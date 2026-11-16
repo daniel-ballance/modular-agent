@@ -248,6 +248,7 @@ An Interface is a plugin, so these are things it does through the plugin API.
 | run a turn | the [turn input](#turn-input-and-turn-outcome) | the [turn outcome](#turn-input-and-turn-outcome) |
 | cancel the turn | the turn | the turn ends as cancelled |
 | take this input in the running turn | the content | taken, or refused ([open](open-questions.md#input-during-a-turn)) |
+| resume an interrupted turn | the turn input, and the tool calls the history shows without a result, each marked started or not | the [turn outcome](#turn-input-and-turn-outcome). A transient Runtime ends the turn as failed. A durable one carries on. Either way, every pending call gets one result. |
 | rewind to a point | the history entry | rewound, or refused before anything changes |
 
 | Runtime asks the Harness | Carrying | Answers |

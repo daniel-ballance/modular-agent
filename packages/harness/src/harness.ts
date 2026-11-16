@@ -17,6 +17,7 @@ import {
 	type HookRule,
 	type InputRequest,
 	type InputRequestDraft,
+	type InterruptedTurn,
 	type InterfaceCapability,
 	type Job,
 	type JobState,
@@ -426,37 +427,42 @@ export class Harness {
 		this.sessions.set(id, s);
 		const a = actor ?? this.defaultActor();
 		s.actors.set(a.id, a);
-		await this.repairInterruptedTurn(s);
+		await this.recoverInterruptedTurn(s);
 		await this.hooks.observe("session.start", { sessionId: s.id, resumed: true });
 		this.emit(s.id, "session.started", { meta: s.meta, resumed: true }, "harness");
 		return id;
 	}
 
-	/** A transient turn whose process stopped ends as failed; its unfinished tool calls get one result each. */
-	private async repairInterruptedTurn(s: Session): Promise<void> {
+	/** Find a turn whose process stopped, and hand it to the Runtime, which decides what happens to it. */
+	private async recoverInterruptedTurn(s: Session): Promise<void> {
 		const all = s.order.map((id) => s.entries.get(id)!);
 		const lastStart = [...all].reverse().find((e) => e.kind === "turnStart");
-		if (!lastStart) return;
+		if (!lastStart?.turnId) return;
 		if (all.some((e) => e.kind === "turnEnd" && e.turnId === lastStart.turnId)) return;
 		const inTurn = all.filter((e) => e.turnId === lastStart.turnId);
 		const answered = new Set(inTurn.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
 		const started = new Set(inTurn.filter((e) => e.kind === "toolStarted").map((e) => e.toolCallId));
-		const drafts: EntryDraft[] = [];
+		const interrupted: InterruptedTurn = { turnId: lastStart.turnId, calls: [] };
 		for (const e of inTurn) {
 			if (e.message?.role !== "assistant") continue;
 			for (const part of e.message.content.filter(isToolCall)) {
-				if (answered.has(part.id)) continue;
-				const status = started.has(part.id) ? "outcomeUnknown" : "notStarted";
-				const note = status === "outcomeUnknown" ? "The process stopped while this tool call was running. Its outcome is unknown." : "The process stopped before this tool call started.";
-				drafts.push({
-					kind: "toolResult", writer: "harness", modelVisible: true, turnId: lastStart.turnId, toolCallId: part.id,
-					message: { role: "toolResult", toolCallId: part.id, toolName: part.name, content: [text(note)], isError: true },
-					data: { status },
-				});
+				if (!answered.has(part.id)) interrupted.calls.push({ id: part.id, name: part.name, input: part.arguments ?? {}, stepId: e.stepId, started: started.has(part.id) });
 			}
 		}
-		drafts.push({ kind: "turnEnd", writer: "harness", modelVisible: false, turnId: lastStart.turnId, data: { outcome: { kind: "failed", error: "The process stopped during the turn" } } });
-		await this.commit(s, drafts);
+		const startedBy = (lastStart.data as { startedBy?: QueuedInput["startedBy"] } | undefined)?.startedBy ?? { kind: "actor", id: lastStart.actorId ?? "user" };
+		this.emit(s.id, "turn.interrupted", { pending: interrupted.calls.length }, "harness", { turnId: interrupted.turnId });
+		await this.launch(s, interrupted.turnId, (signal) => this.resumeTurn(s, interrupted, startedBy, signal));
+		await this.waitForIdle(s.id);
+	}
+
+	/** Used when no Runtime is loaded: the turn ends as failed, and each pending call gets one result. */
+	private async endInterruptedTurn(s: Session, interrupted: InterruptedTurn): Promise<void> {
+		const drafts: EntryDraft[] = interrupted.calls.map((c) => ({
+			kind: "toolResult", writer: "harness", modelVisible: true, turnId: interrupted.turnId, toolCallId: c.id,
+			message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [text(c.started ? "The process stopped while this tool call was running. Its outcome is unknown." : "The process stopped before this tool call started.")], isError: true },
+			data: { status: c.started ? "outcomeUnknown" : "notStarted" },
+		}));
+		if (drafts.length) await this.commit(s, drafts);
 	}
 
 	async forkSession(sessionId: string, entryId: string): Promise<string> {
@@ -635,9 +641,13 @@ export class Harness {
 	}
 
 	private startTurn(s: Session, queued: QueuedInput): void {
-		const turnId = this.newId();
+		void this.launch(s, this.newId(), (signal, turnId) => this.runTurn(s, queued, turnId, signal));
+	}
+
+	/** Run a turn as the session's running turn, then start any queued input. */
+	private launch(s: Session, turnId: string, body: (signal: AbortSignal, turnId: string) => Promise<void>): Promise<void> {
 		const abort = new AbortController();
-		const done = this.runTurn(s, queued, turnId, abort.signal)
+		const done = body(abort.signal, turnId)
 			.catch((error) => this.problem("harness", "turn", error))
 			.finally(() => {
 				s.running = undefined;
@@ -647,6 +657,7 @@ export class Harness {
 				if (next[0] && !s.closed) this.startTurn(s, next[0]);
 			});
 		s.running = { turnId, abort, done };
+		return done;
 	}
 
 	private async runTurn(s: Session, queued: QueuedInput, turnId: string, signal: AbortSignal): Promise<void> {
@@ -682,9 +693,38 @@ export class Harness {
 				outcome = this.failedOutcome(error instanceof Error ? error.message : String(error));
 			}
 		}
+		await this.finishTurn(s, turnId, outcome);
+	}
+
+	private async finishTurn(s: Session, turnId: string, outcome: TurnOutcome): Promise<void> {
 		await this.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId, data: { outcome: outcome.outcome, result: outcome.result, usage: outcome.usage } }]);
 		await this.hooks.observe("turn.end", { sessionId: s.id, turnId, outcome });
 		this.emit(s.id, "turn.ended", outcome, "harness", { turnId });
+	}
+
+	private async resumeTurn(s: Session, interrupted: InterruptedTurn, startedBy: QueuedInput["startedBy"], signal: AbortSignal): Promise<void> {
+		const turnId = interrupted.turnId;
+		const runtime = this.runtime();
+		const model = this.modelAccess(s);
+		if (!runtime || !model) {
+			await this.endInterruptedTurn(s, interrupted);
+			await this.finishTurn(s, turnId, this.failedOutcome("The process stopped during the turn"));
+			return;
+		}
+		const contributions = await this.hooks.collect<{ system?: string }>("turn.before", { sessionId: s.id, turnId, resumed: true });
+		const state: TurnState = { systemPrompt: contributions.map((c) => c.system).filter(Boolean).join("\n\n") };
+		let outcome: TurnOutcome;
+		try {
+			outcome = await runtime.resumeTurn(
+				{ sessionId: s.id, turnId, startedBy, model, settings: { maxSteps: s.settings.maxSteps as number | undefined, reasoning: s.settings.thinking as string | undefined, maxOutput: s.settings.maxOutput as number | undefined }, resultShape: s.settings.resultShape as Record<string, unknown> | undefined },
+				this.runtimeHost(s, turnId, state),
+				signal,
+				interrupted,
+			);
+		} catch (error) {
+			outcome = this.failedOutcome(error instanceof Error ? error.message : String(error));
+		}
+		await this.finishTurn(s, turnId, outcome);
 	}
 
 	private failedOutcome(error: string): TurnOutcome {
@@ -898,6 +938,7 @@ export class Harness {
 		return {
 			inputDuringTurn: runtime?.supports.inputDuringTurn === true,
 			waitingThroughRestart: runtime?.supports.waitingThroughRestart === true,
+			continuesAfterRestart: runtime?.supports.continuesAfterRestart === true,
 			rewinding: false,
 			forking: !!store,
 			keepsStateAtProvider: provider?.supports.keepsState === true,

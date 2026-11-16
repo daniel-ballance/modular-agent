@@ -95,7 +95,7 @@ It never:
 - runs a tool or another plugin's code itself. It asks for that to be done ([ADR 0006](adr/0006-hook-points-belong-to-the-operation-owner.md)).
 - keeps the session's history. The Harness does.
 
-A **transient** Runtime keeps a turn only while its process runs. A **durable** Runtime can carry on with a turn after its process stops and starts again. Both must fit this description.
+A **transient** Runtime keeps a turn only while its process runs. A **durable** Runtime can carry on with a turn after its process stops and starts again. Both must fit this description. When a session is reopened after its process stopped mid-turn, the Harness finds the interrupted turn in the history and hands it to the Runtime, which decides what happens to it.
 
 ### Provider
 

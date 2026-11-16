@@ -1,6 +1,7 @@
 import {
 	type AssistantMessage,
 	type GateResult,
+	type InterruptedTurn,
 	type ModelError,
 	type ModelRequest,
 	type Plugin,
@@ -31,14 +32,36 @@ export interface TransientRuntimeOptions {
  * and ends the turn with an outcome and a result.
  */
 export class TransientRuntime implements Runtime {
-	readonly id = "transient";
-	readonly supports = { inputDuringTurn: true, waitingThroughRestart: false, rewinding: false };
-	constructor(private options: TransientRuntimeOptions = {}) {}
+	readonly id: string = "transient";
+	readonly supports: Record<string, boolean | string> = { inputDuringTurn: true, waitingThroughRestart: false, continuesAfterRestart: false, rewinding: false };
+	constructor(protected options: TransientRuntimeOptions = {}) {}
 
-	async runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome> {
+	runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome> {
+		return this.loop(input, host, signal);
+	}
+
+	/** A transient Runtime ends a turn whose process stopped. Each pending call gets one result. */
+	async resumeTurn(_input: TurnInput, host: RuntimeHost, _signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
+		const entries: string[] = [];
+		for (const c of interrupted.calls) {
+			entries.push((await this.settle(host, c, c.started ? "outcomeUnknown" : "notStarted")).id);
+		}
+		return { outcome: { kind: "failed", error: "The process stopped during the turn" }, result: { openToolCalls: [] }, entries, usage: zeroUsage() };
+	}
+
+	protected settle(host: RuntimeHost, c: InterruptedTurn["calls"][number], status: "outcomeUnknown" | "notStarted") {
+		const note = status === "outcomeUnknown" ? "The process stopped while this tool call was running. Its outcome is unknown." : "The process stopped before this tool call started.";
+		return host.record({
+			kind: "toolResult", writer: "runtime", modelVisible: true, stepId: c.stepId, toolCallId: c.id,
+			message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [text(note)], isError: true },
+			data: { status },
+		});
+	}
+
+	/** The step loop. It rebuilds the model context from the history on every step, so it can start mid-turn. */
+	protected async loop(input: TurnInput, host: RuntimeHost, signal: AbortSignal, entries: string[] = []): Promise<TurnOutcome> {
 		const maxSteps = input.settings.maxSteps ?? this.options.maxSteps ?? 100;
 		const maxRetries = this.options.maxRetries ?? 3;
-		const entries: string[] = [];
 		let usage = zeroUsage();
 		let steps = 0;
 		let retries = 0;
@@ -118,7 +141,7 @@ export class TransientRuntime implements Runtime {
 		}
 	}
 
-	private async runCall(host: RuntimeHost, part: ToolCallPart, stepId: string, signal: AbortSignal) {
+	protected async runCall(host: RuntimeHost, part: ToolCallPart, stepId: string, signal: AbortSignal) {
 		let call: ToolCall = { id: part.id, name: part.name, input: part.arguments ?? {}, startedBy: "model", stepId };
 		const definition = host.definition(call.name);
 		const gate = await host.hook<GateResult<{ call: ToolCall }>>("tool.before", { call, definition });

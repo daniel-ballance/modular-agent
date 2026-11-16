@@ -321,10 +321,22 @@ export interface RuntimeHost {
 	report(type: string, data?: any, ids?: { stepId?: string; toolCallId?: string }): void;
 }
 
+/** A turn whose process stopped, as the history records it. */
+export interface InterruptedTurn {
+	turnId: string;
+	/** Tool calls the model asked for that have no result. */
+	calls: { id: string; name: string; input: Record<string, unknown>; stepId?: string; started: boolean }[];
+}
+
 export interface Runtime {
 	id: string;
 	supports: Declaration;
 	runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome>;
+	/**
+	 * Decide what happens to a turn whose process stopped. A transient Runtime
+	 * ends it; a durable one carries on. Every pending tool call ends with one result.
+	 */
+	resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome>;
 }
 
 // ---------- Jobs ----------
