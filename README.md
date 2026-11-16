@@ -10,7 +10,7 @@ The description says **what** the system does: its parts, what each is responsib
 
 1. [Architecture](docs/architecture.md): purpose, goals, the parts and their responsibilities, and the guarantees.
 2. [Contracts](docs/contracts.md): what passes between the parts, the answers each interaction can get, and the states things move through.
-3. [Scenarios](docs/scenarios.md): the parts working together in ten situations, from a simple request to a crash in the middle of a tool call.
+3. [Scenarios](docs/scenarios.md): the parts working together in seventeen situations, from a simple request to two people sharing a session and a host driving the agent.
 4. [Open questions](docs/open-questions.md): what is still undecided, with the five worth deciding first.
 
 ## Reference
@@ -20,6 +20,7 @@ The description says **what** the system does: its parts, what each is responsib
 | [GLOSSARY.md](GLOSSARY.md) | The vocabulary. Definitions only. |
 | [docs/adr/](docs/adr/) | Decision records, with an index of which still stand. |
 | [docs/research/](docs/research/) | Notes on other systems and protocols, and a map of how each fills our parts. |
+| [docs/pressure-test/](docs/pressure-test/) | The test of our assumptions against Pi, agent frameworks, T3 Code and an everything-at-once system, and what changed as a result. |
 
 ## Acceptance test
 
@@ -27,4 +28,6 @@ The description is good enough when all of these hold:
 - Existing agents (Pi, DeepSeek Harness, Pydantic AI, Tau, PiG) can each be described in its terms.
 - A transient Runtime and a durable Runtime both fit the same description.
 - An agent in one process and one split across services could both follow it unchanged.
+- A host such as T3 Code could drive it as it drives Pi today.
 - Every scenario can be told using only the parts and guarantees it defines.
+- A fresh run of the pressure test finds no assumption false.

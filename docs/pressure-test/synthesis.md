@@ -1,6 +1,6 @@
 # Pressure test: synthesis
 
-**Date:** 2026-11-16. **Status:** complete; the changes below are proposed and not yet made to the architecture.
+**Date:** 2026-11-16. **Status:** complete. Changes 1–10 have been applied to [Architecture](../architecture.md), [Contracts](../contracts.md), the [glossary](../../GLOSSARY.md) and the [scenarios](../scenarios.md).
 
 Four independent reviewers tested assumptions A1–A32 ([plan](README.md)) against four rungs. Two model families reviewed, neither of them the author's:
 
@@ -206,16 +206,17 @@ Also say that the tools a plugin has registered are not necessarily the tools th
 - **A23 (R2 held, others broke it).** Rollback and branching can stay append-only with an added position. Only erasure and retention are true exceptions.
 - **A11 (R2).** Recording a plugin's named operation is not a third kind of request from the Runtime. It is a promise about what gets recorded (change 7).
 
-## Decisions needed
+## Decisions
 
-These are product decisions that the test exposed but can't settle on its own:
-1. **Are several users in one session in scope?** Change 1 assumes they are.
-2. **Is erasure in scope?** If it is, "history only grows" becomes a rule with exceptions.
-3. **Is the coordinating layer out of scope for this description?** The proposal above says yes, for now.
-4. **What do we call the cycle above a turn,** and the new unit of background work?
+The test exposed four product decisions. They were settled on 2026-11-16:
+
+1. **Several actors in one session are allowed, not required.** Every input, answer and approval records its actor, so a single-user agent has exactly one. An agent that supports several actors declares it. A durable Runtime may make shared sessions easier, as Pi Durable aims to, but nothing requires one.
+2. **Keeping history is the history store's job.** Without one, a session is ephemeral. A store may limit how long it keeps history, and must be able to erase. Within a session, history still grows in normal use. Compaction changes what the model sees, not the record: it adds a summary and deletes nothing.
+3. **Coordinating several whole agents is outside this system.** The agent must let a host such as T3 Code drive it fully from outside, through an Interface. Recorded as [ADR 0012](../adr/0012-one-agent-is-the-scope.md).
+4. **Names:** the cycle above a turn is an **exchange**, and session-owned background work is a **job**. "Run" was rejected because Pi and Pydantic AI use it for our turn, "request" because it is already used in "model request" and "input request", and "task" because A2A uses it for our turn.
 
 ## What to do next
 
-1. Settle the four decisions above.
-2. Rewrite [Architecture](../architecture.md), [Contracts](../contracts.md), the [glossary](../../GLOSSARY.md) and the [scenarios](../scenarios.md) with changes 1–10. Add scenarios for: two users in one session, a tool the Provider runs itself, a voice session, rollback, erasure and a background task.
+1. ~~Settle the four decisions above.~~ Done.
+2. ~~Rewrite [Architecture](../architecture.md), [Contracts](../contracts.md), the [glossary](../../GLOSSARY.md) and the [scenarios](../scenarios.md) with changes 1–10. Add scenarios for: two users in one session, a tool the Provider runs itself, a voice session, rollback, erasure and a background task.~~ Done: scenarios 11–17.
 3. Run the test again on the revised docs, with fresh reviewers, against the same ladder.

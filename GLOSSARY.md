@@ -27,6 +27,10 @@ _Avoid_: Seam (DeepSeek Harness's word), service, slot
 **Feature plugin**:
 A plugin that provides no capability and only adds behaviour, such as approval or context management.
 
+**Declaration**:
+What a part says it supports, such as taking input during a turn, rewinding, or keeping state at the Provider. For each feature a part lacks, the description says what happens instead.
+_Avoid_: Capability flags (T3 Code's term), feature flags
+
 ## Capabilities
 
 **Runtime**:
@@ -40,7 +44,7 @@ A Runtime whose turn ends if its process stops.
 A Runtime that can carry on with a turn after its process stops and starts again.
 
 **Provider**:
-The capability that makes one model, or one vendor's models, available.
+The capability that makes one model, or one vendor's models, available. It may keep its own conversation state and run some tools itself, and declares both.
 _Avoid_: Model, LLM, inference layer
 
 **Interface**:
@@ -51,8 +55,16 @@ _Avoid_: Frontend, client, UI (each is too narrow)
 The capability that offers tools and runs them, such as built-in tools, an MCP server or another agent.
 _Avoid_: Toolset, tool provider
 
+**Working environment**:
+The capability that provides where files live and commands run: the local machine, a remote host or a sandbox.
+_Avoid_: Workspace, sandbox (one kind of it), environment (too vague)
+
+**Project**:
+The folder the user is working on, which context files, skills and prompt templates read. It is separate from the working environment.
+_Avoid_: Repo, workspace root
+
 **History store**:
-The capability that keeps session history.
+The capability that keeps session history beyond the process.
 _Avoid_: Storage, database, persistence
 
 **Credential store**:
@@ -62,20 +74,39 @@ _Avoid_: Secrets manager, keychain
 ## Units of work
 
 **Session**:
-One or more turns that share a history. Owned by the Harness.
+Exchanges, turns and jobs that share a history. Owned by the Harness.
 _Avoid_: Conversation, thread, context
 
+**Ephemeral session**:
+A session with no history store. Its history is gone when the process stops.
+
+**Exchange**:
+Everything the agent does in response to one input from an actor: one or more turns, including restarts, retries, goal continuations and turns started when a job reports back.
+_Avoid_: Run (T3 Code's word for it), request, interaction
+
 **Turn**:
-The agent working on something until it can't continue without outside input, or it stops. Owned by the Runtime.
+The agent working until it has nothing more to do for now, or it stops. Waiting for an answer is part of a turn, not its end. Owned by the Runtime.
 _Avoid_: Run, agent run, task, prompt turn
 
 **Step**:
-One model request and its response, plus the tool calls the response asks for.
+One model request and its response, or one stretch of a live session, plus the tool calls it asks for.
 _Avoid_: Turn (Pi's word for it), iteration
 
 **Outcome**:
 How a turn ended: completed, cancelled, failed, or stopped at a limit.
 _Avoid_: Stop reason, status
+
+**Result**:
+What a turn returns to whoever started it: text, structured data, or the tool calls still open.
+_Avoid_: Output, return value, final answer
+
+**Job**:
+Work a session owns that runs outside any turn and can outlive the turn that started it, such as a background command, a subagent or a remote task.
+_Avoid_: Task (A2A's word for a turn), background task, activity
+
+**Live session**:
+A model connection where input and output flow both ways at once, such as voice.
+_Avoid_: Realtime session, stream
 
 ## Tools
 
@@ -88,24 +119,39 @@ A request from the model to run a named tool with some input.
 _Avoid_: Function call, tool use
 
 **Tool result**:
-The single outcome of one tool call: what the model sees, and whether it completed, failed, was refused, was cancelled, never started, or has an unknown outcome.
+The single outcome of one tool call: what the model sees, and whether it completed, failed, was refused, was cancelled, never started, or has an unknown outcome. It can arrive after the call's turn has ended.
+
+**Open tool call**:
+A tool call still waiting for its result after its turn has ended.
+_Avoid_: Deferred tool call (Pydantic AI's term), pending call
 
 ## Context
 
 **History**:
-The complete record of a session, which only grows. It includes entries the model never sees.
+The record of a session, a tree of entries that grows in normal use. It includes entries the model never sees. It is deleted only by retention or erasure.
 _Avoid_: Memory, transcript, log
 
 **History entry**:
 One item in a history, such as an input, a model response, a tool result, a summary or a setting change.
 
+**Current position**:
+The history entry a session is at. Rewinding and branching move it, and the move is recorded.
+_Avoid_: Head, cursor
+
 **Model context**:
-What the model sees on one step: a view worked out from the history before that step.
+What the model sees on one step: a view worked out from the history on the current branch, plus whatever a Provider keeps or adds.
 _Avoid_: Prompt, context window (that is the size limit)
 
 **Compaction**:
-Adding a summary of older history so the model context fits, without removing anything from the history.
+Adding a summary of older history so the model context fits. It changes the view, not the history.
 _Avoid_: Truncation, pruning
+
+**Erasure**:
+Deleting content from history and every copy the agent controls when deletion is required, leaving a record that it happened.
+_Avoid_: Deletion (too general), purge
+
+**Retention**:
+How long a history store keeps a session's history.
 
 **Model access**:
 What the Runtime is given so it can make model requests to the chosen model, without the credentials.
@@ -124,6 +170,10 @@ _Avoid_: Hook (unclear whether it means the point or the handler)
 **Provider middleware**:
 Hook points inside a Provider, around the model request itself.
 
+**Output gate**:
+The hook point before output reaches a recipient, where it can be let through, redacted or blocked.
+_Avoid_: Output filter, post-processing
+
 **Event**:
 A report that something happened. It can't change what happened.
 _Avoid_: Notification, message
@@ -132,14 +182,26 @@ _Avoid_: Notification, message
 An instruction a user gives through an Interface, such as `/model` or `/compact`, that a plugin carries out without involving the model.
 _Avoid_: Slash command (one form of it), tool
 
-## The user
+## Actors
+
+**Actor**:
+Whoever acts on the agent: a user, another agent, a host or a program such as a scheduler. Every input, answer and approval records its actor.
+_Avoid_: Principal, caller, participant
 
 **User**:
-The person using the agent through an Interface.
+A person acting on the agent through an Interface. One kind of actor.
 _Avoid_: Human, operator, person
 
+**Host**:
+A system outside this one that drives whole agents, such as T3 Code. It is an actor of this agent.
+_Avoid_: Orchestrator, coordinator
+
+**Authority**:
+What an actor may do in a session, under limits that only narrow from administrator to tenant to session to actor.
+_Avoid_: Permissions, access level, runtime mode
+
 **Input request**:
-A request for something only the user can give: an approval, an answer, a choice, a sign-in or a secret. It is tied to a tool call when there is one.
+A request for something only an actor can give: an approval, an answer, a choice, a sign-in or a secret. It says who may answer it and how.
 _Avoid_: Prompt, dialog, interrupt, elicitation
 
 **Approval**:
@@ -151,5 +213,9 @@ A session setting that says when approval is asked for, including "never ask", w
 _Avoid_: Permission mode, runtime mode
 
 **Subagent**:
-An agent started by another agent to do a task, with its own session that belongs to the parent's.
+An agent started by another agent's job to do a task, with its own session that belongs to the parent's.
 _Avoid_: Child agent, delegate, worker
+
+**Peer**:
+Another agent this one can message, with no parent relationship.
+_Avoid_: Teammate, sibling

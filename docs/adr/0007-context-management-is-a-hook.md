@@ -4,6 +4,8 @@ date: 2026-11-14
 ---
 
 > **Amended** on 2026-11-16 by [ADR 0011](0011-minimal-harness-everything-is-a-plugin.md): the Harness doesn't decide what the model sees; a context management plugin does, at this hook point.
+>
+> **Amended** on 2026-11-16 by the [pressure test](../pressure-test/synthesis.md#5-history-grows-in-normal-use-with-stated-exceptions): history grows in normal use, and is deleted only by retention or erasure. What the model sees is the view of the current branch plus whatever a Provider keeps or adds. See [History](../architecture.md#history).
 
 # Context management is a hook point before each step, not a component
 

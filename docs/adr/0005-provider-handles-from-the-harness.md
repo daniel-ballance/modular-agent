@@ -4,6 +4,8 @@ date: 2026-11-14
 ---
 
 > **Note,** 2026-11-16: the Provider handle is now called **model access** in the [glossary](../../GLOSSARY.md). With [ADR 0011](0011-minimal-harness-everything-is-a-plugin.md), the Harness holds credentials through a credential store plugin.
+>
+> **Amended** on 2026-11-16 by the [pressure test](../pressure-test/synthesis.md#2-a-provider-can-keep-state-and-run-tools): the consequence "a model call has no effects outside the system" is true only when the Provider keeps no state and runs no tools. A Provider may do either, and declares it. The decision itself, that the Runtime gets access to a model without credentials and never chooses it, stands.
 
 # The Harness owns Providers, and the Runtime gets a handle with no credentials
 
