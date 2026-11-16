@@ -7,6 +7,7 @@ Notes on other systems, gathered to inform the [architecture](../architecture.md
 | Note | What it covers |
 |---|---|
 | [Pi](pi-reference.md) | Our reference implementation: its loop, extensions, tools, and how it waits for the user |
+| [Implementation concerns](implementation-concerns.md) | Questions the pressure tests raised about how individual parts work inside, kept out of the architecture |
 | [Pi's built-in features as plugins](pi-builtins-as-plugins.md) | How the plugin API was worked out, one Pi feature at a time |
 | [DeepSeek Harness](deepseek-harness-reference.md) | Everything is a plugin, including the loop; approval that fails closed; timed questions; "model-visible means logged" |
 | [Pydantic AI](pydantic-ai-reference.md) | A lean core with a large plugin library; three ways to resolve a waiting call; durability is not storage |

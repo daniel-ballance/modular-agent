@@ -213,7 +213,7 @@ The test exposed four product decisions. They were settled on 2026-11-16:
 1. **Several actors in one session are allowed, not required.** Every input, answer and approval records its actor, so a single-user agent has exactly one. An agent that supports several actors declares it. A durable Runtime may make shared sessions easier, as Pi Durable aims to, but nothing requires one.
 2. **Keeping history is the history store's job.** Without one, a session is ephemeral. A store may limit how long it keeps history, and must be able to erase. Within a session, history still grows in normal use. Compaction changes what the model sees, not the record: it adds a summary and deletes nothing.
 3. **Coordinating several whole agents is outside this system.** The agent must let a host such as T3 Code drive it fully from outside, through an Interface. Recorded as [ADR 0012](../adr/0012-one-agent-is-the-scope.md).
-4. **Names:** the cycle above a turn is an **exchange**, and session-owned background work is a **job**. "Run" was rejected because Pi and Pydantic AI use it for our turn, "request" because it is already used in "model request" and "input request", and "task" because A2A uses it for our turn.
+4. **Names:** the cycle above a turn is an **exchange** (dropped in [round 2](round-2/synthesis.md#decisions)), and session-owned background work is a **job**. "Run" was rejected because Pi and Pydantic AI use it for our turn, "request" because it is already used in "model request" and "input request", and "task" because A2A uses it for our turn.
 
 ## What to do next
 

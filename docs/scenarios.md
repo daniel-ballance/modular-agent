@@ -1,6 +1,6 @@
 # Scenarios
 
-**Status:** draft, revised 2026-11-16 after the [pressure test](pressure-test/synthesis.md).
+**Status:** draft, revised 2026-11-16 after two rounds of [pressure testing](pressure-test/README.md).
 
 Each scenario tells what happens in one situation, using only the parts in [Architecture](architecture.md) and the interactions in [Contracts](contracts.md). They test the description: if a scenario can't be told with what is there, something is missing. "Open" lists the gaps each one exposes.
 
@@ -20,7 +20,7 @@ Scenarios 1–10 cover a single agent and user. Scenarios 11–17 were added aft
 
 The user types "Read config.json and summarize it."
 
-1. The terminal UI gives the input to the session, to be taken now. The input records the user as its actor, and starts an exchange.
+1. The terminal UI gives the input to the session, to be taken now. The input records the user as its actor.
 2. At "input arrives", no plugin handles it as a command, so it goes on. The input is recorded in the history.
 3. At "before a turn", the system prompt plugin adds the base instructions and the project's `AGENTS.md`.
 4. The Harness asks the Runtime to run a turn. It gives the Runtime the input, the tool definitions, access to the model that model selection chose, and the session's limits.
@@ -31,9 +31,9 @@ The user types "Read config.json and summarize it."
 9. The Runtime asks for the tool call to be run. The Harness passes it to the file tools, which read the file from the working environment.
 10. Before the second step, context management includes the tool call and its result.
 11. The second model request returns the summary.
-12. After the step, there are no tool calls left, so the turn ends as **completed**, with the summary as its result. The Runtime reports two steps, the new history entries and the usage. The history store keeps them, and the exchange ends.
+12. After the step, there are no tool calls left, so the turn ends as **completed**, with the summary as its result. The Runtime reports two steps, the new history entries and the usage. The history store keeps them.
 
-**Must hold:** every entry is tied to its session, exchange, turn, step, tool call and actor. The Runtime never saw a credential or chose the model.
+**Must hold:** every entry is tied to its session, turn, step, tool call and actor. The Runtime never saw a credential or chose the model.
 
 ## 2. A tool call that needs approval
 
@@ -54,9 +54,9 @@ In the middle of a turn, the model asks to run `rm -rf build/`.
 The model calls a tool that asks the user which database to use. The user has walked away.
 
 1. The tool opens an input request of kind choice, with a time limit, tied to the tool call.
-2. The time limit passes. The transient Runtime can't wait through a restart, so it doesn't hold the turn open. The turn ends as **completed**, and its result lists the tool call as still open. The exchange is now waiting.
-3. The input request now says it can be answered later, as the tool call's result. It has no deadline.
-4. An hour later the user answers. The answer becomes the open call's one result, and the Harness starts a new turn in the same exchange so the agent can carry on from it.
+2. The time limit passes. The transient Runtime can't wait through a restart, so it doesn't hold the turn open. The turn ends as **completed**, and its result lists the tool call as still open.
+3. The input request stays open and answerable, with no deadline.
+4. An hour later the user answers. The answer becomes the open call's one result, and the Harness starts a new turn so the agent can carry on from it.
 
 **Variation:** with a durable Runtime that declares it can wait through a restart, the turn itself waits, and continues when the answer arrives.
 
@@ -70,9 +70,9 @@ While a turn is running, the user types "use the staging config, not production"
 2. The Runtime declares that it can take input during a turn. It takes the input before its next model request, and the model sees it in the next step.
 
 **Variations:**
-- The user asks for it to be taken after the turn. It waits and starts a new turn once this one ends, in the same exchange.
+- The user asks for it to be taken after the turn. It waits and starts a new turn once this one ends.
 - The user changes their mind and withdraws it before it is taken. It is handed back to the Interface with its content.
-- A Runtime that can't take input during a turn: the turn is cancelled and restarted with the input included. Both turns belong to one exchange.
+- A Runtime that can't take input during a turn: the input waits for the turn to end, as the Runtime declares.
 
 **Open:** which of these happens is the Runtime's choice or the user's ([open question](open-questions.md#input-during-a-turn)).
 
@@ -85,10 +85,11 @@ A turn is running a long shell command when the user presses Escape.
 3. Any model request in progress is cancelled at the Provider.
 4. Any open input request tied to the turn is closed as cancelled.
 5. The turn ends as **cancelled**. Everything recorded so far stays in the history.
+6. Jobs the turn started, such as a dev server, keep running. Closing the session would stop them.
 
 **Must hold:** every tool call ends with exactly one result.
 
-**Open:** what happens to input queued for after the turn, and to jobs the turn started ([open question](open-questions.md#cancellation)).
+**Open:** what happens to input queued for after the turn ([open question](open-questions.md#cancellation)).
 
 ## 6. The conversation outgrows the model's context
 
@@ -127,9 +128,9 @@ The agent decides to have another agent review its change. A subagents plugin of
 
 1. The model calls "delegate" with the task and a choice of model.
 2. The subagents plugin starts a job: a child session, recorded as belonging to the parent. The child gets only the task, not the parent's history. Its authority is no more than the parent's.
-3. The "delegate" call ends with a result saying the job has started. The parent's turn carries on, then ends. The exchange is waiting on the job.
+3. The "delegate" call ends with a result saying the job has started. The parent's turn carries on, then ends.
 4. The child asks a question. The input request names the parent agent as who may answer. The parent answers it itself, or passes it to its user, marked as coming from the child.
-5. The child finishes. Its result is the job's report, which starts a parent turn in the same exchange.
+5. The child finishes. Its result is the job's report, which enters the parent session as input, recording the job it came from, and starts a parent turn.
 
 ## 9. Work starts with nobody present
 
@@ -159,7 +160,8 @@ An owner shares a session with a colleague, who may watch and propose input but 
 1. The colleague joins through a web UI. The session records a second actor, with authority to watch and propose.
 2. The colleague proposes "also check the tests". Its input is recorded as proposed. The owner accepts it, and it is given to the session with both actors recorded.
 3. The model asks to run a destructive command. The approval request says only the owner may answer it. The colleague's web UI shows it, but can't answer it.
-4. A tool result contains a secret. At "before output reaches a recipient", the guardrail redacts it for the colleague's view only.
+4. A tool result contains a secret. At "before output reaches a recipient", the guardrail redacts it in the colleague's view. The record keeps it intact, and the owner's view still shows it.
+5. The model streams an account number in three pieces. The guardrail holds the pieces until it can see the whole number, then redacts it for the colleague. The agent has declared that it holds output.
 
 **Must hold:** authority only narrows. The colleague can't approve, even through another agent.
 
@@ -190,16 +192,22 @@ A voice Interface and a Provider that offers live sessions.
 
 **Open:** whether the whole voice session is one turn or several ([open question](open-questions.md#live-sessions)).
 
-## 14. Rewinding to an earlier point
+## 14. Moving back, and rewinding
 
-After three turns that went wrong, the user rewinds to just after the first one, files included.
+After three turns that went wrong, the user goes back to just after the first one.
 
-1. The terminal UI asks to move the session to the entry after the first turn.
-2. The Runtime, the Provider and the working environment each say whether they can rewind. The working environment returns the files to the point saved after the first turn. The Provider keeps no state, so it has nothing to rewind.
-3. The session's current position moves. The move is recorded as a new entry. Nothing is deleted.
-4. The view now leaves out the later turns, so the next turn's model doesn't see them.
+**Moving only.** The user wants to try a different reply from the same point, and doesn't care about files.
+1. The terminal UI asks to move the session to the entry after the first turn, without rewinding.
+2. The session's current position moves. The move is recorded as a new entry, so a restart reopens the session there. Nothing is deleted.
+3. The view now leaves out the later turns. No other part has to do anything.
 
-**Variation:** the Provider keeps state and can't rewind it. It is told to discard its state, and the next request carries the whole model context. If a part can't do either, the rewind is refused before anything changes.
+**Rewinding.** The user also wants the files back as they were.
+1. The terminal UI asks to move the session to the same entry, and to rewind outside state too.
+2. The working environment returns the files to the point saved after the first turn. The Provider keeps no state, so it has nothing to rewind.
+3. Anything still pending on the abandoned branch, such as an open tool call, is cancelled.
+4. The position moves, and the move is recorded.
+
+**Variation:** the Provider keeps state and can't rewind it. It is told to discard its state, and the next request carries the whole model context. If a part can do neither, the rewind is refused before anything changes. Moving without rewinding still works.
 
 ## 15. Erasing personal data
 
@@ -217,23 +225,20 @@ A user asks for their personal data to be deleted, and the deletion is required.
 
 The model starts a dev server and wants to keep working while it runs.
 
-1. The shell tool starts the server as a job, for the session, in the current exchange. The tool call ends with a result saying the job started.
+1. The shell tool starts the server as a job, for the session. The tool call ends with a result saying the job started.
 2. The turn ends. The server keeps running. The terminal UI lists it as a job.
-3. Ten minutes later, the server crashes. The job ends as **failed** and reports back. The report starts a new turn in the same exchange, so the model can look at the error.
-4. The user closes the session. Any jobs still running are stopped.
-
-**Open:** whether cancelling a turn also stops the jobs it started ([open question](open-questions.md#work-outside-a-turn)).
+3. Ten minutes later, the server crashes. The job ends as **failed** and reports back. The report enters the session as input, recording the job it came from, and starts a new turn so the model can look at the error.
+4. If the user had pressed Escape during a turn, the server would have kept running. Closing the session stops it.
 
 ## 17. Driven by a host
 
 A host such as T3 Code drives this agent, as it drives Pi today. The host is outside this system.
 
 1. The host connects through an Interface, as an actor of kind host, with its own authority. It asks what the agent supports, and reads the declaration.
-2. The host gives input with a key. The connection drops before the answer arrives. The host gives the same input again with the same key, and it is not taken twice.
-3. The host reconnects and follows the session from the last point it saw.
-4. An approval request opens. The host shows it in its own UI, and answers it for its user.
-5. The host's user switches to another agent for a while, then comes back. The host gives this agent a summary of what the other agent did, as recorded input.
-6. The host forks the session at an earlier point. This agent forks it, or refuses before anything changes.
-7. The agent starts no turn the host didn't ask for, except where it declared it might, such as a job reporting back.
+2. The host gives input. The connection drops, and the host reconnects and follows the session from the last point it saw. How it avoids giving the same input twice is an [implementation concern](research/implementation-concerns.md#hosts-and-reconnecting).
+3. An approval request opens. The host shows it in its own UI, and answers it for its user.
+4. The host's user switches to another agent for a while, then comes back. The host gives this agent a summary of what the other agent did, as recorded input.
+5. The host forks the session at an earlier point. This agent forks it, or refuses before anything changes.
+6. The agent starts no turn the host didn't ask for, except where it declared it might, such as a job reporting back.
 
 **Must hold:** the host never needs anything outside the Interface and the declaration.

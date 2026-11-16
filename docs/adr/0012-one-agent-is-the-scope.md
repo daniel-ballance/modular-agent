@@ -16,13 +16,6 @@ The pressure test showed that a T3-like system can't be built as plugins on one 
 
 ## Consequences
 
-- The Architecture gains a section on [being driven by a host](../architecture.md#being-driven-by-a-host). The agent must:
-  - declare what it supports
-  - start no turn the host didn't ask for, unless it has declared that it can
-  - take input with a key, so repeating it has no further effect
-  - let the host follow a session from any point
-  - rewind or fork at a point, or refuse before anything changes
-  - accept context from elsewhere as recorded input
-  - say whether each input request can still be answered
+- The Architecture gains a section on [being driven by a host](../architecture.md#being-driven-by-a-host), which lists what the agent must offer a host. That list is kept there. How a host avoids giving the same input twice, and what reconnecting recovers, are [implementation concerns](../research/implementation-concerns.md#hosts-and-reconnecting).
 - A host is an actor, with its own authority.
 - Our agent can still use other agents, as tool sources or subagents, and be used by them.

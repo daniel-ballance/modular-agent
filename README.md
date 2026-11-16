@@ -30,4 +30,4 @@ The description is good enough when all of these hold:
 - An agent in one process and one split across services could both follow it unchanged.
 - A host such as T3 Code could drive it as it drives Pi today.
 - Every scenario can be told using only the parts and guarantees it defines.
-- A fresh run of the pressure test finds no assumption false.
+- A review finds nothing that would break a plugin or a host when one implementation is swapped for another.

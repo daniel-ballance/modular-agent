@@ -45,7 +45,7 @@ Every plugin has settings. Are settings part of the Harness, or a capability? Wh
 
 We use "capability" for a named job a plugin does, such as Runtime. Pydantic AI uses the word for what we call a plugin, and T3 Code for what we now call a declaration. Do we keep it, or choose another word, such as role, slot or seam?
 
-## Turns and exchanges
+## Turns
 
 ### Waiting for an answer
 
@@ -64,7 +64,7 @@ Prior art: Pi takes "steering" input before the next model request, and "follow-
 
 ### Cancellation
 
-What does cancelling leave behind: open input requests, input queued for after the turn, jobs the turn started? Can an actor cancel only its own work in a shared session?
+What does cancelling leave behind: open input requests and input queued for after the turn? Jobs keep running ([Architecture](architecture.md#jobs)). Can an actor cancel only its own work in a shared session?
 
 Prior art: in ACP, cancelling answers every pending permission request as cancelled. Pi returns queued input to the user's editor.
 
@@ -80,10 +80,7 @@ Prior art: DeepSeek Harness fixes the model for each step and won't let a plugin
 
 ### Work outside a turn
 
-[Architecture](architecture.md#jobs) proposes jobs: session-owned work with states, cancelling, reports and usage. Still open:
-- Does cancelling a turn also cancel the jobs it started?
-- When does an exchange end if a job it started runs indefinitely, such as a watcher?
-- Can a job outlive its session?
+[Architecture](architecture.md#jobs) proposes jobs: session-owned work that can be cancelled on its own, reports back as input, and counts toward usage. Cancelling a turn leaves jobs running, and closing the session stops them. Still open: can a job outlive its session, for example a remote task the user wants to continue?
 
 Prior art: ACP v2 separates foreground work from background work, which the session lists and can cancel item by item. T3 Code starts turns from schedules and webhooks, and when a subagent finishes.
 
@@ -125,7 +122,7 @@ Prior art: AG-UI's frontend tools stop the run until the page answers. ACP clien
 
 ### Tool calls outside a turn
 
-A UI can now call a tool directly, as MCP Apps allow, and the same checks apply. Which exchange, if any, does such a call belong to, and does the model ever learn of it?
+A UI can now call a tool directly, as MCP Apps allow, and the same checks apply. Does the model ever learn of such a call?
 
 ### Parallel tool calls
 
@@ -194,6 +191,10 @@ These were open before the [pressure test](pressure-test/synthesis.md). The anch
 - **Waiting for the user** is now [Waiting for an answer](#waiting-for-an-answer), since agents and programs can answer too.
 
 - **History only grows.** It grows in normal use. Keeping it is the history store's job, and deletion happens only by retention or erasure. See [Architecture](architecture.md#history).
+- **Exchanges.** Dropped as a unit. Every turn records what started it, and Interfaces group turns for display from that. See [round 2](pressure-test/round-2/synthesis.md#decisions).
+- **Jobs when a turn is cancelled.** They keep running. Closing the session stops them, unless the agent declares otherwise.
+- **Holding streamed output.** The output gate may hold it, and the agent declares that it does.
+- **Moving the current position.** It is recorded, so a restart reopens the session where it was. Moving is separate from rewinding.
 - **One user.** Every input records its actor. Several actors in one session are optional, and declared. See [Several actors](#several-actors).
 
 <a id="parked-how"></a>
@@ -201,7 +202,7 @@ These were open before the [pressure test](pressure-test/synthesis.md). The anch
 
 ## Parked: how
 
-Set aside until the what is settled ([ADR 0010](adr/0010-describe-parts-not-wiring.md)). Each is about how the system is built or wired, not what it does.
+Set aside until the what is settled ([ADR 0010](adr/0010-describe-parts-not-wiring.md)). Each is about how the system is built or wired, not what it does. Questions about how individual parts work inside are in [Implementation concerns](research/implementation-concerns.md).
 
 - **Protocols.** Do we define our own messages between parts, or reuse existing ones, such as a chat-completions format between Runtime and Provider? The withdrawn [ADR 0009](adr/0009-own-protocol-south-adapters-north.md) proposed our own messages for Harness ↔ Runtime and adapters to existing standards everywhere else.
 - **Translation.** Can our events be turned into AG-UI, ACP, A2A and OpenTelemetry without losing anything?

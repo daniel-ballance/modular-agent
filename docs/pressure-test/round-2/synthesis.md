@@ -1,6 +1,6 @@
 # Pressure test round 2: synthesis
 
-**Date:** 2026-11-16. **Status:** complete. The changes below are proposed and not yet applied.
+**Date:** 2026-11-16. **Status:** complete. Applied in part: see [Decisions](#decisions) and [What was applied](#what-was-applied).
 
 Four fresh reviewers tested the docs as revised after round 1 (commit `94d9d21`), against the same four rungs. Each rung went to the other model family this time ([plan](README.md)).
 
@@ -156,17 +156,37 @@ Lettered so they don't collide with round 1's numbers. Each names the rungs that
 - Every action a host can take has a stable target and a key, and its outcome is either safe to repeat or explicitly uncertain.
 - When two outside protocols share a session, such as ACP and AG-UI, they share one set of rules, and each protocol's retries map onto our keys.
 
-## Decisions needed
+## Decisions
 
-Four of the changes rest on a product choice:
+Settled on 2026-11-16:
 
-1. **Must a move of the current position survive a restart?** Proposed: yes, it is recorded. Pi doesn't do this, and would be described as not keeping its position.
-2. **May the output gate hold live output?** Proposed: yes, when a guardrail needs it, and declared, since it adds delay.
-3. **Exchange boundaries.** Proposed: a job's later report starts a new exchange linked to its cause, rather than reopening the old one.
-4. **Job lifetime.** Proposed: cancelling a turn doesn't cancel jobs, and closing a session does, unless declared otherwise.
+1. **Moving the current position is recorded,** so a restart reopens the session where it was. Pi doesn't do this, and is described as not keeping its position across restarts.
+2. **The output gate may hold streamed output** until it can decide. Buffering streamed output for an operation is useful in general. An agent that holds output declares it.
+3. **Exchanges are dropped.** Grouping turns for display is not a system concern, and not a durability one either. Every turn records what started it (an actor's input, a job's report, or a plugin), and Interfaces and hosts group turns from that. A job's report simply enters the session as input.
+4. **Cancelling a turn leaves its jobs running. Closing the session stops them,** unless the agent declares otherwise. This matches ACP v2.
+
+## Too much detail
+
+Round 2 went one level deeper than round 1, into the lifecycle of every pending thing. Much of that is how a part works inside, not what passes between parts. To sort it, we used one test: if two implementations disagree on a point and that would break a plugin or a host when one is swapped for the other, the point belongs in the architecture. Otherwise it is an implementation concern.
+
+## What was applied
+
+**Applied to the architecture, contracts, glossary and scenarios:**
+- From A: secrets go only to the credential store; one answer closes a request; a late "allow" is checked again; seeing a request is separate from answering it; an approval is not a tool result.
+- From B: moving the position is separate from rewinding; pending work on the abandoned branch is cancelled.
+- From C: decisions 3 and 4.
+- From D: the agent declares what the session, as set up, supports, and a fallback never changes policy.
+- From E: the record is intact and each recipient gets a view; the gate may hold output; observers see the gated view; output that bypasses the agent is declared.
+- From F: work an action causes gets the narrowest authority involved; a peer's message is not a user command.
+- From H: an outside effect with an unknown outcome is not repeated unless declared safe.
+- J: the documents agree. A step ends after its tool calls' results; a turn whose process stops ends as failed; a tool call need not come from the model; an erasure record is always kept.
+
+**Moved to [Implementation concerns](../../research/implementation-concerns.md):** the rest of A, C, G, H, I and K. That covers separate lifecycles, held jobs, Provider sessions, recording completion, per-tool places to run, MCP Apps resources, reconnecting and retry keys.
+
+**Also trimmed:** the lifecycle diagrams in the contracts, the "unanswered" rule for every interaction (kept only for tool calls), and retry keys for host input.
 
 ## What to do next
 
-1. Settle the four decisions.
-2. Apply changes A–K.
-3. Run a narrower round 3, with two reviewers rather than four, aimed at the areas round 2 found weakest: pending-work lifecycles (A, B, C, H) and declarations and views (D, E). If round 3 finds no breaks, the description is ready to move from pressure testing to use.
+1. ~~Settle the four decisions.~~ Done.
+2. ~~Apply changes A–K.~~ Done, as described above.
+3. If another round runs, give reviewers the swap test, and ask them to report only failures that would break a plugin or a host. The original plan was a narrower round 3, with two reviewers rather than four, aimed at the areas round 2 found weakest: pending-work lifecycles (A, B, C, H) and declarations and views (D, E). If round 3 finds no breaks, the description is ready to move from pressure testing to use.

@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-14
 ---
 
-> **Amended** on 2026-11-16 by the [pressure test](../pressure-test/synthesis.md#4-a-turn-returns-a-result-and-can-wait): a turn now runs until the agent has nothing more to do for now, or it stops. Waiting for an answer is part of a turn, not its end, and a turn returns a result. An **exchange** sits between session and turn, and **jobs** run beside turns. See [Units of work](../architecture.md#units-of-work).
+> **Amended** on 2026-11-16 by the [pressure test](../pressure-test/synthesis.md#4-a-turn-returns-a-result-and-can-wait): a turn now runs until the agent has nothing more to do for now, or it stops. Waiting for an answer is part of a turn, not its end, and a turn returns a result. **Jobs** run beside turns. An exchange unit was added between session and turn, then dropped in round 2. See [Units of work](../architecture.md#units-of-work).
 
 # Sessions, turns and steps are nested lifetimes with one owner each
 

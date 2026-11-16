@@ -74,22 +74,18 @@ _Avoid_: Secrets manager, keychain
 ## Units of work
 
 **Session**:
-Exchanges, turns and jobs that share a history. Owned by the Harness.
+Turns and jobs that share a history. Owned by the Harness.
 _Avoid_: Conversation, thread, context
 
 **Ephemeral session**:
 A session with no history store. Its history is gone when the process stops.
-
-**Exchange**:
-Everything the agent does in response to one input from an actor: one or more turns, including restarts, retries, goal continuations and turns started when a job reports back.
-_Avoid_: Run (T3 Code's word for it), request, interaction
 
 **Turn**:
 The agent working until it has nothing more to do for now, or it stops. Waiting for an answer is part of a turn, not its end. Owned by the Runtime.
 _Avoid_: Run, agent run, task, prompt turn
 
 **Step**:
-One model request and its response, or one stretch of a live session, plus the tool calls it asks for.
+One model request and its response, or one stretch of a live session, plus the tool calls it asks for, up to their results.
 _Avoid_: Turn (Pi's word for it), iteration
 
 **Outcome**:
@@ -101,7 +97,7 @@ What a turn returns to whoever started it: text, structured data, or the tool ca
 _Avoid_: Output, return value, final answer
 
 **Job**:
-Work a session owns that runs outside any turn and can outlive the turn that started it, such as a background command, a subagent or a remote task.
+Work a session owns that runs outside any turn and can outlive the turn that started it, such as a background command, a subagent or a remote task. Its report enters the session as input.
 _Avoid_: Task (A2A's word for a turn), background task, activity
 
 **Live session**:
@@ -115,11 +111,11 @@ A tool's name, description, the input it takes, and hints about its effects.
 _Avoid_: Tool schema
 
 **Tool call**:
-A request from the model to run a named tool with some input.
+A request to run a named tool with some input, made by the model, a UI, a plugin or another tool, or made and run by the Provider itself.
 _Avoid_: Function call, tool use
 
 **Tool result**:
-The single outcome of one tool call: what the model sees, and whether it completed, failed, was refused, was cancelled, never started, or has an unknown outcome. It can arrive after the call's turn has ended.
+The single outcome of one tool call: what the model sees, and whether it completed, failed, was refused, was cancelled, never started, or has an unknown outcome. It can arrive after the call's turn has ended. An approval is not a result.
 
 **Open tool call**:
 A tool call still waiting for its result after its turn has ended.
@@ -135,8 +131,16 @@ _Avoid_: Memory, transcript, log
 One item in a history, such as an input, a model response, a tool result, a summary or a setting change.
 
 **Current position**:
-The history entry a session is at. Rewinding and branching move it, and the move is recorded.
+The history entry a session is at. Moving it changes which branch the view follows, and the move is recorded.
 _Avoid_: Head, cursor
+
+**Rewind**:
+Moving the current position and also restoring outside state to match, such as files or a Provider's state.
+_Avoid_: Rollback, undo, revert
+
+**View**:
+What one recipient receives of the record. It may leave out or redact content.
+_Avoid_: Projection, copy
 
 **Model context**:
 What the model sees on one step: a view worked out from the history on the current branch, plus whatever a Provider keeps or adds.
@@ -147,7 +151,7 @@ Adding a summary of older history so the model context fits. It changes the view
 _Avoid_: Truncation, pruning
 
 **Erasure**:
-Deleting content from history and every copy the agent controls when deletion is required, leaving a record that it happened.
+Deleting content from history and every copy the agent controls when deletion is required. It always leaves a record that it happened, without the content.
 _Avoid_: Deletion (too general), purge
 
 **Retention**:
@@ -171,7 +175,7 @@ _Avoid_: Hook (unclear whether it means the point or the handler)
 Hook points inside a Provider, around the model request itself.
 
 **Output gate**:
-The hook point before output reaches a recipient, where it can be let through, redacted or blocked.
+The hook point before output reaches a recipient, where it can be let through, redacted, blocked, or held until more arrives.
 _Avoid_: Output filter, post-processing
 
 **Event**:
