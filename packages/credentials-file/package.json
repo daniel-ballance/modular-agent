@@ -1,0 +1,17 @@
+{
+  "name": "@modular-agent/credentials-file",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "dependencies": {
+    "@modular-agent/harness": "0.1.0",
+    "proper-lockfile": "^4.1.2"
+  }
+}

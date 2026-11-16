@@ -1,0 +1,44 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/harness"
+    },
+    {
+      "path": "packages/runtime-transient"
+    },
+    {
+      "path": "packages/provider-pi-ai"
+    },
+    {
+      "path": "packages/env-local"
+    },
+    {
+      "path": "packages/tools-files"
+    },
+    {
+      "path": "packages/history-jsonl"
+    },
+    {
+      "path": "packages/credentials-file"
+    },
+    {
+      "path": "packages/config-files"
+    },
+    {
+      "path": "packages/context-compaction"
+    },
+    {
+      "path": "packages/system-prompt"
+    },
+    {
+      "path": "packages/model-selection"
+    },
+    {
+      "path": "packages/interface-terminal"
+    },
+    {
+      "path": "packages/agent"
+    }
+  ]
+}

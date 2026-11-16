@@ -1,0 +1,19 @@
+{
+  "name": "modular-agent",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "tsc -b && node --test packages/*/dist/test/*.test.js",
+    "agent": "node packages/agent/dist/src/cli.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^5.9.0"
+  }
+}
