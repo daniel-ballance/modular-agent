@@ -1,5 +1,5 @@
 import type { HistoryEntry, ModelMessage, ModelRequest, Plugin, PluginApi } from "@modular-agent/harness";
-import { text, textOf } from "@modular-agent/harness";
+import { pairToolResults, text, textOf } from "@modular-agent/harness";
 
 export interface CompactionOptions {
 	/** Tokens kept free for the answer. */
@@ -25,7 +25,7 @@ export function view(history: HistoryEntry[]): ModelMessage[] {
 		}
 	}
 	const messages = history.slice(start).filter((e) => e.modelVisible && e.message).map((e) => e.message!);
-	return summary ? [{ role: "user", content: [text(`Summary of the earlier conversation:\n\n${summary.summary}`)] }, ...messages] : messages;
+	return pairToolResults(summary ? [{ role: "user", content: [text(`Summary of the earlier conversation:\n\n${summary.summary}`)] }, ...messages] : messages);
 }
 
 function transcript(entries: HistoryEntry[]): string {

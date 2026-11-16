@@ -1,4 +1,4 @@
-import type { InterruptedTurn, Plugin, RuntimeHost, TurnInput, TurnOutcome } from "@modular-agent/harness";
+import { type InterruptedTurn, type Plugin, type RuntimeHost, type TurnInput, type TurnOutcome, zeroUsage } from "@modular-agent/harness";
 import { TransientRuntime, type TransientRuntimeOptions } from "@modular-agent/runtime-transient";
 
 /**
@@ -25,15 +25,9 @@ export class DurableRuntime extends TransientRuntime {
 	override async resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
 		const entries: string[] = [];
 		host.report("turn.resumed", { pending: interrupted.calls.length });
-		for (const c of interrupted.calls) {
-			const safe = host.definition(c.name)?.hints?.idempotent === true;
-			if (c.started && !safe) {
-				entries.push((await this.settle(host, c, "outcomeUnknown")).id);
-				continue;
-			}
-			const part = { type: "toolCall" as const, id: c.id, name: c.name, arguments: c.input };
-			entries.push((await this.runCall(host, part, c.stepId ?? host.newId(), signal)).id);
-		}
+		// A call that never started runs. One that started runs again only if it is safe to repeat.
+		const open = await this.runPending(host, interrupted.calls, signal, entries, (c) => !c.started || host.definition(c.name)?.hints?.idempotent === true);
+		if (open.length) return { outcome: { kind: "completed" }, result: { openToolCalls: open }, entries, usage: zeroUsage() };
 		return this.loop(input, host, signal, entries);
 	}
 }

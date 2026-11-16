@@ -76,6 +76,11 @@ export class TerminalInterface implements InterfaceCapability {
 		this.requests = this.requests.filter((r) => r.id !== requestId);
 	}
 
+	/** A question takes the next line only while a turn runs. One left open past its turn is answered with /answer. */
+	private blocking(): boolean {
+		return this.requests.length > 0 && this.api.session(this.sessionId).busy;
+	}
+
 	private follow(): void {
 		this.unfollow?.();
 		this.unfollow = this.api.follow(this.sessionId, { recipient: `terminal:${this.actorId}` }, (event) => this.show(event));
@@ -125,6 +130,8 @@ export class TerminalInterface implements InterfaceCapability {
 				else if (outcome.kind === "limit") this.line(yellow(`Stopped at the ${outcome.limit} limit`));
 				else if (outcome.kind === "cancelled") this.line(yellow("Cancelled"));
 				else this.line();
+				const open = event.data.result?.openToolCalls?.length ?? 0;
+				if (open) this.line(yellow(`Waiting for an answer before ${open} tool call${open > 1 ? "s" : ""} can run. Answer with /answer allow (or refuse) whenever you're ready; the agent carries on then.`));
 				const u = event.data.usage;
 				if (u) this.line(dim(`[${u.input} in, ${u.output} out${u.cost ? `, $${u.cost.toFixed(4)}` : ""}]`));
 				this.prompt();
@@ -175,6 +182,7 @@ export class TerminalInterface implements InterfaceCapability {
 		const rl = createInterface({ input: this.options.input ?? process.stdin, output: this.out, terminal: true });
 		this.rl = rl;
 		this.line(dim(`Session ${this.sessionId}. Model: ${this.api.session(this.sessionId).settings.model ?? "(none, use /model)"}. /help lists commands.`));
+		if (this.requests.length && !this.api.session(this.sessionId).busy) this.line(yellow("A question is still open. Answer it with /answer allow (or refuse)."));
 		let lastInterrupt = 0;
 		rl.on("SIGINT", async () => {
 			if (this.api.session(this.sessionId).busy) {
@@ -193,7 +201,7 @@ export class TerminalInterface implements InterfaceCapability {
 		this.prompt();
 		for await (const raw of rl) {
 			const line = raw.trim();
-			if (this.requests.length) {
+			if (this.blocking()) {
 				this.answer(this.requests[0], line);
 				continue;
 			}
@@ -246,6 +254,7 @@ export class TerminalInterface implements InterfaceCapability {
 					["/resume <id>", "open another session"],
 					["/fork [n]", "fork this session at its nth-last input (default 1)"],
 					["/back [n]", "move back to before the nth-last input (default 1)"],
+					["/answer <reply>", "answer a question left open past its turn"],
 					["/jobs", "list running jobs"],
 					["/quit", "quit"],
 					...this.api.commands().map((c) => [`/${c.name}`, c.description]),
@@ -287,6 +296,12 @@ export class TerminalInterface implements InterfaceCapability {
 					this.follow();
 					this.line(dim(`Forked ${old} into ${this.sessionId}`));
 				}
+				return true;
+			}
+			case "/answer": {
+				const request = this.requests[0];
+				if (!request) return this.line("No question is open."), true;
+				this.answer(request, arg);
 				return true;
 			}
 			case "/jobs": {

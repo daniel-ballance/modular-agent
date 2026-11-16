@@ -264,11 +264,13 @@ export interface InputRequest {
 	timeLimitMs?: number;
 	/** A stable key. Asking again with the same key reopens the same question, or reuses its recorded answer. */
 	key?: string;
+	/** When the time limit passes: decline (the default), or leave the question open past its turn. */
+	whenTimeLimit?: "decline" | "leaveOpen";
 	/** The turn that asked, if any. */
 	turnId?: string;
 }
 export type InputRequestDraft = Omit<InputRequest, "id" | "sessionId" | "askedBy" | "answerers" | "turnId"> & { answerers?: string[] };
-export interface Answer { requestId: string; value?: string; declined?: boolean; actorId: string; reason?: string }
+export interface Answer { requestId: string; value?: string; declined?: boolean; actorId: string; reason?: string; /** The question is still open, past its turn. */ pending?: boolean }
 
 // ---------- Events ----------
 
@@ -297,7 +299,7 @@ export interface TurnSettings { maxSteps?: number; reasoning?: string; maxOutput
 export interface TurnInput {
 	sessionId: string;
 	turnId: string;
-	startedBy: { kind: "actor" | "job" | "plugin"; id: string };
+	startedBy: { kind: "actor" | "job" | "plugin" | "answer"; id: string };
 	model: ModelAccess;
 	settings: TurnSettings;
 	resultShape?: Record<string, unknown>;
@@ -341,6 +343,8 @@ export interface Runtime {
 	 * ends it; a durable one carries on. Every pending tool call ends with one result.
 	 */
 	resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome>;
+	/** Carry on from tool calls that were left open past an earlier turn and now have their answers. */
+	continueOpenCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome>;
 }
 
 // ---------- Jobs ----------
@@ -364,10 +368,10 @@ export type HookRule = "observe" | "gate" | "transform" | "first" | "collect";
 export type HandlerOrder = "first" | "normal" | "last";
 
 /** A gate handler's answer. */
-export type GateAnswer<T> = undefined | { refuse: string } | { change: T };
+export type GateAnswer<T> = undefined | { refuse: string } | { change: T } | { pending: string };
 /** A transform handler's answer. */
 export type TransformAnswer<T> = undefined | { value: T; stop?: boolean };
-export interface GateResult<T> { refused?: string; value: T }
+export interface GateResult<T> { refused?: string; pending?: string; value: T }
 
 // ---------- Output gate ----------
 

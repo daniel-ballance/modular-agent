@@ -30,7 +30,8 @@ node packages/agent/dist/src/cli.js --pi-auth -m xai/grok-4.7          # interac
 node packages/agent/dist/src/cli.js --pi-auth -m xai/grok-4.7 -p "..."  # print the answer
 node packages/agent/dist/src/cli.js --pi-auth --durable -s <session>   # reopen, carrying on an interrupted turn
 node packages/agent/dist/src/cli.js --pi-auth --approval ask           # ask before tool calls that aren't read-only
-npm test                                                               # 17 tests, using pi-ai's faux provider
+node packages/agent/dist/src/cli.js --pi-auth --approval ask --approval-wait 30   # after 30 s the question outlasts the turn
+npm test                                                               # 21 tests, using pi-ai's faux provider
 ```
 
 ## What is checked
@@ -61,6 +62,20 @@ A recorded answer is reused only if it is on the current branch and whoever gave
 
 Checked by tests, and by hand with a real model: a live session was killed while the terminal showed "Allow bash?". A new process reopened the session, showed the same question, took `allow`, ran the call and finished the original turn.
 
+## Questions that outlast their turn
+
+A question can be asked with a time limit and "leave open". When the limit passes:
+1. The Harness records that the question is waiting past its turn, and the approval check answers "pending".
+2. The Runtime records the call as open, with no result, and ends the turn. The turn's result lists the open call. The model can't be asked again while one of its calls has no result.
+3. The question stays answerable, with no deadline, and survives a restart with either Runtime, because nothing about it is held in memory.
+4. When every open call has its answer, the Harness starts a new turn, started by the answer. The Runtime runs the open calls through the usual checks: the approval check finds the recorded answer under the same key, so the call runs or is refused. Then the step loop carries on.
+
+New input while a call is open is allowed. The model's view puts a stand-in result ("no result yet") in the call's place, and shows the real result later as a late result. The record never holds a stand-in, so every call still has exactly one result.
+
+In the terminal, a question takes the next line only while a turn is running. One left open past its turn is answered with `/answer allow` or `/answer refuse`, and reopening the session reminds you that it is open.
+
+Checked by tests, and by hand with a real model: the turn ended after four seconds with the call open, the conversation went on (the model knew it was still waiting), the process quit, a new process reopened the session, `/answer allow` ran the command, and the agent finished in a turn started by the answer.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).
@@ -74,7 +89,7 @@ Checked by tests, and by hand with a real model: a live session was killed while
 
 ## Not done yet
 
-- **A question can't yet outlast its turn.** A turn still waits for the answer. A time limit that ends the turn with the call left open is designed but not built.
+- **Only gates can leave a call open.** A tool that asks a question from inside its own run still waits for the answer within the turn.
 - **Tool calls run one at a time,** even when the model asks for several.
 - **Several actors** work in the Harness and tests, but the terminal Interface acts for one user.
 - **Adding plugins during a session** isn't supported. The declaration says so.

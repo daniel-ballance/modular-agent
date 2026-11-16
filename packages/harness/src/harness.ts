@@ -284,7 +284,10 @@ export class Harness {
 			callTool: (sessionId, call) => this.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
 			ask: (sessionId, request) => this.ask(this.session(sessionId), request, pluginName),
 			answer: (sessionId, answer) => this.answer(this.session(sessionId), answer),
-			openRequests: (sessionId) => [...this.session(sessionId).requests.values()].map((r) => r.request),
+			openRequests: (sessionId) => {
+				const s = this.session(sessionId);
+				return [...[...s.requests.values()].map((r) => r.request), ...this.waitingRequests(s)];
+			},
 			startJob: (sessionId, options) => this.startJob(this.session(sessionId), options, pluginName),
 			jobs: (sessionId) => [...this.session(sessionId).jobs.values()].map((j) => ({ ...j.job })),
 			cancelJob: (sessionId, jobId) => this.cancelJob(this.session(sessionId), jobId),
@@ -430,6 +433,11 @@ export class Harness {
 		await this.recoverInterruptedTurn(s);
 		await this.hooks.observe("session.start", { sessionId: s.id, resumed: true });
 		this.emit(s.id, "session.started", { meta: s.meta, resumed: true }, "harness");
+		// Questions left open past their turn are still answerable after a restart.
+		for (const request of this.waitingRequests(s)) {
+			this.emit(s.id, "input.request.opened", { request, waiting: true }, "harness", { toolCallId: request.toolCallId });
+			for (const i of this.viewersFor(s, request)) i.onInputRequest?.(request);
+		}
 		return id;
 	}
 
@@ -639,7 +647,10 @@ export class Harness {
 
 	private async waitForIdle(sessionId: string): Promise<void> {
 		const s = this.session(sessionId);
-		while (s.running) await s.running.done;
+		while (s.running || s.settling) {
+			if (s.settling) await s.settling;
+			if (s.running) await s.running.done;
+		}
 	}
 
 	private runtime(): Runtime | undefined {
@@ -667,9 +678,11 @@ export class Harness {
 	}
 
 	private async runTurn(s: Session, queued: QueuedInput, turnId: string, signal: AbortSignal): Promise<void> {
+		const continuing = queued.continueCalls ? this.openCalls(s).filter((c) => queued.continueCalls!.includes(c.id)) : undefined;
+		if (queued.continueCalls && !continuing?.length) return; // already settled
 		await this.commit(s, [
-			{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, actorId: queued.actorId, data: { startedBy: queued.startedBy } },
-			{ kind: queued.kind, writer: "harness", modelVisible: true, turnId, actorId: queued.actorId, message: { role: "user", content: queued.content }, data: { inputId: queued.id } },
+			{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, actorId: queued.actorId, data: { startedBy: queued.startedBy, continues: queued.continueCalls } },
+			...(continuing ? [] : [{ kind: queued.kind, writer: "harness", modelVisible: true, turnId, actorId: queued.actorId, message: { role: "user" as const, content: queued.content }, data: { inputId: queued.id } }]),
 		]);
 		this.emit(s.id, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
 		const contributions = await this.hooks.collect<{ system?: string; context?: ContentPart[] }>("turn.before", { sessionId: s.id, turnId, input: queued });
@@ -686,15 +699,13 @@ export class Harness {
 		else {
 			await this.hooks.observe("turn.start", { sessionId: s.id, turnId });
 			try {
-				outcome = await runtime.runTurn(
-					{
-						sessionId: s.id, turnId, startedBy: queued.startedBy, model,
-						settings: { maxSteps: s.settings.maxSteps as number | undefined, reasoning: s.settings.thinking as string | undefined, maxOutput: s.settings.maxOutput as number | undefined },
-						resultShape: s.settings.resultShape as Record<string, unknown> | undefined,
-					},
-					this.runtimeHost(s, turnId, state),
-					signal,
-				);
+				const input = {
+					sessionId: s.id, turnId, startedBy: queued.startedBy, model,
+					settings: { maxSteps: s.settings.maxSteps as number | undefined, reasoning: s.settings.thinking as string | undefined, maxOutput: s.settings.maxOutput as number | undefined },
+					resultShape: s.settings.resultShape as Record<string, unknown> | undefined,
+				};
+				const host = this.runtimeHost(s, turnId, state);
+				outcome = continuing ? await runtime.continueOpenCalls(input, host, signal, continuing) : await runtime.runTurn(input, host, signal);
 			} catch (error) {
 				outcome = this.failedOutcome(error instanceof Error ? error.message : String(error));
 			}
@@ -703,7 +714,8 @@ export class Harness {
 	}
 
 	private async finishTurn(s: Session, turnId: string, outcome: TurnOutcome): Promise<void> {
-		for (const request of this.recordedOpenRequests(s).filter((r) => r.turnId === turnId && !s.requests.has(r.id))) {
+		const waiting = new Set(this.waitingRequests(s).map((r) => r.id));
+		for (const request of this.recordedOpenRequests(s).filter((r) => r.turnId === turnId && !s.requests.has(r.id) && !waiting.has(r.id))) {
 			await this.commit(s, [{ kind: "inputClosed", writer: "harness", modelVisible: false, turnId, toolCallId: request.toolCallId, data: { requestId: request.id, reason: "no longer answerable" } }]);
 			this.emit(s.id, "input.request.closed", { requestId: request.id, declined: true, lost: true }, "harness", { turnId, toolCallId: request.toolCallId });
 		}
@@ -909,7 +921,7 @@ export class Harness {
 				reopened = true;
 			}
 		}
-		const viewers = this.interfaces().filter((i) => s.actors.get(i.actorId)?.authority.includes("watch") || this.mayAnswer(s, request, i.actorId));
+		const viewers = this.viewersFor(s, request);
 		if (!viewers.some((i) => this.mayAnswer(s, request, i.actorId))) {
 			return { requestId: request.id, declined: true, actorId: "harness", reason: "No one present can answer" };
 		}
@@ -933,16 +945,87 @@ export class Harness {
 				},
 				timer: undefined as NodeJS.Timeout | undefined,
 			};
-			if (request.timeLimitMs) open.timer = setTimeout(() => open.resolve({ requestId: request.id, declined: true, actorId: "harness", reason: "time limit" }), request.timeLimitMs);
+			if (request.timeLimitMs) {
+				open.timer = setTimeout(() => {
+					if (request.whenTimeLimit !== "leaveOpen") return open.resolve({ requestId: request.id, declined: true, actorId: "harness", reason: "time limit" });
+					// Leave the question open past its turn. Interfaces keep showing it.
+					s.requests.delete(request.id);
+					this.commit(s, [{ kind: "inputWaiting", writer: "harness", modelVisible: false, turnId: request.turnId, toolCallId: request.toolCallId, data: { requestId: request.id } }])
+						.catch((error) => this.problem("harness", "record waiting question", error))
+						.finally(() => {
+							this.emit(s.id, "input.request.waiting", { requestId: request.id }, "harness", { toolCallId: request.toolCallId });
+							resolve({ requestId: request.id, actorId: "harness", pending: true });
+						});
+				}, request.timeLimitMs);
+			}
 			s.requests.set(request.id, open);
 			this.emit(s.id, "input.request.opened", { request, reopened }, askedBy, { toolCallId: request.toolCallId });
 			for (const i of viewers) i.onInputRequest?.(request);
 		});
 	}
 
+	private viewersFor(s: Session, request: InputRequest): InterfaceCapability[] {
+		return this.interfaces().filter((i) => s.actors.get(i.actorId)?.authority.includes("watch") || this.mayAnswer(s, request, i.actorId));
+	}
+
+	/** Questions on the current branch that were left open past their turn and have no answer yet. */
+	private waitingRequests(s: Session): InputRequest[] {
+		const branch = s.branch();
+		const waiting = new Set(branch.filter((e) => e.kind === "inputWaiting").map((e) => (e.data as { requestId: string }).requestId));
+		return this.recordedOpenRequests(s).filter((r) => waiting.has(r.id) && !s.lateAnswers.has(r.id));
+	}
+
+	/** Answer a question left open past its turn. The answer is recorded, then the open calls carry on if they can. */
+	private answerLate(s: Session, answer: Answer): { accepted: boolean; reason?: string } {
+		const request = this.waitingRequests(s).find((r) => r.id === answer.requestId);
+		if (!request) return { accepted: false, reason: "The request is closed or can no longer be answered" };
+		if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
+		s.lateAnswers.add(request.id);
+		const kept = request.kind === "secret" ? { ...answer, value: undefined } : answer;
+		const previous = s.settling ?? Promise.resolve();
+		const work = previous.then(async () => {
+			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, toolCallId: request.toolCallId, actorId: answer.actorId, data: { requestId: request.id, answer: kept, late: true } }]);
+			s.lateAnswers.delete(request.id);
+			for (const i of this.viewersFor(s, request)) i.onInputRequestClosed?.(request.id);
+			this.emit(s.id, "input.request.closed", { requestId: request.id, declined: answer.declined ?? false, late: true }, "harness", { actorId: answer.actorId, toolCallId: request.toolCallId });
+			this.continueOpenCalls(s, answer.actorId);
+		});
+		s.settling = work.catch((error) => this.problem("harness", "late answer", error)).finally(() => {
+			if (s.settling === tracked) s.settling = undefined;
+		});
+		const tracked = s.settling;
+		return { accepted: true };
+	}
+
+	/** Tool calls on the current branch that have no result and are not part of a running turn. */
+	private openCalls(s: Session): InterruptedTurn["calls"] {
+		const branch = s.branch();
+		const results = new Set(branch.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
+		const open = new Set(branch.filter((e) => e.kind === "toolOpen").map((e) => e.toolCallId));
+		const calls: InterruptedTurn["calls"] = [];
+		for (const e of branch) {
+			if (e.message?.role !== "assistant") continue;
+			for (const part of e.message.content.filter(isToolCall)) {
+				if (open.has(part.id) && !results.has(part.id)) calls.push({ id: part.id, name: part.name, input: part.arguments ?? {}, stepId: e.stepId, started: false });
+			}
+		}
+		return calls;
+	}
+
+	/** When every open call has its answer, start a turn that carries on from them. */
+	private continueOpenCalls(s: Session, actorId: string): void {
+		const calls = this.openCalls(s);
+		if (!calls.length) return;
+		const stillWaiting = new Set(this.waitingRequests(s).map((r) => r.toolCallId));
+		if (calls.some((c) => stillWaiting.has(c.id))) return;
+		const queued: QueuedInput = { id: this.newId(), content: [], actorId, when: "after", startedBy: { kind: "answer", id: actorId }, kind: "continue", continueCalls: calls.map((c) => c.id) };
+		if (s.isBusy()) s.followUps.push(queued);
+		else this.startTurn(s, queued);
+	}
+
 	private answer(s: Session, answer: Answer): { accepted: boolean; reason?: string } {
 		const open = s.requests.get(answer.requestId);
-		if (!open) return { accepted: false, reason: "The request is closed or can no longer be answered" };
+		if (!open) return this.answerLate(s, answer);
 		if (!this.mayAnswer(s, open.request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
 		open.resolve(answer); // the first accepted answer closes the request
 		return { accepted: true };
@@ -1006,6 +1089,7 @@ export class Harness {
 			pluginsDuringSession: false,
 			erasure: s?.ephemeral ? true : !!store?.erase,
 			inputKeys: true,
+			questionsOutlastTurns: true,
 		};
 	}
 }

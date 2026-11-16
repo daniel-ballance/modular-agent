@@ -20,11 +20,12 @@ function summary(call: ToolCall): string {
  * Each question is keyed by its tool call, so after a restart a durable
  * Runtime reopens the same question rather than asking a new one.
  */
-export function approval(options: { policy?: ApprovalPolicy } = {}): Plugin {
+export function approval(options: { policy?: ApprovalPolicy; /** Leave the question open past its turn after this long. */ waitMs?: number } = {}): Plugin {
 	return {
 		name: "approval",
 		setup(api) {
 			const fallback = options.policy ?? (api.config().policy as ApprovalPolicy | undefined) ?? "ask";
+			const waitOf = (sessionId: string) => (api.session(sessionId).settings.approvalWaitMs as number | undefined) ?? options.waitMs ?? (api.config().waitMs as number | undefined);
 			const policyOf = (sessionId: string) => (api.session(sessionId).settings.approvalPolicy as ApprovalPolicy | undefined) ?? fallback;
 
 			api.on("tool.before", async (p: { sessionId: string; call: ToolCall; definition?: ToolDefinition }) => {
@@ -38,7 +39,9 @@ export function approval(options: { policy?: ApprovalPolicy } = {}): Plugin {
 					question: `Allow ${p.call.name}?`,
 					details: summary(p.call),
 					toolCallId: p.call.id,
+					...(waitOf(p.sessionId) ? { timeLimitMs: waitOf(p.sessionId), whenTimeLimit: "leaveOpen" as const } : {}),
 				});
+				if (answer.pending) return { pending: "Waiting for approval" };
 				if (answer.declined || answer.value !== "allow") return { refuse: `${p.call.name} was not approved${answer.reason ? ` (${answer.reason})` : ""}.` };
 				return undefined;
 			});

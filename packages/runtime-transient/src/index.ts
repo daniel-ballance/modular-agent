@@ -1,6 +1,7 @@
 import {
 	type AssistantMessage,
 	type GateResult,
+	type HistoryEntry,
 	type InterruptedTurn,
 	type ModelError,
 	type ModelRequest,
@@ -47,6 +48,29 @@ export class TransientRuntime implements Runtime {
 			entries.push((await this.settle(host, c, c.started ? "outcomeUnknown" : "notStarted")).id);
 		}
 		return { outcome: { kind: "failed", error: "The process stopped during the turn" }, result: { openToolCalls: [] }, entries, usage: zeroUsage() };
+	}
+
+	/** Run calls left open past an earlier turn, which now have their answers, then carry on. */
+	async continueOpenCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
+		const entries: string[] = [];
+		const stillOpen = await this.runPending(host, calls, signal, entries, () => true);
+		if (stillOpen.length) return { outcome: { kind: "completed" }, result: { openToolCalls: stillOpen }, entries, usage: zeroUsage() };
+		return this.loop(input, host, signal, entries);
+	}
+
+	/** Run pending calls through the usual checks. Returns the ids of calls that are still open. */
+	protected async runPending(host: RuntimeHost, calls: InterruptedTurn["calls"], signal: AbortSignal, entries: string[], mayRun: (c: InterruptedTurn["calls"][number]) => boolean): Promise<string[]> {
+		const open: string[] = [];
+		for (const c of calls) {
+			if (!mayRun(c)) {
+				entries.push((await this.settle(host, c, "outcomeUnknown")).id);
+				continue;
+			}
+			const recorded = await this.runCall(host, { type: "toolCall", id: c.id, name: c.name, arguments: c.input }, c.stepId ?? host.newId(), signal);
+			if (recorded) entries.push(recorded.id);
+			else open.push(c.id);
+		}
+		return open;
 	}
 
 	protected settle(host: RuntimeHost, c: InterruptedTurn["calls"][number], status: "outcomeUnknown" | "notStarted") {
@@ -111,16 +135,21 @@ export class TransientRuntime implements Runtime {
 			}
 
 			const calls = message.content.filter(isToolCall);
+			const open: string[] = [];
 			for (let i = 0; i < calls.length; i++) {
 				const part = calls[i];
 				if (signal.aborted) {
 					await this.settleUnanswered(host, message, stepId, "cancelled", entries, i);
 					return done({ kind: "cancelled" }, message);
 				}
-				entries.push((await this.runCall(host, part, stepId, signal)).id);
+				const recorded = await this.runCall(host, part, stepId, signal);
+				if (recorded) entries.push(recorded.id);
+				else open.push(part.id);
 			}
 			host.report("step.ended", { usage: message.usage }, { stepId });
 			steps++;
+			// A call left open past this turn has no result, so the model can't be asked again: the turn ends.
+			if (open.length) return { ...done({ kind: "completed" }, message), result: { text: textOf(message.content), openToolCalls: open } };
 
 			// "After each step": a plugin may end the turn.
 			const after = await host.hook<GateResult<unknown>>("step.after", { stepId, response: message });
@@ -141,10 +170,16 @@ export class TransientRuntime implements Runtime {
 		}
 	}
 
-	protected async runCall(host: RuntimeHost, part: ToolCallPart, stepId: string, signal: AbortSignal) {
+	protected async runCall(host: RuntimeHost, part: ToolCallPart, stepId: string, signal: AbortSignal): Promise<HistoryEntry | undefined> {
 		let call: ToolCall = { id: part.id, name: part.name, input: part.arguments ?? {}, startedBy: "model", stepId };
 		const definition = host.definition(call.name);
 		const gate = await host.hook<GateResult<{ call: ToolCall }>>("tool.before", { call, definition });
+		if (gate.pending) {
+			// Left open past this turn. It gets its one result later, when its answer arrives.
+			await host.record({ kind: "toolOpen", writer: "runtime", modelVisible: false, stepId, toolCallId: call.id, data: { reason: gate.pending } });
+			host.report("tool.open", { reason: gate.pending }, { stepId, toolCallId: call.id });
+			return undefined;
+		}
 		let result: ToolResult;
 		if (gate.refused) {
 			result = { callId: call.id, status: "refused", content: [text(`Refused: ${gate.refused}`)] };

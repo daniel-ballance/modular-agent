@@ -80,6 +80,7 @@ export class HookRegistry {
 			}
 			if (!answer) continue;
 			if ("refuse" in answer) return { refused: answer.refuse, value };
+			if ("pending" in answer) return { pending: answer.pending, value };
 			if ("change" in answer) value = answer.change;
 		}
 		return { value };

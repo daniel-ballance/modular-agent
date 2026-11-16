@@ -4,7 +4,7 @@ These are undecided. Each has a stable name, so other documents link to it by na
 
 The questions are about **what** the system does. Questions about **how** it is built or wired are kept apart under [Parked: how](#parked-how).
 
-**Deferred on 2026-11-16** until the first build needs them: who sets how long a turn waits for an answer, whether an approval can outlast its turn, how several actors are granted authority, whether a job can outlive its session, the word "capability", and who sets turn limits.
+**Deferred on 2026-11-16** until the first build needs them: whether an approval can outlast its turn, how several actors are granted authority, whether a job can outlive its session, the word "capability", and who sets turn limits.
 
 ## The Harness and plugins
 
@@ -36,7 +36,6 @@ We use "capability" for a named job a plugin does, such as Runtime. Pydantic AI 
 
 [Architecture](architecture.md#waiting-for-an-answer) proposes requirements: the user answers in context; a tool call can stay open past its turn, and its answer arrives later as its result; every request says who may answer it and how; approval fails closed; a session can be set never to ask; a subagent's requests go to its parent. Still open:
 - Can an approval stay open past its turn, or does it only wait or fail?
-- Who sets the time limit?
 - When does the agent decide to stop waiting and end the turn with the call open?
 
 Prior art: Pi waits in place, and the wait is lost if Pi stops. DeepSeek Harness waits for a set time, then leaves the question open. Pydantic AI hands a resume token to whoever will answer, or ends the run with the calls still open. T3 Code marks each request live or no longer answerable.
@@ -182,7 +181,8 @@ Settled on 2026-11-16 before the first build:
 - **Configuration:** a capability provided by a plugin. The first reads global and project files.
 - **How handlers combine:** each hook point has one fixed rule, chosen by its owner. Plugins run in load order, and can ask to run first or last. See [Contracts](contracts.md#hook-points).
 - **Plugin trust:** global plugins load; project plugins load once the project is trusted. No sandbox in the first build.
-- **Cancelling:** queued input is handed back to the Interface, as in Pi. Several actors in one session are optional, and declared. See [Several actors](#several-actors).
+- **Cancelling:** queued input is handed back to the Interface, as in Pi.
+- **Who sets how long a turn waits for an answer:** the plugin that asks, when it asks. When the limit passes, the question either declines or stays open past its turn (settled while building). Several actors in one session are optional, and declared. See [Several actors](#several-actors).
 
 <a id="parked-how"></a>
 <a id="parked-wiring"></a>

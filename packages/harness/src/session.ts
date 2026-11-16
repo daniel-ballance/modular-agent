@@ -1,3 +1,4 @@
+import { pairToolResults } from "./view.js";
 import type { Actor, AgentEvent, Answer, ContentPart, HistoryEntry, InputRequest, Job, ModelMessage, StoredSession } from "./types.js";
 
 export type InputTiming = "now" | "steer" | "after";
@@ -7,8 +8,10 @@ export interface QueuedInput {
 	actorId: string;
 	when: InputTiming;
 	key?: string;
-	startedBy: { kind: "actor" | "job" | "plugin"; id: string };
+	startedBy: { kind: "actor" | "job" | "plugin" | "answer"; id: string };
 	kind: string;
+	/** Set when this is not input but a continuation of tool calls left open past an earlier turn. */
+	continueCalls?: string[];
 }
 export interface InputReceipt { inputId: string; taken: "now" | "inTurn" | "after"; duplicate?: boolean }
 
@@ -39,6 +42,10 @@ export class Session {
 	closed = false;
 	/** Commits run one at a time, so each entry follows the one before it. */
 	committing: Promise<unknown> = Promise.resolve();
+	/** Work started by a late answer, which waitForIdle also waits for. */
+	settling?: Promise<void>;
+	/** Late answers accepted but not yet recorded: one answer closes a question. */
+	readonly lateAnswers = new Set<string>();
 
 	constructor(readonly meta: StoredSession, readonly ephemeral: boolean) {}
 
@@ -88,7 +95,7 @@ export class Session {
 
 	/** The model-visible messages on the current branch. */
 	modelMessages(entries: HistoryEntry[] = this.branch()): ModelMessage[] {
-		return entries.filter((e) => e.modelVisible && e.message).map((e) => e.message!);
+		return pairToolResults(entries.filter((e) => e.modelVisible && e.message).map((e) => e.message!));
 	}
 
 	isBusy(): boolean {
