@@ -19,6 +19,7 @@ The description says **what** the system does: its parts, what each is responsib
 |---|---|
 | [GLOSSARY.md](GLOSSARY.md) | The vocabulary. Definitions only. |
 | [docs/adr/](docs/adr/) | Decision records, with an index of which still stand. |
+| [docs/examples/](docs/examples/) | Existing agents described in our terms. First: [vanilla Pi](docs/examples/vanilla-pi.md). |
 | [docs/research/](docs/research/) | Notes on other systems and protocols, and a map of how each fills our parts. |
 | [docs/pressure-test/](docs/pressure-test/) | The test of our assumptions against Pi, agent frameworks, T3 Code and an everything-at-once system, and what changed as a result. |
 
