@@ -14,6 +14,7 @@ import {
 	type TurnInput,
 	type TurnOutcome,
 	addUsage,
+	isPending,
 	isToolCall,
 	text,
 	textOf,
@@ -174,18 +175,15 @@ export class TransientRuntime implements Runtime {
 		let call: ToolCall = { id: part.id, name: part.name, input: part.arguments ?? {}, startedBy: "model", stepId };
 		const definition = host.definition(call.name);
 		const gate = await host.hook<GateResult<{ call: ToolCall }>>("tool.before", { call, definition });
-		if (gate.pending) {
-			// Left open past this turn. It gets its one result later, when its answer arrives.
-			await host.record({ kind: "toolOpen", writer: "runtime", modelVisible: false, stepId, toolCallId: call.id, data: { reason: gate.pending } });
-			host.report("tool.open", { reason: gate.pending }, { stepId, toolCallId: call.id });
-			return undefined;
-		}
+		if (gate.pending) return this.leaveOpen(host, call, stepId, gate.pending);
 		let result: ToolResult;
 		if (gate.refused) {
 			result = { callId: call.id, status: "refused", content: [text(`Refused: ${gate.refused}`)] };
 		} else {
 			call = gate.value.call;
-			result = await host.runToolCall(call, signal);
+			const ran = await host.runToolCall(call, signal);
+			if (isPending(ran)) return this.leaveOpen(host, call, stepId, ran.pending);
+			result = ran;
 		}
 		const after = await host.hook<{ result: ToolResult }>("tool.after", { call, result });
 		result = after?.result ?? result;
@@ -195,6 +193,13 @@ export class TransientRuntime implements Runtime {
 			message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: result.content, isError: result.status !== "completed" },
 			data: { status: result.status, value: result.value, display: result.display },
 		});
+	}
+
+	/** Left open past this turn. It gets its one result later, when its answer arrives. */
+	private async leaveOpen(host: RuntimeHost, call: ToolCall, stepId: string, reason: string): Promise<undefined> {
+		await host.record({ kind: "toolOpen", writer: "runtime", modelVisible: false, stepId, toolCallId: call.id, data: { reason } });
+		host.report("tool.open", { reason }, { stepId, toolCallId: call.id });
+		return undefined;
 	}
 
 	/** Every tool call ends with exactly one result. */

@@ -128,6 +128,12 @@ export interface ToolResult {
 	value?: unknown;
 	display?: unknown;
 }
+/** A call left open past its turn. It gets its one result later. */
+export interface ToolPending { pending: string }
+export function isPending(value: object): value is ToolPending {
+	return typeof (value as ToolPending).pending === "string";
+}
+
 export interface ToolContext {
 	sessionId: string;
 	signal: AbortSignal;
@@ -136,13 +142,19 @@ export interface ToolContext {
 	progress(content: ContentPart[]): void;
 	/** The session's working environment, if one is provided. */
 	environment?: WorkingEnvironment;
-	/** Ask an actor something. */
+	/**
+	 * Ask an actor something. Questions are keyed by their order in this run. A tool
+	 * that leaves its call open (returns { pending }) runs again from the top when
+	 * the answer arrives, so it must ask the same questions in the same order;
+	 * asking again then returns the recorded answer.
+	 */
 	ask(request: InputRequestDraft): Promise<Answer>;
 }
 export interface ToolSource {
 	id: string;
 	tools(): ToolDefinition[];
-	run(call: ToolCall, context: ToolContext): Promise<Omit<ToolResult, "callId">>;
+	/** Run a call. Return { pending } to leave the call open past its turn, after asking a question that was left open. */
+	run(call: ToolCall, context: ToolContext): Promise<Omit<ToolResult, "callId"> | ToolPending>;
 	/** Tell the Harness when the list of tools changes. */
 	onChange?(listener: () => void): () => void;
 }
@@ -317,7 +329,7 @@ export interface RuntimeHost {
 	/** Let plugins step in at a hook point. */
 	hook<T = any>(name: string, payload: any): Promise<T>;
 	/** Run this tool call. */
-	runToolCall(call: ToolCall, signal: AbortSignal): Promise<ToolResult>;
+	runToolCall(call: ToolCall, signal: AbortSignal): Promise<ToolResult | (ToolPending & { callId: string })>;
 	definition(toolName: string): ToolDefinition | undefined;
 	/** Record entries in the session's history. */
 	record(entry: EntryDraft): Promise<HistoryEntry>;

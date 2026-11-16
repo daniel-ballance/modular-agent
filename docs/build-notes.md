@@ -9,6 +9,7 @@
 | `harness` | The Harness: hosting plugins, the plugin API, sessions, the hook registry, input requests, jobs, the output gate, declarations |
 | `runtime-transient` | Runtime (transient) |
 | `runtime-durable` | Runtime (durable). Replaces the transient one. A turn, and any question it was waiting on, survives a restart. |
+| `tools-question` | Tool source: `ask_user`, a question the model asks. With a wait set, it can leave its call open past its turn. |
 | `approval` | Feature: asks before tool calls. Policies: `ask` (unless read-only), `all`, `never`, `off`. |
 | `provider-pi-ai` | Provider, one per pi-ai vendor |
 | `interface-terminal` | Interface: interactive, print (`-p`) and JSON modes |
@@ -31,7 +32,8 @@ node packages/agent/dist/src/cli.js --pi-auth -m xai/grok-4.7 -p "..."  # print 
 node packages/agent/dist/src/cli.js --pi-auth --durable -s <session>   # reopen, carrying on an interrupted turn
 node packages/agent/dist/src/cli.js --pi-auth --approval ask           # ask before tool calls that aren't read-only
 node packages/agent/dist/src/cli.js --pi-auth --approval ask --approval-wait 30   # after 30 s the question outlasts the turn
-npm test                                                               # 21 tests, using pi-ai's faux provider
+node packages/agent/dist/src/cli.js --pi-auth --question-wait 30      # ask_user questions outlast the turn after 30 s
+npm test                                                               # 24 tests, using pi-ai's faux provider
 ```
 
 ## What is checked
@@ -70,6 +72,8 @@ A question can be asked with a time limit and "leave open". When the limit passe
 3. The question stays answerable, with no deadline, and survives a restart with either Runtime, because nothing about it is held in memory.
 4. When every open call has its answer, the Harness starts a new turn, started by the answer. The Runtime runs the open calls through the usual checks: the approval check finds the recorded answer under the same key, so the call runs or is refused. Then the step loop carries on.
 
+A tool can do the same from inside its own run. It asks with a time limit and "leave open", and returns "pending" when the answer is pending. When the answer arrives, the tool runs again from the top. Its questions are keyed by their order in the run, so asking again returns the recorded answer instead of a new question. The `ask_user` tool works this way. Checked with a real model: the turn ended with `ask_user` open, `/answer teal` reran it, and the model went on to write the answer to a file.
+
 New input while a call is open is allowed. The model's view puts a stand-in result ("no result yet") in the call's place, and shows the real result later as a late result. The record never holds a stand-in, so every call still has exactly one result.
 
 In the terminal, a question takes the next line only while a turn is running. One left open past its turn is answered with `/answer allow` or `/answer refuse`, and reopening the session reminds you that it is open.
@@ -89,7 +93,7 @@ Checked by tests, and by hand with a real model: the turn ended after four secon
 
 ## Not done yet
 
-- **Only gates can leave a call open.** A tool that asks a question from inside its own run still waits for the answer within the turn.
+- **A call left open must be safe to run again up to its question.** That is the tool author's promise, as with Pi Durable's tools that park.
 - **Tool calls run one at a time,** even when the model asks for several.
 - **Several actors** work in the Harness and tests, but the terminal Interface acts for one user.
 - **Adding plugins during a session** isn't supported. The declaration says so.

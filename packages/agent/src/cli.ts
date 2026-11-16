@@ -2,10 +2,11 @@
 import { terminalInterface, type TerminalMode } from "@modular-agent/interface-terminal";
 import { approval, type ApprovalPolicy } from "@modular-agent/approval";
 import { durableRuntime } from "@modular-agent/runtime-durable";
+import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "./index.js";
 
 function parse(argv: string[]) {
-	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; approvalWait?: number; help: boolean } = {
+	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; approvalWait?: number; questionWait?: number; help: boolean } = {
 		mode: "interactive", piAuth: false, ephemeral: false, durable: false, help: false,
 	};
 	const rest: string[] = [];
@@ -20,6 +21,7 @@ function parse(argv: string[]) {
 		else if (a === "--durable") out.durable = true;
 		else if (a === "--approval") out.approval = argv[++i] as ApprovalPolicy;
 		else if (a === "--approval-wait") out.approvalWait = Number(argv[++i]) * 1000;
+		else if (a === "--question-wait") out.questionWait = Number(argv[++i]) * 1000;
 		else if (a === "-h" || a === "--help") out.help = true;
 		else rest.push(a);
 	}
@@ -42,6 +44,7 @@ Options:
   --durable                 use the durable Runtime: a turn carries on after a crash
   --approval <policy>       ask before tool calls: ask (unless read-only), all, never or off
   --approval-wait <seconds> after this long, end the turn and leave the question open
+  --question-wait <seconds> the same for questions the model asks with ask_user
 `;
 
 async function main() {
@@ -52,7 +55,7 @@ async function main() {
 	}
 	if (args.mode === "interactive" && args.prompt) args.mode = "print";
 	const ui = terminalInterface({ mode: args.mode, prompt: args.prompt, sessionId: args.session });
-	const harness = await createAgent({ model: args.model, usePiAuth: args.piAuth, ephemeral: args.ephemeral, plugins: [...(args.durable ? [durableRuntime()] : []), ...(args.approval ? [approval({ policy: args.approval, waitMs: args.approvalWait })] : []), ui] });
+	const harness = await createAgent({ model: args.model, usePiAuth: args.piAuth, ephemeral: args.ephemeral, plugins: [questionTool({ waitMs: args.questionWait }), ...(args.durable ? [durableRuntime()] : []), ...(args.approval ? [approval({ policy: args.approval, waitMs: args.approvalWait })] : []), ui] });
 	try {
 		return await ui.terminal.run();
 	} finally {

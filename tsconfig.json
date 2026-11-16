@@ -44,6 +44,9 @@
       "path": "packages/approval"
     },
     {
+      "path": "packages/tools-question"
+    },
+    {
       "path": "packages/runtime-durable"
     }
   ]

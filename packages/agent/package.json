@@ -25,7 +25,8 @@
     "@modular-agent/interface-terminal": "0.1.0",
     "@earendil-works/pi-ai": "1.5.2",
     "@modular-agent/runtime-durable": "0.1.0",
-    "@modular-agent/approval": "0.1.0"
+    "@modular-agent/approval": "0.1.0",
+    "@modular-agent/tools-question": "0.1.0"
   },
   "bin": {
     "ma": "dist/src/cli.js"

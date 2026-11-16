@@ -32,10 +32,12 @@ import {
 	type StoredSession,
 	type ToolCall,
 	type ToolDefinition,
+	type ToolPending,
 	type ToolResult,
 	type ToolSource,
 	type TurnOutcome,
 	type WorkingEnvironment,
+	isPending,
 	isToolCall,
 	text,
 	textOf,
@@ -828,13 +830,14 @@ export class Harness {
 	}
 
 	/** Run one tool call. Hook points are applied by whoever owns the operation. */
-	private async executeTool(s: Session, call: ToolCall, signal: AbortSignal, turnId?: string): Promise<ToolResult> {
+	private async executeTool(s: Session, call: ToolCall, signal: AbortSignal, turnId?: string): Promise<ToolResult | (ToolPending & { callId: string })> {
 		const found = this.findTool(s, call.name);
 		if (!found) return { callId: call.id, status: "failed", content: [text(`Unknown tool: ${call.name}`)] };
 		const missing = requiredMissing(found.definition.parameters, call.input);
 		if (missing.length) return { callId: call.id, status: "failed", content: [text(`Missing required input: ${missing.join(", ")}`)] };
 		await this.commit(s, [{ kind: "toolStarted", writer: "harness", modelVisible: false, turnId, toolCallId: call.id, stepId: call.stepId, data: { name: call.name, startedBy: call.startedBy } }]);
 		this.emit(s.id, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
+		let asked = 0;
 		try {
 			const result = await found.source.run(call, {
 				sessionId: s.id,
@@ -842,8 +845,12 @@ export class Harness {
 				call,
 				progress: (content) => this.emit(s.id, "tool.progress", { content }, found.source.id, { turnId, toolCallId: call.id }),
 				environment: this.use<WorkingEnvironment>("working-environment"),
-				ask: (request) => this.ask(s, { ...request, toolCallId: call.id }, found.source.id),
+				ask: (request) => this.ask(s, { ...request, toolCallId: call.id, key: `${call.id}:${request.key ?? `ask:${asked++}`}` }, found.source.id),
 			});
+			if (isPending(result)) {
+				this.emit(s.id, "tool.ended", { status: "open", reason: result.pending }, found.source.id, { turnId, toolCallId: call.id });
+				return { callId: call.id, pending: result.pending };
+			}
 			const out: ToolResult = { ...result, callId: call.id };
 			this.emit(s.id, "tool.ended", { status: out.status }, found.source.id, { turnId, toolCallId: call.id });
 			return out;
@@ -864,7 +871,11 @@ export class Harness {
 		const gate = await this.hooks.gate("tool.before", { sessionId: s.id, call, definition });
 		let result: ToolResult;
 		if (gate.refused) result = { callId: call.id, status: "refused", content: [text(gate.refused)] };
-		else result = await this.executeTool(s, gate.value.call, new AbortController().signal);
+		else {
+			const ran = await this.executeTool(s, gate.value.call, new AbortController().signal);
+			// Only a turn can carry an open call forward, so outside a turn it fails instead.
+			result = isPending(ran) ? { callId: call.id, status: "failed", content: [text(`${call.name} can't wait for an answer outside a turn`)] } : ran;
+		}
 		result = (await this.hooks.transform("tool.after", { sessionId: s.id, call, result })).value.result;
 		await this.commit(s, [{ kind: "toolCallOutsideTurn", writer: "harness", modelVisible: false, toolCallId: call.id, actorId: call.actorId, data: { call, result } }]);
 		return result;

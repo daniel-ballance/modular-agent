@@ -131,7 +131,7 @@ export class TerminalInterface implements InterfaceCapability {
 				else if (outcome.kind === "cancelled") this.line(yellow("Cancelled"));
 				else this.line();
 				const open = event.data.result?.openToolCalls?.length ?? 0;
-				if (open) this.line(yellow(`Waiting for an answer before ${open} tool call${open > 1 ? "s" : ""} can run. Answer with /answer allow (or refuse) whenever you're ready; the agent carries on then.`));
+				if (open) this.line(yellow(`Waiting for an answer before ${open} tool call${open > 1 ? "s" : ""} can run. Answer with /answer <reply> (for an approval: allow or refuse) whenever you're ready; the agent carries on then.`));
 				const u = event.data.usage;
 				if (u) this.line(dim(`[${u.input} in, ${u.output} out${u.cost ? `, $${u.cost.toFixed(4)}` : ""}]`));
 				this.prompt();
@@ -182,7 +182,7 @@ export class TerminalInterface implements InterfaceCapability {
 		const rl = createInterface({ input: this.options.input ?? process.stdin, output: this.out, terminal: true });
 		this.rl = rl;
 		this.line(dim(`Session ${this.sessionId}. Model: ${this.api.session(this.sessionId).settings.model ?? "(none, use /model)"}. /help lists commands.`));
-		if (this.requests.length && !this.api.session(this.sessionId).busy) this.line(yellow("A question is still open. Answer it with /answer allow (or refuse)."));
+		if (this.requests.length && !this.api.session(this.sessionId).busy) this.line(yellow("A question is still open. Answer it with /answer <reply>."));
 		let lastInterrupt = 0;
 		rl.on("SIGINT", async () => {
 			if (this.api.session(this.sessionId).busy) {
