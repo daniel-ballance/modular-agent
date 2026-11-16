@@ -1,6 +1,6 @@
 # Pressure test, round 2
 
-**Started:** 2026-11-16. **Status:** running.
+**Started:** 2026-11-16. **Status:** complete. Results: [synthesis](synthesis.md).
 
 **Question:** do the revised docs hold up? Round 1 ([synthesis](../synthesis.md)) found 12 of 32 assumptions false, and changes 1–10 were applied in commit `94d9d21`. Round 2 checks whether those changes fixed what they were meant to fix, and looks for what they broke or missed.
 
