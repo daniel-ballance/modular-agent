@@ -451,8 +451,8 @@ export class Harness {
 		}
 		const startedBy = (lastStart.data as { startedBy?: QueuedInput["startedBy"] } | undefined)?.startedBy ?? { kind: "actor", id: lastStart.actorId ?? "user" };
 		this.emit(s.id, "turn.interrupted", { pending: interrupted.calls.length }, "harness", { turnId: interrupted.turnId });
-		await this.launch(s, interrupted.turnId, (signal) => this.resumeTurn(s, interrupted, startedBy, signal));
-		await this.waitForIdle(s.id);
+		// Not awaited: the resumed turn may wait for an answer that only an Interface opened after this can give.
+		void this.launch(s, interrupted.turnId, (signal) => this.resumeTurn(s, interrupted, startedBy, signal));
 	}
 
 	/** Used when no Runtime is loaded: the turn ends as failed, and each pending call gets one result. */
@@ -487,7 +487,13 @@ export class Harness {
 	// ---------- the record ----------
 
 	/** Commit drafts to the session. All are kept, or none are. */
-	async commit(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]> {
+	commit(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]> {
+		const run = s.committing.then(() => this.commitNow(s, drafts));
+		s.committing = run.catch(() => undefined);
+		return run;
+	}
+
+	private async commitNow(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]> {
 		let position = s.position;
 		const entries: HistoryEntry[] = drafts.map((d) => {
 			const entry: HistoryEntry = { ...d, id: d.id ?? this.newId(), parentId: position, sessionId: s.id, time: this.now() };
@@ -697,6 +703,10 @@ export class Harness {
 	}
 
 	private async finishTurn(s: Session, turnId: string, outcome: TurnOutcome): Promise<void> {
+		for (const request of this.recordedOpenRequests(s).filter((r) => r.turnId === turnId && !s.requests.has(r.id))) {
+			await this.commit(s, [{ kind: "inputClosed", writer: "harness", modelVisible: false, turnId, toolCallId: request.toolCallId, data: { requestId: request.id, reason: "no longer answerable" } }]);
+			this.emit(s.id, "input.request.closed", { requestId: request.id, declined: true, lost: true }, "harness", { turnId, toolCallId: request.toolCallId });
+		}
 		await this.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId, data: { outcome: outcome.outcome, result: outcome.result, usage: outcome.usage } }]);
 		await this.hooks.observe("turn.end", { sessionId: s.id, turnId, outcome });
 		this.emit(s.id, "turn.ended", outcome, "harness", { turnId });
@@ -861,11 +871,50 @@ export class Harness {
 		return actor.authority.includes(request.kind === "approval" ? "approve" : "answer");
 	}
 
-	private ask(s: Session, draft: InputRequestDraft, askedBy: string): Promise<Answer> {
-		const request: InputRequest = { ...draft, id: this.newId(), sessionId: s.id, askedBy, answerers: draft.answerers ?? [] };
+	/** Questions recorded on the current branch that have no answer and were not closed. */
+	private recordedOpenRequests(s: Session): InputRequest[] {
+		const branch = s.branch();
+		const settled = new Set(branch.filter((e) => e.kind === "inputAnswer" || e.kind === "inputClosed").map((e) => (e.data as { requestId: string }).requestId));
+		return branch.filter((e) => e.kind === "inputRequest").map((e) => (e.data as { request: InputRequest }).request).filter((r) => !settled.has(r.id));
+	}
+
+	/** A recorded answer to the question with this key, if it can still be used. */
+	private recordedAnswer(s: Session, key: string): { request: InputRequest; answer?: Answer } | undefined {
+		const branch = s.branch();
+		const entry = [...branch].reverse().find((e) => e.kind === "inputRequest" && (e.data as { request: InputRequest }).request.key === key);
+		if (!entry) return undefined;
+		const request = (entry.data as { request: InputRequest }).request;
+		if (branch.some((e) => e.kind === "inputClosed" && (e.data as { requestId: string }).requestId === request.id)) return undefined;
+		const answered = branch.find((e) => e.kind === "inputAnswer" && (e.data as { requestId: string }).requestId === request.id);
+		if (!answered) return { request };
+		const answer = (answered.data as { answer: Answer }).answer;
+		// A secret's value is never recorded, so it must be asked again.
+		if (request.kind === "secret" && !answer.declined) return undefined;
+		// A recorded allow counts only if whoever gave it may still answer.
+		if (!answer.declined && !this.mayAnswer(s, request, answer.actorId)) return undefined;
+		return { request, answer };
+	}
+
+	private async ask(s: Session, draft: InputRequestDraft, askedBy: string): Promise<Answer> {
+		let request: InputRequest = { ...draft, id: this.newId(), sessionId: s.id, askedBy, answerers: draft.answerers ?? [], turnId: s.running?.turnId };
+		let reopened = false;
+		if (draft.key) {
+			const recorded = this.recordedAnswer(s, draft.key);
+			if (recorded?.answer) {
+				this.emit(s.id, "input.request.reused", { requestId: recorded.request.id, key: draft.key }, "harness", { toolCallId: request.toolCallId });
+				return recorded.answer;
+			}
+			if (recorded) {
+				request = { ...recorded.request, turnId: s.running?.turnId ?? recorded.request.turnId };
+				reopened = true;
+			}
+		}
 		const viewers = this.interfaces().filter((i) => s.actors.get(i.actorId)?.authority.includes("watch") || this.mayAnswer(s, request, i.actorId));
 		if (!viewers.some((i) => this.mayAnswer(s, request, i.actorId))) {
-			return Promise.resolve({ requestId: request.id, declined: true, actorId: "harness", reason: "No one present can answer" });
+			return { requestId: request.id, declined: true, actorId: "harness", reason: "No one present can answer" };
+		}
+		if (!reopened) {
+			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, toolCallId: request.toolCallId, data: { request } }]);
 		}
 		return new Promise<Answer>((resolve) => {
 			const open = {
@@ -874,14 +923,19 @@ export class Harness {
 					if (open.timer) clearTimeout(open.timer);
 					s.requests.delete(request.id);
 					for (const i of viewers) i.onInputRequestClosed?.(request.id);
-					this.emit(s.id, "input.request.closed", { requestId: request.id, declined: answer.declined ?? false, value: request.kind === "secret" ? undefined : answer.value }, "harness", { actorId: answer.actorId, toolCallId: request.toolCallId });
-					resolve(answer);
+					const kept = request.kind === "secret" ? { ...answer, value: undefined } : answer;
+					this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId, toolCallId: request.toolCallId, actorId: answer.actorId, data: { requestId: request.id, answer: kept } }])
+						.catch((error) => this.problem("harness", "record answer", error))
+						.finally(() => {
+							this.emit(s.id, "input.request.closed", { requestId: request.id, declined: answer.declined ?? false, value: request.kind === "secret" ? undefined : answer.value }, "harness", { actorId: answer.actorId, toolCallId: request.toolCallId });
+							resolve(answer);
+						});
 				},
 				timer: undefined as NodeJS.Timeout | undefined,
 			};
 			if (request.timeLimitMs) open.timer = setTimeout(() => open.resolve({ requestId: request.id, declined: true, actorId: "harness", reason: "time limit" }), request.timeLimitMs);
 			s.requests.set(request.id, open);
-			this.emit(s.id, "input.request.opened", { request }, askedBy, { toolCallId: request.toolCallId });
+			this.emit(s.id, "input.request.opened", { request, reopened }, askedBy, { toolCallId: request.toolCallId });
 			for (const i of viewers) i.onInputRequest?.(request);
 		});
 	}
@@ -937,7 +991,7 @@ export class Harness {
 		const provider = s ? this.providerFor(s) : undefined;
 		return {
 			inputDuringTurn: runtime?.supports.inputDuringTurn === true,
-			waitingThroughRestart: runtime?.supports.waitingThroughRestart === true,
+			waitingThroughRestart: runtime?.supports.waitingThroughRestart === true && !!store && !s?.ephemeral,
 			continuesAfterRestart: runtime?.supports.continuesAfterRestart === true,
 			rewinding: false,
 			forking: !!store,

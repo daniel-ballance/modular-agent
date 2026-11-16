@@ -37,6 +37,8 @@ export class Session {
 	/** Recipients following this session, each through the output gate. */
 	readonly followers = new Set<{ push(event: AgentEvent): void }>();
 	closed = false;
+	/** Commits run one at a time, so each entry follows the one before it. */
+	committing: Promise<unknown> = Promise.resolve();
 
 	constructor(readonly meta: StoredSession, readonly ephemeral: boolean) {}
 

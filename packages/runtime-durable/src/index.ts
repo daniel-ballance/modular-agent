@@ -14,11 +14,13 @@ import { TransientRuntime, type TransientRuntimeOptions } from "@modular-agent/r
  * the model is told so. Every call still passes the "before a tool call" hook
  * point, so a late approval is checked again.
  *
- * What it does not do yet: keep an open input request alive through a restart.
+ * Questions survive too. The Harness records each question and answer, and a
+ * pending call's checks run again with the same keys, so an open question is
+ * reopened and an answered one is not asked twice.
  */
 export class DurableRuntime extends TransientRuntime {
 	override readonly id = "durable";
-	override readonly supports = { inputDuringTurn: true, waitingThroughRestart: false, continuesAfterRestart: true, rewinding: false };
+	override readonly supports = { inputDuringTurn: true, waitingThroughRestart: true, continuesAfterRestart: true, rewinding: false };
 
 	override async resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
 		const entries: string[] = [];

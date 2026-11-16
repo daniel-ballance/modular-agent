@@ -193,6 +193,7 @@ An input request asks for something only an actor can give.
 | who may answer | which actors, such as the user, the parent agent, or a program. They must be within the authority the asker has. |
 | whether it can still be answered | |
 | a time limit *(optional)* | |
+| a key *(optional)* | Asking again with the same key reopens the same question, or reuses its recorded answer. |
 
 | Answer contains |
 |---|

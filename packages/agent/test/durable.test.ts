@@ -48,6 +48,7 @@ test("swap test: the same crashed session, reopened with a transient and then a 
 	// Transient: the turn ends as failed; started calls have an unknown outcome, the rest never started.
 	const t = await agent(dirs, [], false);
 	await t.api("test").openSession(s);
+	await t.api("test").waitForIdle(s);
 	assert.equal(outcome(t, s), "failed");
 	assert.deepEqual(statuses(t, s), { read: "outcomeUnknown", bash: "outcomeUnknown", write: "notStarted" });
 	assert.equal(existsSync(join(dirs.project, "done.txt")), false);
@@ -57,6 +58,7 @@ test("swap test: the same crashed session, reopened with a transient and then a 
 	const d = await agent(copy, [(context) => fauxAssistantMessage([fauxText(`Finished. Saw ${context.messages.filter((m) => m.role === "toolResult").length} results.`)])], true);
 	const api = d.api("test");
 	await api.openSession(s);
+	await api.waitForIdle(s);
 	assert.equal(outcome(d, s), "completed");
 	// read is safe to repeat, so it ran again; bash is not, so its outcome is unknown; write never started, so it ran.
 	assert.deepEqual(statuses(d, s), { read: "completed", bash: "outcomeUnknown", write: "completed" });

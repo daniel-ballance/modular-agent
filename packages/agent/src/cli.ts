@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { terminalInterface, type TerminalMode } from "@modular-agent/interface-terminal";
+import { approval, type ApprovalPolicy } from "@modular-agent/approval";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { createAgent } from "./index.js";
 
 function parse(argv: string[]) {
-	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; help: boolean } = {
+	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; help: boolean } = {
 		mode: "interactive", piAuth: false, ephemeral: false, durable: false, help: false,
 	};
 	const rest: string[] = [];
@@ -17,6 +18,7 @@ function parse(argv: string[]) {
 		else if (a === "--pi-auth") out.piAuth = true;
 		else if (a === "--ephemeral") out.ephemeral = true;
 		else if (a === "--durable") out.durable = true;
+		else if (a === "--approval") out.approval = argv[++i] as ApprovalPolicy;
 		else if (a === "-h" || a === "--help") out.help = true;
 		else rest.push(a);
 	}
@@ -37,6 +39,7 @@ Options:
   --pi-auth                 use Pi's credentials (~/.pi/agent/auth.json)
   --ephemeral               keep no history on disk
   --durable                 use the durable Runtime: a turn carries on after a crash
+  --approval <policy>       ask before tool calls: ask (unless read-only), all, never or off
 `;
 
 async function main() {
@@ -47,7 +50,7 @@ async function main() {
 	}
 	if (args.mode === "interactive" && args.prompt) args.mode = "print";
 	const ui = terminalInterface({ mode: args.mode, prompt: args.prompt, sessionId: args.session });
-	const harness = await createAgent({ model: args.model, usePiAuth: args.piAuth, ephemeral: args.ephemeral, plugins: args.durable ? [durableRuntime(), ui] : [ui] });
+	const harness = await createAgent({ model: args.model, usePiAuth: args.piAuth, ephemeral: args.ephemeral, plugins: [...(args.durable ? [durableRuntime()] : []), ...(args.approval ? [approval({ policy: args.approval })] : []), ui] });
 	try {
 		return await ui.terminal.run();
 	} finally {

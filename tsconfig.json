@@ -41,6 +41,9 @@
       "path": "packages/agent"
     },
     {
+      "path": "packages/approval"
+    },
+    {
       "path": "packages/runtime-durable"
     }
   ]

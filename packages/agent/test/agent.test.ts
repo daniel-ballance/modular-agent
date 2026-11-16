@@ -252,6 +252,7 @@ test("history survives a restart; moving the position is kept; an interrupted tu
 	h = await setup([], [], dirs).make();
 	api = h.api("test");
 	await api.openSession(s);
+	await api.waitForIdle(s);
 	const branch = api.history(s);
 	const repaired = branch.find((e) => e.kind === "toolResult" && e.toolCallId === call.id);
 	assert.equal((repaired?.data as { status: string }).status, "outcomeUnknown");

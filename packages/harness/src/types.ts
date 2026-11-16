@@ -262,8 +262,12 @@ export interface InputRequest {
 	/** Actor ids that may answer. Empty means any actor with "answer" authority. */
 	answerers: string[];
 	timeLimitMs?: number;
+	/** A stable key. Asking again with the same key reopens the same question, or reuses its recorded answer. */
+	key?: string;
+	/** The turn that asked, if any. */
+	turnId?: string;
 }
-export type InputRequestDraft = Omit<InputRequest, "id" | "sessionId" | "askedBy" | "answerers"> & { answerers?: string[] };
+export type InputRequestDraft = Omit<InputRequest, "id" | "sessionId" | "askedBy" | "answerers" | "turnId"> & { answerers?: string[] };
 export interface Answer { requestId: string; value?: string; declined?: boolean; actorId: string; reason?: string }
 
 // ---------- Events ----------

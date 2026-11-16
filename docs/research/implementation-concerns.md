@@ -8,6 +8,7 @@ Anyone building one of these parts will need to answer these questions. Each ent
 
 ## Approval, approval plugins and Interfaces
 
+- **Questions surviving a restart** are done in the first implementation: questions and answers are recorded, keyed, and reopened by a durable Runtime ([build notes](../build-notes.md)).
 - **Separate lifecycles for approvals, questions and tool execution.** An approval can arrive after its call's turn has ended. A question can stay answerable after its tool call has returned, and can be answered by a message, as Codex's async questions are. (R2 F2, R3 F3)
 - **Two actors answering at once.** The architecture says one answer closes a request. How a UI shows a request another actor has just answered is up to the Interface. (R4)
 

@@ -59,8 +59,13 @@ export class TerminalInterface implements InterfaceCapability {
 	}
 
 	onInputRequest(request: InputRequest): void {
+		if (this.options.mode !== "interactive") {
+			// Nobody is there to answer in print and JSON modes.
+			queueMicrotask(() => this.api.answer(request.sessionId, { requestId: request.id, actorId: this.actorId, declined: true, reason: "nobody to answer in print mode" }));
+			return;
+		}
 		this.requests.push(request);
-		if (this.options.mode !== "interactive") return;
+		if (request.kind === "approval" || request.options) this.line();
 		const choices = request.kind === "approval" ? ["allow", "refuse"] : request.options;
 		this.line(yellow(`? ${request.question}`) + (request.details ? `\n${dim(request.details)}` : ""));
 		if (choices?.length) this.line(choices.map((c, i) => `  ${i + 1}. ${c}`).join("\n"));
