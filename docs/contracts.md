@@ -225,7 +225,7 @@ An Interface is a plugin, so these are things it does through the plugin API.
 | list sessions, open a session, join a session | | sessions; the session and its history |
 | give input | the session, the content, when to take it (now, in the running turn, after it), a key *(optional)* | accepted, with when it will be taken; or refused. Input with a key already taken returns the earlier answer, and is not taken again. |
 | withdraw input | the input | withdrawn, with its content; or too late, already taken |
-| cancel | the session | the running turn ends as cancelled. Its jobs keep running. |
+| cancel | the session | the running turn ends as cancelled. Its jobs keep running. Input queued for the turn or after it is handed back to the Interface, with its content. |
 | move to a point | the session, the entry to move to, whether to rewind outside state too | moved; or refused, saying which part can't rewind |
 | list commands, run a command | the command and its arguments | the command's result, or an error |
 | follow a session | the session, and a point to start from | its history from that point, as this actor may see it, then its events as they happen |
@@ -335,7 +335,11 @@ Whoever owns an operation defines its hook points, including plugins ([ADR 0006]
 
 "Before a tool call" also applies to calls a UI or plugin starts. Tools a Provider runs itself can't be stopped one by one. They are allowed or refused before the request.
 
-When several plugins handle one hook point, these rules are **proposed**:
-- A refusal wins. If any plugin refuses a tool call or blocks output, it does not go ahead.
-- Changes are applied one after another, each plugin seeing the result of the one before. The order is [open](open-questions.md#how-handlers-combine).
-- If a plugin fails while handling a gate, the operation is refused.
+When several plugins handle one hook point, the hook point's owner fixes one rule for combining their answers. **Decided** ([open questions](open-questions.md#settled)). The rules are:
+- **observe:** every handler sees it, and answers are ignored.
+- **gate:** handlers answer in turn. A refusal wins and stops the rest. A handler may allow with changed input, and later handlers see the change. A handler that fails counts as a refusal.
+- **transform:** each handler gets the previous handler's result and may change it. A handler may also stop the chain, as when input is handled as a command.
+- **first answer:** the first handler that answers decides.
+- **collect:** every handler's contribution is gathered.
+
+Handlers run in the order their plugins were loaded. A plugin can ask to run first or last.

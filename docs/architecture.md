@@ -62,7 +62,7 @@ A plugin can **provide a capability**, which is a named job the agent needs done
 
 The Harness is the only part that is always present. It holds the agent together and does nothing else. **Decided** ([ADR 0011](adr/0011-minimal-harness-everything-is-a-plugin.md)).
 
-It is responsible for three things. The exact list is **proposed** ([open question](open-questions.md#what-the-harness-keeps)):
+It is responsible for three things. **Decided** ([decided 2026-11-16](open-questions.md#settled)):
 1. **Hosting plugins:** checking that they may load, starting them, giving each the capabilities it needs from other plugins, and stopping them.
 2. **The plugin API:** everything a plugin can do. A plugin can act only through it.
 3. **Sessions:** each session's identity, settings, actors and their authority, active plugins, current position, and history while the session is open. A history store keeps the history beyond that. Without one, a session is **ephemeral**: its history is gone when the process stops. **Decided** ([pressure test](pressure-test/synthesis.md#decisions)).
@@ -82,6 +82,7 @@ The Harness is also where the outside world is turned into a small set of standa
 | [Working environment](#working-environment) | Where files live and commands run | one per session, or none |
 | [History store](#history-store) | Keeps session history beyond the process | one, or none |
 | [Credential store](#credential-store) | Keeps credentials and hands them out | one, or none |
+| [Configuration](#configuration) | Supplies settings to the Harness and plugins | one, or none |
 
 Plugins can also define new capabilities for other plugins to provide. **Decided** ([pressure test](pressure-test/synthesis.md#8-add-the-working-environment-and-let-plugins-define-capabilities)). Whether to keep the word "capability" is [open](open-questions.md#naming-capability).
 
@@ -136,6 +137,10 @@ Keeps session history beyond the process, and gives it back. In normal use it ne
 ### Credential store
 
 Keeps credentials, gives them to the Providers, tool sources and working environments that ask for them, and runs sign-in with the user's help. Credentials never reach the Runtime. **Decided** ([ADR 0005](adr/0005-provider-handles-from-the-harness.md)).
+
+### Configuration
+
+Supplies settings: defaults for new sessions, and each plugin's own settings. The first one reads global and project files, as Pi does. A change that affects a session is recorded in its history. **Decided** ([decided 2026-11-16](open-questions.md#settled)).
 
 ## Feature plugins
 
@@ -199,7 +204,7 @@ This is the plugin API, described by what it lets a plugin do. It is **proposed*
 - Say how what it produced should be shown. An Interface that doesn't understand that falls back to a plain display.
 
 **Its own lifecycle and surroundings**
-- Be checked before it loads, for example whether the project is trusted.
+- Be checked before it loads. Plugins installed globally load. Plugins that come with a project load only once the user trusts that project. Plugins run with the agent's full permissions. **Decided** ([decided 2026-11-16](open-questions.md#settled)).
 - Read its own settings ([open](open-questions.md#configuration)).
 - Know the project, and use the working environment.
 

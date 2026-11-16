@@ -4,20 +4,9 @@ These are undecided. Each has a stable name, so other documents link to it by na
 
 The questions are about **what** the system does. Questions about **how** it is built or wired are kept apart under [Parked: how](#parked-how).
 
-**Worth deciding first,** because many others depend on them:
-1. [What the Harness keeps](#what-the-harness-keeps)
-2. [Waiting for an answer](#waiting-for-an-answer)
-3. [Transient and durable Runtimes](#transient-and-durable-runtimes)
-4. [Several actors](#several-actors)
-5. [Work outside a turn](#work-outside-a-turn)
+**Deferred on 2026-11-16** until the first build needs them: who sets how long a turn waits for an answer, whether an approval can outlast its turn, how several actors are granted authority, whether a job can outlive its session, the word "capability", and who sets turn limits.
 
 ## The Harness and plugins
-
-### What the Harness keeps
-
-The proposal is three things: hosting plugins, the plugin API, and sessions with their history while they are open ([Architecture](architecture.md#the-harness)). A history store keeps history beyond that, and without one a session is ephemeral. Is that the whole list? What does a user get out of the box, and who chooses the first set of plugins?
-
-Prior art: DeepSeek Harness keeps its session log in its core and lets plugins store it, and ships sets of plugins as profiles. Pydantic AI keeps in its core only what needs deep access to the loop or the model. Pi builds everything in. See the [prior-art map](research/README.md).
 
 ### How many of each capability
 
@@ -33,13 +22,9 @@ Prior art: Pydantic AI's on-demand plugins stay hidden until the model asks for 
 
 ### Plugin lifecycle
 
-What does a plugin hand over when the agent reloads, and what is lost? How far is a plugin trusted, given that it can see prompts, files and credentials? Trust is now checked before a plugin loads; who decides it?
+What does a plugin hand over when the agent reloads, and what is lost? How far is a plugin trusted, given that it can see prompts, files and credentials? Trust is checked before a plugin loads, as settled below.
 
 Prior art: Pi reloads extensions with `/reload`, checks project trust before loading project extensions, and runs extensions with its own full permissions.
-
-### Configuration
-
-Every plugin has settings. Are settings part of the Harness, or a capability? Who can change them while a session runs, and is each change recorded in the history?
 
 ### Naming "capability"
 
@@ -64,7 +49,7 @@ Prior art: Pi takes "steering" input before the next model request, and "follow-
 
 ### Cancellation
 
-What does cancelling leave behind: open input requests and input queued for after the turn? Jobs keep running ([Architecture](architecture.md#jobs)). Can an actor cancel only its own work in a shared session?
+What does cancelling do to open input requests? Jobs keep running, and queued input is handed back to the Interface. Can an actor cancel only its own work in a shared session?
 
 Prior art: in ACP, cancelling answers every pending permission request as cancelled. Pi returns queued input to the user's editor.
 
@@ -89,12 +74,6 @@ Prior art: ACP v2 separates foreground work from background work, which the sess
 In a voice session, the Provider decides when someone has finished speaking. Is the whole voice session one turn, or a turn for each thing the user says? How does steering differ from interrupting?
 
 Prior art: Pydantic AI treats a realtime session as one run.
-
-### How handlers combine
-
-When several plugins handle one hook point, what is the result? [Contracts](contracts.md#hook-points) proposes that a refusal wins and that changes apply one after another. In what order, and can a plugin insist on being first or last?
-
-Prior art: Pi names six ways handlers combine. DeepSeek Harness gives each hook point one fixed rule, and has guards that can refuse but never allow. Pydantic AI nests plugins like middleware, and lets a plugin say where it must sit.
 
 ### Partial output
 
@@ -195,7 +174,15 @@ These were open before the [pressure test](pressure-test/synthesis.md). The anch
 - **Jobs when a turn is cancelled.** They keep running. Closing the session stops them, unless the agent declares otherwise.
 - **Holding streamed output.** The output gate may hold it, and the agent declares that it does.
 - **Moving the current position.** It is recorded, so a restart reopens the session where it was. Moving is separate from rewinding.
-- **One user.** Every input records its actor. Several actors in one session are optional, and declared. See [Several actors](#several-actors).
+- **One user.** Every input records its actor.
+
+Settled on 2026-11-16 before the first build:
+<a id="what-the-harness-keeps"></a><a id="configuration"></a><a id="how-handlers-combine"></a>
+- **What the Harness keeps:** hosting plugins, the plugin API, and sessions with their history while open.
+- **Configuration:** a capability provided by a plugin. The first reads global and project files.
+- **How handlers combine:** each hook point has one fixed rule, chosen by its owner. Plugins run in load order, and can ask to run first or last. See [Contracts](contracts.md#hook-points).
+- **Plugin trust:** global plugins load; project plugins load once the project is trusted. No sandbox in the first build.
+- **Cancelling:** queued input is handed back to the Interface, as in Pi. Several actors in one session are optional, and declared. See [Several actors](#several-actors).
 
 <a id="parked-how"></a>
 <a id="parked-wiring"></a>
