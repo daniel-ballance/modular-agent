@@ -1,6 +1,6 @@
 # Pressure test
 
-**Started:** 2026-11-16. **Status:** running.
+**Started:** 2026-11-16. **Status:** complete. Results: [synthesis](synthesis.md).
 
 **Question:** can the [architecture](../architecture.md), [contracts](../contracts.md) and [glossary](../../GLOSSARY.md) describe every agent from a copy of vanilla Pi up to a system with ACP, several agents and users, MCP Apps and everything else, without changing their assumptions?
 
