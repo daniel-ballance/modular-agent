@@ -212,4 +212,4 @@ Set aside until the what is settled ([ADR 0010](adr/0010-describe-parts-not-wiri
 - **Combining handlers.** The mechanism behind [How handlers combine](#how-handlers-combine): ordered lists, nesting, fixed rules per hook point.
 - **Recording progress.** How a durable Runtime records its progress: checkpoints, journals, recording intent before acting.
 - **Loading plugins.** How plugins are found, ordered and started.
-- **Keys for repeated input.** How a key makes repeating an input harmless, and for how long it is remembered.
+- **Keys for repeated input.** How long a key is remembered.

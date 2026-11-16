@@ -223,7 +223,7 @@ An Interface is a plugin, so these are things it does through the plugin API.
 | what does this agent support? | | the session's [declaration](#declaration) |
 | start a session | settings *(optional)*, a session and point to fork from *(optional)* | the session |
 | list sessions, open a session, join a session | | sessions; the session and its history |
-| give input | the session, the content, when to take it (now, in the running turn, after it) | accepted, with when it will be taken; or refused |
+| give input | the session, the content, when to take it (now, in the running turn, after it), a key *(optional)* | accepted, with when it will be taken; or refused. Input with a key already taken returns the earlier answer, and is not taken again. |
 | withdraw input | the input | withdrawn, with its content; or too late, already taken |
 | cancel | the session | the running turn ends as cancelled. Its jobs keep running. |
 | move to a point | the session, the entry to move to, whether to rewind outside state too | moved; or refused, saying which part can't rewind |
@@ -292,7 +292,7 @@ Through the [model access](#model-access) it was given:
 | give me this session's history | the session, a point to start from *(optional)* | the entries |
 | list sessions | filters *(optional)* | sessions |
 | open a session for writing | the session | opened; or refused because it is already open elsewhere |
-| erase | the session, what to erase | erased, including summaries and forks it holds, with erasure records left in place |
+| erase | the session, what to erase | erased, including summaries and forks it holds, with erasure records left in place; or not supported |
 
 ### Asking the credential store
 

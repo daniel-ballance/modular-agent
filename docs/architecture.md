@@ -131,7 +131,7 @@ A working environment can be lost, for example when a sandbox expires, and it sa
 
 ### History store
 
-Keeps session history beyond the process, and gives it back. In normal use it never changes what was recorded. It may keep history for a limited time, and it must be able to erase when erasure is required ([History](#history)). It refuses a second writer for a session that is already open elsewhere.
+Keeps session history beyond the process, and gives it back. In normal use it never changes what was recorded. It may keep history for a limited time. It may also support erasure, and declares whether it does ([History](#history)). It refuses a second writer for a session that is already open elsewhere.
 
 ### Credential store
 
@@ -174,6 +174,7 @@ This is the plugin API, described by what it lets a plugin do. It is **proposed*
 - Move a session to another point in its history, and rewind outside state with it.
 - Change a session's settings, such as its model.
 - Start a job, report on it, and cancel it.
+- Make several changes to a session together, such as checking its own state, giving input and updating its state, so that either all of them are kept or none are.
 
 **History and what the model sees**
 - Read a session's history.
@@ -301,7 +302,7 @@ History is the session's record. What the model sees is a view of it, worked out
 - **Moving the current position is recorded,** so a restart reopens the session where it was. Moving only changes which branch the view follows. **Decided** ([round 2](pressure-test/round-2/synthesis.md#decisions)).
 - **Rewinding is separate from moving.** A rewind also restores outside state, such as files in the working environment or a Provider's state. A part that can't rewind refuses before anything changes. Work still pending on the branch left behind is cancelled, never resumed on the new branch.
 - **Keeping history is the history store's job.** Without one, the session is ephemeral. A store may keep history for a limited time. **Decided** ([pressure test](pressure-test/synthesis.md#decisions)).
-- **Erasure reaches every copy the agent controls** when deletion is required. That includes summaries, forks, exports, and anything a Provider keeps. A record that something was erased always remains, without the erased content. Where a copy is out of reach, such as output already delivered, the agent says so.
+- **Erasure, where supported, reaches every copy the agent controls** when deletion is required. That includes summaries, forks, exports, and anything a Provider keeps. A record that something was erased always remains, without the erased content. Where a copy is out of reach, such as output already delivered, the agent says so.
 - **What the model sees is the view plus whatever a Provider keeps or adds.**
 
 How much the history must record, for example enough to rebuild exactly what the model saw on every step, is [open](open-questions.md#what-history-records).
@@ -337,6 +338,7 @@ Whether subagents need anything beyond this is [open](open-questions.md#agents-w
 A host, such as T3 Code, coordinates several whole agents. It is outside this system ([ADR 0012](adr/0012-one-agent-is-the-scope.md)), but it must be able to drive the agent fully through an Interface. These requirements are **proposed**:
 - **The agent declares what it supports** ([Declared support](#declared-support)).
 - **It starts no turn the host didn't ask for,** unless it has declared that it can, for example because a job reports back.
+- **The host can give input with a key.** The same key is taken once, so the host can resend after a crash or a dropped connection.
 - **The host can follow a session from any point,** including after reconnecting.
 - **The host can move, rewind or fork at a point,** or the agent refuses before anything changes.
 - **The host can give the agent context from elsewhere,** such as a summary of what another agent did, as recorded input.
@@ -361,6 +363,8 @@ The agent declares what the session, as set up, supports. That is what a host or
 | Output that bypasses the agent | none bypasses it |
 | Starting turns nobody asked for | the agent starts none |
 | Cancelling a turn also cancels its jobs | it doesn't: jobs keep running |
+| Adding plugins during a session | the session's plugins are fixed when it starts |
+| Erasure | erasure is refused. Retention still applies. |
 
 ## Guarantees
 

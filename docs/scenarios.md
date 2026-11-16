@@ -211,7 +211,7 @@ After three turns that went wrong, the user goes back to just after the first on
 
 ## 15. Erasing personal data
 
-A user asks for their personal data to be deleted, and the deletion is required.
+A user asks for their personal data to be deleted, and the deletion is required. This agent's history store declares that it supports erasure.
 
 1. An actor with authority to erase asks for it through an Interface.
 2. The history store erases the entries that hold the data, and the summaries and forks that copied it. It leaves erasure records in their place, without the erased content.
@@ -235,7 +235,7 @@ The model starts a dev server and wants to keep working while it runs.
 A host such as T3 Code drives this agent, as it drives Pi today. The host is outside this system.
 
 1. The host connects through an Interface, as an actor of kind host, with its own authority. It asks what the agent supports, and reads the declaration.
-2. The host gives input. The connection drops, and the host reconnects and follows the session from the last point it saw. How it avoids giving the same input twice is an [implementation concern](research/implementation-concerns.md#hosts-and-reconnecting).
+2. The host gives input with a key. The connection drops before the answer arrives. The host reconnects, follows the session from the last point it saw, and resends the input with the same key. It is not taken twice.
 3. An approval request opens. The host shows it in its own UI, and answers it for its user.
 4. The host's user switches to another agent for a while, then comes back. The host gives this agent a summary of what the other agent did, as recorded input.
 5. The host forks the session at an earlier point. This agent forks it, or refuses before anything changes.

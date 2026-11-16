@@ -1,6 +1,6 @@
 # Example: two durable agents
 
-**Status:** 2026-11-16.
+**Status:** 2026-11-16. The four changes below have been applied.
 
 This describes two durable agents in the terms of the [architecture](../architecture.md): Pi Durable, and Pydantic AI running on a durable engine such as Temporal. It tests the weakest claim in the description, that a transient and a durable Runtime fit one description. Each difference is checked with the [swap test](../architecture.md): would it break a plugin or a host?
 

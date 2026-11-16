@@ -67,6 +67,6 @@ Anyone building one of these parts will need to answer these questions. Each ent
 ## Hosts and reconnecting
 
 - **What reconnecting recovers:** open requests, running jobs, queued input, the running turn. (R3 F2)
-- **Stable targets and keys** for host actions, so repeating one is harmless or its outcome is marked uncertain. (R3 F7)
+- **Stable targets and keys** for host actions other than giving input, such as fork, cancel and rewind, so repeating one is harmless or its outcome is marked uncertain. Keys for input moved into the [contracts](../contracts.md#interface-and-harness) after the [durable agents example](../examples/durable-agents.md). (R3 F7)
 - **Two outside protocols on one session,** such as ACP and AG-UI, and mapping each protocol's retries onto one rule. (R4 "Host")
 - **What a host reads before it starts:** model catalogs, settings in effect, what the session offers. The architecture requires a declaration; the full catalog is an Interface matter. (R3 F1)
