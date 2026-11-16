@@ -1,0 +1,30 @@
+# Modular Agent
+
+A description of an AI agent built from parts that can each be swapped out and studied on its own. A small **Harness** holds everything together, and every feature is a **plugin**, including the part that runs the agent loop.
+
+The description says **what** the system does: its parts, what each is responsible for, what passes between them, and what must always hold. It does not say **how** they are built or wired. It should give enough detail to build the agent in one process, as separate processes talking over RPC, or as services over a network.
+
+**Status:** concept stage, no code. Pi is the reference implementation. DeepSeek Harness, Pydantic AI and T3 Code are further prior art.
+
+## Reading order
+
+1. [Architecture](docs/architecture.md): purpose, goals, the parts and their responsibilities, and the guarantees.
+2. [Contracts](docs/contracts.md): what passes between the parts, the answers each interaction can get, and the states things move through.
+3. [Scenarios](docs/scenarios.md): the parts working together in ten situations, from a simple request to a crash in the middle of a tool call.
+4. [Open questions](docs/open-questions.md): what is still undecided, with the five worth deciding first.
+
+## Reference
+
+| File | What it holds |
+|---|---|
+| [GLOSSARY.md](GLOSSARY.md) | The vocabulary. Definitions only. |
+| [docs/adr/](docs/adr/) | Decision records, with an index of which still stand. |
+| [docs/research/](docs/research/) | Notes on other systems and protocols, and a map of how each fills our parts. |
+
+## Acceptance test
+
+The description is good enough when all of these hold:
+- Existing agents (Pi, DeepSeek Harness, Pydantic AI, Tau, PiG) can each be described in its terms.
+- A transient Runtime and a durable Runtime both fit the same description.
+- An agent in one process and one split across services could both follow it unchanged.
+- Every scenario can be told using only the parts and guarantees it defines.
