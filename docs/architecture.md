@@ -10,7 +10,7 @@ Two companion documents complete it:
 - [Contracts](contracts.md): what passes between the parts.
 - [Scenarios](scenarios.md): the parts working together in specific situations.
 
-Terms are defined in the [glossary](../GLOSSARY.md).
+Terms are defined in the [glossary](../GLOSSARY.md). [Status](status.md) says which claims the first implementation proves, and which are still on paper.
 
 ## Purpose
 
@@ -369,6 +369,9 @@ The agent declares what the session, as set up, supports. That is what a host or
 | Output that bypasses the agent | none bypasses it |
 | Starting turns nobody asked for | the agent starts none |
 | Cancelling a turn also cancels its jobs | it doesn't: jobs keep running |
+| Continuing a turn after a restart | the turn ends as failed; started calls have an unknown outcome |
+| Questions outlasting their turn | the turn waits for the answer |
+| Input with a key | the same input given twice is taken twice |
 | Adding plugins during a session | the session's plugins are fixed when it starts |
 | Erasure | erasure is refused. Retention still applies. |
 

@@ -99,6 +99,9 @@ export interface PluginApi {
 	// sessions
 	startSession(options?: SessionStartOptions): Promise<string>;
 	openSession(id: string, actor?: Actor): Promise<string>;
+	/** Add an actor to a session. Its authority must be within the authority of whoever grants it. */
+	join(sessionId: string, actor: Actor, grantedBy: string): Promise<void>;
+	leave(sessionId: string, actorId: string): Promise<void>;
 	listSessions(): Promise<StoredSession[]>;
 	forkSession(sessionId: string, entryId: string): Promise<string>;
 	closeSession(sessionId: string): Promise<void>;
@@ -262,6 +265,12 @@ export class Harness {
 			runCommand: (sessionId, line, actorId) => this.runCommand(sessionId, line, actorId),
 			startSession: (options) => this.startSession(options),
 			openSession: (id, actor) => this.openSession(id, actor),
+			join: (sessionId, actor, grantedBy) => this.join(this.session(sessionId), actor, grantedBy, pluginName),
+			leave: async (sessionId, actorId) => {
+				const s = this.session(sessionId);
+				await this.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
+				this.emit(s.id, "session.left", { actorId }, pluginName, { actorId });
+			},
 			listSessions: async () => (await this.use<HistoryStore>("history-store")?.list({ project: this.project })) ?? [],
 			forkSession: (sessionId, entryId) => this.forkSession(sessionId, entryId),
 			closeSession: (id) => this.closeSession(id),
@@ -567,6 +576,16 @@ export class Harness {
 	}
 
 	// ---------- authority ----------
+
+	/** Authority only narrows: a granted actor can do no more than whoever grants it. */
+	private async join(s: Session, actor: Actor, grantedBy: string, writer: string): Promise<void> {
+		const granter = s.actors.get(grantedBy);
+		if (!granter) throw new Error(`Actor ${grantedBy} is not part of this session`);
+		const beyond = actor.authority.filter((a) => !granter.authority.includes(a));
+		if (beyond.length) throw new Error(`${grantedBy} can't grant ${beyond.join(", ")}`);
+		await this.commit(s, [{ kind: "actorJoined", writer, actorId: grantedBy, modelVisible: false, data: { actor } }]);
+		this.emit(s.id, "session.joined", { actor }, writer, { actorId: actor.id });
+	}
 
 	private requireAuthority(s: Session, actorId: string, authority: Authority): void {
 		const actor = s.actors.get(actorId);

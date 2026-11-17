@@ -160,7 +160,8 @@ test("a viewer can see a question but only an actor with authority can answer it
 	const api = h.api("t");
 	const s = await api.startSession();
 	const v: Actor = { id: "viewer", kind: "user", authority: ["watch"] };
-	(h.session(s).actors as Map<string, Actor>).set(v.id, v);
+	await api.join(s, v, "user");
+	await assert.rejects(api.join(s, { id: "guest", kind: "user", authority: ["erase"] }, "viewer"), /can't grant erase/);
 	await api.input(s, { content: "pay", actorId: "user" });
 	const seen = await viewer.next();
 	assert.equal(viewer.answer(seen, "allow", "viewer").accepted, false);

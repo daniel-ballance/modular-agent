@@ -67,6 +67,14 @@ export class Session {
 				this.settings[key] = value;
 				break;
 			}
+			case "actorJoined": {
+				const actor = (entry.data as { actor: Actor }).actor;
+				this.actors.set(actor.id, actor);
+				break;
+			}
+			case "actorLeft":
+				this.actors.delete((entry.data as { actorId: string }).actorId);
+				break;
 			case "erasure": {
 				for (const id of (entry.data as { entryIds: string[] }).entryIds) {
 					const target = this.entries.get(id);

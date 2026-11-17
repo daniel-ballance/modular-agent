@@ -11,7 +11,8 @@ The description says **what** the system does: its parts, what each is responsib
 1. [Architecture](docs/architecture.md): purpose, goals, the parts and their responsibilities, and the guarantees.
 2. [Contracts](docs/contracts.md): what passes between the parts, the answers each interaction can get, and the states things move through.
 3. [Scenarios](docs/scenarios.md): the parts working together in seventeen situations, from a simple request to two people sharing a session and a host driving the agent.
-4. [Open questions](docs/open-questions.md): what is still undecided, with the five worth deciding first.
+4. [Status](docs/status.md): which claims the code proves, and which are still on paper.
+5. [Open questions](docs/open-questions.md): what is still undecided, with the five worth deciding first.
 
 ## Reference
 
