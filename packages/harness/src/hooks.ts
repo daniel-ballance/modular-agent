@@ -31,6 +31,10 @@ export class HookRegistry {
 		return this.points.has(name);
 	}
 
+	owner(name: string): string {
+		return this.point(name).owner;
+	}
+
 	rule(name: string): HookRule {
 		return this.point(name).rule;
 	}

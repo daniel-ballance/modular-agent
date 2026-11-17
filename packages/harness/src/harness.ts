@@ -256,7 +256,13 @@ export class Harness {
 			useAll: <T>(capability: string) => this.useAll<T>(capability),
 			defineHook: (name, rule) => this.hooks.define(name, rule, pluginName),
 			on: (hook, handler, order) => this.hooks.on(hook, pluginName, handler, order),
-			runHook: (hook, payload) => this.hooks.run(hook, payload),
+			runHook: async (hook, payload) => {
+				// Only the owner runs a hook point: the plugin that defined it, or a plugin providing the capability that owns it.
+				const owner = this.hooks.owner(hook);
+				const provides = this.caps.get(owner)?.some((c) => c.plugin === pluginName);
+				if (owner !== pluginName && !provides) throw new Error(`${pluginName} can't run ${hook}: it belongs to ${owner}`);
+				return this.hooks.run(hook, payload);
+			},
 			onEvent: (fn, options) => {
 				if (options?.raw) {
 					const entry = { plugin: pluginName, raw: true, fn };
@@ -949,10 +955,9 @@ export class Harness {
 	/** A tool call a UI or plugin starts. The same checks apply. */
 	private async callTool(s: Session, call: ToolCall): Promise<ToolResult> {
 		const definition = this.findTool(s, call.name)?.definition;
-		if (definition?.callers && call.startedBy !== "tool" && !definition.callers.includes(call.startedBy as "ui" | "plugin")) {
-			return { callId: call.id, status: "refused", content: [text(`${call.name} can't be called by a ${call.startedBy}`)] };
-		}
-		const gate = await this.hooks.gate("tool.before", { sessionId: s.id, call, definition });
+		const gate = definition?.callers && call.startedBy !== "tool" && !definition.callers.includes(call.startedBy as "ui" | "plugin")
+			? { refused: `${call.name} can't be called by a ${call.startedBy}`, value: { call } }
+			: await this.hooks.gate("tool.before", { sessionId: s.id, call, definition });
 		let result: ToolResult;
 		if (gate.refused) result = { callId: call.id, status: "refused", content: [text(gate.refused)] };
 		else {

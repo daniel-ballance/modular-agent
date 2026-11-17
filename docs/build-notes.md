@@ -167,6 +167,12 @@ A secret's value used to stay out of the record, but it still went back to whoev
 
 Still to do: neither terminal Interface hides a secret as it is typed.
 
+## Hook points that had no test
+
+Tests now cover a plugin checking a turn's result and sending the model back, a plugin defining a hook point for others, and a UI starting a tool call itself. Two fixes came out of them:
+- **Only a hook point's owner may run it.** The contracts said so, but the code let any plugin run any hook point. The owner is the plugin that defined it, or a plugin providing the capability that owns it, such as the Provider for "before a model request".
+- **A tool call refused because of who started it is recorded too.** Before, it returned without a record.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).

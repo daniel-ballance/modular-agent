@@ -18,7 +18,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | An agent is the Harness plus plugins | proven | The `ma` command runs about 15 plugins on one Harness, plus any named in settings. |
 | The Harness hosts plugins, offers the plugin API, keeps sessions | proven | |
 | A plugin provides a capability, adds behaviour, or both | proven | `model-selection` adds behaviour; `tools-files` provides a capability. |
-| Plugins can define capabilities and hook points for each other | built | `defineHook` and `provide` exist. No plugin defines a new hook point for others yet. |
+| Plugins can define capabilities and hook points for each other | proven | A test plugin defines a hook point that two others answer. Only its owner may run it. |
 | A plugin replaces another deliberately | proven | `runtime-durable` replaces `runtime-transient`. |
 | A plugin is checked before it loads | proven | `project-trust` refuses a project's plugins until the project is trusted. |
 | Plugins loaded from settings | proven | `load` in global or project `settings.json`. |
@@ -40,7 +40,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | The agent declares what it supports, to a host | proven | In `initialize`, under `_meta`. |
 | Each session has its own project (`cwd`) | changed, proven | The Harness's project was per process. ACP gives each session its own `cwd`, so tools, context files and the session list now follow the session's. |
 | Tool source | proven | `tools-files`, `tools-question`. |
-| Tool calls started by a UI or plugin, with the same checks | partly | `callTool` exists. Only a refusal is tested. |
+| Tool calls started by a UI or plugin, with the same checks | proven | Checked by "before a tool call", and recorded with who started it, refused or not. |
 | Working environment, separate from the project | proven | `env-local`, moved to each session's `cwd`. |
 | History store, with erasure | proven | `history-jsonl`. |
 | Credential store | proven | `credentials-file`, sharing Pi's `auth.json`. |
@@ -50,7 +50,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | Claim | Status | Notes |
 |---|---|---|
 | A turn ends with an outcome and a result | proven | |
-| A plugin checks a turn's result and sends the model back | built | The `turn.result` hook point exists. No test. |
+| A plugin checks a turn's result and sends the model back | proven | The model is told why, within the same turn. |
 | Input during a turn (steering), and after it | proven | |
 | Input with a key is taken once | proven | |
 | Cancelling hands queued input back and leaves jobs running | proven | |
@@ -88,11 +88,12 @@ When the code and the description disagree, this page says so. Update it when ei
 
 | Hook point | Status |
 |---|---|
-| plugin about to load, session start and end, input arrives, before a turn | built |
+| plugin about to load | proven (project trust) |
+| session start and end, input arrives, before a turn | built |
 | before output reaches a recipient | proven |
 | turn start and end, before and after each step, before and after a tool call | proven |
 | a model request failed | proven (compaction retries on overflow) |
-| the turn's result is ready | built |
+| the turn's result is ready | proven |
 | Provider: before a request, as the response arrives | built |
 
 ## Gaps the code found in the description
