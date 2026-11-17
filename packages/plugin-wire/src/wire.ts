@@ -8,13 +8,19 @@ export const DATA_BINDING = "modular-agent-data/1";
 /** The largest message either side sends or accepts. */
 export const MAX_MESSAGE = 64 * 1024 * 1024;
 
-export type ErrorCode = "invalid_request" | "unknown_handler" | "cancelled" | "not_supported" | "result_too_large" | "lost" | "internal";
+export type ErrorCode = "invalid_request" | "not_found" | "unknown_handler" | "cancelled" | "not_supported" | "result_too_large" | "lost" | "internal";
 
 /** An error as the binding carries it: a JSON-RPC error with `data.code`. */
 export class WireError extends Error {
 	constructor(readonly code: ErrorCode, message: string, readonly rpcCode = -32000) {
 		super(message);
 	}
+}
+
+/** A `not_found` from the other side, as this build's code expects a missing file: an error with code ENOENT. */
+export function notFoundAsEnoent(error: unknown, path: string): unknown {
+	if (error instanceof WireError && error.code === "not_found") return Object.assign(new Error(`ENOENT: no such file or directory, ${path}`), { code: "ENOENT", path });
+	return error;
 }
 
 /** What handles one incoming request: its params, an abort signal for `$/cancel`, and the request's id. */

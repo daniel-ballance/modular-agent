@@ -21,7 +21,7 @@ import type {
 	WorkingEnvironment,
 } from "@modular-agent/harness";
 import { fromWire, toWire } from "./translate.js";
-import { DATA_BINDING, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+import { DATA_BINDING, notFoundAsEnoent, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 /** One external plugin to start, as MODULAR_AGENT_PLUGINS lists it. */
 export interface ExternalPluginSpec {
@@ -124,7 +124,14 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				if (!tool) throw new WireError("invalid_request", "host/ask needs the tool call it belongs to");
 				return toWire(await tool.ask(fromWire(p.request)));
 			});
-			peer.handle("host/env/read", async (p) => ({ data: (await environment(p.parentRequestId, p.cwd).readFile(p.path)).toString("base64") }));
+			peer.handle("host/env/read", async (p) => {
+				try {
+					return { data: (await environment(p.parentRequestId, p.cwd).readFile(p.path)).toString("base64") };
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException)?.code === "ENOENT") throw new WireError("not_found", `No file ${p.path}`);
+					throw error;
+				}
+			});
 			peer.handle("host/env/write", async (p) => (await environment(p.parentRequestId, p.cwd).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
 			peer.handle("host/env/exists", async (p) => ({ exists: await environment(p.parentRequestId, p.cwd).exists(p.path) }));
 			peer.handle("host/env/exec", async (p, ctx) =>
@@ -276,7 +283,11 @@ class WireEnvironment implements WorkingEnvironment {
 		return new WireEnvironment(this.peer, cwd, this.containment);
 	}
 	async readFile(path: string): Promise<Buffer> {
-		return Buffer.from((await this.peer.request<{ data: string }>("env/read", { cwd: this.cwd, path })).data, "base64");
+		try {
+			return Buffer.from((await this.peer.request<{ data: string }>("env/read", { cwd: this.cwd, path })).data, "base64");
+		} catch (error) {
+			throw notFoundAsEnoent(error, path);
+		}
 	}
 	async writeFile(path: string, data: string | Buffer): Promise<void> {
 		await this.peer.request("env/write", { cwd: this.cwd, path, data: Buffer.from(data).toString("base64") });

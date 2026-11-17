@@ -12,7 +12,7 @@ import type {
 	WorkingEnvironment,
 } from "@modular-agent/harness";
 import { fromWire, toWire } from "./translate.js";
-import { PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+import { notFoundAsEnoent, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 export interface ServeOptions {
 	/** The plugin's name in its registration. */
@@ -51,7 +51,13 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		id: `host:${cwd}`,
 		cwd,
 		at: (other: string) => hostEnvironment(parentRequestId, other),
-		readFile: async (path) => Buffer.from((await peer.request<{ data: string }>("host/env/read", { parentRequestId, cwd, path })).data, "base64"),
+		readFile: async (path) => {
+			try {
+				return Buffer.from((await peer.request<{ data: string }>("host/env/read", { parentRequestId, cwd, path })).data, "base64");
+			} catch (error) {
+				throw notFoundAsEnoent(error, path);
+			}
+		},
 		writeFile: async (path, data) => void (await peer.request("host/env/write", { parentRequestId, cwd, path, data: Buffer.from(data).toString("base64") })),
 		exists: async (path) => (await peer.request<{ exists: boolean }>("host/env/exists", { parentRequestId, cwd, path })).exists,
 		exec: async (command, o) => {
@@ -181,7 +187,14 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		const e = env();
 		return cwd && e.cwd !== cwd && e.at ? (e.at(cwd) as WorkingEnvironment) : e;
 	};
-	peer.handle("env/read", async (p) => ({ data: (await envAt(p.cwd).readFile(p.path)).toString("base64") }));
+	const missing = (error: unknown) => ((error as NodeJS.ErrnoException)?.code === "ENOENT" ? new WireError("not_found", `No file ${(error as NodeJS.ErrnoException).path ?? ""}`) : error);
+	peer.handle("env/read", async (p) => {
+		try {
+			return { data: (await envAt(p.cwd).readFile(p.path)).toString("base64") };
+		} catch (error) {
+			throw missing(error);
+		}
+	});
 	peer.handle("env/write", async (p) => (await envAt(p.cwd).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
 	peer.handle("env/exists", async (p) => ({ exists: await envAt(p.cwd).exists(p.path) }));
 	peer.handle("env/exec", async (p, ctx) =>

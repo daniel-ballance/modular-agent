@@ -265,6 +265,13 @@ await attempt("environment", async () => {
 	const rd = await p.request("env/read", { cwd: work, path: "w.txt" });
 	check("env: write, exists, read round trip", ex.exists === true && Buffer.from(rd.data, "base64").toString() === "wrïtten");
 	check("env: exists false for a missing file", (await p.request("env/exists", { cwd: work, path: "nope.txt" })).exists === false);
+	let missing;
+	try {
+		await p.request("env/read", { cwd: work, path: "nope.txt" });
+	} catch (e) {
+		missing = e;
+	}
+	check("env/read of a missing file is not_found", code(missing) === "not_found", JSON.stringify(missing));
 	const nb = p.notes.length;
 	const e = p.request("env/exec", { cwd: work, command: "echo env-out" });
 	const er = await e;
