@@ -173,6 +173,12 @@ export class TerminalInterface implements InterfaceCapability {
 			if (receipt.output) this.line(receipt.output);
 			return 0;
 		}
+		// One-shot modes wait for background jobs too: a job's report may start another turn.
+		for (;;) {
+			await this.api.waitForIdle(this.sessionId);
+			if (!this.api.jobs(this.sessionId).length) break;
+			await new Promise((r) => setTimeout(r, 100));
+		}
 		await this.api.waitForIdle(this.sessionId);
 		if (this.options.mode === "print") this.line(this.lastText);
 		return this.exitCode;

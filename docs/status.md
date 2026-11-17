@@ -68,7 +68,8 @@ When the code and the description disagree, this page says so. Update it when ei
 | Claim | Status | Notes |
 |---|---|---|
 | A job's report enters the session as input and may start a turn | proven | |
-| Jobs survive a restart | paper | Jobs are held in memory. The subagents step adds this. |
+| Jobs survive a restart | proven | Jobs are recorded. After a restart, their plugin ends them as outcome unknown or takes them up again. |
+| Subagents, transient and durable | proven | A real `kill -9` mid-subagent: the durable variant carries on and reports the real result. |
 | History grows in normal use; compaction adds a summary | proven | |
 | Moving the current position is recorded | proven | |
 | Rewinding outside state | paper | Declared unsupported. |

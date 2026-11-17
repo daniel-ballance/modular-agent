@@ -53,6 +53,9 @@
       "path": "packages/interface-tui"
     },
     {
+      "path": "packages/subagents"
+    },
+    {
       "path": "packages/runtime-durable"
     }
   ]

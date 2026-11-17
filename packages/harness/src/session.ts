@@ -40,6 +40,8 @@ export class Session {
 	/** Recipients following this session, each through the output gate. */
 	readonly followers = new Set<{ push(event: AgentEvent): void }>();
 	closed = false;
+	/** The process stopped its part in this session; nothing more is recorded here. */
+	suspended = false;
 	/** Commits run one at a time, so each entry follows the one before it. */
 	committing: Promise<unknown> = Promise.resolve();
 	/** Work started by a late answer, which waitForIdle also waits for. */

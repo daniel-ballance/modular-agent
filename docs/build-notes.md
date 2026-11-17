@@ -14,6 +14,7 @@
 | `provider-pi-ai` | Provider, one per pi-ai vendor |
 | `interface-terminal` | Interface: interactive, print (`-p`) and JSON modes |
 | `interface-acp` | Interface: ACP v1 over stdio (`ma --acp`), using the official SDK |
+| `subagents` | Feature: the `delegate` tool. A subagent is a child session started by a job. `durable: true` carries subagents on after a restart. |
 | `interface-tui` | Interface: full-screen terminal UI on Pi's `pi-tui` library. The default interactive mode; `--plain` gives the line-based one. |
 | `tools-files` | Tool source: `read`, `write`, `edit`, `bash` |
 | `env-local` | Working environment: the local machine |
@@ -113,6 +114,26 @@ What the host test found:
 - **Plugins from settings.** `settings.json` can name plugins under `load`, as a package name or a path, with options. A plugin from the project's settings loads only once the user trusts the project with `/trust`. The trust check is itself a plugin, at the "plugin about to load" hook point.
 - **A full-screen TUI.** Markdown streams as the model writes, each tool call is a card with its live output, approvals and choices are a selection list, and the editor completes slash commands and file paths. Enter sends, or steers a running turn; Esc cancels and hands queued input back to the editor. Checked in a pseudo-terminal with a real model, approving a `bash` call from the list.
 
+## Subagents
+
+The `delegate` tool starts a child session from the task alone, with the parent's project and model. The parent agent is an actor in the child, with no more authority than the parent session's owner. By default the subagent runs in the background: the tool call returns at once, and the subagent's answer comes back later as a job report, which starts a parent turn. With `wait`, the answer comes back in the tool call, and the job ends without a report. The child's questions and approvals are asked again in the parent's session, so they reach the parent's user. A subagent may start subagents, up to a depth limit.
+
+Both variants record the job. They differ only in what happens after the process stops:
+
+| | Transient | Durable |
+|---|---|---|
+| The parent session is reopened | the job ends as outcome unknown, and the parent hears so | the child session is reopened too |
+| The child's interrupted turn | left as it was | its Runtime decides, as for any interrupted turn |
+| The parent hears | that the outcome is unknown | the subagent's real answer, once it has one |
+
+The tests cover both, stopping the process while the child's model request is running. A real run with `xai/grok-4.7` killed the process with `kill -9` while the subagent's `bash` call was running. On reopening, the child got a stand-in "outcome unknown" result for that call, its model carried on, and the parent got the report in a new turn. The job ended exactly once.
+
+To make this work, the Harness changed in three ways:
+
+- **Jobs are recorded,** as `jobStarted` (with the plugin's detail) and `jobEnded` entries. A plugin can list its unfinished jobs and take one up again.
+- **Stopping the process suspends sessions instead of closing them.** Closing ends jobs and records turns as ended, so a durable plugin had nothing to carry on.
+- **A job stays listed until its report is queued.** Otherwise a one-shot run could see an idle session with no jobs in between, and quit before the report's turn. Print and JSON modes now wait for jobs too.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).
@@ -129,4 +150,5 @@ What the host test found:
 - **A call left open must be safe to run again up to its question.** That is the tool author's promise, as with Pi Durable's tools that park.
 - **Several actors** work in the Harness and tests, but the terminal Interface acts for one user.
 - **Adding plugins during a session** isn't supported. Plugins load at start, from code or settings. The declaration says so.
+- **A killed process can leave its tools' processes running.** In the restart run, the `sleep; echo` shell outlived the agent and wrote its file. The child was told its outcome was unknown, which was true. A working environment that should stop its processes with the agent has to put them in its own process group.
 - **Inside the agent, every part talks to the others through function calls.** Only the Interface is over a wire.

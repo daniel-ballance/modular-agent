@@ -308,10 +308,14 @@ Providers, tool sources and working environments ask. The Runtime never does.
 
 | Plugin asks | Carrying | Answers |
 |---|---|---|
-| start a job | the session, its kind, the actor | the [job](#job) |
-| report on a job | progress or result | recorded. A result enters the session as input, and may start a turn. |
+| start a job | the session, its kind, the actor, and the plugin's own detail | the [job](#job), recorded with the detail |
+| report on a job | progress or result, and whether to report the result | recorded. A reported result enters the session as input, and may start a turn. |
+| list its unfinished jobs | the session | the jobs this plugin started that the history shows never ended, with their detail |
+| take up an unfinished job | the job | the job, running again, for this plugin to report on |
 
 The Harness can ask the plugin to cancel a job. Its answer is "cancelled", or the job's result if it had already finished.
+
+A job left unfinished by a stopped process stays unfinished until its plugin takes it up or ends it. The Harness never ends it by itself.
 
 ## Hook points
 

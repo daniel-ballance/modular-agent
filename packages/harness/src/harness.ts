@@ -64,8 +64,8 @@ export interface InputOptions { content: ContentPart[] | string; when?: InputTim
 export interface JobHandle {
 	id: string;
 	progress(content: ContentPart[] | string): void;
-	/** Finish the job. Its result enters the session as input and may start a turn. */
-	finish(state: Exclude<JobState, "running">, result?: ContentPart[] | string): Promise<void>;
+	/** Finish the job. Its result enters the session as input and may start a turn, unless report is false. */
+	finish(state: Exclude<JobState, "running">, result?: ContentPart[] | string, options?: { report?: boolean }): Promise<void>;
 	onCancel(fn: () => void | Promise<void>): void;
 }
 export interface Transaction {
@@ -129,7 +129,12 @@ export interface PluginApi {
 	answer(sessionId: string, answer: Answer): { accepted: boolean; reason?: string };
 	openRequests(sessionId: string): InputRequest[];
 	// jobs
-	startJob(sessionId: string, options: { kind: string; actorId?: string }): JobHandle;
+	/** Start a job. It is recorded in the history, with the plugin's own detail. */
+	startJob(sessionId: string, options: { kind: string; actorId?: string; detail?: unknown }): JobHandle;
+	/** Jobs this plugin started that the history shows as never ended, for example because the process stopped. */
+	unfinishedJobs(sessionId: string): { job: Job; detail?: unknown }[];
+	/** Take over a recorded, unfinished job of this plugin's after a restart. */
+	resumeJob(sessionId: string, jobId: string): JobHandle;
 	jobs(sessionId: string): Job[];
 	cancelJob(sessionId: string, jobId: string): Promise<void>;
 	// following along
@@ -216,8 +221,13 @@ export class Harness {
 		}
 	}
 
+	/**
+	 * Stop the process's part in every session. This is an interruption, not a
+	 * close: running turns and jobs are abandoned without being recorded as ended,
+	 * so reopening a session lets its Runtime and job plugins decide what happens.
+	 */
 	async stop(): Promise<void> {
-		for (const id of [...this.sessions.keys()]) await this.closeSession(id).catch(() => undefined);
+		for (const id of [...this.sessions.keys()]) await this.suspendSession(id).catch(() => undefined);
 		for (const { plugin } of [...this.loaded].reverse()) {
 			try {
 				await plugin.stop?.();
@@ -304,6 +314,13 @@ export class Harness {
 				return [...[...s.requests.values()].map((r) => r.request), ...this.waitingRequests(s)];
 			},
 			startJob: (sessionId, options) => this.startJob(this.session(sessionId), options, pluginName),
+			unfinishedJobs: (sessionId) => this.unfinishedJobs(this.session(sessionId)).filter((j) => j.job.plugin === pluginName),
+			resumeJob: (sessionId, jobId) => {
+				const s = this.session(sessionId);
+				const found = this.unfinishedJobs(s).find((j) => j.job.id === jobId && j.job.plugin === pluginName);
+				if (!found) throw new Error(`No unfinished job ${jobId} of ${pluginName}`);
+				return this.jobHandle(s, { ...found.job, state: "running" }, pluginName);
+			},
 			jobs: (sessionId) => [...this.session(sessionId).jobs.values()].map((j) => ({ ...j.job })),
 			cancelJob: (sessionId, jobId) => this.cancelJob(this.session(sessionId), jobId),
 			follow: (sessionId, options, listener) => this.follow(this.session(sessionId), options, listener),
@@ -494,6 +511,21 @@ export class Harness {
 		return this.startSession({ forkFrom: { sessionId, entryId }, actor: [...s.actors.values()][0] });
 	}
 
+	private async suspendSession(id: string): Promise<void> {
+		const s = this.sessions.get(id);
+		if (!s) return;
+		s.suspended = true;
+		s.steering = [];
+		s.followUps = [];
+		s.running?.abort.abort();
+		for (const r of s.requests.values()) r.resolve({ requestId: r.request.id, declined: true, actorId: "harness", reason: "the process stopped" });
+		s.requests.clear();
+		// A stopping process doesn't wait for its work to finish. Nothing more is recorded once suspended.
+		await s.committing;
+		await this.use<HistoryStore>("history-store")?.close(id);
+		this.sessions.delete(id);
+	}
+
 	async closeSession(id: string): Promise<void> {
 		const s = this.sessions.get(id);
 		if (!s) return;
@@ -512,6 +544,8 @@ export class Harness {
 
 	/** Commit drafts to the session. All are kept, or none are. */
 	commit(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]> {
+		// A suspended session's process has stopped: nothing more is recorded for it here.
+		if (s.suspended) return Promise.resolve([]);
 		const run = s.committing.then(() => this.commitNow(s, drafts));
 		s.committing = run.catch(() => undefined);
 		return run;
@@ -1079,23 +1113,40 @@ export class Harness {
 
 	// ---------- jobs ----------
 
-	private startJob(s: Session, options: { kind: string; actorId?: string }, plugin: string): JobHandle {
+	private startJob(s: Session, options: { kind: string; actorId?: string; detail?: unknown }, plugin: string): JobHandle {
 		const job: Job = { id: this.newId(), kind: options.kind, sessionId: s.id, plugin, actorId: options.actorId, turnId: s.running?.turnId, state: "running", usage: zeroUsage() };
+		void this.commit(s, [{ kind: "jobStarted", writer: plugin, modelVisible: false, turnId: job.turnId, jobId: job.id, actorId: job.actorId, data: { job, detail: options.detail } }]).catch((e) => this.problem(plugin, "record job", e));
+		this.emit(s.id, "job.started", { job }, plugin, { jobId: job.id });
+		return this.jobHandle(s, job, plugin);
+	}
+
+	private unfinishedJobs(s: Session): { job: Job; detail?: unknown }[] {
+		const all = s.order.map((id) => s.entries.get(id)!);
+		const ended = new Set(all.filter((e) => e.kind === "jobEnded").map((e) => e.jobId));
+		return all.filter((e) => e.kind === "jobStarted" && !ended.has(e.jobId) && !s.jobs.has(e.jobId!)).map((e) => e.data as { job: Job; detail?: unknown });
+	}
+
+	private jobHandle(s: Session, job: Job, plugin: string): JobHandle {
 		const record: { job: Job; cancel?: () => void | Promise<void> } = { job };
 		s.jobs.set(job.id, record);
-		this.emit(s.id, "job.started", { job }, plugin, { jobId: job.id });
 		return {
 			id: job.id,
 			progress: (content) => this.emit(s.id, "job.progress", { content: typeof content === "string" ? [text(content)] : content }, plugin, { jobId: job.id }),
-			finish: async (state, result) => {
+			finish: async (state, result, options) => {
 				if (job.state !== "running") return;
 				job.state = state;
 				job.result = typeof result === "string" ? [text(result)] : result;
-				s.jobs.delete(job.id);
-				this.emit(s.id, "job.ended", { state, result: job.result }, plugin, { jobId: job.id });
-				if (s.closed) return;
-				const report: ContentPart[] = [text(`[Job ${job.kind} ${job.id.slice(0, 8)} ${state}]`), ...(job.result ?? [])];
-				await this.input(s.id, { content: report, when: "after", actorId: job.actorId ?? "harness", kind: "jobReport", startedBy: { kind: "job", id: job.id } });
+				// The job stays listed until its report is queued, so nobody sees the session as finished in between.
+				try {
+					if (s.closed) return;
+					await this.commit(s, [{ kind: "jobEnded", writer: plugin, modelVisible: false, jobId: job.id, data: { state, result: job.result } }]);
+					this.emit(s.id, "job.ended", { state, result: job.result }, plugin, { jobId: job.id });
+					if (options?.report === false || s.closed) return;
+					const report: ContentPart[] = [text(`[Job ${job.kind} ${job.id.slice(0, 8)} ${state}]\n`), ...(job.result ?? [])];
+					await this.input(s.id, { content: report, when: "after", actorId: job.actorId ?? "harness", kind: "jobReport", startedBy: { kind: "job", id: job.id } });
+				} finally {
+					s.jobs.delete(job.id);
+				}
 			},
 			onCancel: (fn) => {
 				record.cancel = fn;
@@ -1109,6 +1160,7 @@ export class Harness {
 		record.job.state = "cancelled";
 		s.jobs.delete(jobId);
 		await record.cancel?.();
+		if (!s.closed && !s.suspended) await this.commit(s, [{ kind: "jobEnded", writer: record.job.plugin, modelVisible: false, jobId, data: { state: "cancelled" } }]);
 		this.emit(s.id, "job.ended", { state: "cancelled" }, record.job.plugin, { jobId });
 	}
 

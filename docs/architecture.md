@@ -296,6 +296,9 @@ These requirements are **proposed**:
 - When a job reports back, the report enters the session as input, recording which job it came from. It may start a turn.
 - A job's usage counts toward the session's limits and budgets.
 - **Cancelling a turn leaves its jobs running. Closing the session stops them.** An agent that works differently declares it. **Decided** ([round 2](pressure-test/round-2/synthesis.md#decisions)).
+- **A job is recorded when it starts and when it ends.** After a restart, the plugin that started a job is shown the jobs that never ended, and decides what happens to each: report its outcome as unknown, or take it up again. The Harness doesn't decide, just as recovering an interrupted turn is the Runtime's job. **Decided while building** ([build notes](build-notes.md#subagents)).
+- **Stopping the process is not closing the session.** Closing a session ends its jobs. A process that stops, cleanly or not, only interrupts them, so a durable plugin can carry them on.
+- A job whose result goes back in the tool call that started it ends without a report, so its result isn't given twice.
 
 Schedules and webhooks are not jobs. They are actors that give the agent input.
 
@@ -334,7 +337,7 @@ These requirements are **proposed**, except where marked:
 
 - **Another agent as a tool source.** Our agent can use another agent's tools or hand it work.
 - **Another agent as an actor.** Another agent can use ours through an Interface, with its own authority.
-- **Subagent.** A job starts a subagent. Its session belongs to the parent's. It starts from its task alone, and does not inherit the parent's history unless it is given it. It has no more authority than the parent. Its result reaches the parent as the job's report, and its input requests go to the parent.
+- **Subagent.** A job starts a subagent. Its session belongs to the parent's. It starts from its task alone, and does not inherit the parent's history unless it is given it. It has no more authority than the parent. Its result reaches the parent as the job's report, and its input requests go to the parent. Built and proven in a transient and a durable variant ([build notes](build-notes.md#subagents)).
 - **Peer.** A peer is another agent this one can message, with no parent relationship.
 
 Whether subagents need anything beyond this is [open](open-questions.md#agents-working-together).

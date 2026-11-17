@@ -3,6 +3,7 @@ import { terminalInterface, type TerminalMode } from "@modular-agent/interface-t
 import { approval, type ApprovalPolicy } from "@modular-agent/approval";
 import { acpInterface } from "@modular-agent/interface-acp";
 import { tuiInterface } from "@modular-agent/interface-tui";
+import { subagents } from "@modular-agent/subagents";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "./index.js";
@@ -47,7 +48,7 @@ Options:
   -s, --session id          open an earlier session
   --pi-auth                 use Pi's credentials (~/.pi/agent/auth.json)
   --ephemeral               keep no history on disk
-  --durable                 use the durable Runtime: a turn carries on after a crash
+  --durable                 durable Runtime and subagents: turns and subagents carry on after a crash
   --approval <policy>       ask before tool calls: ask (unless read-only), all, never or off
   --approval-wait <seconds> after this long, end the turn and leave the question open
   --question-wait <seconds> the same for questions the model asks with ask_user
@@ -60,7 +61,7 @@ async function main() {
 		return 0;
 	}
 	if (args.mode === "interactive" && args.prompt) args.mode = "print";
-	const common = [questionTool({ waitMs: args.questionWait }), ...(args.durable ? [durableRuntime()] : []), ...(args.approval ? [approval({ policy: args.approval, waitMs: args.approvalWait })] : [])];
+	const common = [questionTool({ waitMs: args.questionWait }), subagents({ durable: args.durable }), ...(args.durable ? [durableRuntime()] : []), ...(args.approval ? [approval({ policy: args.approval, waitMs: args.approvalWait })] : [])];
 	if (args.acp) {
 		// stdout carries the protocol, so nothing else may write to it.
 		console.log = (...m: unknown[]) => process.stderr.write(m.join(" ") + "\n");
