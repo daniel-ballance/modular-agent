@@ -7,7 +7,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AgentEvent, Harness, HistoryEntry } from "@modular-agent/harness";
 import { httpInterface } from "@modular-agent/interface-http";
-import { environmentHttp, historyHttp, providerHttp } from "@modular-agent/services";
+import { environmentHttp, historyHttp, HttpHistoryStore, providerHttp } from "@modular-agent/services";
 import { createAgent } from "../src/index.js";
 import type { Scripted } from "./fixtures/faux-provider.js";
 
@@ -49,7 +49,7 @@ before(async () => {
 	historyDir = mkdtempSync(join(tmpdir(), "ma-svc-history-"));
 	flakyDir = mkdtempSync(join(tmpdir(), "ma-svc-flaky-"));
 	[history, flakyHistory, environment, gateway] = await Promise.all([
-		startService("history", { dir: historyDir }),
+		startService("history", { dir: historyDir, leaseMs: 800 }),
 		startService("history", { dir: flakyDir, dropAppendResponses: 3 }),
 		startService("environment", { root: project, runDir: mkdtempSync(join(tmpdir(), "ma-svc-run-")) }),
 		startService("provider", { models: { module: new URL("./fixtures/scripted-models.js", import.meta.url).href, export: "scriptedModels", options: { routes } } }),
@@ -147,6 +147,24 @@ test("services: a second agent can't write to a session another holds; once it i
 	await second.h.stop();
 });
 
+test("history service advertises lease expiry and a reopening writer waits for it", async () => {
+	const sid = "abandoned-lease";
+	await http(history, "PUT", `/v1/sessions/${sid}`, { project, created: Date.now() });
+	await http(history, "POST", `/v1/sessions/${sid}/lease`, { owner: "crashed-writer" });
+	const held = await fetch(`${history.url}/v1/sessions/${sid}/lease`, {
+		method: "POST", headers: { authorization: `Bearer ${history.token}`, "content-type": "application/json" },
+		body: JSON.stringify({ owner: "reopening-writer" }),
+	});
+	assert.equal(held.status, 409);
+	const error = await held.json() as { code: string; retryAfterMs: number };
+	assert.equal(error.code, "held");
+	assert.ok(error.retryAfterMs > 0 && error.retryAfterMs <= 800);
+	const client = new HttpHistoryStore(history);
+	await assert.rejects(client.openForWriting(sid), /held by another owner/);
+	await client.openForWriting(sid, { wait: true });
+	await client.close(sid);
+});
+
 test("services: when the history service's answers are lost, appends are sent again and kept once", async () => {
 	const a = await agent({ history: flakyHistory });
 	const { sessionId } = await http(a, "POST", "/sessions");
@@ -181,7 +199,11 @@ test("services: a client that reconnects gets everything recorded while it was a
 	const first = events(a, sessionId);
 	await http(a, "POST", `/sessions/${sessionId}/input`, { content: "say hello", key: "k1" });
 	await first.until((e) => e.type === "turn.ended");
-	const lastId = first.seen.filter((e) => e.eventId).at(-1)!.eventId!;
+	const last = first.seen.filter((e) => e.eventId).at(-1)!;
+	const lastId = last.eventId!;
+	assert.equal(lastId, last.data.id);
+	const unknown = await fetch(`${a.url}/sessions/${sessionId}/events`, { headers: { authorization: `Bearer ${a.token}`, "last-event-id": "missing-entry" } });
+	assert.equal(unknown.status, 404);
 	await first.close();
 	// Away: the client's answer to this input is lost, so it sends it again with the same key.
 	const sent = await http(a, "POST", `/sessions/${sessionId}/input`, { content: "say goodbye", key: "k2" });

@@ -110,7 +110,7 @@ When the code and the description disagree, this page says so. Update it when ei
 
 ## The rules from the clean-room builds
 
-[Contracts](contracts.md#rules-every-implementation-follows) gained rules from three independent builds ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). This build follows most of them already. Where it didn't, the cheap fixes were made at once; the rest are listed here.
+[Contracts](contracts.md#rules-every-implementation-follows) gained rules from three independent builds ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). The table records what this build follows and what it does not support.
 
 | Rule | Status | Notes |
 |---|---|---|
@@ -125,15 +125,15 @@ When the code and the description disagree, this page says so. Update it when ei
 | Keys last for the session, and return the first receipt | proven | |
 | Settings belong to the session; a change applies from the next turn | built | Moving keeps settings; model access is fixed per turn. |
 | A summary names its sources; erasure follows copies | proven | |
-| What counts as a copy: responses, results, turn results, forks, jobs | partly | Summaries only. Responses don't yet name the requests they copied. |
-| Erasure refused while another writer holds an affected session | paper | Not checked across sessions. |
-| Records of authority can't be erased | paper | |
-| "Safe to repeat" is a promise from both the tool and the working environment | partly | The durable Runtime uses the tool's promise; `env-local` keeps its promise but doesn't declare it. |
-| An interrupted model request is repeated only on the Provider's promise | proven | Never repeated. |
+| What counts as a copy: responses, results, turn results, forks, jobs, input taken | built, tested | Responses name the visible sources of their request. Erasure follows those links, tool calls, turn results, summaries, forks and job reports, including child results. |
+| Erasure refused while another writer holds an affected session | built, tested | The Harness checks affected sessions and takes their write leases before deleting anything. Erasure during affected work is refused. |
+| Records of authority can't be erased | built, tested | Joining, granting new rights and leaving are protected. |
+| "Safe to repeat" is a promise from both the tool and the working environment | built, tested | `env-local` declares the promise on Linux. Started calls are retried only with the recorded promise and both current promises. |
+| An interrupted model request is repeated only on the Provider's promise | built | Recovery does not repeat a request if the Provider may keep state or run tools, unless it explicitly promises safe repetition. |
 | Cancelling a command stops what it started, even outside its process group | changed, proven | Found by the plugin kit: `setsid` escapees survived a cancel until the agent died. Each command now carries its own marker. |
-| Background processes outlive a cancelled turn, stop with the session or agent | partly | They stop with the agent; closing a session doesn't stop them. |
+| Background processes outlive a cancelled turn, stop with the session or agent | built, tested | Closing a session stops its processes without stopping another session's. The plugin binding sends `env/sessionEnded`. |
 | Presence is declared; approval with nobody present is refused | proven | |
-| A key binds the whole question | partly | The key alone is matched. |
+| A key binds the whole question | built, tested | A change of kind, text, options, credential name or tool call requires a new answer. |
 | Input keys survive a restart | changed, proven | Found by the ACP conformance kit; keys are now recorded with the input. |
 | A secret is never asked over a protocol that forbids it in forms | changed, built | Found by the round-two review of the ACP binding. |
 | A job's end is recorded before its report | proven | |
@@ -141,5 +141,6 @@ When the code and the description disagree, this page says so. Update it when ei
 | Trust is given and kept outside the project | proven | |
 | Host MCP servers serve one session and aren't recorded | proven | |
 | A lost part fails its waiting calls and is reported | proven | Plugins over RPC. |
-| A Provider that keeps state starts again after a move or erasure | paper | No Provider here keeps state. |
-| Following resumes from an entry; unknown entries are refused | partly | The ACP `history` extension does; the HTTP Interface resumes by count, not by entry identity. |
+| A Provider that keeps state starts again after a move or erasure | built | Built-in Providers do not keep state. A stateful external Provider gets `provider/discard`, with `erase: true` for erasure. |
+| Mixed input acts with only the rights its actors share | built, tested | Each input taken into the turn narrows its authority, including steering input and after recovery. |
+| Following resumes from an entry; unknown entries are refused | built, tested | The ACP `history` extension and HTTP event stream use entry ids. HTTP returns 404 for an unknown id. |

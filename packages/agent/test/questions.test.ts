@@ -67,7 +67,8 @@ after(() => Promise.all(abandoned.map((h) => h.stop().catch(() => undefined))));
 
 test("durable: a question open when the process stopped is reopened, and the answer lets the call run", async () => {
 	const d = dirs();
-	const { s, asked } = await crashWhileAsking(d);
+	const { s, asked, abandoned } = await crashWhileAsking(d);
+	await abandoned.stop();
 	const ui = fakeUi();
 	const h = await agent(d, [fauxAssistantMessage([fauxText("Paid.")])], [durableRuntime(), ui.plugin]);
 	const api = h.api("t");
@@ -89,7 +90,8 @@ test("durable: an answer given before the process stopped is not asked again", a
 	const { s, asked, abandoned } = await crashWhileAsking(d);
 	// Record the answer as the first process would have, then "crash" before the tool started.
 	const a = abandoned.api("t");
-	await a.append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "user", data: { requestId: asked.id, answer: { requestId: asked.id, actorId: "user", value: "allow" } } });
+	await a.append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "user", data: { requestId: asked.id, actorId: "user", value: "allow" } });
+	await abandoned.stop();
 	const ui = fakeUi();
 	const h = await agent(d, [fauxAssistantMessage([fauxText("Paid.")])], [durableRuntime(), ui.plugin]);
 	const api = h.api("t");
@@ -107,7 +109,8 @@ test("durable: an answer given before the process stopped is not asked again", a
 test("durable: a recorded allow from someone who may no longer answer is not reused", async () => {
 	const d = dirs();
 	const { s, asked, abandoned } = await crashWhileAsking(d);
-	await abandoned.api("t").append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "alice", data: { requestId: asked.id, answer: { requestId: asked.id, actorId: "alice", value: "allow" } } });
+	await abandoned.api("t").append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "alice", data: { requestId: asked.id, actorId: "alice", value: "allow" } });
+	await abandoned.stop();
 	const ui = fakeUi();
 	const h = await agent(d, [fauxAssistantMessage([fauxText("Not paid.")])], [durableRuntime(), ui.plugin]);
 	const api = h.api("t");
@@ -122,16 +125,17 @@ test("durable: a recorded allow from someone who may no longer answer is not reu
 
 test("transient: a question open when the process stopped is recorded as no longer answerable", async () => {
 	const d = dirs();
-	const { s, asked } = await crashWhileAsking(d);
+	const { s, asked, abandoned } = await crashWhileAsking(d);
+	await abandoned.stop();
 	const ui = fakeUi();
 	const h = await agent(d, [], [ui.plugin]);
 	const api = h.api("t");
 	await api.openSession(s);
 	await api.waitForIdle(s);
 	assert.equal(ui.requests.length, 0);
-	const closed = kinds(h, s, "inputClosed");
+	const closed = kinds(h, s, "inputAnswer");
 	assert.equal(closed.length, 1);
-	assert.deepEqual(closed[0].data, { requestId: asked.id, reason: "no longer answerable" });
+	assert.deepEqual(closed[0].data, { requestId: asked.id, reason: "no longer answerable", actorId: "harness", declined: true });
 	assert.equal(status(h, s), "notStarted");
 	assert.equal(outcome(h, s), "failed");
 	assert.equal(h.declaration(h.session(s)).waitingThroughRestart, false);

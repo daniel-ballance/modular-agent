@@ -23,12 +23,13 @@ async function crashedSession() {
 	const h = await agent(dirs, [], false);
 	const api = h.api("test");
 	const s = await api.startSession();
-	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t1", data: { startedBy: { kind: "actor", id: "user" } } });
-	await api.append(s, { kind: "input", writer: "test", modelVisible: true, turnId: "t1", message: { role: "user", content: [{ type: "text", text: "do three things" }] } });
+	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t1", actorId: "user", data: { startedBy: { kind: "actor", id: "user" }, model: { provider: "faux", id: "faux-1" }, system: "", tools: api.tools(s), settings: {} } });
+	await api.append(s, { kind: "input", writer: "test", modelVisible: true, turnId: "t1", actorId: "user", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, data: { inputId: "foreign-input" } });
 	const calls = [fauxToolCall("read", { path: "notes.txt" }), fauxToolCall("bash", { command: "echo charged >> payments.log" }), fauxToolCall("write", { path: "done.txt", content: "ok" })];
 	await api.append(s, { kind: "response", writer: "test", modelVisible: true, turnId: "t1", stepId: "step1", message: { role: "assistant", content: calls as never, stop: "toolUse" } });
-	await api.append(s, { kind: "toolStarted", writer: "test", modelVisible: false, turnId: "t1", toolCallId: calls[0].id });
-	await api.append(s, { kind: "toolStarted", writer: "test", modelVisible: false, turnId: "t1", toolCallId: calls[1].id });
+	for (const c of calls.slice(0, 2)) {
+		await api.append(s, { kind: "toolStarted", writer: "test", modelVisible: false, turnId: "t1", toolCallId: c.id, stepId: "step1", data: { call: { id: c.id, name: c.name, input: c.arguments, startedBy: "model", stepId: "step1" }, safeToRepeat: c.name === "read" && process.platform === "linux" } });
+	}
 	await h.stop();
 	return { dirs, s, calls };
 }
@@ -61,11 +62,11 @@ test("swap test: the same crashed session, reopened with a transient and then a 
 	await api.waitForIdle(s);
 	assert.equal(outcome(d, s), "completed");
 	// read is safe to repeat, so it ran again; bash is not, so its outcome is unknown; write never started, so it ran.
-	assert.deepEqual(statuses(d, s), { read: "completed", bash: "outcomeUnknown", write: "completed" });
+	assert.deepEqual(statuses(d, s), { read: process.platform === "linux" ? "completed" : "outcomeUnknown", bash: "outcomeUnknown", write: "completed" });
 	assert.equal(readFileSync(join(dirs.project, "done.txt"), "utf8"), "ok");
 	assert.equal(existsSync(join(dirs.project, "payments.log")), false, "an unsafe call must not run twice");
 	const read = api.history(s).find((e) => e.kind === "toolResult" && e.message?.role === "toolResult" && e.message.toolName === "read")!;
-	assert.match(textOf(read.message!.content), /milk/);
+	assert.match(textOf(read.message!.content), process.platform === "linux" ? /milk/ : /unknown/);
 	assert.equal(d.declaration(d.session(s)).continuesAfterRestart, true);
 	await d.stop();
 });

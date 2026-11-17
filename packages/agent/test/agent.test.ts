@@ -162,7 +162,7 @@ test("a job's report enters the session as input and starts a turn", async () =>
 	const job = api.startJob(s, { kind: "dev-server" });
 	await job.finish("failed", "server crashed: port in use");
 	await api.waitForIdle(s);
-	const report = api.history(s).find((e) => e.kind === "jobReport");
+	const report = api.history(s).find((e) => e.kind === "input" && e.jobId);
 	assert.ok(report);
 	const start = api.history(s).find((e) => e.kind === "turnStart");
 	assert.deepEqual((start!.data as { startedBy: unknown }).startedBy, { kind: "job", id: job.id });
@@ -338,7 +338,7 @@ test("a session started only to look leaves nothing behind", async () => {
 	await h.stop();
 });
 
-test("tool calls that may run together do, and their results are recorded in the order the model asked", async () => {
+test("parallel results are recorded as they finish and reach the model in call order", async () => {
 	const started = new Set<string>();
 	const waitFor = async (name: string) => {
 		for (let i = 0; i < 200 && !started.has(name); i++) await new Promise((r) => setTimeout(r, 2));
@@ -360,7 +360,10 @@ test("tool calls that may run together do, and their results are recorded in the
 		},
 	};
 	const { make } = setup(
-		[fauxAssistantMessage([fauxToolCall("first", {}), fauxToolCall("second", {})], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("both done")])],
+		[fauxAssistantMessage([fauxToolCall("first", {}), fauxToolCall("second", {})], { stopReason: "toolUse" }), (context) => {
+			const names = context.messages.flatMap((m) => m.role === "toolResult" ? [m.toolName] : []);
+			return fauxAssistantMessage([fauxText(names.join(", "))]);
+		}],
 		[together],
 	);
 	const h = await make();
@@ -369,7 +372,8 @@ test("tool calls that may run together do, and their results are recorded in the
 	await api.input(s, { content: "go", actorId: "user" });
 	await api.waitForIdle(s);
 	const results = api.history(s).filter((e) => e.kind === "toolResult").map((e) => textOf(e.message!.content));
-	assert.deepEqual(results, ["first done", "second done"]);
+	assert.deepEqual(results, ["second done", "first done"]);
+	assert.equal(lastTurn(h, s).result.text, "first, second");
 	assert.equal(lastTurn(h, s).outcome.kind, "completed");
 	await h.stop();
 });

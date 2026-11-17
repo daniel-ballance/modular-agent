@@ -50,7 +50,8 @@ test("a question outlasts its turn; a late allow runs the call and the agent car
 	assert.equal(first.outcome.kind, "completed");
 	assert.deepEqual(first.result.openToolCalls, [call.id]);
 	assert.equal(kinds(h, s, "toolResult").length, 0);
-	assert.equal(kinds(h, s, "toolOpen").length, 1);
+	assert.equal(kinds(h, s, "turnEnd").length, 1);
+	assert.equal(api.openRequests(s).length, 1);
 	assert.deepEqual(api.openRequests(s).map((r) => r.id), [asked.id]);
 	assert.equal(existsSync(join(d.project, "paid.txt")), false);
 

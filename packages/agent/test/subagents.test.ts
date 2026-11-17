@@ -51,10 +51,10 @@ test("a background subagent: its result arrives as a job report and wakes the pa
 	const s = await api.startSession();
 	await api.input(s, { content: "please delegate", actorId: "user" });
 	await settle(h, s);
-	const report = api.history(s).find((e) => e.kind === "jobReport");
+	const report = api.history(s).find((e) => e.kind === "input" && e.jobId);
 	assert.ok(report, "the job reported back");
 	assert.match(lastText(h, s), /Parent got: \[Job subagent .* completed\] Subagent "counter" completed\. one two three/);
-	const child = (api.history(s).find((e) => e.kind === "jobStarted")!.data as { detail: { childSessionId: string } }).detail.childSessionId;
+	const child = (api.history(s).find((e) => e.kind === "harness.jobStarted")!.data as { detail: { childSessionId: string } }).detail.childSessionId;
 	assert.notEqual(child, s);
 	await h.stop();
 });
@@ -66,7 +66,7 @@ test("a subagent with wait returns its answer in the call", async () => {
 	await api.input(s, { content: "please delegate", actorId: "user" });
 	await settle(h, s);
 	assert.equal(lastText(h, s), "Parent saw: one two three");
-	assert.ok(!api.history(s).some((e) => e.kind === "jobReport"), "no report: the answer came back in the call");
+	assert.ok(!api.history(s).some((e) => e.kind === "input" && e.jobId), "no report: the answer came back in the call");
 	await h.stop();
 });
 
@@ -128,7 +128,7 @@ test("durable subagents: after a restart, the subagent carries on and the parent
 	await api.openSession(s);
 	await settle(h, s);
 	assert.match(lastText(h, s), /completed\] Subagent "counter" completed\. one two three/);
-	const ended = api.history(s, { all: true }).filter((e) => e.kind === "jobEnded");
+	const ended = api.history(s, { all: true }).filter((e) => e.kind === "harness.jobEnded");
 	assert.equal(ended.length, 1, "the job ended exactly once");
 	await h.stop();
 });
@@ -181,7 +181,7 @@ test("the parent can message a finished subagent again, and it remembers its ear
 	await settle(h, s);
 	assert.equal(lastText(h, s), "Parent saw: the number was 7");
 	assert.deepEqual(seen.at(-1), ["remember the number 7", "what was the number?"], "the follow-up reached the same child, with its history");
-	const children = new Set(api.history(s, { all: true }).filter((e) => e.kind === "jobStarted").map((e) => (e.data as { detail: { childSessionId: string } }).detail.childSessionId));
+	const children = new Set(api.history(s, { all: true }).filter((e) => e.kind === "harness.jobStarted").map((e) => (e.data as { detail: { childSessionId: string } }).detail.childSessionId));
 	assert.equal(children.size, 1, "one child session, two jobs");
 	await h.stop();
 });

@@ -83,7 +83,7 @@ test("a UI starts a tool call itself: the same checks apply, and it is recorded"
 	assert.deepEqual(seenBefore, ["refresh:ui"], "the tool.before check ran for a UI's call");
 	const refused = await api.callTool(s, { name: "model_only", input: {}, startedBy: "ui", actorId: "user" });
 	assert.equal(refused.status, "refused");
-	const recorded = api.history(s, { all: true }).filter((e) => e.kind === "toolCallOutsideTurn");
+	const recorded = api.history(s, { all: true }).filter((e) => e.kind === "toolResult" && !e.turnId);
 	assert.equal(recorded.length, 2, "both are recorded, with who started them");
 	assert.equal((recorded[0].data as { call: { startedBy: string } }).call.startedBy, "ui");
 	await h.stop();
