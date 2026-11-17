@@ -78,7 +78,7 @@ export interface ModelInfo extends ModelRef {
 
 // ---------- Actors ----------
 
-export type Authority = "watch" | "propose" | "input" | "answer" | "approve" | "settings" | "erase";
+export type Authority = "watch" | "propose" | "input" | "answer" | "approve" | "tools" | "cancel" | "settings" | "erase" | "grant" | "jobs" | "delegate";
 export interface Actor { id: string; kind: "user" | "agent" | "host" | "program"; tenant?: string; authority: Authority[] }
 
 // ---------- History ----------

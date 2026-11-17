@@ -27,7 +27,7 @@ async function until(check: () => boolean) {
 	assert.ok(check(), "timed out waiting for the expected event");
 }
 
-const fullRights = ["watch", "input", "answer", "approve", "settings", "erase"] as const;
+const fullRights = ["watch", "input", "answer", "approve", "tools", "settings", "erase"] as const;
 
 test("the agent reopens standard history with session settings, actors, keys and late questions", async (t) => {
 	const { h, api, home } = await start(t, { plugins: [durableRuntime(), approval({ policy: "all", waitMs: 5 })] });
@@ -168,7 +168,7 @@ test("steering from a second actor cannot borrow settings rights from the first"
 	} };
 	const { api } = await start(t, { plugins: [tools] });
 	const sid = await api.startSession();
-	await api.join(sid, { id: "guest", kind: "user", authority: ["input"] }, "user");
+	await api.join(sid, { id: "guest", kind: "user", authority: ["input", "tools"] }, "user");
 	await api.input(sid, { actorId: "user", content: "tool:hold {}" });
 	try {
 		await until(() => entered);

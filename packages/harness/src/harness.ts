@@ -164,7 +164,7 @@ export interface PluginApi {
 
 export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string }
 
-export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "settings", "erase"];
+export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate"];
 
 interface TurnState extends TurnSnapshot { endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string> }
 
@@ -1102,6 +1102,10 @@ export class Harness {
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
 		if (state && state.actors.size > 1 && [...state.actors].some((id) => !s.actors.get(id)?.authority.includes("input"))) return { callId: call.id, status: "refused", content: [text("The contributing actors no longer share input rights")] };
 		if (state && !state.tools.some((t) => t.name === call.name)) return { callId: call.id, status: "refused", content: [text("Tool was not offered to this turn")] };
+		// The "tools" right: every actor the work belongs to must let tools run for it (docs/bindings/data.md#actors).
+		const owners = state ? [...state.actors] : call.actorId ? [call.actorId] : [];
+		const lacking = owners.filter((id) => s.actors.has(id) && !s.actors.get(id)!.authority.includes("tools"));
+		if (lacking.length) return { callId: call.id, status: "refused", content: [text(`No "tools" right: ${lacking.join(", ")}`)] };
 		const env = await this.environmentFor(s);
 		const safeToRepeat = found.definition.hints?.safeToRepeat === true && env?.safeToRepeat === true;
 		await this.commit(s, [{ kind: "toolStarted", writer: "harness", modelVisible: false, turnId, toolCallId: call.id, stepId: call.stepId, data: { call, safeToRepeat } }]);

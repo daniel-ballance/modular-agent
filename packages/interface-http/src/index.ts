@@ -25,7 +25,7 @@ export class HttpInterface implements InterfaceCapability {
 	url = "";
 
 	constructor(private api: PluginApi, private options: HttpInterfaceOptions) {
-		this.actor = options.actor ?? { id: "http-user", kind: "user", authority: ["watch", "propose", "input", "answer", "approve", "settings", "erase"] };
+		this.actor = options.actor ?? { id: "http-user", kind: "user", authority: ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate"] };
 		this.actorId = this.actor.id;
 	}
 

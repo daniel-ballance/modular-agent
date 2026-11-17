@@ -346,7 +346,7 @@ export class TuiInterface implements InterfaceCapability {
 	}
 
 	async run(): Promise<number> {
-		this.sessionId = this.options.sessionId ? await this.api.openSession(this.options.sessionId, { id: this.actorId, kind: "user", authority: ["watch", "propose", "input", "answer", "approve", "settings", "erase"] }) : await this.api.startSession();
+		this.sessionId = this.options.sessionId ? await this.api.openSession(this.options.sessionId, { id: this.actorId, kind: "user", authority: ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate"] }) : await this.api.startSession();
 		this.tui = new TuiMainScreen(new ProcessTerminal());
 		this.editor = new Editor(this.tui, editorTheme, { paddingX: 1 });
 		const commands = [...LOCAL_COMMANDS.map(([name, description]) => ({ name, description })), ...this.api.commands().map((c) => ({ name: c.name, description: c.description }))];

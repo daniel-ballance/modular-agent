@@ -67,7 +67,7 @@ export class Subagents implements ToolSource, InterfaceCapability {
 	/** The parent agent's authority in a child: no more than the parent session's owner has. */
 	private parentActor(parent: string): Actor {
 		const owner = this.api.session(parent).actors[0];
-		return { id: PARENT, kind: "agent", authority: owner ? owner.authority.filter((a) => a !== "erase") : ["input", "answer"] };
+		return { id: PARENT, kind: "agent", authority: owner ? owner.authority.filter((a) => a !== "erase") : ["input", "answer", "tools"] };
 	}
 
 	async run(call: ToolCall, ctx: ToolContext): Promise<Omit<ToolResult, "callId">> {

@@ -79,6 +79,27 @@ A receiver that doesn't understand a part keeps it, and never shows `providerDat
 
 **ExecResult:** `exitCode` (a number, or `null` when killed), `output`, `timedOut`.
 
+## Actors
+
+**An Actor** is `{ id, kind, rights }`. `kind` is `user`, `host`, `agent` or `plugin`. `rights` is an array of these names ([Authority](../contracts.md#authority)):
+
+| Right | Lets the actor |
+|---|---|
+| `watch` | see the session and follow its events |
+| `propose` | give input that waits for another actor to release it |
+| `input` | give input that starts or steers a turn |
+| `answer` | answer questions |
+| `approve` | answer approvals |
+| `tools` | have tools run for it: the model's calls in turns it started, and calls it starts from a UI |
+| `cancel` | cancel turns and jobs |
+| `settings` | change the session's settings |
+| `erase` | erase entries |
+| `grant` | give other actors rights it has |
+| `jobs` | start jobs |
+| `delegate` | start subagents |
+
+A receiver keeps a right it doesn't know, and grants nothing for it.
+
 ## Credentials
 
 **A Credential** is an object with a `type`:
@@ -134,7 +155,7 @@ A build that declares `portableSessions` can reopen a session that another such 
   - **Settings and actors** are the session's, not the branch's: the latest `setting` for each key, and the latest `actorJoined` for each actor not since `actorLeft`, in the order the entries were kept.
   - **Keys:** every `input` with a `data.key`, on any branch, until it is erased.
   - **The model context** is the branch's model-visible messages, after the latest `summary` on the branch in place of the entries it names.
-  - **An interrupted turn** is a `turnStart` on the branch with no `turnEnd`. Its calls without a `toolResult` are pending: started if there is a `toolStarted`, not started if they appear only in a `response`. Each started call may run again only if its `toolStarted` says `safeToRepeat`, and its tool and the working environment promise it now.
+  - **An interrupted turn** is a `turnStart` on the branch with no `turnEnd`. Its calls without a `toolResult` are pending: started if there is a `toolStarted`, not started if they appear only in a `response`. Each started call may run again only if its `toolStarted` says `safeToRepeat`, and its tool and the working environment promise it now. A started call that doesn't run again gets `outcomeUnknown`, whatever anyone's authority is now: its result says what happened, not whether it may happen. A call that runs, again or for the first time, goes through every check, authority included.
   - **An open question** is an `inputRequest` with no `inputAnswer`. A call left open past its turn is in that turn's `turnEnd` `openToolCalls`, with no `toolResult`.
 - **Order within a turn:** `turnStart`, then the input it took; then for each step a `response`, then a `toolStarted` before each call runs, and a `toolResult` when it ends; any `inputRequest` and `inputAnswer` as they happen; and `turnEnd` last. Steering input is an `input` with the running turn's id, kept before the next `response`.
 
@@ -145,5 +166,6 @@ Erasure, jobs and plugins are outside this promise in `/1`:
 
 ## Changes
 
+- **2026-11-18, after the first portable-session swaps.** The names of rights, and what a started call that doesn't run again gets. TypeScript's actor had no `tools` right, because no names were defined, so the Rust agent reopening its session refused the interrupted call. The three clean-room builds had each chosen the same extra names (`tools`, `cancel`, `grant`, `jobs`, `delegate`); those are now the standard. Rust also recorded that started call as `refused`, though it had run.
 - **2026-11-18, round four.** Portable sessions; Credentials; the kinds `toolStarted`, `inputRequest`, `inputAnswer`, `actorJoined` and `actorLeft`; what a `turnStart` carries; standard setting keys, and `settings` for several at once. From the round-three gaps: Rust B-09, Python G53 and Go B8 found three different credential shapes (`apiKey`, `value` and `key`); Python G54 and Go B10 both chose `settings` for a change of several settings.
 - **2026-11-17.** First version. It collects the shapes the [ACP binding](acp.md) already used for entries and requests, and adds the rest.
