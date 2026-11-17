@@ -74,6 +74,7 @@ These keys are optional. A build that needs to say what they say uses these name
 |---|---|---|
 | `lateAnswersStartTurns` | boolean | An answer to a question left open past its turn starts a new turn. `startsTurnsUnasked` covers job reports only. |
 | `queuedJobReportsAfterRestart` | `"handedBack"` or `"run"` | When job reports are treated differently from other queued input after a restart. |
+| `portableSessions` | boolean | The agent writes and reads [portable sessions](data.md#portable-sessions): it can reopen a session another such agent wrote, in any language. Left out, `false`. |
 | `projectRoot` | string | The agent serves only this project. `session/new`, `session/load` and `session/resume` with another `cwd` are refused before anything changes, so a host starts one agent per project. |
 
 When a build's policy is mixed, it declares the more restrictive value, and says the rest in its own keys. For example, a build might cancel open calls when moving but refuse to move while jobs run. It declares `movingWithUnfinishedWork: "refused"`.
@@ -202,7 +203,7 @@ An open question, as the `requests` extension returns it, has at least:
 
 ## Conformance mode
 
-When the environment variable `MODULAR_AGENT_CONFORMANCE=1` is set, the agent offers one extra model, `conformance/echo`. It needs no network and no credentials, and it behaves exactly as follows. It reads the text of the latest input, ignoring tool results:
+When the environment variable `MODULAR_AGENT_CONFORMANCE=1` is set, the agent offers one extra model, `conformance/echo`. It needs no network and no credentials, and it behaves exactly as follows. It reads the text of the latest input, ignoring tool results. The latest input is the last `user` message in the request's `messages`, and "this turn" is everything after it. A model sees only the request, so this is the same in every build, whatever the host:
 - **Text that starts with `tool:`** has the form `tool:<name> <json>`. On a step with no tool result yet in this turn, the model calls tool `<name>` with `<json>` as its input. On the step after the result, it replies with the text `done: ` followed by the first 200 characters of the result's text, counted in Unicode code points.
 - **Any other text** gets the reply `echo: <text>`.
 
@@ -212,6 +213,7 @@ The [conformance kit](../../conformance/acp/README.md) uses this mode.
 
 ## Changes
 
+- **2026-11-18, round four.** The optional declaration key `portableSessions`. The conformance model's "this turn" is everything after the last `user` message (Rust B-14).
 - **2026-11-17, after round two.** Clarifications from the Rust, Python and Go builds' binding gaps. None changes a wire format any build already uses:
   - the echo counts code points;
   - the data folder overrides path flags;

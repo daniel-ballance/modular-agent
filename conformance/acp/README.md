@@ -23,6 +23,16 @@ What it checks:
 - **An unused session** isn't listed after it is closed.
 - **`session/load` in a new process:** replays the session, keeps its history, and remembers its keys.
 
-Two options add checks:
+These options add checks:
 - **`--plugin-checks`:** the conformance plugin's hooks are in force (see the [plugin binding](../../docs/bindings/plugin.md)).
-- **`--crash-checks`:** the agent is killed with SIGKILL during a `bash` call and the session is reopened in a new process. The interrupted call must have exactly one result, with an unknown outcome, and must not run again. The turn must carry on to completion if the agent declares `continuesAfterRestart`, and end as failed if not.
+- **`--crash-checks`:** the agent is killed with SIGKILL during a `bash` call and the session is reopened in a new process. The interrupted call must have exactly one result, with an unknown outcome, and must not run again. The turn must carry on to completion if the agent declares `continuesAfterRestart`, and end as failed if not- **`--probe-checks`:** the kit also loads the probe plugin, `../plugin/probe.mjs`, which checks the host side of the [plugin binding](../../docs/bindings/plugin.md): paging history, which requests need a live parent, an unknown host method, a request cancelled before it started, and refusing a registration the host can't accept.
+- **`--portable-checks`:** with `MODULAR_AGENT_HISTORY_URL` and `MODULAR_AGENT_HISTORY_TOKEN_FILE` set, every entry the agents kept in that history service must be in the [shared shapes](../../docs/bindings/data.md#portable-sessions).
+
+**Reopening with another agent.** After the agent's command, `--then <second command>` gives a second agent. Every reopening in a new process uses it: `session/load` with its replay and keys, and with `--crash-checks`, recovering the killed agent's turn. Point both agents at one history service, and the second agent reopens, continues and recovers a session the first one wrote. The second agent's declaration decides how the recovered turn must end.
+
+```sh
+node ../../packages/services/dist/src/serve.js history '{"dir":"/tmp/h","token":"a-token-of-16-chars-or-more"}'   # prints {"url": ...}
+MODULAR_AGENT_HISTORY_URL=<url> MODULAR_AGENT_HISTORY_TOKEN_FILE=<file> \
+  node run.mjs --crash-checks --portable-checks -- <agent A> --then <agent B>
+```
+.

@@ -419,6 +419,7 @@ These rules come from three independent builds of this description, in Rust, Pyt
 
 ### Recovery and repeating work
 
+- **A turn's start, and the input it takes, are recorded before the Runtime runs it,** so a turn lost at once is still on the record. **Decided** in round four, from the Rust, Python and Go builds, which all did this.
 - **A model response is recorded before any tool call it asks for starts.** A call's start is recorded before the call runs. A finished call never runs again.
 - **"Safe to repeat" is a promise, not a hint.** A call that started and didn't finish runs again only if both of these promise it is safe:
   - the tool's definition, both as recorded and as it is now;

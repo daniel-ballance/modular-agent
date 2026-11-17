@@ -41,7 +41,7 @@ A receiver that doesn't understand a part keeps it, and never shows `providerDat
 
 **ModelRequest:** `systemPrompt`, `messages`, `tools` (ToolDefinitions), `settings`. `settings` is `{ reasoning?, maxOutput? }`, plus any fields of the build's own.
 
-**A stream event** is `{ type: "text" | "reasoning" | "toolInput", delta }`.
+**A stream event** is `{ type: "text" | "reasoning" | "toolInput", delta }`. A stream ends when the request it belongs to is answered; there is no end event.
 
 ## Tools
 
@@ -50,7 +50,7 @@ A receiver that doesn't understand a part keeps it, and never shows `providerDat
 - `returns` *(optional; JSON Schema)*;
 - `hints` *(optional)*: `{ readOnly?, destructive?, openWorld?, safeToRepeat? }`. A missing hint is read cautiously (see [MCP servers](../contracts.md#mcp-servers)). `safeToRepeat` is a promise, not a hint ([Recovery](../contracts.md#recovery-and-repeating-work)).
 - `parallel` *(optional)*: `true` when the tool may run alongside other calls;
-- `callers` *(optional)*: who may call it, from `model`, `ui` and `plugin`.
+- `callers` *(optional)*: who may call it, from `model`, `ui` and `plugin`. Left out, anyone may; an empty array, no one. A call started by a `provider` counts as `model`, and one started by a `tool` as `plugin`.
 
 **ToolCall:** `id`, `name`, `input` (an object), `startedBy` (`model`, `provider`, `ui`, `plugin` or `tool`), `actorId` *(optional)*, `stepId` *(optional)*.
 
@@ -79,6 +79,15 @@ A receiver that doesn't understand a part keeps it, and never shows `providerDat
 
 **ExecResult:** `exitCode` (a number, or `null` when killed), `output`, `timedOut`.
 
+## Credentials
+
+**A Credential** is an object with a `type`:
+- `apiKey`: `key`;
+- `oauth`: `accessToken`, `refreshToken` *(optional)*, `expires` *(optional; a time)*;
+- anything else: its own fields, kept as they arrived.
+
+A credential store that holds a bare string gives it as `{ "type": "apiKey", "key": "<the string>" }`.
+
 ## History entries
 
 **Every entry has:**
@@ -92,20 +101,49 @@ A receiver that doesn't understand a part keeps it, and never shows `providerDat
 
 | `kind` | Carries |
 |---|---|
-| `input` | `message` (user); `data.inputId`, and `data.key` when keyed |
-| `response` | `message` (assistant) |
-| `toolResult` | `message` (toolResult); `data.status` |
-| `turnStart` | `data.startedBy`: `{ kind: "actor" | "job" | "plugin" | "answer", id }` |
-| `turnEnd` | `data.outcome`: `{ kind: "completed" | "failed" | "cancelled" | "limit", error?, limit? }`; `data.result`: `{ text?, value?, openToolCalls }` |
+| `input` | `message` (user); `turnId`; `actorId`; `data.inputId`, and `data.key` when keyed. It is written when the input is taken, by a turn or as steering. |
+| `turnStart` | `data.startedBy`: `{ kind: "actor" | "job" | "plugin" | "answer", id }`. Also what the turn started with ([Settings](../contracts.md#settings)): `data.model` (`{ provider, id }`), `data.system` (the system prompt), `data.tools` (the ToolDefinitions offered) and `data.settings` (`{ maxSteps?, reasoning?, maxOutput? }`). |
+| `response` | `message` (assistant); `stepId` |
+| `toolStarted` | `toolCallId`; `stepId` *(where it applies)*; `data.call` (a ToolCall); `data.safeToRepeat`: `true` only if the tool's definition and the working environment both promised it when the call started |
+| `toolResult` | `message` (toolResult); `toolCallId`; `data.status` |
+| `inputRequest` | `toolCallId` *(where it applies)*; `data.request` (an InputRequest) |
+| `inputAnswer` | `toolCallId` *(where it applies)*; `data` is the Answer |
+| `turnEnd` | `data.outcome`: `{ kind: "completed" | "failed" | "cancelled" | "limit", error?, limit? }`; `data.result`: `{ text?, value?, openToolCalls }`, where `openToolCalls` lists call ids; `data.usage` |
 | `summary` | `data.summary` (text); `sources` |
-| `setting` | `data.key`, `data.value` |
-| `position` | `data.to` (an entry id) |
+| `setting` | `data.key`, `data.value`. The key `settings` sets several at once: its value is an object of them. |
+| `actorJoined` | `data.actor`: `{ id, kind, rights }`. Joining again replaces the actor's rights. |
+| `actorLeft` | `data.actorId` |
+| `position` | `data.to` (an entry id, or `null`) |
 | `erasure` | `data.entryIds` |
 
-Other kinds are the build's own. A receiver keeps them and needn't understand them.
+Other kinds are the build's own. A receiver keeps them and needn't understand them. A build's own kinds should contain a dot, such as `go.snapshot`, so a later standard kind never collides with one.
 
 An erased entry keeps only `id`, `parentId`, `kind` and `erased: true`.
 
+**Setting keys** with fixed meanings: `model` (`{ provider, id }`), `reasoning`, `maxSteps` and `maxOutput`. A receiver ignores keys it doesn't know.
+
+## Portable sessions
+
+A build that declares `portableSessions` can reopen a session that another such build wrote, in any language, through a shared history store ([history service](history-http.md)). It can replay the session, run new turns in it, answer its open questions and recover its interrupted turn.
+
+**What a build that declares it does:**
+- **It writes every entry in the shapes above,** to whatever history store it uses: `sessionId`, not a name of its own; times as numbers; ids as strings.
+- **It records each meaning above with its standard kind,** and needs nothing else to reopen a session. It may also write kinds of its own, but only as caches: reopening without them must give the same session. Another build keeps them and ignores them.
+- **It reads a session the same way as every other build:**
+  - **The current branch.** Each entry becomes the head when it is kept, except a `position` entry, which moves the head to its `data.to` and isn't on any branch itself. The branch is the head and its ancestors, through `parentId`.
+  - **Settings and actors** are the session's, not the branch's: the latest `setting` for each key, and the latest `actorJoined` for each actor not since `actorLeft`, in the order the entries were kept.
+  - **Keys:** every `input` with a `data.key`, on any branch, until it is erased.
+  - **The model context** is the branch's model-visible messages, after the latest `summary` on the branch in place of the entries it names.
+  - **An interrupted turn** is a `turnStart` on the branch with no `turnEnd`. Its calls without a `toolResult` are pending: started if there is a `toolStarted`, not started if they appear only in a `response`. Each started call may run again only if its `toolStarted` says `safeToRepeat`, and its tool and the working environment promise it now.
+  - **An open question** is an `inputRequest` with no `inputAnswer`. A call left open past its turn is in that turn's `turnEnd` `openToolCalls`, with no `toolResult`.
+- **Order within a turn:** `turnStart`, then the input it took; then for each step a `response`, then a `toolStarted` before each call runs, and a `toolResult` when it ends; any `inputRequest` and `inputAnswer` as they happen; and `turnEnd` last. Steering input is an `input` with the running turn's id, kept before the next `response`.
+
+Erasure, jobs and plugins are outside this promise in `/1`:
+- **Erasure** is: the `erasure` entry names what was erased, and any build honours it.
+- **Jobs** are recorded in their plugin's own kinds. A session with an unfinished job reopens fully only in a build with a plugin that reads them.
+- **The plugins a session had** are recorded however the build likes. A build reopening another's session uses its own plugins.
+
 ## Changes
 
+- **2026-11-18, round four.** Portable sessions; Credentials; the kinds `toolStarted`, `inputRequest`, `inputAnswer`, `actorJoined` and `actorLeft`; what a `turnStart` carries; standard setting keys, and `settings` for several at once. From the round-three gaps: Rust B-09, Python G53 and Go B8 found three different credential shapes (`apiKey`, `value` and `key`); Python G54 and Go B10 both chose `settings` for a change of several settings.
 - **2026-11-17.** First version. It collects the shapes the [ACP binding](acp.md) already used for entries and requests, and adds the rest.

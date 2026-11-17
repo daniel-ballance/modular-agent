@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Conformance kit for the ACP host binding, modular-agent-acp/1 (docs/bindings/acp.md).
-// Usage: node run.mjs [--verbose] -- <agent command> [args...]
+// Usage: node run.mjs [--verbose] [options] -- <agent command> [args...] [--then <second agent command> [args...]]
 // The agent is started in conformance mode, with a fresh data folder and project, and driven with the
 // official ACP client library. It needs no network and no model. Exit code 0 means every check passed.
 import { spawn } from "node:child_process";
@@ -17,12 +17,26 @@ const pluginChecks = argv.includes("--plugin-checks");
 // With --crash-checks, also kill the agent with SIGKILL during a bash call, reopen the session in a new
 // process, and check the turn ends as the agent declared: carried on (continuesAfterRestart) or failed.
 const crashChecks = argv.includes("--crash-checks");
+// With --probe-checks, also load the probe plugin (../plugin/probe.mjs), which checks the host side of the plugin binding.
+const probeChecks = argv.includes("--probe-checks");
+// With --portable-checks, also check every entry the agents kept in the history service is in the shared shapes
+// (docs/bindings/data.md#portable-sessions). It needs MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE.
+const portableChecks = argv.includes("--portable-checks");
 const dash = argv.indexOf("--");
 if (dash < 0 || dash === argv.length - 1) {
-	console.error("Usage: node run.mjs [--verbose] -- <agent command> [args...]");
+	console.error("Usage: node run.mjs [--verbose] [--plugin-checks] [--crash-checks] [--probe-checks] [--portable-checks] -- <agent command> [args...] [--then <second agent command> [args...]]");
 	process.exit(2);
 }
-const command = argv.slice(dash + 1);
+// With --then, every reopening in a new process uses the second agent: one agent writes a session and another,
+// perhaps in another language, reopens, continues and recovers it. Both must use the same history service.
+const rest = argv.slice(dash + 1);
+const then = rest.indexOf("--then");
+const command = then < 0 ? rest : rest.slice(0, then);
+const second = then < 0 ? command : rest.slice(then + 1);
+if (!command.length || !second.length) {
+	console.error("--then needs a second agent command");
+	process.exit(2);
+}
 const NS = "modular-agent";
 const REQUIRED_EXTENSIONS = ["history", "input", "requests", "answer"];
 const BOOLEAN_KEYS = ["inputDuringTurn", "waitingThroughRestart", "continuesAfterRestart", "rewinding", "forking", "keepsStateAtProvider", "runsToolsAtProvider", "liveSessions", "severalActors", "holdsOutput", "outputBypassesAgent", "cancellingTurnCancelsJobs", "pluginsDuringSession", "erasure", "inputKeys", "questionsOutlastTurns"];
@@ -37,6 +51,17 @@ const ENUM_KEYS = {
 };
 
 const dataDir = mkdtempSync(join(tmpdir(), "ma-conf-data-"));
+const dataDir2 = second === command ? dataDir : mkdtempSync(join(tmpdir(), "ma-conf-data-"));
+const probeDir = mkdtempSync(join(tmpdir(), "ma-conf-probe-"));
+const probeOut = (role) => join(probeDir, `${role}.json`);
+const pluginEnv = {};
+if (probeChecks) {
+	const probe = new URL("../plugin/probe.mjs", import.meta.url).pathname;
+	const given = process.env.MODULAR_AGENT_PLUGINS ? JSON.parse(process.env.MODULAR_AGENT_PLUGINS) : [];
+	const roles = ["probe", "refuse-hook", "refuse-replace"];
+	pluginEnv.MODULAR_AGENT_PLUGINS = JSON.stringify([...given, ...roles.map((role) => ({ command: [process.execPath, probe], config: { role, out: probeOut(role) } }))]);
+}
+const sessionsUsed = [];
 const project = mkdtempSync(join(tmpdir(), "ma-conf-project-"));
 const results = [];
 const children = [];
@@ -60,11 +85,11 @@ async function attempt(name, fn) {
 }
 
 /** Start the agent and connect the official client. */
-function connect() {
-	const child = spawn(command[0], command.slice(1), {
+function connect(which = command) {
+	const child = spawn(which[0], which.slice(1), {
 		cwd: project,
 		stdio: ["pipe", "pipe", verbose ? "inherit" : "ignore"],
-		env: { ...process.env, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: dataDir },
+		env: { ...process.env, ...pluginEnv, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: which === command ? dataDir : dataDir2 },
 	});
 	children.push(child);
 	const updates = [];
@@ -124,6 +149,7 @@ await attempt("initialize", async () => {
 await attempt("session/new", async () => {
 	const s = await within(15000, agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] }), "session/new");
 	sessionId = s.sessionId;
+	sessionsUsed.push(sessionId);
 	check("session/new: a session id", typeof sessionId === "string" && sessionId.length > 0);
 	const ids = (s.configOptions ?? []).map((o) => o.id);
 	check("session/new: model, thinking and approval options", ["model", "thinking", "approval"].every((i) => ids.includes(i)), ids.join(", "));
@@ -258,10 +284,27 @@ await attempt("unused session", async () => {
 	check("session/list: the used session is listed", ids.includes(sessionId), ids.join(", "));
 });
 
+if (probeChecks) {
+	await attempt("probe", async () => {
+		const r = await within(30000, prompt(agent, sessionId, "tool:probe {}"), "probe prompt");
+		check("probe: the turn ends", r.stopReason === "end_turn", r.stopReason);
+		const checks = existsSync(probeOut("probe")) ? JSON.parse(readFileSync(probeOut("probe"), "utf8")) : [];
+		check("probe: the probe ran", checks.length > 0, "no results; was the tool called?");
+		for (const c of checks) check(`probe: ${c.name}`, c.ok, c.detail);
+		for (const role of ["refuse-hook", "refuse-replace"]) {
+			const lines = existsSync(probeOut(role)) ? readFileSync(probeOut(role), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+			const why = role === "refuse-hook" ? "a handler for a hook point the host doesn't offer" : "naming a replacement it doesn't register";
+			check(`probe: ${why} gets plugin/shutdown, reason refused`, lines.some((l) => l.params?.reason === "refused"), JSON.stringify(lines));
+		}
+		const tools = agent.updates.filter((u) => u.sessionId === sessionId && u.update.sessionUpdate === "tool_call").map((u) => u.update.title);
+		check("probe: the refused plugins left nothing behind, and the host carried on", r.stopReason === "end_turn" && tools.includes("probe"), tools.join(","));
+	});
+}
+
 await attempt("load in a new process", async () => {
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
 	await stop(agent);
-	agent = connect();
+	agent = connect(second);
 	await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	await within(15000, agent.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "session/load");
 	const replayed = agent.updates.filter((u) => u.sessionId === sessionId);
@@ -275,13 +318,14 @@ await attempt("load in a new process", async () => {
 
 if (crashChecks) {
 	await attempt("crash", async () => {
-		agent = connect();
-		const init = await within(15000, agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize");
+		await stop(agent);
+		agent = connect(command);
+		await within(15000, agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize");
 		const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
 		const sid = s.sessionId;
+		sessionsUsed.push(sid);
 		await setOption(agent, sid, "model", "conformance/echo");
 		await setOption(agent, sid, "approval", "off");
-		const durable = (meta(s)?.declaration ?? meta(init)?.declaration ?? {}).continuesAfterRestart === true;
 		const marker = join(project, "crash.txt");
 		void prompt(agent, sid, `tool:bash {"command":"echo start >> crash.txt; sleep 4; echo end >> crash.txt"}`).catch(() => undefined);
 		for (let i = 0; i < 200 && !(existsSync(marker) && readFileSync(marker, "utf8").includes("start")); i++) await sleep(50);
@@ -290,9 +334,12 @@ if (crashChecks) {
 		await sleep(6000);
 		const after = existsSync(marker) ? readFileSync(marker, "utf8") : "";
 		check("crash: the killed agent's command did not finish", !after.includes("end"), JSON.stringify(after));
-		agent = connect();
-		await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
-		await within(20000, agent.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "session/load after the crash");
+		agent = connect(second);
+		const init = await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+		// A history service holds the killed agent's lease until it runs out, so reopening may wait for it.
+		const loaded = await within(45000, agent.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "session/load after the crash");
+		// The agent that reopens decides how the turn ends.
+		const durable = (meta(loaded)?.declaration ?? meta(init)?.declaration ?? {}).continuesAfterRestart === true;
 		let entries = [];
 		let call;
 		for (let i = 0; i < 200; i++) {
@@ -315,8 +362,86 @@ if (crashChecks) {
 }
 
 await stop(agent);
+
+if (portableChecks) {
+	await attempt("portable", async () => {
+		const url = process.env.MODULAR_AGENT_HISTORY_URL;
+		const tokenFile = process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE;
+		if (!url || !tokenFile) throw new Error("--portable-checks needs MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE");
+		const token = readFileSync(tokenFile, "utf8").trim();
+		const problems = [];
+		let count = 0;
+		for (const sid of sessionsUsed) {
+			const res = await fetch(`${url.replace(/\/$/, "")}/v1/sessions/${encodeURIComponent(sid)}`, { headers: { authorization: `Bearer ${token}` } });
+			if (!res.ok) {
+				problems.push(`${sid}: HTTP ${res.status}`);
+				continue;
+			}
+			const { entries } = await res.json();
+			count += entries.length;
+			problems.push(...portableProblems(sid, entries));
+		}
+		check("portable: the sessions are in the history service", count > 0, `${count} entries`);
+		check("portable: every entry is in the shared shapes", problems.length === 0, problems.slice(0, 6).join("; "));
+	});
+}
+
+/** What breaks the shared shapes in one session's kept entries (docs/bindings/data.md). */
+function portableProblems(sid, entries) {
+	const out = [];
+	const say = (e, what) => out.push(`${e.kind ?? "?"} ${String(e.id).slice(0, 8)}: ${what}`);
+	const STANDARD = ["input", "turnStart", "response", "toolStarted", "toolResult", "inputRequest", "inputAnswer", "turnEnd", "summary", "setting", "actorJoined", "actorLeft", "position", "erasure"];
+	const seen = new Set();
+	for (const e of entries) {
+		if (e.erased) continue;
+		if (typeof e.id !== "string") say(e, "id is not a string");
+		if (e.sessionId !== sid) say(e, `sessionId is ${JSON.stringify(e.sessionId)}`);
+		if (typeof e.time !== "number") say(e, `time is ${typeof e.time}`);
+		if (typeof e.kind !== "string") say(e, "no kind");
+		if (typeof e.modelVisible !== "boolean") say(e, "modelVisible is not a boolean");
+		if (typeof e.writer !== "string") say(e, "no writer");
+		if (!STANDARD.includes(e.kind) && !String(e.kind).includes(".")) say(e, "a build's own kind without a dot");
+		const d = e.data ?? {};
+		switch (e.kind) {
+			case "input":
+				if (e.message?.role !== "user" || typeof d.inputId !== "string" || typeof e.turnId !== "string") say(e, "needs a user message, data.inputId and turnId");
+				break;
+			case "turnStart":
+				if (!d.startedBy?.kind || !d.model?.provider || !d.model?.id || typeof d.system !== "string" || !Array.isArray(d.tools)) say(e, "needs data.startedBy, data.model, data.system and data.tools");
+				break;
+			case "response":
+				if (e.message?.role !== "assistant" || !Array.isArray(e.message?.content) || typeof e.message?.stop !== "string") say(e, "needs an assistant message with content and stop");
+				break;
+			case "toolStarted":
+				if (typeof e.toolCallId !== "string" || d.call?.id !== e.toolCallId || typeof d.safeToRepeat !== "boolean") say(e, "needs toolCallId, data.call and data.safeToRepeat");
+				break;
+			case "toolResult":
+				if (e.message?.role !== "toolResult" || typeof d.status !== "string" || e.toolCallId !== e.message?.toolCallId) say(e, "needs a toolResult message, toolCallId and data.status");
+				break;
+			case "inputRequest":
+				if (!d.request?.kind || typeof d.request?.id !== "string") say(e, "needs data.request");
+				break;
+			case "inputAnswer":
+				if (typeof d.requestId !== "string") say(e, "data is the Answer, with requestId");
+				break;
+			case "turnEnd":
+				if (!d.outcome?.kind || !Array.isArray(d.result?.openToolCalls)) say(e, "needs data.outcome and data.result.openToolCalls");
+				break;
+			case "setting":
+				if (typeof d.key !== "string" || !("value" in d)) say(e, "needs data.key and data.value");
+				if (d.key === "model" && (typeof d.value?.provider !== "string" || typeof d.value?.id !== "string")) say(e, "the model setting is { provider, id }");
+				break;
+		}
+		if (e.kind === "toolResult" && seen.has(`started:${e.toolCallId}`) === false && entries.some((x) => x.kind === "toolStarted" && x.toolCallId === e.toolCallId) && entries.indexOf(entries.find((x) => x.kind === "toolStarted" && x.toolCallId === e.toolCallId)) > entries.indexOf(e)) say(e, "kept before its toolStarted");
+		if (e.kind === "toolStarted") seen.add(`started:${e.toolCallId}`);
+	}
+	return out;
+}
+
 for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
 rmSync(dataDir, { recursive: true, force: true });
+rmSync(dataDir2, { recursive: true, force: true });
+rmSync(probeDir, { recursive: true, force: true });
 rmSync(project, { recursive: true, force: true });
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

@@ -52,6 +52,7 @@ function start(extraEnv = {}) {
 	const execs = new Map(); // host/env/exec request id -> { proc, parent }
 	const state = { rt: undefined }; // the running Runtime scenario, if any
 	let nextId = 1;
+	let seq = 0;
 	let buffer = "";
 	const send = (m) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
 	const reply = (id, result) => send({ id, result });
@@ -67,7 +68,7 @@ function start(extraEnv = {}) {
 			case "$/ping":
 				return reply(m.id, {});
 			case "host/env/read":
-				if (!existsSync(envPath(p.cwd, p.path))) return fail(m.id, "invalid_request", `no file ${p.path}`);
+				if (!existsSync(envPath(p.cwd, p.path))) return fail(m.id, "not_found", `no file ${p.path}`);
 				return reply(m.id, { data: readFileSync(envPath(p.cwd, p.path)).toString("base64") });
 			case "host/env/write":
 				writeFileSync(envPath(p.cwd, p.path), Buffer.from(p.data, "base64"));
@@ -96,8 +97,19 @@ function start(extraEnv = {}) {
 				return reply(m.id, p.payload ?? null);
 			case "host/credentials/read":
 				return reply(m.id, { credential: null });
-			case "host/history":
-				return reply(m.id, { entries: [] });
+			case "host/history": {
+				const all = state.rt?.history?.() ?? [];
+				const limit = p.limit ?? 500;
+				if (!Number.isInteger(limit) || limit < 1 || limit > 500) return send({ id: m.id, error: { code: -32602, message: "bad limit", data: { code: "invalid_request" } } });
+				let from = 0;
+				if (p.after != null) {
+					const i = all.findIndex((e) => e.id === p.after);
+					if (i < 0) return send({ id: m.id, error: { code: -32602, message: "unknown entry", data: { code: "invalid_request" } } });
+					from = i + 1;
+				}
+				const entries = all.slice(from, from + limit);
+				return reply(m.id, from + limit < all.length ? { entries, next: entries.at(-1)?.id } : { entries });
+			}
 			case "host/session":
 				return reply(m.id, { id: p.sessionId, project: work, settings: {}, busy: true, actors: [] });
 			case "host/declaration":
@@ -128,6 +140,7 @@ function start(extraEnv = {}) {
 				notes.push({ method: "$/bad-line", params: { line } });
 				continue;
 			}
+			m.seq = ++seq;
 			if (m.method && m.id !== undefined) void onHostRequest(m);
 			else if (m.method) {
 				notes.push(m);
@@ -188,10 +201,13 @@ const code = (e) => e?.data?.code;
  * model(request, n) gives the n-th model answer; tool(call) answers runToolCall (may return a promise);
  * gate(call) answers "before a tool call" with a refusal reason, or null.
  */
-function scenario({ model, tool = async (c) => ({ callId: c.id, status: "completed", content: [{ type: "text", text: `ran ${c.name}` }] }), gate = () => null, definitions = {} }) {
-	const rt = { records: [], reports: [], hooks: [], toolCalls: [], modelCalls: 0, steps: 0, running: new Map() };
+function scenario({ model, tool = async (c) => ({ callId: c.id, status: "completed", content: [{ type: "text", text: `ran ${c.name}` }] }), gate = () => null, definitions = {}, retry = false, before = [] }) {
+	const rt = { records: [], reports: [], hooks: [], toolCalls: [], modelCalls: 0, steps: 0, running: new Map(), order: [] };
+	// What host/history gives: entries another build wrote before this process, then this Runtime's own.
+	rt.history = () => [...before, ...rt.records];
 	rt.handle = async (m, send) => {
 		const p = m.params ?? {};
+		rt.order.push(m.method === "host/runtime/hook" ? `hook:${p.hook}` : m.method);
 		switch (m.method) {
 			case "host/runtime/newId":
 				return { id: randomUUID() };
@@ -212,6 +228,7 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 				}
 				if (p.hook === "step.after" || p.hook === "turn.result") return { value: p.payload };
 				if (p.hook === "tool.after") return p.payload;
+				if (p.hook === "model.failed") return retry && !rt.retried ? ((rt.retried = true), { retry: true }) : null;
 				return null;
 			case "host/runtime/definition":
 				return definitions[p.toolName] ?? { name: p.toolName, description: "kit tool", parameters: { type: "object", properties: {} } };
@@ -226,7 +243,7 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 				}
 			}
 			case "host/runtime/record": {
-				const entry = { ...p.entry, id: randomUUID(), parentId: rt.records.at(-1)?.id ?? null, sessionId: "kit-session", time: Date.now(), turnId: "kit-turn" };
+				const entry = { ...p.entry, id: randomUUID(), parentId: rt.history().at(-1)?.id ?? null, sessionId: "kit-session", time: Date.now(), turnId: "kit-turn" };
 				rt.records.push(entry);
 				return entry;
 			}
@@ -292,6 +309,16 @@ await attempt("provider", async () => {
 	check("provider/request: echo reply", msg.role === "assistant" && textOf(msg.content) === "echo: hello" && msg.stop === "finished", JSON.stringify(msg).slice(0, 200));
 	const events = p.notes.slice(before).filter((n) => n.method === "provider/event" && n.params?.parentRequestId === req.id);
 	check("provider/request: streamed provider/event before the result", events.some((e) => e.params.event?.type === "text"), `${events.length} events`);
+	const responseHooks = p.hostCalls.filter((c) => c.method === "host/hook" && c.params?.hook === "provider.response" && c.params?.parentRequestId === req.id);
+	check("provider/request: \"as the response arrives\" runs once, through host/hook", responseHooks.length === 1, `${responseHooks.length} calls`);
+	check("provider/request: it has the complete message, after the last provider/event", responseHooks.length === 1 && textOf(responseHooks[0].params?.payload?.message?.content) === "echo: hello" && events.every((e) => e.seq < responseHooks[0].seq), JSON.stringify(responseHooks[0]?.params?.payload ?? null).slice(0, 200));
+	let unknownProvider;
+	try {
+		await p.request("provider/request", { provider: "no-such-provider", model: { provider: "no-such-provider", id: "x" }, request: { systemPrompt: "", messages: [], tools: [], settings: {} } });
+	} catch (e) {
+		unknownProvider = e;
+	}
+	check("provider/request: an unknown provider is invalid_request, JSON-RPC -32602", code(unknownProvider) === "invalid_request" && unknownProvider?.code === -32602, JSON.stringify(unknownProvider));
 	const call = await p.request("provider/request", { provider: "conformance", model: { provider: "conformance", id: "echo" }, request: { systemPrompt: "", messages: [{ role: "user", content: [{ type: "text", text: 'tool:read {"path":"a.txt"}' }] }], tools: [], settings: {} } });
 	const tc = (call.content ?? []).find((x) => x.type === "toolCall");
 	check("provider/request: tool: asks for the call", call.stop === "toolUse" && tc?.name === "read" && tc?.arguments?.path === "a.txt", JSON.stringify(call).slice(0, 200));
@@ -316,6 +343,7 @@ await attempt("tools", async () => {
 	const bres = await b;
 	check("tools/call bash: completed with its output", bres.status === "completed" && textOf(bres.content).includes("kit-out"), JSON.stringify(bres).slice(0, 200));
 	check("tools/call bash: used host/env/exec", p.hostCalls.some((c) => c.method === "host/env/exec" && c.params?.parentRequestId === b.id));
+	check("tools/call bash: host/env/exec carries the call's sessionId", p.hostCalls.some((c) => c.method === "host/env/exec" && c.params?.parentRequestId === b.id && c.params?.sessionId === "s1"), JSON.stringify(p.hostCalls.find((c) => c.method === "host/env/exec" && c.params?.parentRequestId === b.id)?.params ?? null).slice(0, 200));
 	check("tools/call bash: sent tools/progress", p.notes.slice(nb).some((n) => n.method === "tools/progress" && n.params?.parentRequestId === b.id));
 	const lst = await p.request("tools/list", { toolSource: "conformance-tools" });
 	check("tools/list", (lst.tools ?? []).some((t) => t.name === "bash"));
@@ -334,33 +362,44 @@ await attempt("tools cancel", async () => {
 	}
 	check("tools/call: cancelling ends the call within 5 s", Date.now() - t0 < 5000, `${Date.now() - t0} ms`);
 	check("tools/call: a cancelled call answers cancelled", code(settled) === "cancelled" || settled?.status === "cancelled" || settled?.status === "failed", JSON.stringify(settled).slice(0, 200));
+	// The request and its cancel in one write, so the plugin reads both before it starts the work.
+	const early = p.request("tools/call", { toolSource: "conformance-tools", sessionId: "s1", project: work, call: { id: "c3b", name: "bash", input: { command: "sleep 30" }, startedBy: "model" } }, 8000);
+	p.notify("$/cancel", { id: early.id });
+	const t1 = Date.now();
+	let earlyAnswer;
+	try {
+		earlyAnswer = await early;
+	} catch (e) {
+		earlyAnswer = e;
+	}
+	check("cancelling: a request cancelled before it started is still answered, within 5 s", !String(earlyAnswer?.message ?? "").startsWith("timed out") && Date.now() - t1 < 5000, JSON.stringify(earlyAnswer).slice(0, 200));
 });
 
 await attempt("environment", async () => {
-	await p.request("env/write", { cwd: work, path: "w.txt", data: Buffer.from("wrïtten").toString("base64") });
-	const ex = await p.request("env/exists", { cwd: work, path: "w.txt" });
-	const rd = await p.request("env/read", { cwd: work, path: "w.txt" });
+	await p.request("env/write", { cwd: work, sessionId: "s1", path: "w.txt", data: Buffer.from("wrïtten").toString("base64") });
+	const ex = await p.request("env/exists", { cwd: work, sessionId: "s1", path: "w.txt" });
+	const rd = await p.request("env/read", { cwd: work, sessionId: "s1", path: "w.txt" });
 	check("env: write, exists, read round trip", ex.exists === true && Buffer.from(rd.data, "base64").toString() === "wrïtten");
-	check("env: exists false for a missing file", (await p.request("env/exists", { cwd: work, path: "nope.txt" })).exists === false);
+	check("env: exists false for a missing file", (await p.request("env/exists", { cwd: work, sessionId: "s1", path: "nope.txt" })).exists === false);
 	let missing;
 	try {
-		await p.request("env/read", { cwd: work, path: "nope.txt" });
+		await p.request("env/read", { cwd: work, sessionId: "s1", path: "nope.txt" });
 	} catch (e) {
 		missing = e;
 	}
 	check("env/read of a missing file is not_found", code(missing) === "not_found", JSON.stringify(missing));
 	const nb = p.notes.length;
-	const e = p.request("env/exec", { cwd: work, command: "echo env-out" });
+	const e = p.request("env/exec", { cwd: work, sessionId: "s1", command: "echo env-out" });
 	const er = await e;
 	check("env/exec: exit code and output", er.exitCode === 0 && er.output.includes("env-out"), JSON.stringify(er));
 	check("env/exec: streamed env/output", p.notes.slice(nb).some((n) => n.method === "env/output" && n.params?.parentRequestId === e.id && n.params.chunk.includes("env-out")));
-	const z = await p.request("env/exec", { cwd: work, command: "echo no-limit", timeoutMs: 0 });
+	const z = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "echo no-limit", timeoutMs: 0 });
 	check("env/exec: timeoutMs 0 means no limit", z.exitCode === 0 && z.output.includes("no-limit") && !z.timedOut, JSON.stringify(z));
 	const t1 = Date.now();
-	const tl = await p.request("env/exec", { cwd: work, command: "sleep 20", timeoutMs: 300 }, 20000);
+	const tl = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "sleep 20", timeoutMs: 300 }, 20000);
 	check("env/exec: a positive timeoutMs stops the command and reports timedOut", tl.timedOut === true && Date.now() - t1 < 5000, `${JSON.stringify(tl)} after ${Date.now() - t1} ms`);
 	const pidFile = join(work, `pid-${randomUUID()}`);
-	const s = p.request("env/exec", { cwd: work, command: `setsid sleep 60 & echo $! > ${pidFile}; sleep 60` }, 20000);
+	const s = p.request("env/exec", { cwd: work, sessionId: "s1", command: `setsid sleep 60 & echo $! > ${pidFile}; sleep 60` }, 20000);
 	for (let i = 0; i < 100 && !existsSync(pidFile); i++) await sleep(50);
 	const pid = Number(readFileSync(pidFile, "utf8"));
 	const t0 = Date.now();
@@ -376,6 +415,19 @@ await attempt("environment", async () => {
 		check("env/exec: strong containment stops a setsid escapee", !alive(pid), `pid ${pid}`);
 	}
 	if (alive(pid)) process.kill(pid, "SIGKILL");
+
+	// A session's background processes outlive the call, and stop at env/sessionEnded for that session only.
+	const bg = async (sessionId) => Number((await p.request("env/exec", { cwd: work, sessionId, command: "sleep 60 >/dev/null 2>&1 & echo $!" })).output.trim());
+	const one = await bg("kit-session-1");
+	const two = await bg("kit-session-2");
+	await sleep(300);
+	check("env/exec: a background process outlives the call", alive(one) && alive(two), JSON.stringify({ one: alive(one), two: alive(two) }));
+	const ended = await p.request("env/sessionEnded", { sessionId: "kit-session-1" }, 10000).catch((e) => ({ error: e }));
+	for (let i = 0; i < 40 && alive(one); i++) await sleep(50);
+	check("env/sessionEnded: answers {}, with the session's background processes stopped", JSON.stringify(ended) === "{}" && !alive(one), JSON.stringify({ ended, alive: alive(one) }));
+	check("env/sessionEnded: another session's processes keep running", alive(two), `pid ${two}`);
+	await p.request("env/sessionEnded", { sessionId: "kit-session-2" }, 10000).catch(() => undefined);
+	for (const x of [one, two]) if (alive(x)) process.kill(x, "SIGKILL");
 });
 
 await attempt("hooks", async () => {
@@ -411,6 +463,14 @@ async function runtimeChecks(part) {
 		let o = await q.request("runtime/runTurn", { turn: turn() });
 		check(`${tag} a text turn completes with its text`, o.outcome?.kind === "completed" && o.result?.text === "plain answer" && Array.isArray(o.result?.openToolCalls), JSON.stringify(o).slice(0, 200));
 		check(`${tag} it recorded the response and listed its entries`, rt.records.some((e) => e.kind === "response") && (o.entries ?? []).length > 0, rt.records.map((e) => e.kind).join(","));
+		check(`${tag} it recorded no turnStart or turnEnd: the host records those`, !rt.records.some((e) => e.kind === "turnStart" || e.kind === "turnEnd"), rt.records.map((e) => e.kind).join(","));
+		check(`${tag} turn.end was its last request`, rt.order.at(-1) === "hook:turn.end", rt.order.slice(-4).join(","));
+		check(`${tag} host/runtime/report is only ever a notification`, !q.hostCalls.some((c) => c.method === "host/runtime/report"));
+
+		rt = q.state.rt = scenario({ retry: true, model: (_r, n) => (n === 0 ? { role: "assistant", content: [], stop: "failed", error: { kind: "temporary", message: "kit says try again" }, usage: usage0 } : say("retried")) });
+		o = await q.request("runtime/runTurn", { turn: turn() });
+		check(`${tag} a retried model request completes the turn`, o.outcome?.kind === "completed" && o.result?.text === "retried", JSON.stringify(o.outcome));
+		check(`${tag} a retry without a request prepares the step again`, rt.steps === 2 && rt.hooks.includes("model.failed"), JSON.stringify({ steps: rt.steps, hooks: rt.hooks }));
 
 		rt = q.state.rt = scenario({ model: (_r, n) => (n === 0 ? callTools(["read", { path: "a" }]) : say("after the tool")) });
 		o = await q.request("runtime/runTurn", { turn: turn() });
@@ -433,6 +493,7 @@ async function runtimeChecks(part) {
 		const startedPar = new Set();
 		let release;
 		const both = new Promise((r) => (release = r));
+		let sawSecondFirst = false;
 		rt = q.state.rt = scenario({
 			definitions: { par },
 			model: (_r, n) => (n === 0 ? callTools(["par", { n: 1 }], ["par", { n: 2 }]) : say("both done")),
@@ -440,13 +501,19 @@ async function runtimeChecks(part) {
 				startedPar.add(c.id);
 				if (startedPar.size === 2) release();
 				await Promise.race([both, sleep(4000)]);
+				// The first call ends only once the second's result is on the record, or after 4 s.
+				if (c.input.n === 1) {
+					for (let i = 0; i < 80 && !sawSecondFirst; i++) {
+						sawSecondFirst = recordedResults(rt).some((e) => JSON.stringify(e.message?.content ?? "").includes("n=2"));
+						if (!sawSecondFirst) await sleep(50);
+					}
+				}
 				return { callId: c.id, status: startedPar.size === 2 ? "completed" : "failed", content: [{ type: "text", text: `n=${c.input.n}` }] };
 			},
 		});
 		o = await q.request("runtime/runTurn", { turn: turn() });
 		check(`${tag} parallel calls overlap`, startedPar.size === 2 && recordedResults(rt).length === 2 && recordedResults(rt).every((e) => statusOf(e) === "completed"), JSON.stringify(recordedResults(rt).map(statusOf)));
-		const order = recordedResults(rt).map((e) => JSON.stringify(e.message?.content ?? "")).join("|");
-		check(`${tag} parallel results recorded in the order asked`, order.indexOf("n=1") >= 0 && order.indexOf("n=1") < order.indexOf("n=2"), order.slice(0, 120));
+		check(`${tag} a parallel result is recorded as soon as it is ready`, sawSecondFirst, "the second call's result wasn't recorded while the first still ran");
 
 		rt = q.state.rt = scenario({ model: (_r, n) => (n === 0 ? callTools(["bash", { command: "sleep 30" }]) : say("should not be reached")), tool: () => new Promise(() => {}) });
 		const running = q.request("runtime/runTurn", { turn: turn() }, 20000);
@@ -458,25 +525,53 @@ async function runtimeChecks(part) {
 		check(`${tag} a cancelled turn's outcome is cancelled`, o.outcome?.kind === "cancelled", JSON.stringify(o).slice(0, 200));
 		check(`${tag} the cancelled call still gets exactly one result`, !!rt.toolCalls[0] && resultFor(rt, rt.toolCalls[0].id).length === 1, JSON.stringify(recordedResults(rt)).slice(0, 200));
 
-		// After a restart: one call never started, one started and not safe to repeat.
-		const notStarted = { id: "c-not-started", name: "read", input: { path: "b" }, started: false };
-		const startedCall = { id: "c-started", name: "bash", input: { command: "echo once" }, started: true };
-		rt = q.state.rt = scenario({ model: () => say("carried on") });
-		o = await q.request("runtime/resumeTurn", { turn: turn(), interrupted: { turnId: "kit-turn", calls: [notStarted, startedCall] } });
+		q.state.rt = undefined;
+		await q.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);
+		await q.stop();
+
+		// After a restart, in a new process. The turn's history was written by another build: only the standard kinds.
+		// One call never started; one started and is not safe to repeat; one started and is.
+		const notStarted = { id: "c-not-started", name: "read", input: { path: "b" }, started: false, safeToRepeat: false };
+		const startedCall = { id: "c-started", name: "bash", input: { command: "echo once" }, started: true, safeToRepeat: false };
+		const safeCall = { id: "c-safe", name: "read", input: { path: "c" }, started: true, safeToRepeat: true };
+		const t0e = Date.now() - 5000;
+		const entry = (kind, extra) => ({ id: `other-${kind}-${randomUUID()}`, parentId: null, sessionId: "kit-session", kind, time: t0e, writer: "another-build", modelVisible: false, turnId: "kit-turn", ...extra });
+		const toolCall = (c) => ({ type: "toolCall", id: c.id, name: c.name, arguments: c.input });
+		const before = [
+			entry("turnStart", { data: { startedBy: { kind: "actor", id: "kit" }, model: { provider: "kit", id: "scripted" }, system: "kit", tools: [], settings: { maxSteps: 8 } } }),
+			entry("input", { modelVisible: true, actorId: "kit", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, data: { inputId: "kit-input" } }),
+			entry("response", { modelVisible: true, stepId: "kit-step-1", message: { role: "assistant", content: [notStarted, startedCall, safeCall].map(toolCall), stop: "toolUse", usage: usage0 } }),
+			entry("toolStarted", { toolCallId: "c-started", stepId: "kit-step-1", data: { call: { ...startedCall, startedBy: "model" }, safeToRepeat: false } }),
+			entry("toolStarted", { toolCallId: "c-safe", stepId: "kit-step-1", data: { call: { ...safeCall, startedBy: "model" }, safeToRepeat: true } }),
+		];
+		for (let i = 1; i < before.length; i++) before[i].parentId = before[i - 1].id;
+		const fresh = start({ MODULAR_AGENT_PLUGIN_PARTS: part });
+		try {
+			await fresh.request("plugin/initialize", initParams);
+			rt = fresh.state.rt = scenario({ model: () => say("carried on"), before });
+			o = await fresh.request("runtime/resumeTurn", { turn: turn(), interrupted: { turnId: "kit-turn", calls: [notStarted, startedCall, safeCall] } });
+		} finally {
+			fresh.state.rt = undefined;
+			await fresh.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);
+			await fresh.stop();
+		}
 		check(`${tag} resume: the started, unsafe call is not repeated`, !rt.toolCalls.some((c) => c.id === "c-started"), JSON.stringify(rt.toolCalls));
 		check(`${tag} resume: it gets one result, outcomeUnknown`, resultFor(rt, "c-started").length === 1 && statusOf(resultFor(rt, "c-started")[0]) === "outcomeUnknown", JSON.stringify(recordedResults(rt)).slice(0, 240));
 		check(`${tag} resume: the call that never started has exactly one result`, resultFor(rt, "c-not-started").length === 1, JSON.stringify(recordedResults(rt)).slice(0, 240));
+		check(`${tag} resume: the started call that is safe to repeat has exactly one result`, resultFor(rt, "c-safe").length === 1, JSON.stringify(recordedResults(rt)).slice(0, 240));
 		if (durable) {
 			check("durable-runtime: resume runs the call that never started", rt.toolCalls.some((c) => c.id === "c-not-started"), JSON.stringify(rt.toolCalls));
+			check("durable-runtime: resume runs again a started call that is safe to repeat", rt.toolCalls.some((c) => c.id === "c-safe") && statusOf(resultFor(rt, "c-safe")[0]) === "completed", JSON.stringify(rt.toolCalls));
 			check("durable-runtime: resume carries the turn on to completion", o.outcome?.kind === "completed" && o.result?.text === "carried on", JSON.stringify(o.outcome));
 		} else {
 			check("runtime: resume ends the turn as failed", o.outcome?.kind === "failed", JSON.stringify(o.outcome));
 			check("runtime: resume asks the model nothing", rt.modelCalls === 0, `${rt.modelCalls} model calls`);
 		}
-		q.state.rt = undefined;
 	} finally {
-		await q.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);
-		await q.stop();
+		if (q.child.exitCode === null && q.child.signalCode === null && !q.child.stdin.writableEnded) {
+			await q.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);
+			await q.stop();
+		}
 	}
 }
 

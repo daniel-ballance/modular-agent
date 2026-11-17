@@ -9,7 +9,7 @@ A history store as an HTTP service, so an agent in one language can keep its ses
 - **Errors:** an error is `{ "error": "<message>", "code": "<code>" }`, with the HTTP status given below.
 - **Malformed requests:** a missing or malformed body or field gives `400 invalid_request`.
 - **Safe to resend:** every request is safe to send again. If an answer is lost, the client sends the same request again and gets the same effect, though not always the same answer: resent entries come back as `kept: 0`. This is how the binding keeps the contracts' rule that keeping the same entries twice keeps them once.
-- **Scope:** the service keeps entries, not an agent's meaning. Each agent encodes its own settings, position and other state as entries of its own kinds. One language's agent reopening another language's session is not promised; any agent using any conforming service is.
+- **Scope:** the service keeps entries, not an agent's meaning. Any agent can use any conforming service. One agent reopening another's session is promised only between agents that declare [portable sessions](data.md#portable-sessions), which write their entries in the shared shapes.
 - **Version:** `GET /v1` answers `{ "binding": "modular-agent-history/1" }`.
 
 ## Sessions
@@ -24,17 +24,27 @@ A Session is the body of the `PUT`, plus its `id`. A lease or entries for a sess
 
 The service lists whatever has entries. Keeping "a session started only to look leaves nothing behind" is the agent's job: it sends a session only once something happens in it beyond setup, such as its first input. A client that sends every setting at once breaks that rule through the service. The TypeScript build did, until the ACP conformance kit caught it.
 
+## Choosing a service at start
+
+An agent that can keep its sessions in a history service reads two environment variables when it starts, so a test or a host can point any build at one service:
+- `MODULAR_AGENT_HISTORY_URL`: the service's base URL;
+- `MODULAR_AGENT_HISTORY_TOKEN_FILE`: a file holding the token.
+
+A build may offer its own way to choose a service too.
+
 ## Writing: one writer at a time
 
 Only one writer may add entries to a session at a time. A writer holds a **lease** on the session, and the service ends it if the writer stops renewing it.
 
 | Request | Body | Answer |
 |---|---|---|
-| `POST /v1/sessions/{id}/lease` | `{ "owner": string }` | `200 { "lease": string, "ttlMs": number }`. If the same owner already holds a lease, the same lease is returned. Another owner's lease that hasn't run out gives `409 held`. |
+| `POST /v1/sessions/{id}/lease` | `{ "owner": string }` | `200 { "lease": string, "ttlMs": number }`. If the same owner already holds a lease, the same lease is returned. Another owner's lease that hasn't run out gives `409 held`, with `retryAfterMs`: how long until it runs out. |
 | `POST /v1/sessions/{id}/lease/{lease}/renew` | | `200 { "ttlMs": number }`. A lease that ran out, or was released, gives `409 lost`. |
 | `DELETE /v1/sessions/{id}/lease/{lease}` | | `200 {}`. Releasing twice is harmless. |
 
 The owner is a string the writer picks once per run, so the service can tell writers apart. When the service restarts, every lease ends. The writer renews its lease at intervals of at most a third of `ttlMs`. A writer whose lease is lost stops writing; it doesn't quietly take a new lease.
+
+**Reopening after a crash.** A writer that stopped without releasing its lease, for example because its process was killed, leaves the session held until the lease runs out. An agent reopening the session waits for that, retrying after `retryAfterMs`, for at most the declared `ttlMs`. Recovery then runs as usual. It doesn't take the session sooner, because the service can't tell a stopped writer from a slow one.
 
 ## Entries
 
@@ -70,6 +80,7 @@ An Entry is a JSON object with at least `id`, a string unique in its session, an
 
 ## Changes
 
+- **2026-11-18, round four.** `409 held` carries `retryAfterMs`, and an agent reopening a session after a crash waits for the old lease to run out. Both the TypeScript and Go agents failed the ACP kit's crash check on a history service: the killed process still held the lease, and the new one was refused. Reopening another agent's session is promised between agents that declare portable sessions.
 - **2026-11-17, after round two.** Clarifications from the Go build's binding gaps, which the TypeScript service also follows:
   - `400 invalid_request`;
   - a resend has the same effect but answers `kept: 0`;
