@@ -113,7 +113,7 @@ Every request carries `cwd`: the session's project, or a folder in it.
 | `env/read` | `cwd`, `path` | `{ "data": "<base64>" }` |
 | `env/write` | `cwd`, `path`, `data` (base64) | `{}` |
 | `env/exists` | `cwd`, `path` | `{ "exists": boolean }` |
-| `env/exec` | `cwd`, `command`, `timeoutMs` *(optional)* | an ExecResult |
+| `env/exec` | `cwd`, `command`, `timeoutMs` *(optional)* | an ExecResult. `timeoutMs` is a positive number of milliseconds. A sender leaves it out for no limit, and a receiver treats `0` the same as leaving it out. When it passes, the command is stopped and the result has `timedOut: true`. |
 
 - **Output streams** as notifications `env/output { parentRequestId, chunk }`.
 - **Cancelling `env/exec`** stops the command and everything it started, within 5 seconds, as the declared `containment` promises.
@@ -206,3 +206,4 @@ The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a
 ## Changes
 
 - **2026-11-17.** First version, stage 1.
+- **2026-11-17, after the first swap matrix.** `timeoutMs: 0` means no limit. Go sent `0` for no limit and Rust read it as an instant timeout, so a Rust host with Go's tools, and a Go host with Rust's tools, cancelled every command at once. Each build passed on its own; only the swap found it. The plugin kit now checks both readings.

@@ -270,6 +270,11 @@ await attempt("environment", async () => {
 	const er = await e;
 	check("env/exec: exit code and output", er.exitCode === 0 && er.output.includes("env-out"), JSON.stringify(er));
 	check("env/exec: streamed env/output", p.notes.slice(nb).some((n) => n.method === "env/output" && n.params?.parentRequestId === e.id && n.params.chunk.includes("env-out")));
+	const z = await p.request("env/exec", { cwd: work, command: "echo no-limit", timeoutMs: 0 });
+	check("env/exec: timeoutMs 0 means no limit", z.exitCode === 0 && z.output.includes("no-limit") && !z.timedOut, JSON.stringify(z));
+	const t1 = Date.now();
+	const tl = await p.request("env/exec", { cwd: work, command: "sleep 20", timeoutMs: 300 }, 20000);
+	check("env/exec: a positive timeoutMs stops the command and reports timedOut", tl.timedOut === true && Date.now() - t1 < 5000, `${JSON.stringify(tl)} after ${Date.now() - t1} ms`);
 	const pidFile = join(work, `pid-${randomUUID()}`);
 	const s = p.request("env/exec", { cwd: work, command: `setsid sleep 60 & echo $! > ${pidFile}; sleep 60` }, 20000);
 	for (let i = 0; i < 100 && !existsSync(pidFile); i++) await sleep(50);
