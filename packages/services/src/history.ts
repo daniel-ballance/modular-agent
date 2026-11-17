@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { HistoryEntry, HistoryStore, Plugin, StoredSession } from "@modular-agent/harness";
+import { erasedEntry, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
 import { call, type ClientOptions, HttpError, serve, ServiceError } from "./http.js";
 
 /** The history service binding this follows (docs/bindings/history-http.md). */
@@ -18,8 +18,8 @@ function canonical(value: unknown): string {
 }
 
 class BindingError extends HttpError {
-	constructor(status: number, readonly code: string, message: string) {
-		super(status, message);
+	constructor(status: number, readonly code: string, message: string, retryAfterMs?: number) {
+		super(status, message, retryAfterMs === undefined ? undefined : { retryAfterMs });
 	}
 }
 
@@ -65,7 +65,7 @@ class EntryFiles {
 		const byId = new Map(kept.map((e) => [e.id as string, canonical(e)]));
 		const fresh: Json[] = [];
 		for (const e of batch) {
-			if (typeof e.id !== "string" || !("parentId" in e)) throw new BindingError(400, "invalid_request", "Every entry needs an id and a parentId");
+			if (!e || typeof e.id !== "string" || (e.parentId !== null && typeof e.parentId !== "string")) throw new BindingError(400, "invalid_request", "Every entry needs an id and a parentId");
 			const earlier = byId.get(e.id) ?? (fresh.find((f) => f.id === e.id) ? canonical(fresh.find((f) => f.id === e.id)) : undefined);
 			if (earlier === undefined) fresh.push(e);
 			else if (earlier !== canonical(e)) throw new BindingError(409, "conflict", `Entry ${e.id} was kept with other content`);
@@ -122,7 +122,7 @@ export async function historyService(options: { dir: string; token: string; port
 			["GET", /^\/v1$/, () => ({ binding: HISTORY_BINDING, ttlMs, retention: null })],
 			["PUT", /^\/v1\/sessions\/([^/]+)$/, (req) => {
 				const b = (req.body ?? {}) as Partial<SessionMeta>;
-				if (typeof b.project !== "string") throw new BindingError(400, "invalid_request", "project is required");
+				if (typeof b.project !== "string" || typeof b.created !== "number") throw new BindingError(400, "invalid_request", "project and created are required");
 				files.put({ id: req.params[0], project: b.project, created: typeof b.created === "number" ? b.created : Date.now(), ...(b.parentSessionId ? { parentSessionId: b.parentSessionId } : {}), ...(b.forkedFrom ? { forkedFrom: b.forkedFrom } : {}) });
 				return {};
 			}],
@@ -142,10 +142,10 @@ export async function historyService(options: { dir: string; token: string; port
 			["POST", /^\/v1\/sessions\/([^/]+)\/lease$/, (req) => {
 				const [id] = req.params;
 				known(id);
-				const owner = String(req.body?.owner ?? "");
-				if (!owner) throw new BindingError(400, "invalid_request", "owner is required");
+				const owner = req.body?.owner;
+				if (typeof owner !== "string" || !owner) throw new BindingError(400, "invalid_request", "owner is required");
 				const l = current(id);
-				if (l && l.owner !== owner) throw new BindingError(409, "held", `Session ${id} is held by another owner`);
+				if (l && l.owner !== owner) throw new BindingError(409, "held", `Session ${id} is held by another owner`, Math.max(0, l.expires - Date.now()));
 				const lease = l?.lease ?? randomUUID();
 				leases.set(id, { owner, lease, expires: Date.now() + ttlMs });
 				return { lease, ttlMs };
@@ -165,7 +165,8 @@ export async function historyService(options: { dir: string; token: string; port
 				const [id] = req.params;
 				known(id);
 				requireLease(id, req.body?.lease);
-				const kept = files.keep(id, (req.body?.entries ?? []) as Json[]);
+				if (!Array.isArray(req.body?.entries)) throw new BindingError(400, "invalid_request", "entries must be an array");
+				const kept = files.keep(id, req.body.entries);
 				// For tests: keep the entries, then lose the answer, as a dropped connection would.
 				if (drop > 0) {
 					drop--;
@@ -178,8 +179,9 @@ export async function historyService(options: { dir: string; token: string; port
 				const [id] = req.params;
 				known(id);
 				const l = current(id);
-				if (l && l.lease !== req.body?.lease) throw new BindingError(409, "held", `Session ${id} is held by another owner`);
-				return { erased: files.erase(id, (req.body?.entryIds ?? []) as string[]) };
+				if (l && l.lease !== req.body?.lease) throw new BindingError(409, "held", `Session ${id} is held by another owner`, Math.max(0, l.expires - Date.now()));
+				if (!Array.isArray(req.body?.entryIds) || req.body.entryIds.some((id: unknown) => typeof id !== "string")) throw new BindingError(400, "invalid_request", "entryIds must be an array of ids");
+				return { erased: files.erase(id, req.body.entryIds) };
 			}],
 		],
 		{ port: options.port, token: options.token },
@@ -221,17 +223,36 @@ export class HttpHistoryStore implements HistoryStore {
 		for (const batch of pending.batches) await this.post(id, batch);
 	}
 
-	async openForWriting(id: string): Promise<void> {
+	async openForWriting(id: string, options?: { wait?: boolean }): Promise<void> {
+		const existing = this.leases.get(id);
+		if (existing?.lost) throw new Error(`Session ${id} is not open for writing: its lease is lost`);
+		if (existing) return;
 		const pending = this.unsent.get(id);
 		if (pending) {
 			pending.writing = true;
 			return;
 		}
-		await this.takeLease(id);
+		await this.takeLease(id, options?.wait);
 	}
 
-	private async takeLease(id: string): Promise<void> {
-		const { lease, ttlMs } = await call<{ lease: string; ttlMs: number }>(this.client, "POST", this.path(id, "/lease"), { body: { owner: this.owner }, retry: true });
+	private async takeLease(id: string, wait = false): Promise<void> {
+		const acquire = () => call<{ lease: string; ttlMs: number }>(this.client, "POST", this.path(id, "/lease"), { body: { owner: this.owner }, retry: true });
+		let deadline: number | undefined;
+		let grant;
+		for (;;) {
+			try { grant = await acquire(); break; } catch (error) {
+				if (!wait || !(error instanceof ServiceError) || error.code !== "held"
+					|| !Number.isFinite(error.retryAfterMs) || error.retryAfterMs! < 0) throw error;
+				if (deadline === undefined) {
+					const caps = await call<{ ttlMs?: number }>(this.client, "GET", "/v1");
+					deadline = Date.now() + (caps.ttlMs ?? error.retryAfterMs!);
+				}
+				const delay = Math.max(1, error.retryAfterMs!);
+				if (Date.now() + delay > deadline) throw error;
+				await new Promise((resolve) => setTimeout(resolve, delay));
+			}
+		}
+		const { lease, ttlMs } = grant;
 		const held = { lease, lost: false, timer: undefined as unknown as NodeJS.Timeout };
 		held.timer = setInterval(() => {
 			call(this.client, "POST", this.path(id, `/lease/${lease}/renew`), { retry: true }).catch((error) => {
@@ -241,7 +262,7 @@ export class HttpHistoryStore implements HistoryStore {
 					clearInterval(held.timer);
 				}
 			});
-		}, Math.max(50, Math.floor(ttlMs / 3)));
+		}, Math.max(1, Math.floor(ttlMs / 3)));
 		held.timer.unref();
 		this.leases.set(id, held);
 	}
@@ -277,9 +298,7 @@ export class HttpHistoryStore implements HistoryStore {
 		const pending = this.unsent.get(id);
 		if (pending) return { meta: pending.meta, entries: pending.batches.flat() };
 		const r = await call<{ session: StoredSession; entries: HistoryEntry[] }>(this.client, "GET", this.path(id), { retry: true });
-		// An erased entry comes back as { id, parentId, kind, erased: true }: shape it as this agent records erasures.
-		const entries = r.entries.map((e) => ((e as unknown as { erased?: boolean }).erased ? ({ ...e, data: { erased: true }, modelVisible: false } as HistoryEntry) : e));
-		return { meta: r.session, entries };
+		return { meta: r.session, entries: r.entries };
 	}
 
 	async list(filter?: { project?: string }): Promise<StoredSession[]> {
@@ -291,7 +310,7 @@ export class HttpHistoryStore implements HistoryStore {
 		const pending = this.unsent.get(id);
 		if (pending) {
 			const targets = new Set(entryIds);
-			pending.batches = pending.batches.map((b) => b.map((e) => (targets.has(e.id) ? ({ ...e, message: undefined, data: { erased: true }, modelVisible: false } as HistoryEntry) : e)));
+			pending.batches = pending.batches.map((b) => b.map((e) => (targets.has(e.id) ? erasedEntry(e) : e)));
 			return;
 		}
 		const held = this.leases.get(id);

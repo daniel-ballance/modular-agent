@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 export type Route = (req: IncomingMessage & { body?: any; query: URLSearchParams; params: string[] }, res: ServerResponse) => Promise<unknown> | unknown;
 
 export class HttpError extends Error {
-	constructor(readonly status: number, message: string) {
+	constructor(readonly status: number, message: string, readonly details?: Record<string, unknown>) {
 		super(message);
 	}
 }
@@ -25,13 +25,15 @@ export async function serve(routes: [method: string, pattern: RegExp, route: Rou
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(chunk as Buffer);
 			const raw = Buffer.concat(chunks).toString("utf8");
-			const r = Object.assign(req, { body: raw ? JSON.parse(raw) : undefined, query: url.searchParams, params: found.match!.slice(1).map(decodeURIComponent) });
+			let body: unknown;
+			try { body = raw ? JSON.parse(raw) : undefined; } catch { throw new HttpError(400, "Malformed JSON"); }
+			const r = Object.assign(req, { body, query: url.searchParams, params: found.match!.slice(1).map(decodeURIComponent) });
 			const result = await found.r(r, res);
 			if (!res.headersSent) send(res, 200, result ?? {});
 		} catch (error) {
 			const status = error instanceof HttpError ? error.status : 500;
 			const code = (error as { code?: unknown }).code;
-			if (!res.headersSent) send(res, status, { error: error instanceof Error ? error.message : String(error), ...(typeof code === "string" ? { code } : {}) });
+			if (!res.headersSent) send(res, status, { error: error instanceof Error ? error.message : String(error), ...(typeof code === "string" ? { code } : status === 400 ? { code: "invalid_request" } : {}), ...(error instanceof HttpError ? error.details : {}) });
 			else res.end();
 		}
 	});
@@ -55,7 +57,7 @@ export interface ClientOptions { url: string; token: string }
 
 /** A failure the service reported, as opposed to one on the way to it. */
 export class ServiceError extends Error {
-	constructor(readonly status: number, message: string) {
+	constructor(readonly status: number, message: string, readonly code?: string, readonly retryAfterMs?: number) {
 		super(message);
 	}
 }
@@ -78,7 +80,7 @@ export async function call<T>(client: ClientOptions, method: string, path: strin
 			});
 			const text = await res.text();
 			const body = text ? JSON.parse(text) : {};
-			if (!res.ok) throw new ServiceError(res.status, body.error ?? res.statusText);
+			if (!res.ok) throw new ServiceError(res.status, body.error ?? res.statusText, body.code, body.retryAfterMs);
 			return body as T;
 		} catch (error) {
 			if (error instanceof ServiceError || options.signal?.aborted || attempt >= waits.length) throw error;

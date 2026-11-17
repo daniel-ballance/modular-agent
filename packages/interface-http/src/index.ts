@@ -40,7 +40,7 @@ export class HttpInterface implements InterfaceCapability {
 				["POST", /^\/sessions\/([^/]+)\/open$/, async (req) => ({ sessionId: await api.openSession(req.params[0], actor) })],
 				["POST", /^\/sessions\/([^/]+)\/close$/, async (req) => (await api.closeSession(req.params[0]), {})],
 				["GET", /^\/sessions\/([^/]+)$/, (req) => api.session(req.params[0])],
-				["GET", /^\/sessions\/([^/]+)\/history$/, (req) => api.history(req.params[0], { all: req.query.get("all") === "1" })],
+				["GET", /^\/sessions\/([^/]+)\/history$/, (req) => api.gatedHistory(req.params[0], { all: req.query.get("all") === "1", recipient: `http:${actor.id}` })],
 				["POST", /^\/sessions\/([^/]+)\/input$/, (req) => {
 					if (!req.body?.content) throw new HttpError(400, "content is required");
 					return api.input(req.params[0], { content: req.body.content, when: req.body.when, key: req.body.key, actorId: actor.id });
@@ -51,16 +51,18 @@ export class HttpInterface implements InterfaceCapability {
 				["GET", /^\/sessions\/([^/]+)\/events$/, (req, res) => {
 					const sessionId = req.params[0];
 					api.session(sessionId); // refuses a session that isn't open
-					const resumeFrom = Number(req.headers["last-event-id"] ?? req.query.get("fromEntry") ?? NaN);
-					let next = Number.isFinite(resumeFrom) ? resumeFrom : api.history(sessionId, { all: true }).length;
+					const resumeFrom = req.headers["last-event-id"] ?? req.query.get("fromEntry");
+					const history = api.history(sessionId, { all: true });
+					const at = resumeFrom == null ? history.length - 1 : history.findIndex((entry) => entry.id === resumeFrom);
+					if (resumeFrom != null && at < 0) throw new HttpError(404, "Unknown entry");
 					res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
 					res.write(": following\n\n");
 					const write = (e: AgentEvent) => {
 						// A recorded entry gets an id: the place to resume from after it.
-						const recorded = e.type === "entry" || e.type === "entry.added";
-						res.write(`${recorded ? `id: ${++next}\n` : ""}event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+						const id = e.type === "entry" || e.type === "entry.added" ? e.data?.id : undefined;
+						res.write(`${id ? `id: ${id}\n` : ""}event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
 					};
-					const stop = api.follow(sessionId, { recipient: `http:${actor.id}`, fromEntry: next }, write);
+					const stop = api.follow(sessionId, { recipient: `http:${actor.id}`, fromEntry: at + 1 }, write);
 					return new Promise<void>((resolve) => res.on("close", () => (stop(), resolve())));
 				}],
 			],

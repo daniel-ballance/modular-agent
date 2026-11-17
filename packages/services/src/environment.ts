@@ -17,7 +17,10 @@ export async function environmentService(options: { root: string; token: string;
 		if (full !== root && !full.startsWith(root + sep)) throw new HttpError(403, `${path} is outside this environment`);
 		return full;
 	};
-	const at = async (cwd?: string) => (cwd ? local.at(inside(cwd)) : local) as LocalEnvironment;
+	const at = (cwd?: string, sessionId?: string): WorkingEnvironment => {
+		const scoped = sessionId ? local.forSession(sessionId) : local;
+		return cwd && scoped.at ? scoped.at(inside(cwd)) as WorkingEnvironment : scoped;
+	};
 	return serve(
 		[
 			["POST", /^\/read$/, async (req) => {
@@ -33,8 +36,13 @@ export async function environmentService(options: { root: string; token: string;
 				const env = await at(req.body.cwd);
 				return { exists: await env.exists(inside(resolve(env.cwd, req.body.path))) };
 			}],
+			["POST", /^\/session-ended$/, async (req) => {
+				if (typeof req.body?.sessionId !== "string") throw new HttpError(400, "sessionId is required");
+				await local.sessionEnded(req.body.sessionId);
+				return {};
+			}],
 			["POST", /^\/exec$/, async (req, res) => {
-				const env = await at(req.body.cwd);
+				const env = at(req.body.cwd, req.body.sessionId);
 				const write = ndjson(res);
 				const abort = new AbortController();
 				let finished = false;
@@ -53,11 +61,17 @@ export async function environmentService(options: { root: string; token: string;
 /** A working environment reached over HTTP. Reading and writing files are safe to repeat; running a command is not, so only it is never retried. */
 export class HttpEnvironment implements WorkingEnvironment {
 	readonly id: string;
-	constructor(private client: ClientOptions, readonly cwd: string) {
+	constructor(private client: ClientOptions, readonly cwd: string, private sessionId?: string) {
 		this.id = `http:${client.url}:${cwd}`;
 	}
 	at(cwd: string): WorkingEnvironment {
-		return new HttpEnvironment(this.client, cwd);
+		return new HttpEnvironment(this.client, cwd, this.sessionId);
+	}
+	forSession(sessionId: string): WorkingEnvironment {
+		return new HttpEnvironment(this.client, this.cwd, sessionId);
+	}
+	async sessionEnded(sessionId: string): Promise<void> {
+		await call(this.client, "POST", "/session-ended", { body: { sessionId }, retry: true });
 	}
 	async readFile(path: string): Promise<Buffer> {
 		const { data } = await call<{ data: string }>(this.client, "POST", "/read", { body: { cwd: this.cwd, path }, retry: true });
@@ -72,7 +86,7 @@ export class HttpEnvironment implements WorkingEnvironment {
 	async exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult> {
 		let result: ExecResult | undefined;
 		try {
-			await stream(this.client, "/exec", { cwd: this.cwd, command, timeoutMs: options.timeoutMs }, (line) => (line.output !== undefined ? options.onOutput?.(line.output) : (result = line.result)), options.signal);
+			await stream(this.client, "/exec", { cwd: this.cwd, sessionId: this.sessionId, command, timeoutMs: options.timeoutMs }, (line) => (line.output !== undefined ? options.onOutput?.(line.output) : (result = line.result)), options.signal);
 		} catch (error) {
 			if (!options.signal.aborted) throw error;
 		}
