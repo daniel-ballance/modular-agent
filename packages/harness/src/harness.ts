@@ -80,6 +80,8 @@ export interface PluginApi {
 	readonly name: string;
 	readonly project: string;
 	readonly home: string;
+	/** The project a session works on: its "cwd" setting, or the Harness's project. */
+	projectOf(sessionId: string): string;
 	// capabilities
 	provide(capability: string, implementation: unknown): void;
 	use<T>(capability: string): T | undefined;
@@ -102,7 +104,8 @@ export interface PluginApi {
 	/** Add an actor to a session. Its authority must be within the authority of whoever grants it. */
 	join(sessionId: string, actor: Actor, grantedBy: string): Promise<void>;
 	leave(sessionId: string, actorId: string): Promise<void>;
-	listSessions(): Promise<StoredSession[]>;
+	/** Sessions in this project, another project, or every project (null). */
+	listSessions(project?: string | null): Promise<StoredSession[]>;
 	forkSession(sessionId: string, entryId: string): Promise<string>;
 	closeSession(sessionId: string): Promise<void>;
 	session(sessionId: string): { id: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
@@ -235,6 +238,7 @@ export class Harness {
 			name: pluginName,
 			project: this.project,
 			home: this.home,
+			projectOf: (sessionId) => this.projectOf(this.session(sessionId)),
 			provide: (capability, impl) => this.provide(pluginName, capability, impl),
 			use: <T>(capability: string) => this.use<T>(capability),
 			useAll: <T>(capability: string) => this.useAll<T>(capability),
@@ -271,7 +275,7 @@ export class Harness {
 				await this.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
 				this.emit(s.id, "session.left", { actorId }, pluginName, { actorId });
 			},
-			listSessions: async () => (await this.use<HistoryStore>("history-store")?.list({ project: this.project })) ?? [],
+			listSessions: async (project) => (await this.use<HistoryStore>("history-store")?.list(project === null ? undefined : { project: project ?? this.project })) ?? [],
 			forkSession: (sessionId, entryId) => this.forkSession(sessionId, entryId),
 			closeSession: (id) => this.closeSession(id),
 			session: (id) => {
@@ -386,7 +390,8 @@ export class Harness {
 
 	async startSession(options: SessionStartOptions = {}): Promise<string> {
 		const store = this.use<HistoryStore>("history-store");
-		const meta: StoredSession = { id: this.newId(), created: this.now(), project: this.project, forkedFrom: options.forkFrom, parentSessionId: options.parentSessionId };
+		const cwd = options.settings?.cwd;
+		const meta: StoredSession = { id: this.newId(), created: this.now(), project: typeof cwd === "string" ? cwd : this.project, forkedFrom: options.forkFrom, parentSessionId: options.parentSessionId };
 		const s = new Session(meta, !store);
 		if (store) {
 			await store.create(meta);
@@ -824,6 +829,17 @@ export class Harness {
 		};
 	}
 
+	projectOf(s: Session): string {
+		return typeof s.settings.cwd === "string" ? s.settings.cwd : this.project;
+	}
+
+	/** The working environment, in the session's project when it has its own. */
+	private environmentFor(s: Session): WorkingEnvironment | undefined {
+		const env = this.use<WorkingEnvironment>("working-environment");
+		const cwd = this.projectOf(s);
+		return env && env.cwd !== cwd && env.at ? env.at(cwd) : env;
+	}
+
 	// ---------- tools ----------
 
 	private findTool(_s: Session | undefined, name: string): { source: ToolSource; definition: ToolDefinition } | undefined {
@@ -863,7 +879,7 @@ export class Harness {
 				signal,
 				call,
 				progress: (content) => this.emit(s.id, "tool.progress", { content }, found.source.id, { turnId, toolCallId: call.id }),
-				environment: this.use<WorkingEnvironment>("working-environment"),
+				environment: this.environmentFor(s),
 				ask: (request) => this.ask(s, { ...request, toolCallId: call.id, key: `${call.id}:${request.key ?? `ask:${asked++}`}` }, found.source.id),
 			});
 			if (isPending(result)) {

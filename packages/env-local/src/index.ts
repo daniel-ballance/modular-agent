@@ -9,6 +9,9 @@ export class LocalEnvironment implements WorkingEnvironment {
 	constructor(readonly cwd: string) {
 		this.id = `local:${cwd}`;
 	}
+	at(cwd: string): WorkingEnvironment {
+		return new LocalEnvironment(cwd);
+	}
 	resolve(path: string): string {
 		return isAbsolute(path) ? path : resolve(this.cwd, path);
 	}

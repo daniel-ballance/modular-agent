@@ -38,10 +38,11 @@ export function systemPrompt(options: { base?: string; contextFileNames?: string
 				"turn.before",
 				(payload: { sessionId: string }) => {
 					const tools = api.tools(payload.sessionId).map((t: ToolDefinition) => `- ${t.name}: ${t.description}`).join("\n");
-					const files = contextFiles(api.project, options.contextFileNames)
+					const project = api.projectOf(payload.sessionId);
+					const files = contextFiles(project, options.contextFileNames)
 						.map((f) => `<context-file path="${f.path}">\n${f.text.trim()}\n</context-file>`)
 						.join("\n\n");
-					const parts = [base, tools && `Available tools:\n${tools}`, `Working directory: ${api.project}`, files && `Project context:\n\n${files}`];
+					const parts = [base, tools && `Available tools:\n${tools}`, `Working directory: ${project}`, files && `Project context:\n\n${files}`];
 					return { system: parts.filter(Boolean).join("\n\n") };
 				},
 				"first",

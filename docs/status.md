@@ -35,10 +35,12 @@ When the code and the description disagree, this page says so. Update it when ei
 | Provider keeps no state and runs no tools | proven | `provider-pi-ai` declares both false. |
 | Provider keeps state, runs tools itself, live sessions, late answers | paper | Declared false; no Provider does them. |
 | Interface: terminal | proven | Interactive, print and JSON modes. |
-| Interface: over a wire, driven by a host | paper | Next step: ACP. |
+| Interface: over a wire, driven by a host | proven | `interface-acp` speaks ACP v1 over stdio. T3 Code drove it as a provider and showed its tool calls as native cards. |
+| The agent declares what it supports, to a host | proven | In `initialize`, under `_meta`. |
+| Each session has its own project (`cwd`) | changed, proven | The Harness's project was per process. ACP gives each session its own `cwd`, so tools, context files and the session list now follow the session's. |
 | Tool source | proven | `tools-files`, `tools-question`. |
 | Tool calls started by a UI or plugin, with the same checks | partly | `callTool` exists. Only a refusal is tested. |
-| Working environment, separate from the project | built | `env-local`. Nothing swaps it yet. |
+| Working environment, separate from the project | proven | `env-local`, moved to each session's `cwd`. |
 | History store, with erasure | proven | `history-jsonl`. |
 | Credential store | proven | `credentials-file`, sharing Pi's `auth.json`. |
 

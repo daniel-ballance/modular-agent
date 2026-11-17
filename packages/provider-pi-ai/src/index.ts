@@ -34,6 +34,14 @@ export class PiAiProvider implements Provider {
 		return this.collection.getModels(this.id).map(toInfo);
 	}
 
+	async available(): Promise<boolean> {
+		try {
+			return (await this.collection.getAuth(this.id)) !== undefined;
+		} catch {
+			return false;
+		}
+	}
+
 	async request(ref: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
 		const model = this.collection.getModel(this.id, ref.id);
 		if (!model) return failed(`Unknown model ${this.id}/${ref.id}`, "other");

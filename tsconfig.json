@@ -47,6 +47,9 @@
       "path": "packages/tools-question"
     },
     {
+      "path": "packages/interface-acp"
+    },
+    {
       "path": "packages/runtime-durable"
     }
   ]

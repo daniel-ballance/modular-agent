@@ -13,6 +13,7 @@
 | `approval` | Feature: asks before tool calls. Policies: `ask` (unless read-only), `all`, `never`, `off`. |
 | `provider-pi-ai` | Provider, one per pi-ai vendor |
 | `interface-terminal` | Interface: interactive, print (`-p`) and JSON modes |
+| `interface-acp` | Interface: ACP v1 over stdio (`ma --acp`), using the official SDK |
 | `tools-files` | Tool source: `read`, `write`, `edit`, `bash` |
 | `env-local` | Working environment: the local machine |
 | `history-jsonl` | History store: one JSONL file per session, appended a batch at a time, with erasure |
@@ -80,6 +81,31 @@ In the terminal, a question takes the next line only while a turn is running. On
 
 Checked by tests, and by hand with a real model: the turn ended after four seconds with the call open, the conversation went on (the model knew it was still waiting), the process quit, a new process reopened the session, `/answer allow` ran the command, and the agent finished in a turn started by the answer.
 
+## Driven by a host over ACP
+
+`ma --acp` serves ACP on stdin and stdout. Each ACP session is one of our sessions, with the same id. The mapping:
+
+| ACP | Ours |
+|---|---|
+| `initialize` | capabilities, plus our declaration under `_meta` |
+| `session/new`, `load`, `resume`, `list`, `close` | start, open (with the history replayed for `load`), list and close sessions. A session's `cwd` is its project. |
+| `session/prompt` | input. The response waits for the turn that took the input, and maps its outcome to a stop reason. A slash command is handled without the model. |
+| `session/cancel` | cancel. Queued prompts that were handed back answer `cancelled`. |
+| `session/update` | the gated event stream: message and reasoning chunks, tool calls and their updates, commands |
+| `session/request_permission` | approvals and choices |
+| `elicitation/create` | free-text questions, when the client supports forms |
+| config options `model` and `thinking` | the session's model and reasoning settings |
+
+An approval left open past its turn stays open on the client as the same permission request. When the user answers it later, the open call runs in a turn started by the answer.
+
+Checked by five tests using the SDK's own client, by a script that drives `ma --acp` over stdio with a real model (`scripts/acp-smoke.mjs`), and by **T3 Code driving it as a provider**. Added to T3 as a local ACP command, T3 read its models and reasoning levels from our config options, delegated a task to it, and showed its messages, a read card, a shell command card, its reasoning and a checkpoint. T3 answered our permission request itself, because the thread was in full-access mode: the host acting as an actor with its own authority.
+
+What the host test found:
+- **A session's project is the session's, not the process's.** ACP gives each session a `cwd`. Tools, context files and the session list now use it.
+- **A host reads the model list through a session.** ACP v1 offers models only as session config options, so T3 starts a throwaway session to read them, which leaves an empty session behind. A way to describe the agent without a session would avoid this.
+- **ACP v1 has no key for repeated input.** Our key travels in `_meta` when a client sends one. T3 doesn't.
+- **MCP servers the client passes are ignored.** There is no MCP client plugin yet.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).
@@ -98,4 +124,4 @@ Checked by tests, and by hand with a real model: the turn ended after four secon
 - **Several actors** work in the Harness and tests, but the terminal Interface acts for one user.
 - **Adding plugins during a session** isn't supported. The declaration says so.
 - **The terminal Interface is line-based,** not a full TUI like Pi's.
-- **No wire binding yet.** Every part talks to the others through function calls.
+- **Inside the agent, every part talks to the others through function calls.** Only the Interface is over a wire.

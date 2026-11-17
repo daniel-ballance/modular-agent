@@ -185,6 +185,8 @@ export interface Provider {
 	id: string;
 	supports: Declaration;
 	models(): ModelInfo[];
+	/** Whether this Provider can be used now, for example because it has credentials. */
+	available?(): Promise<boolean>;
 	/** Make one model request. Never rejects for a model failure: the message says why. */
 	request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage>;
 	discardState?(sessionId: string): Promise<void>;
@@ -217,6 +219,8 @@ export interface WorkingEnvironment {
 	writeFile(path: string, data: string | Buffer): Promise<void>;
 	exists(path: string): Promise<boolean>;
 	exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult>;
+	/** The same environment, working in another directory. */
+	at?(cwd: string): WorkingEnvironment;
 }
 
 // ---------- History store ----------
