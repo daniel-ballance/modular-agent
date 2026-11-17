@@ -1,5 +1,5 @@
 import { Readable, Writable } from "node:stream";
-import { type AgentApp, type AgentContext, agent, methods, ndJsonStream, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
+import { type AgentApp, type AgentContext, agent, methods, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type * as acp from "@agentclientprotocol/sdk";
 import {
 	ALL_AUTHORITY,
@@ -18,17 +18,33 @@ import {
 } from "@modular-agent/harness";
 
 const THINKING = ["default", "minimal", "low", "medium", "high", "xhigh"];
+const APPROVAL = ["off", "ask", "all", "never"];
+/** The ACP host binding this Interface follows (docs/bindings/acp.md). */
+export const BINDING = "modular-agent-acp/1";
+const NS = "modular-agent";
+const EXTENSIONS = ["history", "input", "requests", "answer", "fork", "move", "jobs", "cancel-job"];
 
+interface Outcome { kind: string; error?: string; limit?: string }
 interface Waiter {
 	inputId: string;
 	turnId?: string;
+	duplicate?: boolean;
 	resolve(response: acp.PromptResponse): void;
 	reject(error: Error): void;
+}
+
+/** A turn's outcome as an ACP prompt response, with the binding's _meta. */
+function promptResponse(inputId: string, outcome: Outcome, extra: Record<string, unknown> = {}): acp.PromptResponse {
+	const stopReason: acp.StopReason =
+		outcome.kind === "cancelled" ? "cancelled" : outcome.kind === "limit" ? (outcome.limit === "steps" ? "max_turn_requests" : "max_tokens") : outcome.kind === "failed" ? "refusal" : "end_turn";
+	return { stopReason, _meta: { [NS]: { inputId, outcome, ...extra } } };
 }
 
 interface SessionState {
 	unfollow?: () => void;
 	waiters: Waiter[];
+	/** Input handed back by the last cancel, for the cancelled prompt's response. */
+	handedBack?: { inputId: string; content: unknown }[];
 	/** Inputs this client gave, so they aren't echoed back. */
 	ownInputs: Set<string>;
 	toolOutput: Map<string, string>;
@@ -41,12 +57,6 @@ function kindOf(name: string): acp.ToolKind {
 	return "other";
 }
 
-function titleOf(name: string, input: Record<string, unknown>): string {
-	if (typeof input.command === "string") return `${name}: ${input.command}`;
-	if (typeof input.path === "string") return `${name} ${input.path}`;
-	if (typeof input.question === "string") return `${name}: ${input.question}`;
-	return name;
-}
 
 /** ACP prompt content, as our content parts. */
 export function fromAcp(blocks: acp.ContentBlock[]): ContentPart[] {
@@ -142,7 +152,7 @@ export class AcpInterface implements InterfaceCapability {
 				agentInfo: { name: "modular-agent", title: "Modular Agent", version: "0.1.0" },
 				authMethods: [],
 				// What the agent supports, so a host never has to guess.
-				_meta: { "modular-agent/declaration": declaration },
+				_meta: { [NS]: { binding: BINDING, declaration: this.bindingDeclaration(), extensions: EXTENSIONS, actor: { id: this.actorId, kind: "host" } } },
 			};
 		});
 
@@ -150,7 +160,7 @@ export class AcpInterface implements InterfaceCapability {
 			const sessionId = await this.api.startSession({ settings: { cwd: params.cwd }, actor: this.actor() });
 			await this.attachMcp(sessionId, params.mcpServers, params.cwd);
 			this.open(sessionId);
-			return { sessionId, configOptions: await this.configOptions(sessionId) };
+			return { sessionId, configOptions: await this.configOptions(sessionId), _meta: { [NS]: { declaration: this.bindingDeclaration(sessionId) } } };
 		});
 
 		app.onRequest(methods.agent.session.load, async ({ params }) => {
@@ -159,7 +169,7 @@ export class AcpInterface implements InterfaceCapability {
 			await this.attachMcp(params.sessionId, params.mcpServers, params.cwd);
 			await this.replay(params.sessionId);
 			this.open(params.sessionId);
-			return { configOptions: await this.configOptions(params.sessionId) };
+			return { configOptions: await this.configOptions(params.sessionId), _meta: { [NS]: { declaration: this.bindingDeclaration(params.sessionId) } } };
 		});
 
 		app.onRequest(methods.agent.session.resume, async ({ params }) => {
@@ -167,7 +177,7 @@ export class AcpInterface implements InterfaceCapability {
 			await this.api.openSession(params.sessionId, this.actor());
 			await this.attachMcp(params.sessionId, params.mcpServers, params.cwd);
 			this.open(params.sessionId);
-			return { configOptions: await this.configOptions(params.sessionId) };
+			return { configOptions: await this.configOptions(params.sessionId), _meta: { [NS]: { declaration: this.bindingDeclaration(params.sessionId) } } };
 		});
 
 		app.onRequest(methods.agent.session.list, async ({ params }) => {
@@ -189,6 +199,10 @@ export class AcpInterface implements InterfaceCapability {
 			const value = (params as { value: unknown }).value;
 			if (params.configId === "model") await this.api.setSetting(params.sessionId, "model", String(value), this.actorId);
 			else if (params.configId === "thinking") await this.api.setSetting(params.sessionId, "thinking", value === "default" ? undefined : String(value), this.actorId);
+			else if (params.configId === "approval") {
+				if (!APPROVAL.includes(String(value))) throw RequestError.invalidParams(undefined, `approval must be one of ${APPROVAL.join(", ")}`);
+				await this.api.setSetting(params.sessionId, "approvalPolicy", String(value), this.actorId);
+			}
 			else throw new Error(`Unknown option ${params.configId}`);
 			return { configOptions: await this.configOptions(params.sessionId) };
 		});
@@ -196,13 +210,87 @@ export class AcpInterface implements InterfaceCapability {
 		app.onRequest(methods.agent.session.prompt, async ({ params }) => this.prompt(params));
 
 		app.onNotification(methods.agent.session.cancel, async ({ params }) => {
-			const handedBack = await this.api.cancel(params.sessionId);
 			const state = this.sessions.get(params.sessionId);
+			const handedBack = await this.api.cancel(params.sessionId);
+			const list = handedBack.map((q) => ({ inputId: q.id, content: q.content }));
+			if (state) state.handedBack = list;
 			const ids = new Set(handedBack.map((q) => q.id));
 			for (const w of [...(state?.waiters ?? [])]) {
-				if (ids.has(w.inputId)) this.settle(params.sessionId, w, { stopReason: "cancelled" });
+				if (ids.has(w.inputId)) this.settle(params.sessionId, w, promptResponse(w.inputId, { kind: "cancelled" }, { handedBack: list }));
 			}
 		});
+
+		this.registerExtensions();
+	}
+
+	/** The binding's extension methods (docs/bindings/acp.md). */
+	private registerExtensions(): void {
+		const any = (p: unknown) => (p ?? {}) as Record<string, any>;
+		const open = (sessionId: unknown) => {
+			if (typeof sessionId !== "string" || !this.sessions.has(sessionId)) throw RequestError.invalidParams(undefined, `Session ${String(sessionId)} is not open on this connection`);
+			return sessionId;
+		};
+		this.app.onRequest(`_${NS}/history`, any, async ({ params }) => {
+			const sessionId = open(params.sessionId);
+			const entries = await this.api.gatedHistory(sessionId, { recipient: `acp:${this.actorId}`, all: params.all === true });
+			if (params.after === undefined) return { entries };
+			const at = entries.findIndex((e) => e.id === params.after);
+			if (at < 0) throw new RequestError(-32602, `Unknown entry ${String(params.after)}`);
+			return { entries: entries.slice(at + 1) };
+		});
+		this.app.onRequest(`_${NS}/input`, any, async ({ params }) => {
+			const sessionId = open(params.sessionId);
+			const when = params.when === "steer" || params.when === "after" ? params.when : "now";
+			const content = typeof params.content === "string" ? params.content : fromAcp(params.content as acp.ContentBlock[]);
+			const receipt = await this.api.input(sessionId, { content, actorId: this.actorId, when, key: typeof params.key === "string" ? params.key : undefined });
+			return { inputId: receipt.inputId, taken: receipt.taken, ...(receipt.duplicate ? { duplicate: true } : {}) };
+		});
+		this.app.onRequest(`_${NS}/requests`, any, async ({ params }) => {
+			const sessionId = open(params.sessionId);
+			return { requests: this.api.openRequests(sessionId).map((r) => ({ id: r.id, kind: r.kind, question: r.question, ...(r.options ? { options: r.options } : {}), ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}), answerable: true })) };
+		});
+		this.app.onRequest(`_${NS}/answer`, any, async ({ params }) => {
+			const sessionId = open(params.sessionId);
+			const known = this.api.openRequests(sessionId).some((r) => r.id === params.requestId);
+			if (!known) return { accepted: false, reason: "No open request with that id" };
+			return this.api.answer(sessionId, { requestId: String(params.requestId), actorId: this.actorId, value: params.value, declined: params.declined === true });
+		});
+		this.app.onRequest(`_${NS}/fork`, any, async ({ params }) => ({ sessionId: await this.api.forkSession(open(params.sessionId), String(params.entryId)) }));
+		this.app.onRequest(`_${NS}/move`, any, async ({ params }) => (await this.api.moveTo(open(params.sessionId), String(params.entryId), { actorId: this.actorId }), {}));
+		this.app.onRequest(`_${NS}/jobs`, any, async ({ params }) => ({ jobs: this.api.jobs(open(params.sessionId)).map((j) => ({ id: j.id, kind: j.kind, state: j.state })) }));
+		this.app.onRequest(`_${NS}/cancel-job`, any, async ({ params }) => (await this.api.cancelJob(open(params.sessionId), String(params.jobId)), {}));
+	}
+
+	/** This agent's declaration, with the binding's keys and values. */
+	private bindingDeclaration(sessionId?: string): Record<string, unknown> {
+		const d = this.api.declaration(sessionId) as Record<string, unknown>;
+		const bool = (k: string) => d[k] === true;
+		return {
+			inputDuringTurn: bool("inputDuringTurn"),
+			waitingThroughRestart: bool("waitingThroughRestart"),
+			continuesAfterRestart: bool("continuesAfterRestart"),
+			rewinding: bool("rewinding"),
+			forking: bool("forking"),
+			keepsStateAtProvider: bool("keepsStateAtProvider"),
+			runsToolsAtProvider: bool("runsToolsAtProvider"),
+			liveSessions: bool("liveSessions"),
+			severalActors: bool("severalActors"),
+			holdsOutput: bool("holdsOutput"),
+			outputBypassesAgent: bool("outputBypassesAgent"),
+			cancellingTurnCancelsJobs: bool("cancellingTurnCancelsJobs"),
+			pluginsDuringSession: bool("pluginsDuringSession"),
+			erasure: bool("erasure"),
+			inputKeys: bool("inputKeys"),
+			questionsOutlastTurns: bool("questionsOutlastTurns"),
+			startsTurnsUnasked: d.startsTurnsUnasked ? "jobReports" : "never",
+			// Queued input isn't recorded: after a restart it was never acknowledged, so the host still holds it.
+			queuedInputAfterRestart: "handedBack",
+			movingWithUnfinishedWork: "cancels",
+			mixedActorInput: "shared",
+			settingsDuringTurn: "nextTurn",
+			erasureDuringTurn: "allowed",
+			commandContainment: "strong",
+		};
 	}
 
 	private state(): SessionState {
@@ -224,7 +312,8 @@ export class AcpInterface implements InterfaceCapability {
 		const sessionId = params.sessionId;
 		const state = this.sessions.get(sessionId);
 		if (!state) throw new Error(`Session ${sessionId} is not open on this connection`);
-		const key = (params._meta as Record<string, unknown> | undefined)?.["modular-agent/key"];
+		const m = params._meta as Record<string, any> | undefined;
+		const key = m?.[NS]?.key ?? m?.["modular-agent/key"];
 		const busy = this.api.session(sessionId).busy;
 		const receipt = await this.api.input(sessionId, {
 			content: fromAcp(params.prompt),
@@ -234,11 +323,21 @@ export class AcpInterface implements InterfaceCapability {
 		});
 		if (receipt.handled) {
 			if (receipt.output) await this.update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: receipt.output } });
-			return { stopReason: "end_turn" };
+			return promptResponse(receipt.inputId, { kind: "completed" });
+		}
+		if (receipt.duplicate) {
+			// The key was known: start nothing, and describe the turn the first prompt started.
+			const all = this.api.history(sessionId, { all: true });
+			const taken = all.find((e) => (e.data as { inputId?: string } | undefined)?.inputId === receipt.inputId);
+			const end = taken && all.find((e) => e.kind === "turnEnd" && e.turnId === taken.turnId);
+			if (end || !taken) {
+				const data = (end?.data ?? {}) as { outcome?: Outcome; result?: { openToolCalls?: string[] } };
+				return promptResponse(receipt.inputId, data.outcome ?? { kind: "completed" }, { duplicate: true, ...(data.result?.openToolCalls?.length ? { openToolCalls: data.result.openToolCalls } : {}) });
+			}
 		}
 		state.ownInputs.add(receipt.inputId);
 		return new Promise((resolve, reject) => {
-			const waiter: Waiter = { inputId: receipt.inputId, resolve, reject };
+			const waiter: Waiter = { inputId: receipt.inputId, duplicate: receipt.duplicate, resolve, reject };
 			// The input may already be recorded, if the turn started at once.
 			const entry = this.api.history(sessionId, { all: true }).find((e) => (e.data as { inputId?: string } | undefined)?.inputId === receipt.inputId);
 			if (entry) waiter.turnId = entry.turnId;
@@ -263,13 +362,14 @@ export class AcpInterface implements InterfaceCapability {
 			return;
 		}
 		if (e.type !== "turn.ended") return;
-		const outcome = (e.data as { outcome: { kind: string; error?: string; limit?: string } }).outcome;
+		const data = e.data as { outcome: Outcome; result?: { openToolCalls?: string[] } };
 		for (const w of [...state.waiters]) {
 			if (w.turnId !== e.turnId) continue;
-			if (outcome.kind === "failed") this.settle(e.sessionId, w, new Error(outcome.error ?? "The turn failed"));
-			else if (outcome.kind === "cancelled") this.settle(e.sessionId, w, { stopReason: "cancelled" });
-			else if (outcome.kind === "limit") this.settle(e.sessionId, w, { stopReason: outcome.limit === "steps" ? "max_turn_requests" : "max_tokens" });
-			else this.settle(e.sessionId, w, { stopReason: "end_turn" });
+			const extra: Record<string, unknown> = {};
+			if (w.duplicate) extra.duplicate = true;
+			if (data.result?.openToolCalls?.length) extra.openToolCalls = data.result.openToolCalls;
+			if (data.outcome.kind === "cancelled" && state.handedBack) extra.handedBack = state.handedBack;
+			this.settle(e.sessionId, w, promptResponse(w.inputId, data.outcome, extra));
 		}
 	}
 
@@ -284,7 +384,8 @@ export class AcpInterface implements InterfaceCapability {
 		return this.update(sessionId, {
 			sessionUpdate: "tool_call",
 			toolCallId: part.id,
-			title: titleOf(part.name, part.arguments ?? {}),
+			// The binding: a tool call's title is the tool's name. Its input is in rawInput.
+			title: part.name,
 			kind: kindOf(part.name),
 			status,
 			rawInput: part.arguments ?? {},
@@ -367,6 +468,7 @@ export class AcpInterface implements InterfaceCapability {
 		return [
 			{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options },
 			{ id: "thinking", name: "Reasoning", category: "thought_level", type: "select", currentValue: thinking, options: THINKING.map((v) => ({ value: v, name: v })) },
+			{ id: "approval", name: "Approval", type: "select", currentValue: typeof settings.approvalPolicy === "string" ? settings.approvalPolicy : "off", options: APPROVAL.map((v) => ({ value: v, name: v })) },
 		];
 	}
 

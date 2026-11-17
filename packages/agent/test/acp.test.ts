@@ -47,7 +47,8 @@ test("ACP: initialize declares what the agent supports; a prompt runs a turn wit
 	writeFileSync(join(d.project, "a.txt"), "hello");
 	const init = await ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	assert.equal(init.agentCapabilities?.loadSession, true);
-	const declaration = (init._meta as Record<string, Record<string, unknown>>)["modular-agent/declaration"];
+	const declaration = (init._meta as Record<string, { binding: string; declaration: Record<string, unknown> }>)["modular-agent"].declaration;
+	assert.equal((init._meta as Record<string, { binding: string }>)["modular-agent"].binding, "modular-agent-acp/1");
 	assert.equal(declaration.questionsOutlastTurns, true);
 	const session = await ctx.request(methods.agent.session.new, { cwd: d.project, mcpServers: [] });
 	assert.ok(session.configOptions?.some((o) => o.id === "model"));

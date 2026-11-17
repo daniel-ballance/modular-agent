@@ -6,7 +6,7 @@ import { lines, Peer, type RootMethods } from "./peer.js";
 /** Plugin API calls that wait for an answer anyway, so they cross the connection unchanged. */
 export const ASYNC_API = [
 	"runHook", "startSession", "openSession", "join", "leave", "listSessions", "forkSession", "closeSession", "input", "cancel",
-	"waitForIdle", "moveTo", "setSetting", "append", "transaction", "erase", "callTool", "ask", "runCommand", "cancelJob",
+	"waitForIdle", "moveTo", "setSetting", "append", "transaction", "erase", "callTool", "ask", "runCommand", "cancelJob", "gatedHistory",
 ] as const;
 
 /** Capabilities a plugin in another process may ask for at setup. */

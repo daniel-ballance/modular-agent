@@ -60,6 +60,9 @@ export class Session {
 		const existing = this.entries.get(entry.id);
 		this.entries.set(entry.id, entry);
 		if (!existing) this.order.push(entry.id);
+		// A key is remembered for the session's life, across restarts, so it is rebuilt from the record.
+		const keyed = entry.data as { inputId?: string; key?: string } | undefined;
+		if (keyed?.key && keyed.inputId && !this.keys.has(keyed.key)) this.keys.set(keyed.key, { inputId: keyed.inputId, taken: "now" });
 		switch (entry.kind) {
 			case "position":
 				this.position = (entry.data as { to: string | null }).to;
@@ -80,6 +83,9 @@ export class Session {
 			case "erasure": {
 				for (const id of (entry.data as { entryIds: string[] }).entryIds) {
 					const target = this.entries.get(id);
+					// Erasing an input also forgets its key.
+					const erasedKey = (target?.data as { key?: string } | undefined)?.key;
+					if (erasedKey) this.keys.delete(erasedKey);
 					if (target) this.entries.set(id, { ...target, message: undefined, data: { erased: true }, modelVisible: false });
 				}
 				break;

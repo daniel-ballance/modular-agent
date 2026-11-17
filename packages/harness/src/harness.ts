@@ -124,6 +124,8 @@ export interface PluginApi {
 	setSetting(sessionId: string, key: string, value: unknown, actorId?: string): Promise<void>;
 	// history
 	history(sessionId: string, options?: { all?: boolean }): HistoryEntry[];
+	/** The history as a recipient may see it: every entry passes the output gate for that recipient. */
+	gatedHistory(sessionId: string, options: { recipient: string; all?: boolean }): Promise<HistoryEntry[]>;
 	append(sessionId: string, draft: EntryDraft): Promise<HistoryEntry>;
 	transaction(sessionId: string, fn: (tx: Transaction) => void | Promise<void>): Promise<void>;
 	erase(sessionId: string, entryIds: string[], actorId: string): Promise<void>;
@@ -339,6 +341,15 @@ export class Harness {
 			cancelJob: (sessionId, jobId) => this.cancelJob(this.session(sessionId), jobId),
 			follow: (sessionId, options, listener) => this.follow(this.session(sessionId), options, listener),
 			declaration: (sessionId) => this.declaration(sessionId ? this.session(sessionId) : undefined),
+			gatedHistory: async (sessionId, options) => {
+				const s = this.session(sessionId);
+				const entries = options.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
+				const out: HistoryEntry[] = [];
+				const follower = new Follower(this.hooks, options.recipient, false, (e) => e.type === "entry" && out.push(e.data as HistoryEntry), (e) => this.problem("harness", "gated history", e));
+				for (const entry of entries) follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: entry });
+				await follower.idle();
+				return out;
+			},
 			modelAccess: (sessionId) => this.modelAccess(this.session(sessionId)),
 			config: () => self.use<Configuration>("configuration")?.plugin(pluginName) ?? {},
 		};
@@ -771,7 +782,7 @@ export class Harness {
 		if (queued.continueCalls && !continuing?.length) return; // already settled
 		await this.commit(s, [
 			{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, actorId: queued.actorId, data: { startedBy: queued.startedBy, continues: queued.continueCalls } },
-			...(continuing ? [] : [{ kind: queued.kind, writer: "harness", modelVisible: true, turnId, actorId: queued.actorId, message: { role: "user" as const, content: queued.content }, data: { inputId: queued.id } }]),
+			...(continuing ? [] : [{ kind: queued.kind, writer: "harness", modelVisible: true, turnId, actorId: queued.actorId, message: { role: "user" as const, content: queued.content }, data: { inputId: queued.id, ...(queued.key ? { key: queued.key } : {}) } }]),
 		]);
 		this.emit(s.id, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
 		const contributions = await this.hooks.collect<{ system?: string; context?: ContentPart[] }>("turn.before", { sessionId: s.id, turnId, input: queued });
@@ -867,7 +878,7 @@ export class Harness {
 			takeSteering: async () => {
 				const items = s.steering.splice(0);
 				if (!items.length) return [];
-				return this.commit(s, items.map((q) => ({ kind: q.kind, writer: "harness", modelVisible: true, turnId, actorId: q.actorId, message: { role: "user" as const, content: q.content }, data: { inputId: q.id, steered: true } })));
+				return this.commit(s, items.map((q) => ({ kind: q.kind, writer: "harness", modelVisible: true, turnId, actorId: q.actorId, message: { role: "user" as const, content: q.content }, data: { inputId: q.id, steered: true, ...(q.key ? { key: q.key } : {}) } })));
 			},
 			hasSteering: async () => s.steering.length > 0,
 			report: (type, data, ids) => this.emit(s.id, type, data, "runtime", { turnId, ...ids }),
@@ -1263,6 +1274,11 @@ class Follower {
 
 	push(event: AgentEvent): void {
 		this.chain = this.chain.then(() => this.deliver(event)).catch(this.onError);
+	}
+
+	/** Resolves once everything pushed so far has been delivered or blocked. */
+	idle(): Promise<void> {
+		return this.chain;
 	}
 
 	private async deliver(event: AgentEvent): Promise<void> {
