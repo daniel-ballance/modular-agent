@@ -39,7 +39,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | Parts as services: history store, working environment, model gateway | proven | Separate processes over HTTP, with leases, safe retries and cancelling. |
 | The agent served over HTTP | proven | Server-sent events, resumable from the last entry seen. |
 | Follows the ACP host binding `modular-agent-acp/1` | proven | Conformance kit 43/43, also with history in a service. Rust, Python and Go pass too. |
-| Follows the plugin binding `modular-agent-plugin/1`, stage 1 | proven | Plugin kit 42/42. Across TypeScript, Rust, Python and Go, every host passes the ACP kit with plugins from every other build (16/16), and in four turns that each use all four languages at once. |
+| Follows the plugin binding `modular-agent-plugin/1` | proven | Plugin kit 84/84 ([ADR 0017](adr/0017-plugins-in-any-language.md)). Across TypeScript, Rust, Python and Go, every host passes the ACP kit with plugins from every other build (16/16), in four turns that each use all four languages, and with every build's Runtime through a real `kill -9` (16/16 durable, 16/16 transient). |
 | Follows the history service binding `modular-agent-history/1` | proven | History kit 34/34 for this build's service and client. Swapped with Go's service both ways. |
 | A plugin can run in another process | proven | The whole suite passes with the Runtimes, tools, environment and MCP plugin out of process. |
 | Interface: terminal | proven | Full-screen TUI, line-based, print and JSON modes. |

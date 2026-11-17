@@ -17,6 +17,7 @@ Each record explains one decision that is hard to reverse and would surprise a r
 | [0011](0011-minimal-harness-everything-is-a-plugin.md) | The Harness does the minimum, and everything else is a plugin | stands |
 | [0012](0012-one-agent-is-the-scope.md) | One agent is the scope; hosts that coordinate several agents drive it from outside | stands |
 | [0013](0013-first-binding-typescript-in-process.md) | The first implementation is TypeScript in one process, with a package per part | stands, extended by 0014 |
-| [0014](0014-plugins-in-other-processes.md) | A plugin can run in another process, through one generic RPC | stands |
+| [0014](0014-plugins-in-other-processes.md) | A plugin can run in another process, through one generic RPC | stands, extended across languages by 0017 |
 | [0015](0015-parts-as-services.md) | Parts can be services, each with its own HTTP API | stands |
 | [0016](0016-rules-from-three-clean-room-builds.md) | The rules three clean-room builds agreed on become part of the contracts | stands |
+| [0017](0017-plugins-in-any-language.md) | A plugin in any language, through one binding of the contracts | stands |

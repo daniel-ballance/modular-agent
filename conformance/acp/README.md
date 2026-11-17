@@ -22,3 +22,7 @@ What it checks:
 - **The `requests` and `answer` extensions.**
 - **An unused session** isn't listed after it is closed.
 - **`session/load` in a new process:** replays the session, keeps its history, and remembers its keys.
+
+Two options add checks:
+- **`--plugin-checks`:** the conformance plugin's hooks are in force (see the [plugin binding](../../docs/bindings/plugin.md)).
+- **`--crash-checks`:** the agent is killed with SIGKILL during a `bash` call and the session is reopened in a new process. The interrupted call must have exactly one result, with an unknown outcome, and must not run again. The turn must carry on to completion if the agent declares `continuesAfterRestart`, and end as failed if not.

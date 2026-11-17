@@ -272,6 +272,23 @@ Across all four builds, every host passes the ACP kit with plugins from every ot
 
 The plugin kit also found a bug here: cancelling a command killed its process group, but not a process that had left it with `setsid`. Each command now carries its own marker, which cancelling sweeps.
 
+## Round three, stage 2: the Runtime in another language
+
+The Runtime became a plugin like any other ([ADR 0017](adr/0017-plugins-in-any-language.md)). A turn is one request to it. It asks the host for each step's request, the model, tools, hooks and records, and keeps its state in the history, which it reads back with `host/history` after a restart.
+- This build serves its transient and durable Runtimes over the binding, and hosts another build's in place of its own.
+- The plugin kit checks a served Runtime with a scripted model: turns, tool rounds, refusals, cancelling, step limits, parallel calls, and recovery after a restart.
+- The ACP kit's `--crash-checks` kills the agent with `kill -9` during a `bash` call, reopens the session in a new process, and checks the turn ends as the agent declared.
+
+**The Runtime matrix:** each of the four builds' agents ran each build's Runtime, through a real kill and restart.
+- Durable: 16/16, and the turn carried on to completion.
+- Transient: 16/16, and it ended as failed.
+- The interrupted command never ran twice.
+
+The matrix found three more holes before it passed:
+- the model-output event had no defined name. The binding now has the host emit the standard turn events itself, since the stream passes through it.
+- whether a Runtime may read history. It may, with `host/history`.
+- a host that didn't answer a cancelled request. The binding says it must.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).
