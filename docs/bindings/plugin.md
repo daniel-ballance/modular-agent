@@ -29,7 +29,7 @@ It doesn't copy PiG's approach of porting one plugin API to every language.
   - The host's requests are named `plugin/*`, `tools/*`, `provider/*`, `env/*`, `hook/*` and `command/*`.
   - The plugin's requests to the host are named `host/*`.
 - **A plugin's request about a host request** carries `parentRequestId`: the id of the host request it belongs to. The host uses it to find the session, the actor and the authority. It also uses it to cancel the plugin's request when the parent request is cancelled.
-- **Cancelling:** either side sends the notification `$/cancel { id }` for a request it sent. The receiver stops the work, and still answers: a result, or the error `cancelled`. Cancelling never claims an outside effect was undone.
+- **Cancelling:** either side sends the notification `$/cancel { id }` for a request it sent. The receiver stops the work, and still answers: a result, or the error `cancelled`. That holds for the host's answers to `host/*` requests as much as for a plugin's. Cancelling never claims an outside effect was undone.
 - **Heartbeat:** either side may send `$/ping`. The answer is `{}`. Work has no timeout of its own; the caller's cancelling owns it.
 - **Limits:** a message is at most 64 MiB. A result that would be larger is replaced by the error `result_too_large`.
 - **Errors** are JSON-RPC errors whose `data` is `{ "code": "<code>" }`. The codes:
@@ -162,7 +162,7 @@ An error answer counts as a failing handler, per [Hook points](../contracts.md#h
 
 ## The host asks the Runtime
 
-A turn is one request from the host. The Runtime runs it, asking the host for everything it needs through `host/runtime/*`, with the turn's request id as `parentRequestId`. It never chooses the model, never sees credentials and never runs a tool itself ([Contracts](../contracts.md#harness-and-runtime)).
+A turn is one request from the host. The Runtime runs it, asking the host for what it needs through `host/runtime/*`, with the turn's request id as `parentRequestId`. It also reads the session's history with `host/history`, for example to rebuild its own records after a restart. Those two are all it uses. It never chooses the model, never sees credentials and never runs a tool itself ([Contracts](../contracts.md#harness-and-runtime)).
 
 | Request | Params | Result |
 |---|---|---|
@@ -174,7 +174,7 @@ A turn is one request from the host. The Runtime runs it, asking the host for ev
 - **Each of `calls`** is `{ id, name, input, stepId?, started }`. `started` says whether the call's start was recorded.
 - **A TurnOutcome** is `{ outcome, result: { text?, value?, openToolCalls }, entries, usage }`. `outcome` is as on a `turnEnd` entry, and `entries` lists the ids of the entries the turn recorded.
 - **Cancelling:** the host cancels a turn with `$/cancel` on its request. The Runtime stops at the next safe point, cancels what it asked the host for, records a result for every started call, and answers with outcome `cancelled`.
-- **The Runtime's state lives in the history.** Whatever it needs after a restart, it records through `host/runtime/record`. After a restart, the host starts the Runtime plugin's process again and sends `runtime/resumeTurn`. Nothing in the old process survives, so nothing can be relied on there.
+- **The Runtime's state lives in the history.** Whatever it needs after a restart, it records through `host/runtime/record`, and reads back with `host/history`. After a restart, the host starts the Runtime plugin's process again and sends `runtime/resumeTurn`. Nothing in the old process survives, so nothing can be relied on there.
 
 **What the Runtime asks the host.** Every request carries `parentRequestId`, the turn's request id.
 
@@ -252,6 +252,7 @@ The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a
 
 ## Changes
 
+- **2026-11-17, after the Runtime matrix.** A Runtime reads history with `host/history`, which Go's durable Runtime needed to recover and Python's host refused. Rust (B-18) and Python (G58) had both logged the gap. And a host answers a cancelled `host/*` request too: the Rust host left one unanswered, so a cancel that landed during a hook stalled the turn until a timer fired.
 - **2026-11-17, after the first Runtime swaps.** The host emits the standard turn events itself, and `host/runtime/model` carries `stepId`. Go's Runtime reported streamed text as `model.delta`, and the TypeScript host expected `model.output`, so a TypeScript agent running Go's Runtime showed the client no streamed text. The host sees the stream anyway, so nothing needed naming.
 - **2026-11-17.** Stage 2: the Runtime. `runtime/runTurn`, `runtime/resumeTurn` and `runtime/continueOpenCalls`, the Runtime host as `host/runtime/*`, and the conformance parts `runtime` and `durable-runtime`.
 - **2026-11-17.** First version, stage 1.
