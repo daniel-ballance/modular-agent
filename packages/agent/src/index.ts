@@ -57,7 +57,7 @@ export function vanillaPlugins(options: AgentOptions = {}): Plugin[] {
 
 export async function createAgent(options: AgentOptions = {}): Promise<Harness> {
 	const project = options.project ?? process.cwd();
-	const home = options.home ?? join(homedir(), ".modular-agent");
+	const home = options.home ?? process.env.MA_HOME ?? join(homedir(), ".modular-agent");
 	const harness = new Harness({ project, home });
 	const fromSettings = await pluginsFromSettings(home, project);
 	for (const problem of fromSettings.problems) harness.problems.push({ plugin: "settings", where: "load", error: problem });

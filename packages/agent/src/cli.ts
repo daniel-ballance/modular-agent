@@ -5,12 +5,14 @@ import { acpInterface } from "@modular-agent/interface-acp";
 import { tuiInterface } from "@modular-agent/interface-tui";
 import { subagents } from "@modular-agent/subagents";
 import { mcpTools } from "@modular-agent/tools-mcp";
+import { httpInterface } from "@modular-agent/interface-http";
+import { randomUUID } from "node:crypto";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "./index.js";
 
 function parse(argv: string[]) {
-	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; approvalWait?: number; questionWait?: number; acp: boolean; plain: boolean; help: boolean } = {
+	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; approvalWait?: number; questionWait?: number; acp: boolean; plain: boolean; serve?: number; help: boolean } = {
 		mode: "interactive", piAuth: false, ephemeral: false, durable: false, acp: false, plain: false, help: false,
 	};
 	const rest: string[] = [];
@@ -25,6 +27,7 @@ function parse(argv: string[]) {
 		else if (a === "--durable") out.durable = true;
 		else if (a === "--acp") out.acp = true;
 		else if (a === "--plain") out.plain = true;
+		else if (a === "--serve") out.serve = Number(argv[++i] ?? 0);
 		else if (a === "--approval") out.approval = argv[++i] as ApprovalPolicy;
 		else if (a === "--approval-wait") out.approvalWait = Number(argv[++i]) * 1000;
 		else if (a === "--question-wait") out.questionWait = Number(argv[++i]) * 1000;
@@ -43,6 +46,7 @@ Usage:
   ma --json [options] "prompt" print every event as JSON lines
   ma --acp [options]           serve ACP (Agent Client Protocol) on stdin and stdout
   ma --plain [options]         line-based interactive mode, instead of the full-screen TUI
+  ma --serve <port> [options]  serve the agent over HTTP (token from MA_HTTP_TOKEN, or printed)
 
 Options:
   -m, --model provider/id   model to use (or set "plugins.model-selection.default" in settings)
@@ -74,6 +78,18 @@ async function main() {
 		} finally {
 			await harness.stop();
 		}
+	}
+	if (args.serve !== undefined) {
+		const token = process.env.MA_HTTP_TOKEN ?? randomUUID();
+		const web = httpInterface({ token, port: args.serve });
+		const harness = await createAgent({ model: args.model, usePiAuth: args.piAuth, ephemeral: args.ephemeral, plugins: [...common, web] });
+		process.stdout.write(JSON.stringify({ url: web.http!.url, ...(process.env.MA_HTTP_TOKEN ? {} : { token }) }) + "\n");
+		await new Promise<void>((resolve) => {
+			process.once("SIGINT", resolve);
+			process.once("SIGTERM", resolve);
+		});
+		await harness.stop();
+		return 0;
 	}
 	if (args.mode === "interactive" && !args.plain && process.stdout.isTTY && process.stdin.isTTY) {
 		const tui = tuiInterface({ sessionId: args.session });

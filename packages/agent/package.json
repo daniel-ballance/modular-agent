@@ -32,7 +32,9 @@
     "@modular-agent/interface-tui": "0.1.0",
     "@modular-agent/subagents": "0.1.0",
     "@modular-agent/tools-mcp": "0.1.0",
-    "@modular-agent/plugin-rpc": "0.1.0"
+    "@modular-agent/plugin-rpc": "0.1.0",
+    "@modular-agent/services": "0.1.0",
+    "@modular-agent/interface-http": "0.1.0"
   },
   "bin": {
     "ma": "dist/src/cli.js"

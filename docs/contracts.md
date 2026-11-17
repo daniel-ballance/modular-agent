@@ -294,7 +294,7 @@ Through the [model access](#model-access) it was given:
 
 | Harness asks | Carrying | Answers |
 |---|---|---|
-| keep these entries | the session, the [history entries](#history-entry) | kept safely; or failed |
+| keep these entries | the session, the [history entries](#history-entry) | kept safely; or failed. Keeping the same entries again keeps them once, so a writer that lost the answer can send them again. **Decided while building** ([ADR 0015](adr/0015-parts-as-services.md)). |
 | give me this session's history | the session, a point to start from *(optional)* | the entries |
 | list sessions | filters *(optional)* | sessions |
 | open a session for writing | the session | opened; or refused because it is already open elsewhere |

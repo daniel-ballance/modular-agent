@@ -1,0 +1,17 @@
+{
+  "name": "@modular-agent/services",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": { ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" } },
+  "bin": { "ma-service": "dist/src/serve.js" },
+  "dependencies": {
+    "@modular-agent/harness": "0.1.0",
+    "@modular-agent/history-jsonl": "0.1.0",
+    "@modular-agent/env-local": "0.1.0",
+    "@modular-agent/provider-pi-ai": "0.1.0",
+    "@modular-agent/credentials-file": "0.1.0",
+    "@earendil-works/pi-ai": "1.5.2"
+  }
+}

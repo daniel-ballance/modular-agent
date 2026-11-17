@@ -4,7 +4,7 @@ A description of an AI agent built from parts that can each be swapped out and s
 
 The description says **what** the system does: its parts, what each is responsible for, what passes between them, and what must always hold. It does not say **how** they are built or wired. It should give enough detail to build the agent in one process, as separate processes talking over RPC, or as services over a network.
 
-**Status:** a first implementation exists in `packages/`: TypeScript in one process, with the vanilla Pi plugin set, a durable Runtime that can be swapped in, subagents in a transient and a durable variant, a full-screen terminal UI, and an ACP Interface that T3 Code can drive. See [Building it](docs/build-notes.md). Pi is the reference implementation. DeepSeek Harness, Pydantic AI and T3 Code are further prior art.
+**Status:** a first implementation exists in `packages/`: TypeScript in one process, with the vanilla Pi plugin set, a durable Runtime that can be swapped in, subagents in a transient and a durable variant, a full-screen terminal UI, an ACP Interface that T3 Code can drive, plugins that run in other processes over JSON-RPC, and parts that run as HTTP services. See [Building it](docs/build-notes.md). Pi is the reference implementation. DeepSeek Harness, Pydantic AI and T3 Code are further prior art.
 
 ## Reading order
 

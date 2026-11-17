@@ -75,7 +75,8 @@ From building plugin RPC ([ADR 0014](../adr/0014-plugins-in-other-processes.md))
 
 ## Hosts and reconnecting
 
-- **What reconnecting recovers:** open requests, running jobs, queued input, the running turn. (R3 F2)
+- **What reconnecting recovers:** open requests, running jobs, queued input, the running turn. (R3 F2) Partly answered: a host gets every entry recorded since the last one it saw ([ADR 0015](../adr/0015-parts-as-services.md)). Open requests and jobs are read separately.
+- **Services shared by many agents** need more than one bearer token each: tenants, per-actor tokens, and rotation ([ADR 0015](../adr/0015-parts-as-services.md)).
 - **Stable targets and keys** for host actions other than giving input, such as fork, cancel and rewind, so repeating one is harmless or its outcome is marked uncertain. Keys for input moved into the [contracts](../contracts.md#interface-and-harness) after the [durable agents example](../examples/durable-agents.md). (R3 F7)
 - **Two outside protocols on one session,** such as ACP and AG-UI, and mapping each protocol's retries onto one rule. (R4 "Host")
 - **What a host reads before it starts:** model catalogs, settings in effect, what the session offers. The architecture requires a declaration; the full catalog is an Interface matter. (R3 F1)

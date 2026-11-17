@@ -36,6 +36,8 @@ When the code and the description disagree, this page says so. Update it when ei
 | Provider keeps no state and runs no tools | proven | `provider-pi-ai` declares both false. |
 | Provider keeps state, runs tools itself, live sessions, late answers | paper | Declared false; no Provider does them. |
 | Tools from MCP servers, global and per session | proven | Settings, and servers an ACP client passes. |
+| Parts as services: history store, working environment, model gateway | proven | Separate processes over HTTP, with leases, safe retries and cancelling. |
+| The agent served over HTTP | proven | Server-sent events, resumable from the last entry seen. |
 | A plugin can run in another process | proven | The whole suite passes with the Runtimes, tools, environment and MCP plugin out of process. |
 | Interface: terminal | proven | Full-screen TUI, line-based, print and JSON modes. |
 | Interface: over a wire, driven by a host | proven | `interface-acp` speaks ACP v1 over stdio. T3 Code drove it as a provider and showed its tool calls as native cards. |

@@ -62,6 +62,12 @@
       "path": "packages/plugin-rpc"
     },
     {
+      "path": "packages/services"
+    },
+    {
+      "path": "packages/interface-http"
+    },
+    {
       "path": "packages/runtime-durable"
     }
   ]

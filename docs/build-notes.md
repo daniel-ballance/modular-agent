@@ -14,6 +14,8 @@
 | `provider-pi-ai` | Provider, one per pi-ai vendor |
 | `interface-terminal` | Interface: interactive, print (`-p`) and JSON modes |
 | `interface-acp` | Interface: ACP v1 over stdio (`ma --acp`), using the official SDK |
+| `services` | History store, working environment and model gateway as HTTP services (`ma-service`), and the client plugins that use them ([ADR 0015](adr/0015-parts-as-services.md)) |
+| `interface-http` | Interface: the agent over HTTP, with server-sent events (`ma --serve`) |
 | `plugin-rpc` | Runs any plugin in a process of its own, over JSON-RPC on stdio ([ADR 0014](adr/0014-plugins-in-other-processes.md)) |
 | `tools-mcp` | Tool source: tools from MCP servers, using Pi's `pi-mcp` client. Servers come from settings, or from an ACP client for one session. |
 | `subagents` | Feature: the `delegate` tool. A subagent is a child session started by a job. `durable: true` carries subagents on after a restart. |
@@ -41,7 +43,9 @@ node packages/agent/dist/src/cli.js --pi-auth --question-wait 30      # ask_user
 node packages/agent/dist/src/cli.js --pi-auth --durable               # subagents, too, carry on after a restart
 node packages/agent/dist/src/cli.js --pi-auth --acp                   # serve ACP, for a host such as T3 Code
 MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local node packages/agent/dist/src/cli.js --pi-auth   # each of those in its own process
-npm test                                                               # 53 tests, using pi-ai's faux provider; MA_REMOTE=... npm test runs them across processes
+MA_HTTP_TOKEN=secret node packages/agent/dist/src/cli.js --serve 8080   # the agent over HTTP
+node packages/services/dist/src/serve.js history '{"dir":"/srv/history","token":"t"}'   # a service; also environment, provider
+npm test                                                               # 58 tests, using pi-ai's faux provider; MA_REMOTE=... npm test runs them across processes
 ```
 
 ## What is checked
@@ -204,6 +208,29 @@ What changed to make it work:
 - **A plugin process keeps the agent alive only while the agent waits on it.** A crash test that abandons its harness now stops it after the test, as the real crash would have.
 
 Two test mistakes are worth a note. A test killed `bash`'s parent process to simulate a dying plugin. With the working environment in process, that parent was the test runner. And `echo done > out.txt` has no output, so it can't test live output.
+
+## As services
+
+Three parts run as HTTP services, each in its own process with its own bearer token ([ADR 0015](adr/0015-parts-as-services.md)):
+
+| Service | API | Safe to send again |
+|---|---|---|
+| History store | create, open for writing (a lease, renewed while held), keep entries, load, list, erase, close | every request: entries already kept are not kept twice |
+| Working environment | run a command (its output streams back), read, write, check a file | everything but running a command |
+| Model gateway | list Providers and models, make a request (its events stream back) | listing only |
+
+In the agent, `historyHttp`, `environmentHttp` and `providerHttp` stand for them, each replacing its local plugin. They can be named in settings, under `load`. `ma --serve` serves the agent itself over HTTP.
+
+Five tests run the services as separate processes and drive the agent only over HTTP:
+- A full turn: a file read in the sandbox, `bash` run there, the model reached through the gateway, and the history kept by the history service. The model's output and `bash`'s live output stream through to the client. The agent's home holds no credentials.
+- A second agent is refused a session another holds. Once the first stops, the second opens it, sees the first agent's turn, and adds its own.
+- A history service that loses its answers after keeping a batch: the agent sends the batch again, and each entry is kept once. With retries switched off, this test fails.
+- Cancelling over HTTP stops `sleep 30` in the sandbox.
+- A client that reconnects with `Last-Event-ID` gets the entries recorded while it was away. Input resent with the same key is taken once.
+
+A real `xai/grok-4.7` turn ran the same way, across five processes. The model read a note in the sandbox and wrote its words in reverse order to a new file with `bash`. Only the gateway read Pi's credentials, and the history service kept the turn.
+
+What the description gained: keeping the same entries twice keeps them once, and a host that reconnects gets everything recorded since the last entry it saw. Several existing rules held as written. A second writer is refused, as a lease. Nothing the environment starts outlives the agent: the sandbox stops a command when its caller hangs up. Hook points stay with the Provider's stand-in in the agent. Unknown outcomes are never repeated.
 
 ## What building changed
 

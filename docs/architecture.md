@@ -352,7 +352,7 @@ A host, such as T3 Code, coordinates several whole agents. It is outside this sy
 - **The agent declares what it supports** ([Declared support](#declared-support)).
 - **It starts no turn the host didn't ask for,** unless it has declared that it can, for example because a job reports back.
 - **The host can give input with a key.** The same key is taken once, so the host can resend after a crash or a dropped connection.
-- **The host can follow a session from any point,** including after reconnecting.
+- **The host can follow a session from any point,** including after reconnecting. A host that reconnects gets everything recorded since the last entry it saw. Streamed pieces it missed are not sent again; the entries they became are. **Decided while building** ([ADR 0015](adr/0015-parts-as-services.md)).
 - **The host can move, rewind or fork at a point,** or the agent refuses before anything changes.
 - **The host can give the agent context from elsewhere,** such as a summary of what another agent did, as recorded input.
 - **Every input request says whether it can still be answered.**
