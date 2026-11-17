@@ -322,6 +322,22 @@ test("erasure reaches a summary that copied the erased entry", async () => {
 	await h.stop();
 });
 
+test("a session started only to look leaves nothing behind", async () => {
+	const dirs = { project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) };
+	const h = await setup([fauxAssistantMessage([fauxText("hi")])], [], dirs).make();
+	const api = h.api("test");
+	// What a host does to read the model list: start a session, read and change its settings, close it.
+	const look = await api.startSession({ settings: { cwd: dirs.project } });
+	await api.setSetting(look, "thinking", "low", "user");
+	await api.closeSession(look);
+	assert.deepEqual(await api.listSessions(), []);
+	const used = await api.startSession();
+	await api.input(used, { content: "hello", actorId: "user" });
+	await api.waitForIdle(used);
+	assert.deepEqual((await api.listSessions()).map((x) => x.id), [used]);
+	await h.stop();
+});
+
 test("tool calls that may run together do, and their results are recorded in the order the model asked", async () => {
 	const started = new Set<string>();
 	const waitFor = async (name: string) => {

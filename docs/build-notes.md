@@ -106,7 +106,7 @@ Checked by five tests using the SDK's own client, by a script that drives `ma --
 
 What the host test found:
 - **A session's project is the session's, not the process's.** ACP gives each session a `cwd`. Tools, context files and the session list now use it.
-- **A host reads the model list through a session.** ACP v1 offers models only as session config options, so T3 starts a throwaway session to read them, which leaves an empty session behind. A way to describe the agent without a session would avoid this.
+- **A host reads the model list through a session.** ACP v1 offers models only as session config options, so T3 starts a throwaway session to read them. This used to leave an empty session behind. Now the history store writes a new session only once something happens in it beyond setup, such as its first input, so a session started only to look leaves nothing. A test starts one, changes a setting, closes it, and finds no session listed.
 - **ACP v1 has no key for repeated input.** Our key travels in `_meta` when a client sends one. T3 doesn't.
 - **MCP servers the client passes are ignored.** There is no MCP client plugin yet.
 

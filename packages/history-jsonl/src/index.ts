@@ -20,8 +20,14 @@ function alive(pid: number): boolean {
 	}
 }
 
+/** Entries that alone don't make a session worth keeping. */
+const SETUP_KINDS = new Set(["setting", "actorJoined"]);
+
 /**
- * Session history as one JSONL file per session. Each batch of entries is
+ * Session history as one JSONL file per session. A new session is written only
+ * once something happens in it beyond setup, such as its first input, so a
+ * session started just to look, as a host does to read the model list, leaves
+ * nothing behind. Each batch of entries is
  * appended in one write and ends with a marker, so a torn write is dropped
  * on load: a batch is kept whole or not at all.
  */
@@ -29,6 +35,8 @@ export class JsonlHistoryStore implements HistoryStore {
 	readonly supports = { erasure: true, retention: false };
 	private paths = new Map<string, string>();
 	private held = new Set<string>();
+	/** New sessions not yet worth a file: their header and batches so far. */
+	private unsaved = new Map<string, { meta: StoredSession; batches: HistoryEntry[][] }>();
 	constructor(private dir: string) {}
 
 	private fileFor(meta: { id: string; project: string }): string {
@@ -53,13 +61,26 @@ export class JsonlHistoryStore implements HistoryStore {
 	}
 
 	async create(meta: StoredSession): Promise<void> {
-		const path = this.fileFor(meta);
-		writeFileSync(path, JSON.stringify({ type: "session", meta } satisfies Line) + "\n", { flag: "wx" });
-		this.paths.set(meta.id, path);
+		this.unsaved.set(meta.id, { meta, batches: [] });
+	}
+
+	/** Write a new session's file, with what it has so far, and take its lock. */
+	private save(id: string): void {
+		const pending = this.unsaved.get(id)!;
+		const path = this.fileFor(pending.meta);
+		writeFileSync(path, JSON.stringify({ type: "session", meta: pending.meta } satisfies Line) + "\n", { flag: "wx" });
+		this.paths.set(id, path);
+		this.unsaved.delete(id);
+		if (this.held.has(id)) writeFileSync(`${path}.lock`, String(process.pid));
+		for (const batch of pending.batches) this.write(id, batch);
 	}
 
 	async openForWriting(id: string): Promise<void> {
 		if (this.held.has(id)) return;
+		if (this.unsaved.has(id)) {
+			this.held.add(id);
+			return;
+		}
 		const lock = `${this.find(id)}.lock`;
 		if (existsSync(lock)) {
 			const pid = Number(readFileSync(lock, "utf8"));
@@ -71,12 +92,24 @@ export class JsonlHistoryStore implements HistoryStore {
 
 	async close(id: string): Promise<void> {
 		if (!this.held.delete(id)) return;
+		// Closed before anything happened in it: nothing to keep.
+		if (this.unsaved.delete(id)) return;
 		rmSync(`${this.find(id)}.lock`, { force: true });
 	}
 
 	async append(id: string, batch: HistoryEntry[]): Promise<void> {
 		if (!batch.length) return;
 		if (!this.held.has(id)) throw new Error(`Session ${id} is not open for writing`);
+		const pending = this.unsaved.get(id);
+		if (pending) {
+			pending.batches.push(batch);
+			if (batch.some((e) => !SETUP_KINDS.has(e.kind))) this.save(id);
+			return;
+		}
+		this.write(id, batch);
+	}
+
+	private write(id: string, batch: HistoryEntry[]): void {
 		const batchId = randomUUID();
 		const lines = batch.map((entry, i) => JSON.stringify({ type: "entry", batch: batchId, ...(i === batch.length - 1 ? { last: true } : {}), entry } satisfies Line));
 		appendFileSync(this.find(id), lines.join("\n") + "\n");
@@ -115,6 +148,8 @@ export class JsonlHistoryStore implements HistoryStore {
 	}
 
 	async load(id: string): Promise<{ meta: StoredSession; entries: HistoryEntry[] }> {
+		const pending = this.unsaved.get(id);
+		if (pending) return { meta: pending.meta, entries: pending.batches.flat() };
 		return this.read(this.find(id));
 	}
 
@@ -140,6 +175,12 @@ export class JsonlHistoryStore implements HistoryStore {
 
 	/** Erase the content of these entries in every line that holds it, and rewrite the file. */
 	async erase(id: string, entryIds: string[]): Promise<void> {
+		const pending = this.unsaved.get(id);
+		if (pending) {
+			const targets = new Set(entryIds);
+			pending.batches = pending.batches.map((b) => b.map((e) => (targets.has(e.id) ? { ...e, message: undefined, data: { erased: true }, modelVisible: false } : e)));
+			return;
+		}
 		const path = this.find(id);
 		const targets = new Set(entryIds);
 		const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim());
