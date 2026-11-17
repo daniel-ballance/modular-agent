@@ -42,11 +42,27 @@ export class TransientRuntime implements Runtime {
 	constructor(protected options: TransientRuntimeOptions = {}) {}
 
 	runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome> {
-		return this.loop(input, host, signal);
+		return this.withHooks(input, host, () => this.loop(input, host, signal));
+	}
+
+	protected async withHooks(input: TurnInput, host: RuntimeHost, run: () => Promise<TurnOutcome>, starting = true): Promise<TurnOutcome> {
+		let outcome: TurnOutcome;
+		try {
+			if (starting) await host.hook("turn.start", { sessionId: input.sessionId, turnId: input.turnId });
+			outcome = await run();
+		} catch (error) {
+			outcome = { outcome: { kind: "failed", error: error instanceof Error ? error.message : String(error) }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
+		}
+		await host.hook("turn.end", { sessionId: input.sessionId, turnId: input.turnId, outcome });
+		return outcome;
 	}
 
 	/** A transient Runtime ends a turn whose process stopped. Each pending call gets one result. */
-	async resumeTurn(_input: TurnInput, host: RuntimeHost, _signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
+	resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
+		return this.withHooks(input, host, () => this.recover(input, host, signal, interrupted), false);
+	}
+
+	protected async recover(_input: TurnInput, host: RuntimeHost, _signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
 		const entries: string[] = [];
 		for (const c of interrupted.calls) {
 			entries.push((await this.settle(host, c, c.started ? "outcomeUnknown" : "notStarted")).id);
@@ -55,7 +71,11 @@ export class TransientRuntime implements Runtime {
 	}
 
 	/** Run calls left open past an earlier turn, which now have their answers, then carry on. */
-	async continueOpenCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
+	continueOpenCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
+		return this.withHooks(input, host, () => this.continueCalls(input, host, signal, calls));
+	}
+
+	private async continueCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
 		const entries: string[] = [];
 		const stillOpen = await this.runPending(host, calls, signal, entries, () => true);
 		if (stillOpen.length) return { outcome: { kind: "completed" }, result: { openToolCalls: stillOpen }, entries, usage: zeroUsage() };
@@ -68,6 +88,10 @@ export class TransientRuntime implements Runtime {
 		for (const c of calls) {
 			if (!(await mayRun(c))) {
 				entries.push((await this.settle(host, c, "outcomeUnknown")).id);
+				continue;
+			}
+			if (signal.aborted) {
+				entries.push((await this.settle(host, c, c.started ? "outcomeUnknown" : "notStarted")).id);
 				continue;
 			}
 			const recorded = await this.runCall(host, { type: "toolCall", id: c.id, name: c.name, arguments: c.input }, c.stepId ?? (await host.newId()), signal);
@@ -87,11 +111,10 @@ export class TransientRuntime implements Runtime {
 	}
 
 	/** The step loop. It rebuilds the model context from the history on every step, so it can start mid-turn. */
-	protected async loop(input: TurnInput, host: RuntimeHost, signal: AbortSignal, entries: string[] = []): Promise<TurnOutcome> {
+	protected async loop(input: TurnInput, host: RuntimeHost, signal: AbortSignal, entries: string[] = [], progress = { usage: zeroUsage(), steps: 0 }): Promise<TurnOutcome> {
 		const maxSteps = input.settings.maxSteps ?? this.options.maxSteps ?? 100;
 		const maxRetries = this.options.maxRetries ?? 3;
-		let usage = zeroUsage();
-		let steps = 0;
+		let { usage, steps } = progress;
 		let retries = 0;
 		const done = (outcome: TurnOutcome["outcome"], last?: AssistantMessage): TurnOutcome => ({
 			outcome,
@@ -105,6 +128,7 @@ export class TransientRuntime implements Runtime {
 			if (signal.aborted) return done({ kind: "cancelled" }, last);
 			for (const e of await host.takeSteering()) entries.push(e.id);
 
+			if (steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, last);
 			const stepId = await host.newId();
 			host.report("step.started", {}, { stepId });
 			let request: ModelRequest = await host.prepareStep({ stepId, usage });
@@ -123,7 +147,7 @@ export class TransientRuntime implements Runtime {
 				if (!decision?.retry || retries >= maxRetries) break;
 				retries++;
 				host.report("model.retry", { attempt: retries, error: message.error }, { stepId });
-				if (decision.request) request = decision.request;
+				request = decision.request ?? await host.prepareStep({ stepId, usage });
 			}
 			retries = 0;
 			usage = addUsage(usage, message.usage);
@@ -140,18 +164,18 @@ export class TransientRuntime implements Runtime {
 
 			const calls = message.content.filter(isToolCall);
 			const open: string[] = [];
-			// Calls run together only when every tool in the step says it may. Results are recorded in the order the model asked.
+			// Record each result as soon as it is ready. The host orders the model view.
 			const definitions = await Promise.all(calls.map((c) => host.definition(c.name)));
 			const together = calls.length > 1 && definitions.every((d) => d?.parallel === true);
 			if (together) {
 				const prepared: Prepared[] = [];
 				for (const part of calls) prepared.push(await this.preflight(host, part, stepId));
-				const ran = await Promise.all(prepared.map((p) => (p.refused || p.pending ? undefined : host.runToolCall(p.call, signal))));
-				for (let i = 0; i < prepared.length; i++) {
-					const recorded = await this.complete(host, prepared[i], stepId, ran[i]);
+				await Promise.all(prepared.map(async (p) => {
+					const ran = p.refused || p.pending ? undefined : await host.runToolCall(p.call, signal);
+					const recorded = await this.complete(host, p, stepId, ran);
 					if (recorded) entries.push(recorded.id);
-					else open.push(calls[i].id);
-				}
+					else open.push(p.call.id);
+				}));
 				if (signal.aborted) return done({ kind: "cancelled" }, message);
 			} else {
 				for (let i = 0; i < calls.length; i++) {
@@ -172,7 +196,7 @@ export class TransientRuntime implements Runtime {
 
 			// "After each step": a plugin may end the turn.
 			const after = await host.hook<GateResult<unknown>>("step.after", { stepId, response: message });
-			if (after?.refused) return done({ kind: "completed" }, message);
+			if (after?.refused) return done({ kind: "failed", error: after.refused }, message);
 			if (signal.aborted) return done({ kind: "cancelled" }, message);
 			if (steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, message);
 
@@ -181,7 +205,7 @@ export class TransientRuntime implements Runtime {
 				// "The turn's result is ready": a plugin may send the model back.
 				const check = await host.hook<GateResult<unknown>>("turn.result", { result: { text: textOf(message.content) }, shape: input.resultShape });
 				if (check?.refused) {
-					entries.push((await host.record({ kind: "resultCheck", writer: "runtime", modelVisible: true, message: { role: "user", content: [text(check.refused)] } })).id);
+					entries.push((await host.record({ kind: "runtime.resultCheck", writer: "runtime", modelVisible: true, message: { role: "user", content: [text(check.refused)] } })).id);
 					continue;
 				}
 				return done({ kind: "completed" }, message);
@@ -207,8 +231,8 @@ export class TransientRuntime implements Runtime {
 	/** "After a tool call", then record its one result. Returns undefined when the call is left open. */
 	protected async complete(host: RuntimeHost, prepared: Prepared, stepId: string, ran: Awaited<ReturnType<RuntimeHost["runToolCall"]>> | undefined): Promise<HistoryEntry | undefined> {
 		const call = prepared.call;
-		if (prepared.pending) return this.leaveOpen(host, call, stepId, prepared.pending);
-		if (ran && isPending(ran)) return this.leaveOpen(host, call, stepId, ran.pending);
+		if (prepared.pending) return this.leaveOpen(host, call, prepared.pending);
+		if (ran && isPending(ran)) return this.leaveOpen(host, call, ran.pending);
 		let result: ToolResult = prepared.refused || !ran ? { callId: call.id, status: "refused", content: [text(`Refused: ${prepared.refused}`)] } : (ran as ToolResult);
 		const after = await host.hook<{ result: ToolResult }>("tool.after", { call, result });
 		result = after?.result ?? result;
@@ -221,9 +245,8 @@ export class TransientRuntime implements Runtime {
 	}
 
 	/** Left open past this turn. It gets its one result later, when its answer arrives. */
-	private async leaveOpen(host: RuntimeHost, call: ToolCall, stepId: string, reason: string): Promise<undefined> {
-		await host.record({ kind: "toolOpen", writer: "runtime", modelVisible: false, stepId, toolCallId: call.id, data: { reason } });
-		host.report("tool.open", { reason }, { stepId, toolCallId: call.id });
+	private leaveOpen(host: RuntimeHost, call: ToolCall, reason: string): undefined {
+		host.report("tool.open", { reason }, { stepId: call.stepId, toolCallId: call.id });
 		return undefined;
 	}
 

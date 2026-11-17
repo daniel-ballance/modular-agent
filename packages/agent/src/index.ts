@@ -71,13 +71,34 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 	// A history service that follows modular-agent-history/1, in any language, can replace the local store.
 	const historyUrl = process.env.MODULAR_AGENT_HISTORY_URL;
 	const historyService = historyUrl ? [historyHttp({ url: historyUrl, token: readFileSync(process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "", "utf8").trim() })] : [];
-	// Plugins in any language, over modular-agent-plugin/1 (docs/bindings/plugin.md). Their handshakes
-	// run first, so what they replace is known before this build's own plugins load.
-	const external = await Promise.all((options.externalPlugins ?? pluginSpecsFromEnv()).map((spec) => startExternalPlugin(spec, { project, home })));
-	for (const e of external) for (const item of e.registration.replaces ?? []) harness.replacements.set(item, e.plugin.name);
+	// Load local items first, then validate each external registration against them.
+
 	const plugins = [projectTrust(home), ...vanillaPlugins(options), ...historyService, ...fromSettings.plugins].map((p) => (remote.has(p.name) && p.spawn ? remotePlugin(p) : p));
-	plugins.push(...external.map((e) => e.plugin));
 	await harness.load(plugins);
+	const owned = new Set<string>();
+	for (const [index, spec] of (options.externalPlugins ?? pluginSpecsFromEnv()).entries()) {
+		try {
+			const external = await startExternalPlugin(spec, { project, home });
+			const detail = external.refusal(harness, owned);
+			if (detail) {
+				await external.stop("refused", detail);
+				harness.api(external.plugin.name).reportProblem("registration", new Error(detail));
+				continue;
+			}
+			const plugin = external.plugin;
+			while (harness.plugins().includes(plugin.name)) plugin.name += `#${index + 1}`;
+			for (const item of external.replacements) harness.replacements.set(item, plugin.name);
+			await harness.load([plugin]);
+			if (!harness.plugins().includes(plugin.name)) {
+				for (const item of external.replacements) harness.replacements.delete(item);
+				await external.stop("refused", "The host refused to load this plugin");
+				continue;
+			}
+			for (const item of external.items) owned.add(item);
+		} catch (error) {
+			harness.api(spec.command[0]).reportProblem("registration", error);
+		}
+	}
 	return harness;
 }
 

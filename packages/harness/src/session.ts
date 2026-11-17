@@ -1,4 +1,5 @@
 import { pairToolResults } from "./view.js";
+import { erasedEntry } from "./types.js";
 import type { Actor, AgentEvent, Answer, ContentPart, HistoryEntry, InputRequest, Job, ModelMessage, StoredSession } from "./types.js";
 
 export type InputTiming = "now" | "steer" | "after";
@@ -8,6 +9,7 @@ export interface QueuedInput {
 	actorId: string;
 	when: InputTiming;
 	key?: string;
+	sources?: string[];
 	startedBy: { kind: "actor" | "job" | "plugin" | "answer"; id: string };
 	kind: string;
 	/** Set when this is not input but a continuation of tool calls left open past an earlier turn. */
@@ -36,10 +38,12 @@ export class Session {
 	running?: RunningTurn;
 	readonly jobs = new Map<string, JobRecord>();
 	readonly requests = new Map<string, OpenRequest>();
+	readonly waiting = new Set<string>();
 	readonly recent: AgentEvent[] = [];
 	/** Recipients following this session, each through the output gate. */
 	readonly followers = new Set<{ push(event: AgentEvent): void }>();
 	closed = false;
+	erasing = false;
 	/** The process stopped its part in this session; nothing more is recorded here. */
 	suspended = false;
 	/** Commits run one at a time, so each entry follows the one before it. */
@@ -62,19 +66,24 @@ export class Session {
 		if (!existing) this.order.push(entry.id);
 		// A key is remembered for the session's life, across restarts, so it is rebuilt from the record.
 		const keyed = entry.data as { inputId?: string; key?: string } | undefined;
-		if (keyed?.key && keyed.inputId && !this.keys.has(keyed.key)) this.keys.set(keyed.key, { inputId: keyed.inputId, taken: "now" });
+		if (entry.kind === "input" && keyed?.key && keyed.inputId && !this.keys.has(keyed.key)) this.keys.set(keyed.key, { inputId: keyed.inputId, taken: "now" });
+		if (entry.erased) {
+			if (!existing && entry.kind !== "position") this.position = entry.id;
+			return;
+		}
 		switch (entry.kind) {
 			case "position":
 				this.position = (entry.data as { to: string | null }).to;
 				return;
 			case "setting": {
 				const { key, value } = entry.data as { key: string; value: unknown };
-				this.settings[key] = value;
+				if (key === "settings" && value && typeof value === "object") Object.assign(this.settings, value);
+				else this.settings[key === "thinking" ? "reasoning" : key] = value;
 				break;
 			}
 			case "actorJoined": {
-				const actor = (entry.data as { actor: Actor }).actor;
-				this.actors.set(actor.id, actor);
+				const { rights, ...actor } = (entry.data as { actor: Actor & { rights?: Actor["authority"] } }).actor;
+				this.actors.set(actor.id, { ...actor, authority: rights ?? actor.authority ?? [] });
 				break;
 			}
 			case "actorLeft":
@@ -86,7 +95,7 @@ export class Session {
 					// Erasing an input also forgets its key.
 					const erasedKey = (target?.data as { key?: string } | undefined)?.key;
 					if (erasedKey) this.keys.delete(erasedKey);
-					if (target) this.entries.set(id, { ...target, message: undefined, data: { erased: true }, modelVisible: false });
+					if (target) this.entries.set(id, erasedEntry(target));
 				}
 				break;
 			}

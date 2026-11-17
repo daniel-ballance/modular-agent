@@ -107,7 +107,9 @@ function fromPi(m: PiAssistantMessage, model: Model<Api>): AssistantMessage {
 	}
 	return {
 		role: "assistant",
-		content: m.content as unknown as ContentPart[],
+		content: m.content.map((p): ContentPart => p.type === "thinking"
+			? { type: "reasoning", ...(p.thinking ? { text: p.thinking } : {}), ...(p.thinkingSignature ? { providerData: p.thinkingSignature } : {}) }
+			: { ...p }),
 		stop: STOP[m.stopReason] ?? "finished",
 		usage,
 		model: { provider: m.provider, id: m.model },
@@ -131,7 +133,9 @@ function toPi(m: ModelMessage, model: Model<Api>): PiMessage {
 			if (m.providerData && typeof m.providerData === "object") return m.providerData as PiAssistantMessage;
 			return {
 				role: "assistant",
-				content: m.content.filter((p) => ["text", "thinking", "toolCall"].includes(p.type)) as never,
+				content: m.content.filter((p) => ["text", "reasoning", "thinking", "toolCall"].includes(p.type)).map((p) => p.type === "reasoning"
+					? { type: "thinking", thinking: p.text ?? "", thinkingSignature: p.providerData }
+					: p) as never,
 				api: model.api,
 				provider: m.model?.provider ?? model.provider,
 				model: m.model?.id ?? model.id,

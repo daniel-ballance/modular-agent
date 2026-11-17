@@ -7,7 +7,7 @@
 
 export interface TextPart { type: "text"; text: string; [key: string]: unknown }
 export interface ImagePart { type: "image"; data: string; mimeType: string; [key: string]: unknown }
-export interface ReasoningPart { type: "thinking"; thinking: string; [key: string]: unknown }
+export interface ReasoningPart { type: "reasoning"; text?: string; providerData?: unknown; [key: string]: unknown }
 export interface ToolCallPart { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown>; [key: string]: unknown }
 /** Any other part. The record keeps it intact even if nobody understands it. */
 export interface OtherPart { type: string; [key: string]: unknown }
@@ -101,15 +101,20 @@ export interface HistoryEntry {
 	/** input, response, toolResult, summary, setting, position, approval, erasure, turnStart, turnEnd, toolStarted, plugin kinds, ... */
 	kind: string;
 	modelVisible: boolean;
+	erased?: true;
 	message?: ModelMessage;
 	data?: unknown;
+}
+
+export function erasedEntry({ id, parentId, kind }: HistoryEntry): HistoryEntry {
+	return { id, parentId, kind, erased: true } as HistoryEntry;
 }
 
 export type EntryDraft = Omit<HistoryEntry, "id" | "parentId" | "sessionId" | "time"> & { id?: string };
 
 // ---------- Tools ----------
 
-export interface ToolHints { readOnly?: boolean; destructive?: boolean; idempotent?: boolean; openWorld?: boolean }
+export interface ToolHints { readOnly?: boolean; destructive?: boolean; safeToRepeat?: boolean; openWorld?: boolean }
 export type ToolCaller = "model" | "ui" | "plugin";
 export interface ToolDefinition {
 	name: string;
@@ -160,7 +165,7 @@ export interface ToolContext {
 	 * the answer arrives, so it must ask the same questions in the same order;
 	 * asking again then returns the recorded answer.
 	 */
-	ask(request: InputRequestDraft): Promise<Answer>;
+	ask(request: InputRequestDraft, signal?: AbortSignal): Promise<Answer>;
 }
 export interface ToolSource {
 	id: string;
@@ -202,7 +207,7 @@ export interface Provider {
 	available?(): Promise<boolean>;
 	/** Make one model request. Never rejects for a model failure: the message says why. */
 	request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage>;
-	discardState?(sessionId: string): Promise<void>;
+	discardState?(sessionId: string, options?: { erase?: boolean }): Promise<void | { pending?: string[]; outOfReach?: string[] }>;
 }
 
 /** What the Runtime is given: the chosen model, without credentials. */
@@ -227,6 +232,10 @@ export interface ExecResult { exitCode: number | null; output: string; timedOut:
 export interface WorkingEnvironment {
 	id: string;
 	cwd: string;
+	/** Nothing from an interrupted attempt is still running when recovery begins. */
+	safeToRepeat?: boolean;
+	forSession?(sessionId: string): WorkingEnvironment | Promise<WorkingEnvironment>;
+	sessionEnded?(sessionId: string): Promise<void> | void;
 	readFile(path: string): Promise<Buffer>;
 	writeFile(path: string, data: string | Buffer): Promise<void>;
 	exists(path: string): Promise<boolean>;
@@ -248,7 +257,7 @@ export interface HistoryStore {
 	supports: Declaration;
 	create(meta: StoredSession): Promise<void>;
 	/** Refuses if the session is already open for writing elsewhere. */
-	openForWriting(sessionId: string): Promise<void>;
+	openForWriting(sessionId: string, options?: { wait?: boolean }): Promise<void>;
 	close(sessionId: string): Promise<void>;
 	/** Keep these entries. All of them are kept, or none are. */
 	append(sessionId: string, batch: HistoryEntry[]): Promise<void>;
@@ -335,6 +344,8 @@ export type Outcome =
 	| { kind: "failed"; error: string }
 	| { kind: "limit"; limit: string };
 
+export interface TurnSnapshot { model: ModelRef | null; system: string; tools: ToolDefinition[]; settings: TurnSettings }
+
 export interface TurnSettings { maxSteps?: number; reasoning?: string; maxOutput?: number }
 export interface TurnInput {
 	sessionId: string;
@@ -364,6 +375,7 @@ export interface RuntimeHost {
 	definition(toolName: string): Promise<ToolDefinition | undefined>;
 	/** Record entries in the session's history. */
 	record(entry: EntryDraft): Promise<HistoryEntry>;
+	history(): Promise<HistoryEntry[]>;
 	/** Take input given for the running turn, and record it. */
 	takeSteering(): Promise<HistoryEntry[]>;
 	hasSteering(): Promise<boolean>;
@@ -374,7 +386,7 @@ export interface RuntimeHost {
 export interface InterruptedTurn {
 	turnId: string;
 	/** Tool calls the model asked for that have no result. */
-	calls: { id: string; name: string; input: Record<string, unknown>; stepId?: string; started: boolean }[];
+	calls: { id: string; name: string; input: Record<string, unknown>; stepId?: string; started: boolean; safeToRepeat: boolean }[];
 }
 
 export interface Runtime {

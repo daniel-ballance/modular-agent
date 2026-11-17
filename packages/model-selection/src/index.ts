@@ -1,4 +1,4 @@
-import type { ModelInfo, Plugin, Provider } from "@modular-agent/harness";
+import { parseModel, type ModelInfo, type Plugin, type Provider } from "@modular-agent/harness";
 
 /**
  * Chooses the model and reasoning level for each session from every Provider's
@@ -14,7 +14,7 @@ export function modelSelection(options: { defaultModel?: string; defaultThinking
 			api.on("session.start", async (payload: { sessionId: string }) => {
 				const s = api.session(payload.sessionId);
 				if (!s.settings.model && fallback()) await api.setSetting(payload.sessionId, "model", fallback());
-				if (!s.settings.thinking && options.defaultThinking) await api.setSetting(payload.sessionId, "thinking", options.defaultThinking);
+				if (!s.settings.reasoning && options.defaultThinking) await api.setSetting(payload.sessionId, "thinking", options.defaultThinking);
 			});
 
 			api.registerCommand("model", {
@@ -22,8 +22,8 @@ export function modelSelection(options: { defaultModel?: string; defaultThinking
 				run: async (args, ctx) => {
 					const wanted = args.trim();
 					if (!wanted) {
-						const current = api.session(ctx.sessionId).settings.model ?? "(none)";
-						return `Current model: ${current}`;
+						const current = parseModel(api.session(ctx.sessionId).settings.model);
+						return current ? `Current model: ${current.provider}/${current.id}` : "Current model: (none)";
 					}
 					const all = catalog();
 					const match = all.find((m) => `${m.provider}/${m.id}` === wanted) ?? all.find((m) => m.id === wanted);
@@ -49,7 +49,7 @@ export function modelSelection(options: { defaultModel?: string; defaultThinking
 				description: "Show or set the reasoning level: /thinking low|medium|high",
 				run: async (args, ctx) => {
 					const level = args.trim();
-					if (!level) return `Reasoning level: ${api.session(ctx.sessionId).settings.thinking ?? "(default)"}`;
+					if (!level) return `Reasoning level: ${api.session(ctx.sessionId).settings.reasoning ?? "(default)"}`;
 					await api.setSetting(ctx.sessionId, "thinking", level, ctx.actorId);
 					return `Reasoning level set to ${level}`;
 				},

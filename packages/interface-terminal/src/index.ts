@@ -1,6 +1,6 @@
 import { createInterface, type Interface as Readline } from "node:readline";
 import type { AgentEvent, InputRequest, InterfaceCapability, Plugin, PluginApi } from "@modular-agent/harness";
-import { textOf } from "@modular-agent/harness";
+import { parseModel, textOf } from "@modular-agent/harness";
 
 export type TerminalMode = "interactive" | "print" | "json";
 export interface TerminalOptions {
@@ -187,7 +187,8 @@ export class TerminalInterface implements InterfaceCapability {
 	private async runInteractive(): Promise<number> {
 		const rl = createInterface({ input: this.options.input ?? process.stdin, output: this.out, terminal: true });
 		this.rl = rl;
-		this.line(dim(`Session ${this.sessionId}. Model: ${this.api.session(this.sessionId).settings.model ?? "(none, use /model)"}. /help lists commands.`));
+		const ref = parseModel(this.api.session(this.sessionId).settings.model);
+		this.line(dim(`Session ${this.sessionId}. Model: ${ref ? `${ref.provider}/${ref.id}` : "(none, use /model)"}. /help lists commands.`));
 		if (this.requests.length && !this.api.session(this.sessionId).busy) this.line(yellow("A question is still open. Answer it with /answer <reply>."));
 		let lastInterrupt = 0;
 		rl.on("SIGINT", async () => {

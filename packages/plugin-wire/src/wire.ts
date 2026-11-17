@@ -12,7 +12,7 @@ export type ErrorCode = "invalid_request" | "not_found" | "unknown_handler" | "c
 
 /** An error as the binding carries it: a JSON-RPC error with `data.code`. */
 export class WireError extends Error {
-	constructor(readonly code: ErrorCode, message: string, readonly rpcCode = -32000) {
+	constructor(readonly code: ErrorCode, message: string, readonly rpcCode = code === "invalid_request" ? -32602 : -32000) {
 		super(message);
 	}
 }
@@ -64,13 +64,23 @@ export class WirePeer {
 		const promise = new Promise<T>((resolve, reject) => {
 			if (this.closedWith) return reject(this.closedWith);
 			this.waiting.set(id, { resolve: resolve as (v: unknown) => void, reject });
-			this.send({ jsonrpc: "2.0", id, method, params });
+			try {
+				this.send({ jsonrpc: "2.0", id, method, params });
+			} catch (error) {
+				this.waiting.delete(id);
+				reject(error);
+			}
 		}) as Promise<T> & { id: number };
 		promise.id = id;
 		promise.catch(() => undefined);
 		if (signal) {
 			if (signal.aborted) this.cancel(id);
-			else signal.addEventListener("abort", () => this.cancel(id), { once: true });
+			else {
+				const cancel = () => this.cancel(id);
+				signal.addEventListener("abort", cancel, { once: true });
+				const cleanup = () => signal.removeEventListener("abort", cancel);
+				void promise.then(cleanup, cleanup);
+			}
 		}
 		return promise;
 	}
@@ -92,6 +102,11 @@ export class WirePeer {
 		for (const c of this.running.values()) c.abort();
 	}
 
+	/** True only up to the moment the answer is received, even within one input chunk. */
+	isWaiting(id: number | string): boolean {
+		return this.waiting.has(id);
+	}
+
 	get closed(): boolean {
 		return !!this.closedWith;
 	}
@@ -104,7 +119,7 @@ export class WirePeer {
 			this.buffer = this.buffer.slice(i + 1);
 			if (line.trim()) this.receive(line);
 		}
-		if (this.buffer.length > MAX_MESSAGE) {
+		if (Buffer.byteLength(this.buffer) > MAX_MESSAGE) {
 			this.buffer = "";
 			this.close("a message was larger than the binding allows");
 		}
@@ -112,13 +127,15 @@ export class WirePeer {
 
 	private send(m: Message): void {
 		let line = JSON.stringify(m);
-		if (line.length > MAX_MESSAGE && m.id !== undefined && "result" in m) {
+		if (Buffer.byteLength(line) > MAX_MESSAGE) {
+			if (m.id === undefined || !("result" in m)) throw new WireError("result_too_large", "The message is too large to send");
 			line = JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: "The result is too large to send", data: { code: "result_too_large" } } });
 		}
 		this.write(line + "\n");
 	}
 
 	private receive(line: string): void {
+		if (Buffer.byteLength(line) > MAX_MESSAGE) return this.close("a message was larger than the binding allows");
 		let m: Message;
 		try {
 			m = JSON.parse(line);
@@ -149,7 +166,7 @@ export class WirePeer {
 	private async serve(m: Message): Promise<void> {
 		const handler = this.handlers.get(m.method!);
 		if (!handler) {
-			this.send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `Method not found: ${m.method}` } });
+			this.send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `Method not found: ${m.method}`, data: { code: "not_supported" } } });
 			return;
 		}
 		const abort = new AbortController();

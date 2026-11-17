@@ -17,17 +17,24 @@ const isSummary = (e: HistoryEntry) => e.kind === "summary" && typeof (e.data as
 
 /** The model context: the latest summary, then everything after the first entry it kept. */
 export function view(history: HistoryEntry[]): ModelMessage[] {
-	let start = 0;
+	let summarized = new Set<string>();
 	let summary: SummaryData | undefined;
 	for (let i = history.length - 1; i >= 0; i--) {
 		if (isSummary(history[i])) {
 			summary = history[i].data as SummaryData;
-			const kept = history.findIndex((e) => e.id === summary!.firstKept);
-			start = kept >= 0 ? kept : i + 1;
+			const visit = (entry: HistoryEntry) => {
+				for (const id of entry.sources ?? []) {
+					if (summarized.has(id)) continue;
+					summarized.add(id);
+					const source = history.find((e) => e.id === id);
+					if (source && isSummary(source)) visit(source);
+				}
+			};
+			visit(history[i]);
 			break;
 		}
 	}
-	const messages = history.slice(start).filter((e) => e.modelVisible && e.message).map((e) => e.message!);
+	const messages = history.filter((e) => !summarized.has(e.id) && e.modelVisible && e.message).map((e) => e.message!);
 	return pairToolResults(summary ? [{ role: "user", content: [text(`Summary of the earlier conversation:\n\n${summary.summary}`)] }, ...messages] : messages);
 }
 

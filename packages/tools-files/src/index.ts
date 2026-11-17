@@ -15,14 +15,14 @@ const DEFINITIONS: ToolDefinition[] = [
 		name: "read",
 		description: "Read a file. Returns its text, or the requested lines.",
 		parameters: { type: "object", properties: { path: { type: "string" }, offset: { type: "number", description: "First line, from 1" }, limit: { type: "number" } }, required: ["path"] },
-		hints: { readOnly: true, idempotent: true },
+		hints: { readOnly: true, safeToRepeat: true },
 		parallel: true,
 	},
 	{
 		name: "write",
 		description: "Write a file, replacing it if it exists. Creates folders as needed.",
 		parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
-		hints: { destructive: true, idempotent: true },
+		hints: { destructive: true, safeToRepeat: true },
 	},
 	{
 		name: "edit",

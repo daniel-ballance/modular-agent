@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
 	Answer,
 	AssistantMessage,
@@ -57,21 +58,21 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	let initialized = false;
 
 	/** The host's working environment, reached through host/env/*, for a request the host sent. */
-	const hostEnvironment = (parentRequestId: number | string, cwd: string): WorkingEnvironment => ({
+	const hostEnvironment = (parentRequestId: number | string, cwd: string, sessionId: string): WorkingEnvironment => ({
 		id: `host:${cwd}`,
 		cwd,
-		at: (other: string) => hostEnvironment(parentRequestId, other),
+		at: (other: string) => hostEnvironment(parentRequestId, other, sessionId),
 		readFile: async (path) => {
 			try {
-				return Buffer.from((await peer.request<{ data: string }>("host/env/read", { parentRequestId, cwd, path })).data, "base64");
+				return Buffer.from((await peer.request<{ data: string }>("host/env/read", { parentRequestId, cwd, sessionId, path })).data, "base64");
 			} catch (error) {
 				throw notFoundAsEnoent(error, path);
 			}
 		},
-		writeFile: async (path, data) => void (await peer.request("host/env/write", { parentRequestId, cwd, path, data: Buffer.from(data).toString("base64") })),
-		exists: async (path) => (await peer.request<{ exists: boolean }>("host/env/exists", { parentRequestId, cwd, path })).exists,
+		writeFile: async (path, data) => void (await peer.request("host/env/write", { parentRequestId, cwd, sessionId, path, data: Buffer.from(data).toString("base64") })),
+		exists: async (path) => (await peer.request<{ exists: boolean }>("host/env/exists", { parentRequestId, cwd, sessionId, path })).exists,
 		exec: async (command, o) => {
-			const req = peer.request<ExecResult>("host/env/exec", { parentRequestId, cwd, command, ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}) }, o.signal);
+			const req = peer.request<ExecResult>("host/env/exec", { parentRequestId, cwd, sessionId, command, ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}) }, o.signal);
 			outputs.set(req.id, (chunk) => o.onOutput?.(chunk));
 			try {
 				return await req;
@@ -118,7 +119,10 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 				return () => handlers.delete(id);
 			},
 			defineHook: unavailable("Defining a hook point"),
-			runHook: async (hook: string, payload: unknown) => fromWire(await peer.request("host/hook", { parentRequestId: currentParent, hook, payload: toWire(payload) })),
+			runHook: async (hook: string, payload: unknown) => {
+				const answer = fromWire(await peer.request("host/hook", { parentRequestId: currentParent.getStore(), hook, payload: toWire(payload) }));
+				return answer;
+			},
 			reportProblem: (where: string, error: unknown) => peer.notify("host/problem", { where, message: error instanceof Error ? error.message : String(error) }),
 			emit: (sessionId: string, type: string, data?: unknown) => peer.notify("host/emit", { sessionId, type, data: toWire(data) }),
 			onEvent: () => () => undefined,
@@ -130,7 +134,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		return api as unknown as PluginApi;
 	}
 	// The host request a provider is serving, so its runHook calls name their parent.
-	let currentParent: number | string | undefined;
+	const currentParent = new AsyncLocalStorage<number | string>();
 
 	peer.handle("plugin/initialize", async (p) => {
 		if (p.binding !== PLUGIN_BINDING) throw new WireError("not_supported", `This plugin speaks ${PLUGIN_BINDING}, not ${p.binding}`);
@@ -146,7 +150,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			name: options.name,
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
-			...(environment ? { workingEnvironment: { containment: options.containment ?? "none", platforms: [process.platform] } } : {}),
+			...(environment ? { workingEnvironment: { containment: options.containment ?? "none", platforms: [process.platform], safeToRepeat: environment.safeToRepeat === true } } : {}),
 			...(runtime ? { runtime: { id: runtime.id, supports: runtime.supports } } : {}),
 			...(handlers.size ? { hooks: [...handlers].map(([handlerId, h]) => ({ hook: h.hook, handlerId, order: h.order })) } : {}),
 			...(commands.size ? { commands: [...commands].map(([name, c]) => ({ name, description: c.description })) } : {}),
@@ -161,15 +165,14 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	};
 	peer.handle("provider/models", async (p) => ({ models: toWire(provider(p.provider).models()) }));
 	peer.handle("provider/available", async (p) => ({ available: (await provider(p.provider).available?.()) ?? true }));
-	peer.handle("provider/discard", async (p) => (await provider(p.provider).discardState?.(String(p.sessionId)), {}));
+	peer.handle("provider/discard", async (p) => (await provider(p.provider).discardState?.(String(p.sessionId), { erase: p.erase === true })) ?? {});
 	peer.handle("provider/request", async (p, ctx) => {
-		currentParent = ctx.id;
-		const message = await provider(p.provider).request(p.model, fromWire(p.request), {
+		const impl = provider(p.provider);
+		return currentParent.run(ctx.id, async () => toWire(await impl.request(p.model, fromWire(p.request), {
 			signal: ctx.signal,
 			sessionId: p.sessionId,
 			onEvent: (event) => peer.notify("provider/event", { parentRequestId: ctx.id, event }),
-		});
-		return toWire(message);
+		})));
 	});
 
 	const source = (id: string) => {
@@ -185,7 +188,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			signal: ctx.signal,
 			call,
 			progress: (content) => peer.notify("tools/progress", { parentRequestId: ctx.id, content: toWire(content) }),
-			environment: hostEnvironment(ctx.id, String(p.project)),
+			environment: hostEnvironment(ctx.id, String(p.project), String(p.sessionId)),
 			ask: async (request: InputRequestDraft) => fromWire(await peer.request<Answer>("host/ask", { parentRequestId: ctx.id, request: toWire(request) }, ctx.signal)) as Answer,
 		});
 		return toWire(result);
@@ -195,29 +198,36 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		if (!environment) throw new WireError("not_supported", "This plugin is not a working environment");
 		return environment;
 	};
-	const envAt = (cwd: string) => {
-		const e = env();
+	const envAt = async ({ cwd, sessionId }: { cwd: string; sessionId: string }) => {
+		if (typeof sessionId !== "string" || !sessionId) throw new WireError("invalid_request", "A session is required");
+		const base = env();
+		const e = await base.forSession?.(sessionId) ?? base;
 		return cwd && e.cwd !== cwd && e.at ? (e.at(cwd) as WorkingEnvironment) : e;
 	};
 	const missing = (error: unknown) => ((error as NodeJS.ErrnoException)?.code === "ENOENT" ? new WireError("not_found", `No file ${(error as NodeJS.ErrnoException).path ?? ""}`) : error);
 	peer.handle("env/read", async (p) => {
 		try {
-			return { data: (await envAt(p.cwd).readFile(p.path)).toString("base64") };
+			return { data: (await (await envAt(p)).readFile(p.path)).toString("base64") };
 		} catch (error) {
 			throw missing(error);
 		}
 	});
-	peer.handle("env/write", async (p) => (await envAt(p.cwd).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
-	peer.handle("env/exists", async (p) => ({ exists: await envAt(p.cwd).exists(p.path) }));
+	peer.handle("env/write", async (p) => (await (await envAt(p)).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
+	peer.handle("env/exists", async (p) => ({ exists: await (await envAt(p)).exists(p.path) }));
 	peer.handle("env/exec", async (p, ctx) =>
-		envAt(p.cwd).exec(String(p.command), { signal: ctx.signal, timeoutMs: p.timeoutMs, onOutput: (chunk) => peer.notify("env/output", { parentRequestId: ctx.id, chunk }) }),
+		(await envAt(p)).exec(String(p.command), { signal: ctx.signal, timeoutMs: p.timeoutMs, onOutput: (chunk) => peer.notify("env/output", { parentRequestId: ctx.id, chunk }) }),
 	);
+
+	peer.handle("env/sessionEnded", async (p) => {
+		if (typeof p.sessionId !== "string" || !p.sessionId) throw new WireError("invalid_request", "A session is required");
+		await env().sessionEnded?.(p.sessionId);
+		return {};
+	});
 
 	peer.handle("hook/handle", async (p, ctx) => {
 		const h = handlers.get(Number(p.handlerId));
-		if (!h) throw new WireError("unknown_handler", `No handler ${p.handlerId}`);
-		currentParent = ctx.id;
-		const answer = await h.handler(fromWire(p.payload));
+		if (!h || h.hook !== p.hook) throw new WireError("unknown_handler", `No handler ${p.handlerId}`);
+		const answer = await currentParent.run(ctx.id, () => h.handler(fromWire(p.payload)));
 		return answer === undefined ? null : toWire(answer);
 	});
 
@@ -271,6 +281,16 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			record: async (entry) => {
 				const { turnId: _t, ...rest } = entry as Record<string, unknown>;
 				return fromWire(await call("host/runtime/record", { entry: toWire(rest) })) as HistoryEntry;
+			},
+			history: async () => {
+				const entries: HistoryEntry[] = [];
+				let after: string | undefined;
+				do {
+					const page: { entries: HistoryEntry[]; next?: string } = await call("host/history", { sessionId: input.sessionId, after });
+					entries.push(...fromWire(page.entries));
+					after = page.next ?? undefined;
+				} while (after);
+				return entries;
 			},
 			takeSteering: async () => fromWire((await call<{ entries: unknown[] }>("host/runtime/takeSteering")).entries) as HistoryEntry[],
 			hasSteering: async () => (await call<{ waiting: boolean }>("host/runtime/hasSteering")).waiting,

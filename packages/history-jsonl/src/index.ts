@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { HistoryEntry, HistoryStore, Plugin, StoredSession } from "@modular-agent/harness";
+import { erasedEntry, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
 
 type Line =
 	| { type: "session"; meta: StoredSession }
@@ -84,9 +84,10 @@ export class JsonlHistoryStore implements HistoryStore {
 		const lock = `${this.find(id)}.lock`;
 		if (existsSync(lock)) {
 			const pid = Number(readFileSync(lock, "utf8"));
-			if (pid && pid !== process.pid && alive(pid)) throw new Error(`Session ${id} is already open for writing by process ${pid}`);
+			if (!pid || alive(pid)) throw new Error(`Session ${id} is already open for writing by process ${pid}`);
+			rmSync(lock, { force: true });
 		}
-		writeFileSync(lock, String(process.pid));
+		writeFileSync(lock, String(process.pid), { flag: "wx" });
 		this.held.add(id);
 	}
 
@@ -178,16 +179,17 @@ export class JsonlHistoryStore implements HistoryStore {
 		const pending = this.unsaved.get(id);
 		if (pending) {
 			const targets = new Set(entryIds);
-			pending.batches = pending.batches.map((b) => b.map((e) => (targets.has(e.id) ? { ...e, message: undefined, data: { erased: true }, modelVisible: false } : e)));
+			pending.batches = pending.batches.map((b) => b.map((e) => (targets.has(e.id) ? erasedEntry(e) : e)));
 			return;
 		}
 		const path = this.find(id);
+		if (!this.held.has(id) && existsSync(`${path}.lock`) && alive(Number(readFileSync(`${path}.lock`, "utf8")))) throw new Error(`Session ${id} is already open for writing`);
 		const targets = new Set(entryIds);
 		const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim());
 		const rewritten = lines.map((raw) => {
 			const line = JSON.parse(raw) as Line;
 			if (line.type === "entry" && targets.has(line.entry.id)) {
-				line.entry = { ...line.entry, message: undefined, data: { erased: true }, modelVisible: false };
+				line.entry = erasedEntry(line.entry);
 			}
 			return JSON.stringify(line);
 		});

@@ -73,7 +73,7 @@ export class McpTools implements ToolSource, McpServers {
 					parameters: normalizeMcpInputSchema(tool.inputSchema),
 					...(tool.outputSchema ? { returns: tool.outputSchema } : {}),
 					// MCP's annotations are hints, as ours are: the approval plugin and the durable Runtime read them.
-					hints: { readOnly: a.readOnlyHint, destructive: a.destructiveHint, idempotent: a.idempotentHint, openWorld: a.openWorldHint },
+					hints: { readOnly: a.readOnlyHint, destructive: a.destructiveHint, openWorld: a.openWorldHint },
 					callers: ["model", "ui", "plugin"],
 				};
 				return { definition, mcpName: tool.name };

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AssistantMessage, ContentPart, ModelInfo, ModelRef, ModelRequest, Plugin, Provider, RequestOptions, ToolCall, ToolContext, ToolDefinition, ToolResult, ToolSource } from "@modular-agent/harness";
+import type { AssistantMessage, ContentPart, ModelInfo, ModelRef, ModelRequest, Plugin, PluginApi, Provider, RequestOptions, ToolCall, ToolContext, ToolDefinition, ToolResult, ToolSource } from "@modular-agent/harness";
 import { text, textOf } from "@modular-agent/harness";
 
 /**
@@ -11,13 +11,21 @@ import { text, textOf } from "@modular-agent/harness";
 export class ConformanceProvider implements Provider {
 	readonly id = "conformance";
 	readonly supports = { keepsState: false, runsTools: false, liveSessions: false, lateAnswers: false };
+	constructor(private api?: PluginApi) {}
 	models(): ModelInfo[] {
 		return [{ provider: "conformance", id: "echo", name: "Conformance echo", contextWindow: 1_000_000, maxOutput: 4096, reasoning: false, input: ["text"] }];
 	}
-	async request(_model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
+	async request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
+		const scope = { sessionId: options.sessionId, provider: this.id, model: model.id };
+		const prepared = await this.api?.runHook<{ request: ModelRequest }>("provider.request", { ...scope, request });
+		const message = this.echo(prepared?.request ?? request, options);
+		await this.api?.runHook("provider.response", { ...scope, message });
+		return message;
+	}
+	private echo(request: ModelRequest, options: RequestOptions): AssistantMessage {
 		const messages = request.messages;
 		const lastUser = [...messages].reverse().find((m) => m.role === "user");
-		const latest = lastUser ? textOf(lastUser.content as ContentPart[]).trim() : "";
+		const latest = lastUser ? textOf(lastUser.content as ContentPart[]) : "";
 		const after = lastUser ? messages.slice(messages.lastIndexOf(lastUser) + 1) : [];
 		const result = after.filter((m) => m.role === "toolResult").at(-1);
 		const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
@@ -42,12 +50,12 @@ export class ConformanceProvider implements Provider {
 }
 
 export function conformanceProvider(): Plugin {
-	return { name: "provider-conformance", setup: (api) => api.provide("provider", new ConformanceProvider()) };
+	return { name: "provider-conformance", setup: (api) => api.provide("provider", new ConformanceProvider(api)) };
 }
 
 const TOOLS: ToolDefinition[] = [
 	{ name: "bash", description: "Run a shell command in the working environment", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }, hints: { destructive: true, openWorld: true } },
-	{ name: "read", description: "Read a file in the working environment", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }, hints: { readOnly: true, idempotent: true } },
+	{ name: "read", description: "Read a file in the working environment", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }, hints: { readOnly: true, safeToRepeat: true } },
 ];
 
 /** The conformance plugin's tools: bash and read, using only the session's working environment. */

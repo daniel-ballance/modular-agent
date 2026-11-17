@@ -18,7 +18,7 @@ export const PARENT = "parent-agent";
 
 interface Detail { childSessionId: string; task: string; label: string }
 interface Link extends Detail { parent: string; jobId: string }
-interface Finished { state: Exclude<JobState, "running">; text: string }
+interface Finished { state: Exclude<JobState, "running">; text: string; entryId: string }
 
 const DEFINITION: ToolDefinition = {
 	name: "delegate",
@@ -42,9 +42,9 @@ const DEFINITION: ToolDefinition = {
 	callers: ["model"],
 };
 
-function lastTurnEnd(api: PluginApi, sessionId: string): { outcome: { kind: string; error?: string; limit?: string }; result: { text?: string; openToolCalls: string[] } } | undefined {
+function lastTurnEnd(api: PluginApi, sessionId: string): { id: string; outcome: { kind: string; error?: string; limit?: string }; result: { text?: string; openToolCalls: string[] } } | undefined {
 	const end = api.history(sessionId, { all: true }).filter((e: HistoryEntry) => e.kind === "turnEnd").at(-1);
-	return end?.data as never;
+	return end && !end.erased ? { id: end.id, ...(end.data as object) } as ReturnType<typeof lastTurnEnd> : undefined;
 }
 
 /**
@@ -90,7 +90,7 @@ export class Subagents implements ToolSource, InterfaceCapability {
 			settings: {
 				cwd: this.api.projectOf(parent),
 				model: input.model ?? settings.model,
-				...(settings.thinking ? { thinking: settings.thinking } : {}),
+				...(settings.reasoning ? { reasoning: settings.reasoning } : {}),
 				...(settings.approvalPolicy ? { approvalPolicy: settings.approvalPolicy } : {}),
 				subagentDepth: depth + 1,
 			},
@@ -102,7 +102,7 @@ export class Subagents implements ToolSource, InterfaceCapability {
 	private earlier(parent: string, name: string): Detail | undefined {
 		return this.api
 			.history(parent, { all: true })
-			.filter((e: HistoryEntry) => e.kind === "jobStarted" && e.writer === "subagents")
+			.filter((e: HistoryEntry) => e.kind === "harness.jobStarted" && !e.erased && e.writer === "subagents")
 			.map((e: HistoryEntry) => (e.data as { detail: Detail }).detail)
 			.filter((d) => d.label === name || d.childSessionId === name)
 			.at(-1);
@@ -115,13 +115,13 @@ export class Subagents implements ToolSource, InterfaceCapability {
 		const link: Link = { ...detail, parent, jobId: job.id };
 		this.links.set(child, link);
 		const done = this.watch(link, job);
-		await this.api.input(child, { content: detail.task, actorId: PARENT });
+		await this.api.input(child, { content: detail.task, actorId: PARENT, sources: job.startEntryId ? [job.startEntryId] : undefined });
 		if (wait) {
 			const finished = await done;
-			await job.finish(finished.state, finished.text, { report: false });
-			return { status: finished.state === "completed" ? "completed" : "failed", content: [text(finished.text)], value: { childSessionId: child } };
+			await job.finish(finished.state, finished.text, { report: false, sources: [finished.entryId] });
+			return { status: finished.state === "completed" ? "completed" : "failed", content: [text(finished.text)], value: { childSessionId: child, jobId: job.id } };
 		}
-		void done.then((finished) => job.finish(finished.state, `Subagent "${label}" ${finished.state}.\n\n${finished.text}`));
+		void done.then((finished) => job.finish(finished.state, `Subagent "${label}" ${finished.state}.\n\n${finished.text}`, { sources: [finished.entryId] }));
 		return { status: "completed", content: [text(`Started subagent "${label}" (job ${job.id.slice(0, 8)}). Its result will arrive later as a report.`)], value: { jobId: job.id, childSessionId: child } };
 	}
 
@@ -160,7 +160,7 @@ export class Subagents implements ToolSource, InterfaceCapability {
 		const kind = end.outcome.kind;
 		const state = kind === "failed" ? "failed" : kind === "cancelled" ? "cancelled" : "completed";
 		const note = kind === "failed" ? `It failed: ${end.outcome.error}` : kind === "limit" ? `It stopped at the ${end.outcome.limit} limit.` : "";
-		settle({ state, text: [end.result.text ?? "", note].filter(Boolean).join("\n\n") || "(no answer)" });
+		settle({ state, entryId: end.id, text: [end.result.text ?? "", note].filter(Boolean).join("\n\n") || "(no answer)" });
 	}
 
 	// ---------- the child's questions go to the parent ----------
@@ -197,7 +197,7 @@ export class Subagents implements ToolSource, InterfaceCapability {
 			const link: Link = { ...d, parent, jobId: job.id };
 			this.links.set(d.childSessionId, link);
 			const done = this.watch(link, handle);
-			void done.then((finished) => handle.finish(finished.state, `Subagent "${d.label}" ${finished.state}.\n\n${finished.text}`));
+			void done.then((finished) => handle.finish(finished.state, `Subagent "${d.label}" ${finished.state}.\n\n${finished.text}`, { sources: [finished.entryId] }));
 			// Reopening the child lets its Runtime decide what happens to an interrupted turn.
 			await this.api.openSession(d.childSessionId, this.parentActor(parent));
 			// A follow-up job's child already has earlier input: this job's task is given only if it is the latest.

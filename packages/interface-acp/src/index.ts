@@ -13,6 +13,7 @@ import {
 	type PluginApi,
 	type Provider,
 	isToolCall,
+	parseModel,
 	text,
 	textOf,
 } from "@modular-agent/harness";
@@ -281,14 +282,15 @@ export class AcpInterface implements InterfaceCapability {
 			pluginsDuringSession: bool("pluginsDuringSession"),
 			erasure: bool("erasure"),
 			inputKeys: bool("inputKeys"),
+			portableSessions: bool("portableSessions"),
 			questionsOutlastTurns: bool("questionsOutlastTurns"),
 			startsTurnsUnasked: d.startsTurnsUnasked ? "jobReports" : "never",
 			// Queued input isn't recorded: after a restart it was never acknowledged, so the host still holds it.
 			queuedInputAfterRestart: "handedBack",
 			movingWithUnfinishedWork: "cancels",
-			mixedActorInput: "shared",
+			mixedActorInput: d.mixedActorInput,
 			settingsDuringTurn: "nextTurn",
-			erasureDuringTurn: "allowed",
+			erasureDuringTurn: d.erasureDuringTurn,
 			commandContainment: "strong",
 		};
 	}
@@ -414,6 +416,8 @@ export class AcpInterface implements InterfaceCapability {
 				return;
 			case "tool.started":
 				return this.update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: e.toolCallId!, status: "in_progress" });
+			case "tool.open":
+				return this.update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: e.toolCallId!, status: "pending", content: [{ type: "content", content: { type: "text", text: "Waiting for an answer. The agent carries on when it arrives." } }] });
 			case "tool.progress": {
 				const id = e.toolCallId!;
 				const so_far = ((state.toolOutput.get(id) ?? "") + textOf(e.data.content)).slice(-20_000);
@@ -427,9 +431,7 @@ export class AcpInterface implements InterfaceCapability {
 				} else if (entry.kind === "toolResult" && entry.toolCallId) {
 					state.toolOutput.delete(entry.toolCallId);
 					await this.toolResult(sessionId, entry);
-				} else if (entry.kind === "toolOpen" && entry.toolCallId) {
-					await this.update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: entry.toolCallId, status: "pending", content: [{ type: "content", content: { type: "text", text: "Waiting for an answer. The agent carries on when it arrives." } }] });
-				} else if ((entry.kind === "input" || entry.kind === "jobReport") && entry.message) {
+				} else if (entry.kind === "input" && entry.message) {
 					const inputId = (entry.data as { inputId?: string } | undefined)?.inputId;
 					if (inputId && state.ownInputs.has(inputId)) return;
 					for (const part of entry.message.content) if (part.type === "text") await this.update(sessionId, { sessionUpdate: "user_message_chunk", content: { type: "text", text: (part as { text: string }).text } });
@@ -441,7 +443,7 @@ export class AcpInterface implements InterfaceCapability {
 
 	/** Send a reopened session's history, as session/load requires. */
 	private async replay(sessionId: string): Promise<void> {
-		for (const entry of this.api.history(sessionId)) {
+		for (const entry of await this.api.gatedHistory(sessionId, { recipient: `acp:${this.actorId}` })) {
 			const m = entry.message;
 			if (!m) continue;
 			if (m.role === "user" && entry.modelVisible) {
@@ -461,10 +463,11 @@ export class AcpInterface implements InterfaceCapability {
 		const providers = this.api.useAll<Provider>("provider");
 		const usable = await Promise.all(providers.map(async (p) => ((await p.available?.()) ?? true ? p : undefined)));
 		const settings = this.api.session(sessionId).settings;
-		const current = typeof settings.model === "string" ? settings.model : "";
+		const ref = parseModel(settings.model);
+		const current = ref ? `${ref.provider}/${ref.id}` : "";
 		const options = usable.flatMap((p) => p?.models().map((m) => ({ value: `${m.provider}/${m.id}`, name: m.name ?? m.id })) ?? []);
 		if (current && !options.some((o) => o.value === current)) options.unshift({ value: current, name: current });
-		const thinking = typeof settings.thinking === "string" ? settings.thinking : "default";
+		const thinking = typeof settings.reasoning === "string" ? settings.reasoning : "default";
 		return [
 			{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options },
 			{ id: "thinking", name: "Reasoning", category: "thought_level", type: "select", currentValue: thinking, options: THINKING.map((v) => ({ value: v, name: v })) },

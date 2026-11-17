@@ -1,4 +1,4 @@
-import { type InterruptedTurn, type Plugin, type RuntimeHost, type TurnInput, type TurnOutcome, zeroUsage } from "@modular-agent/harness";
+import { addUsage, interruptedCalls, isToolCall, textOf, type InterruptedTurn, type Plugin, type RuntimeHost, type TurnInput, type TurnOutcome, zeroUsage } from "@modular-agent/harness";
 import { TransientRuntime, type TransientRuntimeOptions } from "@modular-agent/runtime-transient";
 
 /**
@@ -10,7 +10,7 @@ import { TransientRuntime, type TransientRuntimeOptions } from "@modular-agent/r
  * So after a restart it settles the pending tool calls and continues the loop.
  *
  * A pending call that never started is run. One that started is run again only
- * if its tool declares it safe to repeat; otherwise its outcome is unknown, and
+ * if the tool and environment promised it was safe to repeat; otherwise its outcome is unknown, and
  * the model is told so. Every call still passes the "before a tool call" hook
  * point, so a late approval is checked again.
  *
@@ -22,13 +22,35 @@ export class DurableRuntime extends TransientRuntime {
 	override readonly id = "durable";
 	override readonly supports = { inputDuringTurn: true, waitingThroughRestart: true, continuesAfterRestart: true, rewinding: false };
 
-	override async resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
+	protected override async recover(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
+		const history = await host.history();
+		const turn = history.filter((e) => e.turnId === interrupted.turnId);
+		const responses = turn.filter((e) => e.kind === "response");
+		const usage = responses.reduce((sum, e) => addUsage(sum, e.message?.role === "assistant" ? e.message.usage : undefined), zeroUsage());
+		const fromHistory = interruptedCalls(history, interrupted.turnId);
+		const fromOpenTurn = input.startedBy.kind === "answer" ? interrupted.calls.filter((c) => !fromHistory.some((known) => c.id === known.id)) : [];
+		const calls = [...fromOpenTurn, ...fromHistory].map((c) => ({
+			...c,
+			safeToRepeat: c.safeToRepeat && interrupted.calls.some((sent) => sent.id === c.id && sent.safeToRepeat),
+		}));
 		const entries: string[] = [];
-		host.report("turn.resumed", { pending: interrupted.calls.length });
-		// A call that never started runs. One that started runs again only if it is safe to repeat.
-		const open = await this.runPending(host, interrupted.calls, signal, entries, async (c) => !c.started || (await host.definition(c.name))?.hints?.idempotent === true);
-		if (open.length) return { outcome: { kind: "completed" }, result: { openToolCalls: open }, entries, usage: zeroUsage() };
-		return this.loop(input, host, signal, entries);
+		host.report("turn.resumed", { pending: calls.length });
+		const open = await this.runPending(host, calls, signal, entries, (c) => !c.started || c.safeToRepeat);
+		if (open.length) return { outcome: { kind: "completed" }, result: { openToolCalls: open }, entries, usage };
+		const lastEntry = responses.at(-1);
+		const last = lastEntry?.message;
+		const laterInput = lastEntry && turn.slice(turn.indexOf(lastEntry) + 1).some((e) => e.message?.role === "user");
+		if (!signal.aborted && last?.role === "assistant" && !laterInput && !last.content.some(isToolCall)) {
+			const result = { text: textOf(last.content), openToolCalls: [] };
+			if (last.stop === "failed") return { outcome: { kind: "failed", error: last.error?.message ?? "The model request failed" }, result, entries, usage };
+			if (last.stop === "aborted") return { outcome: { kind: "cancelled" }, result, entries, usage };
+			return { outcome: { kind: "completed" }, result, entries, usage };
+		}
+		const support = input.model.supports;
+		if (!signal.aborted && support.safeToRepeat !== true && (support.keepsState !== false || support.runsTools !== false)) {
+			return { outcome: { kind: "failed", error: "An interrupted model request may have had an effect" }, result: { openToolCalls: [] }, entries, usage };
+		}
+		return this.loop(input, host, signal, entries, { usage, steps: responses.length });
 	}
 }
 

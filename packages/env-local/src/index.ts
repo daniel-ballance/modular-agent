@@ -11,11 +11,18 @@ export { ProcessTracker, RUN_MARKER, COMMAND_MARKER, markedProcesses } from "./p
 /** The local machine as the working environment. */
 export class LocalEnvironment implements WorkingEnvironment {
 	readonly id: string;
-	constructor(readonly cwd: string, private processes = new ProcessTracker()) {
+	readonly safeToRepeat = process.platform === "linux";
+	constructor(readonly cwd: string, private processes = new ProcessTracker(), private sessionId?: string) {
 		this.id = `local:${cwd}`;
 	}
 	at(cwd: string): WorkingEnvironment {
-		return new LocalEnvironment(cwd, this.processes);
+		return new LocalEnvironment(cwd, this.processes, this.sessionId);
+	}
+	forSession(sessionId: string): WorkingEnvironment {
+		return new LocalEnvironment(this.cwd, this.processes, sessionId);
+	}
+	sessionEnded(sessionId: string): Promise<void> {
+		return this.processes.stopSession(sessionId);
 	}
 	resolve(path: string): string {
 		return isAbsolute(path) ? path : resolve(this.cwd, path);
@@ -37,10 +44,11 @@ export class LocalEnvironment implements WorkingEnvironment {
 		}
 	}
 	exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult> {
+		if (options.signal.aborted) return Promise.resolve({ exitCode: null, output: "", timedOut: false });
 		return new Promise((done) => {
 			const commandId = randomUUID();
 			const child = spawn("bash", ["-c", command], { cwd: this.cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...this.processes.env(), [COMMAND_MARKER]: commandId } });
-			if (child.pid) this.processes.started(child.pid);
+			if (child.pid) this.processes.started(child.pid, commandId, this.sessionId);
 			let output = "";
 			let timedOut = false;
 			const kill = () => {
@@ -72,7 +80,7 @@ export class LocalEnvironment implements WorkingEnvironment {
 			const finish = (code: number | null) => {
 				if (finished) return;
 				finished = true;
-				if (child.pid) this.processes.ended(child.pid);
+				if (child.pid) this.processes.ended(child.pid, commandId);
 				if (timer) clearTimeout(timer);
 				options.signal.removeEventListener("abort", onAbort);
 				child.stdout.destroy();

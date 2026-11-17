@@ -15,7 +15,7 @@ import {
 	TuiMainScreen,
 } from "@earendil-works/pi-tui";
 import type { AgentEvent, HistoryEntry, InputRequest, InterfaceCapability, Plugin, PluginApi } from "@modular-agent/harness";
-import { isToolCall, textOf } from "@modular-agent/harness";
+import { isToolCall, parseModel, textOf } from "@modular-agent/harness";
 
 const esc = (code: string) => (s: string) => `\x1b[${code}m${s}\x1b[0m`;
 const dim = esc("2");
@@ -258,8 +258,8 @@ export class TuiInterface implements InterfaceCapability {
 				this.add(view.output);
 			}
 			this.endStream();
-		} else if ((entry.kind === "input" || entry.kind === "jobReport") && entry.actorId !== this.actorId && entry.message) {
-			this.add(new Text(userBg(` ${entry.kind === "jobReport" ? "job" : entry.actorId}: ${textOf(entry.message.content)} `), 1, 0));
+		} else if (entry.kind === "input" && entry.actorId !== this.actorId && entry.message) {
+			this.add(new Text(userBg(` ${entry.jobId ? "job" : entry.actorId}: ${textOf(entry.message.content)} `), 1, 0));
 		}
 	}
 
@@ -358,7 +358,8 @@ export class TuiInterface implements InterfaceCapability {
 		this.tui.addChild(this.transcript);
 		this.tui.addChild(this.editor);
 		this.tui.setFocus(this.editor);
-		const model = this.api.session(this.sessionId).settings.model ?? "(no model: use /model)";
+		const ref = parseModel(this.api.session(this.sessionId).settings.model);
+		const model = ref ? `${ref.provider}/${ref.id}` : "(no model: use /model)";
 		this.note(`${bold("modular agent")} ${dim(`· ${model} · session ${this.sessionId.slice(0, 8)} · /help`)}`);
 		for (const q of this.api.openRequests(this.sessionId)) if (!this.questions.some((x) => x.id === q.id)) this.onInputRequest(q);
 		this.tui.addInputListener((data) => {

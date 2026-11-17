@@ -74,7 +74,7 @@ export function cleanUp(file: string): void {
  */
 export class ProcessTracker {
 	readonly runId = randomUUID();
-	private groups = new Set<number>();
+	private commands = new Map<number, { commandId: string; sessionId?: string }>();
 	private file?: string;
 	private watcher = false;
 
@@ -89,29 +89,47 @@ export class ProcessTracker {
 		return { ...process.env, [RUN_MARKER]: this.runId };
 	}
 
-	started(pgid: number): void {
-		this.groups.add(pgid);
+	started(pgid: number, commandId: string, sessionId?: string): void {
+		this.commands.set(pgid, { commandId, sessionId });
 		this.save();
 		this.watch();
 	}
 
-	ended(pgid: number): void {
-		// A command may leave background processes in its group. Keep the group until it is empty.
-		if (alive(-pgid)) return;
-		this.groups.delete(pgid);
+	ended(pgid: number, commandId: string): void {
+		if (alive(-pgid) || markedProcesses(commandId, COMMAND_MARKER).length) return;
+		this.commands.delete(pgid);
+		this.save();
+	}
+
+	private stop(pgid: number, commandId: string): void {
+		const pids = markedProcesses(commandId, COMMAND_MARKER);
+		if (process.platform !== "linux" || pids.length) killGroup(pgid);
+		for (const pid of pids) {
+			try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+		}
+	}
+
+	async stopSession(sessionId: string): Promise<void> {
+		const commands = [...this.commands].filter(([, c]) => c.sessionId === sessionId);
+		for (const [pgid, c] of commands) this.stop(pgid, c.commandId);
+		// Wait until the killed processes can no longer do work. Zombies have no environment.
+		for (let i = 0; i < 500 && commands.some(([, c]) => markedProcesses(c.commandId, COMMAND_MARKER).length); i++) {
+			await new Promise((r) => setTimeout(r, 10));
+		}
+		for (const [pgid] of commands) this.commands.delete(pgid);
 		this.save();
 	}
 
 	/** Stop everything still running. Called when the agent stops cleanly. */
 	stopAll(): void {
-		for (const pgid of this.groups) killGroup(pgid);
-		this.groups.clear();
+		for (const [pgid, c] of this.commands) this.stop(pgid, c.commandId);
+		this.commands.clear();
 		if (this.file) rmSync(this.file, { force: true });
 	}
 
 	private save(): void {
 		if (!this.file) return;
-		const run: RunFile = { agentPid: process.pid, runId: this.runId, groups: [...this.groups] };
+		const run: RunFile = { agentPid: process.pid, runId: this.runId, groups: [...this.commands.keys()] };
 		writeFileSync(this.file, JSON.stringify(run));
 	}
 
