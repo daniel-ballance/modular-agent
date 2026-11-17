@@ -16,6 +16,7 @@ import { fileTools } from "@modular-agent/tools-files";
 import { pluginsFromSettings, projectTrust } from "./loading.js";
 import { remotePlugin } from "@modular-agent/plugin-rpc";
 import { historyHttp } from "@modular-agent/services";
+import { type ExternalPluginSpec, pluginSpecsFromEnv, startExternalPlugin } from "@modular-agent/plugin-wire";
 export { pluginsFromSettings, projectTrust } from "./loading.js";
 
 export interface AgentOptions {
@@ -38,6 +39,8 @@ export interface AgentOptions {
 	 * load them elsewhere can move.
 	 */
 	remote?: string[];
+	/** Plugins to start as separate programs, in any language. Defaults to MODULAR_AGENT_PLUGINS. */
+	externalPlugins?: ExternalPluginSpec[];
 }
 
 /** The plugins that make up the vanilla agent, in load order. */
@@ -68,7 +71,12 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 	// A history service that follows modular-agent-history/1, in any language, can replace the local store.
 	const historyUrl = process.env.MODULAR_AGENT_HISTORY_URL;
 	const historyService = historyUrl ? [historyHttp({ url: historyUrl, token: readFileSync(process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "", "utf8").trim() })] : [];
+	// Plugins in any language, over modular-agent-plugin/1 (docs/bindings/plugin.md). Their handshakes
+	// run first, so what they replace is known before this build's own plugins load.
+	const external = await Promise.all((options.externalPlugins ?? pluginSpecsFromEnv()).map((spec) => startExternalPlugin(spec, { project, home })));
+	for (const e of external) for (const item of e.registration.replaces ?? []) harness.replacements.set(item, e.plugin.name);
 	const plugins = [projectTrust(home), ...vanillaPlugins(options), ...historyService, ...fromSettings.plugins].map((p) => (remote.has(p.name) && p.spawn ? remotePlugin(p) : p));
+	plugins.push(...external.map((e) => e.plugin));
 	await harness.load(plugins);
 	return harness;
 }

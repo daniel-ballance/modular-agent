@@ -3,9 +3,10 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { join } from "node:path";
 import type { ExecResult, Plugin, WorkingEnvironment } from "@modular-agent/harness";
-import { ProcessTracker } from "./processes.js";
+import { randomUUID } from "node:crypto";
+import { COMMAND_MARKER, markedProcesses, ProcessTracker } from "./processes.js";
 
-export { ProcessTracker, RUN_MARKER, markedProcesses } from "./processes.js";
+export { ProcessTracker, RUN_MARKER, COMMAND_MARKER, markedProcesses } from "./processes.js";
 
 /** The local machine as the working environment. */
 export class LocalEnvironment implements WorkingEnvironment {
@@ -37,7 +38,8 @@ export class LocalEnvironment implements WorkingEnvironment {
 	}
 	exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult> {
 		return new Promise((done) => {
-			const child = spawn("bash", ["-c", command], { cwd: this.cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: this.processes.env() });
+			const commandId = randomUUID();
+			const child = spawn("bash", ["-c", command], { cwd: this.cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...this.processes.env(), [COMMAND_MARKER]: commandId } });
 			if (child.pid) this.processes.started(child.pid);
 			let output = "";
 			let timedOut = false;
@@ -46,6 +48,14 @@ export class LocalEnvironment implements WorkingEnvironment {
 					if (child.pid) process.kill(-child.pid, "SIGKILL");
 				} catch {
 					/* already gone */
+				}
+				// Cancelling also reaches processes that left the group, such as with setsid (Linux).
+				for (const pid of markedProcesses(commandId, COMMAND_MARKER)) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						/* gone */
+					}
 				}
 			};
 			const timer = options.timeoutMs ? setTimeout(() => ((timedOut = true), kill()), options.timeoutMs) : undefined;

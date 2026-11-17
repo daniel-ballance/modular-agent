@@ -12,6 +12,8 @@ import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 
 const argv = process.argv.slice(2);
 const verbose = argv.includes("--verbose");
+// With --plugin-checks, also check the conformance plugin's hooks are in force (docs/bindings/plugin.md).
+const pluginChecks = argv.includes("--plugin-checks");
 const dash = argv.indexOf("--");
 if (dash < 0 || dash === argv.length - 1) {
 	console.error("Usage: node run.mjs [--verbose] -- <agent command> [args...]");
@@ -194,6 +196,17 @@ await attempt("approval", async () => {
 	check("updates: tool_call with title bash", calls.some((u) => u.update.title === "bash"), calls.map((u) => u.update.title).join(","));
 	await setOption(agent, sessionId, "approval", "off");
 });
+
+if (pluginChecks) {
+	await attempt("plugin hooks", async () => {
+		const r = await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo conformance-forbidden > forbidden.txt"}'), "forbidden prompt");
+		check("plugin: the conformance plugin's gate refused the call", !existsSync(join(project, "forbidden.txt")));
+		check("plugin: the turn still ends", r.stopReason === "end_turn", r.stopReason);
+		const { entries } = await history(agent, sessionId);
+		const refused = entries.filter((e) => e.kind === "toolResult").at(-1);
+		check("plugin: the refusal reason reached the record", JSON.stringify(refused ?? {}).includes("refused by the conformance plugin"), JSON.stringify(refused?.message ?? refused).slice(0, 160));
+	});
+}
 
 await attempt("cancel", async () => {
 	const started = (async () => {

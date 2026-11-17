@@ -39,6 +39,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | Parts as services: history store, working environment, model gateway | proven | Separate processes over HTTP, with leases, safe retries and cancelling. |
 | The agent served over HTTP | proven | Server-sent events, resumable from the last entry seen. |
 | Follows the ACP host binding `modular-agent-acp/1` | proven | Conformance kit 43/43, also with history in a service. Rust, Python and Go pass too. |
+| Follows the plugin binding `modular-agent-plugin/1`, stage 1 | proven | Hosts external plugins and serves its own. Plugin kit 39/39; the ACP kit passes 46/46 with the Provider, tools, environment and hooks in two external plugin processes. Other languages: in progress. |
 | Follows the history service binding `modular-agent-history/1` | proven | History kit 34/34 for this build's service and client. Swapped with Go's service both ways. |
 | A plugin can run in another process | proven | The whole suite passes with the Runtimes, tools, environment and MCP plugin out of process. |
 | Interface: terminal | proven | Full-screen TUI, line-based, print and JSON modes. |
@@ -129,6 +130,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | Records of authority can't be erased | paper | |
 | "Safe to repeat" is a promise from both the tool and the working environment | partly | The durable Runtime uses the tool's promise; `env-local` keeps its promise but doesn't declare it. |
 | An interrupted model request is repeated only on the Provider's promise | proven | Never repeated. |
+| Cancelling a command stops what it started, even outside its process group | changed, proven | Found by the plugin kit: `setsid` escapees survived a cancel until the agent died. Each command now carries its own marker. |
 | Background processes outlive a cancelled turn, stop with the session or agent | partly | They stop with the agent; closing a session doesn't stop them. |
 | Presence is declared; approval with nobody present is refused | proven | |
 | A key binds the whole question | partly | The key alone is matched. |

@@ -47,3 +47,19 @@ test("this agent passes the ACP kit with its history in a history service", asyn
 		svc.stop();
 	}
 });
+
+const servePlugin = fileURLToPath(import.meta.resolve("@modular-agent/plugin-wire").replace(/index\.js$/, "serve-cli.js"));
+
+test("this build's conformance plugin passes the plugin binding's kit", () => {
+	const run = spawnSync(process.execPath, [`${repo}conformance/plugin/run.mjs`, "--", process.execPath, servePlugin], { encoding: "utf8", timeout: 120_000 });
+	assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
+});
+
+test("this agent passes the ACP kit hosting its Provider, tools, environment and hooks as two external plugins", () => {
+	const plugins = [
+		{ command: [process.execPath, servePlugin], env: { MODULAR_AGENT_PLUGIN_PARTS: "provider,hooks" } },
+		{ command: [process.execPath, servePlugin], env: { MODULAR_AGENT_PLUGIN_PARTS: "tools,environment" } },
+	];
+	const run = spawnSync(process.execPath, [kit, "--plugin-checks", "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 180_000, env: { ...process.env, MODULAR_AGENT_PLUGINS: JSON.stringify(plugins) } });
+	assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
+});

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 /** Every command this agent starts carries this variable, so its processes can be found after the agent dies. */
 export const RUN_MARKER = "MODULAR_AGENT_RUN";
+/** Every command also carries its own marker, so cancelling one command reaches what it started, even outside its process group. */
+export const COMMAND_MARKER = "MODULAR_AGENT_COMMAND";
 
 interface RunFile { agentPid: number; runId: string; groups: number[] }
 
@@ -27,14 +29,14 @@ const killGroup = (pgid: number) => {
 };
 
 /** Linux only: the processes whose environment carries this run's marker. Exact, so it is safe after pids are reused. */
-export function markedProcesses(runId: string): number[] {
+export function markedProcesses(runId: string, marker = RUN_MARKER): number[] {
 	let pids: string[];
 	try {
 		pids = readdirSync("/proc").filter((p) => /^\d+$/.test(p));
 	} catch {
 		return [];
 	}
-	const needle = `${RUN_MARKER}=${runId}\0`;
+	const needle = `${marker}=${runId}\0`;
 	return pids.filter((pid) => {
 		try {
 			return readFileSync(`/proc/${pid}/environ`, "latin1").includes(needle);

@@ -68,6 +68,9 @@
       "path": "packages/interface-http"
     },
     {
+      "path": "packages/plugin-wire"
+    },
+    {
       "path": "packages/runtime-durable"
     }
   ]

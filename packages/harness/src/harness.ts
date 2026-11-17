@@ -288,6 +288,7 @@ export class Harness {
 			},
 			emit: (sessionId, type, data, ids) => this.emit(sessionId, type, data, pluginName, ids),
 			registerCommand: (name, command) => {
+				if (this.replacedFor(pluginName, `command:${name}`)) return;
 				if (this.commandTable.has(name)) this.problem(pluginName, "registerCommand", new Error(`Command /${name} is already registered`));
 				else this.commandTable.set(name, { ...command, plugin: pluginName });
 			},
@@ -357,7 +358,21 @@ export class Harness {
 
 	// ---------- capabilities ----------
 
+	/**
+	 * Items one plugin deliberately takes over from the others: "working-environment",
+	 * "provider:<id>", "tool:<name>" or "command:<name>", mapped to the plugin that owns
+	 * them. A plugin in another process names these in its registration
+	 * (docs/bindings/plugin.md); everyone else's copy is left out, not shadowed.
+	 */
+	readonly replacements = new Map<string, string>();
+	private replacedFor(plugin: string, item: string): boolean {
+		const owner = this.replacements.get(item);
+		return owner !== undefined && owner !== plugin;
+	}
+
 	private provide(plugin: string, capability: string, impl: unknown): void {
+		if (capability === "working-environment" && this.replacedFor(plugin, "working-environment")) return;
+		if (capability === "provider" && this.replacedFor(plugin, `provider:${(impl as { id?: string }).id}`)) return;
 		const list = this.caps.get(capability) ?? [];
 		list.push({ plugin, impl });
 		this.caps.set(capability, list);
@@ -920,8 +935,9 @@ export class Harness {
 	// ---------- tools ----------
 
 	private findTool(s: Session | undefined, name: string): { source: ToolSource; definition: ToolDefinition } | undefined {
-		for (const source of this.useAll<ToolSource>("tool-source")) {
-			const definition = source.tools(s?.id).find((t) => t.name === name);
+		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
+			const source = impl as ToolSource;
+			const definition = source.tools(s?.id).find((t) => t.name === name && !this.replacedFor(plugin, `tool:${t.name}`));
 			if (definition) return { source, definition };
 		}
 		return undefined;
@@ -930,8 +946,10 @@ export class Harness {
 	private toolDefinitions(s?: Session): ToolDefinition[] {
 		const seen = new Set<string>();
 		const out: ToolDefinition[] = [];
-		for (const source of this.useAll<ToolSource>("tool-source")) {
+		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
+			const source = impl as ToolSource;
 			for (const t of source.tools(s?.id)) {
+				if (this.replacedFor(plugin, `tool:${t.name}`)) continue;
 				if (seen.has(t.name)) {
 					// A name is never silently shadowed: the later source's tool is refused, and said so once.
 					const key = `${source.id}:${t.name}`;
