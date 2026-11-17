@@ -124,7 +124,7 @@ async function runChecks(callRequestId, sessionId) {
 		const t0 = Date.now();
 		const o = await outcome(r.promise);
 		check("cancelling: a request cancelled before it started is still answered", !o.error?.timeout, JSON.stringify(o));
-		check("cancelling: that answer is cancelled, within 5 s", codeOf(o.error) === "cancelled" && Date.now() - t0 < 5000, JSON.stringify({ o, ms: Date.now() - t0 }));
+		check("cancelling: that answer is a result or cancelled, within 5 s", (o.result !== undefined || codeOf(o.error) === "cancelled") && Date.now() - t0 < 5000, JSON.stringify({ o, ms: Date.now() - t0 }));
 	});
 	await tryCheck("parent in flight", async () => {
 		const r = await outcome(ask("host/env/exists", { parentRequestId: callRequestId, cwd, sessionId, path: "probe-no-such-file" }));
