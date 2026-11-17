@@ -235,6 +235,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		const parentRequestId = ctx.id;
 		const t = p.turn ?? {};
 		const call = <T>(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal) => peer.request<T>(method, { parentRequestId, ...params }, signal);
+		let currentStep: string | undefined;
 		const input: TurnInput = {
 			sessionId: String(t.sessionId),
 			turnId: String(t.turnId),
@@ -245,7 +246,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 				model: fromWire(t.model),
 				supports: t.modelSupports ?? {},
 				request: async (request: ModelRequest, opts) => {
-					const req = call<AssistantMessage>("host/runtime/model", { request: toWire(request) }, opts.signal);
+					const req = call<AssistantMessage>("host/runtime/model", { request: toWire(request), ...(currentStep ? { stepId: currentStep } : {}) }, opts.signal);
 					modelEvents.set(req.id, (event) => opts.onEvent?.(event));
 					try {
 						return fromWire(await req) as AssistantMessage;
@@ -260,7 +261,10 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		};
 		const host: RuntimeHost = {
 			newId: async () => (await call<{ id: string }>("host/runtime/newId")).id,
-			prepareStep: async (info) => fromWire(await call("host/runtime/prepareStep", { stepId: info.stepId, usage: info.usage })) as ModelRequest,
+			prepareStep: async (info) => {
+				currentStep = info.stepId;
+				return fromWire(await call("host/runtime/prepareStep", { stepId: info.stepId, usage: info.usage })) as ModelRequest;
+			},
 			hook: async (hook, payload) => fromWire(await call("host/runtime/hook", { hook, payload: toWire(payload) })),
 			runToolCall: async (c, signal) => fromWire(await call("host/runtime/runToolCall", { call: toWire(c) }, signal)) as ToolResult,
 			definition: async (toolName) => fromWire(await call("host/runtime/definition", { toolName })) ?? undefined,

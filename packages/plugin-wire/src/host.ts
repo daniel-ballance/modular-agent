@@ -213,10 +213,23 @@ class WireRuntime implements Runtime {
 			return t;
 		};
 		peer.handle("host/runtime/newId", async (p) => ({ id: await turn(p).host.newId() }));
-		peer.handle("host/runtime/prepareStep", async (p) => toWire(await turn(p).host.prepareStep({ stepId: p.stepId, usage: p.usage })));
+		// The host emits the standard turn events itself (docs/bindings/plugin.md): a step starts here...
+		peer.handle("host/runtime/prepareStep", async (p) => {
+			const t = turn(p);
+			t.host.report("step.started", {}, { stepId: p.stepId });
+			return toWire(await t.host.prepareStep({ stepId: p.stepId, usage: p.usage }));
+		});
 		peer.handle("host/runtime/model", async (p, ctx) => {
 			const t = turn(p);
-			return toWire(await t.input.model.request(fromWire(p.request), { signal: AbortSignal.any([t.signal, ctx.signal]), sessionId: t.input.sessionId, onEvent: (event) => peer.notify("host/runtime/modelEvent", { parentRequestId: ctx.id, event }) }));
+			// ...and streamed model output here, as it passes through.
+			return toWire(await t.input.model.request(fromWire(p.request), {
+				signal: AbortSignal.any([t.signal, ctx.signal]),
+				sessionId: t.input.sessionId,
+				onEvent: (event) => {
+					t.host.report("model.output", event, p.stepId ? { stepId: p.stepId } : undefined);
+					peer.notify("host/runtime/modelEvent", { parentRequestId: ctx.id, event });
+				},
+			}));
 		});
 		peer.handle("host/runtime/hook", async (p) => toWire((await turn(p).host.hook(p.hook, fromWire(p.payload))) ?? null));
 		peer.handle("host/runtime/definition", async (p) => toWire((await turn(p).host.definition(p.toolName)) ?? null));
@@ -228,6 +241,8 @@ class WireRuntime implements Runtime {
 		peer.handle("host/runtime/takeSteering", async (p) => ({ entries: toWire(await turn(p).host.takeSteering()) }));
 		peer.handle("host/runtime/hasSteering", async (p) => ({ waiting: await turn(p).host.hasSteering() }));
 		peer.onNotification("host/runtime/report", (p) => {
+			// The host emits these itself; a Runtime's own copy would duplicate them.
+			if (p?.type === "model.output" || p?.type === "step.started") return;
 			const t = this.turns.get(p?.parentRequestId);
 			t?.host.report(String(p.type), fromWire(p.data), { ...(p.stepId ? { stepId: p.stepId } : {}), ...(p.toolCallId ? { toolCallId: p.toolCallId } : {}) });
 		});

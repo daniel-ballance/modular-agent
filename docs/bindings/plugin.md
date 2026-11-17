@@ -182,16 +182,24 @@ A turn is one request from the host. The Runtime runs it, asking the host for ev
 |---|---|---|
 | `host/runtime/newId` | | `{ id }` |
 | `host/runtime/prepareStep` | `stepId`, `usage` | the ModelRequest for this step, after "before each step": the context, tools and settings |
-| `host/runtime/model` | `request` (a ModelRequest) | an assistant message, from the turn's model. The host runs the Provider's hook points. Pieces stream to the Runtime as the notification `host/runtime/modelEvent { parentRequestId, event }`, where `parentRequestId` is this request's id. A model's failure is a result with `stop: "failed"`. |
+| `host/runtime/model` | `request` (a ModelRequest), `stepId` | an assistant message, from the turn's model. The host runs the Provider's hook points. Pieces stream to the Runtime as the notification `host/runtime/modelEvent { parentRequestId, event }`, where `parentRequestId` is this request's id. A model's failure is a result with `stop: "failed"`. |
 | `host/runtime/hook` | `hook`, `payload` | the combined answer, by the hook point's rule: observe `null`; gate `{ value, refused?, pending? }`; transform the payload; first answer the answer or `null`; collect a list. Only for the Runtime's own hook points: `turn.start`, `step.after`, `tool.before`, `tool.after`, `model.failed`, `turn.result` and `turn.end`. The host adds `sessionId` and `turnId`. |
 | `host/runtime/definition` | `toolName` | a ToolDefinition, or `null` |
 | `host/runtime/runToolCall` | `call` (a ToolCall) | a ToolResult, or `{ callId, pending }` for a call left open. The host runs the tool and records its start. "Before a tool call" is the Runtime's to run, through `host/runtime/hook`, before it asks. |
 | `host/runtime/record` | `entry`: an entry without `id`, `parentId`, `sessionId`, `time` or `turnId` | the recorded entry. The host adds those fields. |
 | `host/runtime/takeSteering` | | `{ entries }`: input given for the running turn, now recorded |
 | `host/runtime/hasSteering` | | `{ waiting: boolean }` |
-| `host/runtime/report` | `type`, `data`, `stepId?`, `toolCallId?` | a notification: an event about the turn, such as streamed model output |
+| `host/runtime/report` | `type`, `data`, `stepId?`, `toolCallId?` | a notification: an event of the Runtime's own, which the host passes on as it is |
 
 `host/runtime/*` requests about a turn that has ended are refused with `invalid_request`.
+
+**The host emits the standard events about a turn itself,** since everything they describe passes through it:
+- streamed model output, as `host/runtime/model` streams;
+- a step starting, at `host/runtime/prepareStep`;
+- tool calls starting, progressing and ending, as it runs them;
+- every recorded entry.
+
+A Runtime doesn't report these, and a host ignores a report that duplicates one. Interfaces then show a turn the same way whichever language its Runtime is written in.
 
 ## The host asks a command
 
@@ -244,6 +252,7 @@ The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a
 
 ## Changes
 
+- **2026-11-17, after the first Runtime swaps.** The host emits the standard turn events itself, and `host/runtime/model` carries `stepId`. Go's Runtime reported streamed text as `model.delta`, and the TypeScript host expected `model.output`, so a TypeScript agent running Go's Runtime showed the client no streamed text. The host sees the stream anyway, so nothing needed naming.
 - **2026-11-17.** Stage 2: the Runtime. `runtime/runTurn`, `runtime/resumeTurn` and `runtime/continueOpenCalls`, the Runtime host as `host/runtime/*`, and the conformance parts `runtime` and `durable-runtime`.
 - **2026-11-17.** First version, stage 1.
 - **2026-11-17, after the four-language matrix.** A missing file is `not_found`. Every environment reported it as `internal`, in its own language's words, and the Python host told it apart by looking for the text "No such file". That worked with Rust's and Python's environments, and failed every turn with Go's and TypeScript's.
