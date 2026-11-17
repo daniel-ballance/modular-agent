@@ -253,6 +253,25 @@ The other builds found 20 gaps in the bindings. They are now clarifications in t
 
 `npm test` runs both kits against this build: the ACP kit with the history kept locally and in a history service, and the history kit against its own service. `MODULAR_AGENT_HISTORY_URL` and `MODULAR_AGENT_HISTORY_TOKEN_FILE` point the agent at any conforming history service.
 
+## Round three: plugins in any language
+
+The [plugin binding](bindings/plugin.md), `modular-agent-plugin/1`, lets a Harness host a plugin written in another language. It turns the interactions in [Contracts](contracts.md#interactions) into JSON-RPC messages over a child process's stdio: tool sources, Providers, the working environment, hook handlers and commands. It shares one data schema with the other bindings ([shared data](bindings/data.md)). The design borrows from PiG, which already hosts extensions in four languages ([PiG reference](research/pig-reference.md)):
+- a registration handshake;
+- callbacks linked to the request they belong to;
+- history read on demand;
+- a size cap and a heartbeat.
+
+It doesn't copy PiG's approach of porting one plugin API to every language. That fits one team shipping four SDKs, not four independent builds.
+
+This build gained:
+- a `plugin-wire` package, which hosts external plugins (`MODULAR_AGENT_PLUGINS`) and serves any of its own plugins over the binding;
+- item-level replacement in the Harness: a provider id, a tool name, a command or the working environment;
+- a conformance plugin (`ma-plugin`).
+
+Across all four builds, every host passes the ACP kit with plugins from every other build, and in turns that use four languages at once. The matrix found two holes in the binding that no single build could: `timeoutMs: 0`, and how a missing file is reported. Both are now rules and kit checks. Anything a receiver branches on must be a defined value, never a message or an unstated default.
+
+The plugin kit also found a bug here: cancelling a command killed its process group, but not a process that had left it with `setsid`. Each command now carries its own marker, which cancelling sweeps.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).
