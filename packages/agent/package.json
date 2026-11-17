@@ -30,7 +30,8 @@
     "@modular-agent/interface-acp": "0.1.0",
     "@agentclientprotocol/sdk": "2.7.0",
     "@modular-agent/interface-tui": "0.1.0",
-    "@modular-agent/subagents": "0.1.0"
+    "@modular-agent/subagents": "0.1.0",
+    "@modular-agent/tools-mcp": "0.1.0"
   },
   "bin": {
     "ma": "dist/src/cli.js"

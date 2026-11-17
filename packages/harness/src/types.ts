@@ -164,7 +164,8 @@ export interface ToolContext {
 }
 export interface ToolSource {
 	id: string;
-	tools(): ToolDefinition[];
+	/** The tools offered. With a session, include any that only that session has, such as an ACP client's MCP servers. */
+	tools(sessionId?: string): ToolDefinition[];
 	/** Run a call. Return { pending } to leave the call open past its turn, after asking a question that was left open. */
 	run(call: ToolCall, context: ToolContext): Promise<Omit<ToolResult, "callId"> | ToolPending>;
 	/** Tell the Harness when the list of tools changes. */

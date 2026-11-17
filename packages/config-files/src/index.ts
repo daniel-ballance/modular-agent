@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Configuration, Plugin } from "@modular-agent/harness";
 
 type Json = Record<string, unknown>;
@@ -27,6 +27,9 @@ function merge(a: Json, b: Json): Json {
 /**
  * Settings from <home>/settings.json, overridden by <project>/.modular-agent/settings.json.
  * "session" holds defaults for new sessions; "plugins" holds each plugin's own settings.
+ * A project's plugin settings apply only once the project is trusted, listed under
+ * "trustedProjects" in the global settings: they can start programs, such as MCP
+ * servers, or change where a plugin reads and writes.
  */
 export class FileConfiguration implements Configuration {
 	constructor(private data: Json) {}
@@ -42,9 +45,10 @@ export function fileConfiguration(options: { overrides?: Json } = {}): Plugin {
 	return {
 		name: "config-files",
 		setup(api) {
-			const global = readJson(join(api.home, "settings.json"));
-			const project = readJson(join(api.project, ".modular-agent", "settings.json"));
-			api.provide("configuration", new FileConfiguration(merge(merge(global, project), options.overrides ?? {})));
+			const { global, project } = readSettings(api.home, api.project);
+			const trusted = ((global.trustedProjects as string[] | undefined) ?? []).map((p) => resolve(p)).includes(resolve(api.project));
+			const fromProject = trusted ? project : { session: project.session ?? {} };
+			api.provide("configuration", new FileConfiguration(merge(merge(global, fromProject as Json), options.overrides ?? {})));
 		},
 	};
 }

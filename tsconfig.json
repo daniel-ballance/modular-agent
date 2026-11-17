@@ -56,6 +56,9 @@
       "path": "packages/subagents"
     },
     {
+      "path": "packages/tools-mcp"
+    },
+    {
       "path": "packages/runtime-durable"
     }
   ]

@@ -278,7 +278,7 @@ Through the [model access](#model-access) it was given:
 
 | Harness asks | Carrying | Answers |
 |---|---|---|
-| which tools do you offer? | | [tool definitions](#tool-definition). A tool source says when its list changes. |
+| which tools do you offer? | the session *(optional)* | [tool definitions](#tool-definition), including any only that session has. A tool source says when its list changes. |
 | run this call | the [tool call](#tool-call), and a way to cancel it | progress, then the [tool result](#tool-result). If no answer comes, the outcome is unknown. |
 
 ### Harness and working environment

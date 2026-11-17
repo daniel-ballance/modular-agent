@@ -93,6 +93,8 @@ export interface PluginApi {
 	on(hook: string, handler: (payload: any) => unknown, order?: HandlerOrder): () => void;
 	/** Run a hook point this plugin owns, by its rule. */
 	runHook<T = any>(hook: string, payload: any): Promise<T>;
+	/** Report a problem that didn't stop this plugin, such as a server it couldn't reach. Hosts and Interfaces see it. */
+	reportProblem(where: string, error: unknown): void;
 	// events
 	onEvent(listener: (event: AgentEvent) => void, options?: { raw?: boolean }): () => void;
 	emit(sessionId: string, type: string, data?: any, ids?: Partial<AgentEvent>): void;
@@ -256,6 +258,7 @@ export class Harness {
 			useAll: <T>(capability: string) => this.useAll<T>(capability),
 			defineHook: (name, rule) => this.hooks.define(name, rule, pluginName),
 			on: (hook, handler, order) => this.hooks.on(hook, pluginName, handler, order),
+			reportProblem: (where, error) => this.problem(pluginName, where, error),
 			runHook: async (hook, payload) => {
 				// Only the owner runs a hook point: the plugin that defined it, or a plugin providing the capability that owns it.
 				const owner = this.hooks.owner(hook);
@@ -897,9 +900,9 @@ export class Harness {
 
 	// ---------- tools ----------
 
-	private findTool(_s: Session | undefined, name: string): { source: ToolSource; definition: ToolDefinition } | undefined {
+	private findTool(s: Session | undefined, name: string): { source: ToolSource; definition: ToolDefinition } | undefined {
 		for (const source of this.useAll<ToolSource>("tool-source")) {
-			const definition = source.tools().find((t) => t.name === name);
+			const definition = source.tools(s?.id).find((t) => t.name === name);
 			if (definition) return { source, definition };
 		}
 		return undefined;
@@ -909,7 +912,7 @@ export class Harness {
 		const seen = new Set<string>();
 		const out: ToolDefinition[] = [];
 		for (const source of this.useAll<ToolSource>("tool-source")) {
-			for (const t of source.tools()) {
+			for (const t of source.tools(s?.id)) {
 				if (seen.has(t.name)) continue; // the first source to offer a name wins
 				seen.add(t.name);
 				out.push(t);

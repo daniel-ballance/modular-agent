@@ -4,6 +4,7 @@ import { approval, type ApprovalPolicy } from "@modular-agent/approval";
 import { acpInterface } from "@modular-agent/interface-acp";
 import { tuiInterface } from "@modular-agent/interface-tui";
 import { subagents } from "@modular-agent/subagents";
+import { mcpTools } from "@modular-agent/tools-mcp";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "./index.js";
@@ -61,7 +62,7 @@ async function main() {
 		return 0;
 	}
 	if (args.mode === "interactive" && args.prompt) args.mode = "print";
-	const common = [questionTool({ waitMs: args.questionWait }), subagents({ durable: args.durable }), ...(args.durable ? [durableRuntime()] : []), ...(args.approval ? [approval({ policy: args.approval, waitMs: args.approvalWait })] : [])];
+	const common = [questionTool({ waitMs: args.questionWait }), subagents({ durable: args.durable }), mcpTools(), ...(args.durable ? [durableRuntime()] : []), ...(args.approval ? [approval({ policy: args.approval, waitMs: args.approvalWait })] : [])];
 	if (args.acp) {
 		// stdout carries the protocol, so nothing else may write to it.
 		console.log = (...m: unknown[]) => process.stderr.write(m.join(" ") + "\n");

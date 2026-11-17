@@ -14,6 +14,7 @@
 | `provider-pi-ai` | Provider, one per pi-ai vendor |
 | `interface-terminal` | Interface: interactive, print (`-p`) and JSON modes |
 | `interface-acp` | Interface: ACP v1 over stdio (`ma --acp`), using the official SDK |
+| `tools-mcp` | Tool source: tools from MCP servers, using Pi's `pi-mcp` client. Servers come from settings, or from an ACP client for one session. |
 | `subagents` | Feature: the `delegate` tool. A subagent is a child session started by a job. `durable: true` carries subagents on after a restart. |
 | `interface-tui` | Interface: full-screen terminal UI on Pi's `pi-tui` library. The default interactive mode; `--plain` gives the line-based one. |
 | `tools-files` | Tool source: `read`, `write`, `edit`, `bash` |
@@ -38,7 +39,7 @@ node packages/agent/dist/src/cli.js --pi-auth --approval ask --approval-wait 30 
 node packages/agent/dist/src/cli.js --pi-auth --question-wait 30      # ask_user questions outlast the turn after 30 s
 node packages/agent/dist/src/cli.js --pi-auth --durable               # subagents, too, carry on after a restart
 node packages/agent/dist/src/cli.js --pi-auth --acp                   # serve ACP, for a host such as T3 Code
-npm test                                                               # 37 tests, using pi-ai's faux provider
+npm test                                                               # 50 tests, using pi-ai's faux provider
 ```
 
 ## What is checked
@@ -108,7 +109,7 @@ What the host test found:
 - **A session's project is the session's, not the process's.** ACP gives each session a `cwd`. Tools, context files and the session list now use it.
 - **A host reads the model list through a session.** ACP v1 offers models only as session config options, so T3 starts a throwaway session to read them. This used to leave an empty session behind. Now the history store writes a new session only once something happens in it beyond setup, such as its first input, so a session started only to look leaves nothing. A test starts one, changes a setting, closes it, and finds no session listed.
 - **ACP v1 has no key for repeated input.** Our key travels in `_meta` when a client sends one. T3 doesn't.
-- **MCP servers the client passes are ignored.** There is no MCP client plugin yet.
+- **MCP servers the client passes** are connected for that session ([MCP servers](#mcp-servers)).
 
 ## Day-to-day use
 
@@ -172,6 +173,18 @@ Still to do: neither terminal Interface hides a secret as it is typed.
 Tests now cover a plugin checking a turn's result and sending the model back, a plugin defining a hook point for others, and a UI starting a tool call itself. Two fixes came out of them:
 - **Only a hook point's owner may run it.** The contracts said so, but the code let any plugin run any hook point. The owner is the plugin that defined it, or a plugin providing the capability that owns it, such as the Provider for "before a model request".
 - **A tool call refused because of who started it is recorded too.** Before, it returned without a record.
+
+## MCP servers
+
+`tools-mcp` connects to MCP servers over stdio or Streamable HTTP, using Pi's `pi-mcp` client, and offers their tools as `mcp__<server>__<tool>`. MCP's tool annotations (read-only, destructive, idempotent, open world) map one to one onto our tool hints, so approval and the durable Runtime treat MCP tools like any other. Servers come from two places:
+- **Settings,** under `plugins.tools-mcp.servers`, in the shape Pi and Claude use. They serve every session.
+- **An ACP client,** which passes servers with `session/new`, `session/load` or `session/resume`. They serve only that session, and close with it. They aren't recorded, because their headers and environment may hold secrets. The ACP Interface finds the MCP plugin through an `mcp-servers` capability, so neither package depends on the other, and it declares HTTP support only when that capability is there.
+
+This needed one change to the contracts: asking a tool source for its tools can now name the session.
+
+It also exposed a gap in trust. A project's settings for plugins applied whether or not the project was trusted, so an untrusted project could start an MCP server, or point a plugin at other files. Now a project's plugin settings apply only once the project is trusted. Its session defaults, such as the model, still apply.
+
+Tests use a small MCP server with one tool: from global settings; from a project's settings, ignored until `/trust`; and from an ACP client, offered to that session and not another. `npm test` now runs 50 tests.
 
 ## What building changed
 

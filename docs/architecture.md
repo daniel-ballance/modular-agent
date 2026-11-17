@@ -122,6 +122,8 @@ An Interface always acts for an actor, and that actor's [authority](#actors-and-
 
 Offers tools and runs calls to them. A tool has a name, a description, the input it takes, and hints such as "read-only", "destructive" or "safe to repeat". Examples: built-in file and shell tools, an MCP server, another agent.
 
+**The tools offered can differ by session.** A host can give one session tools of its own, as an ACP client does when it passes MCP servers with a new session. Other sessions don't see them. **Decided while building** ([build notes](build-notes.md#mcp-servers)).
+
 A tool call can be started by the model, by a UI with no model involved (as MCP Apps allow), or by a plugin. Each call records who started it, and the same checks apply whoever starts it. Tools a Provider runs itself are the exception: they come back already done. Whether an Interface can also offer tools is [open](open-questions.md#tools-run-by-an-interface).
 
 ### Working environment
@@ -206,7 +208,7 @@ This is the plugin API, described by what it lets a plugin do. It is **proposed*
 - Say how what it produced should be shown. An Interface that doesn't understand that falls back to a plain display.
 
 **Its own lifecycle and surroundings**
-- Be checked before it loads. Plugins installed globally load. Plugins that come with a project load only once the user trusts that project. Plugins run with the agent's full permissions. **Decided** ([decided 2026-11-16](open-questions.md#settled)).
+- Be checked before it loads. Plugins installed globally load. Plugins that come with a project load only once the user trusts that project, and so do a project's settings for plugins, since those can start programs such as MCP servers. Plugins run with the agent's full permissions. **Decided** ([decided 2026-11-16](open-questions.md#settled)).
 - Read its own settings ([open](open-questions.md#configuration)).
 - Know the project, and use the working environment.
 

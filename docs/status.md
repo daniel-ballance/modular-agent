@@ -35,6 +35,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | Recovering an interrupted turn is the Runtime's job | changed, proven | Was the Harness's job in the first version. |
 | Provider keeps no state and runs no tools | proven | `provider-pi-ai` declares both false. |
 | Provider keeps state, runs tools itself, live sessions, late answers | paper | Declared false; no Provider does them. |
+| Tools from MCP servers, global and per session | proven | Settings, and servers an ACP client passes. |
 | Interface: terminal | proven | Full-screen TUI, line-based, print and JSON modes. |
 | Interface: over a wire, driven by a host | proven | `interface-acp` speaks ACP v1 over stdio. T3 Code drove it as a provider and showed its tool calls as native cards. |
 | The agent declares what it supports, to a host | proven | In `initialize`, under `_meta`. |

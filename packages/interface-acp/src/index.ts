@@ -74,6 +74,10 @@ export function fromAcp(blocks: acp.ContentBlock[]): ContentPart[] {
  * as an editor or a host like T3 Code, drives the agent through it. Each ACP
  * session is one of our sessions, with the same id.
  */
+/** The "mcp-servers" capability, as the tools-mcp plugin provides it. */
+type McpServerConfig = { command: string; args?: string[]; env?: Record<string, string> } | { url: string; headers?: Record<string, string> };
+interface McpServers { attach(sessionId: string, servers: Record<string, McpServerConfig>, cwd?: string): Promise<string[]> }
+
 export class AcpInterface implements InterfaceCapability {
 	readonly id = "acp";
 	readonly actorId: string;
@@ -105,6 +109,22 @@ export class AcpInterface implements InterfaceCapability {
 
 	// ---------- requests from the client ----------
 
+	private mcp(): McpServers | undefined {
+		return this.api.use<McpServers>("mcp-servers");
+	}
+
+	/** Give the session the MCP servers the client passed. They are not recorded: their headers and env may hold secrets. */
+	private async attachMcp(sessionId: string, servers: acp.McpServer[] | undefined, cwd: string | undefined): Promise<void> {
+		const mcp = this.mcp();
+		if (!mcp || !servers?.length) return;
+		const configs: Record<string, McpServerConfig> = {};
+		for (const s of servers) {
+			if ("command" in s) configs[s.name] = { command: s.command, args: s.args, env: Object.fromEntries(s.env.map((e) => [e.name, e.value])) };
+			else if (s.type === "http") configs[s.name] = { url: s.url, headers: Object.fromEntries(s.headers.map((h) => [h.name, h.value])) };
+		}
+		await mcp.attach(sessionId, configs, cwd);
+	}
+
 	private register(): void {
 		const app = this.app;
 		app.onRequest(methods.agent.initialize, ({ params }) => {
@@ -116,6 +136,8 @@ export class AcpInterface implements InterfaceCapability {
 					loadSession: declaration.forking === true,
 					promptCapabilities: { image: true, embeddedContext: true },
 					sessionCapabilities: { list: {}, resume: {}, close: {} },
+					// MCP servers the client passes are served only if a plugin can connect them.
+					mcpCapabilities: { http: !!this.mcp(), sse: false },
 				},
 				agentInfo: { name: "modular-agent", title: "Modular Agent", version: "0.1.0" },
 				authMethods: [],
@@ -126,6 +148,7 @@ export class AcpInterface implements InterfaceCapability {
 
 		app.onRequest(methods.agent.session.new, async ({ params }) => {
 			const sessionId = await this.api.startSession({ settings: { cwd: params.cwd }, actor: this.actor() });
+			await this.attachMcp(sessionId, params.mcpServers, params.cwd);
 			this.open(sessionId);
 			return { sessionId, configOptions: await this.configOptions(sessionId) };
 		});
@@ -133,6 +156,7 @@ export class AcpInterface implements InterfaceCapability {
 		app.onRequest(methods.agent.session.load, async ({ params }) => {
 			this.sessions.set(params.sessionId, this.state());
 			await this.api.openSession(params.sessionId, this.actor());
+			await this.attachMcp(params.sessionId, params.mcpServers, params.cwd);
 			await this.replay(params.sessionId);
 			this.open(params.sessionId);
 			return { configOptions: await this.configOptions(params.sessionId) };
@@ -141,6 +165,7 @@ export class AcpInterface implements InterfaceCapability {
 		app.onRequest(methods.agent.session.resume, async ({ params }) => {
 			this.sessions.set(params.sessionId, this.state());
 			await this.api.openSession(params.sessionId, this.actor());
+			await this.attachMcp(params.sessionId, params.mcpServers, params.cwd);
 			this.open(params.sessionId);
 			return { configOptions: await this.configOptions(params.sessionId) };
 		});
