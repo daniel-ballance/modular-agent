@@ -11,6 +11,7 @@ Notes on other systems, gathered to inform the [architecture](../architecture.md
 | [Pi's built-in features as plugins](pi-builtins-as-plugins.md) | How the plugin API was worked out, one Pi feature at a time |
 | [DeepSeek Harness](deepseek-harness-reference.md) | Everything is a plugin, including the loop; approval that fails closed; timed questions; "model-visible means logged" |
 | [Pydantic AI](pydantic-ai-reference.md) | A lean core with a large plugin library; three ways to resolve a waiting call; durability is not storage |
+| [PiG](pig-reference.md) | Pi ported to Go, hosting extensions in Go, Rust, Python and Node over one subprocess wire; how it keeps four SDKs consistent |
 | [T3 Code](t3-code-reference.md) | A layer above whole agents: how it drives Pi, and how agents delegate to and message each other |
 | [Protocol landscape](protocol-landscape-2026-11.md) | MCP, MCP Apps, AG-UI, A2A, ACP, A2UI and OpenTelemetry |
 | [ChatGPT conversation](chatgpt-conversation.md), [transcript](chatgpt-transcript.md) | Where the project started, and what we kept, changed or dropped |
