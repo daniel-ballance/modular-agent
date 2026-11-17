@@ -3,7 +3,7 @@
 Checks that a build's conformance plugin follows the [plugin binding](../../docs/bindings/plugin.md), `modular-agent-plugin/1`. The kit plays the host: it starts the plugin and serves the `host/*` callbacks from a temporary folder. It needs no network and no model.
 
 ```sh
-node run.mjs -- <the command that serves the build's conformance plugin> [args...]
+node run.mjs -- <the command that serves the build's conformance plugin> [args...]   # use absolute paths: the plugin starts in a temporary folder
 node run.mjs --verbose -- ...
 ```
 

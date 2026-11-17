@@ -31,6 +31,7 @@ These options add checks:
 **Reopening with another agent.** After the agent's command, `--then <second command>` gives a second agent. Every reopening in a new process uses it: `session/load` with its replay and keys, and with `--crash-checks`, recovering the killed agent's turn. Point both agents at one history service, and the second agent reopens, continues and recovers a session the first one wrote. The second agent's declaration decides how the recovered turn must end.
 
 ```sh
+<start any history service that follows the binding; in the modular-agent repository:>
 node ../../packages/services/dist/src/serve.js history '{"dir":"/tmp/h","token":"a-token-of-16-chars-or-more"}'   # prints {"url": ...}
 MODULAR_AGENT_HISTORY_URL=<url> MODULAR_AGENT_HISTORY_TOKEN_FILE=<file> \
   node run.mjs --crash-checks --portable-checks -- <agent A> --then <agent B>

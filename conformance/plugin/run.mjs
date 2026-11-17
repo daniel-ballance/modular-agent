@@ -417,17 +417,26 @@ await attempt("environment", async () => {
 	if (alive(pid)) process.kill(pid, "SIGKILL");
 
 	// A session's background processes outlive the call, and stop at env/sessionEnded for that session only.
-	const bg = async (sessionId) => Number((await p.request("env/exec", { cwd: work, sessionId, command: "sleep 60 >/dev/null 2>&1 & echo $!" })).output.trim());
-	const one = await bg("kit-session-1");
-	const two = await bg("kit-session-2");
+	// Each writes a heartbeat file; a PID would mean nothing to the kit if the environment uses its own PID namespace.
+	const beat = (sessionId) => join(work, `beat-${sessionId}`);
+	const bg = (sessionId) => p.request("env/exec", { cwd: work, sessionId, command: `(for i in $(seq 600); do date +%s%N > ${beat(sessionId)}; sleep 0.1; done) >/dev/null 2>&1 &` });
+	const beating = async (sessionId) => {
+		const f = beat(sessionId);
+		const a = existsSync(f) ? readFileSync(f, "utf8") : "";
+		await sleep(600);
+		const b = existsSync(f) ? readFileSync(f, "utf8") : "";
+		return a !== "" && a !== b;
+	};
+	await bg("kit-session-1");
+	await bg("kit-session-2");
 	await sleep(300);
-	check("env/exec: a background process outlives the call", alive(one) && alive(two), JSON.stringify({ one: alive(one), two: alive(two) }));
+	const both = [await beating("kit-session-1"), await beating("kit-session-2")];
+	check("env/exec: a background process outlives the call", both[0] && both[1], JSON.stringify(both));
 	const ended = await p.request("env/sessionEnded", { sessionId: "kit-session-1" }, 10000).catch((e) => ({ error: e }));
-	for (let i = 0; i < 40 && alive(one); i++) await sleep(50);
-	check("env/sessionEnded: answers {}, with the session's background processes stopped", JSON.stringify(ended) === "{}" && !alive(one), JSON.stringify({ ended, alive: alive(one) }));
-	check("env/sessionEnded: another session's processes keep running", alive(two), `pid ${two}`);
+	const oneAfter = await beating("kit-session-1");
+	check("env/sessionEnded: answers {}, with the session's background processes stopped", JSON.stringify(ended) === "{}" && !oneAfter, JSON.stringify({ ended, stillBeating: oneAfter }));
+	check("env/sessionEnded: another session's processes keep running", await beating("kit-session-2"));
 	await p.request("env/sessionEnded", { sessionId: "kit-session-2" }, 10000).catch(() => undefined);
-	for (const x of [one, two]) if (alive(x)) process.kill(x, "SIGKILL");
 });
 
 await attempt("hooks", async () => {
