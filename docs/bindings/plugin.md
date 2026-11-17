@@ -4,14 +4,15 @@ How a Harness hosts a plugin that runs as a separate program, in any language. T
 
 All data uses the [shared data](data.md) shapes.
 
-**Stage 1** (this version) covers:
+It covers:
 - tool sources;
 - Providers;
 - the working environment;
 - handlers at the standard hook points;
-- commands.
+- commands;
+- the Runtime (stage 2): a Runtime in one language running turns for another language's Harness.
 
-The Runtime follows in stage 2. History, credential and configuration stores are not hosted this way: history has [its own binding](history-http.md), and the other two hold secrets or are trivial.
+History, credential and configuration stores are not hosted this way: history has [its own binding](history-http.md), and the other two hold secrets or are trivial.
 
 The design follows prior art in PiG, which hosts extensions in four languages over one wire ([PiG reference](../research/pig-reference.md)). It takes PiG's:
 - registration handshake;
@@ -68,13 +69,14 @@ The plugin answers with its registration. Registration is the only source of wha
   "workingEnvironment": { "containment": "strong" | "processGroup" | "none", "platforms": ["linux"] },
   "hooks": [ { "hook": "tool.before", "handlerId": 1, "order": "normal" } ],
   "commands": [ { "name": "hello", "description": "..." } ],
+  "runtime": { "id": "durable", "supports": { "inputDuringTurn": true, "waitingThroughRestart": true, "continuesAfterRestart": true, "rewinding": false } },
   "replaces": [ "provider:conformance", "tool:bash", "working-environment" ]
 }
 ```
 
 - **Every field but `binding` and `name` is optional.** A binding the plugin can't speak gets the error `not_supported`.
 - **`order`** is `first`, `normal` or `last`, as in [Hook points](../contracts.md#hook-points).
-- **`replaces`** names what the host leaves out of its own plugins in favour of this one: `working-environment`, `provider:<id>`, `tool:<name>` or `command:<name>`. Without it, a name the host already has is refused, as [never shadowed](../contracts.md#plugins-and-capabilities) requires. A plugin that replaces nothing adds to the host.
+- **`replaces`** names what the host leaves out of its own plugins in favour of this one: `runtime`, `working-environment`, `provider:<id>`, `tool:<name>` or `command:<name>`. A plugin that registers a `runtime` replaces `runtime`, since a session has only one. Without it, a name the host already has is refused, as [never shadowed](../contracts.md#plugins-and-capabilities) requires. A plugin that replaces nothing adds to the host.
 - **`perSession: true`** means the tool list can differ by session.
 
 ## The host asks a tool source
@@ -158,6 +160,39 @@ An error answer counts as a failing handler, per [Hook points](../contracts.md#h
 - **Handlers for hook points a plugin defines** use the same message, with that hook point's own name and rule.
 - **"Before output reaches a recipient" is not offered** to a plugin in another process in `/1`. Its handlers hold streamed pieces per recipient, which would cost a round trip per piece. A host refuses a registration for it with `not_supported`.
 
+## The host asks the Runtime
+
+A turn is one request from the host. The Runtime runs it, asking the host for everything it needs through `host/runtime/*`, with the turn's request id as `parentRequestId`. It never chooses the model, never sees credentials and never runs a tool itself ([Contracts](../contracts.md#harness-and-runtime)).
+
+| Request | Params | Result |
+|---|---|---|
+| `runtime/runTurn` | `turn` | a TurnOutcome |
+| `runtime/resumeTurn` | `turn`; `interrupted`: `{ turnId, calls }` | a TurnOutcome. The host sends it on reopening a session with a turn whose process stopped. A transient Runtime ends the turn; a durable one carries on. Every pending call ends with exactly one result. |
+| `runtime/continueOpenCalls` | `turn`; `calls` | a TurnOutcome. The host sends it when every question behind calls left open past an earlier turn has its answer. |
+
+- **`turn`** is `{ sessionId, turnId, startedBy, model: ModelInfo, modelSupports, settings: { maxSteps?, reasoning?, maxOutput? }, resultShape? }`. `startedBy` is as on a `turnStart` entry. `modelSupports` is the Provider's `supports`.
+- **Each of `calls`** is `{ id, name, input, stepId?, started }`. `started` says whether the call's start was recorded.
+- **A TurnOutcome** is `{ outcome, result: { text?, value?, openToolCalls }, entries, usage }`. `outcome` is as on a `turnEnd` entry, and `entries` lists the ids of the entries the turn recorded.
+- **Cancelling:** the host cancels a turn with `$/cancel` on its request. The Runtime stops at the next safe point, cancels what it asked the host for, records a result for every started call, and answers with outcome `cancelled`.
+- **The Runtime's state lives in the history.** Whatever it needs after a restart, it records through `host/runtime/record`. After a restart, the host starts the Runtime plugin's process again and sends `runtime/resumeTurn`. Nothing in the old process survives, so nothing can be relied on there.
+
+**What the Runtime asks the host.** Every request carries `parentRequestId`, the turn's request id.
+
+| Request | Params | Result |
+|---|---|---|
+| `host/runtime/newId` | | `{ id }` |
+| `host/runtime/prepareStep` | `stepId`, `usage` | the ModelRequest for this step, after "before each step": the context, tools and settings |
+| `host/runtime/model` | `request` (a ModelRequest) | an assistant message, from the turn's model. The host runs the Provider's hook points. Pieces stream to the Runtime as the notification `host/runtime/modelEvent { parentRequestId, event }`, where `parentRequestId` is this request's id. A model's failure is a result with `stop: "failed"`. |
+| `host/runtime/hook` | `hook`, `payload` | the combined answer, by the hook point's rule: observe `null`; gate `{ value, refused?, pending? }`; transform the payload; first answer the answer or `null`; collect a list. Only for the Runtime's own hook points: `turn.start`, `step.after`, `tool.before`, `tool.after`, `model.failed`, `turn.result` and `turn.end`. The host adds `sessionId` and `turnId`. |
+| `host/runtime/definition` | `toolName` | a ToolDefinition, or `null` |
+| `host/runtime/runToolCall` | `call` (a ToolCall) | a ToolResult, or `{ callId, pending }` for a call left open. The host runs the tool and records its start. "Before a tool call" is the Runtime's to run, through `host/runtime/hook`, before it asks. |
+| `host/runtime/record` | `entry`: an entry without `id`, `parentId`, `sessionId`, `time` or `turnId` | the recorded entry. The host adds those fields. |
+| `host/runtime/takeSteering` | | `{ entries }`: input given for the running turn, now recorded |
+| `host/runtime/hasSteering` | | `{ waiting: boolean }` |
+| `host/runtime/report` | `type`, `data`, `stepId?`, `toolCallId?` | a notification: an event about the turn, such as streamed model output |
+
+`host/runtime/*` requests about a turn that has ended are refused with `invalid_request`.
+
 ## The host asks a command
 
 `command/run { name, args, sessionId, actorId }` returns `{ "output"?: string }`.
@@ -194,19 +229,22 @@ Each is started with its `env` added to the host's environment, then initialized
 
 Every build can serve a conformance plugin, from a command it documents. It is used to test hosts and plugins across languages.
 
-The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a comma-separated list from `provider`, `tools`, `environment` and `hooks`, and the default is all four:
+The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a comma-separated list from `provider`, `tools`, `environment`, `hooks`, `runtime` and `durable-runtime`. The default is the first four. `runtime` and `durable-runtime` are never served together:
 
 | Part | Registers | Replaces |
 |---|---|---|
 | `provider` | Provider `conformance`, model `echo`, exactly as in the [ACP binding's conformance mode](acp.md#conformance-mode) | `provider:conformance` |
 | `tools` | tool source `conformance-tools`, with `bash` (`{ command }`, using `host/env/exec`) and `read` (`{ path }`, using `host/env/read`); results as the build's own tools give them | `tool:bash`, `tool:read` |
 | `environment` | a working environment on the local machine, with its true `containment` | `working-environment` |
+| `runtime` | the build's transient Runtime | `runtime` |
+| `durable-runtime` | the build's durable Runtime | `runtime` |
 | `hooks` | a `tool.before` gate that refuses, with the reason `refused by the conformance plugin`, any call whose input, as JSON, contains `conformance-forbidden`; and a `turn.before` collect that contributes `{ "system": "The conformance plugin is loaded." }` | nothing |
 
 `tools` uses `host/env/*`, never its own environment. So tools from one build run commands in another build's working environment, under a third build's Harness.
 
 ## Changes
 
+- **2026-11-17.** Stage 2: the Runtime. `runtime/runTurn`, `runtime/resumeTurn` and `runtime/continueOpenCalls`, the Runtime host as `host/runtime/*`, and the conformance parts `runtime` and `durable-runtime`.
 - **2026-11-17.** First version, stage 1.
 - **2026-11-17, after the four-language matrix.** A missing file is `not_found`. Every environment reported it as `internal`, in its own language's words, and the Python host told it apart by looking for the text "No such file". That worked with Rust's and Python's environments, and failed every turn with Go's and TypeScript's.
 - **2026-11-17, after the first swap matrix.** `timeoutMs: 0` means no limit. Go sent `0` for no limit and Rust read it as an instant timeout, so a Rust host with Go's tools, and a Go host with Rust's tools, cancelled every command at once. Each build passed on its own; only the swap found it. The plugin kit now checks both readings.

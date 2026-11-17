@@ -50,6 +50,7 @@ function start(extraEnv = {}) {
 	const notes = [];
 	const hostCalls = [];
 	const execs = new Map(); // host/env/exec request id -> { proc, parent }
+	const state = { rt: undefined }; // the running Runtime scenario, if any
 	let nextId = 1;
 	let buffer = "";
 	const send = (m) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
@@ -102,6 +103,14 @@ function start(extraEnv = {}) {
 			case "host/declaration":
 				return reply(m.id, {});
 			default:
+				if (m.method.startsWith("host/runtime/") && state.rt) {
+					try {
+						reply(m.id, await state.rt.handle(m, send));
+					} catch (e) {
+						fail(m.id, e.code ?? "internal", e.message ?? String(e));
+					}
+					return;
+				}
 				return send({ id: m.id, error: { code: -32601, message: `Method not found: ${m.method}` } });
 		}
 	}
@@ -122,6 +131,8 @@ function start(extraEnv = {}) {
 			if (m.method && m.id !== undefined) void onHostRequest(m);
 			else if (m.method) {
 				notes.push(m);
+				if (m.method === "host/runtime/report") state.rt?.reports.push(m.params);
+				if (m.method === "$/cancel") state.rt?.running.get(m.params?.id)?.();
 				if (m.method === "$/cancel") {
 					// The plugin cancelled one of its own requests to us.
 					const e = execs.get(m.params?.id);
@@ -138,6 +149,7 @@ function start(extraEnv = {}) {
 	const exited = new Promise((r) => child.on("exit", (code, signal) => r({ code, signal })));
 	return {
 		child,
+		state,
 		notes,
 		hostCalls,
 		exited,
@@ -170,6 +182,71 @@ function start(extraEnv = {}) {
 }
 
 const code = (e) => e?.data?.code;
+
+/**
+ * A Runtime scenario: the kit plays the Harness behind host/runtime/*, with a scripted model.
+ * model(request, n) gives the n-th model answer; tool(call) answers runToolCall (may return a promise);
+ * gate(call) answers "before a tool call" with a refusal reason, or null.
+ */
+function scenario({ model, tool = async (c) => ({ callId: c.id, status: "completed", content: [{ type: "text", text: `ran ${c.name}` }] }), gate = () => null, definitions = {} }) {
+	const rt = { records: [], reports: [], hooks: [], toolCalls: [], modelCalls: 0, steps: 0, running: new Map() };
+	rt.handle = async (m, send) => {
+		const p = m.params ?? {};
+		switch (m.method) {
+			case "host/runtime/newId":
+				return { id: randomUUID() };
+			case "host/runtime/prepareStep":
+				rt.steps++;
+				return { systemPrompt: "kit", messages: [], tools: Object.values(definitions), settings: {} };
+			case "host/runtime/model": {
+				const answer = await model(p.request, rt.modelCalls++);
+				const text = (answer.content ?? []).filter((x) => x.type === "text").map((x) => x.text).join("");
+				if (text) send({ method: "host/runtime/modelEvent", params: { parentRequestId: m.id, event: { type: "text", delta: text } } });
+				return answer;
+			}
+			case "host/runtime/hook":
+				rt.hooks.push(p.hook);
+				if (p.hook === "tool.before") {
+					const g = gate(p.payload?.call);
+					return g ? { value: p.payload, refused: g } : { value: p.payload };
+				}
+				if (p.hook === "step.after" || p.hook === "turn.result") return { value: p.payload };
+				if (p.hook === "tool.after") return p.payload;
+				return null;
+			case "host/runtime/definition":
+				return definitions[p.toolName] ?? { name: p.toolName, description: "kit tool", parameters: { type: "object", properties: {} } };
+			case "host/runtime/runToolCall": {
+				rt.toolCalls.push(p.call);
+				// As a real Harness does: a cancelled tool call stops, and still answers, as cancelled.
+				const cancelled = new Promise((res) => rt.running.set(m.id, () => res({ callId: p.call.id, status: "cancelled", content: [{ type: "text", text: "Cancelled" }] })));
+				try {
+					return await Promise.race([tool(p.call, m.id), cancelled]);
+				} finally {
+					rt.running.delete(m.id);
+				}
+			}
+			case "host/runtime/record": {
+				const entry = { ...p.entry, id: randomUUID(), parentId: rt.records.at(-1)?.id ?? null, sessionId: "kit-session", time: Date.now(), turnId: "kit-turn" };
+				rt.records.push(entry);
+				return entry;
+			}
+			case "host/runtime/takeSteering":
+				return { entries: [] };
+			case "host/runtime/hasSteering":
+				return { waiting: false };
+			default:
+				throw Object.assign(new Error(`unknown ${m.method}`), { code: "invalid_request" });
+		}
+	};
+	return rt;
+}
+const usage0 = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 };
+const say = (text) => ({ role: "assistant", content: [{ type: "text", text }], stop: "finished", usage: usage0 });
+const callTools = (...calls) => ({ role: "assistant", content: calls.map(([name, args]) => ({ type: "toolCall", id: `call-${randomUUID()}`, name, arguments: args })), stop: "toolUse", usage: usage0 });
+const turn = (extra = {}) => ({ sessionId: "kit-session", turnId: "kit-turn", startedBy: { kind: "actor", id: "kit" }, model: { provider: "kit", id: "scripted", contextWindow: 100000, maxOutput: 1000, input: ["text"], reasoning: false }, modelSupports: { keepsState: false, runsTools: false }, settings: { maxSteps: 8 }, ...extra });
+const recordedResults = (rt) => rt.records.filter((e) => e.kind === "toolResult");
+const resultFor = (rt, id) => recordedResults(rt).filter((e) => e.toolCallId === id || e.message?.toolCallId === id);
+const statusOf = (e) => e?.data?.status;
 const textOf = (content) => (content ?? []).filter((p) => p.type === "text").map((p) => p.text).join("");
 const initParams = { binding: BINDING, data: "modular-agent-data/1", host: { name: "conformance-kit", version: "1" }, project: work, home, config: {} };
 
@@ -319,6 +396,94 @@ await attempt("hooks", async () => {
 	}
 	check("hook: an unknown handler is unknown_handler", code(err) === "unknown_handler", JSON.stringify(err));
 });
+
+/** The Runtime checks, for each Runtime part. A build that serves no Runtime skips them with --no-runtime. */
+async function runtimeChecks(part) {
+	const q = start({ MODULAR_AGENT_PLUGIN_PARTS: part });
+	const tag = `${part}:`;
+	try {
+		const r = await q.request("plugin/initialize", initParams);
+		check(`${tag} registers a runtime that replaces runtime`, !!r.runtime?.id && (r.replaces ?? []).includes("runtime"), JSON.stringify({ runtime: r.runtime, replaces: r.replaces }));
+		const durable = r.runtime?.supports?.continuesAfterRestart === true;
+		check(`${tag} declares continuesAfterRestart ${part === "durable-runtime"}`, durable === (part === "durable-runtime"), JSON.stringify(r.runtime?.supports));
+
+		let rt = (q.state.rt = scenario({ model: () => say("plain answer") }));
+		let o = await q.request("runtime/runTurn", { turn: turn() });
+		check(`${tag} a text turn completes with its text`, o.outcome?.kind === "completed" && o.result?.text === "plain answer" && Array.isArray(o.result?.openToolCalls), JSON.stringify(o).slice(0, 200));
+		check(`${tag} it recorded the response and listed its entries`, rt.records.some((e) => e.kind === "response") && (o.entries ?? []).length > 0, rt.records.map((e) => e.kind).join(","));
+
+		rt = q.state.rt = scenario({ model: (_r, n) => (n === 0 ? callTools(["read", { path: "a" }]) : say("after the tool")) });
+		o = await q.request("runtime/runTurn", { turn: turn() });
+		const call = rt.toolCalls[0];
+		check(`${tag} a tool round: the call ran through runToolCall`, rt.toolCalls.length === 1 && call?.name === "read", JSON.stringify(rt.toolCalls));
+		check(`${tag} "before a tool call" ran first`, rt.hooks.includes("tool.before"), rt.hooks.join(","));
+		check(`${tag} exactly one recorded result for the call`, !!call && resultFor(rt, call.id).length === 1, JSON.stringify(recordedResults(rt)).slice(0, 200));
+		check(`${tag} the turn completed after the tool`, o.outcome?.kind === "completed" && o.result?.text === "after the tool", JSON.stringify(o.outcome));
+
+		rt = q.state.rt = scenario({ model: (_r, n) => (n === 0 ? callTools(["bash", { command: "rm -rf x" }]) : say("refused, fine")), gate: () => "kit refuses" });
+		o = await q.request("runtime/runTurn", { turn: turn() });
+		check(`${tag} a refused call never reaches runToolCall`, rt.toolCalls.length === 0, JSON.stringify(rt.toolCalls));
+		check(`${tag} a refused call still gets one result, refused`, recordedResults(rt).length === 1 && statusOf(recordedResults(rt)[0]) === "refused", JSON.stringify(recordedResults(rt)).slice(0, 200));
+
+		rt = q.state.rt = scenario({ model: () => callTools(["read", { path: "again" }]) });
+		o = await q.request("runtime/runTurn", { turn: turn({ settings: { maxSteps: 2 } }) });
+		check(`${tag} a step limit ends the turn as limit steps`, o.outcome?.kind === "limit" && /step/.test(String(o.outcome?.limit)), JSON.stringify(o.outcome));
+
+		const par = { name: "par", description: "parallel", parameters: { type: "object", properties: {} }, parallel: true };
+		const startedPar = new Set();
+		let release;
+		const both = new Promise((r) => (release = r));
+		rt = q.state.rt = scenario({
+			definitions: { par },
+			model: (_r, n) => (n === 0 ? callTools(["par", { n: 1 }], ["par", { n: 2 }]) : say("both done")),
+			tool: async (c) => {
+				startedPar.add(c.id);
+				if (startedPar.size === 2) release();
+				await Promise.race([both, sleep(4000)]);
+				return { callId: c.id, status: startedPar.size === 2 ? "completed" : "failed", content: [{ type: "text", text: `n=${c.input.n}` }] };
+			},
+		});
+		o = await q.request("runtime/runTurn", { turn: turn() });
+		check(`${tag} parallel calls overlap`, startedPar.size === 2 && recordedResults(rt).length === 2 && recordedResults(rt).every((e) => statusOf(e) === "completed"), JSON.stringify(recordedResults(rt).map(statusOf)));
+		const order = recordedResults(rt).map((e) => JSON.stringify(e.message?.content ?? "")).join("|");
+		check(`${tag} parallel results recorded in the order asked`, order.indexOf("n=1") >= 0 && order.indexOf("n=1") < order.indexOf("n=2"), order.slice(0, 120));
+
+		rt = q.state.rt = scenario({ model: (_r, n) => (n === 0 ? callTools(["bash", { command: "sleep 30" }]) : say("should not be reached")), tool: () => new Promise(() => {}) });
+		const running = q.request("runtime/runTurn", { turn: turn() }, 20000);
+		for (let i = 0; i < 100 && rt.toolCalls.length === 0; i++) await sleep(50);
+		const t0 = Date.now();
+		q.cancel(running.id);
+		o = await running.catch((e) => ({ error: e }));
+		check(`${tag} cancelling a turn answers within 5 s`, Date.now() - t0 < 5000, `${Date.now() - t0} ms`);
+		check(`${tag} a cancelled turn's outcome is cancelled`, o.outcome?.kind === "cancelled", JSON.stringify(o).slice(0, 200));
+		check(`${tag} the cancelled call still gets exactly one result`, !!rt.toolCalls[0] && resultFor(rt, rt.toolCalls[0].id).length === 1, JSON.stringify(recordedResults(rt)).slice(0, 200));
+
+		// After a restart: one call never started, one started and not safe to repeat.
+		const notStarted = { id: "c-not-started", name: "read", input: { path: "b" }, started: false };
+		const startedCall = { id: "c-started", name: "bash", input: { command: "echo once" }, started: true };
+		rt = q.state.rt = scenario({ model: () => say("carried on") });
+		o = await q.request("runtime/resumeTurn", { turn: turn(), interrupted: { turnId: "kit-turn", calls: [notStarted, startedCall] } });
+		check(`${tag} resume: the started, unsafe call is not repeated`, !rt.toolCalls.some((c) => c.id === "c-started"), JSON.stringify(rt.toolCalls));
+		check(`${tag} resume: it gets one result, outcomeUnknown`, resultFor(rt, "c-started").length === 1 && statusOf(resultFor(rt, "c-started")[0]) === "outcomeUnknown", JSON.stringify(recordedResults(rt)).slice(0, 240));
+		check(`${tag} resume: the call that never started has exactly one result`, resultFor(rt, "c-not-started").length === 1, JSON.stringify(recordedResults(rt)).slice(0, 240));
+		if (durable) {
+			check("durable-runtime: resume runs the call that never started", rt.toolCalls.some((c) => c.id === "c-not-started"), JSON.stringify(rt.toolCalls));
+			check("durable-runtime: resume carries the turn on to completion", o.outcome?.kind === "completed" && o.result?.text === "carried on", JSON.stringify(o.outcome));
+		} else {
+			check("runtime: resume ends the turn as failed", o.outcome?.kind === "failed", JSON.stringify(o.outcome));
+			check("runtime: resume asks the model nothing", rt.modelCalls === 0, `${rt.modelCalls} model calls`);
+		}
+		q.state.rt = undefined;
+	} finally {
+		await q.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);
+		await q.stop();
+	}
+}
+
+if (!argv.includes("--no-runtime")) {
+	await attempt("runtime", () => runtimeChecks("runtime"));
+	await attempt("durable-runtime", () => runtimeChecks("durable-runtime"));
+}
 
 await attempt("shutdown", async () => {
 	const r = await p.request("plugin/shutdown", { reason: "stop" });

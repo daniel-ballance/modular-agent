@@ -2,6 +2,8 @@
 // Serve this build's conformance plugin over modular-agent-plugin/1 on stdin and stdout.
 // MODULAR_AGENT_PLUGIN_PARTS chooses the parts: provider, tools, environment, hooks (default: all).
 import { localEnvironment } from "@modular-agent/env-local";
+import { durableRuntime } from "@modular-agent/runtime-durable";
+import { transientRuntime } from "@modular-agent/runtime-transient";
 import type { Plugin } from "@modular-agent/harness";
 import { conformanceHooks, conformanceProvider, conformanceTools } from "./conformance.js";
 import { servePlugins } from "./serve.js";
@@ -16,5 +18,8 @@ if (parts.has("provider")) plugins.push(conformanceProvider()), replaces.push("p
 if (parts.has("tools")) plugins.push(conformanceTools()), replaces.push("tool:bash", "tool:read");
 if (parts.has("environment")) plugins.push(localEnvironment()), replaces.push("working-environment");
 if (parts.has("hooks")) plugins.push(conformanceHooks());
+if (parts.has("runtime") && parts.has("durable-runtime")) throw new Error("runtime and durable-runtime are never served together");
+if (parts.has("runtime")) plugins.push(transientRuntime()), replaces.push("runtime");
+if (parts.has("durable-runtime")) plugins.push(durableRuntime()), replaces.push("runtime");
 await servePlugins({ name: "conformance-typescript", plugins, replaces, containment: "strong" });
 process.exit(0);

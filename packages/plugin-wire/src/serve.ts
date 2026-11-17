@@ -1,5 +1,14 @@
 import type {
 	Answer,
+	AssistantMessage,
+	HistoryEntry,
+	InterruptedTurn,
+	ModelRequest,
+	Runtime,
+	RuntimeHost,
+	ToolResult,
+	TurnInput,
+	TurnOutcome,
 	CredentialStore,
 	ExecResult,
 	HandlerOrder,
@@ -40,6 +49,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	const providers: Provider[] = [];
 	const toolSources: ToolSource[] = [];
 	let environment: WorkingEnvironment | undefined;
+	let runtime: Runtime | undefined;
 	const handlers = new Map<number, { hook: string; handler: (payload: any) => unknown; order: HandlerOrder }>();
 	const commands = new Map<string, { description: string; run: (args: string, ctx: any) => unknown }>();
 	const stops: (() => unknown)[] = [];
@@ -97,6 +107,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 				if (capability === "provider") providers.push(impl as Provider);
 				else if (capability === "tool-source") toolSources.push(impl as ToolSource);
 				else if (capability === "working-environment") environment = impl as WorkingEnvironment;
+				else if (capability === "runtime") runtime = impl as Runtime;
 				else throw new Error(`${capability} isn't carried by ${PLUGIN_BINDING}`);
 			},
 			use: (capability: string) => (capability === "credential-store" ? credentialStore : undefined),
@@ -136,6 +147,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
 			...(environment ? { workingEnvironment: { containment: options.containment ?? "none", platforms: [process.platform] } } : {}),
+			...(runtime ? { runtime: { id: runtime.id, supports: runtime.supports } } : {}),
 			...(handlers.size ? { hooks: [...handlers].map(([handlerId, h]) => ({ hook: h.hook, handlerId, order: h.order })) } : {}),
 			...(commands.size ? { commands: [...commands].map(([name, c]) => ({ name, description: c.description })) } : {}),
 			...(options.replaces?.length ? { replaces: options.replaces } : {}),
@@ -214,6 +226,70 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		if (!c) throw new WireError("invalid_request", `No command ${p.name}`);
 		const output = await c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId });
 		return typeof output === "string" ? { output } : {};
+	});
+
+	// ---------- the Runtime: a turn is one host request; everything it needs comes through host/runtime/* ----------
+	const modelEvents = new Map<number, (event: any) => void>();
+	peer.onNotification("host/runtime/modelEvent", (p) => modelEvents.get(p?.parentRequestId)?.(p.event));
+	const turnFor = (p: any, ctx: { signal: AbortSignal; id: number | string }): { input: TurnInput; host: RuntimeHost } => {
+		const parentRequestId = ctx.id;
+		const t = p.turn ?? {};
+		const call = <T>(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal) => peer.request<T>(method, { parentRequestId, ...params }, signal);
+		const input: TurnInput = {
+			sessionId: String(t.sessionId),
+			turnId: String(t.turnId),
+			startedBy: t.startedBy,
+			settings: t.settings ?? {},
+			resultShape: t.resultShape,
+			model: {
+				model: fromWire(t.model),
+				supports: t.modelSupports ?? {},
+				request: async (request: ModelRequest, opts) => {
+					const req = call<AssistantMessage>("host/runtime/model", { request: toWire(request) }, opts.signal);
+					modelEvents.set(req.id, (event) => opts.onEvent?.(event));
+					try {
+						return fromWire(await req) as AssistantMessage;
+					} catch (error) {
+						if (opts.signal.aborted) return { role: "assistant", content: [], stop: "aborted" };
+						return { role: "assistant", content: [], stop: "failed", error: { kind: "temporary", message: error instanceof Error ? error.message : String(error) } };
+					} finally {
+						modelEvents.delete(req.id);
+					}
+				},
+			},
+		};
+		const host: RuntimeHost = {
+			newId: async () => (await call<{ id: string }>("host/runtime/newId")).id,
+			prepareStep: async (info) => fromWire(await call("host/runtime/prepareStep", { stepId: info.stepId, usage: info.usage })) as ModelRequest,
+			hook: async (hook, payload) => fromWire(await call("host/runtime/hook", { hook, payload: toWire(payload) })),
+			runToolCall: async (c, signal) => fromWire(await call("host/runtime/runToolCall", { call: toWire(c) }, signal)) as ToolResult,
+			definition: async (toolName) => fromWire(await call("host/runtime/definition", { toolName })) ?? undefined,
+			record: async (entry) => {
+				const { turnId: _t, ...rest } = entry as Record<string, unknown>;
+				return fromWire(await call("host/runtime/record", { entry: toWire(rest) })) as HistoryEntry;
+			},
+			takeSteering: async () => fromWire((await call<{ entries: unknown[] }>("host/runtime/takeSteering")).entries) as HistoryEntry[],
+			hasSteering: async () => (await call<{ waiting: boolean }>("host/runtime/hasSteering")).waiting,
+			report: (type, data, ids) => peer.notify("host/runtime/report", { parentRequestId, type, data: toWire(data), ...(ids ?? {}) }),
+		};
+		return { input, host };
+	};
+	const needRuntime = () => {
+		if (!runtime) throw new WireError("not_supported", "This plugin is not a Runtime");
+		return runtime;
+	};
+	const outcome = (o: TurnOutcome) => toWire(o);
+	peer.handle("runtime/runTurn", async (p, ctx) => {
+		const { input, host } = turnFor(p, ctx);
+		return outcome(await needRuntime().runTurn(input, host, ctx.signal));
+	});
+	peer.handle("runtime/resumeTurn", async (p, ctx) => {
+		const { input, host } = turnFor(p, ctx);
+		return outcome(await needRuntime().resumeTurn(input, host, ctx.signal, fromWire(p.interrupted) as InterruptedTurn));
+	});
+	peer.handle("runtime/continueOpenCalls", async (p, ctx) => {
+		const { input, host } = turnFor(p, ctx);
+		return outcome(await needRuntime().continueOpenCalls(input, host, ctx.signal, fromWire(p.calls) as InterruptedTurn["calls"]));
 	});
 
 	const shutdown = async () => {

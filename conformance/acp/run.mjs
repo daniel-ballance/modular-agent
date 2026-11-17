@@ -14,6 +14,9 @@ const argv = process.argv.slice(2);
 const verbose = argv.includes("--verbose");
 // With --plugin-checks, also check the conformance plugin's hooks are in force (docs/bindings/plugin.md).
 const pluginChecks = argv.includes("--plugin-checks");
+// With --crash-checks, also kill the agent with SIGKILL during a bash call, reopen the session in a new
+// process, and check the turn ends as the agent declared: carried on (continuesAfterRestart) or failed.
+const crashChecks = argv.includes("--crash-checks");
 const dash = argv.indexOf("--");
 if (dash < 0 || dash === argv.length - 1) {
 	console.error("Usage: node run.mjs [--verbose] -- <agent command> [args...]");
@@ -269,6 +272,47 @@ await attempt("load in a new process", async () => {
 	check("load: a key survives a restart", meta(r)?.duplicate === true, JSON.stringify(meta(r)));
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
 });
+
+if (crashChecks) {
+	await attempt("crash", async () => {
+		agent = connect();
+		const init = await within(15000, agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize");
+		const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+		const sid = s.sessionId;
+		await setOption(agent, sid, "model", "conformance/echo");
+		await setOption(agent, sid, "approval", "off");
+		const durable = (meta(s)?.declaration ?? meta(init)?.declaration ?? {}).continuesAfterRestart === true;
+		const marker = join(project, "crash.txt");
+		void prompt(agent, sid, `tool:bash {"command":"echo start >> crash.txt; sleep 4; echo end >> crash.txt"}`).catch(() => undefined);
+		for (let i = 0; i < 200 && !(existsSync(marker) && readFileSync(marker, "utf8").includes("start")); i++) await sleep(50);
+		check("crash: the bash call started", existsSync(marker));
+		agent.child.kill("SIGKILL");
+		await sleep(6000);
+		const after = existsSync(marker) ? readFileSync(marker, "utf8") : "";
+		check("crash: the killed agent's command did not finish", !after.includes("end"), JSON.stringify(after));
+		agent = connect();
+		await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+		await within(20000, agent.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "session/load after the crash");
+		let entries = [];
+		let call;
+		for (let i = 0; i < 200; i++) {
+			entries = (await history(agent, sid, { all: true })).entries;
+			call = entries.flatMap((e) => (e.kind === "response" ? (e.message?.content ?? []).filter((p) => p.type === "toolCall") : [])).at(-1);
+			const turnId = entries.find((e) => e.kind === "toolResult" && call && (e.toolCallId === call.id || e.message?.toolCallId === call.id))?.turnId;
+			if (turnId && entries.some((e) => e.kind === "turnEnd" && e.turnId === turnId)) break;
+			await sleep(100);
+		}
+		const results = entries.filter((e) => e.kind === "toolResult" && call && (e.toolCallId === call.id || e.message?.toolCallId === call.id));
+		check("crash: the interrupted call has exactly one result", results.length === 1, `${results.length} results`);
+		check("crash: its outcome is unknown", results[0]?.data?.status === "outcomeUnknown", JSON.stringify(results[0]?.data));
+		const end = entries.find((e) => e.kind === "turnEnd" && e.turnId === results[0]?.turnId);
+		if (durable) check("crash: with continuesAfterRestart, the turn carried on and completed", end?.data?.outcome?.kind === "completed", JSON.stringify(end?.data?.outcome));
+		else check("crash: without continuesAfterRestart, the turn ended as failed", end?.data?.outcome?.kind === "failed", JSON.stringify(end?.data?.outcome));
+		const lines = (existsSync(marker) ? readFileSync(marker, "utf8") : "").split("\n").filter((l) => l === "start").length;
+		check("crash: the command was not run again", lines === 1, `${lines} starts`);
+		await agent.ctx.request(methods.agent.session.close, { sessionId: sid });
+	});
+}
 
 await stop(agent);
 for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");

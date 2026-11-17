@@ -372,6 +372,7 @@ export class Harness {
 
 	private provide(plugin: string, capability: string, impl: unknown): void {
 		if (capability === "working-environment" && this.replacedFor(plugin, "working-environment")) return;
+		if (capability === "runtime" && this.replacedFor(plugin, "runtime")) return;
 		if (capability === "provider" && this.replacedFor(plugin, `provider:${(impl as { id?: string }).id}`)) return;
 		const list = this.caps.get(capability) ?? [];
 		list.push({ plugin, impl });

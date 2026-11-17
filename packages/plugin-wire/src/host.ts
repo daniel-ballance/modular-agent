@@ -5,6 +5,11 @@ import type {
 	CredentialStore,
 	ExecResult,
 	HandlerOrder,
+	InterruptedTurn,
+	Runtime,
+	RuntimeHost,
+	TurnInput,
+	TurnOutcome,
 	ModelInfo,
 	ModelRef,
 	ModelRequest,
@@ -38,6 +43,7 @@ export interface Registration {
 	toolSources?: { id: string; tools: unknown[]; perSession?: boolean }[];
 	workingEnvironment?: { containment: "strong" | "processGroup" | "none"; platforms?: string[] };
 	hooks?: { hook: string; handlerId: number; order?: HandlerOrder }[];
+	runtime?: { id: string; supports: Record<string, boolean | string> };
 	commands?: { name: string; description: string }[];
 	replaces?: string[];
 }
@@ -177,6 +183,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			}
 			peer.onNotification("tools/changed", (p) => void WireToolSource.changed.get(peer)?.get(p?.toolSource)?.refresh().catch(() => undefined));
 			if (reg.workingEnvironment) api.provide("working-environment", new WireEnvironment(peer, api.project, reg.workingEnvironment.containment));
+			if (reg.runtime) api.provide("runtime", new WireRuntime(peer, reg.runtime.id, reg.runtime.supports));
 			for (const h of reg.hooks ?? []) {
 				if (h.hook === "output") {
 					api.reportProblem("hooks", new Error("\"Before output reaches a recipient\" can't be handled by a plugin in another process (not_supported)"));
@@ -192,6 +199,58 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			}
 		},
 	};
+}
+
+interface Turn { input: TurnInput; host: RuntimeHost; signal: AbortSignal }
+
+/** A Runtime in another process. Each turn is one request; its callbacks reach this turn's RuntimeHost. */
+class WireRuntime implements Runtime {
+	private turns = new Map<number | string, Turn>();
+	constructor(private peer: WirePeer, readonly id: string, readonly supports: Runtime["supports"]) {
+		const turn = (p: any): Turn => {
+			const t = this.turns.get(p?.parentRequestId);
+			if (!t) throw new WireError("invalid_request", "That turn has ended");
+			return t;
+		};
+		peer.handle("host/runtime/newId", async (p) => ({ id: await turn(p).host.newId() }));
+		peer.handle("host/runtime/prepareStep", async (p) => toWire(await turn(p).host.prepareStep({ stepId: p.stepId, usage: p.usage })));
+		peer.handle("host/runtime/model", async (p, ctx) => {
+			const t = turn(p);
+			return toWire(await t.input.model.request(fromWire(p.request), { signal: AbortSignal.any([t.signal, ctx.signal]), sessionId: t.input.sessionId, onEvent: (event) => peer.notify("host/runtime/modelEvent", { parentRequestId: ctx.id, event }) }));
+		});
+		peer.handle("host/runtime/hook", async (p) => toWire((await turn(p).host.hook(p.hook, fromWire(p.payload))) ?? null));
+		peer.handle("host/runtime/definition", async (p) => toWire((await turn(p).host.definition(p.toolName)) ?? null));
+		peer.handle("host/runtime/runToolCall", async (p, ctx) => {
+			const t = turn(p);
+			return toWire(await t.host.runToolCall(fromWire(p.call), AbortSignal.any([t.signal, ctx.signal])));
+		});
+		peer.handle("host/runtime/record", async (p) => toWire(await turn(p).host.record(fromWire(p.entry))));
+		peer.handle("host/runtime/takeSteering", async (p) => ({ entries: toWire(await turn(p).host.takeSteering()) }));
+		peer.handle("host/runtime/hasSteering", async (p) => ({ waiting: await turn(p).host.hasSteering() }));
+		peer.onNotification("host/runtime/report", (p) => {
+			const t = this.turns.get(p?.parentRequestId);
+			t?.host.report(String(p.type), fromWire(p.data), { ...(p.stepId ? { stepId: p.stepId } : {}), ...(p.toolCallId ? { toolCallId: p.toolCallId } : {}) });
+		});
+	}
+	private async turn(method: string, input: TurnInput, host: RuntimeHost, signal: AbortSignal, extra: Record<string, unknown> = {}): Promise<TurnOutcome> {
+		const turn = { sessionId: input.sessionId, turnId: input.turnId, startedBy: input.startedBy, model: toWire(input.model.model), modelSupports: input.model.supports, settings: input.settings, ...(input.resultShape ? { resultShape: input.resultShape } : {}) };
+		const req = this.peer.request<TurnOutcome>(method, { turn, ...toWire(extra) }, signal);
+		this.turns.set(req.id, { input, host, signal });
+		try {
+			return fromWire(await req) as TurnOutcome;
+		} finally {
+			this.turns.delete(req.id);
+		}
+	}
+	runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome> {
+		return this.turn("runtime/runTurn", input, host, signal);
+	}
+	resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
+		return this.turn("runtime/resumeTurn", input, host, signal, { interrupted });
+	}
+	continueOpenCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
+		return this.turn("runtime/continueOpenCalls", input, host, signal, { calls });
+	}
 }
 
 type Track = <T>(p: Promise<T> & { id: number }, parent: Parent) => Promise<T>;

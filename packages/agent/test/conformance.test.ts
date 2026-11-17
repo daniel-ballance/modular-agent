@@ -63,3 +63,10 @@ test("this agent passes the ACP kit hosting its Provider, tools, environment and
 	const run = spawnSync(process.execPath, [kit, "--plugin-checks", "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 180_000, env: { ...process.env, MODULAR_AGENT_PLUGINS: JSON.stringify(plugins) } });
 	assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
 });
+
+test("this agent survives kill -9 mid-turn with a durable Runtime served from another process", () => {
+	const plugins = [{ command: [process.execPath, servePlugin], env: { MODULAR_AGENT_PLUGIN_PARTS: "durable-runtime" } }];
+	const run = spawnSync(process.execPath, [kit, "--crash-checks", "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 240_000, env: { ...process.env, MODULAR_AGENT_PLUGINS: JSON.stringify(plugins) } });
+	assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
+	assert.match(run.stdout, /PASS {2}crash: with continuesAfterRestart, the turn carried on and completed/);
+});
