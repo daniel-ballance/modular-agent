@@ -2,13 +2,14 @@
 import { terminalInterface, type TerminalMode } from "@modular-agent/interface-terminal";
 import { approval, type ApprovalPolicy } from "@modular-agent/approval";
 import { acpInterface } from "@modular-agent/interface-acp";
+import { tuiInterface } from "@modular-agent/interface-tui";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "./index.js";
 
 function parse(argv: string[]) {
-	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; approvalWait?: number; questionWait?: number; acp: boolean; help: boolean } = {
-		mode: "interactive", piAuth: false, ephemeral: false, durable: false, acp: false, help: false,
+	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; approvalWait?: number; questionWait?: number; acp: boolean; plain: boolean; help: boolean } = {
+		mode: "interactive", piAuth: false, ephemeral: false, durable: false, acp: false, plain: false, help: false,
 	};
 	const rest: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
@@ -21,6 +22,7 @@ function parse(argv: string[]) {
 		else if (a === "--ephemeral") out.ephemeral = true;
 		else if (a === "--durable") out.durable = true;
 		else if (a === "--acp") out.acp = true;
+		else if (a === "--plain") out.plain = true;
 		else if (a === "--approval") out.approval = argv[++i] as ApprovalPolicy;
 		else if (a === "--approval-wait") out.approvalWait = Number(argv[++i]) * 1000;
 		else if (a === "--question-wait") out.questionWait = Number(argv[++i]) * 1000;
@@ -38,6 +40,7 @@ Usage:
   ma -p [options] "prompt"     print the answer and exit
   ma --json [options] "prompt" print every event as JSON lines
   ma --acp [options]           serve ACP (Agent Client Protocol) on stdin and stdout
+  ma --plain [options]         line-based interactive mode, instead of the full-screen TUI
 
 Options:
   -m, --model provider/id   model to use (or set "plugins.model-selection.default" in settings)
@@ -66,6 +69,15 @@ async function main() {
 		try {
 			await acp.acp.serveStdio();
 			return 0;
+		} finally {
+			await harness.stop();
+		}
+	}
+	if (args.mode === "interactive" && !args.plain && process.stdout.isTTY && process.stdin.isTTY) {
+		const tui = tuiInterface({ sessionId: args.session });
+		const harness = await createAgent({ model: args.model, usePiAuth: args.piAuth, ephemeral: args.ephemeral, plugins: [...common, tui] });
+		try {
+			return await tui.tui.run();
 		} finally {
 			await harness.stop();
 		}

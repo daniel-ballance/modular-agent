@@ -20,7 +20,8 @@ When the code and the description disagree, this page says so. Update it when ei
 | A plugin provides a capability, adds behaviour, or both | proven | `model-selection` adds behaviour; `tools-files` provides a capability. |
 | Plugins can define capabilities and hook points for each other | built | `defineHook` and `provide` exist. No plugin defines a new hook point for others yet. |
 | A plugin replaces another deliberately | proven | `runtime-durable` replaces `runtime-transient`. |
-| A plugin is checked before it loads | partly | The `plugin.load` gate exists. No trust plugin uses it yet. |
+| A plugin is checked before it loads | proven | `project-trust` refuses a project's plugins until the project is trusted. |
+| Plugins loaded from settings | proven | `load` in global or project `settings.json`. |
 | A plugin makes several changes together, all kept or none | partly | Entries in one transaction are kept together. Input given in the same transaction is taken after. |
 | Plugins stay within the plugin API | paper | A convention: plugins run in the same process and could reach around the API. |
 | Plugins added during a session | paper | Declared unsupported. |
@@ -34,7 +35,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | Recovering an interrupted turn is the Runtime's job | changed, proven | Was the Harness's job in the first version. |
 | Provider keeps no state and runs no tools | proven | `provider-pi-ai` declares both false. |
 | Provider keeps state, runs tools itself, live sessions, late answers | paper | Declared false; no Provider does them. |
-| Interface: terminal | proven | Interactive, print and JSON modes. |
+| Interface: terminal | proven | Full-screen TUI, line-based, print and JSON modes. |
 | Interface: over a wire, driven by a host | proven | `interface-acp` speaks ACP v1 over stdio. T3 Code drove it as a provider and showed its tool calls as native cards. |
 | The agent declares what it supports, to a host | proven | In `initialize`, under `_meta`. |
 | Each session has its own project (`cwd`) | changed, proven | The Harness's project was per process. ACP gives each session its own `cwd`, so tools, context files and the session list now follow the session's. |
@@ -74,6 +75,12 @@ When the code and the description disagree, this page says so. Update it when ei
 | Erasure reaches every copy | partly | Entries are erased in the store. Summaries that copied the data are not. |
 | The record is intact; each recipient gets a gated view | proven | A secret split across streamed pieces is held and redacted. |
 | Every tool call ends with exactly one result | proven | Including interrupted, refused, cancelled and late results. |
+
+## Tools
+
+| Claim | Status | Notes |
+|---|---|---|
+| Several calls in one step may run together; results in the order asked | proven | Only when every tool in the step allows it. |
 
 ## Hook points
 

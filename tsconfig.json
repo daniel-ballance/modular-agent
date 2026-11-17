@@ -50,6 +50,9 @@
       "path": "packages/interface-acp"
     },
     {
+      "path": "packages/interface-tui"
+    },
+    {
       "path": "packages/runtime-durable"
     }
   ]

@@ -281,3 +281,39 @@ test("erasure removes content from the record and leaves an erasure entry", asyn
 	assert.ok(all.some((e) => e.kind === "erasure"));
 	await h.stop();
 });
+
+test("tool calls that may run together do, and their results are recorded in the order the model asked", async () => {
+	const started = new Set<string>();
+	const waitFor = async (name: string) => {
+		for (let i = 0; i < 200 && !started.has(name); i++) await new Promise((r) => setTimeout(r, 2));
+		if (!started.has(name)) throw new Error(`${name} never started: the calls ran one at a time`);
+	};
+	const together: Plugin = {
+		name: "together",
+		setup(api) {
+			api.provide("tool-source", {
+				id: "together",
+				tools: () => ["first", "second"].map((name) => ({ name, description: name, parameters: { type: "object" }, parallel: true })),
+				run: async (call: { name: string }) => {
+					started.add(call.name);
+					await waitFor(call.name === "first" ? "second" : "first");
+					if (call.name === "first") await new Promise((r) => setTimeout(r, 20)); // first finishes last
+					return { status: "completed", content: [{ type: "text", text: `${call.name} done` }] };
+				},
+			});
+		},
+	};
+	const { make } = setup(
+		[fauxAssistantMessage([fauxToolCall("first", {}), fauxToolCall("second", {})], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("both done")])],
+		[together],
+	);
+	const h = await make();
+	const api = h.api("test");
+	const s = await api.startSession();
+	await api.input(s, { content: "go", actorId: "user" });
+	await api.waitForIdle(s);
+	const results = api.history(s).filter((e) => e.kind === "toolResult").map((e) => textOf(e.message!.content));
+	assert.deepEqual(results, ["first done", "second done"]);
+	assert.equal(lastTurn(h, s).outcome.kind, "completed");
+	await h.stop();
+});

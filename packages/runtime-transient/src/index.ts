@@ -21,6 +21,8 @@ import {
 	zeroUsage,
 } from "@modular-agent/harness";
 
+interface Prepared { call: ToolCall; refused?: string; pending?: string }
+
 export interface TransientRuntimeOptions {
 	/** Default step limit when the session sets none. */
 	maxSteps?: number;
@@ -137,15 +139,29 @@ export class TransientRuntime implements Runtime {
 
 			const calls = message.content.filter(isToolCall);
 			const open: string[] = [];
-			for (let i = 0; i < calls.length; i++) {
-				const part = calls[i];
-				if (signal.aborted) {
-					await this.settleUnanswered(host, message, stepId, "cancelled", entries, i);
-					return done({ kind: "cancelled" }, message);
+			// Calls run together only when every tool in the step says it may. Results are recorded in the order the model asked.
+			const together = calls.length > 1 && calls.every((c) => host.definition(c.name)?.parallel === true);
+			if (together) {
+				const prepared: Prepared[] = [];
+				for (const part of calls) prepared.push(await this.preflight(host, part, stepId));
+				const ran = await Promise.all(prepared.map((p) => (p.refused || p.pending ? undefined : host.runToolCall(p.call, signal))));
+				for (let i = 0; i < prepared.length; i++) {
+					const recorded = await this.complete(host, prepared[i], stepId, ran[i]);
+					if (recorded) entries.push(recorded.id);
+					else open.push(calls[i].id);
 				}
-				const recorded = await this.runCall(host, part, stepId, signal);
-				if (recorded) entries.push(recorded.id);
-				else open.push(part.id);
+				if (signal.aborted) return done({ kind: "cancelled" }, message);
+			} else {
+				for (let i = 0; i < calls.length; i++) {
+					const part = calls[i];
+					if (signal.aborted) {
+						await this.settleUnanswered(host, message, stepId, "cancelled", entries, i);
+						return done({ kind: "cancelled" }, message);
+					}
+					const recorded = await this.runCall(host, part, stepId, signal);
+					if (recorded) entries.push(recorded.id);
+					else open.push(part.id);
+				}
 			}
 			host.report("step.ended", { usage: message.usage }, { stepId });
 			steps++;
@@ -172,19 +188,26 @@ export class TransientRuntime implements Runtime {
 	}
 
 	protected async runCall(host: RuntimeHost, part: ToolCallPart, stepId: string, signal: AbortSignal): Promise<HistoryEntry | undefined> {
-		let call: ToolCall = { id: part.id, name: part.name, input: part.arguments ?? {}, startedBy: "model", stepId };
-		const definition = host.definition(call.name);
-		const gate = await host.hook<GateResult<{ call: ToolCall }>>("tool.before", { call, definition });
-		if (gate.pending) return this.leaveOpen(host, call, stepId, gate.pending);
-		let result: ToolResult;
-		if (gate.refused) {
-			result = { callId: call.id, status: "refused", content: [text(`Refused: ${gate.refused}`)] };
-		} else {
-			call = gate.value.call;
-			const ran = await host.runToolCall(call, signal);
-			if (isPending(ran)) return this.leaveOpen(host, call, stepId, ran.pending);
-			result = ran;
-		}
+		const prepared = await this.preflight(host, part, stepId);
+		const ran = prepared.refused || prepared.pending ? undefined : await host.runToolCall(prepared.call, signal);
+		return this.complete(host, prepared, stepId, ran);
+	}
+
+	/** "Before a tool call": allow, refuse, change or leave open. */
+	protected async preflight(host: RuntimeHost, part: ToolCallPart, stepId: string): Promise<Prepared> {
+		const call: ToolCall = { id: part.id, name: part.name, input: part.arguments ?? {}, startedBy: "model", stepId };
+		const gate = await host.hook<GateResult<{ call: ToolCall }>>("tool.before", { call, definition: host.definition(call.name) });
+		if (gate.pending) return { call, pending: gate.pending };
+		if (gate.refused) return { call, refused: gate.refused };
+		return { call: gate.value.call };
+	}
+
+	/** "After a tool call", then record its one result. Returns undefined when the call is left open. */
+	protected async complete(host: RuntimeHost, prepared: Prepared, stepId: string, ran: Awaited<ReturnType<RuntimeHost["runToolCall"]>> | undefined): Promise<HistoryEntry | undefined> {
+		const call = prepared.call;
+		if (prepared.pending) return this.leaveOpen(host, call, stepId, prepared.pending);
+		if (ran && isPending(ran)) return this.leaveOpen(host, call, stepId, ran.pending);
+		let result: ToolResult = prepared.refused || !ran ? { callId: call.id, status: "refused", content: [text(`Refused: ${prepared.refused}`)] } : (ran as ToolResult);
 		const after = await host.hook<{ result: ToolResult }>("tool.after", { call, result });
 		result = after?.result ?? result;
 		host.report("tool.result", { status: result.status }, { stepId, toolCallId: call.id });

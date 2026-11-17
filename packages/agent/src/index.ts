@@ -12,6 +12,8 @@ import { piAiProviders } from "@modular-agent/provider-pi-ai";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { systemPrompt } from "@modular-agent/system-prompt";
 import { fileTools } from "@modular-agent/tools-files";
+import { pluginsFromSettings, projectTrust } from "./loading.js";
+export { pluginsFromSettings, projectTrust } from "./loading.js";
 
 export interface AgentOptions {
 	project?: string;
@@ -46,8 +48,13 @@ export function vanillaPlugins(options: AgentOptions = {}): Plugin[] {
 }
 
 export async function createAgent(options: AgentOptions = {}): Promise<Harness> {
-	const harness = new Harness({ project: options.project ?? process.cwd(), home: options.home ?? join(homedir(), ".modular-agent") });
-	await harness.load(vanillaPlugins(options));
+	const project = options.project ?? process.cwd();
+	const home = options.home ?? join(homedir(), ".modular-agent");
+	const harness = new Harness({ project, home });
+	const fromSettings = await pluginsFromSettings(home, project);
+	for (const problem of fromSettings.problems) harness.problems.push({ plugin: "settings", where: "load", error: problem });
+	// The trust check loads first, so it can refuse project plugins loaded after it.
+	await harness.load([projectTrust(home), ...vanillaPlugins(options), ...fromSettings.plugins]);
 	return harness;
 }
 

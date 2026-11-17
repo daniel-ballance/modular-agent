@@ -14,6 +14,7 @@
 | `provider-pi-ai` | Provider, one per pi-ai vendor |
 | `interface-terminal` | Interface: interactive, print (`-p`) and JSON modes |
 | `interface-acp` | Interface: ACP v1 over stdio (`ma --acp`), using the official SDK |
+| `interface-tui` | Interface: full-screen terminal UI on Pi's `pi-tui` library. The default interactive mode; `--plain` gives the line-based one. |
 | `tools-files` | Tool source: `read`, `write`, `edit`, `bash` |
 | `env-local` | Working environment: the local machine |
 | `history-jsonl` | History store: one JSONL file per session, appended a batch at a time, with erasure |
@@ -106,6 +107,12 @@ What the host test found:
 - **ACP v1 has no key for repeated input.** Our key travels in `_meta` when a client sends one. T3 doesn't.
 - **MCP servers the client passes are ignored.** There is no MCP client plugin yet.
 
+## Day-to-day use
+
+- **Parallel tool calls.** When every tool in a step says it may run alongside others, the calls are checked one at a time, then run together. Their results are recorded in the order the model asked. A test proves they overlap: each tool waits until the other has started.
+- **Plugins from settings.** `settings.json` can name plugins under `load`, as a package name or a path, with options. A plugin from the project's settings loads only once the user trusts the project with `/trust`. The trust check is itself a plugin, at the "plugin about to load" hook point.
+- **A full-screen TUI.** Markdown streams as the model writes, each tool call is a card with its live output, approvals and choices are a selection list, and the editor completes slash commands and file paths. Enter sends, or steers a running turn; Esc cancels and hands queued input back to the editor. Checked in a pseudo-terminal with a real model, approving a `bash` call from the list.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).
@@ -120,8 +127,6 @@ What the host test found:
 ## Not done yet
 
 - **A call left open must be safe to run again up to its question.** That is the tool author's promise, as with Pi Durable's tools that park.
-- **Tool calls run one at a time,** even when the model asks for several.
 - **Several actors** work in the Harness and tests, but the terminal Interface acts for one user.
-- **Adding plugins during a session** isn't supported. The declaration says so.
-- **The terminal Interface is line-based,** not a full TUI like Pi's.
+- **Adding plugins during a session** isn't supported. Plugins load at start, from code or settings. The declaration says so.
 - **Inside the agent, every part talks to the others through function calls.** Only the Interface is over a wire.

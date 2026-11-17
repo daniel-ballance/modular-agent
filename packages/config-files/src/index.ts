@@ -4,9 +4,16 @@ import type { Configuration, Plugin } from "@modular-agent/harness";
 
 type Json = Record<string, unknown>;
 
-function readJson(path: string): Json {
+export function readJson(path: string): Json {
 	if (!existsSync(path)) return {};
 	return JSON.parse(readFileSync(path, "utf8")) as Json;
+}
+
+/** The two settings layers, kept apart so a host can tell where a setting came from. */
+export function readSettings(home: string, project: string): { global: Json; project: Json; globalPath: string; projectPath: string } {
+	const globalPath = join(home, "settings.json");
+	const projectPath = join(project, ".modular-agent", "settings.json");
+	return { global: readJson(globalPath), project: readJson(projectPath), globalPath, projectPath };
 }
 
 function merge(a: Json, b: Json): Json {
