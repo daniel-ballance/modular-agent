@@ -203,7 +203,7 @@ What changed to make it work:
 - **A stopping process doesn't announce turn ends.** A remote Runtime finished its turn after the session was suspended, and the Harness announced `turn.ended` for a session it no longer held. The subagents plugin then failed on it.
 - **A plugin process keeps the agent alive only while the agent waits on it.** A crash test that abandons its harness now stops it after the test, as the real crash would have.
 
-Two of my test mistakes are worth a note. A test killed `bash`'s parent process to simulate a dying plugin. With the working environment in process, that parent was the test runner. And `echo done > out.txt` has no output, so it can't test live output.
+Two test mistakes are worth a note. A test killed `bash`'s parent process to simulate a dying plugin. With the working environment in process, that parent was the test runner. And `echo done > out.txt` has no output, so it can't test live output.
 
 ## What building changed
 
