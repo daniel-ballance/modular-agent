@@ -268,9 +268,13 @@ export class TuiInterface implements InterfaceCapability {
 	private async submit(raw: string): Promise<void> {
 		const line = raw.trim();
 		if (!line) return;
-		this.editor.addToHistory(line);
 		const pending = this.questions.find((q) => !(q.kind === "approval" || q.options?.length));
-		if (pending && this.isBusy()) return this.answer(pending, line);
+		if (pending && this.isBusy()) {
+			// A secret stays out of the editor's history.
+			if (pending.kind !== "secret") this.editor.addToHistory(line);
+			return this.answer(pending, line);
+		}
+		this.editor.addToHistory(line);
 		if (line === "/quit" || line === "/exit") return this.quit(0);
 		if (await this.local(line)) return;
 		const followUp = line.startsWith(">>");

@@ -245,6 +245,11 @@ export class TerminalInterface implements InterfaceCapability {
 		if (choices && /^\d+$/.test(line)) value = choices[Number(line) - 1];
 		const declined = !line || (request.kind === "approval" && value !== "allow");
 		const result = this.api.answer(this.sessionId, { requestId: request.id, actorId: this.actorId, value: declined ? undefined : value, declined });
+		// A secret must not stay in the line history, where the up arrow would bring it back.
+		if (request.kind === "secret") {
+			const history = (this.rl as unknown as { history?: string[] } | undefined)?.history;
+			if (history?.[0] === line) history.shift();
+		}
 		if (!result.accepted) this.line(red(result.reason ?? "Not accepted"));
 	}
 

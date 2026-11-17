@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -94,4 +94,34 @@ test("a tool that can't wait outside a turn fails instead of staying open", asyn
 	const refused = await api.callTool(s, { name: "ask_user", input: { question: "?" }, startedBy: "ui" });
 	assert.equal(refused.status, "refused");
 	await h.stop();
+});
+
+test("a secret goes to the credential store and nowhere else", async () => {
+	const d = dirs();
+	const ui = fakeUi();
+	let context = "";
+	const events: unknown[] = [];
+	const h = await agent(d, [
+		fauxAssistantMessage([fauxToolCall("ask_user", { question: "Your GitHub token?", secret: "github" })], { stopReason: "toolUse" }),
+		(c) => {
+			context = JSON.stringify(c.messages);
+			return fauxAssistantMessage([fauxText(`Seen: ${answerSeen(c)}`)]);
+		},
+	], ui.plugin);
+	const api = h.api("t");
+	const s = await api.startSession();
+	api.follow(s, { recipient: "test", raw: true }, (e) => events.push(e));
+	await api.input(s, { content: "set up github", actorId: "user" });
+	const q = await ui.next();
+	assert.equal(q.kind, "secret");
+	assert.equal(ui.answer(q, "ghp_SECRET123").accepted, true);
+	await api.waitForIdle(s);
+	assert.match(lastText(h, s)!, /kept as "secret:github"; its value is not shown to you/);
+	assert.ok(!context.includes("ghp_SECRET123"), "the model never sees it");
+	assert.ok(!JSON.stringify(events).includes("ghp_SECRET123"), "no event carries it");
+	await h.stop();
+	const files = readdirSync(d.home, { recursive: true }).map(String).filter((f) => f.endsWith(".jsonl"));
+	assert.ok(files.length && files.every((f) => !readFileSync(join(d.home, f), "utf8").includes("ghp_SECRET123")), "the history never records it");
+	const auth = JSON.parse(readFileSync(join(d.home, "auth.json"), "utf8"));
+	assert.deepEqual(auth["secret:github"], { type: "api_key", key: "ghp_SECRET123" }, "the credential store keeps it");
 });

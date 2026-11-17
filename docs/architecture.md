@@ -283,7 +283,7 @@ These requirements are **proposed** ([open question](open-questions.md#waiting-f
 3. **Every request says who may answer it,** such as the user, the parent agent or a program, **and whether it can still be answered.** A request lost when a process stopped is shown as unanswerable, not silently dropped. Seeing a request does not mean being allowed to answer it.
 4. **One answer closes a request.** Later answers are refused.
 5. **Approval fails closed.** Only an explicit "allow" from an actor with the authority lets a tool call run. A late "allow" is checked again against current authority and the current branch before the call runs.
-6. **A secret goes only to the credential store.** It never reaches the Runtime or the model. Its value is never recorded.
+6. **A secret goes only to the credential store.** It never reaches the Runtime or the model. Its value is never recorded. Whoever asks names the credential to keep it as, and learns only that it was kept. **Decided while building** ([build notes](build-notes.md#secrets)).
 7. **Questions are recorded.** Each question and each answer is a history entry, so which questions are open is worked out from the history. A question can carry a key: asking again with the same key reopens the same question, or reuses its recorded answer if whoever gave it may still answer and it is on the current branch. This is how a question survives a restart with a durable Runtime: the pending call's checks run again and find it.
 8. **A session can be set never to ask,** for unattended work. Every approval is then refused without asking.
 9. **A subagent's requests go to its parent,** which can answer them itself or pass them to its own user.

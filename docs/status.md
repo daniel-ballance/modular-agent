@@ -61,7 +61,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | A late allow is checked again | proven | A recorded allow from someone who may no longer answer is not reused. |
 | Questions are recorded and survive a restart | proven | With a durable Runtime, and past their turn with either. |
 | A tool call stays open past its turn | proven | Left open by an approval check or by the tool itself. |
-| A secret goes only to the credential store | partly | A secret's value is never recorded. Nothing routes it to the credential store yet. |
+| A secret goes only to the credential store | proven | The Harness writes it to the store; the asker, history and events see only its name. Typing it in a terminal still shows it on screen. |
 
 ## Jobs, history and output
 

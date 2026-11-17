@@ -159,6 +159,14 @@ A test compacts a conversation with a phone number in it, erases the input that 
 
 Still out of reach: a fork made before the erasure keeps its own copy.
 
+## Secrets
+
+A secret's value used to stay out of the record, but it still went back to whoever asked. If the asker was `ask_user`, the value went into the tool result, and so to the model. Now a secret request names the credential to keep it as. The Harness writes the answer to the credential store, and the asker, the history and every event see only that name. A request with no name, or no credential store to keep it, is declined before anyone is asked. Because the recorded answer holds no value, it can be reused like any other answer, so a secret can now be answered after its turn.
+
+`ask_user` can ask for a secret by name, under a `secret:` prefix so a model can't overwrite a Provider's key. The value is stored in the `api_key` shape, because Pi refuses an `auth.json` with any other kind of entry. Both terminal Interfaces keep a typed secret out of their line history. A test has the model ask for a token, and checks it reaches the credential store and is absent from the tool result, the model context, the events and the history file.
+
+Still to do: neither terminal Interface hides a secret as it is typed.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).

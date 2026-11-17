@@ -296,9 +296,21 @@ export interface InputRequest {
 	whenTimeLimit?: "decline" | "leaveOpen";
 	/** The turn that asked, if any. */
 	turnId?: string;
+	/** Secret requests only: the name the credential store keeps the answer under. The asker never sees the value. */
+	credential?: string;
 }
 export type InputRequestDraft = Omit<InputRequest, "id" | "sessionId" | "askedBy" | "answerers" | "turnId"> & { answerers?: string[] };
-export interface Answer { requestId: string; value?: string; declined?: boolean; actorId: string; reason?: string; /** The question is still open, past its turn. */ pending?: boolean }
+export interface Answer {
+	requestId: string;
+	value?: string;
+	declined?: boolean;
+	actorId: string;
+	reason?: string;
+	/** The question is still open, past its turn. */
+	pending?: boolean;
+	/** A secret's answer: the credential it was stored as. The value itself goes only to the credential store. */
+	stored?: string;
+}
 
 // ---------- Events ----------
 

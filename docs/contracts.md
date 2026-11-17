@@ -195,14 +195,15 @@ An input request asks for something only an actor can give.
 | whether it can still be answered | |
 | a time limit *(optional)* | |
 | a key *(optional)* | Asking again with the same key reopens the same question, or reuses its recorded answer. |
+| where to keep it *(secret only)* | the name the credential store keeps the answer under. Without one, or without a credential store, the request is declined before anyone is asked. |
 
 | Answer contains |
 |---|
 | the request it answers |
-| the value, or "declined" |
+| the value, or "declined". For a secret, only where it was kept. |
 | the actor who answered |
 
-The first accepted answer closes the request. An answer to a secret request goes only to the credential store.
+The first accepted answer closes the request. An answer to a secret request goes only to the credential store: the asker, the record and every event see only the name it was kept under. That is why a recorded secret answer can be reused like any other.
 
 ### Declaration
 

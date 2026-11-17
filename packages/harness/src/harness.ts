@@ -10,6 +10,7 @@ import {
 	type Configuration,
 	type ContentPart,
 	type Declaration,
+	type CredentialStore,
 	type EntryDraft,
 	type GateResult,
 	type HandlerOrder,
@@ -994,14 +995,30 @@ export class Harness {
 		const answered = branch.find((e) => e.kind === "inputAnswer" && (e.data as { requestId: string }).requestId === request.id);
 		if (!answered) return { request };
 		const answer = (answered.data as { answer: Answer }).answer;
-		// A secret's value is never recorded, so it must be asked again.
-		if (request.kind === "secret" && !answer.declined) return undefined;
+		// A secret's recorded answer holds only where it was stored, so it can be reused like any other.
 		// A recorded allow counts only if whoever gave it may still answer.
 		if (!answer.declined && !this.mayAnswer(s, request, answer.actorId)) return undefined;
 		return { request, answer };
 	}
 
+	/** A secret's answer goes to the credential store. What the asker and the record get is only where it went. */
+	private async keepSecret(request: InputRequest, answer: Answer): Promise<Answer> {
+		if (request.kind !== "secret" || answer.declined || answer.pending) return answer;
+		const { value, ...rest } = answer;
+		try {
+			const store = this.use<CredentialStore>("credential-store");
+			if (!store || !request.credential) throw new Error("there is nowhere to keep a secret");
+			await store.modify(request.credential, async () => ({ type: "api_key", key: value ?? "" }));
+			return { ...rest, stored: request.credential };
+		} catch (error) {
+			return { ...rest, declined: true, reason: `The secret was not kept: ${error instanceof Error ? error.message : String(error)}` };
+		}
+	}
+
 	private async ask(s: Session, draft: InputRequestDraft, askedBy: string): Promise<Answer> {
+		if (draft.kind === "secret" && (!draft.credential || !this.use<CredentialStore>("credential-store"))) {
+			return { requestId: "", declined: true, actorId: "harness", reason: "A secret needs a credential name and a credential store to keep it" };
+		}
 		let request: InputRequest = { ...draft, id: this.newId(), sessionId: s.id, askedBy, answerers: draft.answerers ?? [], turnId: s.running?.turnId };
 		let reopened = false;
 		if (draft.key) {
@@ -1029,13 +1046,14 @@ export class Harness {
 					if (open.timer) clearTimeout(open.timer);
 					s.requests.delete(request.id);
 					for (const i of viewers) i.onInputRequestClosed?.(request.id);
-					const kept = request.kind === "secret" ? { ...answer, value: undefined } : answer;
-					this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId, toolCallId: request.toolCallId, actorId: answer.actorId, data: { requestId: request.id, answer: kept } }])
-						.catch((error) => this.problem("harness", "record answer", error))
-						.finally(() => {
-							this.emit(s.id, "input.request.closed", { requestId: request.id, declined: answer.declined ?? false, value: request.kind === "secret" ? undefined : answer.value }, "harness", { actorId: answer.actorId, toolCallId: request.toolCallId });
-							resolve(answer);
-						});
+					void this.keepSecret(request, answer).then((kept) =>
+						this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId, toolCallId: request.toolCallId, actorId: kept.actorId, data: { requestId: request.id, answer: kept } }])
+							.catch((error) => this.problem("harness", "record answer", error))
+							.finally(() => {
+								this.emit(s.id, "input.request.closed", { requestId: request.id, declined: kept.declined ?? false, value: kept.value }, "harness", { actorId: kept.actorId, toolCallId: request.toolCallId });
+								resolve(kept);
+							}),
+					);
 				},
 				timer: undefined as NodeJS.Timeout | undefined,
 			};
@@ -1075,9 +1093,9 @@ export class Harness {
 		if (!request) return { accepted: false, reason: "The request is closed or can no longer be answered" };
 		if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
 		s.lateAnswers.add(request.id);
-		const kept = request.kind === "secret" ? { ...answer, value: undefined } : answer;
 		const previous = s.settling ?? Promise.resolve();
 		const work = previous.then(async () => {
+			const kept = await this.keepSecret(request, answer);
 			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, toolCallId: request.toolCallId, actorId: answer.actorId, data: { requestId: request.id, answer: kept, late: true } }]);
 			s.lateAnswers.delete(request.id);
 			for (const i of this.viewersFor(s, request)) i.onInputRequestClosed?.(request.id);
