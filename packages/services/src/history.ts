@@ -65,7 +65,7 @@ class EntryFiles {
 		const byId = new Map(kept.map((e) => [e.id as string, canonical(e)]));
 		const fresh: Json[] = [];
 		for (const e of batch) {
-			if (typeof e.id !== "string" || !("parentId" in e)) throw new BindingError(400, "invalid", "Every entry needs an id and a parentId");
+			if (typeof e.id !== "string" || !("parentId" in e)) throw new BindingError(400, "invalid_request", "Every entry needs an id and a parentId");
 			const earlier = byId.get(e.id) ?? (fresh.find((f) => f.id === e.id) ? canonical(fresh.find((f) => f.id === e.id)) : undefined);
 			if (earlier === undefined) fresh.push(e);
 			else if (earlier !== canonical(e)) throw new BindingError(409, "conflict", `Entry ${e.id} was kept with other content`);
@@ -83,7 +83,7 @@ class EntryFiles {
 		const next = this.get(id).map((e) => {
 			if (!targets.has(e.id as string)) return e;
 			erased.push(e.id as string);
-			return { id: e.id, parentId: e.parentId, kind: e.kind, erased: true };
+			return { id: e.id, parentId: e.parentId, kind: e.kind ?? null, erased: true };
 		});
 		if (!erased.length) return [];
 		this.entries.set(id, next);
@@ -122,7 +122,7 @@ export async function historyService(options: { dir: string; token: string; port
 			["GET", /^\/v1$/, () => ({ binding: HISTORY_BINDING, ttlMs, retention: null })],
 			["PUT", /^\/v1\/sessions\/([^/]+)$/, (req) => {
 				const b = (req.body ?? {}) as Partial<SessionMeta>;
-				if (typeof b.project !== "string") throw new BindingError(400, "invalid", "project is required");
+				if (typeof b.project !== "string") throw new BindingError(400, "invalid_request", "project is required");
 				files.put({ id: req.params[0], project: b.project, created: typeof b.created === "number" ? b.created : Date.now(), ...(b.parentSessionId ? { parentSessionId: b.parentSessionId } : {}), ...(b.forkedFrom ? { forkedFrom: b.forkedFrom } : {}) });
 				return {};
 			}],
@@ -143,7 +143,7 @@ export async function historyService(options: { dir: string; token: string; port
 				const [id] = req.params;
 				known(id);
 				const owner = String(req.body?.owner ?? "");
-				if (!owner) throw new BindingError(400, "invalid", "owner is required");
+				if (!owner) throw new BindingError(400, "invalid_request", "owner is required");
 				const l = current(id);
 				if (l && l.owner !== owner) throw new BindingError(409, "held", `Session ${id} is held by another owner`);
 				const lease = l?.lease ?? randomUUID();

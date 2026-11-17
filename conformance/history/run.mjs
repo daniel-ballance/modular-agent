@@ -99,6 +99,12 @@ const gone = r.body.entries?.[0] ?? {};
 check("an erased entry is only id, parentId, kind and erased", gone.erased === true && Object.keys(gone).sort().join() === "erased,id,kind,parentId" && !JSON.stringify(r.body).includes("secret 1"), JSON.stringify(gone));
 r = await req("POST", `/v1/sessions/${id}/erase`, { entryIds: [`${id}-e1`], lease });
 check("erasing again is harmless", r.status === 200, `${r.status}`);
+r = await req("POST", `/v1/sessions/${id}/entries`, { lease, entries: [batch[0]] });
+check("resending an erased entry's content is 409 conflict", r.status === 409 && r.body.code === "conflict", `${r.status} ${JSON.stringify(r.body)}`);
+r = await req("POST", `/v1/sessions/${id}/entries`, { lease, entries: [{ parentId: null }] });
+check("an entry without an id is 400 invalid_request", r.status === 400 && r.body.code === "invalid_request", `${r.status} ${JSON.stringify(r.body)}`);
+r = await req("POST", `/v1/sessions/kit-${randomUUID()}/lease`, { owner: "kit-a" });
+check("a lease on a session never PUT is 404 unknown_session", r.status === 404 && r.body.code === "unknown_session", `${r.status} ${JSON.stringify(r.body)}`);
 
 r = await req("DELETE", `/v1/sessions/${id}/lease/${lease}`);
 check("release the lease", r.status === 200, `${r.status}`);

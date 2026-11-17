@@ -38,6 +38,8 @@ When the code and the description disagree, this page says so. Update it when ei
 | Tools from MCP servers, global and per session | proven | Settings, and servers an ACP client passes. |
 | Parts as services: history store, working environment, model gateway | proven | Separate processes over HTTP, with leases, safe retries and cancelling. |
 | The agent served over HTTP | proven | Server-sent events, resumable from the last entry seen. |
+| Follows the ACP host binding `modular-agent-acp/1` | proven | Conformance kit 43/43, also with history in a service. Rust, Python and Go pass too. |
+| Follows the history service binding `modular-agent-history/1` | proven | History kit 34/34 for this build's service and client. Swapped with Go's service both ways. |
 | A plugin can run in another process | proven | The whole suite passes with the Runtimes, tools, environment and MCP plugin out of process. |
 | Interface: terminal | proven | Full-screen TUI, line-based, print and JSON modes. |
 | Interface: over a wire, driven by a host | proven | `interface-acp` speaks ACP v1 over stdio. T3 Code drove it as a provider and showed its tool calls as native cards. |
@@ -130,10 +132,12 @@ When the code and the description disagree, this page says so. Update it when ei
 | Background processes outlive a cancelled turn, stop with the session or agent | partly | They stop with the agent; closing a session doesn't stop them. |
 | Presence is declared; approval with nobody present is refused | proven | |
 | A key binds the whole question | partly | The key alone is matched. |
+| Input keys survive a restart | changed, proven | Found by the ACP conformance kit; keys are now recorded with the input. |
+| A secret is never asked over a protocol that forbids it in forms | changed, built | Found by the round-two review of the ACP binding. |
 | A job's end is recorded before its report | proven | |
 | A child's job isn't finished while it has calls open | proven | |
 | Trust is given and kept outside the project | proven | |
 | Host MCP servers serve one session and aren't recorded | proven | |
 | A lost part fails its waiting calls and is reported | proven | Plugins over RPC. |
 | A Provider that keeps state starts again after a move or erasure | paper | No Provider here keeps state. |
-| Following resumes from an entry; unknown entries are refused | partly | HTTP resumes by count, not by entry identity. |
+| Following resumes from an entry; unknown entries are refused | partly | The ACP `history` extension does; the HTTP Interface resumes by count, not by entry identity. |

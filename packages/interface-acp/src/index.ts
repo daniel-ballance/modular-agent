@@ -476,6 +476,8 @@ export class AcpInterface implements InterfaceCapability {
 
 	onInputRequest(request: InputRequest): void {
 		if (!this.sessions.has(request.sessionId) || !this.client || this.pending.has(request.id)) return;
+		// Without form support, free text and choices stay open for the binding's requests/answer extensions.
+		if ((request.kind === "text" || request.kind === "choice") && !this.clientCaps.elicitation?.form) return;
 		const abort = new AbortController();
 		this.pending.set(request.id, abort);
 		void this.ask(request, abort.signal)
@@ -491,14 +493,13 @@ export class AcpInterface implements InterfaceCapability {
 
 	private async ask(request: InputRequest, signal: AbortSignal): Promise<{ value?: string; declined?: boolean; reason?: string }> {
 		const client = this.client!;
-		if (request.kind === "approval" || (request.kind === "choice" && request.options?.length)) {
-			const options: acp.PermissionOption[] =
-				request.kind === "approval"
-					? [
-							{ optionId: "allow", name: "Allow", kind: "allow_once" },
-							{ optionId: "refuse", name: "Refuse", kind: "reject_once" },
-						]
-					: [...request.options!.map((o, i) => ({ optionId: `option:${i}`, name: o, kind: "allow_once" as const })), { optionId: "skip", name: "Skip", kind: "reject_once" }];
+		// ACP forbids secrets in forms, so a secret is never asked over ACP.
+		if (request.kind === "secret") return { declined: true, reason: "ACP can't carry a secret" };
+		if (request.kind === "approval") {
+			const options: acp.PermissionOption[] = [
+				{ optionId: "allow", name: "Allow", kind: "allow_once" },
+				{ optionId: "refuse", name: "Refuse", kind: "reject_once" },
+			];
 			const response = await client.request(
 				methods.client.session.requestPermission,
 				{
@@ -509,25 +510,24 @@ export class AcpInterface implements InterfaceCapability {
 				{ cancellationSignal: signal },
 			);
 			if (response.outcome.outcome !== "selected") return { declined: true, reason: "cancelled" };
-			const id = response.outcome.optionId;
-			if (request.kind === "approval") return id === "allow" ? { value: "allow" } : { declined: true };
-			const index = id.startsWith("option:") ? Number(id.slice(7)) : -1;
-			return index >= 0 ? { value: request.options![index] } : { declined: true };
+			return response.outcome.optionId === "allow" ? { value: "allow" } : { declined: true };
 		}
-		if (!this.clientCaps.elicitation?.form) return { declined: true, reason: "the client can't answer free-text questions" };
+		// Free text and choices are a one-field form: a string, or an enum of the options.
+		const field = request.kind === "choice" && request.options?.length ? { type: "string", title: request.question, enum: request.options } : { type: "string", title: request.question };
 		const response = await client.request(
 			methods.client.elicitation.create,
 			{
 				sessionId: request.sessionId,
 				mode: "form",
 				message: request.question,
-				requestedSchema: { type: "object", properties: { answer: { type: "string", title: request.question } }, required: ["answer"] },
+				requestedSchema: { type: "object", properties: { answer: field }, required: ["answer"] },
 			} as acp.CreateElicitationRequest,
 			{ cancellationSignal: signal },
 		);
 		if (response.action !== "accept") return { declined: true };
 		const value = (response as { content?: { answer?: unknown } }).content?.answer;
-		return typeof value === "string" ? { value } : { declined: true };
+		if (typeof value !== "string" || (request.kind === "choice" && request.options?.length && !request.options.includes(value))) return { declined: true };
+		return { value };
 	}
 
 	/** Serve ACP over this process's stdin and stdout. */

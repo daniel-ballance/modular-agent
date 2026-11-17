@@ -232,6 +232,27 @@ A real `xai/grok-4.7` turn ran the same way, across five processes. The model re
 
 What the description gained: keeping the same entries twice keeps them once, and a host that reconnects gets everything recorded since the last entry it saw. Several existing rules held as written. A second writer is refused, as a lease. Nothing the environment starts outlives the agent: the sandbox stops a command when its caller hangs up. Hook points stay with the Provider's stand-in in the agent. Unknown outcomes are never repeated.
 
+## Round two: shared bindings across four languages
+
+After three clean-room builds, in Rust, Python and Go, the description gained their agreed rules ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). Two [bindings](bindings/README.md) were written so builds can work together: one for driving an agent over ACP, and one for a history service over HTTP. Each has a conformance kit, in `conformance/acp` and `conformance/history`.
+
+| | Result |
+|---|---|
+| ACP kit (43 checks) | passed by every build: TypeScript, Rust, Python with plugins in one process and in separate processes, and Go |
+| History kit (34 checks) | passed by the TypeScript and Go history services |
+| The TypeScript agent with its history in Go's service | ACP kit passed |
+| Go's agent with its history in the TypeScript service | ACP kit passed |
+
+The kits found four bugs in this build:
+- input keys didn't survive a restart; they are now recorded with the input and rebuilt on reopening;
+- its HTTP history client sent unused sessions to the service; it now holds them back, as the local store does;
+- its ACP Interface declined free-text questions when a client had no forms; they now stay open for the `answer` extension;
+- it would have sent a secret through an ACP form, which ACP forbids; a secret is now never asked over ACP.
+
+The other builds found 20 gaps in the bindings. They are now clarifications in the bindings, and a known mismatch to fix in a `/2`: ACP's `refusal` means the refused content leaves the context, but the binding uses it for any failed turn.
+
+`npm test` runs both kits against this build: the ACP kit with the history kept locally and in a history service, and the history kit against its own service. `MODULAR_AGENT_HISTORY_URL` and `MODULAR_AGENT_HISTORY_TOKEN_FILE` point the agent at any conforming history service.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).

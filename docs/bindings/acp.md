@@ -17,7 +17,7 @@ Everything here is in addition to ACP v1. Where ACP already says how something w
 
 The agent speaks ACP v1 over its stdin and stdout, one JSON-RPC message per line.
 
-If the environment variable `MODULAR_AGENT_DATA_DIR` is set, the agent keeps all its state under that folder: history, settings, trust and anything else. Otherwise it uses its usual place. The conformance kit depends on this, so it can run each agent in a fresh, empty folder.
+If the environment variable `MODULAR_AGENT_DATA_DIR` is set, the agent keeps all its state under that folder: history, settings, trust and anything else. It overrides any path flags the agent takes. Otherwise the agent uses its usual place. The conformance kit depends on this, so it can run each agent in a fresh, empty folder. A history service the agent was explicitly pointed at keeps its own state.
 
 ## `initialize`
 
@@ -68,12 +68,22 @@ The declaration is an object with these keys. A build may add keys of its own, b
 | `erasureDuringTurn` | `"allowed"` or `"refused"` | Whether erasure is allowed while a turn runs. |
 | `commandContainment` | `"strong"`, `"processGroup"` or `"none"` | How strongly the working environment keeps "nothing outlives the agent": against anything, against the command's process group only, or not at all. |
 
+These keys are optional. A build that needs to say what they say uses these names:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `lateAnswersStartTurns` | boolean | An answer to a question left open past its turn starts a new turn. `startsTurnsUnasked` covers job reports only. |
+| `queuedJobReportsAfterRestart` | `"handedBack"` or `"run"` | When job reports are treated differently from other queued input after a restart. |
+| `projectRoot` | string | The agent serves only this project. `session/new`, `session/load` and `session/resume` with another `cwd` are refused before anything changes, so a host starts one agent per project. |
+
+When a build's policy is mixed, it declares the more restrictive value, and says the rest in its own keys. For example, a build might cancel open calls when moving but refuse to move while jobs run. It declares `movingWithUnfinishedWork: "refused"`.
+
 The response to `session/new`, `session/load` and `session/resume` also carries `_meta["modular-agent"].declaration`: the declaration for that session, which may differ from the agent's, for example because of the session's Provider.
 
 ## Sessions
 
 - **`session/new`** creates a session in the given `cwd`. A session that is created and closed without being used is not listed afterwards, and leaves nothing behind.
-- **`session/load`** sends the session's current branch as `session/update` notifications, then answers. Everything sent passes the output gate. **`session/resume`** answers without replaying.
+- **`session/load`** sends the session's current branch as `session/update` notifications, then answers. Everything sent passes the output gate. **`session/resume`** answers without replaying. If the agent handed back queued input during recovery (`queuedInputAfterRestart: "handedBack"`), the response carries it as `_meta["modular-agent"].handedBack`, in the same shape as a cancelled prompt's.
 - **`session/close`** cancels the running turn and the session's jobs, closes MCP servers the host gave it, and waits for both before answering.
 - **`session/list`** lists kept sessions. With a `cwd`, it lists only that project's.
 
@@ -83,7 +93,7 @@ Each session offers these as ACP `select` configuration options, with these ids:
 
 | Id | Values |
 |---|---|
-| `model` | `"provider/model"` for each model the agent can use |
+| `model` | `"provider/model"` for each model the agent can use. Provider identities other than `conformance` are the build's own, so a host reads the options rather than assuming a value. |
 | `thinking` | the reasoning levels the current model supports, from `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `approval` | `off`; `ask` (ask unless the tool is read-only); `all` (ask always); `never` (refuse without asking) |
 
@@ -97,9 +107,9 @@ The response carries `_meta["modular-agent"]`:
 
 | Field | Value |
 |---|---|
-| `inputId` | the identity of the input this prompt admitted |
-| `duplicate` | `true` when the key was already known. No turn was started, and the response describes the turn the first prompt started. |
-| `outcome` | `{ "kind": "completed" | "failed" | "cancelled" | "limit", "error"?: string, "limit"?: string }` |
+| `inputId` | the identity of the admission this prompt made. The `input` entry that took it carries the same value at `data.inputId`. |
+| `duplicate` | `true` when the key was already known. No turn was started, and the response describes the turn that took the first prompt's input. If that turn hasn't ended, the response waits for it. If the input was handed back without any turn taking it, the prompt is refused with error code `-32602`. |
+| `outcome` | `{ "kind": "completed" | "failed" | "cancelled" | "limit", "error"?: string, "limit"?: string }`. `limit` is `"steps"`, `"output"` (one model response hit its output limit), `"sessionTokens"` (a session-wide budget), or a name of the build's own. |
 | `openToolCalls` | the identities of calls left open past the turn, if any |
 | `handedBack` | on a cancelled turn: the input that was queued and not taken, as `[{ "inputId", "content" }]` |
 
@@ -110,8 +120,11 @@ Stop reasons map as follows:
 | completed, including with open calls | `end_turn` |
 | cancelled | `cancelled` |
 | a step limit | `max_turn_requests` |
-| an output limit | `max_tokens` |
+| an output limit, or a session-wide token budget | `max_tokens`. `outcome.limit` tells them apart. |
+| a question's time limit passed, leaving calls open | `end_turn`, with `openToolCalls` |
 | failed | `refusal`, with the reason in `outcome.error` |
+
+**A known mismatch.** In ACP, `refusal` means the agent refused, and that the refused prompt and what follows won't enter the next prompt. Here it only reports a failed turn: the history is kept, and the next prompt sees it. A host must read `outcome.kind`, not infer anything from `refusal`. All four builds follow this mapping, so it stays in `/1`. A `/2` should report a failed turn as a JSON-RPC error whose `data` carries the same `_meta`. All three clean-room builds found this mismatch.
 
 ## Updates
 
@@ -135,7 +148,7 @@ Only the outcome `selected` with `optionId: "allow"` allows the call. Every othe
 ## Questions
 
 - **Free text or a choice** is asked with ACP form elicitation, and only if the client declared it supports forms. The form has one field, `answer`. Its schema is a string for free text, or an enum of the options for a choice.
-- **Without form support,** or for a question left open past its turn, the host uses the `requests` and `answer` extensions.
+- **Without form support,** or for a question left open past its turn, the host uses the `requests` and `answer` extensions. A question is never declined just because the client doesn't support forms. It stays open.
 - **A secret is never asked through a form,** because ACP forbids it. It is declined, unless the agent has another way to collect it.
 - **Only a declared present actor counts as an answerer.** The ACP connection is present while it is open.
 
@@ -149,10 +162,10 @@ Each extension is a JSON-RPC request with a `sessionId` in its params. These fou
 
 | Method | Params | Result |
 |---|---|---|
-| `_modular-agent/history` | `sessionId`; `after` (an entry identity, optional); `all` (boolean, optional) | `{ "entries": [Entry] }`: the current branch, or with `all` every entry, after `after` if given, through the output gate. An unknown `after` is refused with error code `-32602`. |
+| `_modular-agent/history` | `sessionId`; `after` (an entry identity, optional); `all` (boolean, optional) | `{ "entries": [Entry] }`: the current branch, or with `all` every entry, after `after` if given, through the output gate. `after` must name an entry in the view asked for: an entry on another branch needs `all`. Otherwise it is refused with error code `-32602`. |
 | `_modular-agent/input` | `sessionId`; `content` (a string or ACP content blocks); `when` (`"now"`, `"steer"` or `"after"`); `key` (optional) | `{ "inputId", "taken": "now" | "inTurn" | "after", "duplicate"?: true }`. Answers once the input is admitted, without waiting for the turn. |
 | `_modular-agent/requests` | `sessionId` | `{ "requests": [Request] }`: open questions, including those waiting past their turn |
-| `_modular-agent/answer` | `sessionId`; `requestId`; `value` (optional); `declined` (optional) | `{ "accepted": boolean, "reason"?: string }` |
+| `_modular-agent/answer` | `sessionId`; `requestId`; `value` (a string; for a choice, one of its options; for an approval, `"allow"`); `declined` (optional) | `{ "accepted": boolean, "reason"?: string }`. Leaving out `value` declines. |
 
 These are optional. If offered, they use these names and shapes, and appear in `extensions`:
 
@@ -160,7 +173,7 @@ These are optional. If offered, they use these names and shapes, and appear in `
 |---|---|---|
 | `_modular-agent/fork` | `sessionId`; `entryId` | `{ "sessionId" }`. Refused while the session has unfinished work. |
 | `_modular-agent/move` | `sessionId`; `entryId` | `{}`. Follows `movingWithUnfinishedWork`. |
-| `_modular-agent/erase` | `sessionId`; `entryIds` | `{ "erased": [id], "pending": [id], "outOfReach": [string] }` |
+| `_modular-agent/erase` | `sessionId`; `entryIds` | `{ "erased": [id], "pending": [id], "outOfReach": [string] }`. `pending` lists entries whose remote copies the agent knows of but hasn't yet confirmed deleted; the agent retries, and erasing again finishes the job. `outOfReach` names kinds of copies, such as `"delivered output"`, `"working environment effects"` or `"vendor retention"`. |
 | `_modular-agent/jobs` | `sessionId` | `{ "jobs": [{ "id", "kind", "state" }] }` |
 | `_modular-agent/cancel-job` | `sessionId`; `jobId` | `{}` |
 
@@ -172,7 +185,8 @@ A history entry, as the `history` extension returns it, has at least:
 - `kind`;
 - `time`, in milliseconds since 1970;
 - `turnId`, `toolCallId` and `actorId`, where they apply;
-- `message`, where the entry carries one, as `{ "role": "user" | "assistant" | "toolResult", "content": [blocks] }`.
+- `message`, where the entry carries one, as `{ "role": "user" | "assistant" | "toolResult", "content": [blocks] }`. Text and images are ACP content blocks. A tool call is `{ "type": "toolCall", "id", "name", "arguments" }`. Any other block keeps its own `type`, and a host may skip types it doesn't know. Reasoning that isn't readable text is never shown as text.
+- an erased entry keeps only `id`, `parentId`, `kind`, and `erased: true`.
 
 These kinds have fixed names: `input`, `response`, `toolResult`, `turnStart` and `turnEnd`. A `turnEnd` entry's `data.outcome` is the turn's outcome. Other kinds are the build's own.
 
@@ -189,9 +203,23 @@ An open question, as the `requests` extension returns it, has at least:
 ## Conformance mode
 
 When the environment variable `MODULAR_AGENT_CONFORMANCE=1` is set, the agent offers one extra model, `conformance/echo`. It needs no network and no credentials, and it behaves exactly as follows. It reads the text of the latest input, ignoring tool results:
-- **Text that starts with `tool:`** has the form `tool:<name> <json>`. On a step with no tool result yet in this turn, the model calls tool `<name>` with `<json>` as its input. On the step after the result, it replies with the text `done: ` followed by the first 200 characters of the result's text.
+- **Text that starts with `tool:`** has the form `tool:<name> <json>`. On a step with no tool result yet in this turn, the model calls tool `<name>` with `<json>` as its input. On the step after the result, it replies with the text `done: ` followed by the first 200 characters of the result's text, counted in Unicode code points.
 - **Any other text** gets the reply `echo: <text>`.
 
-Usage is reported as zero. In conformance mode, the agent also offers the tools `bash`, taking `{ "command": string }`, and `read`, taking `{ "path": string }`.
+Usage is reported as zero. It may offer any thinking levels. In conformance mode, the agent also offers the tools `bash`, taking `{ "command": string }`, and `read`, taking `{ "path": string }`. Conformance mode needs no credentials, gateway or other service. The agent's other Providers may still be offered.
 
 The [conformance kit](../../conformance/acp/README.md) uses this mode.
+
+## Changes
+
+- **2026-11-17, after round two.** Clarifications from the Rust, Python and Go builds' binding gaps. None changes a wire format any build already uses:
+  - the echo counts code points;
+  - the data folder overrides path flags;
+  - duplicates whose turn hasn't ended, or whose input was handed back;
+  - the `inputId` link;
+  - the limit names, and the question-deadline row;
+  - handed-back input on load;
+  - no declining for lack of forms;
+  - the cursor scope, answer values, erasure fields, and history blocks;
+  - optional declaration keys for late answers, job reports after a restart, and a single project root;
+  - the `refusal` mismatch, noted for `/2`.
