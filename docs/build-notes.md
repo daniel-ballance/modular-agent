@@ -118,7 +118,7 @@ What the host test found:
 
 ## Subagents
 
-The `delegate` tool starts a child session from the task alone, with the parent's project and model. The parent agent is an actor in the child, with no more authority than the parent session's owner. By default the subagent runs in the background: the tool call returns at once, and the subagent's answer comes back later as a job report, which starts a parent turn. With `wait`, the answer comes back in the tool call, and the job ends without a report. The child's questions and approvals are asked again in the parent's session, so they reach the parent's user. A subagent may start subagents, up to a depth limit.
+The `delegate` tool starts a child session from the task alone, with the parent's project and model. The parent agent is an actor in the child, with no more authority than the parent session's owner. By default the subagent runs in the background: the tool call returns at once, and the subagent's answer comes back later as a job report, which starts a parent turn. With `wait`, the answer comes back in the tool call, and the job ends without a report. The child's questions and approvals are asked again in the parent's session, so they reach the parent's user. A subagent may start subagents, up to a depth limit. A question from a subagent's subagent climbs one level at a time, and reaches the top-level user labelled with each subagent it passed through. To follow up, the parent names an earlier subagent in `subagent`. The child is reopened with its history, and the follow-up is a new job. Tests cover both.
 
 Both variants record the job. They differ only in what happens after the process stops:
 

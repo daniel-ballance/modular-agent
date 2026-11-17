@@ -132,3 +132,56 @@ test("durable subagents: after a restart, the subagent carries on and the parent
 	assert.equal(ended.length, 1, "the job ended exactly once");
 	await h.stop();
 });
+
+test("a subagent's subagent asks for approval: the question climbs to the top user", async () => {
+	const d = dirs();
+	const requests: InputRequest[] = [];
+	let uiApi!: PluginApi;
+	const ui: Plugin = { name: "ui", setup(a) { uiApi = a; a.provide("interface", { id: "ui", actorId: "user", onInputRequest: (r: InputRequest) => requests.push(r) }); } };
+	const route: FauxResponseFactory = (c) => {
+		const first = users(c)[0] ?? "";
+		const done = hasResult(c);
+		const last = c.messages.filter((m) => m.role === "toolResult").map(textOfMessage).at(-1);
+		if (first === "grandchild task") return done ? fauxAssistantMessage([fauxText("grandchild wrote it")]) : fauxAssistantMessage([fauxToolCall("bash", { command: "echo deep > deep.txt" })], { stopReason: "toolUse" });
+		if (first === "child task") return done ? fauxAssistantMessage([fauxText(`child relays: ${last}`)]) : fauxAssistantMessage([fauxToolCall("delegate", { task: "grandchild task", label: "grandchild", wait: true })], { stopReason: "toolUse" });
+		return done ? fauxAssistantMessage([fauxText(`top relays: ${last}`)]) : fauxAssistantMessage([fauxToolCall("delegate", { task: "child task", label: "child", wait: true })], { stopReason: "toolUse" });
+	};
+	const h = await agent(d, route, [approval({ policy: "ask" }), subagents(), ui]);
+	const api = h.api("t");
+	const s = await api.startSession();
+	await api.input(s, { content: "go deep", actorId: "user" });
+	for (let i = 0; i < 400 && !requests.length; i++) await new Promise((r) => setTimeout(r, 5));
+	assert.equal(requests.length, 1, "the top user is asked once");
+	assert.equal(requests[0].sessionId, s);
+	assert.match(requests[0].question, /^\[subagent "child"\] \[subagent "grandchild"\] Allow bash\?/);
+	uiApi.answer(s, { requestId: requests[0].id, actorId: "user", value: "allow" });
+	await settle(h, s);
+	assert.ok(existsSync(join(d.project, "deep.txt")));
+	assert.equal(lastText(h, s), "top relays: child relays: grandchild wrote it");
+	await h.stop();
+});
+
+test("the parent can message a finished subagent again, and it remembers its earlier work", async () => {
+	const seen: string[][] = [];
+	const route: FauxResponseFactory = (c) => {
+		const all = users(c);
+		if (all[0] === "remember the number 7") {
+			seen.push(all);
+			return fauxAssistantMessage([fauxText(all.length > 1 ? "the number was 7" : "noted")]);
+		}
+		const results = c.messages.filter((m) => m.role === "toolResult").map(textOfMessage);
+		if (results.length === 0) return fauxAssistantMessage([fauxToolCall("delegate", { task: "remember the number 7", label: "memory", wait: true })], { stopReason: "toolUse" });
+		if (results.length === 1) return fauxAssistantMessage([fauxToolCall("delegate", { task: "what was the number?", subagent: "memory", wait: true })], { stopReason: "toolUse" });
+		return fauxAssistantMessage([fauxText(`Parent saw: ${results.at(-1)}`)]);
+	};
+	const h = await agent(dirs(), route, [subagents()]);
+	const api = h.api("t");
+	const s = await api.startSession();
+	await api.input(s, { content: "go", actorId: "user" });
+	await settle(h, s);
+	assert.equal(lastText(h, s), "Parent saw: the number was 7");
+	assert.deepEqual(seen.at(-1), ["remember the number 7", "what was the number?"], "the follow-up reached the same child, with its history");
+	const children = new Set(api.history(s, { all: true }).filter((e) => e.kind === "jobStarted").map((e) => (e.data as { detail: { childSessionId: string } }).detail.childSessionId));
+	assert.equal(children.size, 1, "one child session, two jobs");
+	await h.stop();
+});

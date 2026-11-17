@@ -339,7 +339,7 @@ These requirements are **proposed**, except where marked:
 
 - **Another agent as a tool source.** Our agent can use another agent's tools or hand it work.
 - **Another agent as an actor.** Another agent can use ours through an Interface, with its own authority.
-- **Subagent.** A job starts a subagent. Its session belongs to the parent's. It starts from its task alone, and does not inherit the parent's history unless it is given it. It has no more authority than the parent. Its result reaches the parent as the job's report, and its input requests go to the parent. Built and proven in a transient and a durable variant ([build notes](build-notes.md#subagents)).
+- **Subagent.** A job starts a subagent. Its session belongs to the parent's. It starts from its task alone, and does not inherit the parent's history unless it is given it. It has no more authority than the parent. Its result reaches the parent as the job's report, and its input requests go to the parent, which may pass them up to its own parent. The parent can message a finished subagent again: the subagent keeps its own history, and each message is a new job. Built and proven in a transient and a durable variant ([build notes](build-notes.md#subagents)).
 - **Peer.** A peer is another agent this one can message, with no parent relationship.
 
 Whether subagents need anything beyond this is [open](open-questions.md#agents-working-together).

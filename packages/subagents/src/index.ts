@@ -1,5 +1,5 @@
 import type { Actor, AgentEvent, HistoryEntry, InputRequest, InterfaceCapability, JobHandle, JobState, Plugin, PluginApi, ToolCall, ToolContext, ToolDefinition, ToolResult, ToolSource } from "@modular-agent/harness";
-import { text } from "@modular-agent/harness";
+import { text, textOf } from "@modular-agent/harness";
 
 export interface SubagentOptions {
 	/**
@@ -24,7 +24,8 @@ const DEFINITION: ToolDefinition = {
 	name: "delegate",
 	description:
 		"Hand a self-contained task to a subagent: another agent with its own session, which starts from the task alone and can't see this conversation. " +
-		"By default it runs in the background and its result arrives later as a report, so carry on or end your turn. Set wait to true to get its answer in this call instead.",
+		"By default it runs in the background and its result arrives later as a report, so carry on or end your turn. Set wait to true to get its answer in this call instead. " +
+		"To follow up with a subagent that has finished, name it in subagent: it keeps everything from its earlier work.",
 	parameters: {
 		type: "object",
 		properties: {
@@ -32,6 +33,7 @@ const DEFINITION: ToolDefinition = {
 			label: { type: "string", description: "A short name for the subagent" },
 			model: { type: "string", description: "provider/id; defaults to this session's model" },
 			wait: { type: "boolean" },
+			subagent: { type: "string", description: "The label or session id of an earlier subagent to message again" },
 		},
 		required: ["task"],
 	},
@@ -69,9 +71,16 @@ export class Subagents implements ToolSource, InterfaceCapability {
 	}
 
 	async run(call: ToolCall, ctx: ToolContext): Promise<Omit<ToolResult, "callId">> {
-		const input = call.input as { task: string; label?: string; model?: string; wait?: boolean };
+		const input = call.input as { task: string; label?: string; model?: string; wait?: boolean; subagent?: string };
 		const parent = ctx.sessionId;
 		const settings = this.api.session(parent).settings;
+		if (input.subagent) {
+			const earlier = this.earlier(parent, input.subagent);
+			if (!earlier) return { status: "failed", content: [text(`No earlier subagent called "${input.subagent}".`)] };
+			if (this.links.has(earlier.childSessionId)) return { status: "failed", content: [text(`Subagent "${earlier.label}" is still working. Its result will arrive as a report.`)] };
+			await this.api.openSession(earlier.childSessionId, this.parentActor(parent));
+			return this.begin(parent, { ...earlier, task: input.task }, Boolean(input.wait));
+		}
 		const depth = (settings.subagentDepth as number | undefined) ?? 0;
 		if (depth >= (this.options.maxDepth ?? 2)) return { status: "failed", content: [text("Subagents can't start more subagents at this depth.")] };
 		const label = input.label || String(input.task).slice(0, 40);
@@ -86,12 +95,28 @@ export class Subagents implements ToolSource, InterfaceCapability {
 				subagentDepth: depth + 1,
 			},
 		});
-		const job = this.api.startJob(parent, { kind: "subagent", detail: { childSessionId: child, task: input.task, label } satisfies Detail });
-		const link: Link = { childSessionId: child, task: input.task, label, parent, jobId: job.id };
+		return this.begin(parent, { childSessionId: child, task: input.task, label }, Boolean(input.wait));
+	}
+
+	/** The most recent subagent of this parent with this label or session id. */
+	private earlier(parent: string, name: string): Detail | undefined {
+		return this.api
+			.history(parent, { all: true })
+			.filter((e: HistoryEntry) => e.kind === "jobStarted" && e.writer === "subagents")
+			.map((e: HistoryEntry) => (e.data as { detail: Detail }).detail)
+			.filter((d) => d.label === name || d.childSessionId === name)
+			.at(-1);
+	}
+
+	/** Give a child its task, as a job of the parent. */
+	private async begin(parent: string, detail: Detail, wait: boolean): Promise<Omit<ToolResult, "callId">> {
+		const { childSessionId: child, label } = detail;
+		const job = this.api.startJob(parent, { kind: "subagent", detail });
+		const link: Link = { ...detail, parent, jobId: job.id };
 		this.links.set(child, link);
 		const done = this.watch(link, job);
-		await this.api.input(child, { content: input.task, actorId: PARENT });
-		if (input.wait) {
+		await this.api.input(child, { content: detail.task, actorId: PARENT });
+		if (wait) {
 			const finished = await done;
 			await job.finish(finished.state, finished.text, { report: false });
 			return { status: finished.state === "completed" ? "completed" : "failed", content: [text(finished.text)], value: { childSessionId: child } };
@@ -171,7 +196,9 @@ export class Subagents implements ToolSource, InterfaceCapability {
 			void done.then((finished) => handle.finish(finished.state, `Subagent "${d.label}" ${finished.state}.\n\n${finished.text}`));
 			// Reopening the child lets its Runtime decide what happens to an interrupted turn.
 			await this.api.openSession(d.childSessionId, this.parentActor(parent));
-			const gaveTask = this.api.history(d.childSessionId, { all: true }).some((e: HistoryEntry) => e.kind === "input");
+			// A follow-up job's child already has earlier input: this job's task is given only if it is the latest.
+			const latest = this.api.history(d.childSessionId, { all: true }).filter((e: HistoryEntry) => e.kind === "input").at(-1);
+			const gaveTask = latest?.message ? textOf(latest.message.content) === d.task : false;
 			if (!gaveTask) await this.api.input(d.childSessionId, { content: d.task, actorId: PARENT });
 			else if (!this.api.session(d.childSessionId).busy) this.check(d.childSessionId);
 		}

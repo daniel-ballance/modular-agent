@@ -146,7 +146,7 @@ Prior art: ACP and AG-UI for interactive clients. A2A for handing a task to an a
 
 Prior art: ACP gives each subagent its own session, which the parent can message again. DeepSeek Harness starts local and external subagents the same way, and has peer teams. T3 Code gives a child only its task, narrows its permissions, and wakes the parent when it finishes.
 
-Building answered part of this ([build notes](build-notes.md#subagents)). Subagents needed nothing beyond jobs, a parent session, and the parent agent as an actor in the child. A subagent's subagent reaches the top-level user one level at a time: each parent asks its own session again. This follows from how it is built, but no test covers it yet. Still open: whether the parent should be able to message a subagent again after its result, as ACP allows.
+Building answered part of this ([build notes](build-notes.md#subagents)). Subagents needed nothing beyond jobs, a parent session, and the parent agent as an actor in the child. A subagent's subagent reaches the top-level user one level at a time: each parent asks its own session again, and a test covers two levels. A parent can message a finished subagent again, as ACP allows, and the follow-up is a new job on the same child session. Still open: whether peers need anything beyond this.
 
 ### Content model
 
