@@ -130,6 +130,8 @@ Where files live and commands run: the local machine, a remote host or a sandbox
 
 A working environment can be lost, for example when a sandbox expires, and it says so.
 
+**Nothing it starts outlives the agent's process.** When the process stops, however it stops, the commands it started stop too, including any they left running in the background. Otherwise a recovered call could race an earlier attempt that is still running, unseen. A working environment that can't promise this declares it. **Decided while building** ([build notes](build-notes.md#tool-processes-and-a-killed-agent)).
+
 ### History store
 
 Keeps session history beyond the process, and gives it back. In normal use it never changes what was recorded. It may keep history for a limited time. It may also support erasure, and declares whether it does ([History](#history)). It refuses a second writer for a session that is already open elsewhere.
@@ -377,6 +379,7 @@ The agent declares what the session, as set up, supports. That is what a host or
 | Input with a key | the same input given twice is taken twice |
 | Adding plugins during a session | the session's plugins are fixed when it starts |
 | Erasure | erasure is refused. Retention still applies. |
+| Stopping commands when the agent stops | commands may keep running after the process stops. A call they belong to has an unknown outcome, and is not repeated even if it was declared safe to repeat. |
 
 ## Guarantees
 

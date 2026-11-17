@@ -1,4 +1,5 @@
 import {
+	interruptedNote,
 	type AssistantMessage,
 	type GateResult,
 	type HistoryEntry,
@@ -77,7 +78,7 @@ export class TransientRuntime implements Runtime {
 	}
 
 	protected settle(host: RuntimeHost, c: InterruptedTurn["calls"][number], status: "outcomeUnknown" | "notStarted") {
-		const note = status === "outcomeUnknown" ? "The process stopped while this tool call was running. Its outcome is unknown." : "The process stopped before this tool call started.";
+		const note = interruptedNote(status === "outcomeUnknown");
 		return host.record({
 			kind: "toolResult", writer: "runtime", modelVisible: true, stepId: c.stepId, toolCallId: c.id,
 			message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [text(note)], isError: true },

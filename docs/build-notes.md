@@ -136,6 +136,21 @@ To make this work, the Harness changed in three ways:
 - **Stopping the process suspends sessions instead of closing them.** Closing ends jobs and records turns as ended, so a durable plugin had nothing to carry on.
 - **A job stays listed until its report is queued.** Otherwise a one-shot run could see an idle session with no jobs in between, and quit before the report's turn. Print and JSON modes now wait for jobs too.
 
+## Tool processes and a killed agent
+
+The first durable-subagent run showed that killing the agent with `kill -9` left its `bash` command running. The command finished unseen and wrote its file, while the reopened subagent was told its outcome was unknown. A durable Runtime that ran the call again could have raced the first attempt. So the description gained a guarantee: nothing a working environment starts outlives the agent's process, or the environment declares that it can't promise this.
+
+`env-local` keeps the promise in three layers:
+- Each command runs in its own process group, and carries an environment variable naming this run of the agent.
+- The first command starts a small watcher process. When the agent dies, however it dies, the watcher kills the agent's process groups. On Linux it also kills any process carrying the run's variable, which catches processes that left their group, such as ones started with `setsid`.
+- If the watcher dies too, the next agent to start sweeps what is left.
+
+Tests kill an agent with SIGKILL while it has a background process in its group and one that escaped it, and check both die. A second test also kills the watcher, and checks that the next agent's start cleans up.
+
+The same run found a second bug: a command that started a background process, such as `server &`, never returned, because the background process held the output open. A command now ends when `bash` exits, after a moment for the last output. What it left in the background runs until the agent stops.
+
+The stand-in result for an interrupted call was too terse. A model read "the process stopped while this tool call was running" as "the command was started". The text now says the call did not finish, that it may have done all, part or none of its work, and to check before relying on it or running it again. Rerun with a real model, the reopened subagent checked for the file, found it missing, and ran the command again deliberately.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).
@@ -152,5 +167,4 @@ To make this work, the Harness changed in three ways:
 - **A call left open must be safe to run again up to its question.** That is the tool author's promise, as with Pi Durable's tools that park.
 - **Several actors** work in the Harness and tests, but the terminal Interface acts for one user.
 - **Adding plugins during a session** isn't supported. Plugins load at start, from code or settings. The declaration says so.
-- **A killed process can leave its tools' processes running.** In the restart run, the `sleep; echo` shell outlived the agent and wrote its file. The child was told its outcome was unknown, which was true. A working environment that should stop its processes with the agent has to put them in its own process group.
 - **Inside the agent, every part talks to the others through function calls.** Only the Interface is over a wire.

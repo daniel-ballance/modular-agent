@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { HookRegistry } from "./hooks.js";
 import { type InputReceipt, type InputTiming, type QueuedInput, Session } from "./session.js";
 import {
+	interruptedNote,
 	type Actor,
 	type AgentEvent,
 	type Answer,
@@ -500,7 +501,7 @@ export class Harness {
 	private async endInterruptedTurn(s: Session, interrupted: InterruptedTurn): Promise<void> {
 		const drafts: EntryDraft[] = interrupted.calls.map((c) => ({
 			kind: "toolResult", writer: "harness", modelVisible: true, turnId: interrupted.turnId, toolCallId: c.id,
-			message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [text(c.started ? "The process stopped while this tool call was running. Its outcome is unknown." : "The process stopped before this tool call started.")], isError: true },
+			message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [text(interruptedNote(c.started))], isError: true },
 			data: { status: c.started ? "outcomeUnknown" : "notStarted" },
 		}));
 		if (drafts.length) await this.commit(s, drafts);

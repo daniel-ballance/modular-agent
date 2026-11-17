@@ -31,6 +31,16 @@ export function textOf(parts: ContentPart[]): string {
 export type StopReason = "finished" | "toolUse" | "length" | "refused" | "failed" | "aborted";
 export interface ModelError { kind: "temporary" | "contextTooLarge" | "credentials" | "refused" | "other"; message: string }
 export interface Usage { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }
+/**
+ * The stand-in result for a tool call the process stopped. Written for the model:
+ * an unknown outcome must not read like success, or like "still running".
+ */
+export function interruptedNote(started: boolean): string {
+	return started
+		? "Interrupted: the agent's process stopped while this call was running, and it did not finish. Its outcome is unknown: it may have done all, part or none of its work. Don't report it as done or as still running. Check the current state before relying on it or running it again."
+		: "Not run: the agent's process stopped before this call started. Nothing it would have done has happened.";
+}
+
 export const zeroUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
 export function addUsage(a: Usage, b: Usage | undefined): Usage {
 	if (!b) return a;

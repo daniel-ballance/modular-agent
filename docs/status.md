@@ -82,6 +82,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | Claim | Status | Notes |
 |---|---|---|
 | Several calls in one step may run together; results in the order asked | proven | Only when every tool in the step allows it. |
+| Nothing the working environment starts outlives the agent | proven | `env-local`: a watcher, plus a sweep at start. Tested with SIGKILL. |
 
 ## Hook points
 
