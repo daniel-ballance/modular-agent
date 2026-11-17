@@ -58,6 +58,7 @@ The record keeps every part as it arrived, including types nobody understands. W
 | when | |
 | kind | input, model response, tool call, tool result, summary, setting change, position move, approval record, erasure record, plugin state, … |
 | whether the model sees it | Plugin state, approval records and erasure records are kept for the record only. |
+| what it copies *(optional)* | the entries whose content it copies, such as those a summary summarizes. Erasing any of them erases this entry too. |
 | content | Removed by erasure. The entry then becomes an erasure record. |
 
 ### Tool definition

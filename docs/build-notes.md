@@ -151,6 +151,14 @@ The same run found a second bug: a command that started a background process, su
 
 The stand-in result for an interrupted call was too terse. A model read "the process stopped while this tool call was running" as "the command was started". The text now says the call did not finish, that it may have done all, part or none of its work, and to check before relying on it or running it again. Rerun with a real model, the reopened subagent checked for the file, found it missing, and ran the command again deliberately.
 
+## Erasure and summaries
+
+A summary copies what it summarizes, so erasing an entry left its content in any summary made from it. Now an entry can name the entries it copies, under `sources`, and erasure follows them: erasing an entry erases every entry that copied it, and every entry that copied those. Compaction names everything it summarized, including the earlier summary it built on. An erased summary is skipped, so the model sees the rest of the history in full until it is compacted again.
+
+A test compacts a conversation with a phone number in it, erases the input that held the number, and checks the number is gone from what the model sees next, and from the store after a restart. With the new rule switched off, the test fails.
+
+Still out of reach: a fork made before the erasure keeps its own copy.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).

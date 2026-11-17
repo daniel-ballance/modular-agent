@@ -73,7 +73,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | History grows in normal use; compaction adds a summary | proven | |
 | Moving the current position is recorded | proven | |
 | Rewinding outside state | paper | Declared unsupported. |
-| Erasure reaches every copy | partly | Entries are erased in the store. Summaries that copied the data are not. |
+| Erasure reaches every copy | partly | Entries, and summaries that copied them, are erased in the store. Forks made earlier keep their copy. |
 | The record is intact; each recipient gets a gated view | proven | A secret split across streamed pieces is held and redacted. |
 | Every tool call ends with exactly one result | proven | Including interrupted, refused, cancelled and late results. |
 

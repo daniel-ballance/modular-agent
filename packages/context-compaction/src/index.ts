@@ -12,12 +12,15 @@ const estimate = (messages: ModelMessage[]): number => Math.ceil(JSON.stringify(
 
 interface SummaryData { summary: string; firstKept: string }
 
+/** A summary still in force. An erased one is skipped, so the model sees what remains in full, until it is compacted again. */
+const isSummary = (e: HistoryEntry) => e.kind === "summary" && typeof (e.data as Partial<SummaryData> | undefined)?.summary === "string";
+
 /** The model context: the latest summary, then everything after the first entry it kept. */
 export function view(history: HistoryEntry[]): ModelMessage[] {
 	let start = 0;
 	let summary: SummaryData | undefined;
 	for (let i = history.length - 1; i >= 0; i--) {
-		if (history[i].kind === "summary") {
+		if (isSummary(history[i])) {
 			summary = history[i].data as SummaryData;
 			const kept = history.findIndex((e) => e.id === summary!.firstKept);
 			start = kept >= 0 ? kept : i + 1;
@@ -80,7 +83,7 @@ export function contextCompaction(options: CompactionOptions = {}): Plugin {
 /** Summarize everything before the recent part of the history, and record the summary. */
 export async function compact(api: PluginApi, sessionId: string, keepTokens: number): Promise<boolean> {
 	const history = api.history(sessionId);
-	const lastSummary = history.map((e) => e.kind).lastIndexOf("summary");
+	const lastSummary = history.map(isSummary).lastIndexOf(true);
 	const candidates = history.slice(lastSummary + 1);
 	// Keep recent entries, cutting only before an input so tool calls stay with their results.
 	let tokens = 0;
@@ -110,7 +113,9 @@ export async function compact(api: PluginApi, sessionId: string, keepTokens: num
 		{ signal: new AbortController().signal, sessionId },
 	);
 	if (response.stop === "failed") return false;
-	await api.append(sessionId, { kind: "summary", writer: api.name, modelVisible: false, data: { summary: textOf(response.content), firstKept: candidates[cut].id } satisfies SummaryData });
+	// The summary copies what it summarizes, including any earlier summary: erasing any of them erases it.
+	const sources = [...(lastSummary >= 0 ? [history[lastSummary].id] : []), ...older.map((e) => e.id)];
+	await api.append(sessionId, { kind: "summary", writer: api.name, modelVisible: false, sources, data: { summary: textOf(response.content), firstKept: candidates[cut].id } satisfies SummaryData });
 	api.emit(sessionId, "context.compacted", { summarized: older.length });
 	return true;
 }

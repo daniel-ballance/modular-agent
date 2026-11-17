@@ -92,6 +92,8 @@ export interface HistoryEntry {
 	stepId?: string;
 	toolCallId?: string;
 	jobId?: string;
+	/** Entries whose content this one copies, such as those a summary summarizes. Erasing a source erases this entry too. */
+	sources?: string[];
 	/** The part or plugin that wrote it. */
 	writer: string;
 	actorId?: string;

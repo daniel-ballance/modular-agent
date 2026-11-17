@@ -605,12 +605,25 @@ export class Harness {
 
 	private async erase(s: Session, entryIds: string[], actorId: string, writer: string): Promise<void> {
 		this.requireAuthority(s, actorId, "erase");
+		// Erasure reaches every copy: anything that copied an erased entry, directly or through another copy, goes too.
+		const requested = entryIds;
+		const all = new Set(entryIds);
+		for (let grew = true; grew; ) {
+			grew = false;
+			for (const e of s.entries.values()) {
+				if (!all.has(e.id) && e.sources?.some((id) => all.has(id))) {
+					all.add(e.id);
+					grew = true;
+				}
+			}
+		}
+		entryIds = [...all];
 		const store = this.use<HistoryStore>("history-store");
 		if (!s.ephemeral) {
 			if (!store?.erase) throw new Error("Erasure is not supported by this history store");
 			await store.erase(s.id, entryIds);
 		}
-		await this.commit(s, [{ kind: "erasure", writer, actorId, modelVisible: false, data: { entryIds } }]);
+		await this.commit(s, [{ kind: "erasure", writer, actorId, modelVisible: false, data: { entryIds, requested } }]);
 		await this.providerFor(s)?.discardState?.(s.id);
 		this.emit(s.id, "entries.erased", { count: entryIds.length }, writer, { actorId });
 	}

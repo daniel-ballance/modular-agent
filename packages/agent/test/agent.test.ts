@@ -282,6 +282,46 @@ test("erasure removes content from the record and leaves an erasure entry", asyn
 	await h.stop();
 });
 
+test("erasure reaches a summary that copied the erased entry", async () => {
+	const dirs = { project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) };
+	let lastContext = "";
+	const env = setup(
+		[
+			fauxAssistantMessage([fauxText("noted")]),
+			fauxAssistantMessage([fauxText("ok")]),
+			fauxAssistantMessage([fauxText("Summary: the user's phone is 555-0100.")]),
+			(c) => {
+				lastContext = JSON.stringify(c.messages);
+				return fauxAssistantMessage([fauxText("answered")]);
+			},
+		],
+		[],
+		dirs,
+	);
+	let h = await env.make();
+	let api = h.api("test");
+	const s = await api.startSession();
+	await api.input(s, { content: "my phone is 555-0100", actorId: "user" });
+	await api.waitForIdle(s);
+	await api.input(s, { content: "and I like tea", actorId: "user" });
+	await api.waitForIdle(s);
+	assert.equal((await api.input(s, { content: "/compact", actorId: "user" })).output, "Compacted.");
+	const summary = api.history(s).find((e) => e.kind === "summary")!;
+	const input = api.history(s).find((e) => e.kind === "input")!;
+	assert.ok(summary.sources?.includes(input.id), "the summary names what it copied");
+	await api.erase(s, [input.id], "user");
+	await api.input(s, { content: "what do you know?", actorId: "user" });
+	await api.waitForIdle(s);
+	assert.ok(!lastContext.includes("555-0100"), "the model no longer sees the erased number, from the input or the summary");
+	assert.ok(lastContext.includes("I like tea"), "what remains is shown in full instead of the erased summary");
+	await h.stop();
+	h = await setup([], [], dirs).make();
+	api = h.api("test");
+	await api.openSession(s);
+	assert.ok(!JSON.stringify(api.history(s, { all: true })).includes("555-0100"), "the store has no copy left");
+	await h.stop();
+});
+
 test("tool calls that may run together do, and their results are recorded in the order the model asked", async () => {
 	const started = new Set<string>();
 	const waitFor = async (name: string) => {
