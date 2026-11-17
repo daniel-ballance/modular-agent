@@ -217,6 +217,8 @@ Input tokens, output tokens, cached tokens, audio time where it applies, and cos
 
 Each interaction is listed by who asks, what it carries, and the possible answers. Every ask from an Interface carries the actor it acts for, and is refused if the actor lacks the authority.
 
+**An answer comes after its effects.** Once an interaction is answered, whoever asks next sees what it changed. A part that keeps a copy of another part's answers, such as a list of tools, refreshes the copy before the answer that changed it is passed on. **Decided while building** ([ADR 0014](adr/0014-plugins-in-other-processes.md)).
+
 ### Interface and Harness
 
 An Interface is a plugin, so these are things it does through the plugin API.

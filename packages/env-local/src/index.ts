@@ -81,6 +81,7 @@ export function localEnvironment(options: { cwd?: string } = {}): Plugin {
 	let stop = () => {};
 	return {
 		name: "env-local",
+		spawn: { module: "@modular-agent/env-local", export: "localEnvironment", options },
 		setup(api) {
 			// No command this agent starts outlives it: see ProcessTracker.
 			const processes = new ProcessTracker(join(api.home, "run"));

@@ -63,14 +63,14 @@ export class TransientRuntime implements Runtime {
 	}
 
 	/** Run pending calls through the usual checks. Returns the ids of calls that are still open. */
-	protected async runPending(host: RuntimeHost, calls: InterruptedTurn["calls"], signal: AbortSignal, entries: string[], mayRun: (c: InterruptedTurn["calls"][number]) => boolean): Promise<string[]> {
+	protected async runPending(host: RuntimeHost, calls: InterruptedTurn["calls"], signal: AbortSignal, entries: string[], mayRun: (c: InterruptedTurn["calls"][number]) => boolean | Promise<boolean>): Promise<string[]> {
 		const open: string[] = [];
 		for (const c of calls) {
-			if (!mayRun(c)) {
+			if (!(await mayRun(c))) {
 				entries.push((await this.settle(host, c, "outcomeUnknown")).id);
 				continue;
 			}
-			const recorded = await this.runCall(host, { type: "toolCall", id: c.id, name: c.name, arguments: c.input }, c.stepId ?? host.newId(), signal);
+			const recorded = await this.runCall(host, { type: "toolCall", id: c.id, name: c.name, arguments: c.input }, c.stepId ?? (await host.newId()), signal);
 			if (recorded) entries.push(recorded.id);
 			else open.push(c.id);
 		}
@@ -105,7 +105,7 @@ export class TransientRuntime implements Runtime {
 			if (signal.aborted) return done({ kind: "cancelled" }, last);
 			for (const e of await host.takeSteering()) entries.push(e.id);
 
-			const stepId = host.newId();
+			const stepId = await host.newId();
 			host.report("step.started", {}, { stepId });
 			let request: ModelRequest = await host.prepareStep({ stepId, usage });
 			let message: AssistantMessage;
@@ -141,7 +141,8 @@ export class TransientRuntime implements Runtime {
 			const calls = message.content.filter(isToolCall);
 			const open: string[] = [];
 			// Calls run together only when every tool in the step says it may. Results are recorded in the order the model asked.
-			const together = calls.length > 1 && calls.every((c) => host.definition(c.name)?.parallel === true);
+			const definitions = await Promise.all(calls.map((c) => host.definition(c.name)));
+			const together = calls.length > 1 && definitions.every((d) => d?.parallel === true);
 			if (together) {
 				const prepared: Prepared[] = [];
 				for (const part of calls) prepared.push(await this.preflight(host, part, stepId));
@@ -176,7 +177,7 @@ export class TransientRuntime implements Runtime {
 			if (steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, message);
 
 			if (calls.length === 0) {
-				if (host.hasSteering()) continue;
+				if (await host.hasSteering()) continue;
 				// "The turn's result is ready": a plugin may send the model back.
 				const check = await host.hook<GateResult<unknown>>("turn.result", { result: { text: textOf(message.content) }, shape: input.resultShape });
 				if (check?.refused) {
@@ -197,7 +198,7 @@ export class TransientRuntime implements Runtime {
 	/** "Before a tool call": allow, refuse, change or leave open. */
 	protected async preflight(host: RuntimeHost, part: ToolCallPart, stepId: string): Promise<Prepared> {
 		const call: ToolCall = { id: part.id, name: part.name, input: part.arguments ?? {}, startedBy: "model", stepId };
-		const gate = await host.hook<GateResult<{ call: ToolCall }>>("tool.before", { call, definition: host.definition(call.name) });
+		const gate = await host.hook<GateResult<{ call: ToolCall }>>("tool.before", { call, definition: await host.definition(call.name) });
 		if (gate.pending) return { call, pending: gate.pending };
 		if (gate.refused) return { call, refused: gate.refused };
 		return { call: gate.value.call };
@@ -243,6 +244,7 @@ export class TransientRuntime implements Runtime {
 export function transientRuntime(options?: TransientRuntimeOptions): Plugin {
 	return {
 		name: "runtime-transient",
+		spawn: { module: "@modular-agent/runtime-transient", export: "transientRuntime", options },
 		setup(api) {
 			api.provide("runtime", new TransientRuntime(options));
 		},

@@ -54,6 +54,8 @@ export interface Plugin {
 	origin?: "global" | "project";
 	/** A plugin this one deliberately replaces. */
 	replaces?: string;
+	/** How to load this plugin somewhere else, such as in another process: a module, the factory it exports, and options it can take as JSON. */
+	spawn?: { module: string; export: string; options?: unknown };
 	setup(api: PluginApi): void | Promise<void>;
 	stop?(): void | Promise<void>;
 }
@@ -798,6 +800,9 @@ export class Harness {
 	}
 
 	private async finishTurn(s: Session, turnId: string, outcome: TurnOutcome): Promise<void> {
+		// The process stopped: the turn is interrupted, not ended. Nothing is recorded or announced here;
+		// reopening the session finds the turn and hands it to the Runtime.
+		if (s.suspended) return;
 		const waiting = new Set(this.waitingRequests(s).map((r) => r.id));
 		for (const request of this.recordedOpenRequests(s).filter((r) => r.turnId === turnId && !s.requests.has(r.id) && !waiting.has(r.id))) {
 			await this.commit(s, [{ kind: "inputClosed", writer: "harness", modelVisible: false, turnId, toolCallId: request.toolCallId, data: { requestId: request.id, reason: "no longer answerable" } }]);
@@ -839,7 +844,7 @@ export class Harness {
 
 	private runtimeHost(s: Session, turnId: string, state: TurnState): RuntimeHost {
 		return {
-			newId: () => this.newId(),
+			newId: async () => this.newId(),
 			prepareStep: async ({ stepId, usage }) => {
 				const model = this.modelAccess(s);
 				const request: ModelRequest = {
@@ -854,14 +859,14 @@ export class Harness {
 			},
 			hook: (name, payload) => this.hooks.run(name, { sessionId: s.id, turnId, ...payload }),
 			runToolCall: (call, signal) => this.executeTool(s, call, signal, turnId),
-			definition: (name) => this.findTool(s, name)?.definition,
+			definition: async (name) => this.findTool(s, name)?.definition,
 			record: async (draft) => (await this.commit(s, [{ ...draft, turnId }]))[0],
 			takeSteering: async () => {
 				const items = s.steering.splice(0);
 				if (!items.length) return [];
 				return this.commit(s, items.map((q) => ({ kind: q.kind, writer: "harness", modelVisible: true, turnId, actorId: q.actorId, message: { role: "user" as const, content: q.content }, data: { inputId: q.id, steered: true } })));
 			},
-			hasSteering: () => s.steering.length > 0,
+			hasSteering: async () => s.steering.length > 0,
 			report: (type, data, ids) => this.emit(s.id, type, data, "runtime", { turnId, ...ids }),
 		};
 	}
@@ -892,7 +897,7 @@ export class Harness {
 	}
 
 	/** The working environment, in the session's project when it has its own. */
-	private environmentFor(s: Session): WorkingEnvironment | undefined {
+	private async environmentFor(s: Session): Promise<WorkingEnvironment | undefined> {
 		const env = this.use<WorkingEnvironment>("working-environment");
 		const cwd = this.projectOf(s);
 		return env && env.cwd !== cwd && env.at ? env.at(cwd) : env;
@@ -937,7 +942,7 @@ export class Harness {
 				signal,
 				call,
 				progress: (content) => this.emit(s.id, "tool.progress", { content }, found.source.id, { turnId, toolCallId: call.id }),
-				environment: this.environmentFor(s),
+				environment: await this.environmentFor(s),
 				ask: (request) => this.ask(s, { ...request, toolCallId: call.id, key: `${call.id}:${request.key ?? `ask:${asked++}`}` }, found.source.id),
 			});
 			if (isPending(result)) {

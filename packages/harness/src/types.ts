@@ -227,13 +227,12 @@ export interface ExecResult { exitCode: number | null; output: string; timedOut:
 export interface WorkingEnvironment {
 	id: string;
 	cwd: string;
-	resolve(path: string): string;
 	readFile(path: string): Promise<Buffer>;
 	writeFile(path: string, data: string | Buffer): Promise<void>;
 	exists(path: string): Promise<boolean>;
 	exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult>;
 	/** The same environment, working in another directory. */
-	at?(cwd: string): WorkingEnvironment;
+	at?(cwd: string): WorkingEnvironment | Promise<WorkingEnvironment>;
 }
 
 // ---------- History store ----------
@@ -350,21 +349,24 @@ export interface TurnOutcome { outcome: Outcome; result: TurnResult; entries: st
 
 export interface StepPreparation { stepId: string; usage: Usage }
 
-/** What the Harness offers a Runtime during a turn. */
+/**
+ * What the Harness offers a Runtime during a turn. Everything that asks the Harness
+ * is asynchronous, so a Runtime can run in another process.
+ */
 export interface RuntimeHost {
-	newId(): string;
+	newId(): Promise<string>;
 	/** Ask plugins to decide the model request for this step ("before each step"). */
 	prepareStep(info: StepPreparation): Promise<ModelRequest>;
 	/** Let plugins step in at a hook point. */
 	hook<T = any>(name: string, payload: any): Promise<T>;
 	/** Run this tool call. */
 	runToolCall(call: ToolCall, signal: AbortSignal): Promise<ToolResult | (ToolPending & { callId: string })>;
-	definition(toolName: string): ToolDefinition | undefined;
+	definition(toolName: string): Promise<ToolDefinition | undefined>;
 	/** Record entries in the session's history. */
 	record(entry: EntryDraft): Promise<HistoryEntry>;
 	/** Take input given for the running turn, and record it. */
 	takeSteering(): Promise<HistoryEntry[]>;
-	hasSteering(): boolean;
+	hasSteering(): Promise<boolean>;
 	report(type: string, data?: any, ids?: { stepId?: string; toolCallId?: string }): void;
 }
 

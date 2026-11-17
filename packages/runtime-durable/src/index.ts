@@ -26,7 +26,7 @@ export class DurableRuntime extends TransientRuntime {
 		const entries: string[] = [];
 		host.report("turn.resumed", { pending: interrupted.calls.length });
 		// A call that never started runs. One that started runs again only if it is safe to repeat.
-		const open = await this.runPending(host, interrupted.calls, signal, entries, (c) => !c.started || host.definition(c.name)?.hints?.idempotent === true);
+		const open = await this.runPending(host, interrupted.calls, signal, entries, async (c) => !c.started || (await host.definition(c.name))?.hints?.idempotent === true);
 		if (open.length) return { outcome: { kind: "completed" }, result: { openToolCalls: open }, entries, usage: zeroUsage() };
 		return this.loop(input, host, signal, entries);
 	}
@@ -35,6 +35,7 @@ export class DurableRuntime extends TransientRuntime {
 export function durableRuntime(options?: TransientRuntimeOptions): Plugin {
 	return {
 		name: "runtime-durable",
+		spawn: { module: "@modular-agent/runtime-durable", export: "durableRuntime", options },
 		replaces: "runtime-transient",
 		setup(api) {
 			api.provide("runtime", new DurableRuntime(options));

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { ALL_AUTHORITY, type Actor, type AgentEvent, type Harness, type InputRequest, type Plugin, type PluginApi } from "@modular-agent/harness";
 import { approval, type ApprovalPolicy } from "@modular-agent/approval";
@@ -58,8 +58,12 @@ async function crashWhileAsking(d: { project: string; home: string }) {
 	await api.input(s, { content: "pay the bill", actorId: "user" });
 	const asked = await ui.next();
 	// The process stops here. The harness is abandoned without a clean shutdown.
+	abandoned.push(h);
 	return { s, asked, abandoned: h };
 }
+/** A real crash would end the abandoned harnesses' plugin processes too. Do that once the tests are done. */
+const abandoned: Harness[] = [];
+after(() => Promise.all(abandoned.map((h) => h.stop().catch(() => undefined))));
 
 test("durable: a question open when the process stopped is reopened, and the answer lets the call run", async () => {
 	const d = dirs();

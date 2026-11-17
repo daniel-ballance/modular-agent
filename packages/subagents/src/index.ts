@@ -145,7 +145,11 @@ export class Subagents implements ToolSource, InterfaceCapability {
 	/** Raw events: a child's turn ended. Decide once the child is idle. */
 	onAgentEvent(e: AgentEvent): void {
 		if (e.type !== "turn.ended" || !this.waiting.has(e.sessionId)) return;
-		void this.api.waitForIdle(e.sessionId).then(() => this.check(e.sessionId));
+		// The child may close before this runs, for example when the process stops.
+		void Promise.resolve()
+			.then(() => this.api.waitForIdle(e.sessionId))
+			.then(() => this.check(e.sessionId))
+			.catch(() => undefined);
 	}
 
 	private check(child: string): void {

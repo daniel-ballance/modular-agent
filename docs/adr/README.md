@@ -16,4 +16,5 @@ Each record explains one decision that is hard to reverse and would surprise a r
 | [0010](0010-describe-parts-not-wiring.md) | Describe the parts and how they fit, not how they are wired | stands |
 | [0011](0011-minimal-harness-everything-is-a-plugin.md) | The Harness does the minimum, and everything else is a plugin | stands |
 | [0012](0012-one-agent-is-the-scope.md) | One agent is the scope; hosts that coordinate several agents drive it from outside | stands |
-| [0013](0013-first-binding-typescript-in-process.md) | The first implementation is TypeScript in one process, with a package per part | stands |
+| [0013](0013-first-binding-typescript-in-process.md) | The first implementation is TypeScript in one process, with a package per part | stands, extended by 0014 |
+| [0014](0014-plugins-in-other-processes.md) | A plugin can run in another process, through one generic RPC | stands |

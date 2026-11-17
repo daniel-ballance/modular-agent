@@ -65,6 +65,14 @@ Anyone building one of these parts will need to answer these questions. Each ent
 - **Plugins the model loads** during a session. (R4)
 - **Which scoped offering wins** when two plugins offer the same thing to one session. (R2 F11)
 
+## Plugins in other processes
+
+From building plugin RPC ([ADR 0014](../adr/0014-plugins-in-other-processes.md)):
+- **Handles are never released.** Every function or object passed across the connection stays in a table for the life of the process. A long-running agent needs release messages, or handles scoped to the call that passed them.
+- **An object's data is copied once,** when it is first sent. Later changes don't follow. Objects passed this way must keep their data fixed, as working environments do.
+- **Plugin API calls that answer at once** are unavailable to a plugin in another process. A copy of each session built from its events would make them available without changing the plugin API.
+- **A crash test that abandons a harness** must also end its plugin processes, as the real crash would. An abandoned harness that is waiting on a remote plugin keeps the test process alive.
+
 ## Hosts and reconnecting
 
 - **What reconnecting recovers:** open requests, running jobs, queued input, the running turn. (R3 F2)

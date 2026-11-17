@@ -87,6 +87,7 @@ export class FileTools implements ToolSource {
 export function fileTools(): Plugin {
 	return {
 		name: "tools-files",
+		spawn: { module: "@modular-agent/tools-files", export: "fileTools" },
 		setup(api) {
 			api.provide("tool-source", new FileTools());
 		},

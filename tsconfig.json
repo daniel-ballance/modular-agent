@@ -59,6 +59,9 @@
       "path": "packages/tools-mcp"
     },
     {
+      "path": "packages/plugin-rpc"
+    },
+    {
       "path": "packages/runtime-durable"
     }
   ]

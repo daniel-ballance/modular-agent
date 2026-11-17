@@ -158,6 +158,8 @@ export interface PiAiProviderOptions {
 export function piAiProviders(options: PiAiProviderOptions = {}): Plugin {
 	return {
 		name: "provider-pi-ai",
+		// A collection of models passed in can't move to another process; the built-in one can.
+		...(options.models ? {} : { spawn: { module: "@modular-agent/provider-pi-ai", export: "piAiProviders", options: { only: options.only } } }),
 		setup(api) {
 			const credentials = api.use<CredentialStore>("credential-store");
 			const models = options.models ?? builtinModels(credentials ? { credentials: credentials as never } : undefined);

@@ -122,6 +122,7 @@ export function mcpTools(options: { servers?: Record<string, McpServerConfig> } 
 	let tools: McpTools | undefined;
 	return {
 		name: "tools-mcp",
+		spawn: { module: "@modular-agent/tools-mcp", export: "mcpTools", options },
 		async setup(api) {
 			tools = new McpTools(api);
 			api.provide("tool-source", tools);

@@ -14,6 +14,7 @@
 | `provider-pi-ai` | Provider, one per pi-ai vendor |
 | `interface-terminal` | Interface: interactive, print (`-p`) and JSON modes |
 | `interface-acp` | Interface: ACP v1 over stdio (`ma --acp`), using the official SDK |
+| `plugin-rpc` | Runs any plugin in a process of its own, over JSON-RPC on stdio ([ADR 0014](adr/0014-plugins-in-other-processes.md)) |
 | `tools-mcp` | Tool source: tools from MCP servers, using Pi's `pi-mcp` client. Servers come from settings, or from an ACP client for one session. |
 | `subagents` | Feature: the `delegate` tool. A subagent is a child session started by a job. `durable: true` carries subagents on after a restart. |
 | `interface-tui` | Interface: full-screen terminal UI on Pi's `pi-tui` library. The default interactive mode; `--plain` gives the line-based one. |
@@ -39,7 +40,8 @@ node packages/agent/dist/src/cli.js --pi-auth --approval ask --approval-wait 30 
 node packages/agent/dist/src/cli.js --pi-auth --question-wait 30      # ask_user questions outlast the turn after 30 s
 node packages/agent/dist/src/cli.js --pi-auth --durable               # subagents, too, carry on after a restart
 node packages/agent/dist/src/cli.js --pi-auth --acp                   # serve ACP, for a host such as T3 Code
-npm test                                                               # 50 tests, using pi-ai's faux provider
+MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local node packages/agent/dist/src/cli.js --pi-auth   # each of those in its own process
+npm test                                                               # 53 tests, using pi-ai's faux provider; MA_REMOTE=... npm test runs them across processes
 ```
 
 ## What is checked
@@ -185,6 +187,23 @@ This needed one change to the contracts: asking a tool source for its tools can 
 It also exposed a gap in trust. A project's settings for plugins applied whether or not the project was trusted, so an untrusted project could start an MCP server, or point a plugin at other files. Now a project's plugin settings apply only once the project is trusted. Its session defaults, such as the model, still apply.
 
 Tests use a small MCP server with one tool: from global settings; from a project's settings, ignored until `/trust`; and from an ACP client, offered to that session and not another. `npm test` now runs 50 tests.
+
+## Over RPC
+
+Any plugin can run in a process of its own ([ADR 0014](adr/0014-plugins-in-other-processes.md)). The swap test for this is the whole suite: `MA_REMOTE=runtime-transient,runtime-durable,tools-files,env-local,tools-mcp npm test` runs all 53 tests with those plugins out of process, and they all pass. It takes 1.6 seconds, against 1.0 in one process. Three more tests run only across processes:
+- Only the Harness stays in the test's process. The Provider, Runtime, file tools and working environment run in four others, with streaming output and live `bash` output crossing two processes.
+- Cancelling a turn reaches a `bash` command two processes away, and stops it.
+- When a plugin's process dies, the waiting tool call fails with a clear result, the turn carries on, and the Harness reports the problem.
+
+A real `xai/grok-4.7` run with the Provider, Runtime, file tools, working environment and MCP plugin each in its own process read a file and wrote a second with `bash`. The Provider's credentials came from the credential store in the Harness's process, over the connection.
+
+What changed to make it work:
+- **The Runtime host's calls are asynchronous,** including a new id, a tool's definition, and whether input is waiting. A working environment's `at` may be too, and `resolve` left the interface, since only the environment used it.
+- **The Harness keeps copies** of a remote tool source's tools and a remote Provider's models, because it asks for them without waiting. A tool source's change announcement refreshes the copy. A call into the plugin answers only after the refreshes it caused, so a host that adds MCP servers to a session sees their tools at once. That became a contracts rule: an answer comes after its effects.
+- **A stopping process doesn't announce turn ends.** A remote Runtime finished its turn after the session was suspended, and the Harness announced `turn.ended` for a session it no longer held. The subagents plugin then failed on it.
+- **A plugin process keeps the agent alive only while the agent waits on it.** A crash test that abandons its harness now stops it after the test, as the real crash would have.
+
+Two of my test mistakes are worth a note. A test killed `bash`'s parent process to simulate a dying plugin. With the working environment in process, that parent was the test runner. And `echo done > out.txt` has no output, so it can't test live output.
 
 ## What building changed
 

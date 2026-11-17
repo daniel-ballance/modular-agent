@@ -13,6 +13,7 @@ import { transientRuntime } from "@modular-agent/runtime-transient";
 import { systemPrompt } from "@modular-agent/system-prompt";
 import { fileTools } from "@modular-agent/tools-files";
 import { pluginsFromSettings, projectTrust } from "./loading.js";
+import { remotePlugin } from "@modular-agent/plugin-rpc";
 export { pluginsFromSettings, projectTrust } from "./loading.js";
 
 export interface AgentOptions {
@@ -28,6 +29,13 @@ export interface AgentOptions {
 	/** Extra plugins, loaded after the standard set. */
 	plugins?: Plugin[];
 	settings?: Record<string, unknown>;
+	/**
+	 * Plugins to run each in a process of its own, by name, such as
+	 * ["runtime-transient", "tools-files", "env-local"]. Defaults to the
+	 * comma-separated MA_REMOTE environment variable. Only plugins that say how to
+	 * load them elsewhere can move.
+	 */
+	remote?: string[];
 }
 
 /** The plugins that make up the vanilla agent, in load order. */
@@ -54,7 +62,9 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 	const fromSettings = await pluginsFromSettings(home, project);
 	for (const problem of fromSettings.problems) harness.problems.push({ plugin: "settings", where: "load", error: problem });
 	// The trust check loads first, so it can refuse project plugins loaded after it.
-	await harness.load([projectTrust(home), ...vanillaPlugins(options), ...fromSettings.plugins]);
+	const remote = new Set(options.remote ?? (process.env.MA_REMOTE ? process.env.MA_REMOTE.split(",").map((s) => s.trim()) : []));
+	const plugins = [projectTrust(home), ...vanillaPlugins(options), ...fromSettings.plugins].map((p) => (remote.has(p.name) && p.spawn ? remotePlugin(p) : p));
+	await harness.load(plugins);
 	return harness;
 }
 
