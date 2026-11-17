@@ -10,9 +10,9 @@ The questions are about **what** the system does. Questions about **how** it is 
 
 ### How many of each capability
 
-Is there one Runtime per session, or can it change between turns? Providers, tool sources and Interfaces can be many, but what happens when two plugins offer the same thing, such as two tools with one name? A plugin can now replace another deliberately; what happens when two replace the same one?
+**Settled** by the clean-room builds ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). A session has one Runtime, history store, working environment, credential store and configuration; a second is refused unless it names what it replaces. Two tools, commands or Providers with one name: the second is refused, never shadowed. See [Plugins and capabilities](contracts.md#plugins-and-capabilities).
 
-Prior art: DeepSeek Harness refuses a duplicate model route, and lets a tool registered for one agent hide a global tool of the same name.
+Still open: what happens when two plugins both replace the same one.
 
 ### Plugin scope
 
@@ -34,21 +34,18 @@ We use "capability" for a named job a plugin does, such as Runtime. Pydantic AI 
 
 ### Waiting for an answer
 
-[Architecture](architecture.md#waiting-for-an-answer) proposes requirements: the user answers in context; a tool call can stay open past its turn, and its answer arrives later as its result; every request says who may answer it and how; approval fails closed; a session can be set never to ask; a subagent's requests go to its parent. Still open:
-- Can an approval stay open past its turn, or does it only wait or fail?
-- When does the agent decide to stop waiting and end the turn with the call open?
+[Architecture](architecture.md#waiting-for-an-answer) proposes requirements: the user answers in context; a tool call can stay open past its turn, and its answer arrives later as its result; every request says who may answer it and how; approval fails closed; a session can be set never to ask; a subagent's requests go to its parent. When to stop waiting is now settled: the asker's time limit decides, and the asker chooses to decline or leave the call open ([Questions](contracts.md#questions)). Still open:
+- Can an approval stay open past its turn? The clean-room builds split: two let it, one refused.
 
 Prior art: Pi waits in place, and the wait is lost if Pi stops. DeepSeek Harness waits for a set time, then leaves the question open. Pydantic AI hands a resume token to whoever will answer, or ends the run with the calls still open. T3 Code marks each request live or no longer answerable.
 
 ### Input during a turn
 
-Can new input join a turn that is running? A Runtime declares whether it can. If it can't, does the input wait for the turn to end, or is the turn restarted with it, and who chooses?
-
-Prior art: Pi takes "steering" input before the next model request, and "follow-up" input after the turn. ACP v2 accepts a prompt as soon as it joins the conversation. T3 Code chooses between steering, restarting and queueing by what the agent supports.
+**Settled** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). Steering joins the running turn after the current round of tool calls, before the next model request; input for after the turn starts its own turn. A Runtime that can't take input during a turn declares so, and the input waits. See [Input](contracts.md#input).
 
 ### Cancellation
 
-What does cancelling do to open input requests? Jobs keep running, and queued input is handed back to the Interface. Can an actor cancel only its own work in a shared session?
+Settled: jobs keep running, queued input is handed back, and a pending permission request answered as cancelled counts as a refusal ([Input](contracts.md#input), and the [ACP binding](bindings/acp.md)). Still open: can an actor cancel only its own work in a shared session?
 
 Prior art: in ACP, cancelling answers every pending permission request as cancelled. Pi returns queued input to the user's editor.
 
@@ -58,9 +55,7 @@ Who sets step limits, time limits and token budgets: the session's settings, the
 
 ### Changing the model mid-turn
 
-Can the model change between steps of one turn, or between attempts of one request, for example to fall back to another model when one fails? A setting change now records the step from which it applies.
-
-Prior art: DeepSeek Harness fixes the model for each step and won't let a plugin switch it for one request, because that silently loses the provider's cache. Pydantic AI can fall back to another model when a request fails.
+**Settled** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). A settings change never alters a running turn; it applies from the next turn, and a turn records the model it started with. Falling back to another model after a failure is a new request under a new setting, not a change inside a request. See [Settings](contracts.md#settings).
 
 ### Work outside a turn
 
@@ -82,10 +77,7 @@ Users see text, reasoning and audio as the model produces them. [Contracts](cont
 
 ### Several actors
 
-Several actors in one session are optional, and an agent declares whether it supports them ([Architecture](architecture.md#actors-and-authority)). Still open:
-- How is authority granted, and by whom?
-- What happens when two actors give input or steer at once?
-- Does an approval need the actor who started the turn, or anyone with the authority?
+Several actors in one session are optional, and an agent declares whether it supports them ([Architecture](architecture.md#actors-and-authority)). Settled by the clean-room builds: authority is a set of named rights; an actor grants only rights it has; work keeps the authority of everyone who contributed, or mixed input is refused (declared); anyone present with the authority may answer an approval ([Authority](contracts.md#authority)). Still open:
 - How do budgets that span sessions, per tenant, work with a transient Runtime?
 
 Prior art: DeepSeek Harness LiveShare has an owner and viewers. T3 Code lets guests propose input and outside agents sign in with an access level, under an administrator's cap.
@@ -104,9 +96,7 @@ A UI can now call a tool directly, as MCP Apps allow, and the same checks apply.
 
 ### Parallel tool calls
 
-When one step asks for several tool calls, may they run at the same time, and in what order do their results reach the model?
-
-Prior art: Pi runs them together but reports results in the order the model asked. A tool can insist on running alone.
+**Settled** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). Calls run together only when every call's tool allows it; otherwise the whole round runs one at a time. Results are recorded as they finish and reach the model in the order asked. See [Recovery and repeating work](contracts.md#recovery-and-repeating-work).
 
 ### Direct tool access
 
@@ -118,19 +108,17 @@ Prior art: in Pi, every tool the Runtime calls was built by the Harness. An ACP 
 
 ### What history records
 
-Must the history hold enough to rebuild exactly what the model saw on every step, including the model, settings and tool definitions? That makes every request checkable and explains changes in cost, but records more. With a Provider that keeps state, part of what the model saw is outside our history.
+Settled in part: a turn records the model, tools and system prompt it started with, and recovery uses that record ([Settings](contracts.md#settings)). None of the clean-room builds recorded the exact bytes sent to a vendor. Still open: must the history hold enough to rebuild exactly what the model saw on every step? With a Provider that keeps state, part of what the model saw is outside our history.
 
 Prior art: DeepSeek Harness's rule is "model-visible means logged".
 
 ### Transient and durable Runtimes
 
-[Architecture](architecture.md#surviving-interruptions) now treats durability as a promise many parts make. What exactly must each part declare or record, and when, so that a durable Runtime fits the same description as a transient one?
-
-Prior art: Pydantic AI runs one agent on nine durable engines by treating model requests, tool calls and declared plugin operations as the recordable steps. DeepSeek Harness marks unfinished tool calls "outcome unknown" or "not started". T3 Code records what it intends to do before doing it.
+**Settled** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). A model response is recorded before its tools start, and a call's start before it runs. A finished call never runs again. An unfinished call runs again only on two promises, the tool's and the working environment's. Hook handlers may run again and must make their effects safe to repeat. See [Recovery and repeating work](contracts.md#recovery-and-repeating-work).
 
 ### Erasure scope
 
-Erasure reaches every copy the agent controls ([Architecture](architecture.md#history)). What counts as a copy: summaries that paraphrase the data, a Provider's stored state, telemetry already exported? Who may ask for erasure?
+**Settled** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). What counts as a copy is listed in [Erasure](contracts.md#erasure): responses copy their requests, results their calls, summaries what they summarize, forks their originals, job records their calls and results. Erasure follows copies transitively and prefers erasing too much. Who may erase is the "erase" right ([Authority](contracts.md#authority)).
 
 ## Beyond one agent
 

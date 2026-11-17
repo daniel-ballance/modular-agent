@@ -183,7 +183,7 @@ A report that something happened. It can't change what happened.
 _Avoid_: Notification, message
 
 **Command**:
-An instruction a user gives through an Interface, such as `/model` or `/compact`, that a plugin carries out without involving the model.
+An instruction a user gives through an Interface, such as `/model` or `/compact`, that a plugin carries out without starting a turn. Most commands make no model request; one that does, as `/compact` does to write a summary, says so.
 _Avoid_: Slash command (one form of it), tool
 
 ## Actors

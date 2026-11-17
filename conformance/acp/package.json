@@ -1,0 +1,9 @@
+{
+  "name": "modular-agent-acp-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Conformance kit for the modular-agent-acp/1 ACP host binding",
+  "bin": { "ma-acp-conformance": "run.mjs" },
+  "dependencies": { "@agentclientprotocol/sdk": "2.7.0" }
+}

@@ -325,23 +325,23 @@ A job left unfinished by a stopped process stays unfinished until its plugin tak
 
 Whoever owns an operation defines its hook points, including plugins ([ADR 0006](adr/0006-hook-points-belong-to-the-operation-owner.md)). Every Runtime offers the same standard set.
 
-| Owner | Hook point | Plugins are given | Plugins can answer |
-|---|---|---|---|
-| Harness | plugin about to load | the plugin and the project | allow or refuse |
-| Harness | session starts, joined, left, ends | the session and actor | nothing: observe only |
-| Harness | input arrives | the input and its actor | pass it on; change it; or handle it, so it never reaches the model |
-| Harness | before a turn | the session and the input | additions to the system prompt and the context |
-| Harness | before output reaches a recipient | the output and the recipient | let it through, redact it, block it, or hold it until more arrives |
-| Runtime | turn starts | the turn input | nothing: observe only |
-| Runtime | before each step | the history so far, usage so far, the model's limits | the model context for this step; the tools the model may use; whether the Provider may run tools itself |
-| Runtime | after each step | the model response, including tools the Provider ran | continue or end the turn |
-| Runtime | before a tool call | the tool call and its definition | allow it; refuse it, with a reason; or allow it with changed input |
-| Runtime | after a tool call | the tool call and its result | keep the result, or replace it |
-| Runtime | a model request failed | the request and why it failed | retry, perhaps after changing something such as the context; or let it fail |
-| Runtime | the turn's result is ready | the result and the shape it must have | accept it; or send the model back with a reason |
-| Runtime | turn ends | the outcome | nothing: observe only |
-| Provider | before a model request | the request | a changed request |
-| Provider | as the response arrives | each piece | nothing: observe only |
+| Owner | Hook point | Plugins are given | Plugins can answer | Rule |
+|---|---|---|---|---|
+| Harness | plugin about to load | the plugin and the project | allow or refuse | gate |
+| Harness | session starts, joined, left, ends | the session and actor | nothing: observe only | observe |
+| Harness | input arrives | the input and its actor | pass it on; change it; or handle it, so it never reaches the model | transform |
+| Harness | before a turn | the session and the input | additions to the system prompt and the context | collect |
+| Harness | before output reaches a recipient | the output and the recipient | let it through, redact it, block it, or hold it until more arrives | gate, applied by the Harness |
+| Runtime | turn starts | the turn input | nothing: observe only | observe |
+| Runtime | before each step | the history so far, usage so far, the model's limits | the model context for this step; the tools the model may use; whether the Provider may run tools itself | transform |
+| Runtime | after each step | the model response, including tools the Provider ran | continue or end the turn | gate: a refusal ends the turn |
+| Runtime | before a tool call | the tool call and its definition | allow it; refuse it, with a reason; or allow it with changed input | gate |
+| Runtime | after a tool call | the tool call and its result | keep the result, or replace it | transform |
+| Runtime | a model request failed | the request and why it failed | retry, perhaps after changing something such as the context; or let it fail | first answer |
+| Runtime | the turn's result is ready | the result and the shape it must have | accept it; or send the model back with a reason | gate: a refusal sends the model back |
+| Runtime | turn ends | the outcome | nothing: observe only | observe |
+| Provider | before a model request | the request | a changed request | transform |
+| Provider | as the response arrives | each piece | nothing: observe only | observe |
 
 "Before a tool call" also applies to calls a UI or plugin starts. Tools a Provider runs itself can't be stopped one by one. They are allowed or refused before the request.
 
@@ -352,4 +352,159 @@ When several plugins handle one hook point, the hook point's owner fixes one rul
 - **first answer:** the first handler that answers decides.
 - **collect:** every handler's contribution is gathered.
 
-Handlers run in the order their plugins were loaded. A plugin can ask to run first or last.
+Handlers run in the order their plugins were loaded. A plugin can ask to run first or last. Handlers that ask to run first form a group, in load order, then those with no preference, then those that ask to run last, again in load order. Neither group is reversed. **Decided** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)).
+
+**When a handler fails:** at a gate, it counts as a refusal. At an observe point, the failure is reported and the operation carries on. At a transform, first-answer or collect point, the operation that ran the hook point fails, and says which handler failed. **Decided** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)).
+
+**A handler may run more than once for the same work.** After a restart, a recovered turn runs its checks again from the last recorded point. A handler with an outside effect must make that effect safe to repeat, for example by keying it. Neither the Harness nor the Runtime makes a handler's effects happen exactly once. **Decided** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)).
+
+## Rules every implementation follows
+
+These rules come from three independent builds of this description, in Rust, Python and Go, each made from the docs alone ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). Each builder logged where the description left a choice open, and whether two builds that chose differently would break a plugin or a host. Where they would, and the builds agreed, the choice is now a rule. Where they would and the builds disagreed, the rule says what must be declared. All are **decided**.
+
+### Plugins and capabilities
+
+- **Some capabilities a session has only one of:** the Runtime, the history store, the working environment, the credential store and configuration. A second plugin providing one is refused, unless it names the plugin it replaces.
+- **Names are never shadowed.** Two tools with one name, two commands with one name, or two Providers with one identity: the second is refused when it loads. Nothing is silently hidden by load order.
+- **Replacing a plugin** names one that is loaded. Everything the replaced plugin registered goes. If the replacement fails to set up, nothing of it remains.
+- **The set of plugins is fixed** while a session is open. Reopening a session records the plugins active now, beside what history says was active before.
+- **Programs and servers a plugin starts** come from the current configuration and current trust. Nothing recorded in history can make the agent start a program.
+- **Some settings are the Harness's own,** such as a session's parent or an actor's authority. Configuration files can't set them.
+
+### Input
+
+- **Steering joins the running turn** after the current round of tool calls, before the next model request. Input for after the turn starts a turn of its own.
+- **One session takes one input at a time.** Two inputs arriving together are taken in some order, never both lost or merged.
+- **A key is remembered for the session's life,** across branches and restarts, until the input it admitted is erased. Input given again with a known key gets the first receipt, whatever its content, and starts nothing.
+- **Cancelling hands back all input not yet taken.** Input handed back keeps its key, so resending it needs a new key.
+- **After a restart,** input that was queued but not taken is either handed back or run. Which one is declared.
+
+### Settings
+
+- **Settings belong to the session, not to a branch.** Moving keeps the current settings. A fork starts with its source session's current settings, whichever entry it was forked at.
+- **A change never alters a running turn.** It applies from the next turn. An Interface may refuse a change while a turn runs, and declares whether it does.
+- **A turn records what it started with:** the model, the tools offered and the system prompt. Recovery uses that record.
+
+### Commands
+
+- **A command never starts a turn.** Most make no model request either. A command that does, such as `/compact`, which asks a model for a summary, says so.
+- **A command that only reads,** such as listing settings, doesn't make a session worth keeping.
+
+### Compaction
+
+- **Compaction never leaves a tool call without its result,** or a result without its call, in the model context. If the newest part can't be summarized without splitting a pair, the pair is summarized whole, or compaction is refused.
+- **A summary names every entry it summarizes.** Erasure follows those names.
+- **After a context-overflow failure,** a step is compacted and retried at most once. A summary that fails fails the turn. Nothing is deleted either way.
+
+### The output gate
+
+- **Everything that leaves the agent for a recipient passes the gate.** That includes live events, replayed history, answers to an Interface's requests, command results and turn outcomes, not only streamed pieces.
+- **A stream has a declared end:** the end of a model response, or of a tool's output. A guardrail that holds output releases or redacts it no later than that end.
+- **Plugins may read the raw record.** An Interface never passes the raw record to a recipient.
+
+### Erasure
+
+- **What counts as a copy.** Erasure follows copies, and copies of copies. Erasing too much is preferred to leaving a copy behind. The following count as copies:
+  - a model response, of every model-visible entry in the request that produced it;
+  - a tool result, of its call;
+  - a turn's result, of its responses and tool results;
+  - a summary, of what it summarizes;
+  - a fork's entries, of the entries they were copied from;
+  - a job's start, of the call that started it; its end, of the child's result; its report, of its end;
+  - the record of taking an input, of the input. The two are one.
+- **Erasure is refused** while another writer holds a session it would change. Whether it is also refused while a turn runs is declared.
+- **Records of authority can't be erased.** Erasing a revocation must not widen anyone's authority.
+- **Erasure reports three things:** what was erased; what is still pending, such as a remote deletion that failed and will be retried; and what is out of reach, such as output already delivered or a vendor's own logs.
+- **A Provider that keeps state** discards it, and deletes the remote copies it knows of.
+
+### Recovery and repeating work
+
+- **A model response is recorded before any tool call it asks for starts.** A call's start is recorded before the call runs. A finished call never runs again.
+- **"Safe to repeat" is a promise, not a hint.** A call that started and didn't finish runs again only if both of these promise it is safe:
+  - the tool's definition, both as recorded and as it is now;
+  - the working environment: nothing from the first attempt is still running.
+
+  A missing promise means unsafe. "Read-only" does not imply safe to repeat.
+- **An interrupted model request is repeated** only if its Provider declares it keeps no state and runs no tools, or declares its requests safe to repeat.
+- **Parallel tool calls** run together only if every call's tool allows it. Otherwise the whole round runs one call at a time. Each finished result is recorded at once, so a crash loses none, but the model sees results in the order it asked for them.
+
+### The working environment
+
+- **A command's background processes** outlive the call that started them, and a cancelled turn. They stop when the session closes or the agent stops.
+- **The working environment declares how strongly it keeps "nothing outlives the agent",** and on which platforms. Where it can't keep the promise, it refuses to run commands, or declares a weaker promise. Recovery treats a weaker promise as an unknown outcome.
+- **What a stopped agent left running is cleaned up** before any recovered work runs.
+
+### Authority
+
+- **Authority is a set of named rights.** An actor acts with its own rights, narrowed by the session's limit. For work another actor started, such as a job or a child session, they are narrowed further by every ancestor's current rights.
+- **An actor may grant only rights it has.** Grants and revocations apply on every branch.
+- **Work keeps the authority of everyone who contributed to it.** A turn that took input from several actors acts with only the rights they all share, or refuses mixed input. Which one is declared.
+- **A job's report acts as the job,** with the job's narrowed authority, never as the actor who started the job.
+- **Content is never authority.** Text in a message or a tool's input can't grant a right.
+- **Presence is declared.** An Interface says when its actor is present to answer. Following events is not presence. An approval with no present actor who may answer is refused at once.
+
+### Questions
+
+- **A key binds the whole question:** its kind, text, options, credential name and tool call. Asking again with the same key and different details doesn't reuse the earlier answer.
+- **Without a time limit,** a question waits in its turn. With one, the asker chooses what happens when it passes: decline, or leave the call open past its turn.
+- **When every question behind a turn's open calls is answered,** one new turn starts. It is keyed, so answering again starts none. It runs the calls again from the top, through every check, and each open call gets exactly one result.
+- **A call still waiting has no result in the record.** Only the model's view of the history describes it as waiting.
+- **Moving away from unfinished work** either cancels the open calls, questions and jobs left on the abandoned branch, or is refused before anything changes. Which one is declared. Forking at unfinished work is refused.
+
+### Secrets
+
+- **A secret goes straight from the Interface to the credential store,** in one atomic write. Only the credential's name is recorded, sent in events or given to the asker.
+- **If the write fails,** the question stays unanswered, and no error message contains the value.
+- **A question can't replace a Provider's credential.** Those names are reserved.
+- **With no credential store, or no name,** the question is declined before anyone is asked.
+- **A protocol that forbids secrets in a form,** as ACP does, never carries one. The question is declined instead.
+
+### Jobs
+
+- **A job started with a key starts once.**
+- **A job's end is recorded before its report is taken as input,** and the report is keyed by the job. A crash in between loses or repeats neither.
+- **A job whose result goes back in the call that started it doesn't also report.**
+- **Cancelling a job waits for it to clean up.** Closing a session cancels its jobs and waits for them. Stopping the process does neither: its jobs are interrupted, not ended.
+- **A job's usage counts once** toward its session, however its result travels.
+
+### Subagents
+
+- **A child session gets** the same plugins and project, a copy of its parent's settings, only its task, and authority no wider than its parent's.
+- **Subagents have a depth limit.** The default is three levels. The limit is declared.
+- **A follow-up to a finished child** is a new job on the same child. A child that is busy refuses another message.
+- **A child's question reaches the top one level at a time.** Each level records its link, and the answer goes back the same way. A secret's answer passes only its credential name.
+- **A child's job isn't finished** while the child still has calls open.
+
+### Configuration and trust
+
+- **Trust is given outside the project and kept outside it.** A project's own files can't grant it. It is checked again every time plugins are composed.
+- **Global plugins load first.** A trusted project's plugins and options load after them, merged by plugin name.
+
+### MCP servers
+
+- **Servers a host gives a session** serve only that session. Subagents don't inherit them. They close with the session, and must be given again when it reopens. Their environment and headers are never recorded.
+- **A failure before a call reaches the server** is a failed result. Losing the server after the call was sent is an unknown outcome.
+- **A tool's missing annotations are read cautiously:** it may change things, it may reach outside, and it is not safe to repeat.
+
+### Parts that are lost
+
+A part reached over a connection, such as a plugin in another process or a service, can be lost while the agent runs. Then:
+- calls waiting on it fail, saying which part was lost;
+- a tool call it had started gets one unknown outcome;
+- a lost observer is skipped and reported, a lost gate refuses, and a lost transform fails its operation;
+- a lost Runtime or history store is reported, not silently replaced.
+
+### Provider state
+
+- **A Provider that keeps state never supplies context missing from the agent's view.** It continues its state only when a request extends exactly what that state holds. Otherwise it starts again from what the agent sends.
+- **Moving, forking, compacting, erasing and changing the model** all mean it starts again.
+
+### Identities and usage
+
+- **Every tool call has an identity unique in its session.** A vendor's own reference for the call is kept beside it, for the Provider.
+- **Usage is plain numbers that add up:** input, output and cached tokens, and cost. A vendor's own breakdown stays in the Provider's data.
+
+### Following a session
+
+- **A follower resumes from an entry's identity.** It gets every entry recorded after that one, then live events. An unknown entry is refused.
+- **A slow follower may miss streamed pieces, but never entries.** The entries hold the final content of every piece it missed.

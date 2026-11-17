@@ -9,7 +9,7 @@ export interface SubagentOptions {
 	 * parent gets the real result.
 	 */
 	durable?: boolean;
-	/** How deep subagents may start subagents. Default 2. */
+	/** How deep subagents may start subagents. Default 3. */
 	maxDepth?: number;
 }
 
@@ -82,7 +82,7 @@ export class Subagents implements ToolSource, InterfaceCapability {
 			return this.begin(parent, { ...earlier, task: input.task }, Boolean(input.wait));
 		}
 		const depth = (settings.subagentDepth as number | undefined) ?? 0;
-		if (depth >= (this.options.maxDepth ?? 2)) return { status: "failed", content: [text("Subagents can't start more subagents at this depth.")] };
+		if (depth >= (this.options.maxDepth ?? 3)) return { status: "failed", content: [text("Subagents can't start more subagents at this depth.")] };
 		const label = input.label || String(input.task).slice(0, 40);
 		const child = await this.api.startSession({
 			parentSessionId: parent,

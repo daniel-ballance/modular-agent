@@ -61,6 +61,16 @@ export class HookRegistry {
 		return this.points.get(name)?.handlers.length ?? 0;
 	}
 
+	/**
+	 * A handler failed at a transform, first-answer or collect point: the operation
+	 * that ran the hook point fails, naming the handler. (At a gate a failure is a
+	 * refusal; at an observe point it is reported and the operation carries on.)
+	 */
+	private failed(hook: string, plugin: string, error: unknown): Error {
+		this.onFailure({ hook, plugin, error });
+		return new Error(`${plugin} failed at ${hook}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+
 	async observe(name: string, payload: unknown): Promise<void> {
 		for (const h of this.point(name, "observe").handlers) {
 			try {
@@ -98,8 +108,7 @@ export class HookRegistry {
 			try {
 				answer = (await h.handler(value)) as TransformAnswer<T>;
 			} catch (error) {
-				this.onFailure({ hook: name, plugin: h.plugin, error });
-				continue;
+				throw this.failed(name, h.plugin, error);
 			}
 			if (!answer) continue;
 			value = answer.value;
@@ -115,7 +124,7 @@ export class HookRegistry {
 				const answer = await h.handler(payload);
 				if (answer !== undefined) return answer as R;
 			} catch (error) {
-				this.onFailure({ hook: name, plugin: h.plugin, error });
+				throw this.failed(name, h.plugin, error);
 			}
 		}
 		return undefined;
@@ -129,7 +138,7 @@ export class HookRegistry {
 				const answer = await h.handler(payload);
 				if (answer !== undefined) out.push(answer as R);
 			} catch (error) {
-				this.onFailure({ hook: name, plugin: h.plugin, error });
+				throw this.failed(name, h.plugin, error);
 			}
 		}
 		return out;

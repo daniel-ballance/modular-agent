@@ -104,3 +104,36 @@ When the code and the description disagree, this page says so. Update it when ei
 
 - **Declared support** gained rows the description lacked: `continuesAfterRestart`, `questionsOutlastTurns`, `inputKeys`. They are now in [Architecture](architecture.md#declared-support).
 - **Joining a session** was in the plugin API only as "join". It is now `join(session, actor, grantedBy)`, which refuses to grant more authority than the granter has.
+
+## The rules from the clean-room builds
+
+[Contracts](contracts.md#rules-every-implementation-follows) gained rules from three independent builds ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). This build follows most of them already. Where it didn't, the cheap fixes were made at once; the rest are listed here.
+
+| Rule | Status | Notes |
+|---|---|---|
+| Handler order: first group, normal, last group, load order within each | proven | Already so. |
+| A failing transform, first-answer or collect handler fails its operation | changed, proven | Was reported and skipped. |
+| A handler may run again after a restart | built | The durable Runtime reruns checks; no handler here has an unkeyed outside effect. |
+| Tool names are never silently shadowed | changed, built | A later tool with a taken name is refused and reported. Providers and commands were already unique. |
+| Subagents default to a depth of three | changed | Was two. |
+| Forking at unfinished work is refused | changed, built | A running turn, a job or a waiting call refuses the fork. |
+| A job's report is keyed by its job | changed, built | |
+| Steering joins after the current tool round | proven | |
+| Keys last for the session, and return the first receipt | proven | |
+| Settings belong to the session; a change applies from the next turn | built | Moving keeps settings; model access is fixed per turn. |
+| A summary names its sources; erasure follows copies | proven | |
+| What counts as a copy: responses, results, turn results, forks, jobs | partly | Summaries only. Responses don't yet name the requests they copied. |
+| Erasure refused while another writer holds an affected session | paper | Not checked across sessions. |
+| Records of authority can't be erased | paper | |
+| "Safe to repeat" is a promise from both the tool and the working environment | partly | The durable Runtime uses the tool's promise; `env-local` keeps its promise but doesn't declare it. |
+| An interrupted model request is repeated only on the Provider's promise | proven | Never repeated. |
+| Background processes outlive a cancelled turn, stop with the session or agent | partly | They stop with the agent; closing a session doesn't stop them. |
+| Presence is declared; approval with nobody present is refused | proven | |
+| A key binds the whole question | partly | The key alone is matched. |
+| A job's end is recorded before its report | proven | |
+| A child's job isn't finished while it has calls open | proven | |
+| Trust is given and kept outside the project | proven | |
+| Host MCP servers serve one session and aren't recorded | proven | |
+| A lost part fails its waiting calls and is reported | proven | Plugins over RPC. |
+| A Provider that keeps state starts again after a move or erasure | paper | No Provider here keeps state. |
+| Following resumes from an entry; unknown entries are refused | partly | HTTP resumes by count, not by entry identity. |

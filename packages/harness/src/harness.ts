@@ -172,6 +172,7 @@ export class Harness {
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
 	private newId: () => string;
+	private refusedTools = new Set<string>();
 	readonly problems: { plugin: string; where: string; error: string }[] = [];
 
 	constructor(options: HarnessOptions) {
@@ -521,6 +522,8 @@ export class Harness {
 
 	async forkSession(sessionId: string, entryId: string): Promise<string> {
 		const s = this.session(sessionId);
+		// Forking at unfinished work would copy work that is still running: refused.
+		if (s.running || s.jobs.size || this.waitingRequests(s).length) throw new Error("Can't fork while the session has unfinished work: a running turn, a job, or a call waiting for an answer");
 		return this.startSession({ forkFrom: { sessionId, entryId }, actor: [...s.actors.values()][0] });
 	}
 
@@ -918,7 +921,15 @@ export class Harness {
 		const out: ToolDefinition[] = [];
 		for (const source of this.useAll<ToolSource>("tool-source")) {
 			for (const t of source.tools(s?.id)) {
-				if (seen.has(t.name)) continue; // the first source to offer a name wins
+				if (seen.has(t.name)) {
+					// A name is never silently shadowed: the later source's tool is refused, and said so once.
+					const key = `${source.id}:${t.name}`;
+					if (!this.refusedTools.has(key)) {
+						this.refusedTools.add(key);
+						this.problem(source.id, "tools", new Error(`Tool ${t.name} is already offered by another tool source; this one is refused`));
+					}
+					continue;
+				}
 				seen.add(t.name);
 				out.push(t);
 			}
@@ -1188,7 +1199,8 @@ export class Harness {
 					this.emit(s.id, "job.ended", { state, result: job.result }, plugin, { jobId: job.id });
 					if (options?.report === false || s.closed) return;
 					const report: ContentPart[] = [text(`[Job ${job.kind} ${job.id.slice(0, 8)} ${state}]\n`), ...(job.result ?? [])];
-					await this.input(s.id, { content: report, when: "after", actorId: job.actorId ?? "harness", kind: "jobReport", startedBy: { kind: "job", id: job.id } });
+					// Keyed by the job, so a report is taken once even if delivery is retried.
+					await this.input(s.id, { content: report, when: "after", key: `job-report:${job.id}`, actorId: job.actorId ?? "harness", kind: "jobReport", startedBy: { kind: "job", id: job.id } });
 				} finally {
 					s.jobs.delete(job.id);
 				}

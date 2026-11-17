@@ -326,7 +326,7 @@ These requirements are **proposed** ([open question](open-questions.md#transient
 - **A session outlives a process only if it has a history store.**
 - **With a transient Runtime,** a turn whose process stops ends as failed. Its record shows which tool calls finished, which never started, and which have an unknown outcome.
 - **With a durable Runtime,** the turn carries on after a restart.
-- **An outside effect with an unknown outcome is not repeated** unless it was declared safe to repeat. That applies to tool calls, and to model requests to a Provider that keeps state or runs tools.
+- **An outside effect with an unknown outcome is not repeated** unless it was promised safe to repeat: for a tool call, by both the tool and the working environment; for a model request, by the Provider. A hint is not a promise. See [Recovery and repeating work](contracts.md#recovery-and-repeating-work).
 - **A durable Runtime relies on other parts.** Tools say whether they are safe to repeat, Providers say whether they keep state, and a working environment says when it is lost.
 
 ## Who sees what
@@ -385,7 +385,7 @@ The agent declares what the session, as set up, supports. That is what a host or
 
 ## Guarantees
 
-These always hold. They are **proposed** unless a decision is linked.
+The rules every implementation follows, area by area, are in [Contracts](contracts.md#rules-every-implementation-follows). These always hold. They are **proposed** unless a decision is linked.
 
 1. **Everything can be identified.** Every session, turn, step, tool call, job and actor can be identified, and everything that happens can be traced to the ones it belongs to.
 2. **Everything can be observed** by those allowed to see it, for as long as it is kept ([ADR 0010](adr/0010-describe-parts-not-wiring.md)).

@@ -58,9 +58,9 @@ The model calls a tool that asks the user which database to use. The user has wa
 3. The input request stays open and answerable, with no deadline.
 4. An hour later the user answers. The answer becomes the open call's one result, and the Harness starts a new turn so the agent can carry on from it.
 
-**Variation:** with a durable Runtime that declares it can wait through a restart, the turn itself waits, and continues when the answer arrives.
+The asking tool set the time limit, and chose to leave the call open when it passed. That works the same with either Runtime ([Questions](contracts.md#questions)).
 
-**Open:** who sets the time limit ([open question](open-questions.md#waiting-for-an-answer)).
+**Variation:** the tool asks with no time limit. The turn waits for the answer. A durable Runtime that declares it can wait through a restart keeps waiting after one; a transient Runtime records the question as no longer answerable.
 
 ## 4. The user adds a message while the agent works
 
@@ -199,7 +199,9 @@ After three turns that went wrong, the user goes back to just after the first on
 **Moving only.** The user wants to try a different reply from the same point, and doesn't care about files.
 1. The terminal UI asks to move the session to the entry after the first turn, without rewinding.
 2. The session's current position moves. The move is recorded as a new entry, so a restart reopens the session there. Nothing is deleted.
-3. The view now leaves out the later turns. No other part has to do anything.
+3. The view now leaves out the later turns.
+4. Anything still unfinished on the abandoned branch, such as an open tool call or a job, is cancelled, or the move is refused before anything changes. Which one is declared ([Questions](contracts.md#questions)).
+5. A Provider that keeps state starts again from what the agent sends, because its state still holds the abandoned turns ([Provider state](contracts.md#provider-state)).
 
 **Rewinding.** The user also wants the files back as they were.
 1. The terminal UI asks to move the session to the same entry, and to rewind outside state too.
