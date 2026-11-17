@@ -20,6 +20,8 @@ A history store as an HTTP service, so an agent in one language can keep its ses
 
 A Session is the body of the `PUT`, plus its `id`.
 
+The service lists whatever has entries. Keeping "a session started only to look leaves nothing behind" is the agent's job: it sends a session only once something happens in it beyond setup, such as its first input. A client that sends every setting at once breaks that rule through the service. The TypeScript build did, until the ACP conformance kit caught it.
+
 ## Writing: one writer at a time
 
 Only one writer may add entries to a session at a time. A writer holds a **lease** on the session, and the service ends it if the writer stops renewing it.

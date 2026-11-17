@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { MutableModels } from "@earendil-works/pi-ai";
@@ -14,6 +15,7 @@ import { systemPrompt } from "@modular-agent/system-prompt";
 import { fileTools } from "@modular-agent/tools-files";
 import { pluginsFromSettings, projectTrust } from "./loading.js";
 import { remotePlugin } from "@modular-agent/plugin-rpc";
+import { historyHttp } from "@modular-agent/services";
 export { pluginsFromSettings, projectTrust } from "./loading.js";
 
 export interface AgentOptions {
@@ -63,7 +65,10 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 	for (const problem of fromSettings.problems) harness.problems.push({ plugin: "settings", where: "load", error: problem });
 	// The trust check loads first, so it can refuse project plugins loaded after it.
 	const remote = new Set(options.remote ?? (process.env.MA_REMOTE ? process.env.MA_REMOTE.split(",").map((s) => s.trim()) : []));
-	const plugins = [projectTrust(home), ...vanillaPlugins(options), ...fromSettings.plugins].map((p) => (remote.has(p.name) && p.spawn ? remotePlugin(p) : p));
+	// A history service that follows modular-agent-history/1, in any language, can replace the local store.
+	const historyUrl = process.env.MODULAR_AGENT_HISTORY_URL;
+	const historyService = historyUrl ? [historyHttp({ url: historyUrl, token: readFileSync(process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "", "utf8").trim() })] : [];
+	const plugins = [projectTrust(home), ...vanillaPlugins(options), ...historyService, ...fromSettings.plugins].map((p) => (remote.has(p.name) && p.spawn ? remotePlugin(p) : p));
 	await harness.load(plugins);
 	return harness;
 }

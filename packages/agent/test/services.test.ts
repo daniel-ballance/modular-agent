@@ -111,7 +111,7 @@ function events(a: { url: string; token: string }, sessionId: string, lastEventI
 	};
 }
 
-const storedEntries = async (sessionId: string, from = history) => (await http<{ entries: HistoryEntry[] }>(from, "GET", `/sessions/${sessionId}`)).entries;
+const storedEntries = async (sessionId: string, from = history) => (await http<{ entries: HistoryEntry[] }>(from, "GET", `/v1/sessions/${sessionId}`)).entries;
 
 // ---------- the tests ----------
 
@@ -137,7 +137,7 @@ test("services: a second agent can't write to a session another holds; once it i
 	await http(first, "POST", `/sessions/${sessionId}/input`, { content: "say hello" });
 	await first.h.api("t").waitForIdle(sessionId);
 	const second = await agent();
-	await assert.rejects(http(second, "POST", `/sessions/${sessionId}/open`), /409|already open for writing/);
+	await assert.rejects(http(second, "POST", `/sessions/${sessionId}/open`), /409|already open for writing|held by another owner/);
 	await first.h.stop();
 	await http(second, "POST", `/sessions/${sessionId}/open`);
 	await http(second, "POST", `/sessions/${sessionId}/input`, { content: "say goodbye" });

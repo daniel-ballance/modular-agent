@@ -30,7 +30,8 @@ export async function serve(routes: [method: string, pattern: RegExp, route: Rou
 			if (!res.headersSent) send(res, 200, result ?? {});
 		} catch (error) {
 			const status = error instanceof HttpError ? error.status : 500;
-			if (!res.headersSent) send(res, status, { error: error instanceof Error ? error.message : String(error) });
+			const code = (error as { code?: unknown }).code;
+			if (!res.headersSent) send(res, status, { error: error instanceof Error ? error.message : String(error), ...(typeof code === "string" ? { code } : {}) });
 			else res.end();
 		}
 	});
