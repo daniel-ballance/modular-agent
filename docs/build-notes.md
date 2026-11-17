@@ -30,20 +30,22 @@ Run it from a project folder:
 
 ```sh
 npm install && npm run build
-node packages/agent/dist/src/cli.js --pi-auth -m xai/grok-4.7          # interactive
+node packages/agent/dist/src/cli.js --pi-auth -m xai/grok-4.7          # interactive, full-screen (--plain for line-based)
 node packages/agent/dist/src/cli.js --pi-auth -m xai/grok-4.7 -p "..."  # print the answer
 node packages/agent/dist/src/cli.js --pi-auth --durable -s <session>   # reopen, carrying on an interrupted turn
 node packages/agent/dist/src/cli.js --pi-auth --approval ask           # ask before tool calls that aren't read-only
 node packages/agent/dist/src/cli.js --pi-auth --approval ask --approval-wait 30   # after 30 s the question outlasts the turn
 node packages/agent/dist/src/cli.js --pi-auth --question-wait 30      # ask_user questions outlast the turn after 30 s
-npm test                                                               # 24 tests, using pi-ai's faux provider
+node packages/agent/dist/src/cli.js --pi-auth --durable               # subagents, too, carry on after a restart
+node packages/agent/dist/src/cli.js --pi-auth --acp                   # serve ACP, for a host such as T3 Code
+npm test                                                               # 37 tests, using pi-ai's faux provider
 ```
 
 ## What is checked
 
-The tests use pi-ai's faux provider, so they need no network. They cover: a turn that reads a file; approval as a plugin, both refused when nobody can answer and answered through an Interface, where a second answer is refused; input with a key taken once; steering into a running turn; cancelling, which hands queued input back and leaves jobs running; a job's report starting a turn; the output gate holding streamed pieces and redacting a secret split across them while the record stays intact; a context overflow compacted and retried; history surviving a restart, including a recorded move of the position; erasure; and the swap test below.
+The tests use pi-ai's faux provider, so they need no network. They cover: a turn that reads a file; approval as a plugin, both refused when nobody can answer and answered through an Interface, where a second answer is refused; input with a key taken once; steering into a running turn; cancelling, which hands queued input back and leaves jobs running; a job's report starting a turn; the output gate holding streamed pieces and redacting a secret split across them while the record stays intact; a context overflow compacted and retried; history surviving a restart, including a recorded move of the position; erasure; the swap test below; questions that survive a restart or outlast their turn; ACP; parallel tool calls; plugins from settings with project trust; and subagents, in the background, waited for, asking for approval through the parent, and after a restart in both variants.
 
-Also run by hand with a real model (`xai/grok-4.7` through Pi's credentials): print, JSON and interactive modes, reopening a session in a new process, and a real crash during a `bash` call recovered by the durable Runtime.
+Also run by hand with a real model (`xai/grok-4.7` through Pi's credentials): print, JSON and interactive modes, the full-screen TUI in a pseudo-terminal, reopening a session in a new process, a real crash during a `bash` call recovered by the durable Runtime, T3 Code driving the agent over ACP, and subagents, including a `kill -9` during a durable subagent's `bash` call.
 
 ## The swap test
 

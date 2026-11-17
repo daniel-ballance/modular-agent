@@ -15,7 +15,7 @@ When the code and the description disagree, this page says so. Update it when ei
 
 | Claim | Status | Notes |
 |---|---|---|
-| An agent is the Harness plus plugins | proven | The vanilla agent is 13 plugins on one Harness. |
+| An agent is the Harness plus plugins | proven | The `ma` command runs about 15 plugins on one Harness, plus any named in settings. |
 | The Harness hosts plugins, offers the plugin API, keeps sessions | proven | |
 | A plugin provides a capability, adds behaviour, or both | proven | `model-selection` adds behaviour; `tools-files` provides a capability. |
 | Plugins can define capabilities and hook points for each other | built | `defineHook` and `provide` exist. No plugin defines a new hook point for others yet. |
