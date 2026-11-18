@@ -135,7 +135,7 @@ test("transient: a question open when the process stopped is recorded as no long
 	assert.equal(ui.requests.length, 0);
 	const closed = kinds(h, s, "inputAnswer");
 	assert.equal(closed.length, 1);
-	assert.deepEqual(closed[0].data, { requestId: asked.id, reason: "no longer answerable", actorId: "harness", declined: true });
+	assert.deepEqual(closed[0].data, { requestId: asked.id, reason: "noLongerAnswerable", actorId: "harness", declined: true });
 	assert.equal(status(h, s), "notStarted");
 	assert.equal(outcome(h, s), "failed");
 	assert.equal(h.declaration(h.session(s)).waitingThroughRestart, false);
@@ -169,7 +169,7 @@ test("a viewer can see a question but only an actor with authority can answer it
 	const s = await api.startSession();
 	const v: Actor = { id: "viewer", kind: "user", authority: ["watch"] };
 	await api.join(s, v, "user");
-	await assert.rejects(api.join(s, { id: "guest", kind: "user", authority: ["erase"] }, "viewer"), /can't grant erase/);
+	await assert.rejects(api.join(s, { id: "guest", kind: "user", authority: ["erase"] }, "viewer"), /may not grant/);
 	await api.input(s, { content: "pay", actorId: "user" });
 	const seen = await viewer.next();
 	assert.equal(viewer.answer(seen, "allow", "viewer").accepted, false);

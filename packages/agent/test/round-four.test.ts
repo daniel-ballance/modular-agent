@@ -52,7 +52,8 @@ test("the agent reopens standard history with session settings, actors, keys and
 	await api.openSession(sid, { id: "friend", kind: "user", authority: [] });
 	assert.deepEqual(api.session(sid).settings.model, { provider: "conformance", id: "echo" });
 	assert.equal(api.session(sid).settings.reasoning, "low");
-	assert.equal(api.history(sid).at(-1)?.id, "e6");
+	assert.deepEqual(api.history(sid).slice(-2).map((e) => e.kind), ["turnEnd", "plugins"]);
+	assert.equal(api.history(sid).at(-1)?.parentId, "e6");
 	assert.deepEqual(await api.input(sid, { content: "ignored", key: "one", actorId: "friend" }), { duplicate: true, inputId: "original", taken: "now" });
 	assert.equal(api.openRequests(sid)[0]?.id, "foreign-question");
 	assert.equal(api.answer(sid, { requestId: "foreign-question", actorId: "friend", value: "allow" }).accepted, true);
@@ -87,12 +88,12 @@ test("erasure checks all affected writers before changing history and follows re
 		const entries = api.history(sid, { all: true });
 		assert.doesNotMatch(JSON.stringify(entries), /erase me/);
 		assert.ok(!entries.some((e) => e.kind === "turnEnd" && !e.erased), "erasure does not leave an interrupted turn to recover");
-		assert.deepEqual(entries.find((e) => e.id === response.id), { id: response.id, kind: response.kind, parentId: response.parentId, erased: true });
+		assert.deepEqual(entries.find((e) => e.id === response.id), { id: response.id, kind: response.kind, parentId: response.parentId, erased: true, turnId: response.turnId, stepId: response.stepId });
 	}
 });
 
 test("a stateful Provider is asked to delete remote copies before erasure returns", async (t) => {
-	const calls: { sessionId: string; erase?: boolean }[] = [];
+	const calls: { sessionId: string; erase?: boolean; entryIds?: string[] }[] = [];
 	const stateful: Provider = {
 		id: "stateful", supports: { keepsState: true },
 		models: () => [{ provider: "stateful", id: "model", contextWindow: 100_000, maxOutput: 100, input: ["text"], reasoning: false }],
@@ -100,7 +101,7 @@ test("a stateful Provider is asked to delete remote copies before erasure return
 		async discardState(sessionId, options) {
 			await delay(10);
 			calls.push({ sessionId, ...options });
-			return options?.erase ? { pending: ["remote retry"], outOfReach: ["provider logs"] } : undefined;
+			return options?.erase ? { pending: options.entryIds?.slice(0, 1), outOfReach: ["provider logs"] } : undefined;
 		},
 	};
 	const { api } = await start(t, { model: "stateful/model", plugins: [{ name: "stateful", setup(api) { api.provide("provider", stateful); } }] });
@@ -110,8 +111,8 @@ test("a stateful Provider is asked to delete remote copies before erasure return
 	const id = api.history(sid).find((entry) => entry.kind === "input")!.id;
 	await api.moveTo(sid, api.history(sid).at(-1)!.id);
 	const report = await api.erase(sid, [id], "user");
-	assert.deepEqual(calls, [{ sessionId: sid }, { sessionId: sid, erase: true }]);
-	assert.deepEqual(report.pending, ["remote retry"]);
+	assert.deepEqual(calls, [{ sessionId: sid }, { sessionId: sid, erase: true, entryIds: report.erased }]);
+	assert.deepEqual(report.pending, [id]);
 	assert.ok(report.outOfReach.includes("provider logs"));
 });
 

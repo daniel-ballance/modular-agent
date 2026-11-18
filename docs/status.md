@@ -38,9 +38,9 @@ When the code and the description disagree, this page says so. Update it when ei
 | Tools from MCP servers, global and per session | proven | Settings, and servers an ACP client passes. |
 | Parts as services: history store, working environment, model gateway | proven | Separate processes over HTTP, with leases, safe retries and cancelling. |
 | The agent served over HTTP | proven | Server-sent events, resumable from the last entry seen. |
-| Follows the ACP host binding `modular-agent-acp/1` | proven | Conformance kit 43/43, also with history in a service. Rust, Python and Go pass too. |
+| Follows the ACP host bindings `modular-agent-acp/1` and `/2` | proven | `/2` is opt-in. It reports a failed turn as an RPC error; `/1` keeps the refusal response. Both keep the turn in history. |
 | Follows the plugin binding `modular-agent-plugin/1` | proven | Plugin kit 105/105, and the probe plugin's host checks ([ADR 0017](adr/0017-plugins-in-any-language.md)). Across TypeScript, Rust, Python, Go and Elixir: every host with every build's Provider, hooks, tools and working environment (25/25), and with every build's Runtime through a real `kill -9` (25/25 durable, 25/25 transient). |
-| Portable sessions (`portableSessions`) | proven | Every entry in the [shared shapes](bindings/data.md#portable-sessions) ([ADR 0018](adr/0018-portable-sessions.md)). Each of the five builds' agents reopens, continues and recovers after `kill -9` a session each of the others wrote: 25/25 durable, 25/25 transient. The `approval` setting key was added after the real-model runs and isn't built here yet. |
+| Portable sessions (`portableSessions`) | proven | Every entry in the [shared shapes](bindings/data.md#portable-sessions) ([ADR 0018](adr/0018-portable-sessions.md)). Each of the five builds' agents reopens, continues and recovers after `kill -9` a session each of the others wrote: 25/25 durable, 25/25 transient. Round five adds input receipts and hand-backs, model requests, plugin and job records, and erasure that keeps identities. Reopening keeps the recorded model and approval policy. Without a policy, every tool needs approval. The round-five TypeScript checks use both Runtimes and the HTTP history service. |
 | Follows the history service binding `modular-agent-history/1` | proven | History kit 34/34 for this build's service and client. Swapped with Go's service both ways. Reopening after a crash waits for the old lease (`retryAfterMs`). |
 | A plugin can run in another process | proven | The whole suite passes with the Runtimes, tools, environment and MCP plugin out of process. |
 | Interface: terminal | proven | Full-screen TUI, line-based, print and JSON modes. |
@@ -63,7 +63,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | Input with a key is taken once | proven | |
 | Cancelling hands queued input back and leaves jobs running | proven | |
 | Every input, answer and approval records its actor | proven | |
-| Several actors; authority only narrows when granted | partly | `join` refuses to grant more than the granter has. No tenant or administrator limits. |
+| Several actors; authority only narrows when granted | proven | ACP hosts can join and remove actors, act for them with shared rights, and release input proposed by an actor. Joining again can take rights away. |
 | One answer closes a request; seeing is not answering | proven | |
 | Approval fails closed; "never ask" | proven | `approval` plugin. |
 | A late allow is checked again | proven | A recorded allow from someone who may no longer answer is not reused. |
@@ -76,13 +76,13 @@ When the code and the description disagree, this page says so. Update it when ei
 | Claim | Status | Notes |
 |---|---|---|
 | A job's report enters the session as input and may start a turn | proven | |
-| Jobs survive a restart | proven | Jobs are recorded. After a restart, their plugin ends them as outcome unknown or takes them up again. |
+| Jobs survive a restart, including over the plugin binding | proven | The Harness records job starts, ends and keyed reports. During `session.start` on reopening, a plugin finds its own unfinished jobs by name. It can resume or end them. The Harness asks the plugin to cancel a job before marking it cancelled. |
 | Subagents, transient and durable; nested questions; follow-ups | proven | A real `kill -9` mid-subagent: the durable variant carries on and reports the real result. |
 | History grows in normal use; compaction adds a summary | proven | |
 | Moving the current position is recorded | proven | |
-| Rewinding outside state | paper | Declared unsupported. |
+| Rewinding project files | proven | The local working environment saves project files before turns and calls outside turns, including when served as a plugin. A move is refused if it crosses a job, work is still open, or the required point is missing. Saved points belong to the environment process that made them. |
 | Erasure reaches every copy | partly | Entries, and summaries that copied them, are erased in the store. Forks made earlier keep their copy. |
-| The record is intact; each recipient gets a gated view | proven | A secret split across streamed pieces is held and redacted. |
+| The record is intact; each recipient gets a gated view | proven | Remote output gates see one complete model or tool stream at a time. If a gate fails, delivery is blocked. The conformance plugin redacts a test secret, including when it spans pieces. |
 | Every tool call ends with exactly one result | proven | Including interrupted, refused, cancelled and late results. |
 
 ## Tools
