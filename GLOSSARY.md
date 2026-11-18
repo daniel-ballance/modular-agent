@@ -77,6 +77,9 @@ _Avoid_: Storage, database, persistence
 The capability that keeps credentials, supplies them to authorized Providers, tool sources and working environments, and supports sign-in with an actor's help. See [Asking the credential store](docs/contracts.md#asking-the-credential-store).
 _Avoid_: Secrets manager, keychain
 
+**Staged secret**:
+A secret answer the credential store has saved for a question but has not made active. Credential lookups cannot see it, and it does not replace the active value.
+
 ## Units of work
 
 **Session**:
@@ -97,6 +100,15 @@ _Avoid_: Run, agent run, task, prompt turn
 One model request and its response, plus any calls it asks for, until each call settles or is left open. In a live session a step can be one stretch of the connection.
 _Avoid_: Turn (Pi's word for it), iteration
 
+**Auxiliary attempt**:
+A model request a plugin makes for its own work, such as writing a summary. It has usage but is not a step.
+
+**Continuation turn**:
+A new turn that takes up pending calls from an ended turn once their questions are closed. It does not start from a new input admission.
+
+**Metered identity**:
+The model attempt or job to which reported usage belongs. The same work still has the same identity after its entry is erased.
+
 **Outcome**:
 How a turn ended: completed, cancelled, failed, or stopped at a limit.
 _Avoid_: Stop reason, status
@@ -112,6 +124,15 @@ _Avoid_: Task (A2A's word for a turn), background task, activity
 **Job report**:
 Input carrying a job's result back to its session, acting with the job's authority.
 
+**Parked job report**:
+A job report admitted but not ready to run until an authorized actor releases it.
+
+**Job key**:
+A content-free identifier the owning plugin chooses to recognize a retry of a job start within a session.
+
+**Unconfirmed cleanup**:
+An unfinished job state after cancellation did not establish that the old execution stopped.
+
 **Live session**:
 A model connection where input and output flow both ways at once, such as voice.
 _Avoid_: Realtime session, stream
@@ -120,7 +141,10 @@ _Avoid_: Realtime session, stream
 The Harness's acceptance of input. A receipt identifies that admission, even when the input waits in a queue or is handed back before a turn takes it.
 
 **Steering**:
-Input admitted to join a running turn when the Runtime supports it.
+Input requested to join a running turn when the Runtime supports it. The final steering check is the cutoff after which new steering waits for another turn.
+
+**Hand-back**:
+The disposition of admitted input returned without being taken by a turn. For example, a turn can end before taking admitted steering.
 
 **Proposal**:
 Admitted input that waits for an authorized actor to release it.
@@ -131,6 +155,9 @@ Admitted input that waits for an authorized actor to release it.
 A tool's name, description, input schema and declarations about its effects.
 _Avoid_: Tool schema
 
+**Tool registration**:
+A tool definition together with the plugin name and tool source id that identify where it is offered.
+
 **Tool call**:
 A request to run a named tool with some input, made by the model, a UI, a plugin or another tool, or made and run by the Provider itself.
 _Avoid_: Function call, tool use
@@ -139,7 +166,7 @@ _Avoid_: Function call, tool use
 One tool call's settlement: its final status and any returned content or value. An answer to a question about the call is not a tool result.
 
 **Open tool call**:
-A tool call still waiting for its result after its turn has ended.
+A tool call that has stopped its invocation and left its result pending for a continuation turn.
 _Avoid_: Deferred tool call (Pydantic AI's term), pending call
 
 ## Context
@@ -155,7 +182,7 @@ One item in a history, such as an input, a model response, a tool result, a summ
 A successful write to the session's store. A commit in an ephemeral session does not survive a restart.
 
 **Tombstone**:
-The record that stands in place of an erased entry. It preserves identity and links, not erased content.
+The record that stands in place of an erased entry. It preserves identities and selected control facts, such as fork provenance, job keys and numeric usage, not erased content.
 
 **Current position**:
 The history entry a session is at. The shared data binding calls it the *head*. The current branch is that entry and its ancestors. A page cursor identifies where to continue reading a view, not the session's position.
@@ -169,6 +196,9 @@ A saved snapshot of project files from a working environment, or the reference t
 **Rewind**:
 A move on the current branch that also restores project files from a point. Like any move, it resets Provider conversation state; it does not reverse effects outside the snapshot.
 _Avoid_: Rollback, undo, revert
+
+**Rewind journal**:
+The records that distinguish an intended rewind from one whose files were restored, or whose prior position and files were re-established.
 
 **View**:
 What one recipient receives of the record. It may leave out or redact content.
@@ -221,7 +251,7 @@ _Avoid_: Notification, message
 An item passed to the output gate in a [shared format](docs/bindings/data.md#output-events), such as streamed text, a history entry or a reply.
 
 **Command**:
-An instruction a user gives through an Interface, such as `/model` or `/compact`, that a plugin carries out without starting a turn. Most commands make no model request; one that does, as `/compact` does to write a summary, says so.
+A direct action an actor takes through an Interface, such as `/model` or `/compact`, that a plugin carries out under the actor's authority without starting a turn. A command that uses a model declares it.
 _Avoid_: Slash command (one form of it), tool
 
 ## Actors

@@ -117,7 +117,7 @@ Feature plugins add behaviour through the plugin API. For example:
 | Context management | Selects the model view and can summarize older entries. |
 | System prompt | Assembles prompt fragments, sometimes including untrusted project text such as `AGENTS.md`. |
 | Skills and prompt templates | Supply instructions or expand prepared text. |
-| Commands | Act without starting a turn. A command such as `/compact` can declare that it asks the model. |
+| Commands | Carry out an actor's [direct action](contracts.md#commands) without starting a turn. A command such as `/compact` can declare that it asks the model. |
 | Model selection | Chooses a model and reasoning level for a session. |
 | Telemetry | Follows permitted events. |
 | Subagents | Hand work to a child session as a job. |
@@ -134,7 +134,7 @@ The API is not a sandbox. Plugins are trusted code with the agent's permissions 
 | Unit | What it is | Owned by |
 |---|---|---|
 | Session | Turns and jobs that share a record | the Harness |
-| Turn | Work from accepted input to an outcome, possibly after waiting | the Runtime |
+| Turn | Work from admission, continuation or other initiation to an outcome, possibly after waiting | the Runtime |
 | Step | A model request and response plus the round of calls it asks for, through settlement of the round; in a live extension it can be a stretch between turn-taking points | a unit within a turn |
 | Job | Session work outside a turn, which can outlive the turn that started it | the owning plugin, for the session |
 
@@ -166,7 +166,7 @@ A schedule or webhook is an outside program giving ordinary authorized input, no
 
 ## History
 
-History normally grows by appending. The [default model view](contracts.md#hook-execution) follows the current branch. [Shared data](bindings/data.md#append-order-and-the-branch) describes which records instead apply to the whole session. [Compaction](contracts.md#compaction) adds a summary rather than deleting entries. A [move](contracts.md#moving-and-rewinding) changes position without restoring files. A rewind also restores a saved project point and records completion. The [rewind journal](bindings/data.md#rewinding) distinguishes a completed restore from one that recovery still needs to finish. Both reset Provider conversation state. Neither promises to undo outside effects.
+History normally grows by appending. The [default model view](bindings/data.md#context-and-interrupted-work) follows the current branch. [Shared data](bindings/data.md#append-order-and-the-branch) describes which records instead apply to the whole session. [Compaction](contracts.md#compaction) adds a summary rather than deleting entries. A [move](contracts.md#moving-and-rewinding) changes position without restoring files. A rewind also restores a saved project point and records completion. The [rewind journal](bindings/data.md#rewinding) distinguishes a completed restore from one that recovery still needs to finish. Both reset Provider conversation state. Neither promises to undo outside effects.
 
 [Erasure](contracts.md#erasure), when supported, follows copies. The record distinguishes cleared content, pending deletions and out-of-reach copies. Authority records and tombstones remain while kept under retention. Secret values and protected launch material never belong in the record.
 

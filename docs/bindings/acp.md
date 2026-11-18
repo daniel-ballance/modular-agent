@@ -163,7 +163,8 @@ Unless another number is specified, the agent MUST return the following errors a
 | `lost` | `-32000`; cleanup of an affected part could not be confirmed. |
 | `cancelled` | Request cancelled before its normal result is available. |
 | `withheld` | `-32000`; gated output unavailable. |
-| `message_too_large`, `result_too_large` | `-32000`; message or result beyond its limit. |
+| `message_too_large` | `-32000`; message beyond its limit. |
+| `result_too_large` | `-32602` for a fork that cannot fit its initial history HTTP append; `-32000` for a reply beyond its limit. |
 
 The agent MUST check envelope, initialization and generic parameter syntax first, then mask inaccessible sessions, then check attachment, feature support, current state and action rights. It MUST return -32601 for unknown methods. An authorization or pre-admission error MUST NOT include an `inputId` or turn outcome. The [answer method](#extension-methods) has its own negative acknowledgements.
 
@@ -207,7 +208,7 @@ The two admission methods MUST share the [core key lookup](../contracts.md#input
 | `when` | When no turn runs | When a turn runs |
 |---|---|---|
 | `now` (also `session/prompt`) | Start a turn; receipt `now`. | Queue a new turn; receipt `after`. |
-| `steer` | Start a turn; receipt `now`. | With `inputDuringTurn`, queue steering; receipt `inTurn`. Otherwise queue a new turn; receipt `after`. |
+| `steer` | Start a turn; receipt `now`. | Before the [final steering check](../contracts.md#input) and with `inputDuringTurn`, queue steering; receipt `inTurn`. Otherwise queue a new turn; receipt `after`. |
 | `after` | Start a turn; receipt `now`. | Queue a new turn; receipt `after`. |
 | `propose` | Keep a proposal; receipt `proposed`. | Keep a proposal; receipt `proposed`. |
 
@@ -292,22 +293,22 @@ The following extensions are optional and MUST be listed if offered. Features na
 |---|---|---|
 | `_modular-agent/fork` | `entryId` | `{ sessionId }` with a fresh id |
 | `_modular-agent/move` | `entryId`, `rewind?` (boolean, default `false`) | `{}` or `{ outOfReach: [toolCallId] }` |
-| `_modular-agent/erase` | `entryIds` (nonempty array of entry ids) | `{ erased: [id], pending: [id], outOfReach: [string] }` |
-| `_modular-agent/jobs` | none | `{ jobs: [{ id, kind, state }] }` |
+| `_modular-agent/erase` | `entryIds` (nonempty array of entry ids in `sessionId`) | `{ erased: [{ sessionId, id }], pending: [{ sessionId, id }], outOfReach: [string] }` |
+| `_modular-agent/jobs` | none | `{ jobs: [{ id, kind, state }] }`; `state`: `"running"`, `"unfinished"` or `"cleanupUnconfirmed"` |
 | `_modular-agent/cancel-job` | `jobId` | `{}` |
 
-- **Fork:** The agent MUST refuse unsupported forking or unfinished work with `not_supported` or `busy`, respectively. A fork MUST target a kept non-`position` entry in the source session and copy its branch with source lineage. The agent MUST apply the [core inheritance rules](../contracts.md#moving-and-rewinding) and [tenant inheritance](../contracts.md#limits-and-tenants). An unknown target MUST fail with `not_found`. A `position` target MUST fail with `conflict`. A fork MUST be reopened explicitly before use on this connection.
+- **Fork:** The agent MUST refuse unsupported forking or unfinished work with `not_supported` or `busy`, respectively. A fork MUST target a kept non-`position` entry in the source session and copy its branch with source lineage. The agent MUST apply the [core inheritance rules](../contracts.md#moving-and-rewinding) and [tenant inheritance](../contracts.md#limits-and-tenants). An unknown target MUST fail with `not_found`. A `position` target MUST fail with `conflict`. If the [history HTTP preflight](history-http.md#sessions) cannot fit the initial batch, the agent MUST return `-32602` with `data.code: "result_too_large"`. A fork MUST be reopened explicitly before use on this connection.
 - **Move:** The agent MUST refuse a target outside the session with `not_found`. It MUST refuse a `position` target with `conflict`. For `rewind: true` it MUST refuse if rewinding is undeclared, and otherwise follow the target, environment, unfinished-work, restoration and rollback rules in [Rewinding](data.md#rewinding). The agent MUST map target or point refusal to `conflict` and unfinished work to `busy`. With rewind it MUST include `outOfReach` when there are open-world calls the restore could not undo. Without rewind it MUST follow the [core move rule](../contracts.md#moving-and-rewinding). Neither ACP operation takes a null target.
-- **Erase:** The agent MUST validate and deduplicate targets before deletion, returning `not_found` for unknown and `forbidden` for protected records. An invalid request changes nothing. The agent MUST follow [Erasure](../contracts.md#erasure), listing affected sessions' copies under `pending` when held by another writer. It MUST return `busy` if `erasureDuringTurn` disallows starting the operation. It MUST return each id or category at most once. Repeated targets do not cause duplicate erasure.
-- **Jobs:** The agent MUST list unfinished jobs oldest first with `state: "running"`, `"unfinished"` or `"cleanupUnconfirmed"` as applicable. Cancellation MUST follow [Jobs](../contracts.md#jobs), returning `lost` for unconfirmed cleanup and `not_found` for unknown or foreign ids. Repeating cancellation of a terminal job MUST return `{}` without a second end.
+- **Erase:** The agent MUST validate and deduplicate targets before deletion, returning `not_found` for unknown and `forbidden` for protected records. An invalid request changes nothing. The agent MUST follow [Erasure](../contracts.md#erasure), listing affected sessions' copies under `pending` when held by another writer. It MUST return `busy` if `erasureDuringTurn` disallows starting the operation. The agent MUST deduplicate `erased` and `pending` by `(sessionId, id)`. For copies in sessions the actor may not see, it MUST omit the pairs and report only `"copies in other sessions"` in `outOfReach`. It MUST return each category at most once. Repeated targets do not cause duplicate erasure.
+- **Jobs:** The agent MUST list unfinished jobs oldest first. It MUST use `state: "cleanupUnconfirmed"` when the [shared job fold](data.md#session-state) marks cleanup unconfirmed, `"running"` for other live jobs or `"unfinished"` otherwise. Cancellation MUST follow [Jobs](../contracts.md#jobs), returning `lost` for unconfirmed cleanup and `not_found` for unknown or foreign ids. Repeating cancellation of a terminal job MUST return `{}` without a second end.
 
 ### Entry
 
-An ACP `Entry` is a recipient projection of a [shared history entry](data.md#history-entries), not a portable record. The agent MUST use the shared tombstone shape for erased entries. For other entries it MUST keep `id`, `parentId`, `kind`, `time`, and applicable `turnId`, `stepId`, `toolCallId`, `jobId`, `actorId`, `inputId`, `requestId`, `continuesTurnId` and `sources`. It MUST keep the shared message fields except Provider-private fields. For `data` it MUST keep only the applicable fields below, in their shared shapes, subject to the gate:
+An ACP `Entry` is a recipient projection of a [shared history entry](data.md#history-entries), not a portable record. The agent MUST use the shared tombstone shape for erased entries, omitting `writer` and `jobKey` from the recipient view. For other entries it MUST keep `id`, `parentId`, `kind`, `time`, and applicable `turnId`, `stepId`, `toolCallId`, `jobId`, `actorId`, `inputId`, `requestId`, `continuesTurnId` and `sources`. It MUST keep the shared message fields except Provider-private fields. For `data` it MUST keep only the applicable fields below, in their shared shapes, subject to the gate:
 
 | Entry kinds | Fields in `data` |
 |---|---|
-| `inputAccepted`, `input`, `inputHandedBack` | `inputIds`, `when`, `content`, `releasedBy`, `reason` where present; no input keys |
+| `inputAccepted`, `input`, `inputHandedBack` | `inputIds`, `when`, `content`, `releasedBy`, `reason`, `parked` where present; no input keys |
 | `turnStart`, `modelRequest` | `startedBy`, `model` where present |
 | `toolStarted`, `toolResult` | `call`, `status` where present |
 | `inputRequest`, `inputAnswer` | `request` using [Request](#request) below, or the shared Answer without `stored` |
@@ -315,6 +316,7 @@ An ACP `Entry` is a recipient projection of a [shared history entry](data.md#his
 | `actorJoined`, `actorLeft`, `limit`, `tenant`, `erasure` | Standard fields from [Shared data](data.md#standard-kinds), except erased key reservations |
 | `setting` | `key`, `value` for standard keys only; only standard children of a `settings` object |
 | `jobStarted`, `jobEnded` | `kind`, `outcome`, `result`, `report`, `usage` where present |
+| `jobCleanupUnconfirmed` | No `data`; `jobId` is in the envelope |
 | `summary`, `position` | `summary`, `to` respectively |
 | Other kinds | No `data` |
 
@@ -383,6 +385,7 @@ The [conformance kit](../../conformance/acp/README.md) exercises this mode. See 
 - Production round two: configured representation, exact approval views, erased receipts and bounded recovery and cleanup.
 
 - **Production edition.** Pinned ACP schemas and declaration values; specified connection identity, tenant and method checks, answer races, gating and history bounds, cancellation and recovery, and deterministic fixtures. Binding versions are unchanged.
+  - Round three: session-qualified erase results, fork size refusal, durable cleanup status and the steering cutoff.
 - **2026-11-18, round six.** Listing and withdrawing proposals; presence on `join` (Go B28, Elixir R5-4); limits and tenants; a reply the gate withholds (Go B35); what a rewind couldn't reach (Go B34).
 - **2026-11-18, round five.** The Entry section points to the shared data's kinds, and erased entries keep their identities there too (found by the TypeScript builder).
 - **2026-11-18, round five.** `/2`, asked for in `initialize`, reports a failed turn as a JSON-RPC error rather than `refusal`; the conformance model's `fail:` makes one. Several actors: the extensions `actors`, `join`, `leave` and `release`, `actorId` on `input` and `answer`, and proposed input (Python G76, Go B26). `move` with `rewind`.

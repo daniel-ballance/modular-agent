@@ -58,7 +58,7 @@ A long shell command is running when the user presses Escape.
 
 The next request would be too large. The context plugin asks a model to summarize older entries. It records which entries the summary copies and keeps call and result pairs together. The next context contains the summary and recent entries. The old entries stay in history.
 
-**Variations:** A model request can fail first with context overflow. The plugin compacts and retries the step once. Failure to summarize or a second overflow fails the turn. A stateful Provider starts again from the new view after compaction, rather than carrying over the history it replaced.
+**Variations:** A model request can fail first with context overflow. The plugin compacts with an [auxiliary attempt](contracts.md#hook-execution) and retries the step once. Failure to summarize or a second overflow fails the turn. A stateful Provider starts again from the new view after compaction, rather than carrying over the history it replaced.
 
 ## 7. The process stops during a tool call
 
@@ -124,13 +124,13 @@ The user wants to go back to the first `turnEnd`. The session is on that branch,
 
 - **Moving only.** The Harness checks that moving is allowed, then records the new position. The view follows that position without deleting later history. The Provider starts again from the new view. Files are unchanged. If work is unfinished, this agent refuses before changing anything.
 - **Rewinding.** No other session uses this project, and each later turn or direct call has a point from this environment. The Harness saves the current files as P0 and commits a `position` with the earliest later point and P0 as undo. It restores the point, then commits a second `position` without `restore`. The Provider starts fresh. The reply lists later open-world calls in `outOfReach`.
-- **If interrupted or refused.** Reopen retries only an unresolved restore, not one with a completion. If that point is now missing, the Harness leaves the files alone, records a failed completion and reports it. An immediate restore failure instead rolls back to P0 before refusing. See the [rewind journal](bindings/data.md#rewinding).
+- **If interrupted or refused.** Reopen retries only an unresolved restore, not one with a completion. If that restore fails or its point is missing, the Harness tries to restore P0 and select the previous head. If neither restore can complete, project work stays blocked and the journal stays unresolved. See the [rewind journal](bindings/data.md#rewinding).
 
 ## 15. Erasing personal data
 
 An actor with `erase` asks an agent that supports erasure to delete a user's personal data.
 
-1. The Harness finds the entries and their copies, including model requests, summaries and forked entries. It records what is pending before deleting and leaves authority and accounting records alone. A fork held by another writer stays pending; the Harness does not replay or fork the pending entries.
+1. The Harness finds the entries and their copies, including model requests, summaries and forked entries. It records what is pending before deleting, protects authority records and keeps numeric usage in any tombstone that replaces a metered record. A fork held by another writer stays pending; the Harness does not replay or fork the pending entries.
 2. The history store removes the identified content and keeps the tombstone. The agent resets Provider conversation state and requests deletion of known remote copies. One remote deletion fails. The reply lists local success, the pending copy and anything out of reach, such as output already delivered.
 3. During the pending deletion and after a crash, the data is not replayed or sent back as context. The agent uses its recorded deletion work to retry the same remote copy, not recreate it. If the reply were lost and the lease were no longer current, the Harness would read the session to see whether the tombstone was committed. It does not blindly resend under a new lease.
 

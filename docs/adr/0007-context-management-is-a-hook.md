@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-14
 ---
 
-**Current rule:** Without a context handler, the [default](../contracts.md#hook-execution) is the current branch's model-visible entries, subject to [Security](../security.md), not the raw history. [Provider conversation state](../contracts.md#provider-state) can represent only an exact prefix of the permitted view.
+**Current rule:** Without a context handler, the [default model view](../bindings/data.md#context-and-interrupted-work) projects the current branch, not the raw history. [Provider conversation state](../contracts.md#provider-state) can represent only an exact prefix of the permitted view.
 
 > **Amended** on 2026-11-16 by [ADR 0011](0011-minimal-harness-everything-is-a-plugin.md): the Harness doesn't decide what the model sees; a context management plugin does, at this hook point.
 >

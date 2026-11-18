@@ -43,7 +43,7 @@ The service MUST return the status and body shown for each case. All errors MUST
 | Append with a conflicting entry ID | `409 conflict` |
 | Append with an entry that cannot fit a page | `413 entry_too_large` |
 | Erase | `200 { erased: Id[] }` |
-| Acquire held by another owner, or erase without a lease while held | `409 { error: string, code: "held", retryAfterMs: PositiveMs }` |
+| Acquire held by another owner or by the restart or failover wait, or erase without a lease while held | `409 { error: string, code: "held", retryAfterMs: PositiveMs }` |
 | Renew, append or erase with a supplied lease that is not current | `409 lost` |
 | Any operation on an unknown or expired session, except PUT | `404 unknown_session` |
 | Missing or invalid authentication | `401 unauthorized`; a service accepting bearer tokens MUST include `WWW-Authenticate: Bearer` |
@@ -62,7 +62,7 @@ A Session is `{ id: Id, project: string, created: Time, parentSessionId?: Id, fo
 
 The service MUST list sessions with kept entries only, by descending `created`, then by ascending UTF-8 byte order of `id`. It MUST apply `project` before finding the cursor or taking a page. It MUST return session entries in append order. Each page MUST take the longest prefix after the cursor that fits the requested item limit and 4 MiB of compact UTF-8 response JSON, including all metadata and the cursor. A page MUST contain at least one item when any remain. If more remain, `next` MUST be the ID of the last item; the client passes it as `after` on the next request. Reads need no lease and do not take a snapshot across pages.
 
-For a new session the agent MUST defer PUT until its [first admitted input](data.md#setup-records). A fork instead MUST append the complete copied prefix and fresh setup in one initial batch. The service MUST keep a metadata-only record unlisted, and GET returns an empty `entries` array for it. An agent MUST NOT open such a record as a durable session or infer setup from metadata. It MAY finish a known initial batch after identical PUT under a current lease; otherwise the record remains unlisted until retention or operator reclamation. There is no wire delete. Operators MUST bound unpublished metadata and ID reservations with quotas and retention or reclamation. On creation quota exhaustion the service MUST refuse new IDs with `503 unavailable`, preserving capacity for reads, release, erasure and settlement of existing work.
+For a new session the agent MUST defer PUT until its [first admitted input](data.md#setup-records). A fork instead MUST append the complete copied prefix and fresh setup in one initial batch. Before PUT the agent MUST check that the encoded initial append body fits the 64 MiB limit, including the lease field. Since the lease has not been issued yet, it MAY use a guaranteed upper bound on the encoded lease size. The agent MUST refuse a fork whose body cannot be shown to fit, without creating the destination. This binding does not transmit a lease-size bound. See [ACP](acp.md#extension-methods) for the refusal. The service MUST keep a metadata-only record unlisted, and GET returns an empty `entries` array for it. An agent MUST NOT open such a record as a durable session or infer setup from metadata. It MAY finish a known initial batch after identical PUT under a current lease; otherwise the record remains unlisted until retention or operator reclamation. There is no wire delete. Operators MUST bound unpublished metadata and ID reservations with quotas and retention or reclamation. On creation quota exhaustion the service MUST refuse new IDs with `503 unavailable`, preserving capacity for reads, release, erasure and settlement of existing work.
 
 ## Choosing a service at start
 
@@ -74,7 +74,7 @@ When configured, the client MUST use this URL in preference to its local store. 
 
 ## Writing: one writer at a time
 
-The service MUST apply each operation atomically with respect to other operations on that session, including across replicas. It MUST acknowledge a successful metadata, append or erase mutation only after durable commit. A read MUST see either the entire committed change or none of it. A service restart MUST preserve committed records and invalidate every lease.
+The service MUST apply each operation atomically with respect to other operations on that session, including across replicas. It MUST acknowledge a successful metadata, append or erase mutation only after durable commit. A read MUST see either the entire committed change or none of it. A service restart or failover MUST preserve committed records. A service that does not carry forward its current leases and their exclusions MUST invalidate the old leases. For `ttlMs` from the restart or failover, it MUST refuse every acquisition, and every erase without a lease, with `409 held` and `retryAfterMs` for the remaining wait. A writer whose lease vanished in the restart may still be within its own deadline during that time. A service that preserves leases continues to enforce their existing expiries.
 
 An owner is a run identifier, not a credential. A writer MUST generate a fresh owner per run with at least 122 random bits or equivalent uniqueness. The service MUST scope ownership to the authenticated identity and session. Every new lease MUST have a fresh, unguessable value with at least 128 bits of entropy.
 
@@ -85,7 +85,7 @@ An owner is a run identifier, not a credential. A writer MUST generate a fresh o
 | Current lease for another owner or identity | Acquire | The service MUST refuse the acquire as `held`. |
 | Current lease named by its authenticated writer | Renew | The service MUST set expiry to one full `ttlMs` after renewal. |
 | Current lease named by its authenticated writer | Release | The service MUST end that lease. |
-| Expiry reached or service restarted | Any | The service MUST treat that lease as no longer current. |
+| Expiry reached or lease invalidated by restart or failover | Any | The service MUST treat that lease as no longer current. |
 | A lease is no longer current or belongs to another identity | Renew, append or erase naming it | The service MUST refuse the operation as `lost`. |
 | A lease is no longer current or belongs to another identity | Release naming it | The service MUST return success without changing state. |
 
@@ -105,7 +105,7 @@ Neither `kept` nor an equal entry establishes whether an outside effect ran. Bra
 
 ## Entries
 
-For this service an Entry is any JSON object with `id: Id` and `parentId: Id | null`. The `erased: true` marker is reserved for service-created tombstones. The service MUST reject it on append. Other fields are opaque. The service MUST preserve and return those fields using [shared JSON equality](data.md#general-rules). It MUST NOT validate graph relationships or interpret kinds, authority or cross-session copies.
+For this service an Entry is any JSON object with `id: Id` and `parentId: Id | null`. The `erased: true` marker is reserved for service-created tombstones. The service MUST reject it on append. Other fields are opaque. The service MUST preserve and return those fields using [shared JSON equality](data.md#general-rules). It MUST NOT validate graph relationships or interpret kinds, authority or cross-session copies beyond the mechanical [tombstone projection](#erasure).
 
 The service MUST validate the whole batch before committing and check the lease at the same atomic operation as the append. It MUST process entries in array order, skipping equal entries with the same ID already kept or staged in this batch. A different entry with an ID already kept or staged MUST conflict, including an original entry whose ID now holds a tombstone. `kept` counts newly appended entries. An empty batch has no effect and returns `kept: 0` under the current lease. Session IDs and entry IDs within a session MUST NOT be reused, including after erasure or retention.
 
@@ -115,7 +115,7 @@ The service MUST reject a new entry if that entry or its eventual tombstone, alo
 
 The Harness MUST send the exact ids for each session after applying the [core erasure rules](../contracts.md#erasure). The service MUST check the lease and tombstone the requested records in one atomic operation. Without a lease it MUST erase only when no lease is current. A supplied stale lease gives `lost` even if the session is now unheld or another writer holds it.
 
-The service MUST return distinct known IDs from the request in first occurrence order, including IDs already erased. Unknown IDs are ignored. It MUST replace each erased record with the [shared tombstone](data.md#history-entries), using `kind: null` when the old `kind` is missing or not a string and retaining only string-valued associations. The service MUST remove the other fields from its live copies. It MUST NOT serve pre-erasure data after a restart or restore.
+The service MUST return distinct known IDs from the request in first occurrence order, including IDs already erased. Unknown IDs are ignored. It MUST replace each erased record by applying the [shared tombstone field table](data.md#entry-fields-and-tombstones). It MUST use `kind: null` when the old `kind` is missing or not a string and omit non-string associations. It MUST preserve a valid `sources` array without deciding whether the entry belongs to a fork prefix. It MUST omit malformed optional additions and strip any fields other than the standard numeric fields from preserved usage. The service MUST remove the other fields from its live copies. It MUST NOT serve pre-erasure data after a restart or restore.
 
 The Harness MUST keep a durable erasure intent before sending the deletion, and reconcile pending targets by reading if a commit or reply is uncertain. The agent, not the service, records the `erasure` entries. Per-session atomicity does not extend to copies in other sessions or to offline backups; the deployment's erasure policy governs backup deletion.
 
@@ -128,6 +128,7 @@ The client MUST check `GET /v1` before use and refuse a binding it does not spea
 - Production round two: conservative lease timing, reconciliation, path and bootstrap validation, retention cutoff and the [expanded tombstone identities](data.md#entry-fields-and-tombstones).
 
 - **Production edition.** Defines the request and response shapes, paging, authentication, lease generations, durable writes and fenced erasure. The binding remains `modular-agent-history/1`.
+  - Round three: lease exclusion after restart or failover, fork size preflight and the expanded tombstone projection.
 
 - **2026-11-18, round five.** An erased entry keeps its `turnId`, `stepId`, `toolCallId` and `jobId`, as the [shared data](data.md#history-entries) now says. They are identities, not content.
 - **2026-11-18, round four.** `409 held` carries `retryAfterMs`, and an agent reopening a session after a crash waits for the old lease to run out. Both the TypeScript and Go agents failed the ACP kit's crash check on a history service: the killed process still held the lease, and the new one was refused. Reopening another agent's session is promised between agents that declare portable sessions.
