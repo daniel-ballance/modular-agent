@@ -88,7 +88,7 @@ const pluginEnv = {};
 const sessionsUsed = [];
 // Tenants every agent is started with, for the tenant checks (docs/bindings/data.md#limits-and-tenants).
 const tenantRights = ["watch", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
-const TENANTS = JSON.stringify({ "kit-readonly": { rights: ["watch", "input", "answer", "settings"] }, "kit-broke": { rights: tenantRights, tokens: 0 }, "kit-latch": { rights: tenantRights, tokens: 1 }, "kit-race": { rights: tenantRights, tokens: 1 } });
+const TENANTS = JSON.stringify({ "kit-readonly": { rights: ["watch", "input", "answer", "settings"] }, "kit-no-cancel": { rights: tenantRights.filter((right) => right !== "cancel") }, "kit-broke": { rights: tenantRights, tokens: 0 }, "kit-latch": { rights: tenantRights, tokens: 1 }, "kit-race": { rights: tenantRights, tokens: 1 } });
 const project = mkdtempSync(join(tmpdir(), "ma-conf-project-"));
 const results = [];
 const children = [];
@@ -489,7 +489,27 @@ if (decl.tenants) {
 		const b = await within(15000, prompt(agent, broke, "hello broke"), "budget prompt");
 		check("tenants: an exhausted budget ends the turn as tenantTokens, max_tokens", b.stopReason === "max_tokens" && meta(b)?.outcome?.limit === "tenantTokens", `${b.stopReason} ${JSON.stringify(meta(b)?.outcome)}`);
 		check("tenants: without a model request", !(await history(agent, broke, { all: true })).entries.some((e) => e.kind === "response" || e.kind === "modelRequest"));
-		for (const id of [ro, broke]) await agent.ctx.request(methods.agent.session.close, { sessionId: id });
+		// ACP: Authorization. The readonly session is idle and its member has no cancel right.
+		const idle = await closeSession(agent, ro).then(() => true, () => false);
+		check("Authorization: a member without cancel can close an idle session", !info.rights?.includes("cancel") && idle);
+		await closeSession(agent, broke);
+		const busy = await open("kit-no-cancel");
+		const marker = join(project, "kit-close-started"), release = join(project, "kit-close-release");
+		const pending = prompt(agent, busy, `tool:bash ${JSON.stringify({ command: "touch kit-close-started; for ((i=0; i<200; i++)); do if test -f kit-close-release; then echo finished >> kit-close-started; exit; fi; sleep .1; done" })}`);
+		void pending.catch(() => undefined);
+		try {
+			for (let i = 0; i < 100 && !existsSync(marker); i++) await sleep(50);
+			if (!existsSync(marker)) throw Error("the close fixture's tool did not start");
+			const before = await history(agent, busy, { all: true });
+			const denied = await within(6000, closeSession(agent, busy), "refuse close without cancel").catch((e) => e);
+			const after = await history(agent, busy, { all: true }).catch(() => null);
+			writeFileSync(release, "");
+			const done = await within(6000, pending, "finish the uncancelled turn").catch(() => null);
+			check("Authorization: close without cancel is forbidden during a turn and changes nothing", denied?.code === -32602 && denied?.data?.code === "forbidden" &&
+				equal(before, after) && done?.stopReason === "end_turn" && readFileSync(marker, "utf8") === "finished\n",
+				JSON.stringify({ code: denied?.code, dataCode: denied?.data?.code, stop: done?.stopReason, historyUnchanged: equal(before, after) }));
+		} finally { writeFileSync(release, ""); }
+		await closeSession(agent, busy).catch(() => undefined);
 	});
 }
 
@@ -521,10 +541,10 @@ await attempt("input extension", async () => {
 	const p = await within(15000, prompt(agent, sessionId, "from the other method", "key-2"), "duplicate extension input via prompt");
 	check("input: prompt and extension share the receipt", meta(p)?.inputId === a.inputId && meta(p)?.duplicate === true);
 	const { entries } = await history(agent, sessionId, { all: true });
-	const accepted = entries.filter((e) => e.kind === "inputAccepted" && e.data?.inputId === a.inputId);
-	const taken = entries.filter((e) => e.kind === "input" && e.data?.inputId === a.inputId);
+	const accepted = entries.filter((e) => e.kind === "inputAccepted" && e.inputId === a.inputId);
+	const taken = entries.filter((e) => e.kind === "input" && e.inputId === a.inputId);
 	const turnId = taken[0]?.turnId;
-	check("input: one acceptance and one consumption in one completed turn", accepted.length === 1 && taken.length === 1 && !!turnId && entries.filter((e) => e.kind === "turnStart" && e.turnId === turnId).length === 1 && entries.filter((e) => e.kind === "turnEnd").length === before + 1 && said(entries.filter((e) => e.turnId === turnId), "echo: queued"));
+	check("Entry: top-level inputId links one acceptance and one consumption in one completed turn", accepted.length === 1 && taken.length === 1 && !!turnId && entries.filter((e) => e.kind === "turnStart" && e.turnId === turnId).length === 1 && entries.filter((e) => e.kind === "turnEnd").length === before + 1 && said(entries.filter((e) => e.turnId === turnId), "echo: queued"));
 });
 
 // ACP: Questions; Extension methods (answer); Shared data: Questions.
@@ -560,6 +580,17 @@ await attempt("requests and answer", async () => {
 		agent.state.permissionHandler = undefined;
 		await setOption(agent, sessionId, "approval", "off");
 	}
+});
+
+// Shared data: General rules; ACP: Starting and Errors. Count the JSON-RPC object as level 1.
+for (const depth of [64, 65]) await attempt(`Starting: JSON nesting at ${depth} levels`, async () => {
+	const peer = connect(command, { MODULAR_AGENT_PLUGINS: "[]" });
+	try {
+		const opaque = Array.from({ length: depth - 3 }).reduce((inner) => [inner], 1);
+		const r = await within(6000, peer.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {}, _meta: { "kit.depth": opaque } }), "initialize with nested metadata").catch((e) => e);
+		check(`Starting: ${depth} JSON levels ${depth === 64 ? "are accepted" : "are accepted or refused as invalid_request"}`,
+			r?.protocolVersion === 1 || (depth > 64 && r?.code === -32602 && r?.data?.code === "invalid_request"));
+	} finally { await stop(peer); }
 });
 
 await attempt("unused session", async () => {
@@ -740,6 +771,72 @@ if (probeChecks) {
 		}
 	});
 
+	// ACP: Request. Keep the standard permission route exact and change only the polling view.
+	if (agent.state.hasApproval) await attempt("Request: approval projection after gating", async () => {
+		const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+		const sid = s.sessionId;
+		sessionsUsed.push(sid);
+		let release;
+		agent.state.permissionHandler = () => new Promise((resolve) => { release = resolve; });
+		try {
+			await setOption(agent, sid, "model", "conformance/echo");
+			await setOption(agent, sid, "approval", "all");
+			const pending = prompt(agent, sid, 'tool:bash {"command":"echo ran > kit-list-redact.txt"}');
+			void pending.catch(() => undefined);
+			let view;
+			for (let i = 0; i < 100 && !release; i++) await sleep(50);
+			if (release) view = await agent.ctx.request(`_${NS}/requests`, { sessionId: sid }).catch((e) => e);
+			const gateViews = trace("output-observer").filter((p) => p.sessionId === sid).flatMap((p) => p.events ?? [])
+				.filter((e) => e.type === "reply" && e.data?.method === `_${NS}/requests`)
+				.flatMap((e) => e.data.result?.requests ?? []).filter((q) => q.kind === "approval");
+			check("Request: the output gate does not see answerable on the approval projection", !!release && gateViews.length > 0 && gateViews.every((q) => !Object.hasOwn(q, "answerable")));
+			check("Request: the redacted approval projection is returned with answerable false", view?.requests?.some((q) => q.kind === "approval" && q.id === gateViews[0]?.id && q.question === "Redacted approval question" && q.answerable === false));
+			release?.({ outcome: { outcome: "selected", optionId: "allow" } });
+			await within(10000, pending, "finish after the exact permission view answers");
+		} finally {
+			release?.({ outcome: { outcome: "cancelled" } });
+			delete agent.state.permissionHandler;
+			await closeSession(agent, sid);
+		}
+	});
+
+	// Contracts: Moving and rewinding; Plugin binding: Paths and points.
+	await attempt("Moving and rewinding: remote point preflight", async () => {
+		const role = "remote-points";
+		const plugin = { command: [process.execPath, new URL("../plugin/probe.mjs", import.meta.url).pathname], config: { role, out: probeOut(role) } };
+		const remote = connect(command, { MODULAR_AGENT_PLUGINS: JSON.stringify([plugin]) });
+		try {
+			await remote.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+			const s = await remote.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+			if (!meta(s)?.declaration?.rewinding) {
+				console.log("SKIP  Moving and rewinding: remote point preflight (session does not declare rewinding)");
+				return;
+			}
+			const sid = s.sessionId;
+			sessionsUsed.push(sid);
+			await setOption(remote, sid, "model", "conformance/echo");
+			await within(15000, prompt(remote, sid, "before remote rewind"), "first rewind fixture turn");
+			const mark = (await history(remote, sid)).entries.findLast((e) => e.kind === "turnEnd")?.id;
+			if (!mark) throw Error("rewind fixture has no quiescent entry");
+			const file = join(project, "kit-rewind-remote.txt");
+			writeFileSync(file, "before");
+			await within(15000, prompt(remote, sid, "second remote rewind turn"), "second rewind fixture turn");
+			writeFileSync(file, "after");
+			await within(15000, prompt(remote, sid, "third remote rewind turn"), "third rewind fixture turn");
+			const before = trace(role);
+			const points = before.filter((e) => e.method === "env/save").slice(-2).map((e) => e.point);
+			const r = await remote.ctx.request(`_${NS}/move`, { sessionId: sid, entryId: mark, rewind: true }).catch((e) => e);
+			const calls = trace(role).slice(before.length);
+			const firstChange = calls.findIndex((e) => e.method === "env/save" || e.method === "env/restore");
+			const checked = calls.slice(0, firstChange).filter((e) => e.method === "env/checkPoint").map((e) => e.point);
+			check("Moving and rewinding / Paths and points: every later point is checked before saving or restoring",
+				firstChange >= 0 && points.length === 2 && points.every((p) => checked.includes(p)) && !r?.code &&
+				calls.some((e) => e.method === "env/restore" && e.point === points[0]) && readFileSync(file, "utf8") === "before",
+				JSON.stringify({ calls, code: r?.code, dataCode: r?.data?.code }));
+			await closeSession(remote, sid);
+		} finally { await stop(remote); }
+	});
+
 	// Plugin binding: Runtime records and effects and Runtime callbacks.
 	await attempt("remote Runtime host", async () => {
 		const plugin = { command: [process.execPath, new URL("../plugin/probe.mjs", import.meta.url).pathname], config: { role: "runtime", out: probeOut("runtime") } };
@@ -766,7 +863,7 @@ if (probeChecks) {
 				const c = log.find((x) => x.test === name)?.checks ?? {};
 				check(`remote Runtime ${name}: host rejects record of a host-owned setting`, c.hostKind);
 				check(`remote Runtime ${name}: host commits modelRequest with the named tool offer`, c.modelIntent, JSON.stringify(log.find((x) => x.test === name)?.terminal ?? null));
-				check(`remote Runtime ${name}: dispatch requires exact allowed decision`, c.dispatch && equal(log.filter((x) => x.effect).slice(before).map((x) => x.effect), name === "changed" ? [] : [{ value: "original" }]));
+				check(`Runtime callbacks (${name}): dispatch requires exact allowed decision and settles changes as refused`, c.dispatch && equal(log.filter((x) => x.effect).slice(before).map((x) => x.effect), name === "changed" ? [] : [{ value: "original" }]));
 				check(`remote Runtime ${name}: host commits toolResult before replying`, c.resultCommit);
 				if (name === "omitted") check("Runtime callbacks: runToolCall before allowance returns invalid_request without writing", c.earlyDispatch);
 				if (name === "exact") {
@@ -879,7 +976,10 @@ if (jobChecks) {
 		check("jobs: one admitted report follows the end with exact content", report.length === 1 && report[0].jobId === jobId && entries.indexOf(report[0]) > entries.indexOf(ended[0]) && equal(report[0].data?.content, [{ type: "text", text: "background: kit-job" }]));
 		// Shared data: Job reports. Inspect the store if present; the ACP projection also carries parked.
 		const admission = store ? (await store.pages(sessionId)).find((e) => e.kind === "inputAccepted" && e.jobId === jobId) : report[0];
-		check("Job reports: initial disposition records parked for never and ready for jobReports", !!jobId && admission?.data?.parked === (decl.startsTurnsUnasked === "never"));
+		if (decl.startsTurnsUnasked === "jobReports") {
+			console.log('SKIP  Job reports: parked disposition (session declares startsTurnsUnasked: "jobReports")');
+			check("Job reports: a session that starts report turns records a ready disposition", !!jobId && admission?.data?.parked === false);
+		} else check("Job reports: the initial report disposition is parked", !!jobId && admission?.data?.parked === true);
 		for (let i = 0; i < 100 && !trace("jobs").some((x) => x.repeatedEnd === jobId || x.endFailed === jobId); i++) await sleep(50);
 		const log = trace("jobs");
 		check("jobs: start acknowledged after commit and same-key start deduplicates", log.some((x) => x.started === jobId && x.fresh === true && x.commit && x.duplicate));
@@ -977,8 +1077,8 @@ if (decl.erasure && extensions.includes("erase")) await attempt("erased input ke
 // the fault is the late reply, not service-side rejection of an expired generation.
 if (crashChecks && store) await attempt("delayed history renewal", async () => {
 	const { ttlMs } = await store.json("/v1");
-	if (!(ttlMs >= 1000 && ttlMs <= 10000)) {
-		console.log("SKIP  delayed renewal fixture needs a service TTL between 1 and 10 seconds");
+	if (!(ttlMs >= 1000 && ttlMs <= 15000)) {
+		console.log("SKIP  delayed renewal fixture needs a service TTL between 1 and 15 seconds");
 		return;
 	}
 	let sid, markHeld, markLate;
@@ -1058,6 +1158,28 @@ if (crashChecks) {
 
 await stop(agent);
 
+// ACP: Errors; History HTTP: Writing: one writer at a time. Simulate the hold after a TTL decrease.
+if (store && (crashChecks || portableChecks)) await attempt("Errors: reopening during a restart hold", async () => {
+	const caps = await store.json("/v1"), ttlMs = 1000;
+	const base = store.path(mainSession);
+	let heldAt, holdEnds;
+	const tap = await store.observe({ fixtureReply: ({ method, path }) => {
+		if (method === "GET" && path === "/v1") return { status: 200, body: { ...caps, ttlMs } };
+		if (method !== "POST" || path !== base + "/lease") return;
+		heldAt ??= performance.now();
+		holdEnds ??= heldAt + 8000;
+		return { status: 409, body: { error: "Restart hold", code: "held", retryAfterMs: Math.ceil(holdEnds - performance.now()) } };
+	} });
+	const opener = connect(second, { MODULAR_AGENT_HISTORY_URL: tap.url });
+	try {
+		await opener.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+		const loaded = await within(6000, opener.ctx.request(methods.agent.session.load, { sessionId: mainSession, cwd: project, mcpServers: [] }), "open budget during restart hold").catch((e) => e);
+		check("Errors / Writing: one writer at a time: a hold beyond the reopen budget is retryable", heldAt !== undefined && performance.now() - heldAt <= ttlMs + 1000 + 500 &&
+			loaded?.code === -32000 && loaded?.data?.code === "held" && Number.isSafeInteger(loaded.data.retryAfterMs) && loaded.data.retryAfterMs > 0,
+			JSON.stringify({ code: loaded?.code, data: loaded?.data, message: loaded?.message }));
+	} finally { await stop(opener); tap.stop(); }
+});
+
 // ACP: Extension methods (fork); History HTTP: Sessions (preflight before destination PUT).
 if (portableChecks) await attempt("Extension methods: oversized fork", async () => {
 	const mutations = [];
@@ -1124,7 +1246,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 		const init = await s.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 		const principal = meta(init)?.actor;
 		if (!principal?.id) throw Error("reopener did not identify a principal");
-		const actor = { ...principal, rights: ["watch", "input", "settings", "tools", "approve", "jobs"] };
+		const actor = { ...principal, rights: ["watch", "input", "settings", "tools", "approve", "jobs", "cancel"] };
 		const seed = async (mode) => {
 			const sessionId = `kit-portable-${randomUUID()}`;
 			const rows = [
@@ -1202,7 +1324,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 			check("Job reports: the parked disposition is still recorded after reopen", report?.data?.parked === true &&
 				!entries.some((e) => e.kind === "input" && e.jobId === report.jobId));
 			await attempt("Several actors: parked report release", async () => {
-				const reportId = report?.inputId ?? (await store.pages(cleanup)).find((e) => e.id === report?.id)?.data?.inputId;
+				const reportId = report?.inputId;
 				const methodsOffered = meta(init)?.extensions ?? [];
 				check("Several actors: a parked report requires proposals, release and withdraw even without severalActors", ["proposals", "release", "withdraw"].every((name) => methodsOffered.includes(name)));
 				const proposals = () => s.ctx.request(`_${NS}/proposals`, { sessionId: cleanup }).then((r) => r.proposals);
@@ -1224,7 +1346,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 		const queueOpen = await load(queued);
 		if (!meta(queueOpen)?.declaration) throw Error("could not open queue fixture");
 		const fresh = await s.ctx.request(`_${NS}/input`, { sessionId: queued, when: "now", key: "fixture-fresh", content: "fresh input" });
-		await waitFor(s, queued, (es) => said(es, "echo: fresh input"));
+		await waitFor(s, queued, (es) => es.some((e) => e.kind === "turnEnd" && es.some((input) => input.kind === "input" && input.inputId === fresh.inputId && input.turnId === e.turnId)));
 		const kept = await store.pages(queued);
 		const isFor = (e, inputId) => (e.inputId ?? e.data?.inputId) === inputId;
 		const tomb = kept.find((e) => e.id === `${queued}-e4`);
@@ -1245,12 +1367,14 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 // Plugin binding: Model attempt sequences (crash recovery). Seed interrupted attempts in shared data.
 if (probeChecks && portableChecks) for (const [mode, safe] of [
 	["transient", false], ["fresh", false], ["fresh", true], ["repeat", true],
+	["no-request-hook", false], ["early-response-hook", false],
 ]) await attempt(`remote recovery: ${mode} with ${safe ? "repeatable" : "unsafe"} attempt`, async () => {
 	const sid = `kit-runtime-${randomUUID()}`, turnId = "interrupted-turn";
 	const model = { provider: "kit-recovery", id: "echo" };
-	const role = `runtime-${mode}-${safe}`;
+	const role = `runtime-${mode}-${safe}`, transform = mode === "fresh" && safe;
+	const negative = mode === "no-request-hook" || mode === "early-response-hook";
 	const plugin = { command: [process.execPath, new URL("../plugin/recovery.mjs", import.meta.url).pathname],
-		config: { sessionId: sid, mode, safe, out: probeOut(role) } };
+		config: { sessionId: sid, mode, safe, transform, out: probeOut(role) } };
 	const remote = connect(command, { MODULAR_AGENT_PLUGINS: JSON.stringify([plugin]) });
 	try {
 		const init = await remote.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
@@ -1273,6 +1397,15 @@ if (probeChecks && portableChecks) for (const [mode, safe] of [
 			{ kind: "input", turnId, inputId, actorId: actor.id, message, modelVisible: true },
 			{ kind: "modelRequest", turnId, stepId: "old-step", data: { model, safeToRepeat: safe, tools: [], ...(safe ? { request } : {}) }, sources: [entryId(4)] },
 		];
+		if (mode === "fresh" && !safe) {
+			const empty = { role: "assistant", stop: "failed", content: [], error: { kind: "other", message: "Fixture failure" }, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } };
+			rows.splice(5, 0,
+				{ kind: "modelRequest", turnId, stepId: "failed-step", data: { model, safeToRepeat: false, tools: [] }, sources: [entryId(4)] },
+				{ kind: "response", turnId, stepId: "failed-step", message: empty, modelVisible: true, sources: [entryId(5)] },
+				{ kind: "modelRequest", turnId, stepId: "settled-step", data: { model, safeToRepeat: false, tools: [] }, sources: [entryId(4)] },
+				{ kind: "response", turnId, stepId: "settled-step", modelVisible: true, sources: [entryId(7)], message: { role: "assistant", stop: "toolUse", usage: empty.usage, content: [{ type: "toolCall", id: "settled-call", name: "not-offered", arguments: {} }] } },
+				{ kind: "toolResult", turnId, stepId: "settled-step", toolCallId: "settled-call", modelVisible: true, data: { status: "refused" }, message: { role: "toolResult", toolCallId: "settled-call", toolName: "not-offered", isError: true, content: [{ type: "text", text: "not offered" }] } });
+		}
 		const time = Date.now();
 		const entries = rows.map((row, i) => ({ sessionId: sid, time, writer: "kit-history-fixture", modelVisible: false,
 			id: entryId(i), parentId: i ? entryId(i - 1) : null, ...row }));
@@ -1286,7 +1419,7 @@ if (probeChecks && portableChecks) for (const [mode, safe] of [
 		const kept = await waitFor(remote, sid, (es) => !!terminal(es), 8000);
 		const aborted = (es) => es.filter((e) => e.kind === "response" && e.turnId === turnId && e.stepId === "old-step" &&
 			e.message?.stop === "aborted" && e.data?.recovery === true && e.modelVisible === false).length === 1;
-		const intent = (es) => es.filter((e) => e.kind === "modelRequest" && e.turnId === turnId && e.stepId !== "old-step");
+		const intent = (es) => es.filter((e) => e.kind === "modelRequest" && e.turnId === turnId && !["old-step", "failed-step", "settled-step"].includes(e.stepId));
 		const log = trace(role);
 		const resume = log.find((x) => x.resume);
 		const prepared = log.find((x) => x.prepared);
@@ -1297,12 +1430,26 @@ if (probeChecks && portableChecks) for (const [mode, safe] of [
 			resume.log.some((e) => e.kind === "turnStart" && e.turnId === turnId && e.data?.system === system) &&
 			resume.log.some((e) => e.kind === "input" && e.turnId === turnId && equal(e.message, message)));
 		if (!safe) check(`${label}: unsafe attempt is aborted before resumeTurn`, !!resume && aborted(resume.log));
-		if (mode === "transient") {
+		if (mode === "fresh" && !safe) {
+			check("The host asks the Runtime: settled calls are excluded from interrupted.calls", Array.isArray(resume?.resume?.calls) && !resume.resume.calls.some((c) => c.id === "settled-call"));
+			check("Context and interrupted work: an empty failed or aborted attempt is not a model message", prepared?.request?.messages?.some((m) => equal(m, message)) &&
+				!prepared.request.messages.some((m) => m.role === "assistant" && ["failed", "aborted"].includes(m.stop) && m.content?.length === 0));
+		}
+		if (negative) {
+			const early = log.find((x) => x.earlyResponse);
+			check(`The host asks a Provider (${mode}): an uncommitted attempt cannot return an assistant answer`,
+				(mode === "early-response-hook" ? early?.earlyResponse === "invalid_request" : log.some((x) => x.returnedWithoutHook)) &&
+				terminal(kept)?.data?.outcome?.kind === "failed" && !kept.some((e) => e.kind === "response" && said([e], "Recovered fixture turn")));
+		} else if (mode === "transient") {
 			check(`${label}: transient recovery ends the turn without a new model attempt`, !!terminal(kept) &&
 				terminal(kept).data?.outcome?.kind !== "completed" && !dispatched.length && intent(await store.pages(sid)).length === 0);
 		} else {
 			const saved = dispatched[0]?.log ?? [];
 			const beforeEffect = intent(saved);
+			check(`The host asks a Provider (${mode}, safeToRepeat=${safe}): commit occurs at the provider.request callback before inference`,
+				dispatched.length === 1 && intent(dispatched[0].before).length === 0 && beforeEffect.length === 1 &&
+				equal(beforeEffect[0].data?.tools, dispatched[0].provider.tools.map((t) => t.name)) &&
+				(!transform || (dispatched[0].provider.systemPrompt === "Transformed fixture checkpoint" && equal(beforeEffect[0].data?.request, dispatched[0].provider))));
 			check(`${label}: old attempt closes before one fresh checkpointed dispatch`, dispatched.length === 1 &&
 				aborted(saved) && beforeEffect.length === 1 && equal(beforeEffect[0].data?.model, model) &&
 				terminal(kept)?.data?.outcome?.kind === "completed");

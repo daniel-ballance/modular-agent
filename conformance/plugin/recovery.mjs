@@ -34,7 +34,7 @@ async function resume(m, ask) {
 		} else {
 			await host("takeSteering").catch((e) => { if (codeOf(e) !== "not_supported") throw e; });
 			request = await host("prepareStep", { stepId, usage });
-			trace({ prepared: stepId, log: await history(ask, sessionId) });
+			trace({ prepared: stepId, request, log: await history(ask, sessionId) });
 		}
 		const response = await host("model", { stepId, request });
 		entries.push((await host("record", { entry: { kind: "response", stepId, message: response, modelVisible: true } })).id);
@@ -56,9 +56,14 @@ serve(name, async (m, { ask }) => {
 			config = p.config;
 			return { binding, name, replaces: ["runtime"],
 				runtime: { id: name, supports: { continuesAfterRestart: config.mode !== "transient" } },
-				providers: [{ id: name, models, supports: { keepsState: false, runsTools: false, safeToRepeat: config.safe } }] };
+				providers: [{ id: name, models, supports: { keepsState: false, runsTools: false, safeToRepeat: config.safe } }],
+				...(config.transform ? { hooks: [{ hook: "provider.request", handlerId: 1 }] } : {}) };
 		case "plugin/shutdown": stopping = true; return {};
 		case "$/ping": return {};
+		case "hook/handle": {
+			if (!config.transform || p.handlerId !== 1 || p.hook !== "provider.request") throw rpcError("unknown_handler");
+			return { value: { ...p.payload, request: { ...p.payload.request, systemPrompt: "Transformed fixture checkpoint" } } };
+		}
 		case "provider/models":
 		case "provider/available":
 		case "provider/discard":
@@ -73,9 +78,20 @@ serve(name, async (m, { ask }) => {
 			if (p.model?.provider !== name || p.model.id !== model.id) throw rpcError("invalid_request");
 			const scope = { sessionId: p.sessionId ?? null, provider: name, model };
 			const hook = (hook, fields) => ask("host/hook", { parentRequestId: m.id, hook, payload: { ...scope, ...fields } });
-			const { request } = await hook("provider.request", { request: p.request });
-			trace({ provider: request, log: await history(ask, config.sessionId) });
+			const before = await history(ask, config.sessionId);
 			const message = { role: "assistant", stop: "finished", content: text("Recovered fixture turn"), usage };
+			// Deliberately violate the Provider sequence in the two rejection probes.
+			if (config.mode === "no-request-hook") {
+				trace({ returnedWithoutHook: true });
+				return message;
+			}
+			if (config.mode === "early-response-hook") {
+				const r = await hook("provider.response", { message }).catch((e) => e);
+				trace({ earlyResponse: codeOf(r) ?? "accepted" });
+				return message;
+			}
+			const { request } = await hook("provider.request", { request: p.request });
+			trace({ provider: request, before, log: await history(ask, config.sessionId) });
 			await hook("provider.response", { message });
 			return message;
 		}

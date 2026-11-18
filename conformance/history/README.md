@@ -27,7 +27,7 @@ If the service supports a change of TTL across restart, use `--restart-ttl` inst
 Stop any service you started and remove the scratch directory after use. Exit code 0 means all checks run passed.
 
 What it checks:
-- Authentication errors, declaration and lease length, selected response envelopes, and input validation including raw and percent-encoded dot segments sent without URL normalization.
+- Authentication errors, declaration, 1 to 128 byte leases with the permitted alphabet, JSON nesting at 64 and 65 levels, selected response envelopes, and input validation including raw and percent-encoded dot segments sent without URL normalization.
 - Exact metadata resend, conflict on changed metadata, project filtering and list order.
 - Lease generation after release and expiry, renewals, `held` retry timing fields, and concurrent stale requests against a current writer. The expiry check is skipped when the advertised TTL exceeds the kit's 60-second wait budget.
 - Ordered, full JSON round-trip of opaque entries and lineage metadata, numeric equality, equal duplicates and failure atomicity for conflicting or malformed batches.
@@ -35,4 +35,4 @@ What it checks:
 - Erasure with and without a lease, ordered idempotent results, and the exact tombstone projection, including associations, source ids, usage, keyed job ownership and valid legacy nested IDs, including batch hand-back `inputIds`.
 - With either restart flag, committed data survives a restart. If the service drops its old lease, acquire and unleased erase return `409 held` during the restart hold. If it preserves the lease, another owner still cannot acquire it. `--restart-ttl` checks the same exclusions after the shorter TTL has elapsed. The hold check is skipped if the restart and probes exceed the old lease TTL.
 
-It does not check failover between replicas, retention expiry, all client lease loss paths, backup deletion, token entropy on the service, or TLS provisioning. The [ACP kit](../acp/README.md) with `--crash-checks` and a history service checks the client side of late renewal replies. The bearer token is service-wide, not a test of tenant isolation. Passing these checks is not proof of [conformance](../../docs/conformance.md#what-conforms).
+It does not check failover between replicas, retention expiry, all client lease loss paths, backup deletion, token entropy on the service, or TLS provisioning. The [ACP kit](../acp/README.md) with `--crash-checks` checks the client side of late renewal replies with a service TTL from 1,000 to 15,000 ms inclusive. Use the 2,500 ms example above if your service is outside that range. The bearer token is service-wide, not a test of tenant isolation. Passing these checks is not proof of [conformance](../../docs/conformance.md#what-conforms).

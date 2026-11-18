@@ -36,6 +36,8 @@ const valid = {
 	inputRequest: (e, d) => id(d.request?.id) && requestIdOf(e) === d.request.id && id(d.request.kind) && id(d.request.sessionId) && typeof d.request.question === "string" && typeof d.request.answerable === "boolean" && opt(d.request, "answerers", ids) && (d.request.kind !== "approval" || (registration(d) && d.call?.id === e.toolCallId && id(d.call?.id) && d.definition.name === d.call.name && obj(d.call.input))),
 	secretAnswerAccepted: (e) => id(e.requestId) && id(e.actorId) && e.modelVisible === false && !Object.hasOwn(e, "data"),
 	inputAnswer: (e, d) => id(requestIdOf(e)) && opt(d, "actorId", id),
+	// Shared data: Standard kinds.
+	resultFeedback: (e, d) => id(e.turnId) && e.modelVisible === true && typeof d.reason === "string",
 	turnEnd: (e, d) => id(e.turnId) && outcome(d.outcome) && ids(d.result?.openToolCalls) && usage(d.usage),
 	summary: (e, d) => ids(e.sources) && e.sources.length > 0 && typeof d.summary === "string",
 	setting: (_, d) => id(d.key) && Object.hasOwn(d, "value") && (d.key !== "model" || model(d.value)),

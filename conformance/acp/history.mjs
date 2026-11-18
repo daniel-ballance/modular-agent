@@ -31,12 +31,13 @@ export function historyService(raw, tokenFile) {
 			throw new Error("history fixture exceeded the page watchdog");
 		},
 		// Shared data: Job reports. Observe actual append boundaries, not just two adjacent records.
-		async observe({ onRequest, beforeReply } = {}) {
+		async observe({ onRequest, beforeReply, fixtureReply } = {}) {
 			const batches = [];
 			const server = createServer(async (req, res) => {
 				try {
 					if (!timingSafeEqual(digest(req.headers.authorization ?? ""), digest(`Bearer ${token}`))) return res.writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" }).end(JSON.stringify({ error: "Unauthorized", code: "unauthorized" }));
-					onRequest?.({ method: req.method, path: req.url });
+					const info = { method: req.method, path: req.url };
+					onRequest?.(info);
 					const chunks = [];
 					let size = 0;
 					for await (const chunk of req) {
@@ -45,6 +46,8 @@ export function historyService(raw, tokenFile) {
 						chunks.push(chunk);
 					}
 					const body = chunks.length ? Buffer.concat(chunks) : undefined;
+					const fixture = fixtureReply?.(info);
+					if (fixture) return res.writeHead(fixture.status, { "content-type": "application/json" }).end(JSON.stringify(fixture.body));
 					const r = await request(req.url, { method: req.method, body });
 					const entries = r.ok && req.method === "POST" && req.url.endsWith("/entries") && body ? JSON.parse(body).entries : undefined;
 					if (entries) {

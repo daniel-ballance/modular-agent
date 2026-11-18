@@ -118,6 +118,7 @@ await run("session lifecycle", async () => {
 	const a = await acquire(sid, owner);
 	const lease = a.body?.lease;
 	check("lease: acquire and same-owner resend", a.status === 200 && typeof lease === "string" && lease.length > 0 && a.body.ttlMs === ttl && ok(await acquire(sid, owner), a.body));
+	check("Writing: one writer at a time: the lease uses 1 to 128 base64url characters", typeof lease === "string" && lease.length >= 1 && lease.length <= 128 && !/[^A-Za-z0-9_-]/.test(lease));
 	check("lease: a different owner gets held with retryAfterMs", held(await acquire(sid, id()), ttl));
 	check("lease: renewal reports the declared TTL", ok(await renew(sid, lease), { ttlMs: ttl }));
 	const usage = { input: 5, output: 2, cacheRead: 0, cacheWrite: 1, cost: 0.25 };
@@ -235,6 +236,22 @@ await run("validation and paging", async () => {
 	check("paging: longest nonempty prefixes respect 500 entries and 4 MiB", pages.length === 3 && equal(pages.map((r) => r.body?.entries.length), [500, 2, 1]) && pages.every((r, i) => r.status === 200 && Buffer.byteLength(JSON.stringify(r.body)) <= pageCap && r.body.next === (i < pages.length - 1 ? r.body.entries.at(-1)?.id : undefined)));
 	check("paging: walking cursors returns the complete ordered batch", equal(pages.flatMap((r) => r.body?.entries ?? []), entries));
 	await release(sid, lease);
+});
+
+// Shared data: General rules; History HTTP: The basics. Count the root object as level 1.
+await run("The basics: JSON nesting", async () => {
+	const sid = id(), meta = { project, created: Date.now() };
+	await put(sid, meta);
+	const { body: { lease } } = await acquire(sid, id());
+	try {
+		const opaque = Array.from({ length: 61 }).reduce((inner) => [inner], 1);
+		const entry = { id: id(), parentId: null, kind: "kit.depth", opaque };
+		check("The basics: accepts and returns an append with 64 levels of JSON nesting", ok(await append(sid, lease, [entry]), { kept: 1 }) &&
+			ok(await read(sid), { session: { id: sid, ...meta }, entries: [entry] }));
+		const deeper = { ...entry, id: id(), parentId: entry.id, opaque: [opaque] };
+		const r = await append(sid, lease, [deeper]);
+		check("The basics: one level beyond 64 is either accepted or refused as invalid_request", err(r, 400, "invalid_request") || ok(r, { kept: 1 }));
+	} finally { await release(sid, lease); }
 });
 
 // History HTTP: Writing: one writer at a time (expiry is a different transition from release).

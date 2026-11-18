@@ -124,8 +124,16 @@ function start(extraEnv = {}) {
 			case "host/hook": {
 				const { model, request, provider, sessionId = null } = parent.params;
 				if (p.payload?.provider !== provider || p.payload?.sessionId !== sessionId || !equal(p.payload?.model, model)) return fail(m.id, "invalid_request", "wrong Provider scope");
-				if (p.hook === "provider.request" && equal(p.payload?.request, request)) return reply(m.id, p.payload);
-				if (p.hook === "provider.response" && p.payload?.message?.role === "assistant") return reply(m.id, null);
+				if (p.hook === "provider.request" && equal(p.payload?.request, request) && !parent.modelRequestCommitted) {
+					parent.modelRequestCommitted = true;
+					// Return a changed request on one attempt to distinguish using the answer from ignoring it.
+					const last = request.messages.at(-1);
+					if (textOf(last?.content ?? []) === "fixture transform") {
+						return reply(m.id, { ...p.payload, request: { ...request, messages: [{ role: "user", content: [{ type: "text", text: "transformed request" }] }] } });
+					}
+					return reply(m.id, p.payload);
+				}
+				if (p.hook === "provider.response" && parent.modelRequestCommitted && p.payload?.message?.role === "assistant") return reply(m.id, null);
 				return fail(m.id, "invalid_request", "invalid Provider hook");
 			}
 			case "host/credentials/read":
@@ -377,7 +385,8 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 				if (!original || resultFor(rt, c.id).length) invalid("unknown or settled call");
 				const decision = allowed.get(c.id);
 				allowed.delete(c.id);
-				if (!decision || !match(decision, c) || !tools[c.name]) return resultOf(finish(original, { status: "refused", content: [{ type: "text", text: "Fixture denied dispatch" }] }));
+				if (!decision) invalid("call has no allowance");
+				if (!match(decision, c) || !tools[c.name]) return resultOf(finish(original, { status: "refused", content: [{ type: "text", text: "Fixture denied dispatch" }] }));
 				rt.toolCalls.push(c);
 				put({ kind: "toolStarted", toolCallId: c.id, stepId: original.stepId, actorId: "kit", modelVisible: false, data: { call: { ...c, actorId: "kit" }, source: fixtureSource, definition: tools[c.name], safeToRepeat: false, openWorld: tools[c.name].hints?.openWorld ?? true, authorizers, rights } });
 				// As a real Harness does: a cancelled tool call stops, and still answers, as cancelled.
@@ -463,6 +472,20 @@ await attempt("initialize", async () => {
 await attempt("ping", async () => {
 	check("$/ping answers {}", JSON.stringify(await p.request("$/ping", {})) === "{}");
 });
+// Shared data: General rules; Plugin binding: Transport. The JSON-RPC object is level 1.
+for (const depth of [64, 65]) await attempt(`Transport: JSON nesting at ${depth} levels`, async () => {
+	const peer = start();
+	try {
+		const opaque = Array.from({ length: depth - 3 }).reduce((inner) => [inner], 1);
+		const r = await peer.request("plugin/initialize", { ...initParams, config: { "kit.depth": opaque } }).catch((e) => e);
+		check(`Transport: ${depth} JSON levels ${depth === 64 ? "are accepted" : "are accepted or refused as invalid_request"}`,
+			r?.binding === BINDING || (depth > 64 && r?.code === -32602 && code(r) === "invalid_request"));
+	} finally {
+		await peer.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);
+		await peer.stop();
+	}
+});
+
 // Plugin binding: Transport. This independent process takes raw frames, not the mock host's decoder.
 await attempt("framing", async () => {
 	const child = spawn(command[0], command.slice(1), { cwd: work, env: safeEnv, stdio: ["pipe", "pipe", "ignore"] });
@@ -525,6 +548,8 @@ await attempt("provider", async () => {
 	check("provider/request: an unknown provider is invalid_request, JSON-RPC -32602", code(unknownProvider) === "invalid_request" && unknownProvider?.code === -32602, JSON.stringify(unknownProvider));
 	// Plugin binding: The conformance plugin; ACP: Conformance mode.
 	const request = (messages, tools) => p.request("provider/request", { sessionId: "s1", provider: "conformance", model: { provider: "conformance", id: "echo" }, request: { systemPrompt: "", messages, tools, settings: {} } });
+	const transformed = await request([{ role: "user", content: [{ type: "text", text: "fixture transform" }] }], []).catch((e) => e);
+	check("The host asks a Provider: inference uses the answer to provider.request", transformed.stop === "finished" && textOf(transformed.content) === "echo: transformed request");
 	const user = (text) => ({ role: "user", content: [{ type: "text", text }] });
 	const tool = { name: "read", description: "fixture file", parameters: { type: "object", properties: { path: { type: "string" } } } };
 	const input = user('tool:read {"path":"a.txt"}');
@@ -638,6 +663,11 @@ await attempt("environment", async () => {
 		const { point } = await p.request("env/save", { cwd: work, sessionId: "s1" });
 		writeFileSync(join(work, "pt.txt"), "after");
 		writeFileSync(join(work, "pt-new.txt"), "new");
+		const found = (sessionId, point) => p.request("env/checkPoint", { cwd: work, sessionId, point }).catch((e) => e);
+		const pointChecks = [await found("s1", point), await found("s1", "kit-no-such-point"), await found("s2", point)];
+		check("Paths and points: checkPoint reports a point only in its saving session and does not restore",
+			equal(pointChecks, [{ exists: true }, { exists: false }, { exists: false }]) &&
+			readFileSync(join(work, "pt.txt"), "utf8") === "after" && existsSync(join(work, "pt-new.txt")), JSON.stringify(pointChecks));
 		await p.request("env/restore", { cwd: work, sessionId: "s1", point });
 		check("env/restore: restores in place; the project folder is the same folder", statSync(work).ino === folderBefore, `inode ${folderBefore} -> ${statSync(work).ino}`);
 		check("env/restore: files are as they were at the saved point", readFileSync(join(work, "pt.txt"), "utf8") === "before" && !existsSync(join(work, "pt-new.txt")), JSON.stringify({ pt: readFileSync(join(work, "pt.txt"), "utf8"), added: existsSync(join(work, "pt-new.txt")) }));
@@ -863,7 +893,7 @@ async function runtimeChecks(part) {
 		];
 		const before = [
 			entry("actorJoined", { turnId: undefined, data: { actor: { id: "kit", kind: "host", rights } } }),
-			entry("inputAccepted", { turnId: undefined, actorId: "kit", data: { inputId: "kit-input", content: source, when: "now", rights, authorizers } }),
+			entry("inputAccepted", { turnId: undefined, actorId: "kit", inputId: "kit-input", data: { content: source, when: "now", rights, authorizers } }),
 			entry("turnStart", { data: { startedBy: { kind: "actor", id: "kit" }, model: { provider: "kit", id: "scripted" }, system: "kit", tools: ["read", "bash"].map((name) => ({ name, description: name, parameters: true })), settings: { maxSteps: 8 }, rights, authorizers } }),
 			entry("input", { modelVisible: true, actorId: "kit", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, inputId: "kit-input" }),
 			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, tools: recoveryTools.map((t) => t.name) } }),
@@ -878,12 +908,15 @@ async function runtimeChecks(part) {
 		try {
 			await fresh.request("plugin/initialize", initParams);
 			rt = fresh.state.rt = runScenario({ model: () => say("carried on"), definitions: Object.fromEntries(recoveryTools.map((d) => [d.name, d])), before, abandoned: durable ? [startedCall] : [notStarted, startedCall, safeCall] });
-			o = await fresh.request("runtime/resumeTurn", { turn: turn(), interrupted: { turnId: "kit-turn", calls: [notStarted, startedCall, safeCall] } });
+			o = await fresh.request("runtime/resumeTurn", { turn: turn(), interrupted: { turnId: "kit-turn", calls: durable ? [notStarted, safeCall] : [] } });
 		} finally {
 			fresh.state.rt = undefined;
 			await fresh.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);
 			await fresh.stop();
 		}
+		const settled = durable ? [startedCall] : [notStarted, startedCall, safeCall];
+		check(`${tag} The host asks the Runtime: no result is submitted again for a call already settled by the host`,
+			!rt.submitted.some((e) => e.kind === "toolResult" && settled.some((c) => c.id === e.toolCallId)));
 		check(`${tag} resume: the started, unsafe call is not repeated`, !rt.toolCalls.some((c) => c.id === "c-started"), JSON.stringify(rt.toolCalls));
 		check(`${tag} resume: it gets one result, outcomeUnknown`, resultFor(rt, "c-started").length === 1 && statusOf(resultFor(rt, "c-started")[0]) === "outcomeUnknown", String(JSON.stringify(recordedResults(rt))).slice(0, 240));
 		check(`${tag} resume: the call that never started has exactly one result`, resultFor(rt, "c-not-started").length === 1, String(JSON.stringify(recordedResults(rt))).slice(0, 240));

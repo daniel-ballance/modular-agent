@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Host-side fixtures for docs/bindings/plugin.md. The ACP kit loads these with --probe-checks.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, outcome, rpcError, serve } from "./peer.mjs";
@@ -20,6 +21,8 @@ const QUESTION = fixtureTool("probe-question", "Ask one fixture question.", { la
 const REFRESH = fixtureTool("probe-refresh", "Change the fixture tool list.", { fail: { type: "boolean" } });
 const currentTools = () => [PROBE, QUESTION, REFRESH, fixtureTool(refreshed ? "probe-added" : "probe-retired", "A tool from the current view.")];
 let failRefresh = false;
+const points = new Map();
+let pointProject, pointDir;
 function registration() {
 	const base = { binding: BINDING, name: `probe-${config.role ?? "probe"}` };
 	switch (config.role) {
@@ -32,6 +35,7 @@ function registration() {
 			providers: [{ id: model.provider, models, supports: { keepsState: false, runsTools: false } }],
 			hooks: [{ hook: "step.before", handlerId: 2 }, { hook: "tool.before", handlerId: 3 }] };
 		case "steering": return { ...base, replaces: ["runtime"], runtime: { id: "probe-steering", supports: { inputDuringTurn: true } } };
+		case "remote-points": return { ...base, replaces: ["working-environment"], workingEnvironment: { containment: "none", points: true } };
 		default: return { ...base, toolSources: [{ id: "probe-tools", tools: currentTools() }] };
 	}
 }
@@ -159,7 +163,7 @@ async function runtime(m, { ask }) {
 				const starts = records.filter((e) => e.kind === "toolStarted");
 				// Shared data: Recording order and ownership. Use the actual host's raw history, not the ACP projection.
 				checks.registration = starts.length === 1 && equal(starts[0].data?.source, { plugin: "probe-runtime", toolSource: "probe-tools" }) && equal(starts[0].data?.definition, EFFECT);
-				checks.dispatch = toolResult.status === (test === "changed" ? "refused" : "completed");
+				checks.dispatch = toolResult.callId === call.id && toolResult.status === (test === "changed" ? "refused" : "completed") && (test !== "changed" || starts.length === 0);
 				if (test === "exact") {
 					checks.settledGate = await refusedWithoutWrite(beforeHook);
 					checks.settledDispatch = await refusedWithoutWrite(dispatch);
@@ -207,10 +211,36 @@ serve("probe", async (m, ctx) => {
 	const p = m.params ?? {};
 	if (stopping) throw rpcError("invalid_request");
 	switch (m.method) {
+		case "env/save":
+		case "env/checkPoint":
+		case "env/restore": {
+			if (config.role !== "remote-points" || p.cwd !== pointProject || !p.sessionId) throw rpcError("invalid_request");
+			if (m.method === "env/save") {
+				const point = randomUUID();
+				cpSync(pointProject, join(pointDir, point), { recursive: true, verbatimSymlinks: true });
+				points.set(point, p.sessionId);
+				trace({ method: m.method, point });
+				return { point };
+			}
+			trace({ method: m.method, point: p.point });
+			const exists = points.get(p.point) === p.sessionId;
+			if (m.method === "env/checkPoint") return { exists };
+			if (!exists) throw rpcError("not_found");
+			for (const file of readdirSync(pointProject)) rmSync(join(pointProject, file), { recursive: true, force: true });
+			cpSync(join(pointDir, p.point), pointProject, { recursive: true, verbatimSymlinks: true });
+			return {};
+		}
+		case "env/sessionEnded":
+			if (config.role !== "remote-points") throw rpcError("method_not_found");
+			return {};
 		case "$/ping": return {};
 		case "plugin/initialize":
 			if (p.binding !== BINDING || p.data !== DATA) throw rpcError("not_supported");
 			config = p.config ?? {};
+			if (config.role === "remote-points") {
+				pointProject = p.project;
+				pointDir = mkdtempSync(join(p.home, "kit-remote-points-"));
+			}
 			return registration();
 		case "plugin/shutdown":
 			stopping = true;
@@ -241,6 +271,11 @@ serve("probe", async (m, ctx) => {
 					? event.data.params?.toolCall : undefined;
 				const requests = event.type === "reply" && event.data?.method === "_modular-agent/requests"
 					? event.data.result?.requests ?? [] : [];
+				const approval = requests.find((q) => q.kind === "approval" && q.call?.input?.command?.includes("kit-list-redact.txt"));
+				if (approval) {
+					approval.question = "Redacted approval question";
+					return { events };
+				}
 				for (const view of [permission?.rawInput, ...requests.filter((q) => q.kind === "approval").map((q) => q.call?.input)]) {
 					if (!view?.command?.includes("kit-gated-approval.txt")) continue;
 					trace({ approvalView: event.data.method, sessionId: p.payload.sessionId, recipient: p.payload.recipient });
