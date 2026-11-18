@@ -69,7 +69,8 @@ export class TransientRuntime implements Runtime {
 
 	protected async recover(_input: TurnInput, host: RuntimeHost, _signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
 		const entries: string[] = [];
-		for (const c of interrupted.calls) {
+		const settled = new Set((await host.history()).filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
+		for (const c of interrupted.calls) if (!settled.has(c.id)) {
 			entries.push((await this.settle(host, c, c.started ? "outcomeUnknown" : "notStarted")).id);
 		}
 		return { outcome: { kind: "failed", error: "The process stopped during the turn" }, result: { openToolCalls: [] }, entries, usage: zeroUsage() };
@@ -92,7 +93,7 @@ export class TransientRuntime implements Runtime {
 		const open: string[] = [];
 		for (const c of calls) {
 			if (!(await mayRun(c))) {
-				entries.push((await this.settle(host, c, "outcomeUnknown")).id);
+				if (!(await host.history()).some((e) => e.kind === "toolResult" && e.toolCallId === c.id)) entries.push((await this.settle(host, c, "outcomeUnknown")).id);
 				continue;
 			}
 			if (signal.aborted) {
@@ -144,6 +145,8 @@ export class TransientRuntime implements Runtime {
 			usage,
 		});
 		let last: AssistantMessage | undefined;
+		let replacement: ModelRequest | undefined;
+		let compacted = false;
 
 		while (true) {
 			if (signal.aborted) return done({ kind: "cancelled" }, last);
@@ -152,26 +155,23 @@ export class TransientRuntime implements Runtime {
 			if (steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, last);
 			const stepId = await host.newId();
 			host.report("step.started", {}, { stepId });
-			let request: ModelRequest = await host.prepareStep({ stepId, usage });
+			let request: ModelRequest;
 			let message: AssistantMessage;
-			while (true) {
+			try {
+				request = replacement ?? await host.prepareStep({ stepId, usage });
+				replacement = undefined;
 				message = await input.model.request(request, {
-					signal,
-					sessionId: input.sessionId,
-					stepId,
+					signal, sessionId: input.sessionId, stepId,
 					onEvent: (event) => host.report("model.output", event, { stepId }),
 				});
-				if (message.stop !== "failed" || signal.aborted) break;
-				// "A model request failed": a plugin may ask for a retry, perhaps after changing the request.
-				const decision = await host.hook<{ retry: boolean; request?: ModelRequest } | undefined>("model.failed", {
-					stepId, error: message.error ?? ({ kind: "other", message: "unknown" } as ModelError), attempt: retries, request,
-				});
-				if (!decision?.retry || retries >= maxRetries) break;
-				retries++;
-				host.report("model.retry", { attempt: retries, error: message.error }, { stepId });
-				request = decision.request ?? await host.prepareStep({ stepId, usage });
+			} catch (error) {
+				const e = error as { code?: string; limit?: string; data?: { limit?: string } };
+				const limit = e.limit ?? e.data?.limit;
+				if (e.code === "turn_limit" && limit) return done({ kind: "limit", limit }, last);
+				if (signal.aborted) return done({ kind: "cancelled" }, last);
+				throw error;
 			}
-			retries = 0;
+			steps++;
 			usage = addUsage(usage, message.usage);
 			last = message;
 			entries.push((await host.record({ kind: "response", writer: "runtime", modelVisible: true, stepId, message })).id);
@@ -181,9 +181,22 @@ export class TransientRuntime implements Runtime {
 				return done({ kind: "cancelled" }, message);
 			}
 			if (message.stop === "failed") {
+				const decision = !compacted && retries < maxRetries ? await host.hook<{ retry: boolean; request?: ModelRequest } | undefined>("model.failed", {
+					stepId, error: message.error ?? ({ kind: "other", message: "unknown" } as ModelError), attempt: retries, request,
+				}) : undefined;
+				const after = await host.hook<GateResult<unknown>>("step.after", { stepId, response: message });
+				if (signal.aborted) return done({ kind: "cancelled" }, message);
+				if (after?.refused) return done({ kind: "failed", error: after.refused }, message);
+				if (decision?.retry) {
+					retries++;
+					if (message.error?.kind === "contextTooLarge") compacted = true;
+					replacement = decision.request;
+					continue;
+				}
 				return done({ kind: "failed", error: message.error?.message ?? "The model request failed" }, message);
 			}
 
+			retries = 0;
 			const calls = message.content.filter(isToolCall);
 			const open: string[] = [];
 			// Record each result as soon as it is ready. The host orders the model view.
@@ -212,22 +225,23 @@ export class TransientRuntime implements Runtime {
 				}
 			}
 			host.report("step.ended", { usage: message.usage }, { stepId });
-			steps++;
-			// A call left open past this turn has no result, so the model can't be asked again: the turn ends.
-			if (open.length) return { ...done({ kind: "completed" }, message), result: { text: textOf(message.content), openToolCalls: open } };
-
 			// "After each step": a plugin may end the turn.
 			const after = await host.hook<GateResult<unknown>>("step.after", { stepId, response: message });
 			if (after?.refused) return done({ kind: "failed", error: after.refused }, message);
 			if (signal.aborted) return done({ kind: "cancelled" }, message);
+			if (open.length) {
+				if (this.supports.inputDuringTurn) for (const e of await host.takeSteering(true)) entries.push(e.id);
+				return { ...done({ kind: "completed" }, message), result: { text: textOf(message.content), openToolCalls: calls.filter((c) => open.includes(c.id)).map((c) => c.id) } };
+			}
 			if (steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, message);
 
 			if (calls.length === 0) {
-				if (await host.hasSteering()) continue;
+				const taken = this.supports.inputDuringTurn ? await host.takeSteering(true) : [];
+				for (const e of taken) entries.push(e.id);
+				if (taken.length) continue;
 				// "The turn's result is ready": a plugin may send the model back.
 				const check = await host.hook<GateResult<unknown>>("turn.result", { result: { text: textOf(message.content) }, shape: input.resultShape });
 				if (check?.refused) {
-					entries.push((await host.record({ kind: "runtime.resultCheck", writer: "runtime", modelVisible: true, message: { role: "user", content: [text(check.refused)] } })).id);
 					continue;
 				}
 				return done({ kind: "completed" }, message);

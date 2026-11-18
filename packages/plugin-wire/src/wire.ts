@@ -8,11 +8,11 @@ export const DATA_BINDING = "modular-agent-data/1";
 /** The largest message either side sends or accepts. */
 export const MAX_MESSAGE = 64 * 1024 * 1024;
 
-export type ErrorCode = "invalid_request" | "not_found" | "unknown_handler" | "cancelled" | "not_supported" | "result_too_large" | "lost" | "internal";
+export type ErrorCode = "invalid_request" | "not_found" | "unknown_handler" | "cancelled" | "not_supported" | "result_too_large" | "lost" | "internal" | "method_not_found" | "parse_error" | "turn_limit";
 
 /** An error as the binding carries it: a JSON-RPC error with `data.code`. */
 export class WireError extends Error {
-	constructor(readonly code: ErrorCode, message: string, readonly rpcCode = code === "invalid_request" ? -32602 : -32000) {
+	constructor(readonly code: ErrorCode, message: string, readonly rpcCode = code === "invalid_request" ? -32602 : -32000, readonly data?: Record<string, unknown>) {
 		super(message);
 	}
 }
@@ -43,9 +43,11 @@ export class WirePeer {
 	private running = new Map<number | string, AbortController>();
 	private nextId = 1;
 	private closedWith?: Error;
-	private buffer = "";
+	private fragments: Buffer[] = [];
+	private frameBytes = 0;
+	private received = new Set<number | string>();
 
-	constructor(private write: (line: string) => void) {
+	constructor(private write: (line: string) => void, private onClose?: () => void) {
 		this.handle("$/ping", () => ({}));
 		this.onNotification("$/cancel", (p) => this.running.get(p?.id)?.abort());
 	}
@@ -100,6 +102,9 @@ export class WirePeer {
 		for (const w of this.waiting.values()) w.reject(this.closedWith);
 		this.waiting.clear();
 		for (const c of this.running.values()) c.abort();
+		this.fragments = [];
+		this.frameBytes = 0;
+		this.onClose?.();
 	}
 
 	/** True only up to the moment the answer is received, even within one input chunk. */
@@ -112,16 +117,22 @@ export class WirePeer {
 	}
 
 	/** Feed raw bytes as they arrive. */
-	feed(chunk: string): void {
-		this.buffer += chunk;
-		for (let i = this.buffer.indexOf("\n"); i >= 0; i = this.buffer.indexOf("\n")) {
-			const line = this.buffer.slice(0, i);
-			this.buffer = this.buffer.slice(i + 1);
-			if (line.trim()) this.receive(line);
-		}
-		if (Buffer.byteLength(this.buffer) > MAX_MESSAGE) {
-			this.buffer = "";
-			this.close("a message was larger than the binding allows");
+	feed(chunk: Buffer | string): void {
+		const data = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+		for (let from = 0; from < data.length && !this.closed;) {
+			const newline = data.indexOf(10, from);
+			const part = data.subarray(from, newline < 0 ? undefined : newline);
+			this.frameBytes += part.length;
+			if (this.frameBytes > MAX_MESSAGE + 1) return this.close("An oversized plugin frame");
+			this.fragments.push(part);
+			if (newline < 0) return;
+			const raw = Buffer.concat(this.fragments, this.frameBytes);
+			const line = raw.at(-1) === 13 ? raw.subarray(0, -1) : raw;
+			this.fragments = [];
+			this.frameBytes = 0;
+			if (line.length > MAX_MESSAGE) return this.close("An oversized plugin frame");
+			this.receive(line);
+			from = newline + 1;
 		}
 	}
 
@@ -134,15 +145,29 @@ export class WirePeer {
 		this.write(line + "\n");
 	}
 
-	private receive(line: string): void {
-		if (Buffer.byteLength(line) > MAX_MESSAGE) return this.close("a message was larger than the binding allows");
+	private receive(line: Buffer): void {
+		const validId = (id: unknown) => typeof id === "string" || typeof id === "number" && Number.isSafeInteger(id);
+		const fail = (id: unknown, rpc: number, code: string) => {
+			this.write(JSON.stringify({ jsonrpc: "2.0", id: validId(id) ? id : null, error: { code: rpc, message: code, data: { code } } }) + "\n");
+		};
 		let m: Message;
 		try {
-			m = JSON.parse(line);
+			m = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(line));
 		} catch {
-			return;
+			return fail(null, -32700, "parse_error");
+		}
+		if (!m || typeof m !== "object" || Array.isArray(m)) return fail(null, -32600, "invalid_request");
+		const response = Object.hasOwn(m, "result") || Object.hasOwn(m, "error");
+		if (response) {
+			if (m.jsonrpc !== "2.0" || "method" in m || !validId(m.id) || !this.waiting.has(m.id!) ||
+				(Object.hasOwn(m, "result") === Object.hasOwn(m, "error")) ||
+				("error" in m && (!Number.isInteger(m.error?.code) || typeof m.error?.message !== "string"))) return this.close("Invalid or unsolicited plugin reply");
+		} else if (m.jsonrpc !== "2.0" || typeof m.method !== "string" || ("id" in m && !validId(m.id))) {
+			return fail(m.id, -32600, "invalid_request");
 		}
 		if (m.method !== undefined && m.id !== undefined) {
+			if (this.received.has(m.id) || this.received.size >= 1_000_000) return this.close("Reused plugin request ID or exhausted connection budget");
+			this.received.add(m.id);
 			void this.serve(m);
 			return;
 		}
@@ -159,25 +184,27 @@ export class WirePeer {
 		this.waiting.delete(m.id!);
 		if (m.error) {
 			const code = (m.error.data?.code ?? (m.error.code === -32601 ? "not_supported" : "internal")) as ErrorCode;
-			w.reject(new WireError(code, m.error.message, m.error.code));
+			w.reject(new WireError(code, m.error.message, m.error.code, m.error.data));
 		} else w.resolve(m.result ?? null);
 	}
 
 	private async serve(m: Message): Promise<void> {
 		const handler = this.handlers.get(m.method!);
 		if (!handler) {
-			this.send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `Method not found: ${m.method}`, data: { code: "not_supported" } } });
+			this.send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `Method not found: ${m.method}`, data: { code: "method_not_found" } } });
 			return;
 		}
 		const abort = new AbortController();
 		this.running.set(m.id!, abort);
 		try {
+			await Promise.resolve();
+			if (abort.signal.aborted) throw new WireError("cancelled", "Cancelled");
 			const result = await handler(m.params ?? {}, { signal: abort.signal, id: m.id! });
 			this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result });
 		} catch (error) {
 			const e = abort.signal.aborted && !(error instanceof WireError) ? new WireError("cancelled", "Cancelled") : error;
 			const code = e instanceof WireError ? e.code : "internal";
-			this.send({ jsonrpc: "2.0", id: m.id, error: { code: e instanceof WireError ? e.rpcCode : -32000, message: e instanceof Error ? e.message : String(e), data: { code } } });
+			this.send({ jsonrpc: "2.0", id: m.id, error: { code: e instanceof WireError ? e.rpcCode : -32000, message: e instanceof Error ? e.message : String(e), data: { ...(e instanceof WireError ? e.data : {}), code } } });
 		} finally {
 			this.running.delete(m.id!);
 		}

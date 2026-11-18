@@ -46,7 +46,8 @@ export interface ServeOptions {
  */
 export function servePlugins(options: ServeOptions): Promise<void> {
 	const write = options.output ?? ((line: string) => process.stdout.write(line));
-	const peer = new WirePeer(write);
+	let closed = () => {};
+	const peer = new WirePeer(write, () => closed());
 	const providers: Provider[] = [];
 	const toolSources: ToolSource[] = [];
 	let environment: WorkingEnvironment | undefined;
@@ -155,7 +156,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			name: options.name,
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
-			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [process.platform], ...(environment.points ? { points: true } : {}) } } : {}),
+			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [{ darwin: "macos", win32: "windows" }[process.platform as "darwin" | "win32"] ?? process.platform], ...(environment.points ? { points: true } : {}) } } : {}),
 			...(runtime ? { runtime: { id: runtime.id, supports: Object.fromEntries(Object.entries(runtime.supports).filter(([key]) => key !== "rewinding")) } } : {}),
 			...(handlers.size ? { hooks: [...handlers].map(([handlerId, h]) => ({ hook: h.hook, handlerId, order: h.order })) } : {}),
 			...(commands.size ? { commands: [...commands].map(([name, c]) => ({ name, description: c.description })) } : {}),
@@ -231,9 +232,14 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		catch (error) { throw missing(error); }
 		return {};
 	});
-	peer.handle("env/exec", async (p, ctx) =>
-		(await envAt(p)).exec(String(p.command), { signal: ctx.signal, timeoutMs: p.timeoutMs, onOutput: (chunk) => peer.notify("env/output", { parentRequestId: ctx.id, chunk }) }),
-	);
+	peer.handle("env/exec", async (p, ctx) => {
+		const env = await envAt(p);
+		ctx.signal.throwIfAborted();
+		const result = await env.exec(String(p.command), { signal: ctx.signal, timeoutMs: p.timeoutMs,
+			onOutput: (chunk) => { if (!ctx.signal.aborted) peer.notify("env/output", { parentRequestId: ctx.id, chunk }); } });
+		ctx.signal.throwIfAborted();
+		return result;
+	});
 
 	peer.handle("env/sessionEnded", async (p) => {
 		if (typeof p.sessionId !== "string" || !p.sessionId) throw new WireError("invalid_request", "A session is required");
@@ -283,8 +289,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 					try {
 						return fromWire(await req) as AssistantMessage;
 					} catch (error) {
-						if (opts.signal.aborted) return { role: "assistant", content: [], stop: "aborted" };
-						return { role: "assistant", content: [], stop: "failed", error: { kind: "temporary", message: error instanceof Error ? error.message : String(error) } };
+						throw error;
 					} finally {
 						modelEvents.delete(req.id);
 					}
@@ -314,9 +319,11 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 				} while (after);
 				return entries;
 			},
-			takeSteering: async () => fromWire((await call<{ entries: unknown[] }>("host/runtime/takeSteering")).entries) as HistoryEntry[],
+			takeSteering: async (final) => fromWire((await call<{ entries: unknown[] }>("host/runtime/takeSteering", final ? { final } : {})).entries) as HistoryEntry[],
 			hasSteering: async () => (await call<{ waiting: boolean }>("host/runtime/hasSteering")).waiting,
-			report: (type, data, ids) => peer.notify("host/runtime/report", { parentRequestId, type, data: toWire(data), ...(ids ?? {}) }),
+			report: (type, data, ids) => {
+				if (!["step.started", "step.ended", "model.output", "tool.result", "tool.open"].includes(type)) peer.notify("host/runtime/report", { parentRequestId, type: `${runtime?.id}.${type}`, data: toWire(data), ...(ids ?? {}) });
+			},
 		};
 		return { input, host };
 	};
@@ -345,13 +352,10 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	peer.handle("plugin/shutdown", async () => (await shutdown(), {}));
 
 	const input = options.input ?? process.stdin;
-	input.setEncoding?.("utf8");
 	return new Promise((resolve) => {
-		input.on("data", (chunk: string) => peer.feed(chunk));
-		const end = () => {
-			peer.close("the host closed the connection");
-			void shutdown().then(() => resolve());
-		};
+		closed = () => { input.pause?.(); void shutdown().then(() => resolve()); };
+		input.on("data", (chunk: Buffer | string) => peer.feed(chunk));
+		const end = () => peer.close("the host closed the connection");
 		input.on("end", end);
 		input.on("close", end);
 	});

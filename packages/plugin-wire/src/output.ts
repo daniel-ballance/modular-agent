@@ -34,12 +34,13 @@ export function mapOutput(event: AgentEvent): MappedOutput {
 	});
 	if (type === "entry" || type === "entry.added") return mapped("entry", { entry: data }, (d) => ({ data: d.entry }));
 	if (type === "turn.ended") return mapped("turnEnded", { turnId, outcome: data.outcome, result: data.result }, (d) => ({ turnId: d.turnId, data: { ...data, outcome: d.outcome, result: d.result } }));
-	if (type === "reply") return mapped(type, data, (d) => ({ data: d }));
+	if (type === "reply" || type === "request") return mapped(type, data, (d) => ({ data: d }));
 	return mapped(type.includes(".") ? type : `typescript.${type}`, data, (d) => ({ data: d }));
 }
 
 /** A gate may redact strings, but cannot change types, order or non-string values. */
-function sameShape(before: unknown, after: unknown): boolean {
+function sameShape(before: unknown, after: unknown, protectedValue = false): boolean {
+	if (protectedValue) return isDeepStrictEqual(before, after);
 	if (typeof before === "string") return typeof after === "string";
 	if (Array.isArray(before)) return Array.isArray(after) && before.length === after.length && before.every((value, i) => sameShape(value, after[i]));
 	if (before && typeof before === "object") {
@@ -47,7 +48,7 @@ function sameShape(before: unknown, after: unknown): boolean {
 		const left = Object.keys(before);
 		const right = Object.keys(after);
 		return left.length === right.length && left.every((key) => Object.hasOwn(after, key) &&
-			sameShape((before as Record<string, unknown>)[key], (after as Record<string, unknown>)[key]));
+			sameShape((before as Record<string, unknown>)[key], (after as Record<string, unknown>)[key], /^(type|kind|status|method|stop|id|rights|rawInput|key|optionId|credential|nextEntryId)$|Ids?$/.test(key)));
 	}
 	return before === after;
 }

@@ -11,7 +11,9 @@ import { servePlugins } from "./serve.js";
 // stdout carries the connection: nothing else may write to it.
 console.log = console.error;
 console.info = console.error;
-const parts = new Set((process.env.MODULAR_AGENT_PLUGIN_PARTS ?? "provider,tools,environment,hooks").split(",").map((s) => s.trim()).filter(Boolean));
+const requested = (process.env.MODULAR_AGENT_PLUGIN_PARTS ?? "provider,tools,environment,hooks").split(",");
+const parts = new Set(requested);
+if (parts.size !== requested.length || requested.some((p) => !["provider", "tools", "environment", "hooks", "runtime", "durable-runtime"].includes(p))) throw new Error("Invalid conformance plugin part selection");
 const plugins: Plugin[] = [];
 const replaces: string[] = [];
 if (parts.has("provider")) plugins.push(conformanceProvider()), replaces.push("provider:conformance");

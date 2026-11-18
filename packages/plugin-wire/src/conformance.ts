@@ -25,27 +25,25 @@ export class ConformanceProvider implements Provider {
 	private echo(request: ModelRequest, options: RequestOptions): AssistantMessage {
 		const messages = request.messages;
 		const lastUser = [...messages].reverse().find((m) => m.role === "user");
-		const latest = lastUser ? textOf(lastUser.content as ContentPart[]) : "";
+		const latest = lastUser ? lastUser.content.filter((p) => p.type === "text").map((p) => p.text).join("") : "";
 		const after = lastUser ? messages.slice(messages.lastIndexOf(lastUser) + 1) : [];
-		const result = after.filter((m) => m.role === "toolResult").at(-1);
+		const result = after.find((m) => m.role === "toolResult");
 		const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 		const reply = (t: string): AssistantMessage => {
 			options.onEvent?.({ type: "text", delta: t });
 			return { role: "assistant", content: [text(t)], stop: "finished", usage };
 		};
 		if (latest.startsWith("fail:")) return { role: "assistant", content: [], stop: "failed", error: { kind: "other", message: latest.slice(5) }, usage };
-		const tool = /^tool:(\S+)\s+([\s\S]*)$/.exec(latest);
-		if (tool && !result) {
+		if (latest.startsWith("tool:")) {
+			const tool = /^tool:([^ ]+) ([\s\S]*)$/.exec(latest);
+			const invalid: AssistantMessage = { role: "assistant", content: [], stop: "failed", error: { kind: "other", message: "Invalid tool directive" }, usage };
+			if (!tool || !request.tools.some((t) => t.name === tool[1])) return invalid;
 			let input: Record<string, unknown>;
-			try {
-				input = JSON.parse(tool[2]);
-			} catch {
-				return reply(`echo: ${latest}`);
-			}
+			try { input = JSON.parse(tool[2]); } catch { return invalid; }
+			if (!input || typeof input !== "object" || Array.isArray(input)) return invalid;
+			if (result) return reply(`done: ${[...result.content.filter((p) => p.type === "text").map((p) => p.text).join("")].slice(0, 200).join("")}`);
 			return { role: "assistant", content: [{ type: "toolCall", id: `call-${randomUUID()}`, name: tool[1], arguments: input }], stop: "toolUse", usage };
 		}
-		// 200 Unicode code points, not UTF-16 units.
-		if (tool && result) return reply(`done: ${[...textOf(result.content as ContentPart[])].slice(0, 200).join("")}`);
 		return reply(`echo: ${latest}`);
 	}
 }

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { relative, isAbsolute, sep } from "node:path";
-import type { Harness } from "@modular-agent/harness";
+import { isDeepStrictEqual } from "node:util";
+import { addUsage, interruptedNote, isToolCall, text, zeroUsage, type Harness, type HistoryEntry, type Usage } from "@modular-agent/harness";
 import type {
 	Answer,
 	AssistantMessage,
@@ -76,12 +77,12 @@ export function pluginSpecsFromEnv(env: NodeJS.ProcessEnv = process.env): Extern
  * host can leave out its own plugins that this one `replaces`.
  */
 export async function startExternalPlugin(spec: ExternalPluginSpec, info: { project: string; home: string }): Promise<ExternalPlugin> {
-	const child = spawn(spec.command[0], spec.command.slice(1), { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, ...(spec.env ?? {}) } });
-	const peer = new WirePeer((line) => child.stdin.write(line));
-	child.stdout.setEncoding("utf8");
-	child.stdout.on("data", (chunk: string) => peer.feed(chunk));
+	const child = spawn(spec.command[0], spec.command.slice(1), { stdio: ["pipe", "pipe", "inherit"], env: { PATH: process.env.PATH, LANG: process.env.LANG, ...(spec.env ?? {}) } });
+	const peer = new WirePeer((line) => child.stdin.write(line), () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+	child.stdout.on("data", (chunk: Buffer) => peer.feed(chunk));
+	child.stdout.on("end", () => peer.close("The plugin closed its output"));
 	const exited = new Promise<void>((resolve) => child.on("close", () => resolve()));
-	child.on("exit", () => peer.close(`The plugin ${spec.command.join(" ")} ended`));
+	child.on("exit", () => peer.close("The plugin ended"));
 	child.on("error", (error) => peer.close(error.message));
 	child.stdin.on("error", () => undefined);
 	const stop = async (reason = "stop", detail?: string) => {
@@ -155,7 +156,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 	const changedBy = new Map<number, Promise<unknown>>();
 	const track = <T>(p: Promise<T> & { id: number }, parent: Parent): Promise<T> => {
 		parents.set(p.id, { ...parent, actors: parent.actors ?? (parent.sessionId ? workActors(parent.sessionId) : []), jobs: parent.sessionId ? workJobs(parent.sessionId) : [] });
-		return p.then(async (value) => { await changedBy.get(p.id); return value; })
+		return p.then(async (value) => { await changedBy.get(p.id)?.catch(() => undefined); return value; })
 			.finally(() => { parents.delete(p.id); changedBy.delete(p.id); });
 	};
 	return {
@@ -204,7 +205,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				const tool = parentOf(p).tool;
 				if (!tool) throw new WireError("invalid_request", "host/ask needs the tool call it belongs to");
 				const signal = signalOf(p.parentRequestId, ctx.signal);
-				signal.throwIfAborted();
+				if (signal.aborted) throw new WireError("cancelled", "Parent or callback was cancelled");
 				return toWire(await tool.ask(fromWire(p.request), signal));
 			});
 			peer.handle("host/env/read", async (p) => {
@@ -215,15 +216,23 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 					throw error;
 				}
 			});
-			peer.handle("host/env/write", async (p) => (await (await environment(p)).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
+			peer.handle("host/env/write", async (p, ctx) => {
+				const env = await environment(p);
+				if (signalOf(p.parentRequestId, ctx.signal).aborted) throw new WireError("cancelled", "Parent or callback was cancelled");
+				await env.writeFile(p.path, Buffer.from(p.data, "base64"));
+				return {};
+			});
 			peer.handle("host/env/exists", async (p) => ({ exists: await (await environment(p)).exists(p.path) }));
-			peer.handle("host/env/exec", async (p, ctx) =>
-				(await environment(p)).exec(String(p.command), {
-					signal: signalOf(p.parentRequestId, ctx.signal),
-					timeoutMs: p.timeoutMs,
-					onOutput: (chunk) => peer.notify("host/env/output", { parentRequestId: ctx.id, chunk }),
-				}),
-			);
+			peer.handle("host/env/exec", async (p, ctx) => {
+				const env = await environment(p);
+				const signal = signalOf(p.parentRequestId, ctx.signal);
+				if (signal.aborted) throw new WireError("cancelled", "Parent or callback was cancelled");
+				const result = await env.exec(String(p.command), { signal, timeoutMs: p.timeoutMs,
+					onOutput: (chunk) => { if (!signal.aborted) peer.notify("host/env/output", { parentRequestId: ctx.id, chunk }); },
+				});
+				if (signal.aborted) throw new WireError("cancelled", "Parent or callback was cancelled");
+				return result;
+			});
 			peer.handle("host/hook", async (p) => {
 				const parent = parentOf(p);
 				if (!parent.provider || !["provider.request", "provider.response"].includes(p.hook)
@@ -277,6 +286,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				api.reportProblem(String(p.where ?? reg.name), new Error(String(p.message)));
 			});
 
+			const activeJobs = new Set<string>();
 			const ownJob = (p: any) => {
 				const job = typeof p.jobId === "string" && api.findJob(p.jobId);
 				if (!job || (p.sessionId != null && p.sessionId !== job.sessionId)) throw new WireError("invalid_request", "No such unfinished job of this plugin");
@@ -289,17 +299,23 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				try {
 					const handle = api.startJob(parent.sessionId, { kind: p.kind, key: p.key, detail: p.detail, actors: parent.actors, jobs: parent.jobs, toolCallId: parent.tool?.call.id });
 					await handle.ready;
+					if (handle.started) activeJobs.add(handle.id);
 					return { jobId: handle.id, started: handle.started };
 				} catch (error) { throw new WireError("invalid_request", String(error)); }
 			});
 			peer.onNotification("host/jobs/progress", (p) => {
 				const id = ownJob(p);
-				if (Array.isArray(p.content)) api.resumeJob(id, p.jobId).progress(fromWire(p.content));
+				if (activeJobs.has(p.jobId) && Array.isArray(p.content)) api.resumeJob(id, p.jobId).progress(fromWire(p.content));
 			});
 			peer.handle("host/jobs/end", async (p) => {
 				const id = ownJob(p);
 				if (!["completed", "failed", "cancelled"].includes(p.outcome?.kind) || typeof p.report !== "boolean" ||
 					(p.result !== undefined && !Array.isArray(p.result))) throw new WireError("invalid_request", "Invalid job result");
+				const previous = api.history(id, { all: true }).find((e) => e.kind === "jobEnded" && e.jobId === p.jobId);
+				if (previous) {
+					if (!previous.erased && wireEqual(previous.data, { outcome: p.outcome, result: fromWire(p.result), report: p.report })) return {};
+					throw new WireError("invalid_request", "Job already ended");
+				}
 				try { await api.resumeJob(id, p.jobId).finish(p.outcome.kind, fromWire(p.result), { report: p.report, error: p.outcome.error }); }
 				catch (error) { throw new WireError("invalid_request", String(error)); }
 				return {};
@@ -307,7 +323,12 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			peer.handle("host/jobs/unfinished", async (p) => ({
 				jobs: api.unfinishedJobs(sessionOf(p)).map(({ job, key, detail }) => ({ jobId: job.id, kind: job.kind, key, detail, actorId: job.actorId })),
 			}));
-			peer.handle("host/jobs/resume", async (p) => { api.resumeJob(ownJob(p), p.jobId); return {}; });
+			peer.handle("host/jobs/resume", async (p) => {
+				if (activeJobs.has(p.jobId)) throw new WireError("invalid_request", "Job is already running on this connection");
+				try { api.resumeJob(ownJob(p), p.jobId); } catch { throw new WireError("invalid_request", "Job cannot resume"); }
+				activeJobs.add(p.jobId);
+				return {};
+			});
 			api.onJobCancel(async (jobId) => { await peer.request("jobs/cancel", { jobId }); });
 
 			// ---------- what the plugin provides ----------
@@ -329,6 +350,9 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			});
 			if (reg.workingEnvironment) api.provide("working-environment", new WireEnvironment(peer, api.project, reg.workingEnvironment.containment, reg.workingEnvironment.points === true));
 			if (reg.runtime) api.provide("runtime", new WireRuntime(peer, reg.runtime.id, reg.runtime.supports, track));
+			else for (const method of ["newId", "prepareStep", "model", "hook", "definition", "runToolCall", "record", "takeSteering", "hasSteering"]) {
+				peer.handle(`host/runtime/${method}`, () => { throw new WireError("invalid_request", "This connection has no Runtime parent"); });
+			}
 			for (const h of reg.hooks ?? []) {
 				if (h.hook === "output") {
 					api.on(h.hook, async (p: import("@modular-agent/harness").OutputPayload) => {
@@ -356,69 +380,291 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 	};
 }
 
-interface Turn { input: TurnInput; host: RuntimeHost; signal: AbortSignal }
+interface Attempt {
+	request?: ModelRequest;
+	answer?: AssistantMessage;
+	sent?: boolean;
+	record?: HistoryEntry;
+	writing?: boolean;
+	after?: boolean;
+}
+interface CallState {
+	original: ToolCall;
+	offered: boolean;
+	phase: "unstarted" | "checking" | "allowed" | "dispatched" | "pending" | "settled";
+	allowed?: ToolCall;
+	registration?: ReturnType<NonNullable<RuntimeHost["registration"]>>;
+	result?: ToolResult;
+	record?: HistoryEntry;
+}
+interface Turn {
+	input: TurnInput; host: RuntimeHost; signal: AbortSignal;
+	attempts: Map<string, Attempt>;
+	calls: Map<string, CallState>;
+	usage: Usage;
+	current?: string;
+	entries: Set<string>;
+	ended?: boolean;
+	limit?: string;
+	replacement?: ModelRequest;
+	replay?: HistoryEntry;
+}
+const invalidState = (message: string) => new WireError("invalid_request", message);
+const comparable = (value: unknown) => JSON.parse(JSON.stringify(value ?? null));
+const wireEqual = (a: unknown, b: unknown) => isDeepStrictEqual(comparable(a), comparable(b));
+const sameCall = (a: ToolCall, b: ToolCall) => a?.id === b.id && a?.name === b.name && a?.startedBy === b.startedBy &&
+	(a.stepId === undefined || a.stepId === b.stepId) && (a.actorId === undefined || a.actorId === b.actorId) && wireEqual(a.input, b.input);
 
-/** A Runtime in another process. Each turn is one request; its callbacks reach this turn's RuntimeHost. */
+/** A Runtime in another process proposes work. Dispatch and settlement belong to this parent. */
 class WireRuntime implements Runtime {
 	private turns = new Map<number | string, Turn>();
 	constructor(private peer: WirePeer, readonly id: string, readonly supports: Runtime["supports"], private track: Track) {
 		const turn = (p: any): Turn => {
 			const t = this.turns.get(p?.parentRequestId);
-			if (!t || !peer.isWaiting(p.parentRequestId) || (p.sessionId != null && p.sessionId !== t.input.sessionId)) throw new WireError("invalid_request", "No live turn for this session");
+			if (!t || t.ended || !peer.isWaiting(p.parentRequestId) || (p.sessionId !== undefined && p.sessionId !== t.input.sessionId)) throw invalidState("No live turn for this session");
 			return t;
 		};
-		peer.handle("host/runtime/newId", async (p) => ({ id: await turn(p).host.newId() }));
-		// The host emits the standard turn events itself (docs/bindings/plugin.md): a step starts here...
+		const effect = (t: Turn) => { if (t.signal.aborted) throw new WireError("cancelled", "Turn was cancelled"); };
+		const atBoundary = (t: Turn) => !t.current || t.attempts.get(t.current)?.after;
+		const withLimit = async <T>(t: Turn, work: () => Promise<T>): Promise<T> => {
+			try { return await work(); }
+			catch (error) {
+				const e = error as { code?: string; limit?: string };
+				if (e.code === "turn_limit" && e.limit) { t.limit = e.limit; throw new WireError("turn_limit", "Turn limit reached", -32000, { limit: e.limit }); }
+				throw error;
+			}
+		};
+		peer.handle("host/runtime/newId", async (p) => {
+			const t = turn(p);
+			const id = await t.host.newId();
+			t.attempts.set(id, {});
+			return { id };
+		});
 		peer.handle("host/runtime/prepareStep", async (p) => {
 			const t = turn(p);
+			effect(t);
+			const step = t.attempts.get(p.stepId);
+			if (!step || step.sent || step.request || !atBoundary(t) || !wireEqual(t.usage, p.usage)) throw invalidState("Invalid step preparation");
+			t.current = p.stepId;
+			try {
+				await this.closeReplay(t);
+				step.request = await withLimit(t, () => t.host.prepareStep({ stepId: p.stepId, usage: p.usage }));
+			} catch (error) { t.current = undefined; throw error; }
 			t.host.report("step.started", {}, { stepId: p.stepId });
-			return toWire(await t.host.prepareStep({ stepId: p.stepId, usage: p.usage }));
+			return toWire(step.request);
 		});
 		peer.handle("host/runtime/model", async (p, ctx) => {
 			const t = turn(p);
-			// Pass pieces on to the Runtime. The Harness delivers the same pieces to followers.
-			return toWire(await t.input.model.request(fromWire(p.request), {
-				signal: AbortSignal.any([t.signal, ctx.signal]),
-				sessionId: t.input.sessionId,
-				stepId: p.stepId,
-				onEvent: (event) => {
-					peer.notify("host/runtime/modelEvent", { parentRequestId: ctx.id, event });
-				},
-			}));
+			effect(t);
+			const step = t.attempts.get(p.stepId);
+			const request = fromWire(p.request) as ModelRequest;
+			if (!step || step.sent || !(p.stepId === t.current && step.request && wireEqual(step.request, request) ||
+				atBoundary(t) && (t.replacement && wireEqual(t.replacement, request) || t.replay && wireEqual((t.replay.data as { request: ModelRequest }).request, request)))) throw invalidState("Model request is not authorized for this step");
+			t.current = p.stepId;
+			step.request = request;
+			step.sent = true;
+			t.replacement = undefined;
+			try {
+				await this.closeReplay(t);
+				step.answer = await withLimit(t, () => t.input.model.request(request, {
+					signal: AbortSignal.any([t.signal, ctx.signal]), sessionId: t.input.sessionId, stepId: p.stepId,
+					onEvent: (event) => { if (peer.isWaiting(p.parentRequestId)) peer.notify("host/runtime/modelEvent", { parentRequestId: ctx.id, event }); },
+				}));
+			} catch (error) { t.current = undefined; throw error; }
+			return toWire(step.answer);
 		});
 		peer.handle("host/runtime/hook", async (p) => {
 			const t = turn(p);
-			if (!RUNTIME_HOOKS.has(p.hook)) throw new WireError("invalid_request", "Not a Runtime hook");
-			return toWire((await t.host.hook(p.hook, fromWire(p.payload))) ?? null);
+			if (!RUNTIME_HOOKS.has(p.hook) || !p.payload || typeof p.payload !== "object" || Array.isArray(p.payload)) throw invalidState("Invalid Runtime hook");
+			const payload = fromWire(p.payload);
+			if (payload.sessionId !== undefined && payload.sessionId !== t.input.sessionId ||
+				payload.turnId !== undefined && payload.turnId !== t.input.turnId) throw invalidState("Hook scope does not match the turn");
+			if (p.hook === "tool.before") {
+				effect(t);
+				const call = t.calls.get(payload.call?.id);
+				if (!call || call.phase !== "unstarted" || !sameCall(payload.call, call.original)) throw invalidState("Call has no eligible gate transition");
+				if ([...t.calls.values()].some((other) => other !== call && other.phase === "dispatched" &&
+					!(t.host.registration?.(call.original.name)?.definition.parallel && other.registration?.definition.parallel))) throw invalidState("A serial tool is still dispatched");
+				call.phase = "checking";
+				const registration = t.host.registration?.(call.original.name);
+				const hookPayload = { ...payload, call: call.original, definition: registration?.definition };
+				const gate: { value: { call: ToolCall }; refused?: string; pending?: string } = !call.offered || !registration ? { value: hookPayload, refused: "not offered" } :
+					await t.host.hook<{ value: { call: ToolCall }; refused?: string; pending?: string }>("tool.before", hookPayload);
+				if (gate.refused) await this.settle(t, call, { callId: call.original.id, status: "refused", content: [text(gate.refused)] });
+				else if (gate.pending) call.phase = "pending";
+				else {
+					const allowed = gate.value.call;
+					if (!allowed || allowed.id !== call.original.id || allowed.name !== call.original.name ||
+						allowed.startedBy !== call.original.startedBy || allowed.actorId !== call.original.actorId || allowed.stepId !== call.original.stepId) {
+						await this.settle(t, call, { callId: call.original.id, status: "refused", content: [text("Gate changed call identity")] });
+						return toWire({ value: hookPayload, refused: "Gate changed call identity" });
+					}
+					call.allowed = allowed;
+					call.registration = registration;
+					call.phase = "allowed";
+				}
+				return toWire(gate);
+			}
+			if (p.hook === "tool.after") {
+				const call = t.calls.get(payload.call?.id);
+				if (!call?.result || !sameCall(payload.call, call.allowed ?? call.original)) throw invalidState("Call has no settled result");
+				return toWire({ ...payload, result: call.result });
+			}
+			if (p.hook === "step.after" || p.hook === "model.failed") {
+				const step = t.attempts.get(payload.stepId);
+				if (!step?.record || payload.stepId !== t.current) throw invalidState("No answered step for hook");
+				if (p.hook === "step.after") {
+					if (step.after || !wireEqual(payload.response, step.answer) || [...t.calls.values()].some((call) => call.original.stepId === payload.stepId && call.phase !== "pending" && call.phase !== "settled")) throw invalidState("Step has an unfinished call round");
+					step.after = true;
+					t.host.report("step.ended", { usage: step.answer?.usage }, { stepId: payload.stepId });
+				} else if (step.answer?.stop !== "failed") throw invalidState("Step did not fail");
+			}
+			if (p.hook === "turn.end") {
+				if (!t.signal.aborted && !t.limit && !atBoundary(t)) throw invalidState("Turn ended inside a step");
+				if (t.signal.aborted || t.limit) payload.outcome = t.signal.aborted ? { kind: "cancelled" } : { kind: "limit", limit: t.limit };
+				await this.closeReplay(t);
+				t.ended = true;
+			}
+			const answer = await t.host.hook<any>(p.hook, payload);
+			if (p.hook === "model.failed" && answer?.retry) t.replacement = answer.request;
+			return toWire(answer ?? null);
 		});
-		peer.handle("host/runtime/definition", async (p) => toWire((await turn(p).host.definition(p.toolName)) ?? null));
+		peer.handle("host/runtime/definition", async (p) => {
+			const t = turn(p);
+			const step = t.current ? t.attempts.get(t.current) : undefined;
+			return step && !step.request?.tools.some((d) => d.name === p.toolName) ? null : toWire((await t.host.definition(p.toolName)) ?? null);
+		});
 		peer.handle("host/runtime/runToolCall", async (p, ctx) => {
 			const t = turn(p);
-			return toWire(await t.host.runToolCall(fromWire(p.call), AbortSignal.any([t.signal, ctx.signal])));
+			effect(t);
+			const candidate = fromWire(p.call) as ToolCall;
+			const call = t.calls.get(candidate?.id);
+			if (!call || call.phase !== "allowed") throw invalidState("No unused allowance for this call");
+			if (!wireEqual(call.registration, t.host.registration?.(call.original.name))) {
+				call.phase = "unstarted";
+				call.allowed = undefined;
+				throw invalidState("Tool registration has changed; a new gate is required");
+			}
+			const round = [...t.calls.values()].filter((c) => c.original.stepId === call.original.stepId);
+			if (!round.every((c) => t.host.registration?.(c.original.name)?.definition.parallel) &&
+				round.slice(0, round.indexOf(call)).some((c) => c.phase !== "settled" && c.phase !== "pending")) throw invalidState("Calls must dispatch in model order");
+			call.phase = "dispatched";
+			if (!sameCall(candidate, call.allowed!)) return toWire(await this.settle(t, call, { callId: call.original.id, status: "refused", content: [text("Call differs from the allowed operation")] }));
+			const result = await t.host.runToolCall(call.allowed!, AbortSignal.any([t.signal, ctx.signal]));
+			if ("pending" in result) { call.phase = "pending"; return toWire(result); }
+			return toWire(await this.settle(t, call, result));
 		});
 		peer.handle("host/runtime/record", async (p) => {
 			const t = turn(p);
-			const { id: _id, parentId: _parent, time: _time, turnId: _turn, sessionId: _session, ...entry } = p.entry ?? {};
-			if (!["response", "toolResult", "turnStart", "turnEnd"].includes(entry.kind) && (typeof entry.kind !== "string" || !entry.kind.includes("."))) {
-				throw new WireError("invalid_request", "The Runtime cannot record this entry kind");
+			const entry = fromWire(p.entry);
+			if (!entry || typeof entry.kind !== "string") throw invalidState("Missing Runtime entry");
+			let record: HistoryEntry;
+			if (entry.kind === "response") {
+				const step = t.attempts.get(entry.stepId);
+				if (!step?.answer || !wireEqual(entry.message, step.answer) || step.writing) throw invalidState("Response does not match the model attempt");
+				if (!step.record) {
+					step.writing = true;
+					try {
+						step.record = await t.host.record({ kind: "response", writer: this.id, stepId: entry.stepId, message: step.answer, modelVisible: true });
+						t.usage = addUsage(t.usage, step.answer.usage);
+						if (step.answer.stop === "toolUse" || step.answer.stop === "finished") for (const part of step.answer.content.filter(isToolCall)) {
+							t.calls.set(part.id, { original: { id: part.id, name: part.name, input: part.arguments, startedBy: "model", stepId: entry.stepId },
+								offered: step.request!.tools.some((d) => d.name === part.name), phase: "unstarted" });
+						}
+					} finally { step.writing = false; }
+				}
+				record = step.record;
+			} else if (entry.kind === "toolResult") {
+				const call = t.calls.get(entry.toolCallId);
+				if (!call?.record || entry.data?.status === "notStarted" || !wireEqual(call.record.message, entry.message) ||
+					!wireEqual(call.record.data, entry.data) || entry.stepId !== call.record.stepId) throw invalidState("Result does not match a committed result");
+				record = call.record;
+			} else {
+				if (!entry.kind.includes(".")) throw invalidState("The Runtime cannot record this entry kind");
+				record = await t.host.record({ kind: entry.kind.startsWith(this.id + ".") ? entry.kind : this.id + "." + entry.kind, writer: this.id, data: entry.data, modelVisible: false });
 			}
-			return toWire(await t.host.record(entry));
+			t.entries.add(record.id);
+			return toWire(record);
 		});
-		peer.handle("host/runtime/takeSteering", async (p) => ({ entries: toWire(await turn(p).host.takeSteering()) }));
+		peer.handle("host/runtime/takeSteering", async (p) => {
+			const t = turn(p);
+			if (!this.supports.inputDuringTurn) throw new WireError("not_supported", "Steering is not offered");
+			if (p.final !== undefined && typeof p.final !== "boolean" || p.final && !atBoundary(t)) throw invalidState("Final steering outside the boundary");
+			const entries = atBoundary(t) ? await t.host.takeSteering(p.final === true) : [];
+			for (const entry of entries) t.entries.add(entry.id);
+			return { entries: toWire(entries) };
+		});
 		peer.handle("host/runtime/hasSteering", async (p) => ({ waiting: await turn(p).host.hasSteering() }));
 		peer.onNotification("host/runtime/report", (p) => {
-			// The host emits these itself; a Runtime's own copy would duplicate them.
-			if (["model.output", "step.started", "tool.started", "tool.progress", "tool.ended", "tool.result.delivered", "entry.added"].includes(p?.type)) return;
 			const t = this.turns.get(p?.parentRequestId);
-			t?.host.report(String(p.type), fromWire(p.data), { ...(p.stepId ? { stepId: p.stepId } : {}), ...(p.toolCallId ? { toolCallId: p.toolCallId } : {}) });
+			if (!t || t.ended || !peer.isWaiting(p.parentRequestId) || typeof p.type !== "string" || !p.type.startsWith(this.id + ".")) return;
+			t.host.report(p.type, fromWire(p.data), { stepId: p.stepId, toolCallId: p.toolCallId });
 		});
+	}
+
+	private async closeReplay(t: Turn) {
+		const replay = t.replay;
+		t.replay = undefined;
+		if (replay) await this.abortAttempt(t.host, replay);
+	}
+
+	private async abortAttempt(host: RuntimeHost, attempt: HistoryEntry) {
+		await host.record({ kind: "response", writer: "harness", stepId: attempt.stepId, modelVisible: false,
+			message: { role: "assistant", content: [], stop: "aborted" }, data: { recovery: true } });
+	}
+
+	private async settle(t: Turn, call: CallState, result: ToolResult): Promise<ToolResult> {
+		const original = call.allowed ?? call.original;
+		try {
+			const transformed = await t.host.hook<{ result?: ToolResult }>("tool.after", { call: original, result });
+			if (transformed?.result) result = { ...result, content: transformed.result.content, value: transformed.result.value };
+		} catch { result = { callId: original.id, status: result.status, content: [text("Tool result could not be processed")] }; }
+		call.record = await t.host.record({ kind: "toolResult", writer: "harness", modelVisible: true, stepId: original.stepId, toolCallId: original.id,
+			message: { role: "toolResult", toolCallId: original.id, toolName: original.name, content: result.content, isError: result.status !== "completed" },
+			data: { status: result.status, value: result.value } });
+		call.phase = "settled";
+		return call.result = result;
 	}
 	private async turn(method: string, input: TurnInput, host: RuntimeHost, signal: AbortSignal, extra: Record<string, unknown> = {}): Promise<TurnOutcome> {
 		const turn = { sessionId: input.sessionId, turnId: input.turnId, startedBy: input.startedBy, model: toWire(input.model.model), modelSupports: input.model.supports, settings: input.settings, ...(input.resultShape ? { resultShape: input.resultShape } : {}) };
+		const t: Turn = { input, host, signal, attempts: new Map(), calls: new Map(), usage: zeroUsage(), entries: new Set() };
+		const interrupted = extra.interrupted as InterruptedTurn | undefined;
+		if (interrupted) {
+			const history = (await host.history()).filter((e) => e.turnId === input.turnId);
+			const responses = new Map(history.filter((e) => e.kind === "response").map((e) => [e.stepId, e]));
+			const unmatched = history.filter((e) => e.kind === "modelRequest" && !responses.has(e.stepId));
+			const last = unmatched.at(-1);
+			for (const attempt of unmatched) {
+				const d = attempt.data as { safeToRepeat?: boolean; model?: ModelRef; request?: ModelRequest; auxiliary?: boolean } | undefined;
+				const supports = input.model.supports;
+				if (attempt === last && this.supports.continuesAfterRestart && !attempt.erased && d?.safeToRepeat && !d.auxiliary && d.request &&
+					wireEqual(d.model, { id: input.model.model.id, provider: input.model.model.provider }) &&
+					(supports.safeToRepeat || supports.keepsState === false && supports.runsTools === false)) t.replay = attempt;
+				else await this.abortAttempt(host, attempt);
+			}
+			for (const attempt of history.filter((e) => e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean } | undefined)?.auxiliary)) {
+				const row = responses.get(attempt.stepId);
+				t.usage = addUsage(t.usage, row?.message?.role === "assistant" ? row.message.usage : row?.usage);
+			}
+		}
+		for (const call of interrupted?.calls ?? (extra.calls as InterruptedTurn["calls"] | undefined) ?? []) {
+			const original: ToolCall = { id: call.id, name: call.name, input: call.input, startedBy: "model", stepId: call.stepId };
+			if (interrupted && (!this.supports.continuesAfterRestart || call.started && !call.safeToRepeat)) {
+				await host.record({ kind: "toolResult", writer: "harness", modelVisible: true, stepId: call.stepId, toolCallId: call.id,
+					message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: [text(interruptedNote(call.started))], isError: true },
+					data: { status: call.started ? "outcomeUnknown" : "notStarted" } });
+			} else t.calls.set(call.id, { original, offered: true, phase: "unstarted" });
+		}
 		const req = this.peer.request<TurnOutcome>(method, { turn, ...toWire(extra) }, signal);
-		this.turns.set(req.id, { input, host, signal });
+		this.turns.set(req.id, t);
 		try {
-			return fromWire(await this.track(req, { runtime: true, sessionId: input.sessionId, signal })) as TurnOutcome;
+			const reply = fromWire(await this.track(req, { runtime: true, sessionId: input.sessionId, signal })) as TurnOutcome;
+			await this.closeReplay(t);
+			if (signal.aborted) return { outcome: { kind: "cancelled" }, result: { openToolCalls: [] }, entries: [...t.entries], usage: t.usage };
+			if (t.limit && (reply.outcome.kind !== "limit" || reply.outcome.limit !== t.limit)) throw invalidState("Runtime did not report the signalled limit");
+			if (method === "runtime/runTurn" && (!wireEqual(reply.usage, t.usage) || !wireEqual(reply.entries, [...t.entries]))) throw invalidState("Runtime outcome does not match its committed work");
+			if (!wireEqual(reply.result.openToolCalls, [...t.calls.values()].filter((c) => c.phase === "pending").map((c) => c.original.id))) throw invalidState("Runtime outcome has invalid open calls");
+			return reply;
 		} finally {
 			this.turns.delete(req.id);
 		}
