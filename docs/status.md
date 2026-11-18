@@ -1,6 +1,25 @@
 # Status: the description against the code
 
-**Checked:** 2026-11-16, against the first implementation in `packages/` ([build notes](build-notes.md)).
+## Production edition — TypeScript, round seven
+
+**Checked against:** production specification `388cd90`, implementer's guide `1569f84`, conformance kits `1ad258f`, on Linux with Node.js 26.13.1. This records fixture results, not a full production conformance claim or an independent cross-build swap.
+
+| Role and binding | Fixture coverage | Result |
+|---|---|---|
+| Local build | Normal and `MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local` | 88/88 tests in each |
+| History service, `modular-agent-history/1` | Authenticated reads, durable mutations, page caps, exact tombstones and changed-TTL restart exclusion | 39/39 |
+| Served plugin, `modular-agent-plugin/1` | Baseline parts and both Runtime tiers | 133/133 |
+| Agent and plugin host, `modular-agent-acp/1` and `/2` with `modular-agent-plugin/1` | Crash, plugin, probe and job checks; `provider,hooks`, then with the durable Runtime, then also tools and environment | 192/192 in each layout |
+| History client and portable agent | Two fresh TypeScript processes, shared service, crash and job checks | 145/145 transient; 145/145 durable |
+| History client + remote recovery probes | Portable transient run with probes, including seeded interrupted remote model attempts and the post-intent limit | 225/225 |
+
+The portable runs declare `queuedInputAfterRestart: handedBack`; the kit skips the receipt check for the alternative `run` policy. The tests used scripted models and disposable processes and stores. The service uses a local SQLite store (`node:sqlite`), a single exclusive writer process, and a persisted TTL upper bound. Use only a fresh service directory or one written by this implementation; old JSONL service directories lack a verifiable lease bound. Plain HTTP is loopback only and assumes trusted local accounts.
+
+**Outstanding production work.** In particular, the matrix does not establish full project and tenant isolation or configured ACP representation, secret staging and recovery, durable coordination for pending cross-session erasure, comprehensive portable-record validation, or all dispatch, metering and cancellation rules under failure. Full production readiness is not claimed. The round-seven handoff records the specific gaps in `/tmp/ma-tools/r7/ts-gaps.md`.
+
+## Historical evidence — before the production edition
+
+The rest of this page records pre-edition observations, including the previous independent-build matrix. Those results do not establish interoperability against the production revision.
 
 Each row is a claim from [Architecture](architecture.md) or [Contracts](contracts.md). The status says how far the code backs it:
 - **proven:** the code does it, and a test or a run with a real model shows it
