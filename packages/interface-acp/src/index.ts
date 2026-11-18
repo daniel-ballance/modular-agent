@@ -820,7 +820,8 @@ export class AcpInterface implements InterfaceCapability {
 			if (signal.aborted || !this.hasRight(request.sessionId, this.actorId, "approve")) return;
 			this.exactApprovals.add(request.id);
 			const response = await client.request(methods.client.session.requestPermission, gated.params, { cancellationSignal: signal }) as acp.RequestPermissionResponse;
-			if (signal.aborted || !this.canAnswer(request.sessionId, request.id) || !this.exactApprovals.has(request.id)) return;
+			// The permission reply refers to the exact view already delivered on this route.
+			if (signal.aborted || !this.canAnswer(request.sessionId, request.id)) return;
 			if (response.outcome.outcome !== "selected") return { declined: true, reason: "cancelled" };
 			return response.outcome.optionId === "allow" ? { value: "allow" } : { declined: true };
 		}
