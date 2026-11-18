@@ -139,8 +139,10 @@ export class WirePeer {
 	private send(m: Message): void {
 		let line = JSON.stringify(m);
 		if (Buffer.byteLength(line) > MAX_MESSAGE) {
-			if (m.id === undefined || !("result" in m)) throw new WireError("result_too_large", "The message is too large to send");
-			line = JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: "The result is too large to send", data: { code: "result_too_large" } } });
+			if (m.id === undefined || !("result" in m || "error" in m)) throw new WireError("result_too_large", "The message is too large to send");
+			const code = m.error?.data?.code ?? "result_too_large";
+			line = JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: m.error?.code ?? -32000, message: code, data: { code } } });
+			if (Buffer.byteLength(line) > MAX_MESSAGE) return this.close("Plugin response ID cannot fit the line limit");
 		}
 		this.write(line + "\n");
 	}

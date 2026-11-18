@@ -28,6 +28,7 @@ import {
 	type JobState,
 	type ModelAccess,
 	type ModelInfo,
+	type ModelMessage,
 	type ModelRequest,
 	type OutputAnswer,
 	type OutputPayload,
@@ -1466,14 +1467,14 @@ export class Harness {
 				const branch = s.branch();
 				const lastAttempt = branch.findLastIndex((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary);
 				const feedback = branch.slice(lastAttempt + 1).filter((e) => !e.erased && e.turnId === turnId && e.kind === "resultFeedback");
-				const messages = s.modelMessages(branch, turnId);
-				for (const e of feedback) messages.push({ role: "user", content: [text((e.data as { reason: string }).reason)] });
 				const request: ModelRequest = {
-					systemPrompt: state.system, messages, tools: state.tools, providerTools: "none",
+					systemPrompt: state.system, messages: s.modelMessages(branch, turnId), tools: state.tools, providerTools: "none",
 					settings: { reasoning: state.settings.reasoning, maxOutput: state.settings.maxOutput },
 				};
 				const payload = { sessionId: s.id, turnId, stepId, usage, model: model?.model, history: s.branch(), request };
-				const prepared = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
+				const transformed = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
+				const prepared: ModelRequest = feedback.length ? { ...transformed, messages: [...transformed.messages,
+					...feedback.map((e): ModelMessage => ({ role: "user", content: [text((e.data as { reason: string }).reason)] }))] } : transformed;
 				// Hooks may copy or transform messages, so conservatively name their visible sources.
 				state.sources.set(stepId, [...new Set([...branch.filter((e) => (e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length)), ...feedback].map((e) => e.id))]);
 				return prepared;
@@ -1510,7 +1511,7 @@ export class Harness {
 				}
 				const modelSources = draft.kind === "response" ? [
 					...(state.sources.get(draft.stepId ?? "") ?? []),
-					...s.branch().filter((e) => e.modelVisible || e.kind === "summary").map((e) => e.id),
+					...s.branch().filter((e) => e.kind === "modelRequest" && e.turnId === turnId && e.stepId === draft.stepId).map((e) => e.id),
 				] : [];
 				const callSources = draft.kind === "toolResult" && draft.toolCallId ? s.branch()
 					.filter((e) => e.kind === "toolStarted" && e.toolCallId === draft.toolCallId
@@ -1556,12 +1557,19 @@ export class Harness {
 						!Array.isArray(prepared.request?.tools) || prepared.request.tools.some((tool) => !request.tools.some((offered) => isDeepStrictEqual(offered, tool))) ||
 						!isDeepStrictEqual(prepared.request.providerTools, request.providerTools)) throw new Error("Invalid provider.request transform");
 					await check();
-					await this.commit(s, [{
+					const [intent] = await this.commit(s, [{
 						kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
 						data: { model: scope.model, safeToRepeat, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat ? { request: prepared.request } : {}) },
 						sources: state.sources.get(stepId),
 					}]);
-					await check();
+					try { await check(); }
+					catch (error) {
+						if (intent && !s.suspended && !this.use<HistoryStore>("history-store")?.writerSignal?.(s.id)?.aborted) {
+							await this.commit(s, [{ kind: "response", writer: "harness", turnId, stepId, modelVisible: false,
+								message: { role: "assistant", stop: "aborted", content: [] }, sources: [intent.id], data: { recovery: true } }]);
+						}
+						throw error;
+					}
 					options.onEffectiveRequest?.(prepared.request);
 					return prepared.request;
 				};
@@ -1824,7 +1832,7 @@ export class Harness {
 		const registered = request.kind === "approval" && call ? this.findTool(s, call.name) : undefined;
 		const approval = registered && call ? { call, source: { plugin: registered.plugin, toolSource: registered.source.id }, definition: registered.definition } : {};
 		if (!reopened) {
-			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, data: { request: { ...request, answerable: true }, ...approval } }]);
+			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, data: { request: { ...request, answerable: viewers.length > 0 }, ...approval } }]);
 		}
 		if (!this.presentActors(s).some((id) => this.mayAnswer(s, request, id))) {
 			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId, toolCallId: request.toolCallId,

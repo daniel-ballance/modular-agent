@@ -22,13 +22,18 @@ peer.handle("tools/call", (_p, ctx) => {
 	peer.notify("tools/changed", { toolSource: "changing", parentRequestId: ctx.id });
 	return { status: "completed", content: [] };
 });
-peer.handle("provider/request", (_p, ctx) => {
+peer.handle("provider/request", async (p, ctx) => {
+	const scope = { provider: p.provider, sessionId: p.sessionId, model: p.model };
+	await peer.request("host/hook", { parentRequestId: ctx.id, hook: "provider.request", payload: { ...scope, request: p.request } });
 	for (const delta of ["split conformance-", "secret end"]) peer.notify("provider/event", { parentRequestId: ctx.id, event: { type: "text", delta } });
-	return { role: "assistant", stop: "finished", content: [text("split conformance-secret end")] };
+	const message = { role: "assistant", stop: "finished", content: [text("split conformance-secret end")] };
+	await peer.request("host/hook", { parentRequestId: ctx.id, hook: "provider.response", payload: { ...scope, message } });
+	return message;
 });
 peer.handle("command/run", async (p, ctx) => {
 	const { sessionId, args: after } = p;
-	const page = await peer.request<{ entries: { id: string }[]; next?: string }>("host/history", { sessionId, after, parentRequestId: ctx.id });
+	const page = await peer.request<{ entries: { id: string }[]; next?: string }>("host/history", { sessionId, after, parentRequestId: ctx.id }).catch((error) => ({ code: error.code } as const));
+	if ("code" in page) return { output: JSON.stringify(page) };
 	return { output: JSON.stringify({ bytes: Buffer.byteLength(JSON.stringify(page)), next: page.next, ids: page.entries.map((e) => e.id) }) };
 });
 createInterface({ input: process.stdin }).on("line", (line) => peer.feed(line + "\n"));

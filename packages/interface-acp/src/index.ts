@@ -27,6 +27,7 @@ const APPROVAL = ["off", "ask", "all", "never"];
 export const BINDING = "modular-agent-acp/1";
 const NS = "modular-agent";
 const BINDING_V2 = "modular-agent-acp/2";
+const MAX_LINE_BYTES = 64 * 1024 * 1024;
 const bindingError = (code: string, message = code) => new RequestError(-32602, message, { code });
 const notOpen = () => ({ accepted: false, reason: "not_open" });
 const EXTENSIONS = ["history", "input", "requests", "answer", "actors", "join", "leave", "release", "proposals", "withdraw", "limit", "tenant", "fork", "move", "jobs", "cancel-job", "erase"];
@@ -304,18 +305,59 @@ export class AcpInterface implements InterfaceCapability {
 		};
 		const extension = (name: string, run: (ctx: { params: Record<string, any> }) => unknown) => {
 			const method = `_${NS}/${name}`;
-			this.app.onRequest(method, any, async (ctx) => name === "requests" ? run(ctx) : this.gateReply(open(ctx.params.sessionId), method, await run(ctx)));
+			this.app.onRequest(method, any, async (ctx) => (name === "requests" || name === "history") ? run(ctx) : this.gateReply(open(ctx.params.sessionId), method, await run(ctx)));
 		};
 		extension("history", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
-			const all = params.all === true;
-			const raw = this.api.history(sessionId, { all });
+			const limit = params.limit ?? 500;
+			if (!Number.isInteger(limit) || limit < 1 || limit > 500 || (params.all !== undefined && typeof params.all !== "boolean")) throw bindingError("invalid_params");
+			const raw = this.api.history(sessionId, { all: params.all === true });
 			const at = params.after === undefined ? -1 : raw.findIndex((e) => e.id === params.after);
-			if (params.after !== undefined && at < 0) throw new RequestError(-32602, `Unknown entry ${String(params.after)}`);
-			const ids = new Set(raw.slice(at + 1).map((e) => e.id));
-			const gated = await this.api.gatedHistory(sessionId, { recipient: this.actorId, all });
-			return { entries: gated.filter((e) => ids.has(e.id)) };
+			if (params.after !== undefined && at < 0) throw bindingError("invalid_params", "Unknown history cursor");
+			const entries: HistoryEntry[] = [];
+			const before = new Map<string, ReturnType<AcpInterface["requestView"]>>();
+			const changed = new Set<string>();
+			const max = 4 * 1024 * 1024;
+			let bytes = Buffer.byteLength('{"entries":[]}');
+			for (let i = at + 1; i < raw.length && entries.length < limit; i++) {
+				const entry = raw[i];
+				const request = entry.kind === "inputRequest" ? (entry.data as { request?: InputRequest } | undefined)?.request : undefined;
+				const view = request && this.requestView(request);
+				const projected = view ? { ...entry, data: { request: view } } : entry;
+				const allowed = await this.api.gateOutput(sessionId, this.actorId, "entry", projected);
+				if (!allowed) {
+					if (view) this.exactApprovals.delete(view.id);
+					throw new RequestError(-32000, "History entry was blocked", { code: "withheld" });
+				}
+				const nextBytes = i + 1 < raw.length ? Buffer.byteLength(`,"nextEntryId":${JSON.stringify(entry.id)}`) : 0;
+				const estimate = view ? { ...allowed, data: { request: { ...(allowed.data as { request: typeof view }).request, answerable: false } } } : allowed;
+				const size = Buffer.byteLength(JSON.stringify(estimate)) + Number(entries.length > 0);
+				if (bytes + size + nextBytes > max) {
+					if (!entries.length) throw new RequestError(-32000, "History entry does not fit", { code: "result_too_large" });
+					break;
+				}
+				if (view) {
+					before.set(entry.id, view);
+					if (!isDeepStrictEqual((allowed.data as { request: typeof view }).request, view)) changed.add(entry.id);
+				}
+				bytes += size;
+				entries.push(allowed);
+			}
+			const page = await this.gateReply(sessionId, "_modular-agent/history", {
+				entries, ...(at + 1 + entries.length < raw.length ? { nextEntryId: entries.at(-1)!.id } : {}),
+			});
+			page.entries = page.entries.map((entry) => {
+				const original = before.get(entry.id);
+				if (!original) return entry;
+				const { request } = entry.data as { request: typeof original };
+				const exact = !changed.has(entry.id) && isDeepStrictEqual(request, original);
+				const answerable = this.canAnswer(sessionId, request.id) && (request.kind !== "approval" || exact);
+				if (request.kind === "approval" && !exact) this.exactApprovals.delete(request.id);
+				return { ...entry, data: { request: { ...request, answerable } } };
+			});
+			if (Buffer.byteLength(JSON.stringify(page)) > max) throw new RequestError(-32000, "Gated history page does not fit", { code: "result_too_large" });
+			return page;
 		});
 		extension("input", async ({ params }) => {
 			const sessionId = open(params.sessionId);
@@ -671,9 +713,11 @@ export class AcpInterface implements InterfaceCapability {
 
 	/** Send a reopened session's history, as session/load requires. */
 	private async replay(sessionId: string): Promise<void> {
-		for (const entry of await this.api.gatedHistory(sessionId, { recipient: this.actorId })) {
-			const m = entry.message;
-			if (!m) continue;
+		for (const raw of this.api.history(sessionId)) {
+			if (!raw.message) continue;
+			const entry = await this.api.gateOutput(sessionId, this.actorId, "entry", raw);
+			const m = entry?.message;
+			if (!entry || !m) continue;
 			if (m.role === "user" && entry.modelVisible) {
 				const t = textOf(m.content);
 				if (t) await this.update(sessionId, { sessionUpdate: "user_message_chunk", content: { type: "text", text: t } });
@@ -707,10 +751,16 @@ export class AcpInterface implements InterfaceCapability {
 	// ---------- questions to the client ----------
 
 	private requestViews(sessionId: string) {
-		return { requests: this.api.openRequests(sessionId).map((r) => ({
-			id: r.id, kind: r.kind, question: r.question, ...(r.options ? { options: r.options } : {}),
-			...(r.toolCallId ? { toolCallId: r.toolCallId } : {}), ...(r.kind === "approval" ? { call: this.approvalCall(r) } : {}),
-		})) };
+		return { requests: this.api.openRequests(sessionId).map((r) => this.requestView(r)) };
+	}
+
+	private requestView(r: InputRequest) {
+		const call = r.kind === "approval" ? this.approvalCall(r) : undefined;
+		return {
+			id: r.id, kind: r.kind, question: r.question, ...(r.kind === "choice" && r.options ? { options: r.options } : {}),
+			...(r.kind === "link" && r.details ? { details: r.details } : {}), ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}),
+			...(call ? { call: { name: call.name, input: call.input } } : {}),
+		};
 	}
 
 	private canAnswer(sessionId: string, id: string): boolean {
@@ -761,7 +811,7 @@ export class AcpInterface implements InterfaceCapability {
 				options, _meta: { [NS]: { requestId: request.id, actorId: this.actorId } },
 			} };
 			const gated = await this.api.gateOutput(request.sessionId, this.actorId, "request", payload);
-			if (!gated || !isDeepStrictEqual(gated, payload)) {
+			if (!gated || !isDeepStrictEqual(gated, payload) || Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, ...gated })) > MAX_LINE_BYTES) {
 				const views = this.requestViews(request.sessionId);
 				const poll = await this.gateReply(request.sessionId, "_modular-agent/requests", views).catch(() => undefined);
 				if (!poll || !isDeepStrictEqual(views.requests.find((q) => q.id === request.id), poll.requests.find((q) => q.id === request.id))) return { declined: true, reason: "refused" };
@@ -770,6 +820,7 @@ export class AcpInterface implements InterfaceCapability {
 			if (signal.aborted || !this.hasRight(request.sessionId, this.actorId, "approve")) return;
 			this.exactApprovals.add(request.id);
 			const response = await client.request(methods.client.session.requestPermission, gated.params, { cancellationSignal: signal }) as acp.RequestPermissionResponse;
+			if (signal.aborted || !this.canAnswer(request.sessionId, request.id) || !this.exactApprovals.has(request.id)) return;
 			if (response.outcome.outcome !== "selected") return { declined: true, reason: "cancelled" };
 			return response.outcome.optionId === "allow" ? { value: "allow" } : { declined: true };
 		}
@@ -780,16 +831,16 @@ export class AcpInterface implements InterfaceCapability {
 		if (request.kind === "secret") return { declined: true, reason: "noLongerAnswerable" };
 		// Free text and choices are a one-field form: a string, or an enum of the options.
 		const field = request.kind === "choice" && request.options?.length ? { type: "string", title: request.question, enum: request.options } : { type: "string", title: request.question };
-		const response = await client.request(
-			methods.client.elicitation.create,
-			{
-				sessionId: request.sessionId,
-				mode: "form",
-				message: request.question,
-				requestedSchema: { type: "object", properties: { answer: field }, required: ["answer"] },
-			} as acp.CreateElicitationRequest,
-			{ cancellationSignal: signal },
-		);
+		const params = {
+			sessionId: request.sessionId,
+			mode: "form",
+			message: request.question,
+			requestedSchema: { type: "object", properties: { answer: field }, required: ["answer"] },
+		} as acp.CreateElicitationRequest;
+		if (Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, method: "elicitation/create", params })) > MAX_LINE_BYTES) {
+			return { declined: true, reason: "noLongerAnswerable" };
+		}
+		const response = await client.request(methods.client.elicitation.create, params, { cancellationSignal: signal });
 		if (response.action !== "accept") return { declined: true };
 		const value = (response as { content?: { answer?: unknown } }).content?.answer;
 		if (typeof value !== "string" || (request.kind === "choice" && request.options?.length && !request.options.includes(value))) return { declined: true };
@@ -798,7 +849,20 @@ export class AcpInterface implements InterfaceCapability {
 
 	/** Serve ACP over this process's stdin and stdout. */
 	serveStdio(): Promise<void> {
-		const stream = ndJsonStream(Writable.toWeb(process.stdout) as WritableStream<Uint8Array>, Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>);
+		const stream = ndJsonStream(Writable.toWeb(process.stdout) as WritableStream<Uint8Array>, Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>, { maxMessageBytes: MAX_LINE_BYTES });
+		const output = stream.writable.getWriter();
+		stream.writable = new WritableStream({
+			async write(message) {
+				if (Buffer.byteLength(JSON.stringify(message)) <= MAX_LINE_BYTES) return output.write(message);
+				if ("result" in message || "error" in message) {
+					const replacement = { jsonrpc: "2.0" as const, id: message.id, error: { code: -32000, message: "Result is too large", data: { code: "result_too_large" } } };
+					if (Buffer.byteLength(JSON.stringify(replacement)) <= MAX_LINE_BYTES) return output.write(replacement);
+					throw new Error("ACP response ID cannot fit the line limit");
+				}
+				// Updates are withheld. An oversized request must never be queued for reply.
+				if ("id" in message) throw new Error("ACP request is too large");
+			},
+		});
 		return this.app.connect(stream).closed;
 	}
 }

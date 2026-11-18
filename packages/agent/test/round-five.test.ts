@@ -126,6 +126,29 @@ test("an unsafe in-flight model request is not repeated even by the durable Runt
 	assert.match(JSON.stringify(api.history(sid).at(-1)?.data), /interrupted model request/);
 });
 
+
+test("durable reopen sends committed result feedback in its next request", async (t) => {
+	const { api, store, dirs } = await open(t, folders(t), [durableRuntime()]);
+	const turnId = "unfinished";
+	const reason = "Please cite the source";
+	const sid = await seed(store, dirs.project, [
+		joined(), setting("model", model),
+		draft("inputAccepted", { inputId: "admission", actorId: "user", data: { when: "now", taken: "now", content: [text("Question")] } }),
+		draft("turnStart", { turnId, actorId: "user", data: { model, tools: [], system: "", settings: {}, startedBy: { kind: "actor", id: "user" } } }),
+		draft("input", { turnId, inputId: "admission", actorId: "user", modelVisible: true, message: { role: "user", content: [text("Question")] } }),
+		draft("modelRequest", { turnId, stepId: "first", data: { model, tools: [], safeToRepeat: false } }),
+		draft("response", { turnId, stepId: "first", modelVisible: true, message: { role: "assistant", content: [text("An answer")], stop: "finished" } }),
+		draft("resultFeedback", { turnId, modelVisible: true, data: { reason } }),
+	]);
+	await api.openSession(sid);
+	await api.waitForIdle(sid);
+	const history = api.history(sid);
+	const retry = history.filter((e) => e.kind === "modelRequest").at(-1)!;
+	assert.notEqual(retry.stepId, "first");
+	assert.ok(retry.sources?.includes("e7"));
+	assert.equal((history.findLast((e) => e.kind === "turnEnd")?.data as { result: { text: string } }).result.text, "echo: Please cite the source");
+});
+
 test("a refused repeat of a started tool settles it as outcomeUnknown, without a second call", async (t) => {
 	const { api, store, dirs } = await open(t, folders(t), [durableRuntime()]);
 	const call = { id: "call", name: "read", input: { path: "note" }, startedBy: "model", stepId: "step" };
@@ -178,7 +201,7 @@ test("plugin binding: the history cursor counts toward the exact 4 MiB result li
 	await api.append(sid, draft("foreign.pad", { id: "edge2", data: "x".repeat(max - alone) }));
 	await api.append(sid, draft("foreign.tail", { id: "last" }));
 	const minimum = await api.runCommand(sid, "/wire-page blank", "user");
-	assert.deepEqual(JSON.parse(minimum!), { ids: ["edge2"], next: "edge2", bytes: max + Buffer.byteLength(',"next":"edge2"') });
+	assert.deepEqual(JSON.parse(minimum!), { code: "result_too_large" });
 });
 
 async function wireHarness(t: TestContext) {

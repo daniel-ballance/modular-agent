@@ -38,7 +38,15 @@ test("a plugin checking the turn's result sends the model back", async () => {
 	await api.waitForIdle(s);
 	assert.equal(sawCheck, "Cite a source, marked [source].", "the model was told why it was sent back");
 	assert.equal(lastText(h, s), "The sky is blue [source].");
-	assert.equal(api.history(s).filter((e) => e.kind === "turnEnd").length, 1, "still one turn");
+	const history = api.history(s);
+	assert.equal(history.filter((e) => e.kind === "turnEnd").length, 1, "still one turn");
+	const feedback = history.find((e) => e.kind === "resultFeedback")!;
+	const attempts = history.filter((e) => e.kind === "modelRequest");
+	assert.deepEqual(feedback.data, { reason: sawCheck });
+	assert.equal(feedback.turnId, attempts[1].turnId);
+	assert.ok(history.indexOf(attempts[0]) < history.indexOf(feedback));
+	assert.ok(history.indexOf(feedback) < history.indexOf(attempts[1]));
+	assert.ok(attempts[1].sources?.includes(feedback.id));
 	await h.stop();
 });
 

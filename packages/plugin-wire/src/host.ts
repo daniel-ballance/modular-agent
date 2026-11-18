@@ -296,9 +296,10 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 					const entry = toWire(all[i]);
 					const size = Buffer.byteLength(JSON.stringify(entry));
 					const nextBytes = i + 1 < all.length ? Buffer.byteLength(JSON.stringify(all[i].id)) + 8 : 0;
-					if (entries.length && bytes + size + 1 + nextBytes > max) break;
-					if (!entries.length && bytes + size > max) throw new WireError("result_too_large", "One entry does not fit in a page");
-					// Allow the first entry to fill the result even if only the cursor tips it over.
+					if (bytes + size + Number(entries.length > 0) + nextBytes > max) {
+						if (!entries.length) throw new WireError("result_too_large", "One entry and its cursor do not fit in a page");
+						break;
+					}
 					bytes += size + Number(entries.length > 0);
 					entries.push(entry);
 				}

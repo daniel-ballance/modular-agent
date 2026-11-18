@@ -44,7 +44,7 @@ export class DurableRuntime extends TransientRuntime {
 		}
 		const lastEntry = responses.at(-1);
 		const last = lastEntry?.message;
-		const laterInput = lastEntry && turn.slice(turn.indexOf(lastEntry) + 1).some((e) => e.message?.role === "user");
+		const laterInput = lastEntry && turn.slice(turn.indexOf(lastEntry) + 1).some((e) => !e.erased && (e.message?.role === "user" || e.kind === "resultFeedback"));
 		if (!signal.aborted && !inFlight.length && last?.role === "assistant" && !laterInput && !last.content.some(isToolCall)) {
 			const result = { text: textOf(last.content), openToolCalls: [] };
 			if (last.stop === "failed") return { outcome: { kind: "failed", error: last.error?.message ?? "The model request failed" }, result, entries, usage };

@@ -166,6 +166,27 @@ test("history service retains exact opaque decimal values and rejects ambiguous 
 	assert.match(await res.text(), /"entries":\[\{"id":"e","parentId":null,"value":9007199254740993,"tiny":1e-400\}\]/);
 });
 
+
+test("history service refuses encoded bodies and overlong leases without committing", async () => {
+	const sid = "wire-limits";
+	await http(history, "PUT", `/v1/sessions/${sid}`, { project, created: Date.now() });
+	const { lease } = await http<{ lease: string }>(history, "POST", `/v1/sessions/${sid}/lease`, { owner: "limits-fixture" });
+	const path = `${history.url}/v1/sessions/${sid}`;
+	const send = (lease: string, encoding?: string) => fetch(`${path}/entries`, {
+		method: "POST", headers: { authorization: `Bearer ${history.token}`, "content-type": "application/json",
+			...(encoding ? { "content-encoding": encoding } : {}) },
+		body: JSON.stringify({ lease, entries: [{ id: "entry", parentId: null }] }),
+	});
+	assert.equal((await send(lease, "identity")).status, 415);
+	assert.equal((await send("a".repeat(129))).status, 400);
+	assert.equal((await send("a".repeat(128))).status, 409);
+	const res = await fetch(path, { headers: { authorization: `Bearer ${history.token}` } });
+	assert.equal(res.headers.get("content-encoding"), null);
+	assert.deepEqual((await res.json() as { entries: unknown[] }).entries, []);
+	assert.deepEqual(await (await send(lease)).json(), { kept: 1 });
+	await http(history, "DELETE", `/v1/sessions/${sid}/lease/${lease}`);
+});
+
 test("history service advertises lease expiry and a reopening writer waits for it", async () => {
 	const sid = "abandoned-lease";
 	await http(history, "PUT", `/v1/sessions/${sid}`, { project, created: Date.now() });
