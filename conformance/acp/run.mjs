@@ -325,7 +325,9 @@ if (decl.severalActors) {
 		let ran = false;
 		for (let i = 0; i < 100 && !ran; i++) {
 			await sleep(100);
-			ran = (await history(agent, sessionId)).entries.some((e) => e.kind === "response" && JSON.stringify(e.message ?? {}).includes("echo: proposed by the guest"));
+			const es = (await history(agent, sessionId)).entries;
+			// The released input's turn has replied and ended.
+			ran = said(es, "echo: proposed by the guest") && es.filter((e) => e.kind === "turnEnd").length > turns;
 		}
 		check("release: the released input ran as a turn", ran);
 		await ask("join", { actor: { id: "kit-guest", kind: "user", rights: ["watch"] } });
