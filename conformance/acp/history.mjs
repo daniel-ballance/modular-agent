@@ -46,13 +46,14 @@ export function historyService(raw, tokenFile) {
 					}
 					const body = chunks.length ? Buffer.concat(chunks) : undefined;
 					const r = await request(req.url, { method: req.method, body });
-					if (r.ok && req.method === "POST" && req.url.endsWith("/entries") && body) {
-						const events = JSON.parse(body).entries.filter((e) => (e.kind === "jobEnded" && e.data?.report === true) || (e.kind === "inputAccepted" && e.data?.key?.startsWith("job:"))).map((e) => ({ kind: e.kind, jobId: e.jobId, key: e.data?.key }));
+					const entries = r.ok && req.method === "POST" && req.url.endsWith("/entries") && body ? JSON.parse(body).entries : undefined;
+					if (entries) {
+						const events = entries.filter((e) => (e.kind === "jobEnded" && e.data?.report === true) || (e.kind === "inputAccepted" && e.data?.key?.startsWith("job:"))).map((e) => ({ kind: e.kind, jobId: e.jobId, key: e.data?.key }));
 						if (events.length) batches.push(events);
 					}
 					const headers = Object.fromEntries(["content-type", "www-authenticate"].flatMap((k) => r.headers.has(k) ? [[k, r.headers.get(k)]] : []));
 					const bytes = Buffer.from(await r.arrayBuffer());
-					await beforeReply?.({ method: req.method, path: req.url, ok: r.ok });
+					await beforeReply?.({ method: req.method, path: req.url, ok: r.ok, entries });
 					res.writeHead(r.status, headers).end(bytes);
 				} catch { res.destroy(); }
 			});

@@ -79,7 +79,7 @@ const pluginEnv = {};
 	const extra = [];
 	if (probeChecks) {
 		const probe = new URL("../plugin/probe.mjs", import.meta.url).pathname;
-		for (const role of ["probe", "refuse-hook", "refuse-replace", "refuse-duplicate", "output-observer"]) extra.push({ command: [process.execPath, probe], config: { role, out: probeOut(role), ...(role === "probe" ? { release: probeOut("release-refresh"), traceOut: probeOut("probe-events") } : {}) } });
+		for (const role of ["probe", "refuse-hook", "refuse-replace", "refuse-duplicate", "output-observer"]) extra.push({ command: [process.execPath, probe], config: { role, out: probeOut(role), ...(role === "probe" ? { release: probeOut("release-refresh"), traceOut: probeOut("probe-events") } : {}), ...(role === "output-observer" ? { withholdLoad: probeOut("withhold-load") } : {}) } });
 	}
 	if (jobChecks) extra.push({ command: [process.execPath, new URL("../plugin/jobs.mjs", import.meta.url).pathname], config: { out: probeOut("jobs") } });
 	const given = process.env.MODULAR_AGENT_PLUGINS ? JSON.parse(process.env.MODULAR_AGENT_PLUGINS) : [];
@@ -87,7 +87,8 @@ const pluginEnv = {};
 }
 const sessionsUsed = [];
 // Tenants every agent is started with, for the tenant checks (docs/bindings/data.md#limits-and-tenants).
-const TENANTS = JSON.stringify({ "kit-readonly": { rights: ["watch", "input", "answer", "settings"] }, "kit-broke": { rights: ["watch", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"], tokens: 0 } });
+const tenantRights = ["watch", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
+const TENANTS = JSON.stringify({ "kit-readonly": { rights: ["watch", "input", "answer", "settings"] }, "kit-broke": { rights: tenantRights, tokens: 0 }, "kit-latch": { rights: tenantRights, tokens: 1 }, "kit-race": { rights: tenantRights, tokens: 1 } });
 const project = mkdtempSync(join(tmpdir(), "ma-conf-project-"));
 const results = [];
 const children = [];
@@ -384,7 +385,7 @@ if (decl.severalActors) {
 		await sleep(400);
 		const after = (await ask("proposals", {})).proposals ?? [];
 		const es2 = (await history(agent, sessionId)).entries;
-		check("withdraw: the proposal is gone, handed back, and never ran", !after.some((x) => x.inputId === p2.inputId) && es2.some((e) => e.kind === "inputHandedBack" && (e.data?.inputIds ?? []).includes(p2.inputId)) && !said(es2, "echo: a second proposal"), String(JSON.stringify(after)).slice(0, 200));
+		check("withdraw: the proposal is gone, handed back, and never ran", !after.some((x) => x.inputId === p2.inputId) && es2.some((e) => e.kind === "inputHandedBack" && (e.inputId === p2.inputId || e.data?.inputIds?.includes(p2.inputId))) && !said(es2, "echo: a second proposal"), String(JSON.stringify(after)).slice(0, 200));
 		await ask("join", { actor: { id: guest, kind: "user", rights: ["watch"] } });
 		check("join again: replaces recorded rights", (await ask("actors", {})).actors.some((a) => a.id === guest && equal(a.rights, ["watch"])));
 		await ask("leave", { actorId: "kit-viewer" });
@@ -514,7 +515,7 @@ await attempt("cancel", async () => {
 await attempt("input extension", async () => {
 	const before = (await history(agent, sessionId, { all: true })).entries.filter((e) => e.kind === "turnEnd").length;
 	const a = await agent.ctx.request(`_${NS}/input`, { sessionId, content: "queued", when: "now", key: "key-2" });
-	check("input: receipt", typeof a.inputId === "string" && ["now", "inTurn", "after"].includes(a.taken));
+	check("Input admission: input that runs next in an idle session gets now", typeof a.inputId === "string" && a.taken === "now");
 	const b = await agent.ctx.request(`_${NS}/input`, { sessionId, content: "different content", when: "after", key: "key-2" });
 	check("input: duplicate preserves original receipt and disposition", b.duplicate === true && b.inputId === a.inputId && b.taken === a.taken);
 	const p = await within(15000, prompt(agent, sessionId, "from the other method", "key-2"), "duplicate extension input via prompt");
@@ -551,7 +552,7 @@ await attempt("requests and answer", async () => {
 		release?.({ outcome: { outcome: "selected", optionId: "refuse" } });
 		check("answer: closed request rejects a later answer", equal(await answer(q.id, "refuse"), { accepted: false, reason: "not_open" }));
 		await within(12000, pending, "tool after the winning approval");
-		const answers = (await history(agent, sessionId, { all: true })).entries.filter((e) => e.kind === "inputAnswer" && e.data?.requestId === q.id);
+		const answers = (await history(agent, sessionId, { all: true })).entries.filter((e) => e.kind === "inputAnswer" && (e.requestId ?? e.data?.requestId) === q.id);
 		const marker = join(project, "answer-race.txt");
 		check("answer: only the winning approval is recorded and the call runs once", answers.length === 1 && existsSync(marker) && readFileSync(marker, "utf8") === "approved\n");
 	} finally {
@@ -641,8 +642,24 @@ if (probeChecks) {
 		check(`${late ? "late" : "in-turn"} question: two valid replies produce one acceptance`, pair.filter((r) => r.accepted === true).length === 1 && pair.some((r) => equal(r, { accepted: false, reason: "not_open" })));
 		if (!late) await within(10000, pending, "tool receives its text answer");
 		const entries = await waitFor(agent, sessionId, (es) => es.some((e) => e.kind === "toolResult" && e.toolCallId === question.toolCallId && JSON.stringify(e.message?.content).includes("fixture answer: fixture value")), 8000);
-		check(`${late ? "late" : "in-turn"} question: one value record and one tool result for the original call`, entries.filter((e) => e.kind === "inputAnswer" && e.data?.requestId === question.id && e.data.value === "fixture value").length === 1 && entries.filter((e) => e.kind === "toolResult" && e.toolCallId === question.toolCallId).length === 1);
-		if (late) check("late question: exactly one continuation names the originating turn", !!originatingTurn && entries.filter((e) => e.kind === "turnStart" && e.data?.continuesTurnId === originatingTurn && e.data?.startedBy?.id === question.id).length === 1);
+		check(`${late ? "late" : "in-turn"} question: one value record and one tool result for the original call`, entries.filter((e) => e.kind === "inputAnswer" && (e.requestId ?? e.data?.requestId) === question.id && e.data?.value === "fixture value").length === 1 && entries.filter((e) => e.kind === "toolResult" && e.toolCallId === question.toolCallId).length === 1);
+		if (late) check("late question: exactly one continuation names the originating turn", !!originatingTurn && entries.filter((e) => e.kind === "turnStart" && (e.continuesTurnId ?? e.data?.continuesTurnId) === originatingTurn && e.data?.startedBy?.id === question.id).length === 1);
+		if (late && portableChecks && decl.portableSessions) {
+			const raw = await store.pages(sessionId);
+			const callRows = raw.filter((e) => e.toolCallId === question.toolCallId);
+			const opened = callRows.find((e) => e.kind === "inputRequest" && e.requestId === question.id);
+			const start = callRows.find((e) => e.kind === "toolStarted" && e.turnId === originatingTurn);
+			const held = callRows.filter((e) => e.kind === "toolPending" && e.turnId === originatingTurn);
+			const end = raw.find((e) => e.kind === "turnEnd" && e.turnId === originatingTurn);
+			check("Recording order and ownership: toolPending names the call, relinquished start and question before turnEnd", !!start && !!opened && held.length === 1 && held[0].stepId === start.stepId &&
+				held[0].data?.toolStartedId === start.id && equal(held[0].data?.requestIds, [question.id]) && raw.indexOf(opened) < raw.indexOf(held[0]) && raw.indexOf(held[0]) < raw.indexOf(end));
+			const next = raw.find((e) => e.kind === "turnStart" && e.continuesTurnId === originatingTurn);
+			const invoked = callRows.find((e) => e.kind === "toolStarted" && e.turnId === next?.turnId);
+			const settled = callRows.find((e) => e.kind === "toolResult");
+			const answer = callRows.find((e) => e.kind === "inputAnswer" && e.requestId === question.id);
+			check("Call identities and mappings: continuation records retain the old step and call but use the executing turn", !!next && !!start && !!invoked && !!settled &&
+				invoked.stepId === start.stepId && settled.stepId === start.stepId && settled.turnId === next.turnId && answer?.turnId === originatingTurn && answer?.stepId === start.stepId);
+		}
 	});
 
 	// ACP: Output gate. Separate sessions keep blocked history replies away from other checks.
@@ -655,6 +672,28 @@ if (probeChecks) {
 		const hit = trace("output-observer").some((p) => p?.fixtureMutation === field && p.sessionId === s.sessionId);
 		check(`output gate: changing a reply event ${field} withholds history`, hit && got?.code === -32000 && got?.data?.code === "withheld" && !JSON.stringify(got).includes(`kit-gate-change-${field}`));
 		await closeSession(agent, s.sessionId);
+	});
+
+	// ACP: Sessions and Output gate. Withhold only the complete open result, not the replay events.
+	await attempt("withheld load replay", async () => {
+		const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+		const sid = s.sessionId;
+		sessionsUsed.push(sid);
+		await setOption(agent, sid, "model", "conformance/echo");
+		await within(15000, prompt(agent, sid, "fixture load replay"), "seed load replay");
+		await closeSession(agent, sid);
+		writeFileSync(probeOut("withhold-load"), sid);
+		const load = () => agent.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] });
+		const mark = agent.updates.length;
+		try {
+			const reply = await within(await reopenWatchdog(), load(), "withheld load").catch((e) => e);
+			check("Sessions: withheld session/load does not replay any updates", reply?.code === -32000 && reply?.data?.code === "withheld" &&
+				trace("output-observer").some((e) => e.withheldLoad === sid) && !agent.updates.slice(mark).some((u) => u.sessionId === sid));
+		} finally { rmSync(probeOut("withhold-load"), { force: true }); }
+		const retry = agent.updates.length;
+		await within(await reopenWatchdog(), load(), "retry gated load");
+		check("Sessions: successful retry replays the withheld session", textOf(agent.updates.slice(retry), sid).includes("echo: fixture load replay"));
+		await closeSession(agent, sid);
 	});
 
 	// ACP: Approvals and Questions. Reject both forms of the changed view.
@@ -674,6 +713,14 @@ if (probeChecks) {
 			const question = find(await waitFor(agent, sid, (es) => !!find(es), 5000));
 			const id = question?.requestId ?? question?.data?.request?.id;
 			if (!id) throw Error("fixture approval request not recorded");
+			if (portableChecks && meta(s)?.declaration?.portableSessions) {
+				const raw = (await store.pages(sid)).find((e) => e.kind === "inputRequest" && (e.requestId ?? e.data?.request?.id) === id);
+				const binding = raw?.data;
+				check("Standard kinds / Questions: approval records the exact call, registration source and definition", !!raw?.toolCallId && binding?.call?.id === raw.toolCallId && binding?.call?.name === "bash" &&
+					equal(binding.call.input, { command: "echo ran > kit-gated-approval.txt" }) &&
+					["plugin", "toolSource"].every((k) => typeof binding.source?.[k] === "string" && binding.source[k].length > 0) && binding.definition?.name === binding.call.name &&
+					typeof binding.definition.description === "string" && Object.hasOwn(binding.definition, "parameters"));
+			}
 			const view = await agent.ctx.request(`_${NS}/requests`, { sessionId: sid }).catch((e) => e);
 			const answer = await agent.ctx.request(`_${NS}/answer`, { sessionId: sid, requestId: id, value: "allow" }).catch((e) => e);
 			const gated = trace("output-observer").some((p) => p.approvalView && p.sessionId === sid);
@@ -696,7 +743,16 @@ if (probeChecks) {
 	// Plugin binding: Runtime records and effects and Runtime callbacks.
 	await attempt("remote Runtime host", async () => {
 		const plugin = { command: [process.execPath, new URL("../plugin/probe.mjs", import.meta.url).pathname], config: { role: "runtime", out: probeOut("runtime") } };
-		const remote = connect(command, { MODULAR_AGENT_PLUGINS: JSON.stringify([plugin]) });
+		let racePath, heldIntent, releaseIntent;
+		const committed = new Promise((resolve) => { heldIntent = resolve; });
+		const released = new Promise((resolve) => { releaseIntent = resolve; });
+		const tap = store && await store.observe({ beforeReply: async ({ path, entries }) => {
+			if (path !== racePath || !entries?.some((e) => e.kind === "modelRequest")) return;
+			racePath = undefined;
+			heldIntent();
+			await released;
+		} });
+		const remote = connect(command, { MODULAR_AGENT_PLUGINS: JSON.stringify([plugin]), ...(tap ? { MODULAR_AGENT_HISTORY_URL: tap.url } : {}) });
 		try {
 			await remote.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 			const s = await remote.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
@@ -709,7 +765,7 @@ if (probeChecks) {
 				const log = trace("runtime");
 				const c = log.find((x) => x.test === name)?.checks ?? {};
 				check(`remote Runtime ${name}: host rejects record of a host-owned setting`, c.hostKind);
-				check(`remote Runtime ${name}: host commits exact modelRequest`, c.modelIntent);
+				check(`remote Runtime ${name}: host commits modelRequest with the named tool offer`, c.modelIntent, JSON.stringify(log.find((x) => x.test === name)?.terminal ?? null));
 				check(`remote Runtime ${name}: dispatch requires exact allowed decision`, c.dispatch && equal(log.filter((x) => x.effect).slice(before).map((x) => x.effect), name === "changed" ? [] : [{ value: "original" }]));
 				check(`remote Runtime ${name}: host commits toolResult before replying`, c.resultCommit);
 				if (name === "omitted") check("Runtime callbacks: runToolCall before allowance returns invalid_request without writing", c.earlyDispatch);
@@ -718,10 +774,47 @@ if (probeChecks) {
 					check("Runtime callbacks: runToolCall after settlement returns invalid_request without writing", c.settledDispatch);
 					check("remote Runtime exact: repeating the matching record returns the committed result", c.cachedResult);
 					check("Recording order and ownership: toolStarted preserves the dispatch source and definition", c.registration);
+					check("Authority: a dispatched tool can call host/env/exec without a second allowance", log.filter((x) => x.effect).slice(before).some((x) => x.env === true));
 				}
 			}
+			const openProbe = async (tenant) => {
+				const session = await remote.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [], ...(tenant ? { _meta: { [NS]: { tenant } } } : {}) });
+				await setOption(remote, session.sessionId, "model", "kit-probe/scripted");
+				return session.sessionId;
+			};
+			// Shared data: Recording order and ownership; Plugin binding: Runtime callbacks.
+			const unoffered = await openProbe();
+			await within(15000, prompt(remote, unoffered, "fixture unoffered"), "unoffered model call");
+			const log = trace("runtime"), missing = log.find((x) => x.test === "unoffered")?.checks;
+			const finalOffer = log.find((x) => x.providerDispatch === unoffered)?.offered;
+			check("Runtime callbacks: a registered but unoffered tool is refused without the gate or dispatch", missing?.unoffered && missing.modelIntent && equal(missing.offered, finalOffer) &&
+				!log.some((x) => x.gate === missing.unofferedCall || x.effect?.value === "unoffered"));
+			await closeSession(remote, unoffered);
+			if (meta(s)?.declaration?.tenants) {
+				const sid = await openProbe("kit-latch");
+				const p = await within(15000, prompt(remote, sid, "fixture budget latch"), "latched limit");
+				check("Runtime callbacks: limit reached after a step is signalled at the next prepareStep", trace("runtime").find((x) => x.test === "latched")?.checks?.latched &&
+					equal(meta(p)?.outcome, { kind: "limit", limit: "tenantTokens" }));
+				await closeSession(remote, sid);
+				if (tap) await attempt("Runtime records and effects: post-intent limit", async () => {
+					const target = await openProbe("kit-race"), burner = await openProbe("kit-race");
+					racePath = store.path(target) + "/entries";
+					const pending = prompt(remote, target, "fixture post-intent limit");
+					void pending.catch(() => undefined);
+					try {
+						await within(5000, committed, "target model intent commit");
+						await within(5000, prompt(remote, burner, "fixture exhausts tenant budget"), "other session exhausts the budget");
+					} finally { releaseIntent(); }
+					const result = await within(15000, pending, "post-intent limit settles");
+					const actual = trace("runtime");
+					check("Runtime records and effects: post-intent turn_limit has an aborted host response before the callback returns", actual.find((x) => x.test === "post-intent")?.checks?.postIntent &&
+						!actual.some((x) => x.providerDispatch === target) && actual.some((x) => x.providerDispatch === burner) && equal(meta(result)?.outcome, { kind: "limit", limit: "tenantTokens" }));
+					await closeSession(remote, target);
+					await closeSession(remote, burner);
+				});
+			}
 			await closeSession(remote, s.sessionId);
-		} finally { await stop(remote); }
+		} finally { releaseIntent(); await stop(remote); tap?.stop(); }
 	});
 }
 
@@ -1003,9 +1096,8 @@ if (portableChecks) await attempt("Extension methods: oversized fork", async () 
 		for (let i = 0; i < 17; i++) {
 			await store.json(leasePath + "/renew", "POST");
 			const inputId = randomUUID();
-			// Use the shared legacy intake forms so the test isolates fork preflight.
-			const accepted = entry("inputAccepted", { actorId: actor.id, data: { inputId, content, authorizers, rights: actor.rights, when: "now" } });
-			await store.json(base + "/entries", "POST", { lease, entries: [accepted, entry("inputHandedBack", { data: { inputIds: [inputId], reason: "handled" } })] });
+			const accepted = entry("inputAccepted", { actorId: actor.id, inputId, data: { content, authorizers, rights: actor.rights, when: "now" } });
+			await store.json(base + "/entries", "POST", { lease, entries: [accepted, entry("inputHandedBack", { inputId, data: { reason: "handled" } })] });
 		}
 		await store.json(leasePath, "DELETE");
 		const loaded = await within((await reopenWatchdog()) + 30000, s.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "load oversized fork source");
@@ -1039,7 +1131,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 				{ kind: "actorJoined", data: { actor: { id: "kit-granter", kind: "user", rights: [...actor.rights, "grant"] } } },
 				{ kind: "actorJoined", actorId: "kit-granter", data: { actor } },
 				{ kind: "setting", data: { key: "model", value: { provider: "conformance", id: "echo" } } },
-				{ kind: "inputAccepted", actorId: actor.id, data: { inputId: "initial-input", when: "after", key: "fixture-old", content: [{ type: "text", text: "old input" }], authorizers: [{ sessionId, actorId: actor.id }], rights: actor.rights } },
+				{ kind: "inputAccepted", inputId: "initial-input", actorId: actor.id, data: { when: "after", key: "fixture-old", content: [{ type: "text", text: "old input" }], authorizers: [{ sessionId, actorId: actor.id }], rights: actor.rights } },
 				{ kind: "inputHandedBack", data: { inputIds: ["initial-input"] } },
 			];
 			if (mode === "approval") rows.push({ kind: "setting", data: { key: "approval", value: "kit-unrecognized-policy" } });
@@ -1051,15 +1143,19 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 				rows.push(
 					start(jobId), { kind: "jobCleanupUnconfirmed", jobId }, start(reported),
 					{ kind: "jobEnded", jobId: reported, data: { outcome: { kind: "completed" }, report: true, result: report } },
-					{ kind: "inputAccepted", jobId: reported, actorId: actor.id, data: { inputId: randomUUID(), key: `job:${reported}`, when: "after", content: report, parked: true, authorizers: [{ sessionId, actorId: actor.id, jobId: reported }], rights: ["watch", "input"] } },
+					{ kind: "inputAccepted", jobId: reported, inputId: randomUUID(), actorId: actor.id, data: { key: `job:${reported}`, when: "after", content: report, parked: true, authorizers: [{ sessionId, actorId: actor.id, jobId: reported }], rights: ["watch", "input"] } },
 				);
 			}
-			rows.push({ kind: "position", data: { to: `${sessionId}-e4` } });
+			if (mode === "queue") rows.push({ kind: "inputAccepted", inputId: "older-ready", actorId: actor.id, data: {
+				when: "after", taken: "after", key: "fixture-ready", content: [{ type: "text", text: "older ready input" }], authorizers: [{ sessionId, actorId: actor.id }], rights: actor.rights,
+			} });
+			rows.push({ kind: "position", data: { to: `${sessionId}-e3` } });
 			const entries = rows.map((e, i) => ({ ...e, id: `${sessionId}-e${i}`, parentId: i ? `${sessionId}-e${i - 1}` : null, sessionId, time: Date.now(), writer: e.writer ?? "kit-history-fixture", modelVisible: false }));
 			const base = store.path(sessionId);
 			await store.json(base, "PUT", { project, created: Date.now() });
 			const { lease } = await store.json(base + "/lease", "POST", { owner: randomUUID() });
 			await store.json(base + "/entries", "POST", { lease, entries });
+			if (mode === "queue") await store.json(base + "/erase", "POST", { lease, entryIds: [entries[4].id] });
 			await store.json(base + "/lease/" + encodeURIComponent(lease), "DELETE");
 			return sessionId;
 		};
@@ -1105,7 +1201,44 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 			const report = entries.find((e) => e.kind === "inputAccepted" && e.jobId);
 			check("Job reports: the parked disposition is still recorded after reopen", report?.data?.parked === true &&
 				!entries.some((e) => e.kind === "input" && e.jobId === report.jobId));
+			await attempt("Several actors: parked report release", async () => {
+				const reportId = report?.inputId ?? (await store.pages(cleanup)).find((e) => e.id === report?.id)?.data?.inputId;
+				const methodsOffered = meta(init)?.extensions ?? [];
+				check("Several actors: a parked report requires proposals, release and withdraw even without severalActors", ["proposals", "release", "withdraw"].every((name) => methodsOffered.includes(name)));
+				const proposals = () => s.ctx.request(`_${NS}/proposals`, { sessionId: cleanup }).then((r) => r.proposals);
+				const listed = (await proposals()).filter((p) => p.inputId === reportId);
+				check("Several actors: proposals lists the parked report with its original actor and content", listed.length === 1 && listed[0].actorId === actor.id && equal(listed[0].content, report?.data?.content));
+				const released = await s.ctx.request(`_${NS}/release`, { sessionId: cleanup, inputId: reportId, when: "now" });
+				const finished = await waitFor(s, cleanup, (es) => es.some((e) => e.kind === "turnStart" && e.data?.startedBy?.id === report?.jobId));
+				const admissions = (await store.pages(cleanup)).filter((e) => e.kind === "inputAccepted" && e.jobId === report?.jobId);
+				check("Several actors / Job reports: release consumes the parked proposal once and preserves job attribution", released.inputId === reportId &&
+					!(await proposals()).some((p) => p.inputId === reportId) && admissions.length === 2 &&
+					(admissions[1].inputId ?? admissions[1].data?.inputId) === reportId && admissions[1].data?.releasedBy === actor.id &&
+					finished.some((e) => e.kind === "turnStart" && equal(e.data?.startedBy, { kind: "job", id: report.jobId })));
+			});
+			await closeSession(s, cleanup);
 		}
+
+		// Shared data: Legacy associations and Session state; ACP: Input admission.
+		const queued = await seed("queue");
+		const queueOpen = await load(queued);
+		if (!meta(queueOpen)?.declaration) throw Error("could not open queue fixture");
+		const fresh = await s.ctx.request(`_${NS}/input`, { sessionId: queued, when: "now", key: "fixture-fresh", content: "fresh input" });
+		await waitFor(s, queued, (es) => said(es, "echo: fresh input"));
+		const kept = await store.pages(queued);
+		const isFor = (e, inputId) => (e.inputId ?? e.data?.inputId) === inputId;
+		const tomb = kept.find((e) => e.id === `${queued}-e4`);
+		check("Legacy associations: a tombstoned batch hand-back keeps its IDs and stays terminal on reopen", tomb?.erased === true && equal(tomb.inputIds, ["initial-input"]) &&
+			!kept.some((e) => e !== tomb && ((e.kind === "input" || e.kind === "inputHandedBack") && isFor(e, "initial-input") || e.kind === "inputHandedBack" && e.data?.inputIds?.includes("initial-input"))));
+		if (meta(queueOpen).declaration.queuedInputAfterRestart === "run") {
+			const admission = kept.find((e) => e.kind === "inputAccepted" && isFor(e, fresh.inputId));
+			const older = kept.find((e) => e.kind === "input" && isFor(e, "older-ready"));
+			const taken = kept.find((e) => e.kind === "input" && isFor(e, fresh.inputId));
+			const end = older && kept.find((e) => e.kind === "turnEnd" && e.turnId === older.turnId);
+			check("Input admission: fresh input queues behind recovered input and gets after while it cannot run next", !!admission && !!end && !!taken && kept.indexOf(end) < kept.indexOf(taken) &&
+				(kept.indexOf(admission) > kept.indexOf(end) || fresh.taken === "after"));
+		} else console.log("SKIP  recovered queue receipt (session does not declare queuedInputAfterRestart: run)");
+		await closeSession(s, queued);
 	} finally { await stop(s); }
 });
 
@@ -1138,7 +1271,7 @@ if (probeChecks && portableChecks) for (const [mode, safe] of [
 			{ kind: "inputAccepted", inputId, actorId: actor.id, data: { when: "now", taken: "now", content, authorizers, rights } },
 			{ kind: "turnStart", turnId, data: { startedBy: { kind: "actor", id: actor.id }, model, system, tools: [], settings: {}, authorizers, rights } },
 			{ kind: "input", turnId, inputId, actorId: actor.id, message, modelVisible: true },
-			{ kind: "modelRequest", turnId, stepId: "old-step", data: { model, safeToRepeat: safe, ...(safe ? { request } : {}) }, sources: [entryId(4)] },
+			{ kind: "modelRequest", turnId, stepId: "old-step", data: { model, safeToRepeat: safe, tools: [], ...(safe ? { request } : {}) }, sources: [entryId(4)] },
 		];
 		const time = Date.now();
 		const entries = rows.map((row, i) => ({ sessionId: sid, time, writer: "kit-history-fixture", modelVisible: false,

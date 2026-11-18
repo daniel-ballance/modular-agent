@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // Host-side fixtures for docs/bindings/plugin.md. The ACP kit loads these with --probe-checks.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, outcome, rpcError, serve } from "./peer.mjs";
 
 const BINDING = "modular-agent-plugin/1";
 const DATA = "modular-agent-data/1";
+const model = { provider: "kit-probe", id: "scripted" };
+const models = [{ ...model, contextWindow: 4096, maxOutput: 512, input: ["text"], reasoning: false }];
 const PROBE = { name: "probe", description: "Check the host callbacks.", parameters: { type: "object", properties: {} } };
 const EFFECT = { name: "probe-effect", description: "Record a fixture invocation.", parameters: { type: "object", properties: { value: { type: "string" } } }, hints: { readOnly: true, openWorld: false } };
 const trace = (data) => { const out = config.traceOut ?? config.out; if (out) appendFileSync(out, JSON.stringify(data) + "\n"); };
@@ -26,7 +28,9 @@ function registration() {
 		case "refuse-replace": return { ...base, replaces: ["tool:probe-absent"] };
 		case "refuse-duplicate": return { ...base, name: "probe-probe" };
 		case "output-observer": return { ...base, hooks: [{ hook: "output", handlerId: 1, order: "last" }] };
-		case "runtime": return { ...base, replaces: ["runtime"], runtime: { id: "probe-runtime", supports: {} }, toolSources: [{ id: "probe-tools", tools: [EFFECT] }] };
+		case "runtime": return { ...base, replaces: ["runtime"], runtime: { id: "probe-runtime", supports: {} }, toolSources: [{ id: "probe-tools", tools: [EFFECT] }],
+			providers: [{ id: model.provider, models, supports: { keepsState: false, runsTools: false } }],
+			hooks: [{ hook: "step.before", handlerId: 2 }, { hook: "tool.before", handlerId: 3 }] };
 		case "steering": return { ...base, replaces: ["runtime"], runtime: { id: "probe-steering", supports: { inputDuringTurn: true } } };
 		default: return { ...base, toolSources: [{ id: "probe-tools", tools: currentTools() }] };
 	}
@@ -86,7 +90,7 @@ async function runChecks(m, { ask, request, recent, signal }) {
 async function runtime(m, { ask }) {
 	// Runtime callbacks; Runtime records and effects. Only this negative fixture sends forbidden requests.
 	const { turn } = m.params;
-	const test = ["omitted", "changed", "exact"][runs++];
+	const test = ["omitted", "changed", "exact", "unoffered", "latched", "post-intent"][runs++];
 	const callHost = (method, params = {}) => ask(`host/runtime/${method}`, { parentRequestId: m.id, ...params });
 	const record = (entry) => callHost("record", { entry });
 	const history = () => ask("host/history", { sessionId: turn.sessionId, parentRequestId: m.id, all: true }).then((r) => r.entries);
@@ -100,49 +104,80 @@ async function runtime(m, { ask }) {
 		const { id: stepId } = await callHost("newId");
 		await callHost("takeSteering").catch((e) => { if (codeOf(e) !== "not_supported") throw e; });
 		const request = await callHost("prepareStep", { stepId, usage });
-		const response = await callHost("model", { stepId, request });
+		const dispatched = await outcome(callHost("model", { stepId, request }));
+		if (test === "post-intent") {
+			const rows = (await history()).filter((e) => e.stepId === stepId && e.turnId === turn.turnId);
+			checks.postIntent = codeOf(dispatched.error) === "turn_limit" && dispatched.error?.data?.limit === "tenantTokens" &&
+				equal(rows.map((e) => e.kind), ["modelRequest", "response"]) && rows[1].modelVisible === false &&
+				rows[1].data?.recovery === true && equal(rows[1].message, { role: "assistant", stop: "aborted", content: [] });
+		}
+		if (dispatched.error) throw dispatched.error;
+		const response = dispatched.result;
 		usage = response.usage ?? usage;
-		// Exact requests need not be persisted for non-repeatable attempts.
-		checks.modelIntent = (await history()).some((e) => e.kind === "modelRequest" && e.stepId === stepId && e.turnId === turn.turnId && equal(e.data?.model, { provider: turn.model.provider, id: turn.model.id }) && (e.data.request === undefined ? e.data.safeToRepeat === false : equal(e.data.request, request)));
+		// The final offer can differ from preparation after a Provider request transform.
+		const intents = (await history()).filter((e) => e.kind === "modelRequest" && e.stepId === stepId && e.turnId === turn.turnId);
+		const intent = intents[0]?.data;
+		checks.offered = intent?.tools;
+		checks.modelIntent = intents.length === 1 && equal(intent?.model, { provider: turn.model.provider, id: turn.model.id }) &&
+			Array.isArray(intent.tools) && intent.tools.every((name) => typeof name === "string" && name.length > 0) &&
+			(intent.request === undefined ? intent.safeToRepeat === false : equal(intent.tools, intent.request.tools?.map((t) => t.name)));
 		entries.push((await record({ kind: "response", stepId, message: response, modelVisible: true })).id);
 		const fake = await outcome(record({ kind: "setting", data: { key: "approval", value: "off" }, modelVisible: false }));
 		checks.hostKind = fake.error?.code === -32602 && codeOf(fake.error) === "invalid_request";
-		const part = response.content.find((p) => p.type === "toolCall");
-		if (!part) throw Error("fixture model did not request the tool");
-		const call = { id: part.id, name: part.name, input: part.arguments, startedBy: "model" };
-		const beforeHook = () => callHost("hook", { hook: "tool.before", payload: { call, definition: EFFECT } });
-		const dispatch = (c = call) => callHost("runToolCall", { call: c });
-		const refusedWithoutWrite = async (callback) => {
-			const before = await history();
-			const r = await outcome(callback());
-			return r.error?.code === -32602 && codeOf(r.error) === "invalid_request" && equal(await history(), before);
-		};
-		if (test === "omitted") checks.earlyDispatch = await refusedWithoutWrite(dispatch);
-		await beforeHook();
-		if (test === "exact") checks.repeatedGate = await refusedWithoutWrite(beforeHook);
-		const toolResult = await dispatch(test === "changed" ? { ...call, input: { value: "changed" } } : call);
-		const records = (await history()).filter((e) => e.toolCallId === call.id);
-		const saved = records.filter((e) => e.kind === "toolResult");
-		const starts = records.filter((e) => e.kind === "toolStarted");
-		// Shared data: Recording order and ownership. Use the actual host's raw history, not the ACP projection.
-		checks.registration = starts.length === 1 && equal(starts[0].data?.source, { plugin: "probe-runtime", toolSource: "probe-tools" }) && equal(starts[0].data?.definition, EFFECT);
-		checks.dispatch = toolResult.status === (test === "changed" ? "refused" : "completed");
-		if (test === "exact") {
-			checks.settledGate = await refusedWithoutWrite(beforeHook);
-			checks.settledDispatch = await refusedWithoutWrite(dispatch);
+		if (!["omitted", "changed", "exact", "unoffered"].includes(test)) {
+			await callHost("hook", { hook: "step.after", payload: { stepId, response } });
+			if (test === "latched") {
+				const next = await callHost("newId");
+				const denied = await outcome(callHost("prepareStep", { stepId: next.id, usage }));
+				checks.latched = codeOf(denied.error) === "turn_limit" && denied.error?.data?.limit === "tenantTokens" && !(await history()).some((e) => e.kind === "modelRequest" && e.stepId === next.id);
+				if (checks.latched) terminal = { kind: "limit", limit: denied.error.data.limit };
+			}
+		} else {
+			const part = response.content.find((p) => p.type === "toolCall");
+			if (!part) throw Error("fixture model did not request the tool");
+			const call = { id: part.id, name: part.name, input: part.arguments, startedBy: "model" };
+			const beforeHook = () => callHost("hook", { hook: "tool.before", payload: { call, definition: EFFECT } });
+			const dispatch = (c = call) => callHost("runToolCall", { call: c });
+			const refusedWithoutWrite = async (callback) => {
+				const before = await history();
+				const r = await outcome(callback());
+				return r.error?.code === -32602 && codeOf(r.error) === "invalid_request" && equal(await history(), before);
+			};
+			if (test === "omitted") checks.earlyDispatch = await refusedWithoutWrite(dispatch);
+			const gate = await beforeHook();
+			if (test === "unoffered") {
+				const records = (await history()).filter((e) => e.toolCallId === call.id);
+				const saved = records.find((e) => e.kind === "toolResult");
+				checks.unofferedCall = call.id;
+				checks.unoffered = !checks.offered?.includes(call.name) && gate?.refused === "not offered" &&
+					saved?.data?.status === "refused" && saved.message?.content?.some((p) => p.type === "text" && p.text.includes("not offered")) && !records.some((e) => e.kind === "toolStarted");
+			} else {
+				if (test === "exact") checks.repeatedGate = await refusedWithoutWrite(beforeHook);
+				const toolResult = await dispatch(test === "changed" ? { ...call, input: { value: "changed" } } : call);
+				const records = (await history()).filter((e) => e.toolCallId === call.id);
+				const saved = records.filter((e) => e.kind === "toolResult");
+				const starts = records.filter((e) => e.kind === "toolStarted");
+				// Shared data: Recording order and ownership. Use the actual host's raw history, not the ACP projection.
+				checks.registration = starts.length === 1 && equal(starts[0].data?.source, { plugin: "probe-runtime", toolSource: "probe-tools" }) && equal(starts[0].data?.definition, EFFECT);
+				checks.dispatch = toolResult.status === (test === "changed" ? "refused" : "completed");
+				if (test === "exact") {
+					checks.settledGate = await refusedWithoutWrite(beforeHook);
+					checks.settledDispatch = await refusedWithoutWrite(dispatch);
+				}
+				checks.resultCommit = saved.length === 1 && saved[0].data?.status === toolResult.status && equal(saved[0].message?.content, toolResult.content);
+				if (test === "exact") {
+					await callHost("hook", { hook: "tool.after", payload: { call, result: toolResult } });
+					const recorded = await record({ kind: "toolResult", stepId, toolCallId: call.id, message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: toolResult.content, isError: toolResult.status !== "completed" }, data: { status: toolResult.status, ...(toolResult.value === undefined ? {} : { value: toolResult.value }) }, modelVisible: true });
+					entries.push(recorded.id);
+					checks.cachedResult = recorded.id === saved[0]?.id;
+				}
+			}
+			await callHost("hook", { hook: "step.after", payload: { stepId, response } });
 		}
-		checks.resultCommit = saved.length === 1 && saved[0].data?.status === toolResult.status && equal(saved[0].message?.content, toolResult.content);
-		if (test === "exact") {
-			await callHost("hook", { hook: "tool.after", payload: { call, result: toolResult } });
-			const recorded = await record({ kind: "toolResult", stepId, toolCallId: call.id, message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: toolResult.content, isError: toolResult.status !== "completed" }, data: { status: toolResult.status, ...(toolResult.value === undefined ? {} : { value: toolResult.value }) }, modelVisible: true });
-			entries.push(recorded.id);
-			checks.cachedResult = recorded.id === saved[0]?.id;
-		}
-		await callHost("hook", { hook: "step.after", payload: { stepId, response } });
 	} catch (e) {
-		terminal = { kind: "failed", error: codeOf(e) ?? "fixture callback failed" };
+		terminal = codeOf(e) === "turn_limit" ? { kind: "limit", limit: e.data.limit } : { kind: "failed", error: codeOf(e) ?? "fixture callback failed" };
 	}
-	trace({ test, checks, terminal: terminal.kind });
+	trace({ test, checks, terminal });
 	await callHost("hook", { hook: "turn.end", payload: { outcome: terminal, result } });
 	return { outcome: terminal, result, entries, usage };
 }
@@ -182,8 +217,23 @@ serve("probe", async (m, ctx) => {
 			if (config.role?.startsWith("refuse-")) trace({ method: m.method, params: p });
 			return {};
 		case "hook/handle": {
+			if (config.role === "runtime" && p.handlerId === 2 && p.hook === "step.before") {
+				if (p.payload.model?.provider !== model.provider) return null;
+				const request = p.payload.request;
+				return { value: { ...p.payload, request: { ...request, tools: request.tools.filter((t) => t.name !== EFFECT.name) } } };
+			}
+			if (config.role === "runtime" && p.handlerId === 3 && p.hook === "tool.before") {
+				trace({ gate: p.payload.call.id });
+				return null;
+			}
 			if (config.role !== "output-observer" || p.handlerId !== 1 || p.hook !== "output") throw rpcError("unknown_handler");
 			trace(p.payload);
+			// ACP: Sessions. This gate allows every replay event but withholds the selected load result.
+			if (config.withholdLoad && existsSync(config.withholdLoad) && readFileSync(config.withholdLoad, "utf8") === p.payload.sessionId &&
+				p.payload.events.some((e) => e.type === "reply" && e.data?.method === "session/load")) {
+				trace({ withheldLoad: p.payload.sessionId });
+				return { block: true };
+			}
 			// ACP: Approvals and Questions. Try to alter each exact view of one fixture call.
 			const events = structuredClone(p.payload.events);
 			for (const event of events) {
@@ -218,6 +268,24 @@ serve("probe", async (m, ctx) => {
 			}
 			return null;
 		}
+		case "provider/models":
+		case "provider/available":
+		case "provider/discard":
+		case "provider/request": {
+			if (config.role !== "runtime" || p.provider !== model.provider) throw rpcError("invalid_request");
+			if (m.method === "provider/models") return { models };
+			if (m.method === "provider/available") return { available: true };
+			if (m.method === "provider/discard") { if (p.erase) throw rpcError("not_supported"); return {}; }
+			const hook = (hook, fields) => ctx.ask("host/hook", { parentRequestId: m.id, hook, payload: { sessionId: p.sessionId ?? null, provider: model.provider, model, ...fields } });
+			const { request } = await hook("provider.request", { request: p.request });
+			trace({ providerDispatch: p.sessionId, offered: request.tools.map((t) => t.name) });
+			const last = request.messages.findLast((m) => m.role === "user");
+			const unoffered = last?.content?.some((p) => p.text === "fixture unoffered");
+			const message = { role: "assistant", stop: unoffered ? "toolUse" : "finished", usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
+				content: unoffered ? [{ type: "toolCall", id: "probe-unoffered-call", name: EFFECT.name, arguments: { value: "unoffered" } }] : [{ type: "text", text: "fixture limit" }] };
+			await hook("provider.response", { message });
+			return message;
+		}
 		case "runtime/runTurn":
 			if (config.role === "steering" && p.turn) return steering(m, ctx);
 			if (config.role !== "runtime" || !p.turn) throw rpcError("invalid_request");
@@ -241,7 +309,9 @@ serve("probe", async (m, ctx) => {
 		case "tools/call": {
 			if (p.toolSource !== "probe-tools" || !p.sessionId || !p.project) throw rpcError("invalid_request");
 			if (config.role === "runtime" && p.call?.name === EFFECT.name) {
-				trace({ effect: p.call.input });
+				// Authority: the live invocation has already consumed its allowance.
+				const r = await ctx.ask("host/env/exec", { sessionId: p.sessionId, parentRequestId: m.id, cwd: p.project, command: "printf fixture-env" });
+				trace({ effect: p.call.input, env: r.exitCode === 0 && r.output === "fixture-env" });
 				return { status: "completed", content: [{ type: "text", text: "fixture effect" }] };
 			}
 			if (config.role !== "probe" || !currentTools().some((t) => t.name === p.call?.name)) throw rpcError("invalid_request");

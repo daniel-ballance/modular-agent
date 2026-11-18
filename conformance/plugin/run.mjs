@@ -305,7 +305,7 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 					// Model attempt sequences: host-owned auxiliary work is committed inside preparation.
 					const input = rt.history().find((e) => e.kind === "input");
 					const stepId = randomUUID(), request = { systemPrompt: "Summarize fixture input", messages: [input.message], tools: [], settings: {} };
-					const intent = put({ kind: "modelRequest", stepId, modelVisible: false, data: { model: modelRef, request, safeToRepeat: false, auxiliary: true }, sources: [input.id] });
+					const intent = put({ kind: "modelRequest", stepId, modelVisible: false, data: { model: modelRef, tools: request.tools.map((t) => t.name), safeToRepeat: false, auxiliary: true }, sources: [input.id] });
 					put({ kind: "response", stepId, modelVisible: false, message: { ...say("fixture summary"), usage: auxiliaryUsage }, sources: [intent.id] });
 					rt.summary = put({ kind: "summary", modelVisible: true, data: { summary: "fixture summary" }, sources: [input.id] });
 					rt.auxiliary = stepId;
@@ -335,7 +335,12 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 				if (!attempt || attempt.sent || !equal(attempt.request, p.request)) invalid("not the prepared attempt");
 				refuseLimit("model", p.stepId);
 				attempt.sent = true;
-				attempt.intent = put({ kind: "modelRequest", stepId: p.stepId, modelVisible: false, data: { model: modelRef, safeToRepeat: false, request: p.request }, sources: attempt.sources });
+				attempt.intent = put({ kind: "modelRequest", stepId: p.stepId, modelVisible: false, data: { model: modelRef, safeToRepeat: false, tools: p.request.tools.map((t) => t.name) }, sources: attempt.sources });
+				if (refuseAt === "postIntent" && rt.modelCalls === 1) {
+					// Runtime records and effects: only the host settles a committed, undispatched attempt.
+					put({ kind: "response", stepId: p.stepId, modelVisible: false, data: { recovery: true }, message: { role: "assistant", stop: "aborted", content: [] } });
+					refuseLimit("postIntent", p.stepId);
+				}
 				const answer = await model(p.request, rt.modelCalls++);
 				attempt.answer = answer;
 				const text = (answer.content ?? []).filter((x) => x.type === "text").map((x) => x.text).join("");
@@ -642,7 +647,19 @@ await attempt("environment", async () => {
 		} catch (e) {
 			gone = e;
 		}
-		check("env/restore: an unknown point is not_found", code(gone) === "not_found", JSON.stringify(gone));
+		check("Paths and points: env/restore of an unknown point is not_found", code(gone) === "not_found", JSON.stringify(gone));
+		const foreign = start({ MODULAR_AGENT_PLUGIN_PARTS: "environment" });
+		try {
+			const otherProject = mkdtempSync(join(work, "foreign-project-"));
+			const otherHome = mkdtempSync(join(home, "foreign-home-"));
+			await foreign.request("plugin/initialize", { ...initParams, project: otherProject, home: otherHome });
+			const saved = await foreign.request("env/save", { cwd: otherProject, sessionId: "s1" });
+			const error = await p.request("env/restore", { cwd: work, sessionId: "s1", point: saved.point }).catch((e) => e);
+			check("Paths and points: a point from another environment is distinct and restores as not_found", saved.point !== point && code(error) === "not_found");
+		} finally {
+			await foreign.request("plugin/shutdown", {}).catch(() => undefined);
+			await foreign.stop();
+		}
 	}
 
 	// A session's background processes outlive the call, and stop at env/sessionEnded for that session only.
@@ -761,13 +778,13 @@ async function runtimeChecks(part) {
 			equal(rt.afterSteps, [intents[0]?.stepId, intents[2]?.stepId]) && equal(rt.preparedUsage, [zeroUsage, usage0]) &&
 			equal(o.usage, { ...usage0, input: 2, output: 2 }));
 
-		for (const phase of ["prepareStep", "model"]) {
+		for (const phase of ["prepareStep", "model", "postIntent"]) {
 			rt = q.state.rt = runScenario({ refuseAt: phase, model: () => callTools(["read", { path: "a" }]) });
 			o = await q.request("runtime/runTurn", { turn: turn() }).catch((e) => ({ error: e }));
 			const limit = { kind: "limit", limit: "sessionTokens" };
-			check(`${tag} Runtime callbacks: turn_limit from ${phase} ends the turn without an undispatched response`,
+			check(`${tag} Runtime callbacks: turn_limit from ${phase} ends the turn without a Runtime response to the undispatched attempt`,
 				!!rt.denied && rt.modelCalls === 1 && equal(o.outcome, limit) && (rt.endOutcome === undefined || equal(rt.endOutcome, limit)) &&
-				rt.records.filter((e) => e.kind === "response").length === 1 && !rt.submitted.some((e) => e.kind === "response" && e.stepId === rt.denied), JSON.stringify(o));
+				rt.records.filter((e) => e.kind === "response").length === (phase === "postIntent" ? 2 : 1) && !rt.submitted.some((e) => e.kind === "response" && e.stepId === rt.denied), JSON.stringify(o));
 		}
 
 		rt = q.state.rt = runScenario({ model: (_r, n) => (n === 0 ? callTools(["read", { path: "a" }]) : say("after the tool")) });
@@ -849,7 +866,7 @@ async function runtimeChecks(part) {
 			entry("inputAccepted", { turnId: undefined, actorId: "kit", data: { inputId: "kit-input", content: source, when: "now", rights, authorizers } }),
 			entry("turnStart", { data: { startedBy: { kind: "actor", id: "kit" }, model: { provider: "kit", id: "scripted" }, system: "kit", tools: ["read", "bash"].map((name) => ({ name, description: name, parameters: true })), settings: { maxSteps: 8 }, rights, authorizers } }),
 			entry("input", { modelVisible: true, actorId: "kit", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, inputId: "kit-input" }),
-			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, request: { systemPrompt: "kit", messages: [{ role: "user", content: source }], settings: {}, tools: recoveryTools } } }),
+			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, tools: recoveryTools.map((t) => t.name) } }),
 			entry("response", { modelVisible: true, stepId: "kit-step-1", message: { role: "assistant", content: [notStarted, startedCall, safeCall].map(toolCall), stop: "toolUse", usage: usage0 } }),
 			entry("toolStarted", { toolCallId: "c-started", stepId: "kit-step-1", actorId: "kit", data: { call: { id: startedCall.id, name: startedCall.name, input: startedCall.input, actorId: "kit", startedBy: "model" }, source: fixtureSource, definition: recoveryTools[1], openWorld: true, safeToRepeat: false, rights, authorizers } }),
 			entry("toolStarted", { toolCallId: "c-safe", stepId: "kit-step-1", actorId: "kit", data: { call: { id: safeCall.id, name: safeCall.name, input: safeCall.input, actorId: "kit", startedBy: "model" }, source: fixtureSource, definition: recoveryTools[0], openWorld: false, safeToRepeat: true, rights, authorizers } }),

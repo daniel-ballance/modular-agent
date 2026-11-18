@@ -9,8 +9,8 @@ import { isDeepStrictEqual as equal } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const [url, tokenFile, restartFlag, ...restartCommand] = process.argv.slice(2);
-if (!url || !tokenFile || (restartFlag !== undefined && (restartFlag !== "--restart" || restartCommand[0] !== "--" || !restartCommand[1]))) {
-	console.error("Usage: node run.mjs <service url> <token file> [--restart -- <service command> [args...]]");
+if (!url || !tokenFile || (restartFlag !== undefined && (!["--restart", "--restart-ttl"].includes(restartFlag) || restartCommand[0] !== "--" || !restartCommand[1]))) {
+	console.error("Usage: node run.mjs <service url> <token file> [--restart|--restart-ttl -- <service command> [args...]]");
 	process.exit(2);
 }
 const base = new URL(url);
@@ -51,7 +51,7 @@ const rawPath = (method, route) => new Promise((resolve, reject) => {
 const ok = (r, expected) => r.status === 200 && equal(r.body, expected);
 const err = (r, status, code) => r.status === status && r.body?.code === code && typeof r.body.error === "string" && r.headers.get("content-type")?.split(";")[0] === "application/json";
 const positive = (x) => Number.isSafeInteger(x) && x > 0;
-const held = (r, ttl) => err(r, 409, "held") && positive(r.body.retryAfterMs) && r.body.retryAfterMs <= ttl;
+const held = (r, ttl = Infinity) => err(r, 409, "held") && positive(r.body.retryAfterMs) && r.body.retryAfterMs <= ttl;
 const id = () => `kit-${randomUUID()}`;
 const project = `/tmp/${id()}/+%`;
 const path = (id) => `/v1/sessions/${encodeURIComponent(id)}`;
@@ -64,8 +64,8 @@ const erase = (sid, lease, entryIds) => req("POST", `${path(sid)}/erase`, { leas
 const read = (sid, query = "") => req("GET", path(sid) + query);
 const pageCap = 4 * 1024 * 1024;
 let ttl, service;
-async function startService() {
-	const child = spawn(restartCommand[1], restartCommand.slice(2), { stdio: "ignore" });
+async function startService(phase = "initial") {
+	const child = spawn(restartCommand[1], restartCommand.slice(2), { stdio: "ignore", env: { ...process.env, MODULAR_AGENT_KIT_RESTART_PHASE: phase } });
 	service = { child, stopped: new Promise((resolve) => {
 		child.once("exit", resolve);
 		child.once("error", resolve);
@@ -172,6 +172,34 @@ await run("session lifecycle", async () => {
 	check("erase: no lease is needed without a writer", ok(await erase(sid, undefined, [third.id]), { erased: [third.id] }));
 });
 
+// History HTTP: Erasure; Shared data: Legacy associations. Opaque rows isolate the projection.
+await run("legacy tombstones", async () => {
+	const sid = id(), meta = { project, created: Date.now() };
+	await put(sid, meta);
+	const { body: { lease } } = await acquire(sid, id());
+	const cases = [
+		[{ kind: "input", data: { inputId: "input-nested" } }, { inputId: "input-nested" }],
+		[{ kind: "inputAccepted", data: { inputId: "admission-nested", content: "removed" } }, { inputId: "admission-nested" }],
+		[{ kind: "inputHandedBack", data: { inputIds: ["first", "second"] } }, { inputIds: ["first", "second"] }],
+		[{ kind: "inputHandedBack", data: { inputId: "single", inputIds: ["ignored"] } }, { inputId: "single" }],
+		[{ kind: "inputHandedBack", data: { inputId: 7, inputIds: ["ignored"] } }, {}],
+		[{ kind: "inputHandedBack", data: { inputIds: ["valid", ""] } }, {}],
+		[{ kind: "inputRequest", data: { requestId: "first-id", request: { id: "second-id" } } }, { requestId: "first-id" }],
+		[{ kind: "inputRequest", data: { requestId: null, request: { id: "question-id" } } }, { requestId: "question-id" }],
+		[{ kind: "inputAnswer", data: { requestId: "answer-id", value: "removed" } }, { requestId: "answer-id" }],
+		[{ kind: "inputAnswer", requestId: null, data: { requestId: "ignored" } }, {}],
+		[{ kind: "inputAnswer", requestId: "envelope", data: { requestId: "ignored" } }, { requestId: "envelope" }],
+		[{ kind: "turnStart", data: { continuesTurnId: "old-turn" } }, { continuesTurnId: "old-turn" }],
+		[{ kind: "kit.private", data: { inputId: "ignored", requestId: "ignored", continuesTurnId: "ignored" } }, {}],
+	];
+	const rows = cases.map(([entry]) => ({ id: id(), parentId: null, ...entry }));
+	const expected = cases.map(([, projected], i) => ({ id: rows[i].id, parentId: null, kind: rows[i].kind, erased: true, ...projected }));
+	const targets = rows.map((e) => e.id);
+	check("Erasure / Legacy associations: valid legacy IDs survive at the top level without overriding the envelope", ok(await append(sid, lease, rows), { kept: rows.length }) &&
+		ok(await erase(sid, lease, targets), { erased: targets }) && ok(await read(sid), { session: { id: sid, ...meta }, entries: expected }));
+	await release(sid, lease);
+});
+
 // History HTTP: The basics (path segments are validated before normalization).
 await run("dot segments", async () => {
 	const sid = id();
@@ -239,15 +267,20 @@ if (restartFlag) {
 		const renewedAt = performance.now();
 		if (!ok(await renew(sid, current.lease), { ttlMs: ttl })) throw Error("could not renew restart fixture lease");
 		await stopService();
-		await startService();
-		const keptLease = await renew(sid, current.lease);
-		if (ok(keptLease, { ttlMs: ttl })) {
-			check("Writing: one writer at a time: a preserved lease still excludes another owner", held(await acquire(sid, id()), ttl));
+		const restarted = await startService("restart");
+		const newTtl = restarted.body?.ttlMs;
+		const decreased = restartFlag === "--restart-ttl";
+		check("Writing: one writer at a time: restarted service advertises the fixture TTL", positive(newTtl) && (decreased ? newTtl < ttl : newTtl === ttl));
+		if (decreased && positive(newTtl) && newTtl < ttl) await sleep(newTtl + 25);
+		// Empty append tests the old lease without extending it at the new TTL.
+		const keptLease = await append(sid, current.lease, []);
+		if (ok(keptLease, { kept: 0 })) {
+			check("Writing: one writer at a time: a preserved lease still excludes another owner", held(await acquire(sid, id())));
 		} else {
 			// Separate sessions for acquire and erase: an unintended acquire must not mask a missing hold.
 			const [a, e] = await Promise.all([acquire(sid, owner), erase(unheld, undefined, [free.entry.id])]);
 			if (performance.now() - renewedAt >= ttl) console.log("SKIP  restart hold (restart and probes exceeded the TTL)");
-			else check("Writing: one writer at a time: restart holds acquire and unleased erase", err(keptLease, 409, "lost") && held(a, ttl) && held(e, ttl) && ok(await read(unheld), { session: { id: unheld, ...meta }, entries: [free.entry] }));
+			else check(`Writing: one writer at a time: restart holds acquire and unleased erase${decreased ? " beyond the decreased TTL" : ""}`, err(keptLease, 409, "lost") && held(a) && held(e) && ok(await read(unheld), { session: { id: unheld, ...meta }, entries: [free.entry] }));
 		}
 		check("Writing: one writer at a time: acknowledged entries survive restart", ok(await read(sid), { session: { id: sid, ...meta }, entries: [current.entry] }));
 	});

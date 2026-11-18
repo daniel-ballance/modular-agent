@@ -6,25 +6,26 @@ Run on a disposable Linux environment with Node.js, Bash, `setsid` and GNU coreu
 
 ```sh
 node conformance/plugin/run.mjs -- <plugin command> [args...]
-node conformance/plugin/run.mjs -- node "$PWD/packages/plugin-wire/dist/src/serve-cli.js"
 ```
 
-Use `--verbose` before `--` for stderr and passing details. Use `--no-runtime` for the baseline roles alone.
+For the TypeScript build, run `npm ci && npm run build` at the repository root, then use `node conformance/plugin/run.mjs -- node "$PWD/packages/plugin-wire/dist/src/serve-cli.js"`.
+
+Use `--verbose` before `--` for stderr and passing details. Use `--no-runtime` for the baseline roles alone. The default run also exercises the Runtime tiers; use `--no-runtime` if neither tier is offered. Exit code 0 means all checks run passed.
 
 What it checks:
 - Handshake, supported version, selected parts, registration, replacement names, ping, framing and error envelopes, shutdown and natural EOF exit.
 - The fixture Provider: stream order, the complete-response hook, a valid and an unoffered tool directive, and exact truncation to 200 Unicode code points from the first result after the latest user message.
 - Tool calls through `host/env/*`, parent and session scope, fixture progress and exit text, and cancellation. The early-arrival cancel probe does not prove that dispatch had not started.
-- Environment files, output, deadlines and background process ownership. Platform claims use the binding's spellings for standard systems. Descendant tests use the advertised containment only for an exact platform match. With `points: true`, it checks point lookup and in-place restore.
+- Environment files, output, deadlines and background process ownership. Platform claims use the binding's spellings for standard systems. Descendant tests use the advertised containment only for an exact platform match. With `points: true`, it checks in-place restore and `not_found` for unknown points and a point saved by a separate environment.
 - Hook replies for a refusal, a system contribution, and lossless redaction across text events within a stream segment and within one standalone custom event.
-- Scripted Runtime turns: exact dispatch order, refused calls, host-recorded model intent and result, normal and failed attempt order, fresh attempt ids on retry, preparation after context overflow with a scripted host compaction, cancellation and step limits. The Runtime reports only step usage and does not call `step.after` for the scripted auxiliary attempt. A host `turn_limit` from preparation or dispatch ends the turn with that limit and no response for the undispatched attempt. When steering is advertised, the Runtime makes its final check at the turn boundary. Serial and overlapping scheduling are both allowed for parallel-capable calls.
+- Scripted Runtime turns: exact dispatch order, refused calls, host-recorded model intent and result, normal and failed attempt order, fresh attempt ids on retry, preparation after context overflow with a scripted host compaction, cancellation and step limits. The Runtime reports only step usage and does not call `step.after` for the scripted auxiliary attempt. It simulates `turn_limit` before preparation or dispatch, and after the host has written a model intent and its bookkeeping abort. The Runtime reports the limit without submitting a response for the undispatched attempt. When steering is advertised, the Runtime makes its final check at the turn boundary. Serial and overlapping scheduling are both allowed for parallel-capable calls.
 - `resumeTurn` against synthetic standard history. An unsafe started call is not repeated. A transient Runtime fails and does not dispatch; a durable one runs the calls it can recover. This is not an independent second build's history.
 
 The [ACP kit](../acp/README.md) checks the host side:
-- `--probe-checks`: out-of-phase Runtime callbacks leave no records, exact-call dispatch and its recorded registration, the closed steering cutoff, output validation, and preservation of a completed result when its catalog refresh fails.
+- `--probe-checks`: out-of-phase Runtime callbacks leave no records, exact-call dispatch and its recorded registration, an already-dispatched tool's environment callback, refusal of a call not offered in the attempt, the steering cutoff, output validation, and preservation of a completed result when its catalog refresh fails. With tenant support, the host signals a latched limit at the next `prepareStep`. With tenant support and a history service, the kit also checks the host's aborted response after a post-intent limit.
 - `--probe-checks --portable-checks`: interrupted remote model attempts are aborted or replayed as specified in [Model attempt sequences](../../docs/bindings/plugin.md#model-attempt-sequences).
 - `--job-checks --crash-checks`: job recovery refuses a second resume on the same plugin connection.
 
-Use `--plugin-checks` with conformance parts from another build for an interoperability run. The probe, recovery and jobs programs are test fixtures, not production plugins.
+Use the ACP kit's `--plugin-checks` with the `hooks` part from another build for an interoperability run. The probe, recovery and jobs programs are test fixtures, not production plugins.
 
 The kit tests selected transcripts, not arbitrary schemas, credential handling, credential-bearing Providers, tenant separation, or reliable cleanup of unconfirmed external effects. Use separate acceptance tests for these. A pass is not proof of [conformance](../../docs/conformance.md#what-conforms).
