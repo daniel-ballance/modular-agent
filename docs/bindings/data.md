@@ -149,7 +149,7 @@ An erased entry keeps only `id`, `parentId`, `kind` and `erased: true`, plus whi
 
 **A question's key** when the asker gives none, for a question a tool call asks, is `call:<toolCallId>:<n>`, where `n` counts the questions that call asked, from 1, in the order it asked them. So a call run again finds its earlier answers in any build.
 
-**A job's report** is an `input` entry with `data.key` `job:<jobId>`, kept after its `jobEnded`. The turn it starts has `startedBy` `{ kind: "job", id: <jobId> }`.
+**A job's report** is an `input` entry with `data.key` `job:<jobId>`, kept after its `jobEnded`. Its content is the job's `result`, exactly as the job ended with it: the host adds no framing, so the model sees the same report whichever build takes it. The turn it starts has `startedBy` `{ kind: "job", id: <jobId> }`.
 
 **Setting keys** with fixed meanings: `model` (`{ provider, id }`), `reasoning`, `maxSteps`, `maxOutput`, and `approval`: `off`, `ask`, `all` or `never`, as the [ACP binding's](acp.md#configuration-options) approval option. A receiver ignores other keys it doesn't know. A build that reopens a session with no `approval` setting, or one whose value it doesn't offer, uses `all`, asking before every call, until an actor with `settings` chooses: it never runs tools with less checking than the session's owner chose. Approval fails closed, so with nobody present to answer, a call is refused.
 
@@ -185,6 +185,7 @@ Rewinding to an entry restores the earliest point recorded after it on the curre
 
 ## Changes
 
+- **2026-11-18, after the round-five matrices.** A job's report is its result, unchanged. The Python agent framed the report of a job it took up in another build's session ("Job <id> reported ..."), so the model saw different text depending on which build took the job up.
 - **2026-11-18, round five.** Jobs and plugins become portable: `jobStarted`, `jobEnded`, a job's report, and `plugins`. Rewinding: `data.point` on `turnStart` and `toolStarted`. Before this, jobs and plugins were each build's own kinds, and no build could rewind. From the gaps the builders logged in round four:
   - `inputAccepted` and `inputHandedBack`, so queued input and its keys survive a reopening in another build (Python G67, Go B19, Elixir M1-2);
   - `modelRequest`, so a crash during a model request can be told apart from one before it (Python G68, Go B23, Rust R4-02);
