@@ -10,6 +10,7 @@ import { localEnvironment } from "@modular-agent/env-local";
 import { jsonlHistory } from "@modular-agent/history-jsonl";
 import { modelSelection } from "@modular-agent/model-selection";
 import { piAiProviders } from "@modular-agent/provider-pi-ai";
+import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { systemPrompt } from "@modular-agent/system-prompt";
 import { fileTools } from "@modular-agent/tools-files";
@@ -56,6 +57,7 @@ export function vanillaPlugins(options: AgentOptions = {}): Plugin[] {
 		systemPrompt(),
 		contextCompaction(),
 		modelSelection({ defaultModel: options.model }),
+		...(options.plugins?.some((p) => p.name === "approval") ? [] : [approval({ policy: "off" })]),
 		...(options.plugins ?? []),
 	];
 }

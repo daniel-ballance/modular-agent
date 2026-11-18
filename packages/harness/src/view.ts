@@ -1,4 +1,4 @@
-import { type HistoryEntry, type InterruptedTurn, type ModelMessage, type ToolCall, isToolCall, text } from "./types.js";
+import { type ContentPart, type HistoryEntry, type InterruptedTurn, type ModelMessage, type ToolCall, isToolCall, text } from "./types.js";
 
 /** Rebuild pending calls from the standard entry kinds on the current branch. */
 export function interruptedCalls(history: HistoryEntry[], turnId: string): InterruptedTurn["calls"] {
@@ -19,6 +19,41 @@ export function interruptedCalls(history: HistoryEntry[], turnId: string): Inter
 		if (call) calls.set(id, { id, name: call.name, input: call.input, stepId: entry.stepId, started: true, safeToRepeat: data?.safeToRepeat === true });
 	}
 	return [...calls.values()];
+}
+
+/** Build the model view from standard history, including the current turn's collected context. */
+export function modelView(entries: HistoryEntry[], turnId?: string): ModelMessage[] {
+	const summary = entries.findLast((e) => e.kind === "summary" && !e.erased);
+	const byId = new Map(entries.map((e) => [e.id, e]));
+	const summarized = new Set<string>();
+	const visit = (entry: HistoryEntry) => {
+		for (const id of entry.sources ?? []) {
+			if (summarized.has(id)) continue;
+			summarized.add(id);
+			const source = byId.get(id);
+			if (source?.kind === "summary") visit(source);
+		}
+	};
+	if (summary) visit(summary);
+	const start = turnId && entries.findLast((e) => e.kind === "turnStart" && e.turnId === turnId && !e.erased);
+	let context = start ? (start.data as { context?: ContentPart[] })?.context : undefined;
+	const messages: ModelMessage[] = [];
+	const summaryText = (summary?.data as { summary?: string } | undefined)?.summary;
+	if (summaryText !== undefined) messages.push({ role: "user", content: [text(`Summary of the earlier conversation:\n\n${summaryText}`)] });
+	for (const entry of entries) {
+		if (!entry.modelVisible || !entry.message || summarized.has(entry.id)) continue;
+		if (context?.length && entry.kind === "input" && entry.turnId === turnId && entry.message.role === "user") {
+			messages.push({ ...entry.message, content: [...context, ...entry.message.content] });
+			context = undefined;
+		} else messages.push(entry.message);
+	}
+	if (context?.length) {
+		// A continuation need not have an input entry of its own.
+		const at = messages.findLastIndex((m) => m.role === "user");
+		if (at < 0) messages.unshift({ role: "user", content: context });
+		else messages[at] = { role: "user", content: [...context, ...messages[at].content] };
+	}
+	return pairToolResults(messages);
 }
 
 export const WAITING_NOTE = "No result yet: this tool call is waiting for an answer. Its result will arrive later.";

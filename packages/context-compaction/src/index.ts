@@ -1,5 +1,5 @@
 import type { HistoryEntry, ModelMessage, ModelRequest, Plugin, PluginApi } from "@modular-agent/harness";
-import { pairToolResults, text, textOf } from "@modular-agent/harness";
+import { modelView, text, textOf } from "@modular-agent/harness";
 
 export interface CompactionOptions {
 	/** Tokens kept free for the answer. */
@@ -15,28 +15,7 @@ interface SummaryData { summary: string; firstKept: string }
 /** A summary still in force. An erased one is skipped, so the model sees what remains in full, until it is compacted again. */
 const isSummary = (e: HistoryEntry) => e.kind === "summary" && typeof (e.data as Partial<SummaryData> | undefined)?.summary === "string";
 
-/** The model context: the latest summary, then everything after the first entry it kept. */
-export function view(history: HistoryEntry[]): ModelMessage[] {
-	let summarized = new Set<string>();
-	let summary: SummaryData | undefined;
-	for (let i = history.length - 1; i >= 0; i--) {
-		if (isSummary(history[i])) {
-			summary = history[i].data as SummaryData;
-			const visit = (entry: HistoryEntry) => {
-				for (const id of entry.sources ?? []) {
-					if (summarized.has(id)) continue;
-					summarized.add(id);
-					const source = history.find((e) => e.id === id);
-					if (source && isSummary(source)) visit(source);
-				}
-			};
-			visit(history[i]);
-			break;
-		}
-	}
-	const messages = history.filter((e) => !summarized.has(e.id) && e.modelVisible && e.message).map((e) => e.message!);
-	return pairToolResults(summary ? [{ role: "user", content: [text(`Summary of the earlier conversation:\n\n${summary.summary}`)] }, ...messages] : messages);
-}
+export const view = modelView;
 
 function transcript(entries: HistoryEntry[]): string {
 	return entries
@@ -62,21 +41,21 @@ export function contextCompaction(options: CompactionOptions = {}): Plugin {
 			const reserve = (options.reserveTokens ?? (api.config().reserveTokens as number | undefined)) ?? 16_384;
 			const keep = (options.keepRecentTokens ?? (api.config().keepRecentTokens as number | undefined)) ?? 20_000;
 
-			api.on("step.before", async (payload: { sessionId: string; model?: { contextWindow: number }; request: ModelRequest }) => {
-				let messages = view(api.history(payload.sessionId));
+			api.on("step.before", async (payload: { sessionId: string; turnId: string; model?: { contextWindow: number }; request: ModelRequest }) => {
+				let messages = view(api.history(payload.sessionId), payload.turnId);
 				const window = payload.model?.contextWindow ?? Infinity;
 				if (estimate(messages) > window - reserve) {
 					await compact(api, payload.sessionId, keep);
-					messages = view(api.history(payload.sessionId));
+					messages = view(api.history(payload.sessionId), payload.turnId);
 				}
 				return { value: { ...payload, request: { ...payload.request, messages } } };
 			});
 
-			api.on("model.failed", async (payload: { sessionId: string; error: { kind: string }; request: ModelRequest }) => {
+			api.on("model.failed", async (payload: { sessionId: string; turnId: string; error: { kind: string }; request: ModelRequest }) => {
 				if (payload.error.kind !== "contextTooLarge") return undefined;
 				const done = await compact(api, payload.sessionId, keep);
 				if (!done) return undefined;
-				return { retry: true, request: { ...payload.request, messages: view(api.history(payload.sessionId)) } };
+				return { retry: true, request: { ...payload.request, messages: view(api.history(payload.sessionId), payload.turnId) } };
 			});
 
 			api.registerCommand("compact", {

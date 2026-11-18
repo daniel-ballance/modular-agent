@@ -38,7 +38,7 @@ export interface TransientRuntimeOptions {
  */
 export class TransientRuntime implements Runtime {
 	readonly id: string = "transient";
-	readonly supports: Record<string, boolean | string> = { inputDuringTurn: true, waitingThroughRestart: false, continuesAfterRestart: false, rewinding: false };
+	readonly supports: Record<string, boolean | string> = { inputDuringTurn: true, waitingThroughRestart: false, continuesAfterRestart: false };
 	constructor(protected options: TransientRuntimeOptions = {}) {}
 
 	runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome> {
@@ -98,7 +98,23 @@ export class TransientRuntime implements Runtime {
 				entries.push((await this.settle(host, c, c.started ? "outcomeUnknown" : "notStarted")).id);
 				continue;
 			}
-			const recorded = await this.runCall(host, { type: "toolCall", id: c.id, name: c.name, arguments: c.input }, c.stepId ?? (await host.newId()), signal);
+			const stepId = c.stepId ?? await host.newId();
+			const part = { type: "toolCall" as const, id: c.id, name: c.name, arguments: c.input };
+			let recorded: HistoryEntry | undefined;
+			if (c.started) {
+				const starts = async () => (await host.history()).filter((e) => e.kind === "toolStarted" && e.toolCallId === c.id).length;
+				const before = await starts();
+				let ran: Awaited<ReturnType<RuntimeHost["runToolCall"]>> | undefined;
+				let prepared: Prepared | undefined;
+				try {
+					prepared = await this.preflight(host, part, stepId);
+					if (!prepared.refused && !prepared.pending) ran = await host.runToolCall(prepared.call, signal);
+				} catch {
+					// A failed check tells us nothing about the first attempt.
+				}
+				const didStart = ran && !isPending(ran) && ["refused", "failed", "notStarted"].includes(ran.status) ? await starts() > before : !!ran;
+				recorded = didStart && prepared ? await this.complete(host, prepared, stepId, ran) : await this.settle(host, c, "outcomeUnknown");
+			} else recorded = await this.runCall(host, part, stepId, signal);
 			if (recorded) entries.push(recorded.id);
 			else open.push(c.id);
 		}
@@ -141,6 +157,7 @@ export class TransientRuntime implements Runtime {
 				message = await input.model.request(request, {
 					signal,
 					sessionId: input.sessionId,
+					stepId,
 					onEvent: (event) => host.report("model.output", event, { stepId }),
 				});
 				if (message.stop !== "failed" || signal.aborted) break;

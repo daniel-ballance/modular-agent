@@ -4,6 +4,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { join } from "node:path";
 import type { ExecResult, Plugin, WorkingEnvironment } from "@modular-agent/harness";
 import { randomUUID } from "node:crypto";
+import { SavedPoints } from "./points.js";
 import { COMMAND_MARKER, markedProcesses, ProcessTracker } from "./processes.js";
 
 export { ProcessTracker, RUN_MARKER, COMMAND_MARKER, markedProcesses } from "./processes.js";
@@ -11,18 +12,27 @@ export { ProcessTracker, RUN_MARKER, COMMAND_MARKER, markedProcesses } from "./p
 /** The local machine as the working environment. */
 export class LocalEnvironment implements WorkingEnvironment {
 	readonly id: string;
-	readonly safeToRepeat = process.platform === "linux";
-	constructor(readonly cwd: string, private processes = new ProcessTracker(), private sessionId?: string) {
+	readonly containment = process.platform === "linux" ? "strong" : "processGroup";
+	readonly safeToRepeat = this.containment === "strong";
+	readonly points = true;
+	constructor(readonly cwd: string, private processes = new ProcessTracker(), private sessionId?: string, private snapshots = new SavedPoints()) {
 		this.id = `local:${cwd}`;
 	}
 	at(cwd: string): WorkingEnvironment {
-		return new LocalEnvironment(cwd, this.processes, this.sessionId);
+		return new LocalEnvironment(cwd, this.processes, this.sessionId, this.snapshots);
 	}
 	forSession(sessionId: string): WorkingEnvironment {
-		return new LocalEnvironment(this.cwd, this.processes, sessionId);
+		return new LocalEnvironment(this.cwd, this.processes, sessionId, this.snapshots);
 	}
-	sessionEnded(sessionId: string): Promise<void> {
-		return this.processes.stopSession(sessionId);
+	async sessionEnded(sessionId: string): Promise<void> {
+		await this.processes.stopSession(sessionId);
+		// Kept until the environment stops, so a session reopened here still has its points.
+	}
+	save(): Promise<string> {
+		return this.snapshots.save(this.cwd, this.sessionId);
+	}
+	restore(point: string): Promise<void> {
+		return this.snapshots.restore(this.cwd, point);
 	}
 	resolve(path: string): string {
 		return isAbsolute(path) ? path : resolve(this.cwd, path);
@@ -96,15 +106,16 @@ export class LocalEnvironment implements WorkingEnvironment {
 }
 
 export function localEnvironment(options: { cwd?: string } = {}): Plugin {
-	let stop = () => {};
+	let stop: () => void | Promise<void> = () => {};
 	return {
 		name: "env-local",
 		spawn: { module: "@modular-agent/env-local", export: "localEnvironment", options },
 		setup(api) {
 			// No command this agent starts outlives it: see ProcessTracker.
 			const processes = new ProcessTracker(join(api.home, "run"));
-			api.provide("working-environment", new LocalEnvironment(options.cwd ?? api.project, processes));
-			stop = () => processes.stopAll();
+			const snapshots = new SavedPoints(api.home);
+			api.provide("working-environment", new LocalEnvironment(options.cwd ?? api.project, processes, undefined, snapshots));
+			stop = async () => { processes.stopAll(); await snapshots.stop(); };
 		},
 		stop: () => stop(),
 	};

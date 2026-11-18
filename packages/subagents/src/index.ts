@@ -66,13 +66,19 @@ export class Subagents implements ToolSource, InterfaceCapability {
 
 	/** The parent agent's authority in a child: no more than the parent session's owner has. */
 	private parentActor(parent: string): Actor {
-		const owner = this.api.session(parent).actors[0];
+		const active = this.api.workActors(parent)[0];
+		const owner = this.api.session(parent).actors.find((a) => a.id === active) ?? this.api.session(parent).actors[0];
 		return { id: PARENT, kind: "agent", authority: owner ? owner.authority.filter((a) => a !== "erase") : ["input", "answer", "tools"] };
 	}
 
 	async run(call: ToolCall, ctx: ToolContext): Promise<Omit<ToolResult, "callId">> {
 		const input = call.input as { task: string; label?: string; model?: string; wait?: boolean; subagent?: string };
 		const parent = ctx.sessionId;
+		const actorId = this.api.workActors(parent)[0];
+		const workActor = this.api.session(parent).actors.find((a) => a.id === actorId);
+		if (!workActor?.authority.includes("delegate") || !workActor.authority.includes("jobs")) {
+			return { status: "refused", content: [text("Starting a subagent requires delegate and jobs rights")] };
+		}
 		const settings = this.api.session(parent).settings;
 		if (input.subagent) {
 			const earlier = this.earlier(parent, input.subagent);
@@ -91,7 +97,7 @@ export class Subagents implements ToolSource, InterfaceCapability {
 				cwd: this.api.projectOf(parent),
 				model: input.model ?? settings.model,
 				...(settings.reasoning ? { reasoning: settings.reasoning } : {}),
-				...(settings.approvalPolicy ? { approvalPolicy: settings.approvalPolicy } : {}),
+				...(settings.approval ? { approval: settings.approval } : {}),
 				subagentDepth: depth + 1,
 			},
 		});
@@ -102,7 +108,7 @@ export class Subagents implements ToolSource, InterfaceCapability {
 	private earlier(parent: string, name: string): Detail | undefined {
 		return this.api
 			.history(parent, { all: true })
-			.filter((e: HistoryEntry) => e.kind === "harness.jobStarted" && !e.erased && e.writer === "subagents")
+			.filter((e: HistoryEntry) => (e.kind === "jobStarted" || e.kind === "harness.jobStarted") && !e.erased && e.writer === "subagents")
 			.map((e: HistoryEntry) => (e.data as { detail: Detail }).detail)
 			.filter((d) => d.label === name || d.childSessionId === name)
 			.at(-1);

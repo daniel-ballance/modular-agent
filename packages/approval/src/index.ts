@@ -26,7 +26,13 @@ export function approval(options: { policy?: ApprovalPolicy; /** Leave the quest
 		setup(api) {
 			const fallback = options.policy ?? (api.config().policy as ApprovalPolicy | undefined) ?? "ask";
 			const waitOf = (sessionId: string) => (api.session(sessionId).settings.approvalWaitMs as number | undefined) ?? options.waitMs ?? (api.config().waitMs as number | undefined);
-			const policyOf = (sessionId: string) => (api.session(sessionId).settings.approvalPolicy as ApprovalPolicy | undefined) ?? fallback;
+			const policyOf = (sessionId: string) => {
+				const value = api.session(sessionId).settings.approval as ApprovalPolicy | undefined;
+				return value === undefined ? fallback : POLICIES.includes(value) ? value : "all";
+			};
+			api.on("session.start", async ({ sessionId, resumed }) => {
+				if (!resumed && api.session(sessionId).settings.approval === undefined) await api.setSetting(sessionId, "approval", fallback);
+			});
 
 			api.on("tool.before", async (p: { sessionId: string; call: ToolCall; definition?: ToolDefinition }) => {
 				const policy = policyOf(p.sessionId);
@@ -52,7 +58,7 @@ export function approval(options: { policy?: ApprovalPolicy; /** Leave the quest
 					const wanted = args.trim() as ApprovalPolicy;
 					if (!wanted) return `Approval policy: ${policyOf(ctx.sessionId)}`;
 					if (!POLICIES.includes(wanted)) return `Unknown policy. Use one of: ${POLICIES.join(", ")}`;
-					await api.setSetting(ctx.sessionId, "approvalPolicy", wanted, ctx.actorId);
+					await api.setSetting(ctx.sessionId, "approval", wanted, ctx.actorId);
 					return `Approval policy set to ${wanted}`;
 				},
 			});

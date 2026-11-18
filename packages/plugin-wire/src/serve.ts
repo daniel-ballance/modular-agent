@@ -106,7 +106,12 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			projectOf: () => init.project,
 			provide: (capability: string, impl: unknown) => {
 				if (capability === "provider") providers.push(impl as Provider);
-				else if (capability === "tool-source") toolSources.push(impl as ToolSource);
+				else if (capability === "tool-source") {
+					const source = impl as ToolSource;
+					toolSources.push(source);
+					const off = source.onChange?.(() => peer.notify("tools/changed", { toolSource: source.id, parentRequestId: currentParent.getStore() }));
+					if (off) stops.push(off);
+				}
 				else if (capability === "working-environment") environment = impl as WorkingEnvironment;
 				else if (capability === "runtime") runtime = impl as Runtime;
 				else throw new Error(`${capability} isn't carried by ${PLUGIN_BINDING}`);
@@ -128,7 +133,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			onEvent: () => () => undefined,
 			registerCommand: (name: string, command: { description: string; run: (args: string, ctx: any) => unknown }) => commands.set(name, command),
 		};
-		for (const name of ["commands", "runCommand", "startSession", "openSession", "join", "leave", "listSessions", "forkSession", "closeSession", "session", "input", "withdraw", "cancel", "waitForIdle", "moveTo", "setSetting", "history", "gatedHistory", "append", "transaction", "erase", "tools", "callTool", "ask", "answer", "openRequests", "startJob", "unfinishedJobs", "resumeJob", "jobs", "cancelJob", "follow", "declaration", "modelAccess"]) {
+		for (const name of ["presentActors", "releaseInput", "recoveredInput", "commands", "runCommand", "startSession", "openSession", "join", "leave", "listSessions", "forkSession", "closeSession", "session", "input", "withdraw", "cancel", "waitForIdle", "moveTo", "setSetting", "history", "gatedHistory", "append", "transaction", "erase", "tools", "callTool", "ask", "answer", "openRequests", "startJob", "unfinishedJobs", "resumeJob", "jobs", "cancelJob", "follow", "declaration", "modelAccess"]) {
 			api[name] = unavailable(`${name}()`);
 		}
 		return api as unknown as PluginApi;
@@ -150,8 +155,8 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			name: options.name,
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
-			...(environment ? { workingEnvironment: { containment: options.containment ?? "none", platforms: [process.platform], safeToRepeat: environment.safeToRepeat === true } } : {}),
-			...(runtime ? { runtime: { id: runtime.id, supports: runtime.supports } } : {}),
+			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [process.platform], ...(environment.points ? { points: true } : {}) } } : {}),
+			...(runtime ? { runtime: { id: runtime.id, supports: Object.fromEntries(Object.entries(runtime.supports).filter(([key]) => key !== "rewinding")) } } : {}),
 			...(handlers.size ? { hooks: [...handlers].map(([handlerId, h]) => ({ hook: h.hook, handlerId, order: h.order })) } : {}),
 			...(commands.size ? { commands: [...commands].map(([name, c]) => ({ name, description: c.description })) } : {}),
 			...(options.replaces?.length ? { replaces: options.replaces } : {}),
@@ -165,7 +170,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	};
 	peer.handle("provider/models", async (p) => ({ models: toWire(provider(p.provider).models()) }));
 	peer.handle("provider/available", async (p) => ({ available: (await provider(p.provider).available?.()) ?? true }));
-	peer.handle("provider/discard", async (p) => (await provider(p.provider).discardState?.(String(p.sessionId), { erase: p.erase === true })) ?? {});
+	peer.handle("provider/discard", async (p) => (await provider(p.provider).discardState?.(String(p.sessionId), p.erase === true ? { erase: true, entryIds: p.entryIds } : undefined)) ?? {});
 	peer.handle("provider/request", async (p, ctx) => {
 		const impl = provider(p.provider);
 		return currentParent.run(ctx.id, async () => toWire(await impl.request(p.model, fromWire(p.request), {
@@ -183,14 +188,14 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	peer.handle("tools/list", async (p) => ({ tools: toWire(source(p.toolSource).tools(p.sessionId)) }));
 	peer.handle("tools/call", async (p, ctx) => {
 		const call = fromWire(p.call) as ToolCall;
-		const result = await source(p.toolSource).run(call, {
+		const result = await currentParent.run(ctx.id, () => source(p.toolSource).run(call, {
 			sessionId: String(p.sessionId),
 			signal: ctx.signal,
 			call,
 			progress: (content) => peer.notify("tools/progress", { parentRequestId: ctx.id, content: toWire(content) }),
 			environment: hostEnvironment(ctx.id, String(p.project), String(p.sessionId)),
 			ask: async (request: InputRequestDraft) => fromWire(await peer.request<Answer>("host/ask", { parentRequestId: ctx.id, request: toWire(request) }, ctx.signal)) as Answer,
-		});
+		}));
 		return toWire(result);
 	});
 
@@ -214,6 +219,18 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	});
 	peer.handle("env/write", async (p) => (await (await envAt(p)).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
 	peer.handle("env/exists", async (p) => ({ exists: await (await envAt(p)).exists(p.path) }));
+	peer.handle("env/save", async (p) => {
+		const e = await envAt(p);
+		if (!e.points || !e.save) throw new WireError("not_supported", "This environment does not save points");
+		return { point: await e.save() };
+	});
+	peer.handle("env/restore", async (p) => {
+		const e = await envAt(p);
+		if (!e.points || !e.restore) throw new WireError("not_supported", "This environment does not restore points");
+		try { await e.restore(p.point); }
+		catch (error) { throw missing(error); }
+		return {};
+	});
 	peer.handle("env/exec", async (p, ctx) =>
 		(await envAt(p)).exec(String(p.command), { signal: ctx.signal, timeoutMs: p.timeoutMs, onOutput: (chunk) => peer.notify("env/output", { parentRequestId: ctx.id, chunk }) }),
 	);
@@ -228,13 +245,18 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		const h = handlers.get(Number(p.handlerId));
 		if (!h || h.hook !== p.hook) throw new WireError("unknown_handler", `No handler ${p.handlerId}`);
 		const answer = await currentParent.run(ctx.id, () => h.handler(fromWire(p.payload)));
+		if (h.hook === "output") {
+			const gate = answer as import("@modular-agent/harness").OutputAnswer;
+			if (gate?.action === "pass") return gate.events ? { events: toWire(gate.events) } : null;
+			if (gate?.action === "block" || gate?.action === "hold") return { block: true };
+		}
 		return answer === undefined ? null : toWire(answer);
 	});
 
-	peer.handle("command/run", async (p) => {
+	peer.handle("command/run", async (p, ctx) => {
 		const c = commands.get(String(p.name));
 		if (!c) throw new WireError("invalid_request", `No command ${p.name}`);
-		const output = await c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId });
+		const output = await currentParent.run(ctx.id, () => c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId }));
 		return typeof output === "string" ? { output } : {};
 	});
 
@@ -256,7 +278,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 				model: fromWire(t.model),
 				supports: t.modelSupports ?? {},
 				request: async (request: ModelRequest, opts) => {
-					const req = call<AssistantMessage>("host/runtime/model", { request: toWire(request), ...(currentStep ? { stepId: currentStep } : {}) }, opts.signal);
+					const req = call<AssistantMessage>("host/runtime/model", { request: toWire(request), ...((opts.stepId ?? currentStep) ? { stepId: opts.stepId ?? currentStep } : {}) }, opts.signal);
 					modelEvents.set(req.id, (event) => opts.onEvent?.(event));
 					try {
 						return fromWire(await req) as AssistantMessage;

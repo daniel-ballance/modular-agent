@@ -20,7 +20,7 @@ import { TransientRuntime, type TransientRuntimeOptions } from "@modular-agent/r
  */
 export class DurableRuntime extends TransientRuntime {
 	override readonly id = "durable";
-	override readonly supports = { inputDuringTurn: true, waitingThroughRestart: true, continuesAfterRestart: true, rewinding: false };
+	override readonly supports = { inputDuringTurn: true, waitingThroughRestart: true, continuesAfterRestart: true };
 
 	protected override async recover(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
 		const history = await host.history();
@@ -37,18 +37,19 @@ export class DurableRuntime extends TransientRuntime {
 		host.report("turn.resumed", { pending: calls.length });
 		const open = await this.runPending(host, calls, signal, entries, (c) => !c.started || c.safeToRepeat);
 		if (open.length) return { outcome: { kind: "completed" }, result: { openToolCalls: open }, entries, usage };
+		const inFlight = turn.filter((e) => e.kind === "modelRequest" && !e.erased && !responses.some((r) => r.stepId === e.stepId));
+		if (!signal.aborted && inFlight.some((e) => (e.data as { safeToRepeat?: boolean }).safeToRepeat !== true ||
+			!(input.model.supports.safeToRepeat === true || (input.model.supports.keepsState === false && input.model.supports.runsTools === false)))) {
+			return { outcome: { kind: "failed", error: "An interrupted model request may have had an effect" }, result: { openToolCalls: [] }, entries, usage };
+		}
 		const lastEntry = responses.at(-1);
 		const last = lastEntry?.message;
 		const laterInput = lastEntry && turn.slice(turn.indexOf(lastEntry) + 1).some((e) => e.message?.role === "user");
-		if (!signal.aborted && last?.role === "assistant" && !laterInput && !last.content.some(isToolCall)) {
+		if (!signal.aborted && !inFlight.length && last?.role === "assistant" && !laterInput && !last.content.some(isToolCall)) {
 			const result = { text: textOf(last.content), openToolCalls: [] };
 			if (last.stop === "failed") return { outcome: { kind: "failed", error: last.error?.message ?? "The model request failed" }, result, entries, usage };
 			if (last.stop === "aborted") return { outcome: { kind: "cancelled" }, result, entries, usage };
 			return { outcome: { kind: "completed" }, result, entries, usage };
-		}
-		const support = input.model.supports;
-		if (!signal.aborted && support.safeToRepeat !== true && (support.keepsState !== false || support.runsTools !== false)) {
-			return { outcome: { kind: "failed", error: "An interrupted model request may have had an effect" }, result: { openToolCalls: [] }, entries, usage };
 		}
 		return this.loop(input, host, signal, entries, { usage, steps: responses.length });
 	}

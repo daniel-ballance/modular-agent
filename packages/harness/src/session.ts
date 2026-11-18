@@ -1,21 +1,25 @@
-import { pairToolResults } from "./view.js";
+import type { JobHandle } from "./harness.js";
+import { modelView } from "./view.js";
 import { erasedEntry } from "./types.js";
 import type { Actor, AgentEvent, Answer, ContentPart, HistoryEntry, InputRequest, Job, ModelMessage, StoredSession } from "./types.js";
 
-export type InputTiming = "now" | "steer" | "after";
+export type InputTiming = "now" | "steer" | "after" | "propose";
 export interface QueuedInput {
 	id: string;
 	content: ContentPart[];
 	actorId: string;
 	when: InputTiming;
 	key?: string;
+	releasedBy?: string;
+	delegatedBy?: string;
+	authorityActors?: string[];
 	sources?: string[];
 	startedBy: { kind: "actor" | "job" | "plugin" | "answer"; id: string };
 	kind: string;
 	/** Set when this is not input but a continuation of tool calls left open past an earlier turn. */
 	continueCalls?: string[];
 }
-export interface InputReceipt { inputId: string; taken: "now" | "inTurn" | "after"; duplicate?: boolean }
+export interface InputReceipt { inputId: string; taken: "now" | "inTurn" | "after" | "proposed"; duplicate?: boolean }
 
 export interface RunningTurn { turnId: string; abort: AbortController; done: Promise<void> }
 export interface OpenRequest {
@@ -23,7 +27,16 @@ export interface OpenRequest {
 	resolve(answer: Answer): void;
 	timer?: NodeJS.Timeout;
 }
-export interface JobRecord { job: Job; cancel?: () => void | Promise<void> }
+export interface JobRecord {
+	job: Job;
+	key?: string;
+	detail?: unknown;
+	actors?: string[];
+	handle: JobHandle;
+	cancel?: () => void | Promise<void>;
+	cancelling?: Promise<void>;
+	ending?: Promise<void>;
+}
 
 /** One session: identity, settings, actors, current position and history. */
 export class Session {
@@ -34,6 +47,9 @@ export class Session {
 	readonly actors = new Map<string, Actor>();
 	steering: QueuedInput[] = [];
 	followUps: QueuedInput[] = [];
+	readonly proposals = new Map<string, QueuedInput>();
+	readonly admissions = new Map<string, QueuedInput>();
+	admitting: Promise<unknown> = Promise.resolve();
 	readonly keys = new Map<string, InputReceipt>();
 	running?: RunningTurn;
 	readonly jobs = new Map<string, JobRecord>();
@@ -41,9 +57,14 @@ export class Session {
 	readonly waiting = new Set<string>();
 	readonly recent: AgentEvent[] = [];
 	/** Recipients following this session, each through the output gate. */
-	readonly followers = new Set<{ push(event: AgentEvent): void }>();
+	readonly followers = new Set<{ recipient: string; push(event: AgentEvent): void; idle(): Promise<void> }>();
 	closed = false;
+	closing = false;
+	reopening = false;
 	erasing = false;
+	moving = false;
+	outsideTools = 0;
+	recoveredInput: QueuedInput[] = [];
 	/** The process stopped its part in this session; nothing more is recorded here. */
 	suspended = false;
 	/** Commits run one at a time, so each entry follows the one before it. */
@@ -65,20 +86,39 @@ export class Session {
 		this.entries.set(entry.id, entry);
 		if (!existing) this.order.push(entry.id);
 		// A key is remembered for the session's life, across restarts, so it is rebuilt from the record.
-		const keyed = entry.data as { inputId?: string; key?: string } | undefined;
-		if (entry.kind === "input" && keyed?.key && keyed.inputId && !this.keys.has(keyed.key)) this.keys.set(keyed.key, { inputId: keyed.inputId, taken: "now" });
+
 		if (entry.erased) {
 			if (!existing && entry.kind !== "position") this.position = entry.id;
 			return;
 		}
 		switch (entry.kind) {
+			case "inputAccepted": {
+				const { inputId, key, content, when, releasedBy, delegatedBy, taken } = entry.data as {
+					inputId: string; key?: string; content: ContentPart[]; when: InputTiming; releasedBy?: string; delegatedBy?: string; taken?: InputReceipt["taken"];
+				};
+				const actorId = entry.actorId!;
+				this.admissions.set(inputId, { id: inputId, actorId, key, content, when, releasedBy, delegatedBy, kind: "input", startedBy: { kind: "actor", id: actorId } });
+				if (key && !this.keys.has(key)) this.keys.set(key, { inputId, taken: taken ?? (when === "propose" ? "proposed" : when === "steer" ? "inTurn" : when) });
+				break;
+			}
+			case "inputHandedBack":
+				for (const id of (entry.data as { inputIds: string[] }).inputIds) this.admissions.delete(id);
+				break;
+			case "input": {
+				const { inputId, key } = (entry.data ?? {}) as { inputId?: string; key?: string };
+				if (inputId) {
+					this.admissions.delete(inputId);
+					if (key && !this.keys.has(key)) this.keys.set(key, { inputId, taken: "now" });
+				}
+				break;
+			}
 			case "position":
 				this.position = (entry.data as { to: string | null }).to;
 				return;
 			case "setting": {
 				const { key, value } = entry.data as { key: string; value: unknown };
 				if (key === "settings" && value && typeof value === "object") Object.assign(this.settings, value);
-				else this.settings[key === "thinking" ? "reasoning" : key] = value;
+				else this.settings[key === "thinking" ? "reasoning" : key === "approvalPolicy" ? "approval" : key] = value;
 				break;
 			}
 			case "actorJoined": {
@@ -95,6 +135,8 @@ export class Session {
 					// Erasing an input also forgets its key.
 					const erasedKey = (target?.data as { key?: string } | undefined)?.key;
 					if (erasedKey) this.keys.delete(erasedKey);
+					const inputId = (target?.data as { inputId?: string } | undefined)?.inputId;
+					if (inputId) { this.admissions.delete(inputId); this.proposals.delete(inputId); }
 					if (target) this.entries.set(id, erasedEntry(target));
 				}
 				break;
@@ -119,8 +161,8 @@ export class Session {
 	}
 
 	/** The model-visible messages on the current branch. */
-	modelMessages(entries: HistoryEntry[] = this.branch()): ModelMessage[] {
-		return pairToolResults(entries.filter((e) => e.modelVisible && e.message).map((e) => e.message!));
+	modelMessages(entries: HistoryEntry[] = this.branch(), turnId?: string): ModelMessage[] {
+		return modelView(entries, turnId);
 	}
 
 	isBusy(): boolean {

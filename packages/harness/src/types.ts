@@ -79,7 +79,7 @@ export interface ModelInfo extends ModelRef {
 // ---------- Actors ----------
 
 export type Authority = "watch" | "propose" | "input" | "answer" | "approve" | "tools" | "cancel" | "settings" | "erase" | "grant" | "jobs" | "delegate";
-export interface Actor { id: string; kind: "user" | "agent" | "host" | "program"; tenant?: string; authority: Authority[] }
+export interface Actor { id: string; kind: "user" | "agent" | "host" | "plugin" | "program"; tenant?: string; authority: Authority[] }
 
 // ---------- History ----------
 
@@ -106,8 +106,13 @@ export interface HistoryEntry {
 	data?: unknown;
 }
 
-export function erasedEntry({ id, parentId, kind }: HistoryEntry): HistoryEntry {
-	return { id, parentId, kind, erased: true } as HistoryEntry;
+export function erasedEntry({ id, parentId, kind, turnId, stepId, toolCallId, jobId }: HistoryEntry): HistoryEntry {
+	return { id, parentId, kind, erased: true,
+		...(typeof turnId === "string" ? { turnId } : {}),
+		...(typeof stepId === "string" ? { stepId } : {}),
+		...(typeof toolCallId === "string" ? { toolCallId } : {}),
+		...(typeof jobId === "string" ? { jobId } : {}),
+	} as HistoryEntry;
 }
 
 export type EntryDraft = Omit<HistoryEntry, "id" | "parentId" | "sessionId" | "time"> & { id?: string };
@@ -197,7 +202,7 @@ export type ModelStreamEvent =
 	| { type: "text"; delta: string }
 	| { type: "reasoning"; delta: string }
 	| { type: "toolInput"; delta: string };
-export interface RequestOptions { signal: AbortSignal; sessionId?: string; onEvent?(event: ModelStreamEvent): void }
+export interface RequestOptions { signal: AbortSignal; sessionId?: string; stepId?: string; onEvent?(event: ModelStreamEvent): void }
 
 export interface Provider {
 	id: string;
@@ -207,7 +212,7 @@ export interface Provider {
 	available?(): Promise<boolean>;
 	/** Make one model request. Never rejects for a model failure: the message says why. */
 	request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage>;
-	discardState?(sessionId: string, options?: { erase?: boolean }): Promise<void | { pending?: string[]; outOfReach?: string[] }>;
+	discardState?(sessionId: string, options?: { erase?: boolean; entryIds?: string[] }): Promise<void | { pending?: string[]; outOfReach?: string[] }>;
 }
 
 /** What the Runtime is given: the chosen model, without credentials. */
@@ -234,6 +239,10 @@ export interface WorkingEnvironment {
 	cwd: string;
 	/** Nothing from an interrupted attempt is still running when recovery begins. */
 	safeToRepeat?: boolean;
+	containment?: string;
+	points?: boolean;
+	save?(): Promise<string>;
+	restore?(point: string): Promise<void>;
 	forSession?(sessionId: string): WorkingEnvironment | Promise<WorkingEnvironment>;
 	sessionEnded?(sessionId: string): Promise<void> | void;
 	readFile(path: string): Promise<Buffer>;
@@ -279,6 +288,8 @@ export interface Configuration {
 export interface InterfaceCapability {
 	id: string;
 	actorId: string;
+	/** Whether this Interface declares its actor present for the session. */
+	present?(sessionId: string): boolean;
 	/** Told about input requests this Interface's actor may see. */
 	onInputRequest?(request: InputRequest): void;
 	onInputRequestClosed?(requestId: string): void;
@@ -344,7 +355,7 @@ export type Outcome =
 	| { kind: "failed"; error: string }
 	| { kind: "limit"; limit: string };
 
-export interface TurnSnapshot { model: ModelRef | null; system: string; tools: ToolDefinition[]; settings: TurnSettings }
+export interface TurnSnapshot { model: ModelRef | null; system: string; context?: ContentPart[]; tools: ToolDefinition[]; settings: TurnSettings }
 
 export interface TurnSettings { maxSteps?: number; reasoning?: string; maxOutput?: number }
 export interface TurnInput {
@@ -431,4 +442,4 @@ export interface GateResult<T> { refused?: string; pending?: string; value: T }
 // ---------- Output gate ----------
 
 export type OutputAnswer = { action: "pass"; events?: AgentEvent[] } | { action: "hold" } | { action: "block" } | undefined;
-export interface OutputPayload { events: AgentEvent[]; recipient: string; final: boolean }
+export interface OutputPayload { sessionId?: string; events: AgentEvent[]; recipient: string; final: boolean }

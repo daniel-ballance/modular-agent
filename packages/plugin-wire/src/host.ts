@@ -43,7 +43,7 @@ export interface Registration {
 	name: string;
 	providers?: { id: string; supports?: Record<string, boolean | string>; models: unknown[] }[];
 	toolSources?: { id: string; tools: unknown[]; perSession?: boolean }[];
-	workingEnvironment?: { containment: "strong" | "processGroup" | "none"; platforms?: string[]; safeToRepeat?: boolean };
+	workingEnvironment?: { containment: "strong" | "processGroup" | "none"; platforms?: string[]; points?: boolean };
 	hooks?: { hook: string; handlerId: number; order?: HandlerOrder }[];
 	runtime?: { id: string; supports: Record<string, boolean | string> };
 	commands?: { name: string; description: string }[];
@@ -133,10 +133,11 @@ export async function startExternalPlugin(spec: ExternalPluginSpec, info: { proj
 }
 
 /** What the host knows about each request it sent: the tool call's context, for the plugin's callbacks. */
-const STANDARD_HOOKS = new Set("plugin.load session.start session.end input turn.before turn.start step.before step.after tool.before tool.after model.failed turn.result turn.end provider.request provider.response".split(" "));
+const STANDARD_HOOKS = new Set("plugin.load session.start session.end input turn.before turn.start step.before step.after tool.before tool.after model.failed turn.result turn.end provider.request provider.response output".split(" "));
 const RUNTIME_HOOKS = new Set("turn.start step.after tool.before tool.after model.failed turn.result turn.end".split(" "));
 
 interface Parent {
+	actors?: string[];
 	runtime?: boolean;
 	provider?: string;
 	sessionId?: string;
@@ -146,14 +147,18 @@ interface Parent {
 
 function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>): Plugin {
 	const parents = new Map<number | string, Parent>();
+	let workActors: PluginApi["workActors"];
+	const changedBy = new Map<number, Promise<unknown>>();
 	const track = <T>(p: Promise<T> & { id: number }, parent: Parent): Promise<T> => {
-		parents.set(p.id, parent);
-		return p.finally(() => parents.delete(p.id));
+		parents.set(p.id, { ...parent, actors: parent.actors ?? (parent.sessionId ? workActors(parent.sessionId) : []) });
+		return p.then(async (value) => { await changedBy.get(p.id); return value; })
+			.finally(() => { parents.delete(p.id); changedBy.delete(p.id); });
 	};
 	return {
 		name: reg.name,
 		stop,
 		async setup(api: PluginApi) {
+			workActors = api.workActors;
 			const parentOf = (p: any): Parent => {
 				const parent = parents.get(p.parentRequestId);
 				if (!parent || !peer.isWaiting(p.parentRequestId)) throw new WireError("invalid_request", "There is no live parent");
@@ -265,6 +270,39 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				api.reportProblem(String(p.where ?? reg.name), new Error(String(p.message)));
 			});
 
+			const ownJob = (p: any) => {
+				const job = typeof p.jobId === "string" && api.findJob(p.jobId);
+				if (!job || (p.sessionId != null && p.sessionId !== job.sessionId)) throw new WireError("invalid_request", "No such unfinished job of this plugin");
+				return job.sessionId;
+			};
+			peer.handle("host/jobs/start", async (p) => {
+				const parent = parentOf(p);
+				if (!parent.sessionId || !parent.actors?.length || parent.signal?.aborted ||
+					typeof p.kind !== "string" || (p.key !== undefined && typeof p.key !== "string")) throw new WireError("invalid_request", "Job needs an authorized parent and kind");
+				try {
+					const handle = api.startJob(parent.sessionId, { kind: p.kind, key: p.key, detail: p.detail, actors: parent.actors, toolCallId: parent.tool?.call.id });
+					await handle.ready;
+					return { jobId: handle.id, started: handle.started };
+				} catch (error) { throw new WireError("invalid_request", String(error)); }
+			});
+			peer.onNotification("host/jobs/progress", (p) => {
+				const id = ownJob(p);
+				if (Array.isArray(p.content)) api.resumeJob(id, p.jobId).progress(fromWire(p.content));
+			});
+			peer.handle("host/jobs/end", async (p) => {
+				const id = ownJob(p);
+				if (!["completed", "failed", "cancelled"].includes(p.outcome?.kind) || typeof p.report !== "boolean" ||
+					(p.result !== undefined && !Array.isArray(p.result))) throw new WireError("invalid_request", "Invalid job result");
+				try { await api.resumeJob(id, p.jobId).finish(p.outcome.kind, fromWire(p.result), { report: p.report, error: p.outcome.error }); }
+				catch (error) { throw new WireError("invalid_request", String(error)); }
+				return {};
+			});
+			peer.handle("host/jobs/unfinished", async (p) => ({
+				jobs: api.unfinishedJobs(sessionOf(p)).map(({ job, key, detail }) => ({ jobId: job.id, kind: job.kind, key, detail, actorId: job.actorId })),
+			}));
+			peer.handle("host/jobs/resume", async (p) => { api.resumeJob(ownJob(p), p.jobId); return {}; });
+			api.onJobCancel(async (jobId) => { await peer.request("jobs/cancel", { jobId }); });
+
 			// ---------- what the plugin provides ----------
 			for (const p of reg.providers ?? []) api.provide("provider", new WireProvider(peer, p.id, (p.supports ?? {}) as never, fromWire(p.models) as ModelInfo[], track));
 			for (const t of reg.toolSources ?? []) {
@@ -272,16 +310,40 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				api.provide("tool-source", source);
 				if (t.perSession) api.on("session.start", (s: { sessionId: string }) => source.refresh(s.sessionId));
 			}
-			peer.onNotification("tools/changed", (p) => WireToolSource.changed.get(peer)?.get(p?.toolSource)?.changedList());
-			if (reg.workingEnvironment) api.provide("working-environment", new WireEnvironment(peer, api.project, reg.workingEnvironment.containment, reg.workingEnvironment.safeToRepeat === true));
-			if (reg.runtime) api.provide("runtime", new WireRuntime(peer, reg.runtime.id, { ...reg.runtime.supports, rewinding: false }, track));
+			peer.onNotification("tools/changed", (p) => {
+				const source = WireToolSource.changed.get(peer)?.get(p?.toolSource);
+				if (!source) return;
+				if (p.parentRequestId != null) parentOf(p);
+				const refresh = source.changedList();
+				if (p.parentRequestId != null) {
+					const previous = changedBy.get(p.parentRequestId);
+					changedBy.set(p.parentRequestId, Promise.all([previous, refresh]));
+				}
+			});
+			if (reg.workingEnvironment) api.provide("working-environment", new WireEnvironment(peer, api.project, reg.workingEnvironment.containment, reg.workingEnvironment.points === true));
+			if (reg.runtime) api.provide("runtime", new WireRuntime(peer, reg.runtime.id, reg.runtime.supports, track));
 			for (const h of reg.hooks ?? []) {
-				api.on(h.hook, async (payload: { sessionId?: string }) => fromWire(await track(peer.request("hook/handle", { handlerId: h.handlerId, hook: h.hook, payload: toWire(payload) }), { sessionId: payload.sessionId })) ?? undefined, h.order ?? "normal");
+				if (h.hook === "output") {
+					api.on(h.hook, async (p: import("@modular-agent/harness").OutputPayload) => {
+						const events = p.events.map(({ type, data }) => ({ type, data }));
+						const answer = await peer.request<{ events?: { type: string; data: unknown }[]; block?: boolean } | null>("hook/handle", {
+							handlerId: h.handlerId, hook: h.hook, payload: { sessionId: p.sessionId, recipient: p.recipient, events, final: true },
+						});
+						if (answer === null) return undefined;
+						if (answer?.block === true) return { action: "block" };
+						if (!Array.isArray(answer?.events) || answer.events.some((e) => typeof e?.type !== "string")) throw new WireError("invalid_request", "Invalid output gate answer");
+						return { action: "pass", events: answer.events.map((event, i) => ({
+							...(p.events[i]?.type === event.type ? p.events[i] : p.events.find((e) => e.type === event.type) ?? p.events[0]), ...event,
+						})) };
+					}, h.order, { stream: true });
+				} else {
+					api.on(h.hook, async (payload: { sessionId?: string }) => fromWire(await track(peer.request("hook/handle", { handlerId: h.handlerId, hook: h.hook, payload: toWire(payload) }), { sessionId: payload.sessionId })) ?? undefined, h.order ?? "normal");
+				}
 			}
 			for (const c of reg.commands ?? []) {
 				api.registerCommand(c.name, {
 					description: c.description,
-					run: async (args, ctx) => (await track(peer.request<{ output?: string }>("command/run", { name: c.name, args, sessionId: ctx.sessionId, actorId: ctx.actorId }), { sessionId: ctx.sessionId }))?.output,
+					run: async (args, ctx) => (await track(peer.request<{ output?: string }>("command/run", { name: c.name, args, sessionId: ctx.sessionId, actorId: ctx.actorId }), { sessionId: ctx.sessionId, actors: [ctx.actorId] }))?.output,
 				});
 			}
 		},
@@ -308,12 +370,12 @@ class WireRuntime implements Runtime {
 		});
 		peer.handle("host/runtime/model", async (p, ctx) => {
 			const t = turn(p);
-			// ...and streamed model output here, as it passes through.
+			// Pass pieces on to the Runtime. The Harness delivers the same pieces to followers.
 			return toWire(await t.input.model.request(fromWire(p.request), {
 				signal: AbortSignal.any([t.signal, ctx.signal]),
 				sessionId: t.input.sessionId,
+				stepId: p.stepId,
 				onEvent: (event) => {
-					t.host.report("model.output", event, p.stepId ? { stepId: p.stepId } : undefined);
 					peer.notify("host/runtime/modelEvent", { parentRequestId: ctx.id, event });
 				},
 			}));
@@ -391,8 +453,8 @@ class WireProvider implements Provider {
 			WireProvider.listeners.get(this.peer)?.delete(req.id);
 		}
 	}
-	async discardState(sessionId: string, options?: { erase?: boolean }): Promise<{ pending?: string[]; outOfReach?: string[] }> {
-		return this.peer.request("provider/discard", { provider: this.id, sessionId, erase: options?.erase });
+	async discardState(sessionId: string, options?: { erase?: boolean; entryIds?: string[] }): Promise<{ pending?: string[]; outOfReach?: string[] }> {
+		return this.peer.request("provider/discard", { provider: this.id, sessionId, erase: options?.erase, entryIds: options?.entryIds });
 	}
 	static listeners = new WeakMap<WirePeer, Map<number, (p: any) => void>>();
 	static listen(peer: WirePeer, id: number, fn: (p: any) => void): void {
@@ -426,13 +488,14 @@ class WireToolSource implements ToolSource {
 	tools(sessionId?: string): ToolDefinition[] {
 		return (sessionId && this.bySession.get(sessionId)) || this.everywhere;
 	}
-	changedList(): void {
+	changedList(): Promise<void> {
 		const prior = this.changing ?? Promise.resolve();
 		const current = prior.then(async () => {
 			await this.refresh();
 			if (this.perSession) await Promise.all([...this.bySession.keys()].map((id) => this.refresh(id)));
 		});
 		this.changing = current.catch(() => undefined);
+		return this.changing;
 	}
 	async refresh(sessionId?: string): Promise<void> {
 		const list = fromWire((await this.peer.request<{ tools: unknown[] }>("tools/list", { toolSource: this.id, ...(sessionId ? { sessionId } : {}) })).tools) as ToolDefinition[];
@@ -458,14 +521,21 @@ class WireToolSource implements ToolSource {
 
 class WireEnvironment implements WorkingEnvironment {
 	readonly id: string;
-	constructor(private peer: WirePeer, readonly cwd: string, readonly containment: string, readonly safeToRepeat: boolean, private sessionId?: string) {
+	constructor(private peer: WirePeer, readonly cwd: string, readonly containment: string, readonly points: boolean, private sessionId?: string) {
 		this.id = `plugin:${cwd}`;
 	}
 	at(cwd: string): WorkingEnvironment {
-		return new WireEnvironment(this.peer, cwd, this.containment, this.safeToRepeat, this.sessionId);
+		return new WireEnvironment(this.peer, cwd, this.containment, this.points, this.sessionId);
 	}
 	forSession(sessionId: string): WorkingEnvironment {
-		return new WireEnvironment(this.peer, this.cwd, this.containment, this.safeToRepeat, sessionId);
+		return new WireEnvironment(this.peer, this.cwd, this.containment, this.points, sessionId);
+	}
+	get safeToRepeat(): boolean { return this.containment === "strong"; }
+	async save(): Promise<string> {
+		return (await this.peer.request<{ point: string }>("env/save", { cwd: this.cwd, sessionId: this.sessionId })).point;
+	}
+	async restore(point: string): Promise<void> {
+		await this.peer.request("env/restore", { cwd: this.cwd, sessionId: this.sessionId, point });
 	}
 	async sessionEnded(sessionId: string): Promise<void> {
 		await this.peer.request("env/sessionEnded", { sessionId });

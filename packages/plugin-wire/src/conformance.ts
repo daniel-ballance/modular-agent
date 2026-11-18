@@ -33,6 +33,7 @@ export class ConformanceProvider implements Provider {
 			options.onEvent?.({ type: "text", delta: t });
 			return { role: "assistant", content: [text(t)], stop: "finished", usage };
 		};
+		if (latest.startsWith("fail:")) return { role: "assistant", content: [], stop: "failed", error: { kind: "other", message: latest.slice(5) }, usage };
 		const tool = /^tool:(\S+)\s+([\s\S]*)$/.exec(latest);
 		if (tool && !result) {
 			let input: Record<string, unknown>;
@@ -87,13 +88,49 @@ export function conformanceTools(): Plugin {
 	return { name: "conformance-tools", setup: (api) => api.provide("tool-source", new ConformanceTools()) };
 }
 
-/** The conformance plugin's hooks: a gate on a marker string, and a system line. */
+const SECRET = "conformance-secret";
+
+/** Replace a marker even when it straddles events. Keep each piece's place in the stream. */
+function redactPieces(pieces: { object: Record<string, any>; key: string }[]): void {
+	const joined = pieces.map(({ object, key }) => object[key]).join("");
+	const matches = [...joined.matchAll(/conformance-secret/g)].map((m) => m.index);
+	let start = 0;
+	let match = 0;
+	for (const { object, key } of pieces) {
+		const value = object[key] as string;
+		const end = start + value.length;
+		let cursor = start;
+		let out = "";
+		while (match < matches.length && matches[match] < end) {
+			const at = matches[match];
+			if (at >= start) out += value.slice(cursor - start, at - start) + "[redacted]";
+			cursor = at + SECRET.length;
+			if (cursor > end) break;
+			match++;
+		}
+		object[key] = out + value.slice(cursor - start);
+		start = end;
+	}
+}
+
+/** The conformance plugin's hook handlers. */
 export function conformanceHooks(): Plugin {
 	return {
 		name: "conformance-hooks",
 		setup(api) {
 			api.on("tool.before", (p: { call: { input: unknown } }) => (JSON.stringify(p.call.input ?? {}).includes("conformance-forbidden") ? { refuse: "refused by the conformance plugin" } : undefined));
 			api.on("turn.before", () => ({ system: "The conformance plugin is loaded." }));
+			api.on("output", (p: { events: { type: string; data: any }[] }) => {
+				const events = JSON.parse(JSON.stringify(p.events)) as typeof p.events;
+				for (const type of ["text", "reasoning", "toolInput"]) {
+					redactPieces(events.flatMap(({ type: name, data }) =>
+						name === "model.output" && (data?.type ?? "text") === type && typeof data.delta === "string" ? [{ object: data, key: "delta" }] : []));
+				}
+				redactPieces(events.flatMap(({ type, data }) => type === "tool.progress" && Array.isArray(data?.content)
+					? data.content.filter((part: any) => part?.type === "text" && typeof part.text === "string").map((part: any) => ({ object: part, key: "text" })) : []));
+				const redacted = JSON.parse(JSON.stringify(events, (_key, value) => typeof value === "string" ? value.replaceAll(SECRET, "[redacted]") : value));
+				return { action: "pass", events: redacted };
+			});
 		},
 	};
 }

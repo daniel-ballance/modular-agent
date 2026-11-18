@@ -1,7 +1,7 @@
 import type { GateAnswer, GateResult, HandlerOrder, HookRule, TransformAnswer } from "./types.js";
 
 type Handler = (payload: any) => unknown | Promise<unknown>;
-interface Registered { plugin: string; order: HandlerOrder; seq: number; handler: Handler }
+interface Registered { plugin: string; order: HandlerOrder; seq: number; handler: Handler; stream?: boolean }
 interface HookPoint { name: string; owner: string; rule: HookRule; handlers: Registered[] }
 
 const ORDER: Record<HandlerOrder, number> = { first: 0, normal: 1, last: 2 };
@@ -43,9 +43,9 @@ export class HookRegistry {
 		return [...this.points.values()].map((p) => ({ name: p.name, owner: p.owner, rule: p.rule, handlers: p.handlers.map((h) => h.plugin) }));
 	}
 
-	on(name: string, plugin: string, handler: Handler, order: HandlerOrder = "normal"): () => void {
+	on(name: string, plugin: string, handler: Handler, order: HandlerOrder = "normal", stream?: boolean): () => void {
 		const point = this.point(name);
-		const entry: Registered = { plugin, order, seq: this.seq++, handler };
+		const entry: Registered = { plugin, order, seq: this.seq++, handler, stream };
 		point.handlers.push(entry);
 		point.handlers.sort((a, b) => ORDER[a.order] - ORDER[b.order] || a.seq - b.seq);
 		return () => {
@@ -161,8 +161,8 @@ export class HookRegistry {
 	}
 
 	/** Handlers in order, for rules the owner applies itself (such as the output gate). */
-	raw(name: string): { plugin: string; handler: Handler }[] {
-		return this.point(name).handlers.map((h) => ({ plugin: h.plugin, handler: h.handler }));
+	raw(name: string): readonly Registered[] {
+		return this.point(name).handlers;
 	}
 
 	private point(name: string, rule?: HookRule): HookPoint {
