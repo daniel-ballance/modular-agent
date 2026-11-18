@@ -39,7 +39,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | Parts as services: history store, working environment, model gateway | proven | Separate processes over HTTP, with leases, safe retries and cancelling. |
 | The agent served over HTTP | proven | Server-sent events, resumable from the last entry seen. |
 | Follows the ACP host bindings `modular-agent-acp/1` and `/2` | proven | `/2` is opt-in. It reports a failed turn as an RPC error; `/1` keeps the refusal response. Both keep the turn in history. |
-| Follows the plugin binding `modular-agent-plugin/1` | proven | Plugin kit 110/110, the probe plugin's host checks, and the jobs plugin ([ADR 0017](adr/0017-plugins-in-any-language.md)). Across TypeScript, Rust, Python, Go and Elixir: every host with every build's Provider, hooks (the output gate included), tools and working environment (25/25), and with every build's Runtime through a real `kill -9` (25/25 durable, 25/25 transient). |
+| Follows the plugin binding `modular-agent-plugin/1` | proven | Plugin kit 111/111, the probe plugin's host checks, and the jobs plugin ([ADR 0017](adr/0017-plugins-in-any-language.md)). Across TypeScript, Rust, Python, Go and Elixir: every host with every build's Provider, hooks (the output gate included), tools and working environment (25/25), and with every build's Runtime through a real `kill -9` (25/25 durable, 25/25 transient). |
 | Portable sessions (`portableSessions`) | proven | Every entry in the [shared shapes](bindings/data.md#portable-sessions) ([ADR 0018](adr/0018-portable-sessions.md)), jobs and queued input included. Each of the five builds' agents reopens, continues and recovers after `kill -9` a session each of the others wrote, and takes up a job the killed agent left: 25/25 durable, 25/25 transient. |
 | Follows the history service binding `modular-agent-history/1` | proven | History kit 34/34 for this build's service and client. Swapped with Go's service both ways. Reopening after a crash waits for the old lease (`retryAfterMs`). |
 | A plugin can run in another process | proven | The whole suite passes with the Runtimes, tools, environment and MCP plugin out of process. |
@@ -128,7 +128,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | A summary names its sources; erasure follows copies | proven | |
 | What counts as a copy: responses, results, turn results, forks, jobs, input taken | built, tested | Responses name the visible sources of their request. Erasure follows those links, tool calls, turn results, summaries, forks and job reports, including child results. |
 | Erasure refused while another writer holds an affected session | built, tested | The Harness checks affected sessions and takes their write leases before deleting anything. Erasure during affected work is refused. |
-| Records of authority can't be erased | built, tested | Joining, granting new rights and leaving are protected. |
+| Records of authority can't be erased | proven | Joining, granting new rights, leaving, session limits and tenant assignments are protected. |
 | "Safe to repeat" is a promise from both the tool and the working environment | built, tested | `env-local` declares the promise on Linux. Started calls are retried only with the recorded promise and both current promises. |
 | An interrupted model request is repeated only on the Provider's promise | built | Recovery does not repeat a request if the Provider may keep state or run tools, unless it explicitly promises safe repetition. |
 | Cancelling a command stops what it started, even outside its process group | changed, proven | Found by the plugin kit: `setsid` escapees survived a cancel until the agent died. Each command now carries its own marker. |
@@ -137,7 +137,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | A key binds the whole question | built, tested | A change of kind, text, options, credential name or tool call requires a new answer. |
 | Input keys survive a restart | changed, proven | Found by the ACP conformance kit; keys are now recorded with the input. |
 | A secret is never asked over a protocol that forbids it in forms | changed, built | Found by the round-two review of the ACP binding. |
-| A job's end is recorded before its report | proven | |
+| A job's end is recorded before its report | proven | `host/jobs/end` waits for the report's keyed `inputAccepted` entry, not for the turn. A reopened session runs a report that was accepted but not taken. |
 | A child's job isn't finished while it has calls open | proven | |
 | Trust is given and kept outside the project | proven | |
 | Host MCP servers serve one session and aren't recorded | proven | |
@@ -145,3 +145,17 @@ When the code and the description disagree, this page says so. Update it when ei
 | A Provider that keeps state starts again after a move or erasure | built | Built-in Providers do not keep state. A stateful external Provider gets `provider/discard`, with `erase: true` for erasure. |
 | Mixed input acts with only the rights its actors share | built, tested | Each input taken into the turn narrows its authority, including steering input and after recovery. |
 | Following resumes from an entry; unknown entries are refused | built, tested | The ACP `history` extension and HTTP event stream use entry ids. HTTP returns 404 for an unknown id. |
+
+## Round six binding checks
+
+| Item | Status | Evidence |
+|---|---|---|
+| Limits and tenants | proven | ACP declares `sessionLimits` and `tenants`. The `administer` right controls `limit`. The tenant is recorded before all other entries. Rights narrow immediately, and `tenantTokens` counts usage across sessions and reopenings. The ACP kit and offline tests cover both ceilings and token budgets. |
+| Shared output events | proven | The plugin wire host maps streams and single events to the shared shapes and back. The conformance gate redacts a test secret across text pieces and in build-specific events. The probe checks host event shapes. |
+| One plugin of each name | proven | The probe's second registration receives `plugin/shutdown` with `reason: refused`. TypeScript's served part sets have distinct names. |
+| Proposals and presence | proven | The ACP kit and offline tests cover listing and withdrawing proposals, `handedBack` on a declined release, and choosing whether a joined actor is present. |
+| Job rights and report admission | proven | `jobStarted` records the rights shared by the work behind it. Reports use those rights, subject to current ceilings, and reach the model unchanged. |
+| Rewinding | proven | The ACP kit checks file restoration. Offline tests also cover refusing another branch or a missing point, rolling files back after a failed history write, and reporting open-world calls as out of reach. |
+| Withheld replies | proven | A blocked or failing gate answers ACP extensions with `-32000` and `data.code: withheld` without undoing the request. |
+| Reasoning and cancellation | proven | The next turn uses a reasoning level the chosen model accepts without raising it. A cancelled turn does not become failed because a Runtime callback failed. |
+| History page minimum | proven | A first entry that fits by itself is sent even when adding the cursor takes the page over 4 MiB. |
