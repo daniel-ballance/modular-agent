@@ -289,6 +289,22 @@ The matrix found three more holes before it passed:
 - whether a Runtime may read history. It may, with `host/history`.
 - a host that didn't answer a cancelled request. The binding says it must.
 
+## Round six: the last open items
+
+Round six closed what round five left open ([ADR 0020](adr/0020-tenants-limits-and-output-events.md)):
+- **tenants and session limits,** with an `administer` right and a token budget per tenant;
+- **a shared shape for the output gate's events;**
+- **one plugin of each name per host;**
+- **listing and withdrawing proposed input.**
+
+It also took in the round-five gaps the builders agreed on: the order of a rewind, presence, a job's rights, a reply the gate withholds, and a reasoning level the new model doesn't accept.
+
+**What this build changed.** It does all of the above, and passes the plugin kit (111 checks), the ACP kit with the probe and jobs plugins and the limit and tenant checks, and portable sessions. Its served output gate always answers with the events, which the binding allows, and that is what exposed the number hole below.
+
+**The matrices,** across the five builds: plugins 25/25; Runtimes through `kill -9`, 25/25 durable and 25/25 transient; portable sessions with jobs, 25/25 durable and 25/25 transient. One combination failed at first: a Rust host with this build's gate. JavaScript writes `0.0` as `0`, and the Rust host took the echoed entries as changed and blocked them. Shared data now says numbers compare by value.
+
+**Real models.** An Elixir agent on `gpt-6-luna` and a Python agent on Haiku each ran a tenant without `tools`, a session limit set and lifted, and proposals listed, withdrawn and released. `gpt-6-luna` took one refusal for an empty answer; Haiku reported its refusal exactly. A result that isn't completed now says plainly that the call didn't run.
+
 ## Round five: the open items
 
 Round five closed what round four left open ([ADR 0019](adr/0019-acp-2-and-several-actors.md)), and the binding gaps the five builders logged in round four:

@@ -109,7 +109,7 @@
   <div class="step"><b>Describe</b>Parts, contracts and guarantees: what passes between parts, never the wiring (ADR 0010).</div>
   <div class="step"><b>Build clean-room</b>Independent builders get only the documents, and log every gap they had to decide.</div>
   <div class="step"><b>Bind the wire</b>Small versioned bindings: ACP for hosts, plugins in any language, shared data, history over HTTP.</div>
-  <div class="step"><b>Check</b>A conformance kit per binding: plugin kit (110 checks), ACP kit (109), portable sessions (86).</div>
+  <div class="step"><b>Check</b>A conformance kit per binding: plugin kit (111 checks), ACP kit (130), portable sessions (102).</div>
   <div class="step"><b>Swap</b>Every build's agent with every build's parts, through a real <code>kill -9</code>. Each failure becomes a rule and a kit check.</div>
 </div>
 
@@ -131,19 +131,19 @@
   <tr><td><b>Crash safety as a contract</b></td><td>"Safe to repeat" is a promise from the tool and the environment. Starts are recorded before work runs; nothing finished runs twice.</td><td>Best-effort retries, or a durable engine baked in.</td></tr>
   <tr><td><b>Portable sessions</b></td><td>History in shared shapes, so any build reopens, continues and recovers another's session.</td><td>Sessions locked to one implementation.</td></tr>
   <tr><td><b>Host-drivable</b></td><td>Speaks ACP with a declared feature set, so a host like T3 Code drives it as it drives other agents.</td><td>A bespoke API per agent.</td></tr>
-  <tr><td><b>Safety in the Harness</b></td><td>Authority only narrows; approvals fail closed; secrets go straight to the credential store; every output passes a gate; erasure follows copies.</td><td>Left to each feature.</td></tr>
+  <tr><td><b>Safety in the Harness</b></td><td>Authority only narrows, under session limits and tenants; approvals fail closed; secrets go straight to the credential store; every output passes a gate; erasure follows copies.</td><td>Left to each feature.</td></tr>
 </table>
 
 <h2>What we learned</h2>
 <div class="grid2">
-  <div class="card quote">Each build passed every kit on its own, yet every round of swaps found holes the kits missed: 24 across rounds two to five. Nearly all were the same kind: a receiver relying on a value the binding never defined, such as a timeout of 0, an event name, the names of rights, or a folder replaced on restore.</div>
+  <div class="card quote">Each build passed every kit on its own, yet every round of swaps found holes the kits missed: 25 across rounds two to six. Nearly all were the same kind: a receiver relying on a value the binding never defined, such as a timeout of 0, an event name, the names of rights, a folder replaced on restore, or <code>0.0</code> written as <code>0</code>.</div>
   <div class="card quote">The descriptions of the parts held throughout. What kept needing work was the exact values one side relies on from the other. So the recipe is: describe the parts, bind each wire narrowly, write a kit per binding, and run every pairing.</div>
 </div>
 
 <h2>Status</h2>
 <div class="card warnbox">
-  <p><b>Done:</b> 19 decision records; five builds passing every kit and every 5×5 swap matrix; ACP <code>/2</code>, several actors, jobs, rewinding and remote output gates.</p>
-  <p style="margin:0"><b>In progress (round six):</b> listing proposed input, a shared shape for output events, tenant and administrator limits on authority, and one plugin per name.</p>
+  <p><b>Done:</b> 20 decision records; five builds passing every kit and every 5×5 swap matrix; ACP <code>/2</code>, several actors and proposals, jobs, rewinding, remote output gates with shared event shapes, and tenants and session limits on authority.</p>
+  <p style="margin:0"><b>Known limits:</b> a tenant's token budget isn't reserved ahead, so turns already running can cross it together; production performance is not a goal.</p>
 </div>
 
 <footer>Repository: <code>~/Code/modular-agent</code>. Start with <code>docs/architecture.md</code>, <code>docs/contracts.md</code> and <code>docs/bindings/</code>; the decisions are in <code>docs/adr/</code>.</footer>

@@ -23,3 +23,4 @@ Each record explains one decision that is hard to reverse and would surprise a r
 | [0017](0017-plugins-in-any-language.md) | A plugin in any language, through one binding of the contracts | stands |
 | [0018](0018-portable-sessions.md) | Portable sessions: one shared format for what history holds | stands |
 | [0019](0019-acp-2-and-several-actors.md) | ACP `/2`, several actors, jobs, rewinding and the output gate across processes | stands |
+| [0020](0020-tenants-limits-and-output-events.md) | Tenants, session limits, output events, and one plugin per name | stands |
