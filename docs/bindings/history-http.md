@@ -65,7 +65,7 @@ An Entry is a JSON object with at least `id`, a string unique in its session, an
 |---|---|---|
 | `POST /v1/sessions/{id}/erase` | `{ "entryIds": [string], "lease"?: string }` | `200 { "erased": [string] }` |
 
-- **What remains of an erased entry** is only `{ "id", "parentId", "kind", "erased": true }`, with `kind` null if the entry had none. Every other field is removed, in every place the service keeps it.
+- **What remains of an erased entry** is only `{ "id", "parentId", "kind", "erased": true }`, with `kind` null if the entry had none, plus whichever of `turnId`, `stepId`, `toolCallId` and `jobId` the entry had, as strings. Every other field is removed, in every place the service keeps it.
 - **An erased entry can't be restored.** Resending its original content gives `409 conflict`.
 - **Erasing an entry again is harmless.** `erased` lists every known entry asked for, including ones already erased. Unknown ids are ignored.
 - **Erasure is atomic for one session.** An agent that erases across sessions erases each in turn, and retries any that failed.
@@ -80,6 +80,7 @@ An Entry is a JSON object with at least `id`, a string unique in its session, an
 
 ## Changes
 
+- **2026-11-18, round five.** An erased entry keeps its `turnId`, `stepId`, `toolCallId` and `jobId`, as the [shared data](data.md#history-entries) now says. They are identities, not content.
 - **2026-11-18, round four.** `409 held` carries `retryAfterMs`, and an agent reopening a session after a crash waits for the old lease to run out. Both the TypeScript and Go agents failed the ACP kit's crash check on a history service: the killed process still held the lease, and the new one was refused. Reopening another agent's session is promised between agents that declare portable sessions.
 - **2026-11-17, after round two.** Clarifications from the Go build's binding gaps, which the TypeScript service also follows:
   - `400 invalid_request`;

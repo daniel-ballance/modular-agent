@@ -10,7 +10,9 @@ It covers:
 - the working environment;
 - handlers at the standard hook points;
 - commands;
-- the Runtime (stage 2): a Runtime in one language running turns for another language's Harness.
+- the Runtime (stage 2): a Runtime in one language running turns for another language's Harness;
+- jobs: work a plugin starts that outlives a turn;
+- the output gate, a stream at a time.
 
 History, credential and configuration stores are not hosted this way: history has [its own binding](history-http.md), and the other two hold secrets or are trivial.
 
@@ -67,14 +69,15 @@ The plugin answers with its registration. Registration is the only source of wha
   "name": "my-plugin",
   "providers": [ { "id": "conformance", "supports": { "keepsState": false, "runsTools": false }, "models": [ ModelInfo ] } ],
   "toolSources": [ { "id": "files", "tools": [ ToolDefinition ], "perSession": false } ],
-  "workingEnvironment": { "containment": "strong" | "processGroup" | "none", "platforms": ["linux"] },
+  "workingEnvironment": { "containment": "strong" | "processGroup" | "none", "platforms": ["linux"], "points": false },
   "hooks": [ { "hook": "tool.before", "handlerId": 1, "order": "normal" } ],
   "commands": [ { "name": "hello", "description": "..." } ],
-  "runtime": { "id": "durable", "supports": { "inputDuringTurn": true, "waitingThroughRestart": true, "continuesAfterRestart": true, "rewinding": false } },
+  "runtime": { "id": "durable", "supports": { "inputDuringTurn": true, "waitingThroughRestart": true, "continuesAfterRestart": true } },
   "replaces": [ "provider:conformance", "tool:bash", "working-environment" ]
 }
 ```
 
+- **`name` is the plugin's identity,** the same in every build and every version of it. Jobs belong to a plugin by name ([Jobs](#jobs)), so a renamed plugin loses its unfinished jobs.
 - **Every field but `binding` and `name` is optional.** A binding the plugin can't speak gets the error `not_supported`.
 - **`order`** is `first`, `normal` or `last`, as in [Hook points](../contracts.md#hook-points).
 - **`replaces`** names items the host leaves out of its own plugins in favour of this one: `runtime`, `working-environment`, `provider:<id>`, `tool:<name>` or `command:<name>`.
@@ -98,7 +101,7 @@ While a call runs, the plugin may:
 - **ask a question:** `host/ask { parentRequestId, request }`, with an InputRequestDraft, which returns an Answer. Questions in one call are keyed by their order in the run, as in Contracts. A call that left a question open answers `{ pending }`, and runs again from the top once the question is answered.
 - **use the session's working environment** through `host/env/*` (below). A tool never uses a working environment of its own, unless its plugin is the session's working environment. Swapping the working environment then moves every tool with it.
 
-When its list changes, the plugin sends the notification `tools/changed { toolSource }`. It sends it before it answers the request that caused the change. The host then reads the list again before it passes that answer on.
+When its list changes, the plugin sends the notification `tools/changed { toolSource, parentRequestId? }`, with the id of the request that caused the change, if one did. It sends it before it answers the request that caused the change. The host then reads the list again before it passes that answer on.
 
 ## The host asks a Provider
 
@@ -107,7 +110,7 @@ When its list changes, the plugin sends the notification `tools/changed { toolSo
 | `provider/models` | `provider` | `{ "models": [ModelInfo] }` |
 | `provider/available` | `provider` | `{ "available": boolean }` |
 | `provider/request` | `provider`, `model` (`{ provider, id }`), `request` (a ModelRequest), `sessionId` *(optional)* | an assistant message |
-| `provider/discard` | `provider`, `sessionId`, `erase` *(optional)* | `{}`. For a Provider that keeps state ([Provider state](../contracts.md#provider-state)). With `erase: true`, for [erasure](../contracts.md#erasure), the Provider also deletes the remote copies it knows of, and answers `{ "pending"?: [string], "outOfReach"?: [string] }`, describing what it couldn't delete yet and what it never can. The host awaits it before reporting the erasure. |
+| `provider/discard` | `provider`, `sessionId`, `erase` *(optional)*, `entryIds` *(with `erase`)* | `{}`. For a Provider that keeps state ([Provider state](../contracts.md#provider-state)). With `erase: true`, for [erasure](../contracts.md#erasure), the Provider also deletes the remote copies it knows of, of the entries named, and answers `{ "pending"?: [entryId], "outOfReach"?: [string] }`. `pending` lists the entries whose remote copies it couldn't delete yet; it deletes them when asked again. `outOfReach` names kinds of copies it never can, as in the ACP `erase` result. The host awaits it before reporting the erasure. |
 
 - **The response streams** as notifications `provider/event { parentRequestId, event }`, all before the result.
 - **A model's failure is a result, not an error:** an assistant message with `stop: "failed"` and an `error`.
@@ -123,9 +126,13 @@ Every request carries `cwd`, the session's project or a folder in it, and `sessi
 | `env/read` | `cwd`, `path` | `{ "data": "<base64>" }` |
 | `env/write` | `cwd`, `path`, `data` (base64) | `{}` |
 | `env/exists` | `cwd`, `path` | `{ "exists": boolean }` |
+| `env/save` | `cwd` | `{ "point": string }`: a saved point, from which `env/restore` can put the project's files back as they are now. Only if the registration says `points: true`. |
+| `env/restore` | `cwd`, `point` | `{}`, with the files as they were at the point; or `not_found` for a point it no longer has. |
 | `env/exec` | `cwd`, `command`, `timeoutMs` *(optional)* | an ExecResult. `timeoutMs` is a positive number of milliseconds. A sender leaves it out for no limit, and a receiver treats `0` the same as leaving it out. When it passes, the command is stopped and the result has `timedOut: true`. |
 
 - **A session's background work:** processes a command leaves running outlive the call and a cancelled turn, as [the working environment](../contracts.md#the-working-environment) requires. When the session closes, the host sends `env/sessionEnded { sessionId }`, which answers `{}` once they have stopped. They all stop when the plugin stops.
+- **"Safe to repeat":** a working environment promises that nothing from an interrupted command is still running only when its `containment` is `strong`. A call's `safeToRepeat` needs that promise as well as the tool's ([Recovery](../contracts.md#recovery-and-repeating-work)).
+- **Saved points** are the working environment's own: one environment can't restore another's. A point covers the project's files, not processes or anything outside the project.
 - **A missing file:** `env/read` of a file that doesn't exist answers the error `not_found`, and so does `host/env/read`. A reader tells a missing file apart from other failures by that code, never by the error's message, which is in each build's own words.
 - **Output streams** as notifications `env/output { parentRequestId, chunk }`.
 - **Cancelling `env/exec`** stops the command and everything it started, within 5 seconds, as the declared `containment` promises.
@@ -164,9 +171,14 @@ An error answer counts as a failing handler, per [Hook points](../contracts.md#h
 | `turn.end` | observe | `{ sessionId, turnId, outcome, result }`, as on a `turnEnd` entry: `outcome` is `{ kind, error?, limit? }` | |
 | `provider.request` | transform | `{ sessionId, provider, model, request }`, where `model` is `{ provider, id }`, as on `provider/request` | the same shape |
 | `provider.response` | observe | `{ sessionId, provider, model, message }`, with `model` as above | |
+| `output` | gate, a stream at a time | `{ sessionId, recipient, events, final }`, as below | `null`, `{ events }` or `{ block: true }` |
 
 - **Only the standard hook points** are offered to a plugin in another process in `/1`. A plugin can't define hook points over the wire, and a handler for any other point is [refused](#starting-the-handshake).
-- **"Before output reaches a recipient" is not offered** to a plugin in another process in `/1`. Its handlers hold streamed pieces per recipient, which would cost a round trip per piece. A host refuses a registration for it with `not_supported`.
+- **"Before output reaches a recipient" is offered a stream at a time,** as the hook point `output`. A handler in another process would cost a round trip per streamed piece, so the host holds each stream for each recipient until the stream's declared end: the end of a model response, or of a tool's output ([The output gate](../contracts.md#the-output-gate)). It then sends one `hook/handle` with the whole stream. Output that isn't streamed goes one item at a time: a recorded entry, a turn's outcome, or an answer to an Interface's request, such as a page of history, as one event. A held stream reaches the recipient before the answer to the request that caused it, such as a prompt's response.
+  - The payload is `{ sessionId, recipient, events, final }`. `events` are the events to deliver, in order, each `{ type, data }`; `final` is `true`. The answer is `null` to let them through, `{ "events": [...] }` to deliver others in their place, such as a redacted copy, or `{ "block": true }`.
+  - Handlers combine as a gate, in order: a block stops the rest, and each handler sees the events the previous one left.
+  - A recipient with such a handler sees no live pieces, only each stream when it ends. The host declares `holdsOutput: true`.
+  - A handler that fails, or a plugin lost, blocks: the gate fails closed.
 
 ## The host asks the Runtime
 
@@ -186,7 +198,7 @@ A turn is one request from the host. The Runtime runs it, asking the host for wh
 - **A failed model request.** When `model.failed` answers `{ retry: true }`, the host discards any state the turn's Provider keeps. The Runtime then sends the answer's `request` if it has one, or asks `host/runtime/prepareStep` again.
 - **Cancelling:** the host cancels a turn with `$/cancel` on its request. The Runtime stops at the next safe point, cancels what it asked the host for, records a result for every started call, and answers with outcome `cancelled`.
 - **The Runtime's state lives in the history.** After a restart, the host starts the Runtime plugin's process again and sends `runtime/resumeTurn`. Nothing in the old process survives. The Runtime reads the turn back with `host/history`: its responses, results and step count are in the [standard kinds](data.md#history-entries). It may record kinds of its own through `host/runtime/record` too, but only to save work: a Runtime must recover a turn from the standard kinds alone, since another build may have started it ([portable sessions](data.md#portable-sessions)).
-- **What stays with the host.** A tool call an Interface starts outside a turn is the host's to run, not the Runtime's. `/1` has no request for rewinding, so a host running a Runtime over the binding declares `rewinding: false`.
+- **What stays with the host.** A tool call an Interface starts outside a turn is the host's to run, not the Runtime's. So is rewinding: the host moves the session and restores the working environment's saved point ([Rewinding](data.md#rewinding)), with no request to the Runtime. A Runtime's `supports` says nothing about rewinding.
 
 **What the Runtime asks the host.** Every request carries `parentRequestId`, the turn's request id.
 
@@ -213,6 +225,22 @@ A turn is one request from the host. The Runtime runs it, asking the host for wh
 
 A Runtime doesn't report these, and a host ignores a report that duplicates one. A host never depends on a report: a Runtime that sends none loses nothing. Interfaces then show a turn the same way whichever language its Runtime is written in.
 
+## Jobs
+
+A job is work a plugin starts that outlives a turn, such as a subagent or a background check ([Contracts](../contracts.md#plugin-and-harness-jobs)). A job belongs to the plugin that started it, by the plugin's `name`. It is recorded in the [standard kinds](data.md#history-entries), so a session's jobs survive a restart, and a session reopened by another build, with the same plugin loaded, finds them.
+
+| Request | Params | Result |
+|---|---|---|
+| `host/jobs/start` | `parentRequestId`, `kind`, `key` *(optional)*, `detail` | `{ jobId, started }`. The host records `jobStarted` before it answers. The job acts as the actor behind the parent, narrowed as for any work that actor started, and needs the `jobs` right. With a `key` the session has seen, it answers the first job's `jobId` with `started: false`, and starts nothing. |
+| `host/jobs/progress` | `jobId`, `content` | a notification: progress, passed on as an event |
+| `host/jobs/end` | `jobId`, `outcome` (`{ kind, error? }`), `result` *(optional; content)*, `report` (boolean) | `{}`, once `jobEnded` is recorded, and with `report`, the report taken as input, keyed `job:<jobId>`. A job already ended is `invalid_request`. |
+| `host/jobs/unfinished` | `sessionId` | `{ "jobs": [{ jobId, kind, key?, detail, actorId }] }`: this plugin's jobs in the session that have a `jobStarted` and no `jobEnded` |
+| `host/jobs/resume` | `jobId` | `{}`. The plugin takes up an unfinished job of its own, after a restart. The host records nothing; the plugin ends the job when it can. |
+
+**The host asks the plugin** `jobs/cancel { jobId }` to cancel a job, when an actor with the `cancel` right asks, or when its session closes. The plugin stops the job and ends it with `host/jobs/end` before it answers `{}`. If the job had already finished, the plugin ends it with its result instead. If the answer comes without the job ended, the host records it ended as `cancelled`.
+
+**After a restart:** a job the stopped process left unfinished stays unfinished. The host never ends it by itself. Its plugin, given `session.start` with `resumed: true`, finds it with `host/jobs/unfinished`, then takes it up with `host/jobs/resume` or ends it. A session whose jobs belong to a plugin that isn't loaded keeps them unfinished, and the host lists them as such.
+
 ## The host asks a command
 
 `command/run { name, args, sessionId, actorId }` returns `{ "output"?: string }`.
@@ -232,12 +260,14 @@ Every request below names its session, directly or through `parentRequestId`.
 | `host/declaration` | `sessionId` *(optional)* | the declaration, as in the [ACP binding](acp.md#the-declaration) |
 | `host/emit` | `sessionId`, `type`, `data` | a notification: an event of the plugin's own |
 | `host/problem` | `where`, `message` | a notification: a problem the plugin carried on past |
+| `host/jobs/*` | see [Jobs](#jobs) | |
 
-**Paging history.** `after` is an entry id; the page starts with the entry after it. `next` is the id of the page's last entry, given only when more remain, so the plugin passes it as `after` for the next page. An `after` that isn't in the list asked for is refused with `invalid_request`. An entry is never split or skipped: one that alone is over 4 MiB gives `result_too_large`.
+**Paging history.** `after` is an entry id; the page starts with the entry after it. `next` is the id of the page's last entry, given only when more remain, so the plugin passes it as `after` for the next page. An `after` that isn't in the list asked for is refused with `invalid_request`. An entry is never split or skipped: one that alone is over 4 MiB gives `result_too_large`. The 4 MiB counts the UTF-8 JSON of the whole `result` object, `entries` and `next` included, not the JSON-RPC envelope.
 
 **Authority.** A request whose authority, session or ownership doesn't hold is refused with `invalid_request`.
-- **Requests that need a parent:** `host/ask`, `host/env/*`, `host/hook` and `host/runtime/*`. They act with the authority of the work behind the parent, never more, and only in its session. `host/hook` also needs the parent to be a request to the Provider whose hook points it runs.
+- **Requests that need a parent:** `host/ask`, `host/env/*`, `host/hook`, `host/runtime/*` and `host/jobs/start`. They act with the authority of the work behind the parent, never more, and only in its session. `host/hook` also needs the parent to be a request to the Provider whose hook points it runs.
 - **Requests that may name a session directly:** `host/history`, `host/session` and `host/emit`. The session must be open in the host, with this plugin loaded. They read or report; they never act. With a `parentRequestId`, they belong to that work, as a Runtime's `host/history` does.
+- **Requests about a job:** `host/jobs/progress`, `host/jobs/end` and `host/jobs/resume` name a job of this plugin's; `host/jobs/unfinished` names a session open in the host, with this plugin loaded. A job's report acts as the job, never as the plugin.
 - **Requests about no session:** `host/declaration` without a `sessionId`, `host/credentials/read` and `host/problem`.
 
 ## Choosing plugins at start
@@ -260,15 +290,21 @@ The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a
 |---|---|---|
 | `provider` | Provider `conformance`, model `echo`, exactly as in the [ACP binding's conformance mode](acp.md#conformance-mode) | `provider:conformance` |
 | `tools` | tool source `conformance-tools`, with `bash` (`{ command }`, using `host/env/exec`) and `read` (`{ path }`, using `host/env/read`); results as the build's own tools give them | `tool:bash`, `tool:read` |
-| `environment` | a working environment on the local machine, with its true `containment`. It keeps each session's background processes until `env/sessionEnded` for that session. | `working-environment` |
+| `environment` | a working environment on the local machine, with its true `containment`. It keeps each session's background processes until `env/sessionEnded` for that session. It saves points (`points: true`) if the build's own working environment does. | `working-environment` |
 | `runtime` | the build's transient Runtime | `runtime` |
 | `durable-runtime` | the build's durable Runtime. It recovers a turn from the standard kinds alone, whatever wrote them. | `runtime` |
-| `hooks` | a `tool.before` gate that refuses, with the reason `refused by the conformance plugin`, any call whose input, as JSON, contains `conformance-forbidden`; and a `turn.before` collect that contributes `{ "system": "The conformance plugin is loaded." }` | nothing |
+| `hooks` | a `tool.before` gate that refuses, with the reason `refused by the conformance plugin`, any call whose input, as JSON, contains `conformance-forbidden`; and a `turn.before` collect that contributes `{ "system": "The conformance plugin is loaded." }`; and an `output` gate that replaces every `conformance-secret` in the text of the events it is given with `[redacted]` | nothing |
 
 `tools` uses `host/env/*`, never its own environment. So tools from one build run commands in another build's working environment, under a third build's Harness.
 
 ## Changes
 
+- **2026-11-18, round five.** The open items left after round four, and the gaps the builders logged in it:
+  - **Jobs** over the binding: `host/jobs/*` and `jobs/cancel`, recorded in standard kinds, so a reopening build with the same plugin finds a job's unfinished work. A plugin's `name` is its identity.
+  - **The output gate,** offered as `output`, a stream at a time: the host holds each stream to its end and asks once. The conformance plugin's `hooks` part redacts `conformance-secret`.
+  - **Rewinding** is the host's: `env/save` and `env/restore` with `points: true`. A Runtime's `supports` no longer mentions it.
+  - **"Safe to repeat"** from a working environment means `containment: "strong"` (Elixir M2-4).
+  - **`provider/discard`** with `erase` names entries, and `pending` lists entries (Go B24, Rust R4-05, Python G73). **`tools/changed`** may carry the request that caused it (Go B25). The history page's 4 MiB counts the `result` object (Python G72, Rust R4-07).
 - **2026-11-18, after the final round-four matrices.** The Provider hook payloads' `model` is `{ provider, id }`. The TypeScript Provider sent the model's id as a string, and the Go host, checking it against the parent `provider/request`, refused every hook call, so every turn failed. The other hosts didn't compare the two.
 - **2026-11-18, after the round-four Runtime matrix.** The `turn.end` payload's `outcome` is the `{ kind, ... }` object of a `turnEnd` entry, with `result` beside it. TypeScript's Runtime sent the whole TurnOutcome as `outcome`, and the Rust and Python hosts, reading `outcome.kind`, refused the hook request, which failed every turn. The Go and Elixir hosts accepted either.
 - **2026-11-18, round four.** Rules from the 42 binding gaps the Rust, Python and Go builders logged in round three. Where they agreed, their choice became the rule. Where they didn't, the change says which way it went:

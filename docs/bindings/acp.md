@@ -1,4 +1,4 @@
-# ACP host binding: `modular-agent-acp/1`
+# ACP host binding: `modular-agent-acp/1` and `/2`
 
 How a host drives a Modular Agent over the [Agent Client Protocol](https://agentclientprotocol.com) v1. ACP covers sessions, prompts, streamed updates, permissions and cancelling. This binding fixes everything else a host relies on across builds:
 - where the declaration and the input key go;
@@ -12,6 +12,10 @@ Everything here is in addition to ACP v1. Where ACP already says how something w
 
 - All binding data in `_meta` lives under the key `"modular-agent"`.
 - Extension methods are named `_modular-agent/<name>`. ACP reserves names that start with an underscore for extensions.
+
+## Versions
+
+There are two versions, which differ in one thing: how a failed turn is reported ([Prompts](#prompts)). A client asks for `/2` by sending `_meta["modular-agent"].binding: "modular-agent-acp/2"` in `initialize`. The agent answers with the version it will speak on this connection, in the same place. A client that asks for nothing gets `/1`. A build that follows this binding as revised in round five speaks both.
 
 ## Starting
 
@@ -31,12 +35,12 @@ Its `_meta["modular-agent"]` holds:
 
 | Field | Value |
 |---|---|
-| `binding` | `"modular-agent-acp/1"` |
+| `binding` | `"modular-agent-acp/1"`, or `"modular-agent-acp/2"` if the client asked for it |
 | `declaration` | the agent's [declaration](#the-declaration) |
 | `extensions` | the names of the extension methods offered, without the prefix, for example `["history", "input", "requests", "answer"]` |
 | `actor` | the actor the connection acts for: `{ "id": "...", "kind": "host" }` |
 
-The connection acts for one actor. Whatever the client sends about itself, it can't choose another actor or widen this one's authority.
+The connection acts for one actor. Whatever the client sends about itself, it can't choose another actor or widen this one's authority. In an agent with `severalActors`, the connection may also act for other actors in a session, as a host does for its users ([Several actors](#several-actors)), but only with the rights both have.
 
 ## The declaration
 
@@ -47,12 +51,12 @@ The declaration is an object with these keys. A build may add keys of its own, b
 | `inputDuringTurn` | boolean | Input can steer a running turn. |
 | `waitingThroughRestart` | boolean | A turn waiting for an answer survives a restart. |
 | `continuesAfterRestart` | boolean | An interrupted turn carries on after a restart. |
-| `rewinding` | boolean | Moving can also restore outside state. |
+| `rewinding` | boolean | Moving with `rewind` also restores the working environment's files ([Rewinding](data.md#rewinding)). |
 | `forking` | boolean | Sessions can be forked. |
 | `keepsStateAtProvider` | boolean | The session's Provider keeps conversation state. |
 | `runsToolsAtProvider` | boolean | The Provider runs tools itself. |
 | `liveSessions` | boolean | Voice or other live sessions. |
-| `severalActors` | boolean | A session can have several actors. |
+| `severalActors` | boolean | A session can have several actors, and the agent offers the [several-actors extensions](#several-actors). |
 | `holdsOutput` | boolean | The output gate may hold streamed output. |
 | `outputBypassesAgent` | boolean | Some output reaches recipients without passing the gate. |
 | `cancellingTurnCancelsJobs` | boolean | Cancelling a turn also cancels its jobs. |
@@ -124,9 +128,9 @@ Stop reasons map as follows:
 | a step limit | `max_turn_requests` |
 | an output limit, or a session-wide token budget | `max_tokens`. `outcome.limit` tells them apart. |
 | a question's time limit passed, leaving calls open | `end_turn`, with `openToolCalls` |
-| failed | `refusal`, with the reason in `outcome.error` |
+| failed | in `/1`, `refusal`, with the reason in `outcome.error`. In `/2`, no stop reason: a JSON-RPC error instead (below). |
 
-**A known mismatch.** In ACP, `refusal` means the agent refused, and that the refused prompt and what follows won't enter the next prompt. Here it only reports a failed turn: the history is kept, and the next prompt sees it. A host must read `outcome.kind`, not infer anything from `refusal`. All four builds follow this mapping, so it stays in `/1`. A `/2` should report a failed turn as a JSON-RPC error whose `data` carries the same `_meta`. All three clean-room builds found this mismatch.
+**A failed turn.** In ACP, `refusal` means the agent refused, and that the refused prompt and what follows won't enter the next prompt. A failed turn is neither: the history is kept, and the next prompt sees it. So `/1`, which reports it as `refusal`, needs the host to read `outcome.kind`, not infer anything from the stop reason. `/2` reports a failed turn as a JSON-RPC error on `session/prompt`: code `-32000`, the message from `outcome.error`, and `data: { "_meta": { "modular-agent": { ... } } }`, carrying the same fields a response's `_meta` would. The turn's history is kept either way. All three clean-room builds found the `/1` mismatch.
 
 ## Updates
 
@@ -174,7 +178,7 @@ These are optional. If offered, they use these names and shapes, and appear in `
 | Method | Params | Result |
 |---|---|---|
 | `_modular-agent/fork` | `sessionId`; `entryId` | `{ "sessionId" }`. Refused while the session has unfinished work. |
-| `_modular-agent/move` | `sessionId`; `entryId` | `{}`. Follows `movingWithUnfinishedWork`. |
+| `_modular-agent/move` | `sessionId`; `entryId`; `rewind` *(optional; boolean)* | `{}`. Follows `movingWithUnfinishedWork`. With `rewind`, in an agent that declares `rewinding`, the working environment's files are restored as they were at the entry ([Rewinding](data.md#rewinding)), or the move is refused with `-32602` before anything changes. |
 | `_modular-agent/erase` | `sessionId`; `entryIds` | `{ "erased": [id], "pending": [id], "outOfReach": [string] }`. `pending` lists entries whose remote copies the agent knows of but hasn't yet confirmed deleted; the agent retries, and erasing again finishes the job. `outOfReach` names kinds of copies, such as `"delivered output"`, `"working environment effects"` or `"vendor retention"`. |
 | `_modular-agent/jobs` | `sessionId` | `{ "jobs": [{ "id", "kind", "state" }] }` |
 | `_modular-agent/cancel-job` | `sessionId`; `jobId` | `{}` |
@@ -202,9 +206,25 @@ An open question, as the `requests` extension returns it, has at least:
 - `toolCallId`, where it applies;
 - `answerable`: whether it can still be answered.
 
+## Several actors
+
+An agent that declares `severalActors` offers these extensions too, and lists them in `extensions`. They let a host act for several people in one session. Each records the [standard entries](data.md#history-entries); the rights are the [standard names](data.md#actors).
+
+| Method | Params | Result |
+|---|---|---|
+| `_modular-agent/actors` | `sessionId` | `{ "actors": [Actor], "present": [actorId] }` |
+| `_modular-agent/join` | `sessionId`; `actor` (`{ id, kind, rights }`) | `{}`, recorded as `actorJoined`. Needs the `grant` right, and every right given must be one the connection's actor has. Joining an actor again replaces its rights, which is how rights are taken away. Otherwise `-32602`, and nothing changes. |
+| `_modular-agent/leave` | `sessionId`; `actorId` | `{}`, recorded as `actorLeft`. Needs `grant`, unless the actor is leaving itself. |
+| `_modular-agent/release` | `sessionId`; `inputId`; `when` (`"now"`, `"steer"` or `"after"`); `declined` *(optional)* | `{ "inputId", "taken" }`. Releases proposed input, recorded as an `inputAccepted` with the same `inputId`, the new `when` and `data.releasedBy`. Needs `input`. With `declined`, the input is handed back instead. |
+
+- **Acting for another actor.** `_modular-agent/input` and `_modular-agent/answer` take an optional `actorId`: an actor in the session. The request acts with only the rights that actor and the connection's actor both have. A request whose rights don't hold is refused with `-32602`.
+- **Proposed input.** `_modular-agent/input` with `when: "propose"` needs only `propose`. The answer is `{ "inputId", "taken": "proposed" }`, and nothing runs until an actor with `input` releases it. Released input acts with the rights the proposer and the releaser share.
+- **Questions** go to every present actor who may answer them. An answer from an actor without the right is refused.
+
 ## Conformance mode
 
 When the environment variable `MODULAR_AGENT_CONFORMANCE=1` is set, the agent offers one extra model, `conformance/echo`. It needs no network and no credentials, and it behaves exactly as follows. It reads the text of the latest input, ignoring tool results. The latest input is the last `user` message in the request's `messages`, and "this turn" is everything after it. A model sees only the request, so this is the same in every build, whatever the host:
+- **Text that starts with `fail:`** gets a failed response: `stop: "failed"`, with an error of kind `other` whose message is the rest of the text. So the turn ends as failed.
 - **Text that starts with `tool:`** has the form `tool:<name> <json>`. On a step with no tool result yet in this turn, the model calls tool `<name>` with `<json>` as its input. On the step after the result, it replies with the text `done: ` followed by the first 200 characters of the result's text, counted in Unicode code points.
 - **Any other text** gets the reply `echo: <text>`.
 
@@ -214,6 +234,7 @@ The [conformance kit](../../conformance/acp/README.md) uses this mode.
 
 ## Changes
 
+- **2026-11-18, round five.** `/2`, asked for in `initialize`, reports a failed turn as a JSON-RPC error rather than `refusal`; the conformance model's `fail:` makes one. Several actors: the extensions `actors`, `join`, `leave` and `release`, `actorId` on `input` and `answer`, and proposed input (Python G76, Go B26). `move` with `rewind`.
 - **2026-11-18, after the portable-session matrix.** The connection's actor joins every session it opens or reopens. The Python agent refused to reopen sessions written by the TypeScript and Elixir agents, because its own actor wasn't among the session's actors. The Elixir builder had logged the same gap (M3-2).
 - **2026-11-18, round four.** The optional declaration key `portableSessions`. The conformance model's "this turn" is everything after the last `user` message (Rust B-14).
 - **2026-11-17, after round two.** Clarifications from the Rust, Python and Go builds' binding gaps. None changes a wire format any build already uses:
