@@ -48,9 +48,7 @@ function end(job, kind, result) {
 	return job.ending;
 }
 
-async function takeUp(sessionId) {
-	const { jobs } = await peer.ask("host/jobs/unfinished", { sessionId });
-	note({ unfinished: jobs.map((j) => j.jobId) });
+async function takeUp(sessionId, jobs) {
 	for (const j of jobs) {
 		await peer.ask("host/jobs/resume", { jobId: j.jobId });
 		// Jobs: the first successful resume is still running on this connection.
@@ -106,10 +104,17 @@ const peer = serve("jobs", async (m, { ask, signal }) => {
 				return { status: "failed", content: text("Could not start the fixture job.") };
 			}
 		}
-		case "hook/handle":
+		case "hook/handle": {
 			if (p.hook !== "session.start" || p.handlerId !== 1) throw rpcError("unknown_handler");
-			if (p.payload?.resumed) setImmediate(() => void takeUp(p.payload.sessionId).catch((e) => note({ takeUpFailed: e?.data?.code ?? "internal" })));
+			if (!p.payload?.resumed) return null;
+			// Jobs: list while session.start is still live. An idle session can close as soon as it opens.
+			const { sessionId } = p.payload;
+			const failed = (e) => note({ takeUpFailed: e?.data?.code ?? "internal" });
+			const { jobs } = await ask("host/jobs/unfinished", { sessionId }).catch((e) => { failed(e); throw e; });
+			note({ unfinished: jobs.map((j) => j.jobId) });
+			if (jobs.length) setImmediate(() => void takeUp(sessionId, jobs).catch(failed));
 			return null;
+		}
 		case "jobs/cancel": {
 			const job = running.get(p.jobId);
 			if (!job) throw rpcError("invalid_request");

@@ -169,6 +169,23 @@ async function waitFor(a, sid, fn, ms = 15000) {
 }
 const said = (entries, text) => entries.some((e) => e.kind === "response" && JSON.stringify(e.message ?? {}).includes(text));
 
+// ACP: Prompts and Conformance mode. Contracts: Tool dispatch and Recovery and repeating work.
+function checkDeniedTool(name, reply, entries, marker) {
+	const { inputId, outcome } = meta(reply) ?? {};
+	const turnId = inputId && entries.find((e) => e.kind === "input" && e.inputId === inputId)?.turnId;
+	const rows = turnId ? entries.filter((e) => e.turnId === turnId) : [];
+	const results = rows.filter((e) => e.kind === "toolResult");
+	const refused = reply.stopReason === "end_turn" && outcome?.kind === "completed" &&
+		results.length === 1 && results[0].data?.status === "refused";
+	// ACP exposes a failure description, not the Provider's structured error. It can include the kind.
+	const omitted = reply.stopReason === "refusal" && outcome?.kind === "failed" &&
+		typeof outcome.error === "string" && /(?:^|: )Invalid tool directive$/.test(outcome.error) && results.length === 0;
+	const started = rows.some((e) => e.kind === "toolStarted");
+	const ran = existsSync(join(project, marker));
+	check(name, !!turnId && (refused || omitted) && !started && !ran,
+		JSON.stringify({ stopReason: reply.stopReason, outcome, turnId, started, ran, results: results.map((e) => e.data?.status) }));
+}
+
 let sessionId, mainSession;
 let erasedForPortable;
 let portableDeclarations = [];
@@ -451,7 +468,7 @@ if (decl.sessionLimits) {
 		check("limits: a limit with a right the administrator lacks is refused", refused);
 		await lim(["watch", "input", "answer", "approve", "settings", "erase", "grant", "administer", "cancel", "propose", "jobs", "delegate"]);
 		const r = await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo yes > limited.txt"}'), "limited prompt");
-		check("limits: a tool call is refused under a limit without tools", r.stopReason === "end_turn" && !existsSync(join(project, "limited.txt")), r.stopReason);
+		checkDeniedTool("limits: no dispatch under a limit without tools", r, (await history(agent, sessionId, { all: true })).entries, "limited.txt");
 		await lim(null);
 		await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo yes > unlimited.txt"}'), "unlimited prompt");
 		check("limits: with the limit removed, the call runs", existsSync(join(project, "unlimited.txt")));
@@ -482,9 +499,10 @@ if (decl.tenants) {
 		check("tenants: the session reports its tenant", info.tenant === "kit-readonly" && Array.isArray(info.rights) && !info.rights.includes("tools"), JSON.stringify(info));
 		const r = await within(15000, prompt(agent, ro, 'tool:bash {"command":"echo yes > tenant.txt"}'), "tenant prompt");
 		// Shared data: Portable sessions. After the first admission, tenant precedes all other records.
-		const first = (await history(agent, ro, { all: true })).entries[0];
+		const { entries } = await history(agent, ro, { all: true });
+		const first = entries[0];
 		check("tenants: first persisted record names the tenant", first?.kind === "tenant" && first.data?.tenant === "kit-readonly");
-		check("tenants: the tenant's ceiling refuses a tool call", r.stopReason === "end_turn" && !existsSync(join(project, "tenant.txt")), r.stopReason);
+		checkDeniedTool("tenants: no dispatch under a tenant ceiling without tools", r, entries, "tenant.txt");
 		const broke = await open("kit-broke");
 		const b = await within(15000, prompt(agent, broke, "hello broke"), "budget prompt");
 		check("tenants: an exhausted budget ends the turn as tenantTokens, max_tokens", b.stopReason === "max_tokens" && meta(b)?.outcome?.limit === "tenantTokens", `${b.stopReason} ${JSON.stringify(meta(b)?.outcome)}`);
@@ -858,12 +876,12 @@ if (probeChecks) {
 			if ((s.configOptions ?? []).some((o) => o.id === "approval")) await setOption(remote, s.sessionId, "approval", "off");
 			for (const name of ["omitted", "changed", "exact"]) {
 				const before = trace("runtime").filter((x) => x.effect).length;
-				await within(15000, prompt(remote, s.sessionId, 'tool:probe-effect {"value":"original"}'), `remote Runtime fixture: ${name}`).catch(() => undefined);
+				await within(15000, prompt(remote, s.sessionId, `tool:probe-effect ${JSON.stringify({ value: name })}`), `remote Runtime fixture: ${name}`).catch(() => undefined);
 				const log = trace("runtime");
 				const c = log.find((x) => x.test === name)?.checks ?? {};
 				check(`remote Runtime ${name}: host rejects record of a host-owned setting`, c.hostKind);
 				check(`remote Runtime ${name}: host commits modelRequest with the named tool offer`, c.modelIntent, JSON.stringify(log.find((x) => x.test === name)?.terminal ?? null));
-				check(`Runtime callbacks (${name}): dispatch requires exact allowed decision and settles changes as refused`, c.dispatch && equal(log.filter((x) => x.effect).slice(before).map((x) => x.effect), name === "changed" ? [] : [{ value: "original" }]));
+				check(`Runtime callbacks (${name}): dispatch requires exact allowed decision and settles changes as refused`, c.dispatch && equal(log.filter((x) => x.effect).slice(before).map((x) => x.effect), name === "changed" ? [] : [{ value: name }]));
 				check(`remote Runtime ${name}: host commits toolResult before replying`, c.resultCommit);
 				if (name === "omitted") check("Runtime callbacks: runToolCall before allowance returns invalid_request without writing", c.earlyDispatch);
 				if (name === "exact") {
@@ -889,18 +907,18 @@ if (probeChecks) {
 			await closeSession(remote, unoffered);
 			if (meta(s)?.declaration?.tenants) {
 				const sid = await openProbe("kit-latch");
-				const p = await within(15000, prompt(remote, sid, "fixture budget latch"), "latched limit");
+				const p = await within(15000, prompt(remote, sid, "fixture latched"), "latched limit");
 				check("Runtime callbacks: limit reached after a step is signalled at the next prepareStep", trace("runtime").find((x) => x.test === "latched")?.checks?.latched &&
 					equal(meta(p)?.outcome, { kind: "limit", limit: "tenantTokens" }));
 				await closeSession(remote, sid);
 				if (tap) await attempt("Runtime records and effects: post-intent limit", async () => {
 					const target = await openProbe("kit-race"), burner = await openProbe("kit-race");
 					racePath = store.path(target) + "/entries";
-					const pending = prompt(remote, target, "fixture post-intent limit");
+					const pending = prompt(remote, target, "fixture post-intent");
 					void pending.catch(() => undefined);
 					try {
 						await within(5000, committed, "target model intent commit");
-						await within(5000, prompt(remote, burner, "fixture exhausts tenant budget"), "other session exhausts the budget");
+						await within(5000, prompt(remote, burner, "fixture burner"), "other session exhausts the budget");
 					} finally { releaseIntent(); }
 					const result = await within(15000, pending, "post-intent limit settles");
 					const actual = trace("runtime");

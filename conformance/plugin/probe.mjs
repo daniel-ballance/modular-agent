@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Host-side fixtures for docs/bindings/plugin.md. The ACP kit loads these with --probe-checks.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, outcome, rpcError, serve } from "./peer.mjs";
@@ -15,7 +15,7 @@ const PROBE = { name: "probe", description: "Check the host callbacks.", paramet
 const EFFECT = { name: "probe-effect", description: "Record a fixture invocation.", parameters: { type: "object", properties: { value: { type: "string" } } }, hints: { readOnly: true, openWorld: false } };
 const trace = (data) => { const out = config.traceOut ?? config.out; if (out) appendFileSync(out, JSON.stringify(data) + "\n"); };
 let config = {}, stopping = false;
-let runs = 0, refreshed = false;
+let refreshed = false;
 const fixtureTool = (name, description, properties = {}) => ({ name, description, parameters: { type: "object", properties } });
 const QUESTION = fixtureTool("probe-question", "Ask one fixture question.", { late: { type: "boolean" } });
 const REFRESH = fixtureTool("probe-refresh", "Change the fixture tool list.", { fail: { type: "boolean" } });
@@ -94,7 +94,6 @@ async function runChecks(m, { ask, request, recent, signal }) {
 async function runtime(m, { ask }) {
 	// Runtime callbacks; Runtime records and effects. Only this negative fixture sends forbidden requests.
 	const { turn } = m.params;
-	const test = ["omitted", "changed", "exact", "unoffered", "latched", "post-intent"][runs++];
 	const callHost = (method, params = {}) => ask(`host/runtime/${method}`, { parentRequestId: m.id, ...params });
 	const record = (entry) => callHost("record", { entry });
 	const history = () => ask("host/history", { sessionId: turn.sessionId, parentRequestId: m.id, all: true }).then((r) => r.entries);
@@ -103,7 +102,14 @@ async function runtime(m, { ask }) {
 	let usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 	let terminal = { kind: "completed" };
 	const result = { openToolCalls: [] };
+	let test;
 	try {
+		// The host asks the Runtime; Shared data: Recording order and ownership. Use this turn's committed input.
+		const input = (await history()).find((e) => e.kind === "input" && e.turnId === turn.turnId);
+		const text = input?.message?.content?.find((p) => p.type === "text")?.text;
+		test = text?.match(/^tool:probe-effect \{"value":"(omitted|changed|exact)"\}$/)?.[1] ??
+			text?.match(/^fixture (unoffered|latched|post-intent|burner)$/)?.[1];
+		if (!test) throw rpcError("invalid_request", "unknown Runtime fixture input");
 		await callHost("hook", { hook: "turn.start", payload: {} });
 		const { id: stepId } = await callHost("newId");
 		await callHost("takeSteering").catch((e) => { if (codeOf(e) !== "not_supported") throw e; });
@@ -157,7 +163,7 @@ async function runtime(m, { ask }) {
 					saved?.data?.status === "refused" && saved.message?.content?.some((p) => p.type === "text" && p.text.includes("not offered")) && !records.some((e) => e.kind === "toolStarted");
 			} else {
 				if (test === "exact") checks.repeatedGate = await refusedWithoutWrite(beforeHook);
-				const toolResult = await dispatch(test === "changed" ? { ...call, input: { value: "changed" } } : call);
+				const toolResult = await dispatch(test === "changed" ? { ...call, input: { value: "tampered" } } : call);
 				const records = (await history()).filter((e) => e.toolCallId === call.id);
 				const saved = records.filter((e) => e.kind === "toolResult");
 				const starts = records.filter((e) => e.kind === "toolStarted");
@@ -211,6 +217,22 @@ serve("probe", async (m, ctx) => {
 	const p = m.params ?? {};
 	if (stopping) throw rpcError("invalid_request");
 	switch (m.method) {
+		// The host asks the working environment; Paths and points. Allow optional project file reads before saving.
+		case "env/read": {
+			if (config.role !== "remote-points") throw rpcError("method_not_found");
+			if (p.cwd !== pointProject || typeof p.sessionId !== "string" || !p.sessionId || typeof p.path !== "string" || !p.path || p.path.includes("\0")) throw rpcError("invalid_request");
+			const path = resolve(p.cwd, p.path), prefix = pointProject + sep;
+			if (!path.startsWith(prefix)) throw rpcError("invalid_request");
+			try {
+				const file = realpathSync(path);
+				if (!file.startsWith(prefix) || !statSync(file).isFile()) throw rpcError("invalid_request");
+				return { data: readFileSync(file).toString("base64") };
+			} catch (e) {
+				if (e.code === "ENOENT") throw rpcError("not_found");
+				if (["EACCES", "EPERM", "ENOTDIR", "ELOOP"].includes(e.code)) throw rpcError("invalid_request");
+				throw e;
+			}
+		}
 		case "env/save":
 		case "env/checkPoint":
 		case "env/restore": {
