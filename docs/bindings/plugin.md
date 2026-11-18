@@ -293,7 +293,7 @@ The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a
 | `environment` | a working environment on the local machine, with its true `containment`. It keeps each session's background processes until `env/sessionEnded` for that session. It saves points (`points: true`) if the build's own working environment does. | `working-environment` |
 | `runtime` | the build's transient Runtime | `runtime` |
 | `durable-runtime` | the build's durable Runtime. It recovers a turn from the standard kinds alone, whatever wrote them. | `runtime` |
-| `hooks` | a `tool.before` gate that refuses, with the reason `refused by the conformance plugin`, any call whose input, as JSON, contains `conformance-forbidden`; and a `turn.before` collect that contributes `{ "system": "The conformance plugin is loaded." }`; and an `output` gate that replaces every `conformance-secret` in the text of the events it is given with `[redacted]` | nothing |
+| `hooks` | a `tool.before` gate that refuses, with the reason `refused by the conformance plugin`, any call whose input, as JSON, contains `conformance-forbidden`; and a `turn.before` collect that contributes `{ "system": "The conformance plugin is loaded." }`; and an `output` gate that replaces every `conformance-secret` in the strings of the events it is given with `[redacted]`, including one split across the `text` events of a stream, and changes nothing else | nothing |
 
 `tools` uses `host/env/*`, never its own environment. So tools from one build run commands in another build's working environment, under a third build's Harness.
 

@@ -134,7 +134,7 @@ What the output gate is given ([plugin binding](plugin.md#the-host-asks-a-hook-h
 | a build's own, containing a dot | its own |
 
 - **One stream** is the `text` and `reasoning` events of one model response, or the `toolOutput` events of one call. The gate gets the whole stream at once, so text split across pieces can be checked as one.
-- **A gate passes on what it doesn't understand.** It may redact strings anywhere in an event's `data`, and must leave everything else, and every event type it doesn't know, unchanged. A gate that fails blocks.
+- **A gate passes on what it doesn't understand.** It may redact strings anywhere in an event's `data`, whatever the event's type, a build's own included. It leaves everything else as it was: the types, the order, and every value that isn't a redacted string. A gate that fails blocks.
 - **Mapping is the host's job.** A host translates its own events to these shapes before a remote gate sees them, and translates the gate's answer back. A host that can't map a changed event back blocks it, failing closed.
 
 ## Credentials
