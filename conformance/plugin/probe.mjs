@@ -7,6 +7,9 @@
 //                                          writes them to <file> as JSON: [{ name, ok, detail }].
 //   { "role": "refuse-hook", "out": "<file>" }     registers a handler for a hook point no host offers.
 //   { "role": "refuse-replace", "out": "<file>" }  names `tool:probe-absent` in replaces, and registers no such tool.
+//   { "role": "refuse-duplicate", "out": "<file>" } registers the name `probe-probe`, which the probe role already has.
+//   { "role": "output-observer", "out": "<file>" }  registers an `output` gate that lets everything through, and appends
+//                                          each payload it is given to <file>, one JSON line each.
 // A refused probe appends the plugin/shutdown it gets to <file>, as one JSON line.
 import { appendFileSync, writeFileSync } from "node:fs";
 
@@ -46,6 +49,8 @@ function registration() {
 	const base = { binding: BINDING, name: `probe-${config.role ?? "probe"}` };
 	if (config.role === "refuse-hook") return { ...base, hooks: [{ hook: "probe.no-such-point", handlerId: 1, order: "normal" }] };
 	if (config.role === "refuse-replace") return { ...base, replaces: ["tool:probe-absent"] };
+	if (config.role === "refuse-duplicate") return { ...base, name: "probe-probe" };
+	if (config.role === "output-observer") return { ...base, hooks: [{ hook: "output", handlerId: 1, order: "last" }] };
 	return {
 		...base,
 		toolSources: [
@@ -141,8 +146,11 @@ async function onRequest(m) {
 			if (p.binding !== BINDING) return send({ id: m.id, error: { code: -32000, message: "unknown binding", data: { code: "not_supported" } } });
 			return reply(m.id, registration());
 		case "plugin/shutdown":
-			if (config.out && config.role !== "probe") appendFileSync(config.out, JSON.stringify({ method: m.method, params: p }) + "\n");
+			if (config.out && config.role !== "probe" && config.role !== "output-observer") appendFileSync(config.out, JSON.stringify({ method: m.method, params: p }) + "\n");
 			return reply(m.id, {});
+		case "hook/handle":
+			if (config.role === "output-observer" && config.out) appendFileSync(config.out, JSON.stringify(p.payload ?? null) + "\n");
+			return reply(m.id, null);
 		case "$/ping":
 			return reply(m.id, {});
 		case "tools/list":

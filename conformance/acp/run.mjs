@@ -62,7 +62,7 @@ const pluginEnv = {};
 	const extra = [];
 	if (probeChecks) {
 		const probe = new URL("../plugin/probe.mjs", import.meta.url).pathname;
-		for (const role of ["probe", "refuse-hook", "refuse-replace"]) extra.push({ command: [process.execPath, probe], config: { role, out: probeOut(role) } });
+		for (const role of ["probe", "refuse-hook", "refuse-replace", "refuse-duplicate", "output-observer"]) extra.push({ command: [process.execPath, probe], config: { role, out: probeOut(role) } });
 	}
 	if (jobChecks) extra.push({ command: [process.execPath, new URL("../plugin/jobs.mjs", import.meta.url).pathname], config: { out: probeOut("jobs") } });
 	if (extra.length) {
@@ -71,6 +71,8 @@ const pluginEnv = {};
 	}
 }
 const sessionsUsed = [];
+// Tenants every agent is started with, for the tenant checks (docs/bindings/data.md#limits-and-tenants).
+const TENANTS = JSON.stringify({ "kit-readonly": { rights: ["watch", "input", "answer", "settings"] }, "kit-broke": { rights: ["watch", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "administer"], tokens: 0 } });
 const project = mkdtempSync(join(tmpdir(), "ma-conf-project-"));
 const results = [];
 const children = [];
@@ -98,7 +100,7 @@ function connect(which = command) {
 	const child = spawn(which[0], which.slice(1), {
 		cwd: project,
 		stdio: ["pipe", "pipe", verbose ? "inherit" : "ignore"],
-		env: { ...process.env, ...pluginEnv, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: which === command ? dataDir : dataDir2 },
+		env: { ...process.env, ...pluginEnv, MODULAR_AGENT_TENANTS: TENANTS, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: which === command ? dataDir : dataDir2 },
 	});
 	children.push(child);
 	const updates = [];
@@ -330,6 +332,15 @@ if (decl.severalActors) {
 			ran = said(es, "echo: proposed by the guest") && es.filter((e) => e.kind === "turnEnd").length > turns;
 		}
 		check("release: the released input ran as a turn", ran);
+		check("proposals: the proposals extensions are listed", ["proposals", "withdraw"].every((x) => extensions.includes(x)), JSON.stringify(extensions));
+		const p2 = await ask("input", { actorId: "kit-guest", content: "a second proposal", when: "propose" });
+		const listed = (await ask("proposals", {})).proposals ?? [];
+		check("proposals: a proposal is listed with its proposer", listed.some((x) => x.inputId === p2.inputId && x.actorId === "kit-guest") && !listed.some((x) => x.inputId === prop.inputId), String(JSON.stringify(listed)).slice(0, 200));
+		await ask("withdraw", { inputId: p2.inputId, actorId: "kit-guest" });
+		await sleep(400);
+		const after = (await ask("proposals", {})).proposals ?? [];
+		const es2 = (await history(agent, sessionId)).entries;
+		check("withdraw: the proposal is gone, handed back, and never ran", !after.some((x) => x.inputId === p2.inputId) && es2.some((e) => e.kind === "inputHandedBack" && (e.data?.inputIds ?? []).includes(p2.inputId)) && !said(es2, "echo: a second proposal"), String(JSON.stringify(after)).slice(0, 200));
 		await ask("join", { actor: { id: "kit-guest", kind: "user", rights: ["watch"] } });
 		check("join again: taking a right away holds", await refused(ask("input", { actorId: "kit-guest", content: "no longer allowed", when: "propose" })));
 		await ask("leave", { actorId: "kit-viewer" });
@@ -353,6 +364,59 @@ if (decl.rewinding) {
 		check("rewinding: the branch ends at the entry moved to", branch.at(-1)?.id === mark, `${branch.at(-1)?.kind}`);
 		const r = await within(15000, prompt(agent, sessionId, "after the rewind"), "prompt after rewind");
 		check("rewinding: the session carries on", r.stopReason === "end_turn", r.stopReason);
+	});
+}
+
+if (decl.sessionLimits) {
+	await attempt("session limits", async () => {
+		const lim = (rights) => agent.ctx.request(`_${NS}/limit`, { sessionId, rights });
+		check("limits: the limit extension is listed", extensions.includes("limit"), JSON.stringify(extensions));
+		let refused = false;
+		try {
+			await lim(["watch", "kit-unknown-right"]);
+		} catch (e) {
+			refused = e?.code === -32602;
+		}
+		check("limits: a limit with a right the administrator lacks is refused", refused);
+		await lim(["watch", "input", "answer", "approve", "settings", "erase", "grant", "administer", "cancel", "propose"]);
+		const r = await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo yes > limited.txt"}'), "limited prompt");
+		check("limits: a tool call is refused under a limit without tools", r.stopReason === "end_turn" && !existsSync(join(project, "limited.txt")), r.stopReason);
+		await lim(null);
+		await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo yes > unlimited.txt"}'), "unlimited prompt");
+		check("limits: with the limit removed, the call runs", existsSync(join(project, "unlimited.txt")));
+		const es = (await history(agent, sessionId)).entries.filter((e) => e.kind === "limit");
+		check("limits: recorded as limit entries", es.length >= 2 && es.at(-1).data?.rights === null, String(JSON.stringify(es.map((e) => e.data))).slice(0, 200));
+	});
+}
+
+if (decl.tenants) {
+	await attempt("tenants", async () => {
+		const open = async (tenant) => {
+			const s2 = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [], _meta: { [NS]: { tenant } } });
+			await setOption(agent, s2.sessionId, "model", "conformance/echo");
+			await setOption(agent, s2.sessionId, "approval", "off");
+			return s2.sessionId;
+		};
+		check("tenants: the tenant extension is listed", extensions.includes("tenant"), JSON.stringify(extensions));
+		let refused = false;
+		try {
+			await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [], _meta: { [NS]: { tenant: "kit-no-such-tenant" } } });
+		} catch (e) {
+			refused = e?.code === -32602;
+		}
+		check("tenants: an unknown tenant is refused", refused);
+		const ro = await open("kit-readonly");
+		const info = await agent.ctx.request(`_${NS}/tenant`, { sessionId: ro });
+		check("tenants: the session reports its tenant", info.tenant === "kit-readonly" && Array.isArray(info.rights) && !info.rights.includes("tools"), JSON.stringify(info));
+		const first = (await history(agent, ro, { all: true })).entries;
+		check("tenants: a tenant entry is the session's first", first[0]?.kind === "tenant" && first[0]?.data?.tenant === "kit-readonly", String(JSON.stringify(first[0])).slice(0, 160));
+		const r = await within(15000, prompt(agent, ro, 'tool:bash {"command":"echo yes > tenant.txt"}'), "tenant prompt");
+		check("tenants: the tenant's ceiling refuses a tool call", r.stopReason === "end_turn" && !existsSync(join(project, "tenant.txt")), r.stopReason);
+		const broke = await open("kit-broke");
+		const b = await within(15000, prompt(agent, broke, "hello broke"), "budget prompt");
+		check("tenants: an exhausted budget ends the turn as tenantTokens, max_tokens", b.stopReason === "max_tokens" && meta(b)?.outcome?.limit === "tenantTokens", `${b.stopReason} ${JSON.stringify(meta(b)?.outcome)}`);
+		check("tenants: without a model request", !(await history(agent, broke)).entries.some((e) => e.kind === "response"));
+		for (const id of [ro, broke]) await agent.ctx.request(methods.agent.session.close, { sessionId: id });
 	});
 }
 
@@ -410,13 +474,23 @@ if (probeChecks) {
 		const checks = existsSync(probeOut("probe")) ? JSON.parse(readFileSync(probeOut("probe"), "utf8")) : [];
 		check("probe: the probe ran", checks.length > 0, "no results; was the tool called?");
 		for (const c of checks) check(`probe: ${c.name}`, c.ok, c.detail);
-		for (const role of ["refuse-hook", "refuse-replace"]) {
+		for (const role of ["refuse-hook", "refuse-replace", "refuse-duplicate"]) {
 			const lines = existsSync(probeOut(role)) ? readFileSync(probeOut(role), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-			const why = role === "refuse-hook" ? "a handler for a hook point the host doesn't offer" : "naming a replacement it doesn't register";
+			const why = { "refuse-hook": "a handler for a hook point the host doesn't offer", "refuse-replace": "naming a replacement it doesn't register", "refuse-duplicate": "a second plugin with a name already loaded" }[role];
 			check(`probe: ${why} gets plugin/shutdown, reason refused`, lines.some((l) => l.params?.reason === "refused"), JSON.stringify(lines));
 		}
 		const tools = agent.updates.filter((u) => u.sessionId === sessionId && u.update.sessionUpdate === "tool_call").map((u) => u.update.title);
 		check("probe: the refused plugins left nothing behind, and the host carried on", r.stopReason === "end_turn" && tools.includes("probe"), tools.join(","));
+		// What the output gate was given, in the shared shapes (docs/bindings/data.md#output-events).
+		const seen = existsSync(probeOut("output-observer")) ? readFileSync(probeOut("output-observer"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+		const events = seen.flatMap((x) => x?.events ?? []);
+		check("output events: the gate was given events", events.length > 0, `${seen.length} payloads`);
+		check("output events: every payload has sessionId, recipient, events and final", seen.every((x) => typeof x?.sessionId === "string" && typeof x?.recipient === "string" && Array.isArray(x?.events) && typeof x?.final === "boolean"), String(JSON.stringify(seen.find((x) => !(typeof x?.sessionId === "string" && Array.isArray(x?.events))))).slice(0, 200));
+		const OUT = { text: (d) => typeof d?.delta === "string", reasoning: (d) => typeof d?.delta === "string", toolCall: (d) => typeof d?.call?.id === "string" && typeof d?.call?.name === "string", toolOutput: (d) => typeof d?.toolCallId === "string" && typeof d?.chunk === "string", toolResult: (d) => typeof d?.toolCallId === "string" && typeof d?.status === "string" && Array.isArray(d?.content), entry: (d) => typeof d?.entry?.id === "string", turnEnded: (d) => typeof d?.outcome?.kind === "string", reply: (d) => typeof d?.method === "string" };
+		const bad = events.filter((e) => (OUT[e?.type] ? !OUT[e.type](e.data) : !String(e?.type ?? "").includes(".")));
+		check("output events: every event is a standard type in its shape, or a build's own type with a dot", bad.length === 0, String(JSON.stringify(bad.slice(0, 2))).slice(0, 300));
+		const types = new Set(events.map((e) => e?.type));
+		check("output events: a turn with a tool call gives text, toolCall, toolResult and turnEnded", ["text", "toolCall", "toolResult", "turnEnded"].every((t) => types.has(t)), [...types].join(","));
 	});
 }
 
@@ -582,7 +656,7 @@ if (portableChecks) {
 function portableProblems(sid, entries) {
 	const out = [];
 	const say = (e, what) => out.push(`${e.kind ?? "?"} ${String(e.id).slice(0, 8)}: ${what}`);
-	const STANDARD = ["inputAccepted", "inputHandedBack", "input", "turnStart", "modelRequest", "response", "toolStarted", "toolResult", "inputRequest", "inputAnswer", "turnEnd", "summary", "setting", "actorJoined", "actorLeft", "position", "erasure", "jobStarted", "jobEnded", "plugins"];
+	const STANDARD = ["inputAccepted", "inputHandedBack", "input", "turnStart", "modelRequest", "response", "toolStarted", "toolResult", "inputRequest", "inputAnswer", "turnEnd", "summary", "setting", "actorJoined", "actorLeft", "position", "erasure", "jobStarted", "jobEnded", "plugins", "limit", "tenant"];
 	const seen = new Set();
 	for (const e of entries) {
 		if (e.erased) continue;

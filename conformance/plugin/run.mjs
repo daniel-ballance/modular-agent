@@ -472,10 +472,13 @@ await attempt("hooks", async () => {
 	const contrib = await p.request("hook/handle", { handlerId: collect?.handlerId, hook: "turn.before", payload: { sessionId: "s1", turnId: "t1", input: [{ type: "text", text: "hi" }] } });
 	check("hook turn.before: contributes the system line", contrib?.system === "The conformance plugin is loaded.", JSON.stringify(contrib));
 	const out = (reg.hooks ?? []).find((h) => h.hook === "output");
-	const events = [{ type: "model.output", data: { delta: "the conformance-" } }, { type: "model.output", data: { delta: "secret is here" } }, { type: "entry", data: { message: { role: "assistant", content: [{ type: "text", text: "conformance-secret" }] } } }];
+	const events = [{ type: "text", data: { delta: "the conformance-", stepId: "k1" } }, { type: "text", data: { delta: "secret is here", stepId: "k1" } }, { type: "kit.own", data: { n: 7, note: "conformance-secret", flag: true } }];
 	const red = await p.request("hook/handle", { handlerId: out?.handlerId, hook: "output", payload: { sessionId: "s1", recipient: "kit", events, final: true } });
-	const redJson = JSON.stringify(red ?? null);
-	check("hook output: redacts conformance-secret in every event's text", Array.isArray(red?.events) && redJson.includes("[redacted]") && !/conformance-secret"/.test(redJson) && red.events.length === 3, redJson.slice(0, 240));
+	const got = red?.events ?? [];
+	const joined = got.filter((e) => e.type === "text").map((e) => e.data?.delta ?? "").join("");
+	check("hook output: redacts a secret split across a stream's text events", Array.isArray(red?.events) && joined.includes("[redacted]") && !joined.includes("conformance-secret"), String(JSON.stringify(red)).slice(0, 240));
+	const own = got.find((e) => e.type === "kit.own");
+	check("hook output: redacts strings in a build's own event type, and keeps the rest", own?.data?.n === 7 && own?.data?.flag === true && own?.data?.note === "[redacted]" && got.map((e) => e.type).join() === events.map((e) => e.type).join(), String(JSON.stringify(own)).slice(0, 200));
 	const clean = await p.request("hook/handle", { handlerId: out?.handlerId, hook: "output", payload: { sessionId: "s1", recipient: "kit", events: [{ type: "entry", data: { text: "nothing to hide" } }], final: true } });
 	check("hook output: lets clean output through", clean === null || JSON.stringify(clean).includes("nothing to hide"), JSON.stringify(clean));
 	let err;
