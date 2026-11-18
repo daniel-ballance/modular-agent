@@ -98,7 +98,7 @@ The agent MUST send a complete session declaration on open and settings replies.
 
 - **`session/new`:** The agent MUST validate the canonical project, the tenant and all supplied MCP server specifications before creating a session. The [setup rules](../contracts.md#input) govern when the session is kept. An unused closed session does not appear in later lists.
 - **`session/load` / `session/resume`:** The agent MUST check the stored project and [authority](#authorization). For a closed session it MUST obtain the writer lease, validate the record, reconcile pending mutations and install interrupted work before admitting fresh work. Opening MUST NOT wait for recovered work or an actor answer. After the open result, the agent MUST allow authorized reads, answers and cancellation, queue fresh work behind recovered work, and publish live questions. An already open session MUST reuse its writer and work. A concurrent open during opening or close MUST fail `busy`. Both methods MUST report authorized recovery `handedBack` content in admission order, omitting an empty list.
-- **Replay and live output:** On first attachment `session/load` MUST replay the gated branch oldest first before answering, with no intervening live updates. It MUST render `input` as user chunks, visible responses as model chunks and call notices, and tool results as terminal updates, synthesizing the initial call notice for a visible direct refusal when needed. `resume` and repeat attachments MUST NOT replay. History is authoritative for reconstruction; ACP updates have no cursor or watermark and cannot be merged losslessly with paged history. Use `history` with `all: true` for kept order.
+- **Replay and live output:** Before first-attachment replay, the agent MUST authorize and gate the complete `session/load` result. If that gate withholds the result, the agent MUST send no replay for that load. Otherwise it MUST serialize replay for that session on the connection, oldest first with no intervening live updates, then send the already-gated result. The client MUST treat replay as provisional for the pending load of that session on that connection. On error or a lost result, it MUST discard that attempt's replay before retrying. The agent MUST render `input` as user chunks, visible responses as model chunks and call notices, and tool results as terminal updates, synthesizing the initial call notice for a visible direct refusal when needed. `resume` and repeat attachments MUST NOT replay. History is authoritative for reconstruction; ACP updates have no cursor or watermark and cannot be merged losslessly with paged history. Use `history` with `all: true` for kept order.
 - **`session/close`:** The agent MUST stop admission, cancel the turn and jobs and close host-supplied servers. It MUST wait for settlement or the applicable cleanup deadline. If cleanup is unconfirmed it MUST report `lost` and leave affected work interrupted or unfinished. It MUST detach all views and release the lease after stopping old writes; reopen follows normal recovery and cannot infer cleanup from lease acquisition. Close without attachment MUST fail `not_open`; concurrent close MUST fail `busy`.
 - **`session/list`:** The agent MUST list only kept sessions the connection may discover. With `cwd` it MUST filter by canonical project, not path spelling. Listing MUST NOT join an actor. The agent MAY page the list using ACP's cursor fields.
 
@@ -138,7 +138,7 @@ The agent MUST apply the [connection actor rules](../contracts.md#authority), in
 | `_modular-agent/cancel-job` | `cancel` | `forbidden` |
 | `_modular-agent/join` | `grant`; only rights the granter effectively holds | `forbidden` |
 | `_modular-agent/leave` | `grant` for another actor; membership for self | `forbidden` |
-| `_modular-agent/release` | `input` | `forbidden` |
+| `_modular-agent/release` | `input`; a report release also requires the job's current `input` | `forbidden` |
 | `_modular-agent/withdraw` | The connection's actor is the proposer, or has `input` | `forbidden` |
 | `_modular-agent/limit` | `administer` and the [ceiling rule](../contracts.md#limits-and-tenants) | `forbidden` |
 | `authenticate`, `logout`, `session/delete`, `session/set_mode`, `elicitation/complete`, ACP `session/fork`, `fs/*`, `terminal/*`, other ACP additions | Not part of this profile | `-32601` if requested; ignore notifications |
@@ -205,7 +205,9 @@ The agent MUST keep failed turns in history in both versions. The agent MUST rep
 
 The two admission methods MUST share the [core key lookup](../contracts.md#input), retaining keys across branches and restarts. Externally supplied keys are scoped by session, configured submitter and attributed actor. New keys MUST be nonempty strings outside reserved prefixes. A refusal MUST NOT claim a key. An authorized erased duplicate MUST return exactly `{ duplicate: true, erased: true }` from `input`; a prompt MUST return `stopReason: "end_turn"` with only those two metadata fields and no turn outcome. A duplicate cannot start or cancel work.
 
-| `when` | When no turn runs | When a turn runs |
+The agent MUST decide admission and its receipt in the same serialized operation as the ready queue, installed recovery work and turn state. With no running turn, non-proposal input takes `now` only if it can run next without overtaking ready or recovered work; otherwise it queues with `after`.
+
+| `when` | When idle and this input can run next | When a turn runs |
 |---|---|---|
 | `now` (also `session/prompt`) | Start a turn; receipt `now`. | Queue a new turn; receipt `after`. |
 | `steer` | Start a turn; receipt `now`. | Before the [final steering check](../contracts.md#input) and with `inputDuringTurn`, queue steering; receipt `inTurn`. Otherwise queue a new turn; receipt `after`. |
@@ -332,7 +334,7 @@ For example, `requests` can return `{ "requests": [{ "id": "q1", "kind": "choice
 
 ## Several actors
 
-An agent with `severalActors` MUST offer and list all the following extensions. Without `severalActors` it MUST refuse `when: "propose"` and represented actors with `not_supported`. The actor shape and rights are those of [shared data](data.md#actors).
+An agent with `severalActors` MUST offer and list all the following extensions. An agent that can park job reports or reopen them still parked MUST offer and list `proposals`, `release` and `withdraw` even without `severalActors`. Without `severalActors` it MUST refuse `when: "propose"` and represented actors with `not_supported`. The actor shape and rights are those of [shared data](data.md#actors).
 
 | Method | Params beyond `sessionId` | Result |
 |---|---|---|
@@ -340,14 +342,14 @@ An agent with `severalActors` MUST offer and list all the following extensions. 
 | `_modular-agent/join` | `actor`, `present?` (boolean, default `true`) | `{}` |
 | `_modular-agent/leave` | `actorId` | `{}` |
 | `_modular-agent/release` | `inputId`, `when` (`now`, `steer`, `after`), `declined?` (boolean, default `false`) | `{ inputId, taken }`; `handedBack` for a declined release |
-| `_modular-agent/proposals` | none | `{ proposals: [{ inputId, actorId, content, time }] }`, pending proposals oldest first |
+| `_modular-agent/proposals` | none | `{ proposals: [{ inputId, actorId, content, time }] }`, pending proposals and parked job reports oldest first |
 | `_modular-agent/withdraw` | `inputId` | `{}` |
 
 The agent MUST record successful `join` and `leave` as session-wide grants and revocations, with the granter's id for grants. A rejoin MUST replace rights without changing the actor's kind. The agent MUST NOT let `join` replace the connection's configured principal or reclassify an existing actor id. Self-leave MUST revoke the configured actor, not an actor selected for delegation. Disconnect MUST remove that connection's presence and bindings without revoking durable rights.
 
 Presence follows [Authority](../contracts.md#authority). On open the agent MUST mark the configured actor present. A `join` MUST set presence only for a represented actor, and `present: false` clears only presence. Leave MUST clear that actor's presence on every connection. On `input` or `answer` an explicit `actorId` MUST name a current member the operator configured this connection to represent. Joining an actor never confers representation. The agent MUST intersect attributed and configured actors' effective rights and record both identities. Without `actorId` it MUST use the configured actor. Other methods do not select a principal through `actorId`.
 
-For `release` or `withdraw` the agent MUST check the proposal and commit its transition atomically with authorization. A successful release MUST record another `inputAccepted` with the same `inputId`, the new `when` and `data.releasedBy`. Its work MUST act with the proposer and releaser's shared rights, including any delegating actor's rights. A decline or withdrawal MUST record `inputHandedBack` and take no turn. The agent MUST fail an unknown proposal id with `not_found` and a known no-longer-pending proposal with `conflict`.
+For `proposals`, `release` and `withdraw`, the agent MUST treat an unreleased parked job report as a proposal, whatever its recorded `when`. For `release` or `withdraw` the agent MUST check the proposal and commit its transition atomically with authorization. A successful release MUST record another `inputAccepted` with the same `inputId`, the new `when` and `data.releasedBy`. For a report release, `steer` behaves as `after` under [Input admission](#input-admission); attribution and authority follow [Jobs](../contracts.md#jobs). For other releases the agent MUST use the proposer and releaser's shared rights, including any delegating actor's rights. The [restart policy](../contracts.md#input) applies to reports only once ready. A decline or withdrawal MUST record `inputHandedBack` and take no turn. The agent MUST fail an unknown proposal id with `not_found` and a known no-longer-pending proposal with `conflict`.
 
 For example, `proposals` can return `{ "proposals": [{ "inputId": "i1", "actorId": "guest", "content": [{ "type": "text", "text": "Check the draft" }], "time": 1760000000000 }] }`. A declined `release` of `i1` returns `{ "inputId": "i1", "taken": "handedBack" }` and removes it from this list.
 
@@ -386,6 +388,7 @@ The [conformance kit](../../conformance/acp/README.md) exercises this mode. See 
 
 - **Production edition.** Pinned ACP schemas and declaration values; specified connection identity, tenant and method checks, answer races, gating and history bounds, cancellation and recovery, and deterministic fixtures. Binding versions are unchanged.
   - Round three: session-qualified erase results, fork size refusal, durable cleanup status and the steering cutoff.
+  - Round four: provisional load replay, release of parked job reports and queue-aware input receipts.
 - **2026-11-18, round six.** Listing and withdrawing proposals; presence on `join` (Go B28, Elixir R5-4); limits and tenants; a reply the gate withholds (Go B35); what a rewind couldn't reach (Go B34).
 - **2026-11-18, round five.** The Entry section points to the shared data's kinds, and erased entries keep their identities there too (found by the TypeScript builder).
 - **2026-11-18, round five.** `/2`, asked for in `initialize`, reports a failed turn as a JSON-RPC error rather than `refusal`; the conformance model's `fail:` makes one. Several actors: the extensions `actors`, `join`, `leave` and `release`, `actorId` on `input` and `answer`, and proposed input (Python G76, Go B26). `move` with `rewind`.
