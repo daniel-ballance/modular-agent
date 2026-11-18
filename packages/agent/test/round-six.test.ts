@@ -55,8 +55,8 @@ test("a limit narrows a running turn's next action, persists off branch, and can
 	const limit = api.history(s).find((e) => e.kind === "limit")!;
 	await api.moveTo(s, mark);
 	assert.ok(!api.session(s).actors[0].authority.includes("tools"));
-	await assert.rejects(api.setLimit(s, ALL_AUTHORITY, "user"), /lacks/);
 	await assert.rejects(api.erase(s, [limit.id], "user"), /authority/);
+	await api.setLimit(s, ALL_AUTHORITY, "user");
 	await api.setLimit(s, null, "user");
 	assert.ok(api.session(s).actors[0].authority.includes("tools"));
 });
@@ -104,18 +104,19 @@ test("ACP proposals list oldest first, allow a proposer to withdraw, and report 
 	await ext("join", { actor, present: false });
 	assert.deepEqual((await ext("actors") as { present: string[] }).present, ["acp-user"]);
 	await ext("join", { actor });
-	assert.deepEqual((await ext("actors") as { present: string[] }).present, ["acp-user", "guest"]);
-	const propose = async (content: string) => (await ext("input", { content, when: "propose", actorId: "guest" }) as { inputId: string }).inputId;
+	assert.deepEqual((await ext("actors") as { present: string[] }).present, ["acp-user"]);
+	await assert.rejects(ext("input", { content: "not represented", when: "propose", actorId: "guest" }), { code: -32602, data: { code: "forbidden" } });
+	const propose = async (content: string) => (await ext("input", { content, when: "propose" }) as { inputId: string }).inputId;
 	const one = await propose("one"), two = await propose("two");
 	const listed = (await ext("proposals") as { proposals: { inputId: string; actorId: string; content: ReturnType<typeof text>[]; time: number }[] }).proposals;
-	assert.deepEqual(listed.map(({ inputId, actorId, content }) => [inputId, actorId, textOf(content)]), [[one, "guest", "one"], [two, "guest", "two"]]);
+	assert.deepEqual(listed.map(({ inputId, actorId, content }) => [inputId, actorId, textOf(content)]), [[one, "acp-user", "one"], [two, "acp-user", "two"]]);
 	assert.ok(listed[0].time > 0 && listed[0].time <= listed[1].time);
 	await ext("join", { actor: { ...actor, id: "other" }, present: false });
 	await assert.rejects(ext("withdraw", { inputId: one, actorId: "other" }), { code: -32602 });
-	await ext("withdraw", { inputId: one, actorId: "guest" });
+	await ext("withdraw", { inputId: one });
 	assert.deepEqual(await ext("release", { inputId: two, when: "now", declined: true }), { inputId: two, taken: "handedBack" });
 	assert.deepEqual(await ext("proposals"), { proposals: [] });
-	assert.deepEqual(api.history(sessionId).filter((e) => e.kind === "inputHandedBack").map((e) => e.data), [{ inputIds: [one] }, { inputIds: [two] }]);
+	assert.deepEqual(api.history(sessionId).filter((e) => e.kind === "inputHandedBack").map((e) => e.data), [{ inputId: one, reason: "withdrawn" }, { inputId: two, reason: "declined" }]);
 });
 
 test("ACP replies withheld by a blocking or failing gate return an error without reversing the effect", async (t) => {
@@ -132,7 +133,7 @@ test("ACP replies withheld by a blocking or failing gate return an error without
 	await assert.rejects(ext("history"), withheld);
 });
 
-test("rewind restores the original files if recording fails, reports open-world calls, and refuses another branch", async (t) => {
+test("rewind commits intent before touching files, reports open-world calls, and refuses another branch", async (t) => {
 	const { api, h, dirs } = await agent(t);
 	const s = await api.startSession();
 	const mark = api.session(s).position!;
@@ -145,7 +146,7 @@ test("rewind restores the original files if recording fails, reports open-world 
 	const append = store.append.bind(store);
 	store.append = async (id, entries) => {
 		if (entries.some((e) => e.kind === "position")) {
-			assert.equal(readFileSync(note, "utf8"), "before", "the files were restored before the write");
+			assert.equal(readFileSync(note, "utf8"), "after", "no restore may run before committing the intent");
 			throw new Error("lease lost");
 		}
 		await append(id, entries);
@@ -167,11 +168,11 @@ test("a job records its starting rights and accepts its report before the waitin
 		api.on("turn.before", async (p) => { if (textOf(p.input) === "hold") { requesting.release(); await proceed.wait; } });
 	} }]);
 	const s = await api.startSession();
-	await api.join(s, { id: "worker", kind: "plugin", authority: ["watch", "jobs"] }, "user");
+	await api.join(s, { id: "worker", kind: "plugin", authority: ["watch", "jobs", "input"] }, "user");
 	const job = api.startJob(s, { kind: "check", actorId: "worker" });
 	await job.ready;
-	assert.deepEqual((api.history(s).find((e) => e.kind === "jobStarted")!.data as { rights: string[] }).rights, ["watch", "jobs"]);
-	await api.join(s, { id: "worker", kind: "plugin", authority: ["watch", "jobs", "tools"] }, "user");
+	assert.deepEqual((api.history(s).find((e) => e.kind === "jobStarted")!.data as { rights: string[] }).rights, ["watch", "input", "jobs"]);
+	await api.join(s, { id: "worker", kind: "plugin", authority: ["watch", "jobs", "input", "tools"] }, "user");
 	await api.input(s, { actorId: "user", content: "hold" });
 	await requesting.wait;
 	const content = [text('tool:write {"path":"job-file","content":"bad"}')];

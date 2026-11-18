@@ -44,7 +44,7 @@ export function contextCompaction(options: CompactionOptions = {}): Plugin {
 			api.on("step.before", async (payload: { sessionId: string; turnId: string; model?: { contextWindow: number }; request: ModelRequest }) => {
 				let messages = view(api.history(payload.sessionId), payload.turnId);
 				const window = payload.model?.contextWindow ?? Infinity;
-				if (estimate(messages) > window - reserve) {
+				if (estimate(messages) > window - Math.min(reserve, Math.floor(window / 2))) {
 					await compact(api, payload.sessionId, keep);
 					messages = view(api.history(payload.sessionId), payload.turnId);
 				}
@@ -86,6 +86,7 @@ export async function compact(api: PluginApi, sessionId: string, keepTokens: num
 	if (cut <= 0) cut = candidates.map((e) => e.message?.role).lastIndexOf("user");
 	if (cut <= 0) return false;
 	const older = candidates.slice(0, cut);
+	if (lastSummary < 0 && !older.some((e) => e.modelVisible && e.message)) return false;
 	const access = api.modelAccess(sessionId);
 	if (!access) return false;
 	const previous = lastSummary >= 0 ? (history[lastSummary].data as SummaryData).summary + "\n\n" : "";

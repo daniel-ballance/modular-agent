@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
-import { ALL_AUTHORITY, text, type EntryDraft, type HistoryStore, type Plugin, type Provider } from "@modular-agent/harness";
+import { ALL_AUTHORITY, text, type EntryDraft, type HistoryStore, type ModelRequest, type Plugin, type Provider } from "@modular-agent/harness";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { createAgent, conformanceProvider } from "../src/index.js";
 
@@ -43,7 +43,7 @@ test("portable receipts survive reopening even when input is handed back, and an
 	]);
 	await api.openSession(sid);
 	assert.deepEqual(api.recoveredInput(sid).map((q) => q.id), ["receipt"]);
-	assert.deepEqual(api.history(sid).find((e) => e.kind === "inputHandedBack")?.data, { inputIds: ["receipt"] });
+	assert.deepEqual(api.history(sid).find((e) => e.kind === "inputHandedBack")?.data, { inputId: "receipt", reason: "restart" });
 	assert.deepEqual(await api.input(sid, { actorId: "user", key: "retry", content: "wrong" }), { inputId: "receipt", taken: "after", duplicate: true });
 	assert.equal(api.session(sid).settings.approval, "all");
 	assert.deepEqual(api.session(sid).settings.model, missing);
@@ -97,10 +97,14 @@ test("collected context stays on turnStart and reaches the model; every step has
 	assert.deepEqual((start.data as { context: unknown }).context, [text("collected: ")]);
 	assert.deepEqual(branch.find((e) => e.kind === "input")?.message?.content, [text("hello")]);
 	const response = branch.find((e) => e.kind === "response")!;
-	assert.match(JSON.stringify(response.message), /echo: collected: /);
+	assert.match(JSON.stringify(response.message), /echo: hello/);
 	const request = branch.find((e) => e.kind === "modelRequest" && e.stepId === response.stepId)!;
 	assert.ok(branch.indexOf(request) < branch.indexOf(response));
-	assert.deepEqual(request.data, { model, safeToRepeat: true });
+	const intent = request.data as { model: typeof model; safeToRepeat: boolean; tools: string[]; request: ModelRequest };
+	assert.deepEqual(intent.model, model);
+	assert.equal(intent.safeToRepeat, true);
+	assert.deepEqual(intent.request.messages.filter((m) => m.role === "user").map((m) => m.content), [[text("collected: ")], [text("hello")]]);
+	assert.deepEqual(intent.tools, intent.request.tools.map((t) => t.name));
 });
 
 test("an unsafe in-flight model request is not repeated even by the durable Runtime", async (t) => {
@@ -125,7 +129,7 @@ test("an unsafe in-flight model request is not repeated even by the durable Runt
 test("a refused repeat of a started tool settles it as outcomeUnknown, without a second call", async (t) => {
 	const { api, store, dirs } = await open(t, folders(t), [durableRuntime()]);
 	const call = { id: "call", name: "read", input: { path: "note" }, startedBy: "model", stepId: "step" };
-	const sid = await seed(store, dirs.project, [joined(["input"]), setting("model", model), setting("approval", "off"),
+	const sid = await seed(store, dirs.project, [joined(["watch", "input"]), setting("model", model), setting("approval", "off"),
 		draft("turnStart", { turnId: "turn", data: { model, startedBy: { kind: "actor", id: "user" }, system: "", tools: api.tools(), settings: {} } }),
 		draft("input", { turnId: "turn", actorId: "user", modelVisible: true, data: { inputId: "input" }, message: { role: "user", content: [text('tool:read {"path":"note"}')] } }),
 		draft("response", { turnId: "turn", stepId: "step", modelVisible: true, message: { role: "assistant", stop: "toolUse", content: [{ type: "toolCall", id: call.id, name: call.name, arguments: call.input }] } }),

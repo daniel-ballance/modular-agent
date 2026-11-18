@@ -20,15 +20,15 @@ function summary(call: ToolCall): string {
  * Each question is keyed by its tool call, so after a restart a durable
  * Runtime reopens the same question rather than asking a new one.
  */
-export function approval(options: { policy?: ApprovalPolicy; /** Leave the question open past its turn after this long. */ waitMs?: number } = {}): Plugin {
+export function approval(options: { policy?: ApprovalPolicy;  /** Close an unanswered approval at this deadline. */ waitMs?: number } = {}): Plugin {
 	return {
 		name: "approval",
 		setup(api) {
-			const fallback = options.policy ?? (api.config().policy as ApprovalPolicy | undefined) ?? "ask";
+			const fallback = options.policy ?? (api.config().policy as ApprovalPolicy | undefined) ?? "all";
 			const waitOf = (sessionId: string) => (api.session(sessionId).settings.approvalWaitMs as number | undefined) ?? options.waitMs ?? (api.config().waitMs as number | undefined);
 			const policyOf = (sessionId: string) => {
 				const value = api.session(sessionId).settings.approval as ApprovalPolicy | undefined;
-				return value === undefined ? fallback : POLICIES.includes(value) ? value : "all";
+				return value === undefined ? "all" : POLICIES.includes(value) ? value : "never";
 			};
 			api.on("session.start", async ({ sessionId, resumed }) => {
 				if (!resumed && api.session(sessionId).settings.approval === undefined) await api.setSetting(sessionId, "approval", fallback);
@@ -37,7 +37,7 @@ export function approval(options: { policy?: ApprovalPolicy; /** Leave the quest
 			api.on("tool.before", async (p: { sessionId: string; call: ToolCall; definition?: ToolDefinition }) => {
 				const policy = policyOf(p.sessionId);
 				if (policy === "off") return undefined;
-				if (policy !== "all" && p.definition?.hints?.readOnly) return undefined;
+				if (policy === "ask" && p.definition?.hints?.readOnly) return undefined;
 				if (policy === "never") return { refuse: `The approval policy is "never", so ${p.call.name} was refused without asking.` };
 				const answer = await api.ask(p.sessionId, {
 					kind: "approval",
@@ -45,7 +45,7 @@ export function approval(options: { policy?: ApprovalPolicy; /** Leave the quest
 					question: `Allow ${p.call.name}?`,
 					details: summary(p.call),
 					toolCallId: p.call.id,
-					...(waitOf(p.sessionId) ? { timeLimitMs: waitOf(p.sessionId), whenTimeLimit: "leaveOpen" as const } : {}),
+					...(waitOf(p.sessionId) !== undefined ? { timeLimitMs: waitOf(p.sessionId) } : {}),
 				});
 				if (answer.pending) return { pending: "Waiting for approval" };
 				if (answer.declined || answer.value !== "allow") return { refuse: `${p.call.name} was not approved${answer.reason ? ` (${answer.reason})` : ""}.` };

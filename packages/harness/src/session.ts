@@ -21,9 +21,9 @@ export interface QueuedInput {
 	/** Set when this is not input but a continuation of tool calls left open past an earlier turn. */
 	continueCalls?: string[];
 }
-export interface InputReceipt { inputId: string; taken: "now" | "inTurn" | "after" | "proposed" | "handedBack"; duplicate?: boolean }
+export interface InputReceipt { inputId: string; taken: "now" | "inTurn" | "after" | "proposed" | "handedBack"; duplicate?: boolean; erased?: true }
 
-export interface RunningTurn { turnId: string; abort: AbortController; done: Promise<void> }
+export interface RunningTurn { turnId: string; abort: AbortController; done: Promise<void>; steeringClosed?: boolean }
 export interface OpenRequest {
 	request: InputRequest;
 	resolve(answer: Answer): void;
@@ -44,6 +44,8 @@ export interface JobRecord {
 /** One session: identity, settings, actors, current position and history. */
 export class Session {
 	readonly entries = new Map<string, HistoryEntry>();
+	readonly copied = new Set<string>();
+	private forkSetup = false;
 	readonly order: string[] = [];
 	position: string | null = null;
 	settings: Record<string, unknown> = {};
@@ -56,6 +58,7 @@ export class Session {
 	readonly admissions = new Map<string, QueuedInput>();
 	admitting: Promise<unknown> = Promise.resolve();
 	readonly keys = new Map<string, InputReceipt>();
+	readonly erasedKeys = new Set<string>();
 	running?: RunningTurn;
 	readonly jobs = new Map<string, JobRecord>();
 	readonly requests = new Map<string, OpenRequest>();
@@ -90,31 +93,42 @@ export class Session {
 		const existing = this.entries.get(entry.id);
 		this.entries.set(entry.id, entry);
 		if (!existing) this.order.push(entry.id);
+		if (this.meta.forkedFrom && !this.forkSetup && (entry.sources?.length || entry.erased)) {
+			this.copied.add(entry.id);
+			this.position = entry.id;
+			return;
+		}
+		this.forkSetup = true;
 		// A key is remembered for the session's life, across restarts, so it is rebuilt from the record.
 
 		if (entry.erased) {
+			if (entry.kind === "input" || entry.kind === "inputHandedBack") {
+				for (const id of entry.inputId ? [entry.inputId] : entry.inputIds ?? []) { this.admissions.delete(id); this.proposals.delete(id); }
+			}
 			if (!existing && entry.kind !== "position") this.position = entry.id;
 			return;
 		}
 		switch (entry.kind) {
 			case "inputAccepted": {
-				const { inputId, key, content, when, releasedBy, delegatedBy, taken } = entry.data as {
-					inputId: string; key?: string; content: ContentPart[]; when: InputTiming; releasedBy?: string; delegatedBy?: string; taken?: InputReceipt["taken"];
+				const { inputId: legacyId, key, content, when, releasedBy, delegatedBy, taken, parked } = entry.data as {
+					inputId: string; key?: string; content: ContentPart[]; when: InputTiming; releasedBy?: string; delegatedBy?: string; taken?: InputReceipt["taken"]; parked?: boolean;
 				};
+				const inputId = entry.inputId ?? legacyId;
 				const actorId = entry.actorId!;
 				const startedBy = entry.jobId ? { kind: "job" as const, id: entry.jobId } : { kind: "actor" as const, id: actorId };
 				const queued = { id: inputId, actorId, key, content, when, releasedBy, delegatedBy, time: entry.time, kind: "input", startedBy };
 				this.admissions.set(inputId, queued);
-				if (when === "propose") this.proposals.set(inputId, queued);
+				if (when === "propose" || parked === true && !releasedBy) this.proposals.set(inputId, queued);
 				else this.proposals.delete(inputId);
 				if (key && !this.keys.has(key)) this.keys.set(key, { inputId, taken: taken ?? (when === "propose" ? "proposed" : when === "steer" ? "inTurn" : when) });
 				break;
 			}
 			case "inputHandedBack":
-				for (const id of (entry.data as { inputIds: string[] }).inputIds) { this.admissions.delete(id); this.proposals.delete(id); }
+				for (const id of entry.inputId ? [entry.inputId] : (entry.data as { inputIds?: string[]; inputId?: string })?.inputIds ?? ((entry.data as { inputId?: string })?.inputId ? [(entry.data as { inputId: string }).inputId] : [])) { this.admissions.delete(id); this.proposals.delete(id); }
 				break;
 			case "input": {
-				const { inputId, key } = (entry.data ?? {}) as { inputId?: string; key?: string };
+				const { inputId: legacyId, key } = (entry.data ?? {}) as { inputId?: string; key?: string };
+				const inputId = entry.inputId ?? legacyId;
 				if (inputId) {
 					this.admissions.delete(inputId);
 					if (key && !this.keys.has(key)) this.keys.set(key, { inputId, taken: "now" });
@@ -145,6 +159,12 @@ export class Session {
 				this.actors.delete((entry.data as { actorId: string }).actorId);
 				break;
 			case "erasure": {
+				for (const { key, inputId } of (entry.data as { inputKeys?: { key: string; inputId: string }[] }).inputKeys ?? []) {
+					this.erasedKeys.add(key);
+					this.keys.delete(key);
+					this.admissions.delete(inputId);
+					this.proposals.delete(inputId);
+				}
 				for (const id of (entry.data as { entryIds: string[] }).entryIds) {
 					const target = this.entries.get(id);
 					// Erasing an input also forgets its key.
@@ -152,7 +172,7 @@ export class Session {
 					if (erasedKey) this.keys.delete(erasedKey);
 					const inputId = (target?.data as { inputId?: string } | undefined)?.inputId;
 					if (inputId) { this.admissions.delete(inputId); this.proposals.delete(inputId); }
-					if (target) this.entries.set(id, erasedEntry(target));
+					if (target && !target.erased) this.entries.set(id, erasedEntry(target));
 				}
 				break;
 			}

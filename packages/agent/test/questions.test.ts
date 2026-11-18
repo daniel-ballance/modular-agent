@@ -142,7 +142,7 @@ test("transient: a question open when the process stopped is recorded as no long
 	await h.stop();
 });
 
-test("approval policies: read-only tools pass under ask; never refuses without asking", async () => {
+test("approval policy never refuses even read-only tools without asking", async () => {
 	const d = dirs();
 	const ui = fakeUi();
 	const h = await agent(d, [
@@ -155,7 +155,7 @@ test("approval policies: read-only tools pass under ask; never refuses without a
 	await api.input(s, { content: "go", actorId: "user" });
 	await api.waitForIdle(s);
 	const results = kinds(h, s, "toolResult").map((e) => (e.data as { status: string }).status);
-	assert.deepEqual(results, ["failed", "refused"]); // read ran (file missing); bash refused
+	assert.deepEqual(results, ["refused", "refused"]);
 	assert.equal(ui.requests.length, 0);
 	await h.stop();
 });

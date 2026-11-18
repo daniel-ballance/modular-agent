@@ -83,7 +83,7 @@ test("ACP: an approval becomes session/request_permission; a refusal blocks the 
 	await harness.stop();
 });
 
-test("ACP: an approval left open past its turn is answered later through the same permission request", async () => {
+test("ACP: a timed-out approval is closed and a late allow cannot dispatch", async () => {
 	const { d, harness, ctx, connection, answer } = await setup(
 		[fauxAssistantMessage([fauxToolCall("bash", { command: "echo x > x.txt" })], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Done.")])],
 		{ permission: "never", waitMs: 30 },
@@ -91,13 +91,16 @@ test("ACP: an approval left open past its turn is answered later through the sam
 	await ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: d.project, mcpServers: [] });
 	const response = await ctx.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "make x" }] });
-	assert.equal(response.stopReason, "end_turn", "the turn ends with the call open");
+	assert.equal(response.stopReason, "end_turn");
+	assert.equal(harness.api("t").openRequests(sessionId).length, 0);
+	const entries = harness.api("t").history(sessionId);
+	assert.ok(entries.some((e) => e.kind === "inputAnswer" && (e.data as { reason?: string }).reason === "timeLimit"));
 	assert.equal(existsSync(join(d.project, "x.txt")), false);
 	answer("allow");
 	await harness.api("t").waitForIdle(sessionId);
 	await new Promise((r) => setTimeout(r, 20));
 	await harness.api("t").waitForIdle(sessionId);
-	assert.ok(existsSync(join(d.project, "x.txt")), "the late allow ran the call");
+	assert.equal(existsSync(join(d.project, "x.txt")), false, "the late allow must not run the call");
 	connection.close();
 	await harness.stop();
 });

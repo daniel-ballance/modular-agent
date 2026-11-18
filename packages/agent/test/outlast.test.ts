@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { type Harness, type InputRequest, type Plugin, type PluginApi, textOf, WAITING_NOTE } from "@modular-agent/harness";
-import { approval } from "@modular-agent/approval";
+import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "../src/index.js";
 
 function fakeUi() {
@@ -28,9 +28,9 @@ async function agent(d: { project: string; home: string }, responses: FauxRespon
 	const models = createModels();
 	models.setProvider(faux.provider);
 	faux.setResponses(responses);
-	return createAgent({ ...d, models, model: "faux/faux-1", plugins: [approval({ policy: "ask", waitMs: 30 }), ui] });
+	return createAgent({ ...d, models, model: "faux/faux-1", plugins: [questionTool({ waitMs: 30 }), ui] });
 }
-const pay = () => fauxToolCall("bash", { command: "echo paid > paid.txt" });
+const pay = () => fauxToolCall("ask_user", { question: "Confirm payment?" });
 const kinds = (h: Harness, s: string, k: string) => h.api("t").history(s).filter((e) => e.kind === k);
 const turnData = (h: Harness, s: string) => kinds(h, s, "turnEnd").map((e) => e.data as { outcome: { kind: string }; result: { openToolCalls: string[]; text?: string } });
 
@@ -53,7 +53,9 @@ test("a question outlasts its turn; a late allow runs the call and the agent car
 	assert.equal(kinds(h, s, "turnEnd").length, 1);
 	assert.equal(api.openRequests(s).length, 1);
 	assert.deepEqual(api.openRequests(s).map((r) => r.id), [asked.id]);
-	assert.equal(existsSync(join(d.project, "paid.txt")), false);
+	const checkpoint = kinds(h, s, "toolPending")[0];
+	assert.equal(checkpoint.toolCallId, call.id);
+	assert.deepEqual((checkpoint.data as { requestIds: string[] }).requestIds, [asked.id]);
 
 	// The late answer lets the call run, in a new turn started by the answer.
 	assert.deepEqual(ui.answer(asked, "allow"), { accepted: true });
@@ -63,16 +65,20 @@ test("a question outlasts its turn; a late allow runs the call and the agent car
 	assert.equal(results.length, 1, "exactly one result");
 	assert.equal(results[0].toolCallId, call.id);
 	assert.equal((results[0].data as { status: string }).status, "completed");
-	assert.ok(existsSync(join(d.project, "paid.txt")));
+	assert.match(JSON.stringify(results[0].message), /The user answered: allow/);
 	const second = turnData(h, s)[1];
 	assert.equal(second.outcome.kind, "completed");
 	assert.equal(second.result.text, "Paid.");
-	const starts = kinds(h, s, "turnStart").map((e) => (e.data as { startedBy: { kind: string } }).startedBy.kind);
-	assert.deepEqual(starts, ["actor", "answer"]);
+	const starts = kinds(h, s, "turnStart");
+	assert.deepEqual(starts.map((e) => (e.data as { startedBy: { kind: string } }).startedBy.kind), ["actor", "answer"]);
+	assert.equal(starts[1].continuesTurnId, starts[0].turnId);
+	assert.equal(results[0].turnId, starts[1].turnId);
+	assert.equal(results[0].stepId, checkpoint.stepId);
+	assert.equal(kinds(h, s, "inputAnswer")[0].stepId, checkpoint.stepId);
 	await h.stop();
 });
 
-test("new input while a call is open sees a stand-in result; the real one arrives later as a late result", async () => {
+test("new input while a call is open sees a stand-in result; the real one later replaces the stand-in at the original call", async () => {
 	const d = dirs();
 	const ui = fakeUi();
 	const call = pay();
@@ -86,8 +92,9 @@ test("new input while a call is open sees a stand-in result; the real one arrive
 			return fauxAssistantMessage([fauxText("Noted. Still waiting on the payment.")]);
 		},
 		(context) => {
-			const late = context.messages.find((m) => m.role === "user" && textOf(m.content as never).includes("Late result"));
-			seen.push(late ? "late result shown" : "no late result");
+			const i = context.messages.findIndex((m) => m.role === "assistant");
+			const result = context.messages[i + 1];
+			seen.push(result.role === "toolResult" ? textOf(result.content as never) : "no result");
 			return fauxAssistantMessage([fauxText("The payment went through.")]);
 		},
 	], ui.plugin);
@@ -103,12 +110,12 @@ test("new input while a call is open sees a stand-in result; the real one arrive
 	assert.equal(kinds(h, s, "toolResult").length, 0);
 	ui.answer(asked, "allow");
 	await api.waitForIdle(s);
-	assert.equal(seen[1], "late result shown");
+	assert.equal(seen[1], "The user answered: allow");
 	assert.equal(turnData(h, s).at(-1)!.result.text, "The payment went through.");
 	await h.stop();
 });
 
-test("a late refusal ends the open call as refused, and the agent carries on", async () => {
+test("a late decline is passed to the question tool and the agent carries on", async () => {
 	const d = dirs();
 	const ui = fakeUi();
 	const h = await agent(d, [fauxAssistantMessage([pay()], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Understood, not paying.")])], ui.plugin);
@@ -120,8 +127,8 @@ test("a late refusal ends the open call as refused, and the agent carries on", a
 	ui.answer(asked, "refuse");
 	await api.waitForIdle(s);
 	const [result] = kinds(h, s, "toolResult");
-	assert.equal((result.data as { status: string }).status, "refused");
-	assert.equal(existsSync(join(d.project, "paid.txt")), false);
+	assert.equal((result.data as { status: string }).status, "completed");
+	assert.match(JSON.stringify(result.message), /The user did not answer/);
 	assert.equal(turnData(h, s).at(-1)!.result.text, "Understood, not paying.");
 	await h.stop();
 });
@@ -145,7 +152,7 @@ test("a question waiting past its turn survives a restart, with a transient Runt
 	assert.equal(again.id, asked.id);
 	assert.deepEqual(ui.answer(again, "allow"), { accepted: true });
 	await api.waitForIdle(s);
-	assert.ok(existsSync(join(d.project, "paid.txt")));
+	assert.match(JSON.stringify(kinds(h, s, "toolResult")[0].message), /The user answered: allow/);
 	assert.equal(turnData(h, s).at(-1)!.result.text, "Paid after the restart.");
 	assert.equal(h.declaration(h.session(s)).questionsOutlastTurns, true);
 	await h.stop();

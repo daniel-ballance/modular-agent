@@ -148,6 +148,24 @@ test("services: a second agent can't write to a session another holds; once it i
 	await second.h.stop();
 });
 
+test("history service retains exact opaque decimal values and rejects ambiguous JSON atomically", async () => {
+	const sid = "opaque-decimals";
+	await http(history, "PUT", `/v1/sessions/${sid}`, { project, created: Date.now() });
+	const { lease } = await http<{ lease: string }>(history, "POST", `/v1/sessions/${sid}/lease`, { owner: "decimal-fixture" });
+	const path = `${history.url}/v1/sessions/${sid}`;
+	const request = (entries: string) => fetch(`${path}/entries`, {
+		method: "POST", headers: { authorization: `Bearer ${history.token}`, "content-type": "application/json" },
+		body: `{"lease":"${lease}","entries":${entries}}`,
+	});
+	const initial = '[{"id":"e","parentId":null,"value":9007199254740993,"tiny":1e-400}]';
+	assert.deepEqual(await (await request(initial)).json(), { kept: 1 });
+	assert.deepEqual(await (await request(initial.replace("9007199254740993", "90071992547409930e-1"))).json(), { kept: 0 });
+	assert.equal((await request(initial.replace("9007199254740993", "9007199254740992"))).status, 409);
+	assert.equal((await request('[{"id":"staged","parentId":null},{"id":"dup","id":"other","parentId":null}]')).status, 400);
+	const res = await fetch(path, { headers: { authorization: `Bearer ${history.token}` } });
+	assert.match(await res.text(), /"entries":\[\{"id":"e","parentId":null,"value":9007199254740993,"tiny":1e-400\}\]/);
+});
+
 test("history service advertises lease expiry and a reopening writer waits for it", async () => {
 	const sid = "abandoned-lease";
 	await http(history, "PUT", `/v1/sessions/${sid}`, { project, created: Date.now() });

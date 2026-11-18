@@ -64,7 +64,7 @@ test("the agent reopens standard history with session settings, actors, keys and
 	assert.equal(api.openRequests(sid).length, 0);
 });
 
-test("erasure checks all affected writers before changing history and follows response and fork copies", async (t) => {
+test("erasure reports in-use fork copies as pending and preserves copy lineage", async (t) => {
 	const { api, home } = await start(t);
 	const parent = await api.startSession();
 	await api.input(parent, { actorId: "user", content: "erase me" });
@@ -76,19 +76,21 @@ test("erasure checks all affected writers before changing history and follows re
 	await api.closeSession(child);
 	const { api: other } = await start(t, { home });
 	await other.openSession(child);
-	await assert.rejects(api.erase(parent, [input.id], "user"), /open for writing/);
-	assert.match(JSON.stringify(api.history(parent)), /erase me/);
+	const pending = await api.erase(parent, [input.id], "user");
+	assert.ok(pending.pendingPairs.some((p) => p.sessionId === child));
+	assert.doesNotMatch(JSON.stringify(api.history(parent)), /erase me/);
 	await other.closeSession(child);
 	const report = await api.erase(parent, [input.id], "user");
-	assert.ok(report.erased.includes(response.id));
-	assert.ok(report.erased.includes(end.id));
+	assert.ok(pending.erased.includes(response.id));
+	assert.ok(pending.erased.includes(end.id));
+	assert.ok(report.erasedPairs.some((p) => p.sessionId === child));
 	await api.openSession(child);
 	await api.waitForIdle(child);
 	for (const sid of [parent, child]) {
 		const entries = api.history(sid, { all: true });
 		assert.doesNotMatch(JSON.stringify(entries), /erase me/);
 		assert.ok(!entries.some((e) => e.kind === "turnEnd" && !e.erased), "erasure does not leave an interrupted turn to recover");
-		assert.deepEqual(entries.find((e) => e.id === response.id), { id: response.id, kind: response.kind, parentId: response.parentId, erased: true, turnId: response.turnId, stepId: response.stepId });
+		assert.ok(entries.some((e) => e.kind === "response" && e.erased));
 	}
 });
 

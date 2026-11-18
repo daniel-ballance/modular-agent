@@ -1,4 +1,5 @@
 import { Readable, Writable } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 import { type AgentApp, type AgentContext, agent, methods, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type * as acp from "@agentclientprotocol/sdk";
 import {
@@ -26,6 +27,8 @@ const APPROVAL = ["off", "ask", "all", "never"];
 export const BINDING = "modular-agent-acp/1";
 const NS = "modular-agent";
 const BINDING_V2 = "modular-agent-acp/2";
+const bindingError = (code: string, message = code) => new RequestError(-32602, message, { code });
+const notOpen = () => ({ accepted: false, reason: "not_open" });
 const EXTENSIONS = ["history", "input", "requests", "answer", "actors", "join", "leave", "release", "proposals", "withdraw", "limit", "tenant", "fork", "move", "jobs", "cancel-job", "erase"];
 
 interface Outcome { kind: string; error?: string; limit?: string }
@@ -100,6 +103,8 @@ export class AcpInterface implements InterfaceCapability {
 	private api!: PluginApi;
 	private client?: AgentContext;
 	private binding = BINDING;
+	private initialized = false;
+	private exactApprovals = new Set<string>();
 	private clientCaps: acp.ClientCapabilities = {};
 	private sessions = new Map<string, SessionState>();
 	private pending = new Map<string, AbortController>();
@@ -154,14 +159,18 @@ export class AcpInterface implements InterfaceCapability {
 
 	private register(): void {
 		const app = this.app;
-		app.onRequest(methods.agent.initialize, ({ params }) => {
+		app.onRequest(methods.agent.initialize, async ({ params }) => {
+			if (this.initialized) throw bindingError("already_initialized");
+			const ns = params._meta?.[NS];
+			if (ns !== undefined && (!ns || typeof ns !== "object" || Array.isArray(ns) || ("binding" in ns && typeof ns.binding !== "string"))) throw bindingError("invalid_params");
+			const binding = (ns as { binding?: string } | undefined)?.binding ?? BINDING;
+			if (params.protocolVersion !== PROTOCOL_VERSION || (binding !== BINDING && binding !== BINDING_V2)) throw bindingError("unsupported_version");
 			this.clientCaps = params.clientCapabilities ?? {};
-			this.binding = (params._meta?.[NS] as { binding?: string } | undefined)?.binding === BINDING_V2 ? BINDING_V2 : BINDING;
-			const declaration = this.api.declaration();
-			return {
+			this.binding = binding;
+			const result = {
 				protocolVersion: PROTOCOL_VERSION,
 				agentCapabilities: {
-					loadSession: declaration.forking === true,
+					loadSession: true,
 					promptCapabilities: { image: true, embeddedContext: true },
 					sessionCapabilities: { list: {}, resume: {}, close: {} },
 					// MCP servers the client passes are served only if a plugin can connect them.
@@ -170,8 +179,11 @@ export class AcpInterface implements InterfaceCapability {
 				agentInfo: { name: "modular-agent", title: "Modular Agent", version: "0.1.0" },
 				authMethods: [],
 				// What the agent supports, so a host never has to guess.
-				_meta: { [NS]: { binding: this.binding, declaration: this.bindingDeclaration(), extensions: EXTENSIONS, actor: { id: this.actorId, kind: "host" } } },
-			};
+				_meta: { [NS]: { binding: this.binding, declaration: this.bindingDeclaration(), extensions: EXTENSIONS, actor: { id: this.actorId, kind: "host", rights: ALL_AUTHORITY } } },
+			} as const;
+			const gated = await this.gateReply("", "initialize", { ...result, authMethods: [] });
+			this.initialized = true;
+			return gated;
 		});
 
 		app.onRequest(methods.agent.session.new, async ({ params }) => {
@@ -184,18 +196,11 @@ export class AcpInterface implements InterfaceCapability {
 		});
 
 		app.onRequest(methods.agent.session.load, async ({ params }) => {
-			await this.reopen(params.sessionId);
-			await this.attachMcp(params.sessionId, params.mcpServers, params.cwd);
-			if (this.hasRight(params.sessionId, this.actorId, "watch")) await this.replay(params.sessionId);
-			this.open(params.sessionId);
-			return this.openResponse(params.sessionId);
+			return this.openForClient(params, true);
 		});
 
 		app.onRequest(methods.agent.session.resume, async ({ params }) => {
-			await this.reopen(params.sessionId);
-			await this.attachMcp(params.sessionId, params.mcpServers, params.cwd);
-			this.open(params.sessionId);
-			return this.openResponse(params.sessionId);
+			return this.openForClient(params, false);
 		});
 
 		app.onRequest(methods.agent.session.list, async ({ params }) => {
@@ -232,7 +237,7 @@ export class AcpInterface implements InterfaceCapability {
 				await this.api.setSetting(params.sessionId, "approval", String(value), this.actorId);
 			}
 			else throw new Error(`Unknown option ${params.configId}`);
-			return { configOptions: await this.configOptions(params.sessionId) };
+			return this.gateReply(params.sessionId, "session/set_config_option", { configOptions: await this.configOptions(params.sessionId), _meta: { [NS]: { declaration: this.bindingDeclaration(params.sessionId) } } });
 		});
 
 		app.onRequest(methods.agent.session.prompt, async ({ params }) => this.prompt(params));
@@ -252,6 +257,19 @@ export class AcpInterface implements InterfaceCapability {
 		this.registerExtensions();
 	}
 
+	private async openForClient(params: { sessionId: string; cwd: string; mcpServers?: acp.McpServer[] }, replay: boolean) {
+		const id = params.sessionId;
+		const attached = this.sessions.has(id);
+		await this.reopen(id);
+		try {
+			if (!attached) await this.attachMcp(id, params.mcpServers, params.cwd);
+			const result = await this.gateReply(id, replay ? "session/load" : "session/resume", await this.openResponse(id));
+			if (replay && !attached && this.hasRight(id, this.actorId, "watch")) await this.replay(id);
+			if (!attached) this.open(id);
+			return result;
+		} catch (e) { if (!attached) this.sessions.delete(id); throw e; }
+	}
+
 	private async reopen(sessionId: string): Promise<void> {
 		const previous = this.sessions.get(sessionId);
 		if (!previous) this.sessions.set(sessionId, this.state());
@@ -265,7 +283,7 @@ export class AcpInterface implements InterfaceCapability {
 
 	private requireRight(sessionId: string, actorId: string, right: Authority): void {
 		if (!this.hasRight(sessionId, actorId, right)) {
-			throw RequestError.invalidParams(undefined, `Actor ${actorId} may not ${right}`);
+			throw bindingError("forbidden", `Actor may not ${right}`);
 		}
 	}
 
@@ -286,7 +304,7 @@ export class AcpInterface implements InterfaceCapability {
 		};
 		const extension = (name: string, run: (ctx: { params: Record<string, any> }) => unknown) => {
 			const method = `_${NS}/${name}`;
-			this.app.onRequest(method, any, async (ctx) => this.gateReply(open(ctx.params.sessionId), method, await run(ctx)));
+			this.app.onRequest(method, any, async (ctx) => name === "requests" ? run(ctx) : this.gateReply(open(ctx.params.sessionId), method, await run(ctx)));
 		};
 		extension("history", async ({ params }) => {
 			const sessionId = open(params.sessionId);
@@ -304,32 +322,39 @@ export class AcpInterface implements InterfaceCapability {
 			const { when } = params;
 			if (when !== "now" && when !== "steer" && when !== "after" && when !== "propose") throw RequestError.invalidParams();
 			const actorId = params.actorId ?? this.actorId;
+			if (typeof actorId !== "string") throw bindingError("invalid_params");
+			if (actorId !== this.actorId) throw bindingError("forbidden");
 			const right = when === "propose" ? "propose" : "input";
 			this.requireRight(sessionId, this.actorId, right);
 			this.requireRight(sessionId, actorId, right);
 			if (typeof params.content !== "string" && !Array.isArray(params.content)) throw RequestError.invalidParams();
 			const content = typeof params.content === "string" ? params.content : fromAcp(params.content);
 			const receipt = await this.checked(() => this.api.input(sessionId, { content, actorId, delegatedBy: actorId === this.actorId ? undefined : this.actorId, when, key: typeof params.key === "string" ? params.key : undefined }));
-			return { inputId: receipt.inputId, taken: receipt.taken, ...(receipt.duplicate ? { duplicate: true } : {}) };
+			return receipt.erased ? { duplicate: true, erased: true } : { inputId: receipt.inputId, taken: receipt.taken, ...(receipt.duplicate ? { duplicate: true } : {}) };
 		});
 		extension("requests", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
-			const requests = this.api.openRequests(sessionId).map((r) => ({ id: r.id, kind: r.kind, question: r.question, ...(r.options ? { options: r.options } : {}), ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}), answerable: true }));
-			return { requests };
+			const view = this.requestViews(sessionId);
+			const gated = await this.gateReply(sessionId, "_modular-agent/requests", view);
+			for (const q of gated.requests) if (q.kind === "approval" && q.answerable && isDeepStrictEqual(q, view.requests.find((r) => r.id === q.id))) this.exactApprovals.add(q.id);
+			return gated;
 		});
 		extension("answer", async ({ params }) => {
 			const sessionId = open(params.sessionId);
-			const request = this.api.openRequests(sessionId).find((r) => r.id === params.requestId);
-			if (!request) return { accepted: false, reason: "No open request with that id" };
 			const actorId = params.actorId ?? this.actorId;
+			if (typeof actorId !== "string" || typeof params.requestId !== "string" || !params.requestId ||
+				(params.declined !== undefined && typeof params.declined !== "boolean")) throw bindingError("invalid_params");
+			if (actorId !== this.actorId || !["answer", "approve"].some((r) => this.hasRight(sessionId, actorId, r as Authority))) throw bindingError("forbidden");
+			const request = this.api.openRequests(sessionId).find((r) => r.id === params.requestId);
+			if (!request || (request.answerers.length && !request.answerers.includes(actorId))) return notOpen();
 			const right = request.kind === "approval" ? "approve" : "answer";
-			this.requireRight(sessionId, this.actorId, right);
-			this.requireRight(sessionId, actorId, right);
-			const declined = params.declined === true || params.value === undefined;
-			if (!declined && (typeof params.value !== "string" || (request.kind === "choice" && !request.options?.includes(params.value)) ||
-				(request.kind === "approval" && params.value !== "allow"))) throw RequestError.invalidParams(undefined, "Invalid answer value");
-			return this.api.answer(sessionId, { requestId: request.id, actorId, value: declined ? undefined : params.value, declined });
+			if (!this.hasRight(sessionId, actorId, right) || request.kind === "approval" && !this.exactApprovals.has(request.id)) return notOpen();
+			const declined = params.declined === true || params.value === undefined || request.kind === "approval" && params.value === "refuse";
+			if ((request.kind === "secret" && params.value !== undefined) || !declined && (typeof params.value !== "string" || (request.kind === "choice" && !request.options?.includes(params.value)) ||
+				(request.kind === "approval" && params.value !== "allow"))) throw bindingError("invalid_params", "Invalid answer value");
+			const answer = this.api.answer(sessionId, { requestId: request.id, actorId, value: declined ? undefined : params.value, declined });
+			return answer.accepted ? answer : notOpen();
 		});
 		extension("actors", ({ params }) => {
 			const sessionId = open(params.sessionId);
@@ -340,13 +365,14 @@ export class AcpInterface implements InterfaceCapability {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "grant");
 			const actor = params.actor;
-			if (typeof actor?.id !== "string" || !actor.id || !["host", "user", "agent", "plugin"].includes(actor.kind) ||
+			if (typeof actor?.id !== "string" || !actor.id || !["host", "user", "agent", "program"].includes(actor.kind) ||
 				!Array.isArray(actor.rights) || !actor.rights.every((r: Authority) => ALL_AUTHORITY.includes(r)) ||
 				(params.present !== undefined && typeof params.present !== "boolean")) throw RequestError.invalidParams(undefined, "Invalid actor, rights or presence");
+			if (actor.id === this.actorId) throw bindingError("forbidden");
 			const present = this.sessions.get(sessionId)!.present;
 			const wasPresent = present.has(actor.id);
+			// Membership is not representation; no additional principals are configured for this connection.
 			if (params.present === false) present.delete(actor.id);
-			else present.add(actor.id);
 			try { await this.checked(() => this.api.join(sessionId, { id: actor.id, kind: actor.kind, authority: [...new Set<Authority>(actor.rights)] }, this.actorId)); }
 			catch (error) { if (wasPresent) present.add(actor.id); else present.delete(actor.id); throw error; }
 			return {};
@@ -370,9 +396,9 @@ export class AcpInterface implements InterfaceCapability {
 		});
 		extension("withdraw", async ({ params }) => {
 			const sessionId = open(params.sessionId);
-			const actorId = params.actorId ?? this.actorId;
-			if (typeof actorId !== "string" || typeof params.inputId !== "string") throw RequestError.invalidParams();
-			await this.checked(() => this.api.withdrawProposal(sessionId, params.inputId, actorId, this.actorId));
+			if (typeof params.inputId !== "string" || !params.inputId) throw bindingError("invalid_params");
+			if (params.actorId !== undefined) throw bindingError("invalid_params");
+			await this.checked(() => this.api.withdrawProposal(sessionId, params.inputId, this.actorId));
 			return {};
 		});
 		extension("limit", async ({ params }) => {
@@ -407,7 +433,9 @@ export class AcpInterface implements InterfaceCapability {
 		extension("erase", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			if (!Array.isArray(params.entryIds) || !params.entryIds.every((id: unknown) => typeof id === "string")) throw RequestError.invalidParams();
-			return this.checked(() => this.api.erase(sessionId, params.entryIds, this.actorId));
+			this.requireRight(sessionId, this.actorId, "erase");
+			const report = await this.checked(() => this.api.erase(sessionId, params.entryIds, this.actorId));
+			return { erased: report.erasedPairs, pending: report.pendingPairs, outOfReach: [...new Set(report.outOfReach)] };
 		});
 	}
 
@@ -419,7 +447,12 @@ export class AcpInterface implements InterfaceCapability {
 
 	private async checked<T>(work: () => Promise<T>): Promise<T> {
 		try { return await work(); }
-		catch (error) { throw RequestError.invalidParams(undefined, error instanceof Error ? error.message : String(error)); }
+		catch (error) {
+			if (error instanceof RequestError) throw error;
+			const code = (error as { code?: string })?.code;
+			const message = error instanceof Error ? error.message : String(error);
+			throw bindingError(code === "result_too_large" || code === "conflict" || code === "not_found" || code === "forbidden" || code === "busy" || code === "wrong_project" ? code : /Unknown tenant|forbidden/i.test(message) ? "forbidden" : "invalid_params", message);
+		}
 	}
 
 	private async response(sessionId: string, inputId: string, outcome: Outcome, extra?: Record<string, unknown>): Promise<acp.PromptResponse | RequestError> {
@@ -459,6 +492,7 @@ export class AcpInterface implements InterfaceCapability {
 			inputKeys: bool("inputKeys"),
 			portableSessions: bool("portableSessions"),
 			questionsOutlastTurns: bool("questionsOutlastTurns"),
+			lateAnswersStartTurns: bool("questionsOutlastTurns"),
 			startsTurnsUnasked: d.startsTurnsUnasked ? "jobReports" : "never",
 			queuedInputAfterRestart: d.queuedInputAfterRestart,
 			queuedJobReportsAfterRestart: d.queuedJobReportsAfterRestart,
@@ -499,6 +533,7 @@ export class AcpInterface implements InterfaceCapability {
 			when: busy ? "after" : "now",
 			key: typeof key === "string" ? key : undefined,
 		});
+		if (receipt.erased) return this.gateReply(sessionId, "session/prompt", { stopReason: "end_turn", _meta: { [NS]: { duplicate: true, erased: true } } });
 		if (receipt.handled) {
 			if (receipt.output && !receipt.duplicate) {
 				const output = await this.api.gateOutput(sessionId, this.actorId, "command.result", receipt.output);
@@ -664,6 +699,19 @@ export class AcpInterface implements InterfaceCapability {
 
 	// ---------- questions to the client ----------
 
+	private requestViews(sessionId: string) {
+		return { requests: this.api.openRequests(sessionId).map((r) => ({
+			id: r.id, kind: r.kind, question: r.question, ...(r.options ? { options: r.options } : {}),
+			...(r.toolCallId ? { toolCallId: r.toolCallId } : {}), ...(r.kind === "approval" ? { call: this.approvalCall(r) } : {}),
+			answerable: this.hasRight(sessionId, this.actorId, r.kind === "approval" ? "approve" : "answer") && (!r.answerers.length || r.answerers.includes(this.actorId)),
+		})) };
+	}
+
+	private approvalCall(request: InputRequest) {
+		const entry = this.api.history(request.sessionId, { all: true }).find((e) => e.kind === "inputRequest" && (e.data as { request?: { id: string } })?.request?.id === request.id);
+		return (entry?.data as { call?: { name: string; input: object } } | undefined)?.call;
+	}
+
 	onInputRequest(request: InputRequest): void {
 		if (!this.sessions.has(request.sessionId) || !this.client || this.pending.has(request.id)) return;
 		if (!this.api.session(request.sessionId).actors.some((a) => a.id === this.actorId && a.authority.includes(request.kind === "approval" ? "approve" : "answer"))) return;
@@ -671,39 +719,53 @@ export class AcpInterface implements InterfaceCapability {
 		if ((request.kind === "text" || request.kind === "choice") && !this.clientCaps.elicitation?.form) return;
 		const abort = new AbortController();
 		this.pending.set(request.id, abort);
-		void this.api.gateOutput(request.sessionId, this.actorId, "input.request", request)
-			.then((gated) => gated && !abort.signal.aborted ? this.ask(gated, abort.signal) : { declined: true })
-			.then((answer) => this.api.answer(request.sessionId, { requestId: request.id, actorId: this.actorId, ...answer }))
-			.catch(() => this.api.answer(request.sessionId, { requestId: request.id, actorId: this.actorId, declined: true, reason: "noLongerAnswerable" }))
+		const send = request.kind === "approval" ? this.offerApproval(request, abort.signal) : this.api.gateOutput(request.sessionId, this.actorId, "input.request", request)
+			.then((gated) => gated && !abort.signal.aborted ? this.ask(gated, abort.signal) : undefined);
+		void send
+			.then((answer) => answer && this.api.answer(request.sessionId, { requestId: request.id, actorId: this.actorId, ...answer }))
+			.catch(() => undefined)
 			.finally(() => this.pending.delete(request.id));
 	}
 
 	onInputRequestClosed(requestId: string): void {
 		// Answered elsewhere, or no longer answerable: withdraw the question from the client.
+		this.exactApprovals.delete(requestId);
 		this.pending.get(requestId)?.abort();
 	}
 
-	private async ask(request: InputRequest, signal: AbortSignal): Promise<{ value?: string; declined?: boolean; reason?: string }> {
-		const client = this.client!;
-		// ACP forbids secrets in forms, so a secret is never asked over ACP.
-		if (request.kind === "secret") return { declined: true, reason: "ACP can't carry a secret" };
-		if (request.kind === "approval") {
+	private async offerApproval(request: InputRequest, signal: AbortSignal): Promise<{ value?: string; declined?: boolean; reason?: string } | undefined> {
+		{
+			const client = this.client!;
+			const call = this.approvalCall(request);
+			if (!call) return { declined: true, reason: "refused" };
 			const options: acp.PermissionOption[] = [
 				{ optionId: "allow", name: "Allow", kind: "allow_once" },
 				{ optionId: "refuse", name: "Refuse", kind: "reject_once" },
 			];
-			const response = await client.request(
-				methods.client.session.requestPermission,
-				{
-					sessionId: request.sessionId,
-					toolCall: { toolCallId: request.toolCallId ?? request.id, title: request.question, ...(request.details ? { content: [{ type: "content", content: { type: "text", text: request.details } }] } : {}) },
-					options,
-				},
-				{ cancellationSignal: signal },
-			);
+			const payload = { method: "session/request_permission", params: {
+				sessionId: request.sessionId,
+				toolCall: { toolCallId: request.toolCallId ?? request.id, title: call.name, rawInput: call.input,
+					...(request.details ? { content: [{ type: "content" as const, content: { type: "text" as const, text: request.details } }] } : {}) },
+				options, _meta: { [NS]: { requestId: request.id, actorId: this.actorId } },
+			} };
+			const gated = await this.api.gateOutput(request.sessionId, this.actorId, "request", payload);
+			if (!gated || !isDeepStrictEqual(gated, payload)) {
+				const views = this.requestViews(request.sessionId);
+				const poll = await this.gateReply(request.sessionId, "_modular-agent/requests", views).catch(() => undefined);
+				if (!poll || !isDeepStrictEqual(views.requests.find((q) => q.id === request.id), poll.requests.find((q) => q.id === request.id))) return { declined: true, reason: "refused" };
+				return;
+			}
+			if (signal.aborted || !this.hasRight(request.sessionId, this.actorId, "approve")) return;
+			this.exactApprovals.add(request.id);
+			const response = await client.request(methods.client.session.requestPermission, gated.params, { cancellationSignal: signal }) as acp.RequestPermissionResponse;
 			if (response.outcome.outcome !== "selected") return { declined: true, reason: "cancelled" };
 			return response.outcome.optionId === "allow" ? { value: "allow" } : { declined: true };
 		}
+	}
+
+	private async ask(request: InputRequest, signal: AbortSignal): Promise<{ value?: string; declined?: boolean; reason?: string }> {
+		const client = this.client!;
+		if (request.kind === "secret") return { declined: true, reason: "noLongerAnswerable" };
 		// Free text and choices are a one-field form: a string, or an enum of the options.
 		const field = request.kind === "choice" && request.options?.length ? { type: "string", title: request.question, enum: request.options } : { type: "string", title: request.question };
 		const response = await client.request(
