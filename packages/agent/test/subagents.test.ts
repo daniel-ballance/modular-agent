@@ -21,7 +21,7 @@ function router(child: (c: Context) => ReturnType<FauxResponseFactory>, delegate
 	return (c) => {
 		const first = users(c)[0] ?? "";
 		if (first === "count to three") return child(c);
-		const report = users(c).find((u) => u.startsWith("[Job subagent"));
+		const report = users(c).find((u) => /^Subagent "[^"]+" (completed|was interrupted)/.test(u));
 		if (report) return fauxAssistantMessage([fauxText(`Parent got: ${report.replace(/\s+/g, " ")}`)]);
 		if (!hasResult(c)) return fauxAssistantMessage([fauxToolCall("delegate", delegateInput)], { stopReason: "toolUse" });
 		const result = c.messages.filter((m) => m.role === "toolResult").map(textOfMessage).at(-1);
@@ -53,7 +53,7 @@ test("a background subagent: its result arrives as a job report and wakes the pa
 	await settle(h, s);
 	const report = api.history(s).find((e) => e.kind === "input" && e.jobId);
 	assert.ok(report, "the job reported back");
-	assert.match(lastText(h, s), /Parent got: \[Job subagent .* completed\] Subagent "counter" completed\. one two three/);
+	assert.match(lastText(h, s), /Parent got: Subagent "counter" completed\. one two three/);
 	const child = (api.history(s).find((e) => e.kind === "jobStarted")!.data as { detail: { childSessionId: string } }).detail.childSessionId;
 	assert.notEqual(child, s);
 	await h.stop();
@@ -116,7 +116,7 @@ test("transient subagents: after a restart, the parent hears the subagent's outc
 	const api = h.api("t");
 	await api.openSession(s);
 	await settle(h, s);
-	assert.match(lastText(h, s), /outcomeUnknown\] Subagent "counter" was interrupted when the process stopped/);
+	assert.match(lastText(h, s), /Parent got: Subagent "counter" was interrupted when the process stopped/);
 	await h.stop();
 });
 
@@ -127,7 +127,7 @@ test("durable subagents: after a restart, the subagent carries on and the parent
 	const api = h.api("t");
 	await api.openSession(s);
 	await settle(h, s);
-	assert.match(lastText(h, s), /completed\] Subagent "counter" completed\. one two three/);
+	assert.match(lastText(h, s), /Parent got: Subagent "counter" completed\. one two three/);
 	const ended = api.history(s, { all: true }).filter((e) => e.kind === "jobEnded");
 	assert.equal(ended.length, 1, "the job ended exactly once");
 	await h.stop();

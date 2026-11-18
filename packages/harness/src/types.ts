@@ -74,11 +74,13 @@ export interface ModelInfo extends ModelRef {
 	maxOutput: number;
 	input: string[];
 	reasoning: boolean;
+	/** Explicit levels, if the model accepts only a subset. */
+	thinking?: string[];
 }
 
 // ---------- Actors ----------
 
-export type Authority = "watch" | "propose" | "input" | "answer" | "approve" | "tools" | "cancel" | "settings" | "erase" | "grant" | "jobs" | "delegate";
+export type Authority = "watch" | "propose" | "input" | "answer" | "approve" | "tools" | "cancel" | "settings" | "erase" | "grant" | "jobs" | "delegate" | "administer";
 export interface Actor { id: string; kind: "user" | "agent" | "host" | "plugin" | "program"; tenant?: string; authority: Authority[] }
 
 // ---------- History ----------
@@ -242,6 +244,8 @@ export interface WorkingEnvironment {
 	containment?: string;
 	points?: boolean;
 	save?(): Promise<string>;
+	/** Check a point without touching project files, if the environment can. */
+	hasPoint?(point: string): Promise<boolean>;
 	restore?(point: string): Promise<void>;
 	forSession?(sessionId: string): WorkingEnvironment | Promise<WorkingEnvironment>;
 	sessionEnded?(sessionId: string): Promise<void> | void;
@@ -290,6 +294,8 @@ export interface InterfaceCapability {
 	actorId: string;
 	/** Whether this Interface declares its actor present for the session. */
 	present?(sessionId: string): boolean;
+	/** Other actors whose presence this connection declares. */
+	presentActors?(sessionId: string): string[];
 	/** Told about input requests this Interface's actor may see. */
 	onInputRequest?(request: InputRequest): void;
 	onInputRequestClosed?(requestId: string): void;

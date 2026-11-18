@@ -57,7 +57,7 @@ export class PiAiProvider implements Provider {
 			const stream = this.collection.streamSimple(model, context, {
 				signal: options.signal,
 				sessionId: options.sessionId,
-				reasoning: (req.settings.reasoning as never) || undefined,
+				reasoning: req.settings.reasoning === "off" ? undefined : (req.settings.reasoning as never) || undefined,
 				maxTokens: req.settings.maxOutput,
 			});
 			for await (const event of stream) {

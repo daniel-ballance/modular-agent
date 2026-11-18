@@ -14,7 +14,7 @@ function fakeUi(actorId = "user") {
 	const requests: InputRequest[] = [];
 	let api!: PluginApi;
 	const plugin: Plugin = {
-		name: "fake-ui",
+		name: `fake-ui:${actorId}`,
 		setup(a) {
 			api = a;
 			a.provide("interface", { id: "fake", actorId, onInputRequest: (r: InputRequest) => requests.push(r) });

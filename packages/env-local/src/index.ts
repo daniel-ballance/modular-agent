@@ -31,6 +31,10 @@ export class LocalEnvironment implements WorkingEnvironment {
 	save(): Promise<string> {
 		return this.snapshots.save(this.cwd, this.sessionId);
 	}
+	hasPoint(point: string): Promise<boolean> {
+		return this.snapshots.has(this.cwd, point);
+	}
+
 	restore(point: string): Promise<void> {
 		return this.snapshots.restore(this.cwd, point);
 	}

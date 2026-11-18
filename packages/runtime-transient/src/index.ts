@@ -56,6 +56,7 @@ export class TransientRuntime implements Runtime {
 				? { outcome: { kind: "cancelled" }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() }
 				: { outcome: { kind: "failed", error: error instanceof Error ? error.message : String(error) }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
 		}
+		if (signal?.aborted && outcome.outcome.kind !== "completed") outcome = { ...outcome, outcome: { kind: "cancelled" } };
 		// The shared shape (docs/bindings/plugin.md): outcome as on a turnEnd entry, and the result beside it.
 		await host.hook("turn.end", { sessionId: input.sessionId, turnId: input.turnId, outcome: outcome.outcome, result: outcome.result });
 		return outcome;

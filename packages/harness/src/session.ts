@@ -10,16 +10,18 @@ export interface QueuedInput {
 	actorId: string;
 	when: InputTiming;
 	key?: string;
+	time?: number;
 	releasedBy?: string;
 	delegatedBy?: string;
 	authorityActors?: string[];
+	authorityJobs?: string[];
 	sources?: string[];
 	startedBy: { kind: "actor" | "job" | "plugin" | "answer"; id: string };
 	kind: string;
 	/** Set when this is not input but a continuation of tool calls left open past an earlier turn. */
 	continueCalls?: string[];
 }
-export interface InputReceipt { inputId: string; taken: "now" | "inTurn" | "after" | "proposed"; duplicate?: boolean }
+export interface InputReceipt { inputId: string; taken: "now" | "inTurn" | "after" | "proposed" | "handedBack"; duplicate?: boolean }
 
 export interface RunningTurn { turnId: string; abort: AbortController; done: Promise<void> }
 export interface OpenRequest {
@@ -32,6 +34,7 @@ export interface JobRecord {
 	key?: string;
 	detail?: unknown;
 	actors?: string[];
+	rights?: Actor["authority"];
 	handle: JobHandle;
 	cancel?: () => void | Promise<void>;
 	cancelling?: Promise<void>;
@@ -45,6 +48,8 @@ export class Session {
 	position: string | null = null;
 	settings: Record<string, unknown> = {};
 	readonly actors = new Map<string, Actor>();
+	limit: Actor["authority"] | null = null;
+	tenant?: string;
 	steering: QueuedInput[] = [];
 	followUps: QueuedInput[] = [];
 	readonly proposals = new Map<string, QueuedInput>();
@@ -97,12 +102,16 @@ export class Session {
 					inputId: string; key?: string; content: ContentPart[]; when: InputTiming; releasedBy?: string; delegatedBy?: string; taken?: InputReceipt["taken"];
 				};
 				const actorId = entry.actorId!;
-				this.admissions.set(inputId, { id: inputId, actorId, key, content, when, releasedBy, delegatedBy, kind: "input", startedBy: { kind: "actor", id: actorId } });
+				const startedBy = entry.jobId ? { kind: "job" as const, id: entry.jobId } : { kind: "actor" as const, id: actorId };
+				const queued = { id: inputId, actorId, key, content, when, releasedBy, delegatedBy, time: entry.time, kind: "input", startedBy };
+				this.admissions.set(inputId, queued);
+				if (when === "propose") this.proposals.set(inputId, queued);
+				else this.proposals.delete(inputId);
 				if (key && !this.keys.has(key)) this.keys.set(key, { inputId, taken: taken ?? (when === "propose" ? "proposed" : when === "steer" ? "inTurn" : when) });
 				break;
 			}
 			case "inputHandedBack":
-				for (const id of (entry.data as { inputIds: string[] }).inputIds) this.admissions.delete(id);
+				for (const id of (entry.data as { inputIds: string[] }).inputIds) { this.admissions.delete(id); this.proposals.delete(id); }
 				break;
 			case "input": {
 				const { inputId, key } = (entry.data ?? {}) as { inputId?: string; key?: string };
@@ -121,6 +130,12 @@ export class Session {
 				else this.settings[key === "thinking" ? "reasoning" : key === "approvalPolicy" ? "approval" : key] = value;
 				break;
 			}
+			case "limit":
+				this.limit = (entry.data as { rights: Actor["authority"] | null }).rights;
+				break;
+			case "tenant":
+				this.tenant = (entry.data as { tenant: string }).tenant;
+				break;
 			case "actorJoined": {
 				const { rights, ...actor } = (entry.data as { actor: Actor & { rights?: Actor["authority"] } }).actor;
 				this.actors.set(actor.id, { ...actor, authority: rights ?? actor.authority ?? [] });

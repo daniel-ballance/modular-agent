@@ -37,6 +37,11 @@ export class SavedPoints {
 		return id;
 	}
 
+	async has(cwd: string, id: string): Promise<boolean> {
+		const saved = this.points.get(id);
+		return !!saved && saved.project === await realpath(cwd);
+	}
+
 	async restore(cwd: string, id: string): Promise<void> {
 		const saved = this.points.get(id);
 		const project = await realpath(cwd);

@@ -14,18 +14,19 @@ import {
 	type PluginApi,
 	type Provider,
 	isToolCall,
+	lowerReasoning,
 	parseModel,
+	thinkingLevels,
 	text,
 	textOf,
 } from "@modular-agent/harness";
 
-const THINKING = ["default", "minimal", "low", "medium", "high", "xhigh"];
 const APPROVAL = ["off", "ask", "all", "never"];
 /** The ACP host binding this Interface follows (docs/bindings/acp.md). */
 export const BINDING = "modular-agent-acp/1";
 const NS = "modular-agent";
 const BINDING_V2 = "modular-agent-acp/2";
-const EXTENSIONS = ["history", "input", "requests", "answer", "actors", "join", "leave", "release", "fork", "move", "jobs", "cancel-job", "erase"];
+const EXTENSIONS = ["history", "input", "requests", "answer", "actors", "join", "leave", "release", "proposals", "withdraw", "limit", "tenant", "fork", "move", "jobs", "cancel-job", "erase"];
 
 interface Outcome { kind: string; error?: string; limit?: string }
 interface Waiter {
@@ -51,6 +52,7 @@ interface SessionState {
 	/** Inputs this client gave, so they aren't echoed back. */
 	ownInputs: Set<string>;
 	toolOutput: Map<string, string>;
+	present: Set<string>;
 }
 
 function kindOf(name: string): acp.ToolKind {
@@ -107,7 +109,14 @@ export class AcpInterface implements InterfaceCapability {
 		this.app = agent({ name: "modular-agent" });
 		this.app.onConnect((connection) => {
 			this.client = connection.client;
-			connection.signal.addEventListener("abort", () => { if (this.client === connection.client) this.client = undefined; }, { once: true });
+			connection.signal.addEventListener("abort", () => {
+				if (this.client !== connection.client) return;
+				this.client = undefined;
+				for (const [id, state] of this.sessions) {
+					state.present.clear();
+					this.api.presenceChanged(id);
+				}
+			}, { once: true });
 		});
 		this.register();
 	}
@@ -119,6 +128,7 @@ export class AcpInterface implements InterfaceCapability {
 	}
 
 	present(sessionId: string): boolean { return !!this.client && this.sessions.has(sessionId); }
+	presentActors(sessionId: string): string[] { return [...(this.sessions.get(sessionId)?.present ?? [])]; }
 
 	private actor(): Actor {
 		return { id: this.actorId, kind: "host", authority: ALL_AUTHORITY };
@@ -133,7 +143,7 @@ export class AcpInterface implements InterfaceCapability {
 	/** Give the session the MCP servers the client passed. They are not recorded: their headers and env may hold secrets. */
 	private async attachMcp(sessionId: string, servers: acp.McpServer[] | undefined, cwd: string | undefined): Promise<void> {
 		const mcp = this.mcp();
-		if (!mcp || !servers?.length) return;
+		if (!mcp || !servers?.length || !this.hasRight(sessionId, this.actorId, "tools")) return;
 		const configs: Record<string, McpServerConfig> = {};
 		for (const s of servers) {
 			if ("command" in s) configs[s.name] = { command: s.command, args: s.args, env: Object.fromEntries(s.env.map((e) => [e.name, e.value])) };
@@ -165,24 +175,24 @@ export class AcpInterface implements InterfaceCapability {
 		});
 
 		app.onRequest(methods.agent.session.new, async ({ params }) => {
-			const sessionId = await this.api.startSession({ settings: { cwd: params.cwd }, actor: this.actor() });
+			const tenant = (params._meta?.[NS] as { tenant?: unknown } | undefined)?.tenant;
+			if (tenant !== undefined && typeof tenant !== "string") throw RequestError.invalidParams();
+			const sessionId = await this.checked(() => this.api.startSession({ tenant, settings: { cwd: params.cwd }, actor: this.actor() }));
 			await this.attachMcp(sessionId, params.mcpServers, params.cwd);
 			this.open(sessionId);
 			return { sessionId, configOptions: await this.configOptions(sessionId), _meta: { [NS]: { declaration: this.bindingDeclaration(sessionId) } } };
 		});
 
 		app.onRequest(methods.agent.session.load, async ({ params }) => {
-			this.sessions.set(params.sessionId, this.state());
-			await this.api.openSession(params.sessionId, this.actor());
+			await this.reopen(params.sessionId);
 			await this.attachMcp(params.sessionId, params.mcpServers, params.cwd);
-			await this.replay(params.sessionId);
+			if (this.hasRight(params.sessionId, this.actorId, "watch")) await this.replay(params.sessionId);
 			this.open(params.sessionId);
 			return this.openResponse(params.sessionId);
 		});
 
 		app.onRequest(methods.agent.session.resume, async ({ params }) => {
-			this.sessions.set(params.sessionId, this.state());
-			await this.api.openSession(params.sessionId, this.actor());
+			await this.reopen(params.sessionId);
 			await this.attachMcp(params.sessionId, params.mcpServers, params.cwd);
 			this.open(params.sessionId);
 			return this.openResponse(params.sessionId);
@@ -197,6 +207,7 @@ export class AcpInterface implements InterfaceCapability {
 		});
 
 		app.onRequest(methods.agent.session.close, async ({ params }) => {
+			if (!this.sessions.has(params.sessionId)) throw RequestError.invalidParams(undefined, "Session is not open on this connection");
 			this.sessions.get(params.sessionId)?.unfollow?.();
 			this.sessions.delete(params.sessionId);
 			await this.api.closeSession(params.sessionId);
@@ -211,7 +222,11 @@ export class AcpInterface implements InterfaceCapability {
 				if (!option || !("options" in option) || !option.options.some((o) => "value" in o && o.value === value)) throw RequestError.invalidParams(undefined, "Model is not offered");
 				await this.api.setSetting(params.sessionId, "model", String(value), this.actorId);
 			}
-			else if (params.configId === "thinking") await this.api.setSetting(params.sessionId, "thinking", value === "default" ? undefined : String(value), this.actorId);
+			else if (params.configId === "thinking") {
+				const model = this.api.modelAccess(params.sessionId)?.model;
+				if (value !== "default" && !thinkingLevels(model).includes(String(value))) throw RequestError.invalidParams(undefined, "Reasoning level is not offered");
+				await this.api.setSetting(params.sessionId, "thinking", value === "default" ? "off" : String(value), this.actorId);
+			}
 			else if (params.configId === "approval") {
 				if (!APPROVAL.includes(String(value))) throw RequestError.invalidParams(undefined, `approval must be one of ${APPROVAL.join(", ")}`);
 				await this.api.setSetting(params.sessionId, "approval", String(value), this.actorId);
@@ -230,22 +245,33 @@ export class AcpInterface implements InterfaceCapability {
 			if (state) state.handedBack = list;
 			const ids = new Set(handedBack.map((q) => q.id));
 			for (const w of [...(state?.waiters ?? [])]) {
-				if (ids.has(w.inputId)) this.settle(params.sessionId, w, promptResponse(w.inputId, { kind: "cancelled" }, { handedBack: list }));
+				if (ids.has(w.inputId)) this.settle(params.sessionId, w, await this.response(params.sessionId, w.inputId, { kind: "cancelled" }, { handedBack: list }));
 			}
 		});
 
 		this.registerExtensions();
 	}
 
+	private async reopen(sessionId: string): Promise<void> {
+		const previous = this.sessions.get(sessionId);
+		if (!previous) this.sessions.set(sessionId, this.state());
+		try { await this.checked(() => this.api.openSession(sessionId, this.actor())); }
+		catch (error) { if (!previous) this.sessions.delete(sessionId); throw error; }
+	}
+
+	private hasRight(sessionId: string, actorId: string, right: Authority): boolean {
+		return this.api.session(sessionId).actors.some((a) => a.id === actorId && a.authority.includes(right));
+	}
+
 	private requireRight(sessionId: string, actorId: string, right: Authority): void {
-		if (!this.api.session(sessionId).actors.some((a) => a.id === actorId && a.authority.includes(right))) {
+		if (!this.hasRight(sessionId, actorId, right)) {
 			throw RequestError.invalidParams(undefined, `Actor ${actorId} may not ${right}`);
 		}
 	}
 
 	private async openResponse(sessionId: string) {
-		const recovered = this.api.recoveredInput(sessionId).map((q) => ({ inputId: q.id, content: q.content }));
-		const handedBack = recovered.length ? await this.api.gateOutput(sessionId, `acp:${this.actorId}`, "input.handedBack", recovered) : [];
+		const recovered = this.hasRight(sessionId, this.actorId, "watch") ? this.api.recoveredInput(sessionId).map((q) => ({ inputId: q.id, content: q.content })) : [];
+		const handedBack = recovered.length ? await this.api.gateOutput(sessionId, this.actorId, "input.handedBack", recovered) : [];
 		return { configOptions: await this.configOptions(sessionId), _meta: { [NS]: {
 			declaration: this.bindingDeclaration(sessionId), ...(handedBack?.length ? { handedBack } : {}),
 		} } };
@@ -258,7 +284,11 @@ export class AcpInterface implements InterfaceCapability {
 			if (typeof sessionId !== "string" || !this.sessions.has(sessionId)) throw RequestError.invalidParams(undefined, `Session ${String(sessionId)} is not open on this connection`);
 			return sessionId;
 		};
-		this.app.onRequest(`_${NS}/history`, any, async ({ params }) => {
+		const extension = (name: string, run: (ctx: { params: Record<string, any> }) => unknown) => {
+			const method = `_${NS}/${name}`;
+			this.app.onRequest(method, any, async (ctx) => this.gateReply(open(ctx.params.sessionId), method, await run(ctx)));
+		};
+		extension("history", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
 			const all = params.all === true;
@@ -266,11 +296,10 @@ export class AcpInterface implements InterfaceCapability {
 			const at = params.after === undefined ? -1 : raw.findIndex((e) => e.id === params.after);
 			if (params.after !== undefined && at < 0) throw new RequestError(-32602, `Unknown entry ${String(params.after)}`);
 			const ids = new Set(raw.slice(at + 1).map((e) => e.id));
-			const gated = await this.api.gatedHistory(sessionId, { recipient: `acp:${this.actorId}`, all });
-			const page = { entries: gated.filter((e) => ids.has(e.id)) };
-			return await this.api.gateOutput(sessionId, `acp:${this.actorId}`, "history.page", page) ?? { entries: [] };
+			const gated = await this.api.gatedHistory(sessionId, { recipient: this.actorId, all });
+			return { entries: gated.filter((e) => ids.has(e.id)) };
 		});
-		this.app.onRequest(`_${NS}/input`, any, async ({ params }) => {
+		extension("input", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			const { when } = params;
 			if (when !== "now" && when !== "steer" && when !== "after" && when !== "propose") throw RequestError.invalidParams();
@@ -283,13 +312,13 @@ export class AcpInterface implements InterfaceCapability {
 			const receipt = await this.checked(() => this.api.input(sessionId, { content, actorId, delegatedBy: actorId === this.actorId ? undefined : this.actorId, when, key: typeof params.key === "string" ? params.key : undefined }));
 			return { inputId: receipt.inputId, taken: receipt.taken, ...(receipt.duplicate ? { duplicate: true } : {}) };
 		});
-		this.app.onRequest(`_${NS}/requests`, any, async ({ params }) => {
+		extension("requests", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
 			const requests = this.api.openRequests(sessionId).map((r) => ({ id: r.id, kind: r.kind, question: r.question, ...(r.options ? { options: r.options } : {}), ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}), answerable: true }));
-			return await this.api.gateOutput(sessionId, `acp:${this.actorId}`, "input.requests", { requests }) ?? { requests: [] };
+			return { requests };
 		});
-		this.app.onRequest(`_${NS}/answer`, any, async ({ params }) => {
+		extension("answer", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			const request = this.api.openRequests(sessionId).find((r) => r.id === params.requestId);
 			if (!request) return { accepted: false, reason: "No open request with that id" };
@@ -302,57 +331,90 @@ export class AcpInterface implements InterfaceCapability {
 				(request.kind === "approval" && params.value !== "allow"))) throw RequestError.invalidParams(undefined, "Invalid answer value");
 			return this.api.answer(sessionId, { requestId: request.id, actorId, value: declined ? undefined : params.value, declined });
 		});
-		this.app.onRequest(`_${NS}/actors`, any, ({ params }) => {
+		extension("actors", ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
 			return { actors: this.api.session(sessionId).actors.map(({ id, kind, authority }) => ({ id, kind, rights: authority })), present: this.api.presentActors(sessionId) };
 		});
-		this.app.onRequest(`_${NS}/join`, any, async ({ params }) => {
+		extension("join", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "grant");
 			const actor = params.actor;
 			if (typeof actor?.id !== "string" || !actor.id || !["host", "user", "agent", "plugin"].includes(actor.kind) ||
-				!Array.isArray(actor.rights) || !actor.rights.every((r: Authority) => ALL_AUTHORITY.includes(r))) throw RequestError.invalidParams(undefined, "Invalid actor or rights");
-			await this.checked(() => this.api.join(sessionId, { id: actor.id, kind: actor.kind, authority: [...new Set<Authority>(actor.rights)] }, this.actorId));
+				!Array.isArray(actor.rights) || !actor.rights.every((r: Authority) => ALL_AUTHORITY.includes(r)) ||
+				(params.present !== undefined && typeof params.present !== "boolean")) throw RequestError.invalidParams(undefined, "Invalid actor, rights or presence");
+			const present = this.sessions.get(sessionId)!.present;
+			const wasPresent = present.has(actor.id);
+			if (params.present === false) present.delete(actor.id);
+			else present.add(actor.id);
+			try { await this.checked(() => this.api.join(sessionId, { id: actor.id, kind: actor.kind, authority: [...new Set<Authority>(actor.rights)] }, this.actorId)); }
+			catch (error) { if (wasPresent) present.add(actor.id); else present.delete(actor.id); throw error; }
 			return {};
 		});
-		this.app.onRequest(`_${NS}/leave`, any, async ({ params }) => {
-			await this.checked(() => this.api.leave(open(params.sessionId), String(params.actorId), this.actorId));
+		extension("leave", async ({ params }) => {
+			const sessionId = open(params.sessionId);
+			await this.checked(() => this.api.leave(sessionId, String(params.actorId), this.actorId));
+			this.sessions.get(sessionId)!.present.delete(String(params.actorId));
 			return {};
 		});
-		this.app.onRequest(`_${NS}/release`, any, async ({ params }) => {
+		extension("release", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			const { when } = params;
 			if (when !== "now" && when !== "steer" && when !== "after") throw RequestError.invalidParams();
 			return this.checked(() => this.api.releaseInput(sessionId, String(params.inputId), when, this.actorId, params.declined === true));
 		});
-		this.app.onRequest(`_${NS}/fork`, any, async ({ params }) => {
+		extension("proposals", ({ params }) => {
+			const sessionId = open(params.sessionId);
+			this.requireRight(sessionId, this.actorId, "watch");
+			return { proposals: this.api.proposals(sessionId, this.actorId) };
+		});
+		extension("withdraw", async ({ params }) => {
+			const sessionId = open(params.sessionId);
+			const actorId = params.actorId ?? this.actorId;
+			if (typeof actorId !== "string" || typeof params.inputId !== "string") throw RequestError.invalidParams();
+			await this.checked(() => this.api.withdrawProposal(sessionId, params.inputId, actorId, this.actorId));
+			return {};
+		});
+		extension("limit", async ({ params }) => {
+			const sessionId = open(params.sessionId);
+			const { rights } = params;
+			if (rights !== null && (!Array.isArray(rights) || !rights.every((r) => ALL_AUTHORITY.includes(r)))) throw RequestError.invalidParams();
+			await this.checked(() => this.api.setLimit(sessionId, rights, this.actorId));
+			return {};
+		});
+		extension("tenant", ({ params }) => this.api.tenant(open(params.sessionId)));
+		extension("fork", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "settings");
 			return { sessionId: await this.checked(() => this.api.forkSession(sessionId, String(params.entryId))) };
 		});
-		this.app.onRequest(`_${NS}/move`, any, async ({ params }) => {
+		extension("move", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "settings");
-			await this.checked(() => this.api.moveTo(sessionId, String(params.entryId), { actorId: this.actorId, rewind: params.rewind === true }));
-			return {};
+			return this.checked(() => this.api.moveTo(sessionId, String(params.entryId), { actorId: this.actorId, rewind: params.rewind === true }));
 		});
-		this.app.onRequest(`_${NS}/jobs`, any, ({ params }) => {
+		extension("jobs", ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
 			return { jobs: this.api.jobs(sessionId).map(({ id, kind, state }) => ({ id, kind, state })) };
 		});
-		this.app.onRequest(`_${NS}/cancel-job`, any, async ({ params }) => {
+		extension("cancel-job", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "cancel");
 			await this.api.cancelJob(sessionId, String(params.jobId));
 			return {};
 		});
-		this.app.onRequest(`_${NS}/erase`, any, async ({ params }) => {
+		extension("erase", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			if (!Array.isArray(params.entryIds) || !params.entryIds.every((id: unknown) => typeof id === "string")) throw RequestError.invalidParams();
 			return this.checked(() => this.api.erase(sessionId, params.entryIds, this.actorId));
 		});
+	}
+
+	private async gateReply<T>(sessionId: string, method: string, result: T): Promise<T> {
+		const gated = await this.api.gateOutput(sessionId, this.actorId, "reply", { method, result });
+		if (!gated) throw new RequestError(-32000, "Output was blocked", { code: "withheld" });
+		return gated.result;
 	}
 
 	private async checked<T>(work: () => Promise<T>): Promise<T> {
@@ -363,11 +425,11 @@ export class AcpInterface implements InterfaceCapability {
 	private async response(sessionId: string, inputId: string, outcome: Outcome, extra?: Record<string, unknown>): Promise<acp.PromptResponse | RequestError> {
 		// Raw bookkeeping sees turn.ended just before it is enqueued for the follower.
 		await Promise.resolve();
-		await this.api.flushOutput(sessionId, `acp:${this.actorId}`);
-		const gated = await this.api.gateOutput(sessionId, `acp:${this.actorId}`, "turn.outcome", { outcome, extra });
-		if (!gated) return new RequestError(-32000, "Output was blocked");
-		outcome = gated.outcome;
-		const response = promptResponse(inputId, outcome, gated.extra);
+		await this.api.flushOutput(sessionId, this.actorId);
+		let response: acp.PromptResponse;
+		try { response = await this.gateReply(sessionId, "session/prompt", promptResponse(inputId, outcome, extra)); }
+		catch (error) { if (error instanceof RequestError) return error; throw error; }
+		outcome = (response._meta?.[NS] as { outcome: Outcome }).outcome;
 		return outcome.kind === "failed" && this.binding === BINDING_V2
 			? new RequestError(-32000, outcome.error ?? "Turn failed", { _meta: response._meta })
 			: response;
@@ -387,6 +449,8 @@ export class AcpInterface implements InterfaceCapability {
 			runsToolsAtProvider: bool("runsToolsAtProvider"),
 			liveSessions: bool("liveSessions"),
 			severalActors: bool("severalActors"),
+			sessionLimits: bool("sessionLimits"),
+			tenants: bool("tenants"),
 			holdsOutput: bool("holdsOutput"),
 			outputBypassesAgent: bool("outputBypassesAgent"),
 			cancellingTurnCancelsJobs: bool("cancellingTurnCancelsJobs"),
@@ -407,14 +471,14 @@ export class AcpInterface implements InterfaceCapability {
 	}
 
 	private state(): SessionState {
-		return { waiters: [], ownInputs: new Set(), toolOutput: new Map() };
+		return { waiters: [], ownInputs: new Set(), toolOutput: new Map(), present: new Set() };
 	}
 
 	private open(sessionId: string): void {
 		const state = this.sessions.get(sessionId) ?? this.state();
 		this.sessions.set(sessionId, state);
 		state.unfollow?.();
-		state.unfollow = this.api.follow(sessionId, { recipient: `acp:${this.actorId}` }, (e) => this.forward(sessionId, e));
+		state.unfollow = this.api.follow(sessionId, { recipient: this.actorId }, (e) => this.forward(sessionId, e));
 		void this.update(sessionId, {
 			sessionUpdate: "available_commands_update",
 			availableCommands: this.api.commands().map((c) => ({ name: c.name, description: c.description, input: { hint: "arguments" } })),
@@ -437,10 +501,10 @@ export class AcpInterface implements InterfaceCapability {
 		});
 		if (receipt.handled) {
 			if (receipt.output && !receipt.duplicate) {
-				const output = await this.api.gateOutput(sessionId, `acp:${this.actorId}`, "command.result", receipt.output);
+				const output = await this.api.gateOutput(sessionId, this.actorId, "command.result", receipt.output);
 				if (output) await this.update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: output } });
 			}
-			return promptResponse(receipt.inputId, { kind: "completed" }, receipt.duplicate ? { duplicate: true } : {});
+			return this.gateReply(sessionId, "session/prompt", promptResponse(receipt.inputId, { kind: "completed" }, receipt.duplicate ? { duplicate: true } : {}));
 		}
 		const all = this.api.history(sessionId, { all: true });
 		const taken = all.find((e) => e.kind === "input" && (e.data as { inputId?: string } | undefined)?.inputId === receipt.inputId);
@@ -530,7 +594,7 @@ export class AcpInterface implements InterfaceCapability {
 	/** Gated events, as ACP session updates. */
 	private async forward(sessionId: string, e: AgentEvent): Promise<void> {
 		const state = this.sessions.get(sessionId);
-		if (!state || !this.api.session(sessionId).actors.some((a) => a.id === this.actorId && a.authority.includes("watch"))) return;
+		if (!state || !this.hasRight(sessionId, this.actorId, "watch")) return;
 		switch (e.type) {
 			case "model.output":
 				if (e.data?.type === "text") return this.update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: e.data.delta } });
@@ -565,7 +629,7 @@ export class AcpInterface implements InterfaceCapability {
 
 	/** Send a reopened session's history, as session/load requires. */
 	private async replay(sessionId: string): Promise<void> {
-		for (const entry of await this.api.gatedHistory(sessionId, { recipient: `acp:${this.actorId}` })) {
+		for (const entry of await this.api.gatedHistory(sessionId, { recipient: this.actorId })) {
 			const m = entry.message;
 			if (!m) continue;
 			if (m.role === "user" && entry.modelVisible) {
@@ -588,10 +652,12 @@ export class AcpInterface implements InterfaceCapability {
 		const ref = parseModel(settings.model);
 		const current = ref ? `${ref.provider}/${ref.id}` : "";
 		const options = usable.flatMap((p) => p?.models().map((m) => ({ value: `${m.provider}/${m.id}`, name: m.name ?? m.id })) ?? []);
-		const thinking = typeof settings.reasoning === "string" ? settings.reasoning : "default";
+		const model = this.api.modelAccess(sessionId)?.model;
+		const levels = thinkingLevels(model);
+		const thinking = lowerReasoning(settings.reasoning, model) ?? (levels.includes("off") ? "off" : levels[0] ?? "off");
 		return [
 			{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options },
-			{ id: "thinking", name: "Reasoning", category: "thought_level", type: "select", currentValue: thinking, options: THINKING.map((v) => ({ value: v, name: v })) },
+			{ id: "thinking", name: "Reasoning", category: "thought_level", type: "select", currentValue: thinking, options: levels.map((v) => ({ value: v, name: v })) },
 			{ id: "approval", name: "Approval", type: "select", currentValue: APPROVAL.includes(String(settings.approval)) ? String(settings.approval) : "all", options: APPROVAL.map((v) => ({ value: v, name: v })) },
 		];
 	}
@@ -605,7 +671,7 @@ export class AcpInterface implements InterfaceCapability {
 		if ((request.kind === "text" || request.kind === "choice") && !this.clientCaps.elicitation?.form) return;
 		const abort = new AbortController();
 		this.pending.set(request.id, abort);
-		void this.api.gateOutput(request.sessionId, `acp:${this.actorId}`, "input.request", request)
+		void this.api.gateOutput(request.sessionId, this.actorId, "input.request", request)
 			.then((gated) => gated && !abort.signal.aborted ? this.ask(gated, abort.signal) : { declined: true })
 			.then((answer) => this.api.answer(request.sessionId, { requestId: request.id, actorId: this.actorId, ...answer }))
 			.catch(() => this.api.answer(request.sessionId, { requestId: request.id, actorId: this.actorId, declined: true, reason: "noLongerAnswerable" }))
