@@ -141,7 +141,7 @@ Other kinds are the build's own. A receiver keeps them and needn't understand th
 
 An erased entry keeps only `id`, `parentId`, `kind` and `erased: true`.
 
-**Setting keys** with fixed meanings: `model` (`{ provider, id }`), `reasoning`, `maxSteps` and `maxOutput`. A receiver ignores keys it doesn't know.
+**Setting keys** with fixed meanings: `model` (`{ provider, id }`), `reasoning`, `maxSteps`, `maxOutput`, and `approval`: `off`, `ask`, `all` or `never`, as the [ACP binding's](acp.md#configuration-options) approval option. A receiver ignores other keys it doesn't know. A build that reopens a session with no `approval` setting, or one whose value it doesn't offer, uses `never` until an actor with `settings` chooses: it never runs tools with less checking than the session's owner chose.
 
 ## Portable sessions
 
@@ -166,6 +166,7 @@ Erasure, jobs and plugins are outside this promise in `/1`:
 
 ## Changes
 
+- **2026-11-18, after the real-model runs.** `approval` is a standard setting key. The Rust agent kept the approval policy under a key of its own, so the Elixir agent reopening its session fell back to its own default and refused a call the user had allowed. The other way round, a reopening agent whose default is `off` would have run tools the user wanted to approve.
 - **2026-11-18, after the first portable-session swaps.** The names of rights, and what a started call that doesn't run again gets. TypeScript's actor had no `tools` right, because no names were defined, so the Rust agent reopening its session refused the interrupted call. The three clean-room builds had each chosen the same extra names (`tools`, `cancel`, `grant`, `jobs`, `delegate`); those are now the standard. Rust also recorded that started call as `refused`, though it had run.
 - **2026-11-18, round four.** Portable sessions; Credentials; the kinds `toolStarted`, `inputRequest`, `inputAnswer`, `actorJoined` and `actorLeft`; what a `turnStart` carries; standard setting keys, and `settings` for several at once. From the round-three gaps: Rust B-09, Python G53 and Go B8 found three different credential shapes (`apiKey`, `value` and `key`); Python G54 and Go B10 both chose `settings` for a change of several settings.
 - **2026-11-17.** First version. It collects the shapes the [ACP binding](acp.md) already used for entries and requests, and adds the rest.

@@ -289,6 +289,44 @@ The matrix found three more holes before it passed:
 - whether a Runtime may read history. It may, with `host/history`.
 - a host that didn't answer a cancelled request. The binding says it must.
 
+## Round four: portable sessions, and a fifth build
+
+**What changed in the bindings.** All 42 binding gaps the Rust, Python and Go builders logged in round three went into the bindings: where they agreed, as the rule; where they didn't, with a choice. Then came [portable sessions](bindings/data.md#portable-sessions) ([ADR 0018](adr/0018-portable-sessions.md)): one shared format for what history holds, so any build's agent can reopen another's session.
+
+**What this build changed.**
+- Every entry is written in the shared shapes, and sessions are read by the shared rules.
+- The host records a turn's start before the Runtime runs it.
+- The durable Runtime recovers from the standard kinds alone, in a fresh process.
+- Reopening after a crash waits for the old history lease.
+- The open rules in [status](status.md#the-rules-from-the-clean-room-builds) were closed:
+  - erasure follows every copy, and is refused while another writer holds a session it would change;
+  - records of authority can't be erased;
+  - a key binds the whole question;
+  - mixed-actor input acts with the shared rights;
+  - closing a session stops its background processes;
+  - the HTTP Interface resumes by entry.
+
+**The fifth build.** An Elixir build, made clean-room from the docs, the bindings and the kits alone, passed every kit. In its first swaps it worked as a plugin, a Runtime and a portable-session peer with all four other builds. As a host, it failed one probe check: it didn't answer a request cancelled before it started.
+
+**The matrices,** across TypeScript, Rust, Python, Go and Elixir, all through the ACP kit:
+- plugins: 25/25;
+- Runtimes, through `kill -9`: 25/25 durable and 25/25 transient;
+- portable sessions, where one agent writes and another reopens and recovers: 25/25 durable and 25/25 transient.
+
+**Real models.** Three runs mixed the languages: an Elixir agent with Python's Runtime, Go's tools and TypeScript's environment; a session Rust wrote and Elixir reopened; and a Python agent with Rust's Runtime, Elixir's tools and Go's environment. Each read a file, was killed during `bash`, recovered without repeating it, and remembered the earlier answer.
+
+**What the swaps found,** each a value a receiver branched on that a binding had left undefined:
+- the names of rights;
+- the `turn.end` payload's `outcome`;
+- the Provider hooks' `model`;
+- `null` for a field left out;
+- how a reopening connection relates to the session's actors;
+- the conformance model's thinking levels;
+- the approval setting;
+- a history lease held by a killed writer.
+
+Two more were in this build alone. TypeScript's Runtime reported a cancelled turn as failed when a host answered its later requests with `cancelled`. And the kit itself checked background processes by PID, which means nothing inside Go's PID namespace.
+
 ## What building changed
 
 - **Recovering an interrupted turn is the Runtime's job.** The first version had the Harness repair the turn itself, which hard-wired transient behaviour into the Harness. The Harness now finds the interrupted turn and hands it to the Runtime. This is now an interaction in [Contracts](contracts.md#harness-and-runtime).
