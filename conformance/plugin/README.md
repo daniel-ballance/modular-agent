@@ -15,13 +15,13 @@ What it checks:
 - Handshake, supported version, selected parts, registration, replacement names, ping, framing and error envelopes, shutdown and natural EOF exit.
 - The fixture Provider: stream order, the complete-response hook, a valid and an unoffered tool directive, and exact truncation to 200 Unicode code points from the first result after the latest user message.
 - Tool calls through `host/env/*`, parent and session scope, fixture progress and exit text, and cancellation. The early-arrival cancel probe does not prove that dispatch had not started.
-- Environment files, output, deadlines and background process ownership. The descendant test applies to the advertised containment. With `points: true`, it checks point lookup and in-place restore.
+- Environment files, output, deadlines and background process ownership. Platform claims use the binding's spellings for standard systems. Descendant tests use the advertised containment only for an exact platform match. With `points: true`, it checks point lookup and in-place restore.
 - Hook replies for a refusal, a system contribution, and lossless redaction across text events within a stream segment and within one standalone custom event.
-- Scripted Runtime turns: exact dispatch order, refused calls, host-recorded model intent and result, normal and failed attempt order, fresh attempt ids on retry, preparation after context overflow with a scripted host compaction, cancellation and step limits. Serial and overlapping scheduling are both allowed for parallel-capable calls.
+- Scripted Runtime turns: exact dispatch order, refused calls, host-recorded model intent and result, normal and failed attempt order, fresh attempt ids on retry, preparation after context overflow with a scripted host compaction, cancellation and step limits. The Runtime reports only step usage and does not call `step.after` for the scripted auxiliary attempt. A host `turn_limit` from preparation or dispatch ends the turn with that limit and no response for the undispatched attempt. When steering is advertised, the Runtime makes its final check at the turn boundary. Serial and overlapping scheduling are both allowed for parallel-capable calls.
 - `resumeTurn` against synthetic standard history. An unsafe started call is not repeated. A transient Runtime fails and does not dispatch; a durable one runs the calls it can recover. This is not an independent second build's history.
 
 The [ACP kit](../acp/README.md) checks the host side:
-- `--probe-checks`: out-of-phase Runtime callbacks leave no records, exact-call dispatch, output validation, and preservation of a completed result when its catalog refresh fails.
+- `--probe-checks`: out-of-phase Runtime callbacks leave no records, exact-call dispatch and its recorded registration, the closed steering cutoff, output validation, and preservation of a completed result when its catalog refresh fails.
 - `--probe-checks --portable-checks`: interrupted remote model attempts are aborted or replayed as specified in [Model attempt sequences](../../docs/bindings/plugin.md#model-attempt-sequences).
 - `--job-checks --crash-checks`: job recovery refuses a second resume on the same plugin connection.
 

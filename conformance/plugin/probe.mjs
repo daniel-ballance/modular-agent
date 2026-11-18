@@ -27,6 +27,7 @@ function registration() {
 		case "refuse-duplicate": return { ...base, name: "probe-probe" };
 		case "output-observer": return { ...base, hooks: [{ hook: "output", handlerId: 1, order: "last" }] };
 		case "runtime": return { ...base, replaces: ["runtime"], runtime: { id: "probe-runtime", supports: {} }, toolSources: [{ id: "probe-tools", tools: [EFFECT] }] };
+		case "steering": return { ...base, replaces: ["runtime"], runtime: { id: "probe-steering", supports: { inputDuringTurn: true } } };
 		default: return { ...base, toolSources: [{ id: "probe-tools", tools: currentTools() }] };
 	}
 }
@@ -120,7 +121,11 @@ async function runtime(m, { ask }) {
 		await beforeHook();
 		if (test === "exact") checks.repeatedGate = await refusedWithoutWrite(beforeHook);
 		const toolResult = await dispatch(test === "changed" ? { ...call, input: { value: "changed" } } : call);
-		const saved = (await history()).filter((e) => e.kind === "toolResult" && e.toolCallId === call.id);
+		const records = (await history()).filter((e) => e.toolCallId === call.id);
+		const saved = records.filter((e) => e.kind === "toolResult");
+		const starts = records.filter((e) => e.kind === "toolStarted");
+		// Shared data: Recording order and ownership. Use the actual host's raw history, not the ACP projection.
+		checks.registration = starts.length === 1 && equal(starts[0].data?.source, { plugin: "probe-runtime", toolSource: "probe-tools" }) && equal(starts[0].data?.definition, EFFECT);
 		checks.dispatch = toolResult.status === (test === "changed" ? "refused" : "completed");
 		if (test === "exact") {
 			checks.settledGate = await refusedWithoutWrite(beforeHook);
@@ -140,6 +145,27 @@ async function runtime(m, { ask }) {
 	trace({ test, checks, terminal: terminal.kind });
 	await callHost("hook", { hook: "turn.end", payload: { outcome: terminal, result } });
 	return { outcome: terminal, result, entries, usage };
+}
+
+async function steering(m, { ask, signal }) {
+	// Plugin binding: Runtime callbacks. Hold the first turn after the serialized final check.
+	const host = (method, params = {}) => ask(`host/runtime/${method}`, { parentRequestId: m.id, ...params });
+	const hook = (hook, payload) => host("hook", { hook, payload });
+	const entries = [];
+	await hook("turn.start", {});
+	const { id: stepId } = await host("newId");
+	entries.push(...(await host("takeSteering")).entries.map((e) => e.id));
+	const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	const request = await host("prepareStep", { stepId, usage: zero });
+	const response = await host("model", { stepId, request });
+	entries.push((await host("record", { entry: { kind: "response", stepId, message: response, modelVisible: true } })).id);
+	await hook("step.after", { stepId, response });
+	entries.push(...(await host("takeSteering", { final: true })).entries.map((e) => e.id));
+	trace({ final: m.params.turn.turnId });
+	while (!existsSync(config.release)) await sleep(30, undefined, { signal });
+	const outcome = { kind: "completed" }, result = { openToolCalls: [] };
+	await hook("turn.end", { outcome, result });
+	return { outcome, result, entries, usage: response.usage ?? zero };
 }
 
 serve("probe", async (m, ctx) => {
@@ -193,6 +219,7 @@ serve("probe", async (m, ctx) => {
 			return null;
 		}
 		case "runtime/runTurn":
+			if (config.role === "steering" && p.turn) return steering(m, ctx);
 			if (config.role !== "runtime" || !p.turn) throw rpcError("invalid_request");
 			return runtime(m, ctx);
 		case "runtime/continueOpenCalls":

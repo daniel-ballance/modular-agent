@@ -25,6 +25,8 @@ const work = mkdtempSync(join(tmpdir(), "ma-plugin-kit-"));
 const home = mkdtempSync(join(tmpdir(), "ma-plugin-home-"));
 const safeEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: home, LANG: "C.UTF-8" };
 const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+const standardPlatforms = ["linux", "darwin", "win32", "freebsd", "openbsd"];
+const containmentOn = (env, platform) => standardPlatforms.includes(platform) && env?.platforms?.includes(platform) ? env.containment : "none";
 const declaration = { inputDuringTurn: false, waitingThroughRestart: false, continuesAfterRestart: false, rewinding: false, forking: false, keepsStateAtProvider: false, runsToolsAtProvider: false, liveSessions: false, severalActors: false, holdsOutput: false, outputBypassesAgent: false, cancellingTurnCancelsJobs: false, pluginsDuringSession: false, erasure: false, inputKeys: true, questionsOutlastTurns: false, startsTurnsUnasked: "never", queuedInputAfterRestart: "handedBack", movingWithUnfinishedWork: "refused", mixedActorInput: "refused", settingsDuringTurn: "refused", erasureDuringTurn: "refused", commandContainment: "processGroup" };
 const results = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -145,13 +147,14 @@ function start(extraEnv = {}) {
 			case "host/session":
 				return reply(m.id, { id: p.sessionId, project: work, settings: {}, busy: true, actors: [] });
 			case "host/declaration":
-				return reply(m.id, declaration);
+				return reply(m.id, { ...declaration, inputDuringTurn: state.rt?.steering ?? false });
 			default:
 				if (m.method.startsWith("host/runtime/") && state.rt) {
 					try {
 						reply(m.id, await state.rt.handle(m, send));
 					} catch (e) {
-						fail(m.id, e.code ?? "internal", e.message ?? String(e));
+						if (codeOf(e)) send({ id: m.id, error: e });
+						else fail(m.id, e.code ?? "internal", e.message ?? String(e));
 					}
 					return;
 				}
@@ -246,9 +249,9 @@ const code = (e) => e?.data?.code;
  * model(request, n) gives the n-th model answer; tool(call) answers runToolCall (may return a promise);
  * gate(call) answers "before a tool call" with a refusal reason, or null.
  */
-function scenario({ model, tool = async (c) => ({ callId: c.id, status: "completed", content: [{ type: "text", text: `ran ${c.name}` }] }), gate = () => null, definitions = {}, retry = false, compact = false, before = [], abandoned = [] }) {
+function scenario({ model, tool = async (c) => ({ callId: c.id, status: "completed", content: [{ type: "text", text: `ran ${c.name}` }] }), gate = () => null, definitions = {}, retry = false, compact = false, steering = false, refuseAt, before = [], abandoned = [] }) {
 	// Plugin binding: Runtime callbacks and Runtime records and effects.
-	const rt = { records: [], reports: [], hooks: [], toolCalls: [], modelCalls: 0, steps: 0, running: new Map(), order: [], submitted: [] };
+	const rt = { records: [], reports: [], hooks: [], toolCalls: [], modelCalls: 0, steps: 0, running: new Map(), order: [], submitted: [], steering, finalChecks: [], preparedUsage: [], afterSteps: [] };
 	const tools = { read: { name: "read", description: "fixture read", parameters: true }, bash: { name: "bash", description: "fixture shell", parameters: true }, ...definitions };
 	const modelRef = { provider: "kit", id: "scripted" };
 	const authorizers = [{ sessionId: "kit-session", actorId: "kit" }];
@@ -270,6 +273,13 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 	};
 	const invalid = (message) => { throw Object.assign(Error(message), { code: "invalid_request" }); };
 	const allowed = new Map(), known = new Map(), attempts = new Map();
+	const refuseLimit = (phase, stepId) => {
+		if (refuseAt !== phase || rt.modelCalls !== 1) return;
+		rt.denied = stepId;
+		const error = rpcError("turn_limit");
+		error.data.limit = "sessionTokens";
+		throw error;
+	};
 	const finish = (call, result) => put({ kind: "toolResult", ...(known.get(call.id)?.stepId ? { stepId: known.get(call.id).stepId } : {}), toolCallId: call.id, modelVisible: true, message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: result.content, isError: result.status !== "completed" }, data: { status: result.status, ...(result.value === undefined ? {} : { value: result.value }) } });
 	const resultOf = (e) => ({ callId: e.toolCallId, status: e.data.status, content: e.message.content, ...(e.data.value === undefined ? {} : { value: e.data.value }) });
 	for (const e of before.filter((e) => e.kind === "response")) for (const c of e.message.content.filter((c) => c.type === "toolCall")) known.set(c.id, { id: c.id, name: c.name, input: c.arguments, startedBy: "model", stepId: e.stepId });
@@ -287,15 +297,17 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 				return { id: randomUUID() };
 			case "host/runtime/prepareStep": {
 				rt.steps++;
+				rt.preparedUsage.push(p.usage);
 				if (attempts.has(p.stepId)) invalid("reused attempt");
+				refuseLimit("prepareStep", p.stepId);
 				const messages = [], sources = [];
 				if (compact && rt.retried && !rt.summary) {
 					// Model attempt sequences: host-owned auxiliary work is committed inside preparation.
 					const input = rt.history().find((e) => e.kind === "input");
 					const stepId = randomUUID(), request = { systemPrompt: "Summarize fixture input", messages: [input.message], tools: [], settings: {} };
-					const intent = put({ kind: "modelRequest", stepId, modelVisible: false, data: { model: modelRef, request, safeToRepeat: false }, sources: [input.id] });
-					const response = put({ kind: "response", stepId, modelVisible: true, message: say("fixture summary"), sources: [intent.id] });
-					rt.summary = put({ kind: "summary", modelVisible: true, data: { summary: "fixture summary" }, sources: [input.id, response.id] });
+					const intent = put({ kind: "modelRequest", stepId, modelVisible: false, data: { model: modelRef, request, safeToRepeat: false, auxiliary: true }, sources: [input.id] });
+					put({ kind: "response", stepId, modelVisible: false, message: { ...say("fixture summary"), usage: auxiliaryUsage }, sources: [intent.id] });
+					rt.summary = put({ kind: "summary", modelVisible: true, data: { summary: "fixture summary" }, sources: [input.id] });
 					rt.auxiliary = stepId;
 				}
 				for (const e of rt.history().filter((x) => x.modelVisible && x.kind !== "toolResult" &&
@@ -321,6 +333,7 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 			case "host/runtime/model": {
 				const attempt = attempts.get(p.stepId);
 				if (!attempt || attempt.sent || !equal(attempt.request, p.request)) invalid("not the prepared attempt");
+				refuseLimit("model", p.stepId);
 				attempt.sent = true;
 				attempt.intent = put({ kind: "modelRequest", stepId: p.stepId, modelVisible: false, data: { model: modelRef, safeToRepeat: false, request: p.request }, sources: attempt.sources });
 				const answer = await model(p.request, rt.modelCalls++);
@@ -342,6 +355,8 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 					allowed.set(call.id, structuredClone(call));
 					return { value: p.payload };
 				}
+				if (p.hook === "step.after") rt.afterSteps.push(p.payload?.stepId);
+				if (p.hook === "turn.end") rt.endOutcome = p.payload?.outcome;
 				if (p.hook === "step.after" || p.hook === "turn.result") return { value: p.payload };
 				if (p.hook === "tool.after") {
 					const result = resultFor(rt, p.payload?.call?.id)[0];
@@ -359,7 +374,7 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 				allowed.delete(c.id);
 				if (!decision || !match(decision, c) || !tools[c.name]) return resultOf(finish(original, { status: "refused", content: [{ type: "text", text: "Fixture denied dispatch" }] }));
 				rt.toolCalls.push(c);
-				put({ kind: "toolStarted", toolCallId: c.id, stepId: original.stepId, actorId: "kit", modelVisible: false, data: { call: { ...c, actorId: "kit" }, safeToRepeat: false, openWorld: true, authorizers, rights } });
+				put({ kind: "toolStarted", toolCallId: c.id, stepId: original.stepId, actorId: "kit", modelVisible: false, data: { call: { ...c, actorId: "kit" }, source: fixtureSource, definition: tools[c.name], safeToRepeat: false, openWorld: tools[c.name].hints?.openWorld ?? true, authorizers, rights } });
 				// As a real Harness does: a cancelled tool call stops, and still answers, as cancelled.
 				const cancelled = new Promise((res) => rt.running.set(m.id, () => res({ callId: p.call.id, status: "cancelled", content: [{ type: "text", text: "Cancelled" }] })));
 				try {
@@ -390,6 +405,8 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 				return put({ ...e, modelVisible: false }, "kit-runtime");
 			}
 			case "host/runtime/takeSteering":
+				if (!rt.steering) throw rpcError("not_supported");
+				if (p.final === true) rt.finalChecks.push(rt.order.length - 1);
 				return { entries: [] };
 			case "host/runtime/hasSteering":
 				return { waiting: false };
@@ -400,6 +417,8 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 	return rt;
 }
 const usage0 = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 };
+const auxiliaryUsage = { ...usage0, input: 7 };
+const fixtureSource = { plugin: "kit-host", toolSource: "kit-tools" };
 const say = (text) => ({ role: "assistant", content: [{ type: "text", text }], stop: "finished", usage: usage0 });
 const callTools = (...calls) => ({ role: "assistant", content: calls.map(([name, args]) => ({ type: "toolCall", id: `call-${randomUUID()}`, name, arguments: args })), stop: "toolUse", usage: usage0 });
 const turn = (extra = {}) => ({ sessionId: "kit-session", turnId: "kit-turn", startedBy: { kind: "actor", id: "kit" }, model: { provider: "kit", id: "scripted", contextWindow: 100000, maxOutput: 1000, input: ["text"], reasoning: false }, modelSupports: { keepsState: false, runsTools: false, safeToRepeat: false }, settings: { maxSteps: 8 }, ...extra });
@@ -425,6 +444,9 @@ await attempt("initialize", async () => {
 	// Plugin binding: The host asks a Provider.
 	check("register: Provider declares runsTools false", provider?.supports?.runsTools === false);
 	check("register: working environment with a containment value", ["strong", "processGroup", "none"].includes(reg.workingEnvironment?.containment), JSON.stringify(reg.workingEnvironment));
+	const platforms = reg.workingEnvironment?.platforms;
+	check("Starting: the handshake: platform claims use standard spellings for standard identifiers", platforms === undefined ||
+		(Array.isArray(platforms) && platforms.every((p) => typeof p === "string" && (!standardPlatforms.includes(p.toLowerCase()) || standardPlatforms.includes(p)))), JSON.stringify(platforms));
 	const hooks = reg.hooks ?? [];
 	check("register: tool.before, turn.before and output handlers", hooks.some((h) => h.hook === "tool.before") && hooks.some((h) => h.hook === "turn.before") && hooks.some((h) => h.hook === "output"), JSON.stringify(hooks));
 	// Plugin binding: Starting: the handshake.
@@ -594,7 +616,9 @@ await attempt("environment", async () => {
 	// Plugin binding: Command lifetime.
 	const cancelled = await s.catch((e) => e);
 	check("env/exec: cancelling answers cancelled or lost within 5 s", ["cancelled", "lost"].includes(code(cancelled)) && Date.now() - t0 <= 5000, `${Date.now() - t0} ms`);
-	if (reg.workingEnvironment?.containment === "strong") {
+	// Plugin binding: Starting: the handshake. A nonmatching platform does not claim containment here.
+	const containment = containmentOn(reg.workingEnvironment, process.platform);
+	if (containment === "strong") {
 		await sleep(1500);
 		const a = existsSync(escBeat) ? readFileSync(escBeat, "utf8") : "";
 		await sleep(700);
@@ -633,7 +657,7 @@ await attempt("environment", async () => {
 		return a !== "" && a !== b;
 	};
 	// Plugin binding: Command lifetime. No descendant cleanup guarantee under containment none.
-	if (reg.workingEnvironment?.containment === "none") {
+	if (containment === "none") {
 		check("env/sessionEnded: acknowledges an unused session", equal(await p.request("env/sessionEnded", { sessionId: "kit-unused" }), {}));
 		return;
 	}
@@ -690,7 +714,9 @@ async function runtimeChecks(part) {
 		const durable = r.runtime?.supports?.continuesAfterRestart === true;
 		check(`${tag} declares continuesAfterRestart ${part === "durable-runtime"}`, durable === (part === "durable-runtime"), JSON.stringify(r.runtime?.supports));
 
-		let rt = (q.state.rt = scenario({ model: () => say("plain answer") }));
+		const steering = r.runtime?.supports?.inputDuringTurn === true;
+		const runScenario = (options) => scenario({ steering, ...options });
+		let rt = (q.state.rt = runScenario({ model: () => say("plain answer") }));
 		let o = await q.request("runtime/runTurn", { turn: turn() });
 		check(`${tag} a text turn completes with its text`, o.outcome?.kind === "completed" && o.result?.text === "plain answer" && Array.isArray(o.result?.openToolCalls), String(JSON.stringify(o)).slice(0, 200));
 		const ordered = (items, needed) => {
@@ -703,9 +729,11 @@ async function runtimeChecks(part) {
 		check(`${tag} it recorded the response and listed its entries`, rt.records.some((e) => e.kind === "response") && (o.entries ?? []).length > 0, rt.records.map((e) => e.kind).join(","));
 		check(`${tag} it recorded no turnStart or turnEnd: the host records those`, !rt.submitted.some((e) => !["response", "toolResult"].includes(e.kind) && !e.kind.includes(".")), rt.records.map((e) => e.kind).join(","));
 		check(`${tag} turn.end was its last request`, rt.order.at(-1) === "hook:turn.end", rt.order.slice(-4).join(","));
+		if (steering) check(`${tag} Runtime callbacks: final steering check at the end boundary`, rt.finalChecks.some((i) => i > rt.order.lastIndexOf("hook:step.after") && i < rt.order.indexOf("hook:turn.end")));
+		else console.log(`SKIP  ${tag} final steering check (steering not advertised)`);
 		check(`${tag} host/runtime/report is only ever a notification`, !q.hostCalls.some((c) => c.method === "host/runtime/report"));
 
-		rt = q.state.rt = scenario({ retry: true, model: (_r, n) => (n === 0 ? { role: "assistant", content: [], stop: "failed", error: { kind: "temporary", message: "kit says try again" }, usage: usage0 } : say("retried")) });
+		rt = q.state.rt = runScenario({ retry: true, model: (_r, n) => (n === 0 ? { role: "assistant", content: [], stop: "failed", error: { kind: "temporary", message: "kit says try again" }, usage: usage0 } : say("retried")) });
 		o = await q.request("runtime/runTurn", { turn: turn() });
 		check(`${tag} a retried model request completes the turn`, o.outcome?.kind === "completed" && o.result?.text === "retried", JSON.stringify(o.outcome));
 		// Plugin binding: Runtime callbacks. Each answered attempt has a separate committed response.
@@ -716,7 +744,7 @@ async function runtimeChecks(part) {
 		check(`${tag} Model attempt sequences: failed response precedes model.failed and step.after precedes retry`,
 			rt.order.indexOf(callback("record")) >= 0 && rt.order.indexOf(callback("record")) < rt.order.indexOf("hook:model.failed") &&
 			ordered(rt.order, [callback("model"), "hook:step.after", callback("model")]));
-		rt = q.state.rt = scenario({ retry: true, compact: true, model: (_req, n) => n === 0
+		rt = q.state.rt = runScenario({ retry: true, compact: true, model: (_req, n) => n === 0
 			? { role: "assistant", content: [], stop: "failed", error: { kind: "contextTooLarge", message: "fixture overflow" }, usage: usage0 }
 			: say("after compaction") });
 		o = await q.request("runtime/runTurn", { turn: turn() });
@@ -727,8 +755,22 @@ async function runtimeChecks(part) {
 			rt.records.indexOf(rt.summary) < rt.records.indexOf(intents[2]) &&
 			ordered(rt.order, [callback("model"), callback("record"), "hook:model.failed", callback("prepareStep"), callback("model")]) &&
 			ordered(rt.order, [callback("model"), "hook:step.after", callback("prepareStep")]));
+		const aux = rt.records.find((e) => e.kind === "response" && e.stepId === rt.auxiliary);
+		check(`${tag} Hook execution / Runtime callbacks: auxiliary attempt carries usage but no step.after or Runtime usage`,
+			intents[1]?.data.auxiliary === true && equal(aux?.message.usage, auxiliaryUsage) &&
+			equal(rt.afterSteps, [intents[0]?.stepId, intents[2]?.stepId]) && equal(rt.preparedUsage, [zeroUsage, usage0]) &&
+			equal(o.usage, { ...usage0, input: 2, output: 2 }));
 
-		rt = q.state.rt = scenario({ model: (_r, n) => (n === 0 ? callTools(["read", { path: "a" }]) : say("after the tool")) });
+		for (const phase of ["prepareStep", "model"]) {
+			rt = q.state.rt = runScenario({ refuseAt: phase, model: () => callTools(["read", { path: "a" }]) });
+			o = await q.request("runtime/runTurn", { turn: turn() }).catch((e) => ({ error: e }));
+			const limit = { kind: "limit", limit: "sessionTokens" };
+			check(`${tag} Runtime callbacks: turn_limit from ${phase} ends the turn without an undispatched response`,
+				!!rt.denied && rt.modelCalls === 1 && equal(o.outcome, limit) && (rt.endOutcome === undefined || equal(rt.endOutcome, limit)) &&
+				rt.records.filter((e) => e.kind === "response").length === 1 && !rt.submitted.some((e) => e.kind === "response" && e.stepId === rt.denied), JSON.stringify(o));
+		}
+
+		rt = q.state.rt = runScenario({ model: (_r, n) => (n === 0 ? callTools(["read", { path: "a" }]) : say("after the tool")) });
 		o = await q.request("runtime/runTurn", { turn: turn() });
 		const call = rt.toolCalls[0];
 		// Plugin binding: Runtime callbacks and Runtime records and effects.
@@ -738,12 +780,12 @@ async function runtimeChecks(part) {
 		check(`${tag} exactly one recorded result for the call`, !!call && resultFor(rt, call.id).length === 1, String(JSON.stringify(recordedResults(rt))).slice(0, 200));
 		check(`${tag} the turn completed after the tool`, o.outcome?.kind === "completed" && o.result?.text === "after the tool", JSON.stringify(o.outcome));
 
-		rt = q.state.rt = scenario({ model: (_r, n) => (n === 0 ? callTools(["bash", { command: "echo denied" }]) : say("refused, fine")), gate: () => "kit refuses" });
+		rt = q.state.rt = runScenario({ model: (_r, n) => (n === 0 ? callTools(["bash", { command: "echo denied" }]) : say("refused, fine")), gate: () => "kit refuses" });
 		o = await q.request("runtime/runTurn", { turn: turn() });
 		check(`${tag} a refused call never dispatches`, rt.toolCalls.length === 0, JSON.stringify(rt.toolCalls));
 		check(`${tag} a refused call still gets one result, refused`, recordedResults(rt).length === 1 && statusOf(recordedResults(rt)[0]) === "refused", String(JSON.stringify(recordedResults(rt))).slice(0, 200));
 
-		rt = q.state.rt = scenario({ model: () => callTools(["read", { path: "again" }]) });
+		rt = q.state.rt = runScenario({ model: () => callTools(["read", { path: "again" }]) });
 		o = await q.request("runtime/runTurn", { turn: turn({ settings: { maxSteps: 2 } }) });
 		check(`${tag} a step limit ends the turn as limit steps`, o.outcome?.kind === "limit" && o.outcome.limit === "steps", JSON.stringify(o.outcome));
 
@@ -752,7 +794,7 @@ async function runtimeChecks(part) {
 		let release;
 		const both = new Promise((r) => (release = r));
 		let sawSecondFirst = false;
-		rt = q.state.rt = scenario({
+		rt = q.state.rt = runScenario({
 			definitions: { par },
 			model: (_r, n) => (n === 0 ? callTools(["par", { n: 1 }], ["par", { n: 2 }]) : say("both done")),
 			tool: async (c) => {
@@ -773,7 +815,7 @@ async function runtimeChecks(part) {
 		// Contracts: Tool dispatch. parallel is permission, not a promise of overlap.
 		check(`${tag} both parallel-capable calls settle once`, startedPar.size === 2 && recordedResults(rt).length === 2 && recordedResults(rt).every((e) => statusOf(e) === "completed"));
 
-		rt = q.state.rt = scenario({ model: (_r, n) => (n === 0 ? callTools(["bash", { command: "sleep 30" }]) : say("should not be reached")), tool: () => new Promise(() => {}) });
+		rt = q.state.rt = runScenario({ model: (_r, n) => (n === 0 ? callTools(["bash", { command: "sleep 30" }]) : say("should not be reached")), tool: () => new Promise(() => {}) });
 		const running = q.request("runtime/runTurn", { turn: turn() }, 20000);
 		for (let i = 0; i < 100 && rt.toolCalls.length === 0; i++) await sleep(50);
 		const t0 = Date.now();
@@ -798,21 +840,27 @@ async function runtimeChecks(part) {
 		const rights = ["watch", "input", "tools"];
 		const authorizers = [{ sessionId: "kit-session", actorId: "kit" }];
 		const source = [{ type: "text", text: "do three things" }];
+		const recoveryTools = [
+			{ name: "read", description: "fixture read", parameters: true, hints: { safeToRepeat: true, openWorld: false } },
+			{ name: "bash", description: "fixture shell", parameters: true },
+		];
 		const before = [
 			entry("actorJoined", { turnId: undefined, data: { actor: { id: "kit", kind: "host", rights } } }),
 			entry("inputAccepted", { turnId: undefined, actorId: "kit", data: { inputId: "kit-input", content: source, when: "now", rights, authorizers } }),
 			entry("turnStart", { data: { startedBy: { kind: "actor", id: "kit" }, model: { provider: "kit", id: "scripted" }, system: "kit", tools: ["read", "bash"].map((name) => ({ name, description: name, parameters: true })), settings: { maxSteps: 8 }, rights, authorizers } }),
-			entry("input", { modelVisible: true, actorId: "kit", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, data: { inputId: "kit-input" } }),
-			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, request: { systemPrompt: "kit", messages: [{ role: "user", content: source }], settings: {}, tools: ["read", "bash"].map((name) => ({ name, description: name, parameters: true })) } } }),
+			entry("input", { modelVisible: true, actorId: "kit", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, inputId: "kit-input" }),
+			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, request: { systemPrompt: "kit", messages: [{ role: "user", content: source }], settings: {}, tools: recoveryTools } } }),
 			entry("response", { modelVisible: true, stepId: "kit-step-1", message: { role: "assistant", content: [notStarted, startedCall, safeCall].map(toolCall), stop: "toolUse", usage: usage0 } }),
-			entry("toolStarted", { toolCallId: "c-started", stepId: "kit-step-1", actorId: "kit", data: { call: { id: startedCall.id, name: startedCall.name, input: startedCall.input, actorId: "kit", startedBy: "model" }, openWorld: true, safeToRepeat: false, rights, authorizers } }),
-			entry("toolStarted", { toolCallId: "c-safe", stepId: "kit-step-1", actorId: "kit", data: { call: { id: safeCall.id, name: safeCall.name, input: safeCall.input, actorId: "kit", startedBy: "model" }, openWorld: false, safeToRepeat: true, rights, authorizers } }),
+			entry("toolStarted", { toolCallId: "c-started", stepId: "kit-step-1", actorId: "kit", data: { call: { id: startedCall.id, name: startedCall.name, input: startedCall.input, actorId: "kit", startedBy: "model" }, source: fixtureSource, definition: recoveryTools[1], openWorld: true, safeToRepeat: false, rights, authorizers } }),
+			entry("toolStarted", { toolCallId: "c-safe", stepId: "kit-step-1", actorId: "kit", data: { call: { id: safeCall.id, name: safeCall.name, input: safeCall.input, actorId: "kit", startedBy: "model" }, source: fixtureSource, definition: recoveryTools[0], openWorld: false, safeToRepeat: true, rights, authorizers } }),
 		];
 		for (let i = 1; i < before.length; i++) before[i].parentId = before[i - 1].id;
+		before[4].sources = [before[3].id];
+		before[5].sources = [before[4].id];
 		const fresh = start({ MODULAR_AGENT_PLUGIN_PARTS: part });
 		try {
 			await fresh.request("plugin/initialize", initParams);
-			rt = fresh.state.rt = scenario({ model: () => say("carried on"), before, abandoned: durable ? [startedCall] : [notStarted, startedCall, safeCall] });
+			rt = fresh.state.rt = runScenario({ model: () => say("carried on"), definitions: Object.fromEntries(recoveryTools.map((d) => [d.name, d])), before, abandoned: durable ? [startedCall] : [notStarted, startedCall, safeCall] });
 			o = await fresh.request("runtime/resumeTurn", { turn: turn(), interrupted: { turnId: "kit-turn", calls: [notStarted, startedCall, safeCall] } });
 		} finally {
 			fresh.state.rt = undefined;

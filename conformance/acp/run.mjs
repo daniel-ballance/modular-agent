@@ -717,12 +717,46 @@ if (probeChecks) {
 					check("Runtime callbacks: tool.before on an allowed or settled call returns invalid_request without writing", c.repeatedGate && c.settledGate);
 					check("Runtime callbacks: runToolCall after settlement returns invalid_request without writing", c.settledDispatch);
 					check("remote Runtime exact: repeating the matching record returns the committed result", c.cachedResult);
+					check("Recording order and ownership: toolStarted preserves the dispatch source and definition", c.registration);
 				}
 			}
 			await closeSession(remote, s.sessionId);
 		} finally { await stop(remote); }
 	});
 }
+
+// ACP: Input admission; Plugin binding: Runtime callbacks; Contracts: Input.
+if (probeChecks) await attempt("Input admission: steering cutoff", async () => {
+	const release = probeOut("release-steering");
+	const plugin = { command: [process.execPath, new URL("../plugin/probe.mjs", import.meta.url).pathname], config: { role: "steering", out: probeOut("steering"), release } };
+	const remote = connect(command, { MODULAR_AGENT_PLUGINS: JSON.stringify([plugin]) });
+	try {
+		await remote.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+		const s = await remote.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+		if (!check("Runtime callbacks: fixture Runtime advertises steering through the host", meta(s)?.declaration?.inputDuringTurn === true)) return;
+		await setOption(remote, s.sessionId, "model", "conformance/echo");
+		const opening = prompt(remote, s.sessionId, "first fixture input").catch((e) => e);
+		let finalTurn;
+		for (let i = 0; i < 200 && !finalTurn; i++) {
+			finalTurn = trace("steering").find((e) => e.final)?.final;
+			if (!finalTurn) await sleep(30);
+		}
+		if (!finalTurn) throw Error("fixture Runtime never acknowledged its final steering check");
+		const late = await within(5000, remote.ctx.request(`_${NS}/input`, { sessionId: s.sessionId, when: "steer", content: "input after the cutoff" }), "late steering receipt");
+		writeFileSync(release, "continue");
+		const first = await within(10000, opening, "first steering fixture turn");
+		const es = await waitFor(remote, s.sessionId, (rows) => rows.filter((e) => e.kind === "turnEnd").length >= 2 ||
+			rows.some((e) => e.kind === "inputHandedBack" && (e.inputId === late.inputId || e.data?.inputIds?.includes(late.inputId))));
+		const input = es.filter((e) => e.kind === "input" && (e.inputId ?? e.data?.inputId) === late.inputId);
+		const firstEnd = es.findIndex((e) => e.kind === "turnEnd" && e.turnId === finalTurn);
+		check("Input admission: steering after the final check queues after and cannot enter the ending turn", !!late.inputId && late.taken === "after" &&
+			first.stopReason === "end_turn" && firstEnd >= 0 && input.length === 1 && input[0].turnId !== finalTurn && es.indexOf(input[0]) > firstEnd, JSON.stringify(late));
+		await closeSession(remote, s.sessionId);
+	} finally {
+		writeFileSync(release, "continue");
+		await stop(remote);
+	}
+});
 
 // Plugin binding: The host asks a tool source. Run last for this source: its catalog stays unavailable.
 if (probeChecks) await attempt("tool catalog refresh fails", async () => {
@@ -744,12 +778,15 @@ if (jobChecks) {
 		const entries = await waitFor(agent, sessionId, (es) => decl.startsTurnsUnasked === "jobReports" ? said(es, "echo: background: kit-job") : es.some((e) => e.kind === "jobEnded" && e.data?.report));
 		const started = entries.find((e) => e.kind === "jobStarted" && e.data?.kind === "background");
 		const jobId = started?.jobId;
-		check("jobs: jobStarted, by the plugin's name", !!jobId && started.writer === "conformance-jobs" && started.data?.detail?.text === "kit-job", String(JSON.stringify(started)).slice(0, 200));
+		check("Entry: the job start appears in ACP history", !!jobId, JSON.stringify(started));
 		const ended = entries.filter((e) => e.kind === "jobEnded" && e.jobId === jobId);
 		check("jobs: one jobEnded, completed and reported", ended.length === 1 && ended[0].data?.outcome?.kind === "completed" && ended[0].data?.report === true, String(JSON.stringify(ended)).slice(0, 200));
 		// Shared data: Job reports; Plugin binding: Jobs.
-		const report = entries.filter((e) => e.kind === "inputAccepted" && e.data?.key === `job:${jobId}`);
+		const report = entries.filter((e) => e.kind === "inputAccepted" && e.jobId === jobId);
 		check("jobs: one admitted report follows the end with exact content", report.length === 1 && report[0].jobId === jobId && entries.indexOf(report[0]) > entries.indexOf(ended[0]) && equal(report[0].data?.content, [{ type: "text", text: "background: kit-job" }]));
+		// Shared data: Job reports. Inspect the store if present; the ACP projection also carries parked.
+		const admission = store ? (await store.pages(sessionId)).find((e) => e.kind === "inputAccepted" && e.jobId === jobId) : report[0];
+		check("Job reports: initial disposition records parked for never and ready for jobReports", !!jobId && admission?.data?.parked === (decl.startsTurnsUnasked === "never"));
 		for (let i = 0; i < 100 && !trace("jobs").some((x) => x.repeatedEnd === jobId || x.endFailed === jobId); i++) await sleep(50);
 		const log = trace("jobs");
 		check("jobs: start acknowledged after commit and same-key start deduplicates", log.some((x) => x.started === jobId && x.fresh === true && x.commit && x.duplicate));
@@ -765,13 +802,14 @@ if (jobChecks) {
 		}
 		if (extensions.includes("cancel-job")) {
 			await within(15000, prompt(agent, sessionId, 'tool:background {"text":"kit-cancel","ms":600000}'), "long background prompt");
-			const es = await waitFor(agent, sessionId, (x) => x.some((e) => e.kind === "jobStarted" && e.data?.detail?.text === "kit-cancel"));
-			const id = es.find((e) => e.kind === "jobStarted" && e.data?.detail?.text === "kit-cancel")?.jobId;
+			const newJob = (e) => e.kind === "jobStarted" && e.data?.kind === "background" && e.jobId !== jobId;
+			const es = await waitFor(agent, sessionId, (x) => x.some(newJob));
+			const id = es.find(newJob)?.jobId;
 			await agent.ctx.request(`_${NS}/cancel-job`, { sessionId, jobId: id });
 			// ACP: Extension methods (cancel-job). The long fixture timer cannot win this race.
 			const after = (await history(agent, sessionId, { all: true })).entries;
 			const end = after.filter((e) => e.kind === "jobEnded" && e.jobId === id);
-			check("jobs: cancel-job ends the job once, as cancelled, without a report", end.length === 1 && end[0].data?.outcome?.kind === "cancelled" && !after.some((e) => e.kind === "inputAccepted" && e.data?.key === `job:${id}`), String(JSON.stringify(end)).slice(0, 200));
+			check("jobs: cancel-job ends the job once, as cancelled, without a report", end.length === 1 && end[0].data?.outcome?.kind === "cancelled" && !after.some((e) => e.kind === "inputAccepted" && e.jobId === id), String(JSON.stringify(end)).slice(0, 200));
 		}
 	});
 }
@@ -825,8 +863,11 @@ if (decl.erasure && extensions.includes("erase")) await attempt("erased input ke
 		const input = log.find((e) => e.kind === "input" && (e.inputId ?? e.data?.inputId) === id)
 			?? log.find((e) => e.kind === "input" && e.message?.content?.some((p) => p.text === content));
 		if (!id || !input) throw Error("erasable fixture input was not admitted and consumed");
-		const erased = await agent.ctx.request(`_${NS}/erase`, { sessionId: sid, entryIds: [input.id] });
-		check("Input admission: selected input was erased", erased.erased.includes(input.id));
+		const erased = await agent.ctx.request(`_${NS}/erase`, { sessionId: sid, entryIds: [input.id, input.id] });
+		// ACP: Extension methods (erase).
+		const pairs = (rows) => Array.isArray(rows) && rows.every((p) => typeof p?.sessionId === "string" && p.sessionId && typeof p.id === "string" && p.id && equal(Object.keys(p).sort(), ["id", "sessionId"])) &&
+			new Set(rows.map((p) => JSON.stringify([p.sessionId, p.id]))).size === rows.length;
+		check("Extension methods: erase returns deduplicated session-qualified pairs", pairs(erased.erased) && pairs(erased.pending) && erased.erased.some((p) => p.sessionId === sid && p.id === input.id));
 		await closeSession(agent, sid);
 		await within(await reopenWatchdog(), agent.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "load erased input fixture");
 		const before = await history(agent, sid, { all: true });
@@ -924,6 +965,66 @@ if (crashChecks) {
 
 await stop(agent);
 
+// ACP: Extension methods (fork); History HTTP: Sessions (preflight before destination PUT).
+if (portableChecks) await attempt("Extension methods: oversized fork", async () => {
+	const mutations = [];
+	const tap = await store.observe({ onRequest: (req) => { if (req.method === "PUT" || req.method === "POST") mutations.push(req); } });
+	const s = connect(command, { MODULAR_AGENT_HISTORY_URL: tap.url });
+	try {
+		const init = await s.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+		const principal = meta(init)?.actor;
+		if (!meta(init)?.extensions?.includes("fork")) {
+			console.log("SKIP  oversized fork (fork extension unavailable)");
+			return;
+		}
+		let actor = principal;
+		if (!principal?.rights && meta(init)?.extensions?.includes("actors")) {
+			// Read the effective fixture actor from a provisional session on older builds.
+			const provisional = await s.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+			const { actors } = await s.ctx.request(`_${NS}/actors`, { sessionId: provisional.sessionId });
+			actor = actors.find((a) => a.id === principal?.id);
+			await closeSession(s, provisional.sessionId);
+		}
+		if (!actor?.rights?.includes("settings") || !actor.rights.includes("watch") || !actor.rights.includes("input"))
+			throw Error("fixture requires a principal with watch, settings and input");
+		const sid = `kit-fork-${randomUUID()}`, base = store.path(sid), time = Date.now();
+		const content = [{ type: "text", text: "x".repeat(4_000_000) }];
+		const authorizers = [{ sessionId: sid, actorId: actor.id }];
+		let head = null;
+		const entry = (kind, fields) => {
+			const row = { id: randomUUID(), parentId: head, sessionId: sid, time, writer: "kit-history-fixture", modelVisible: false, kind, ...fields };
+			head = row.id;
+			return row;
+		};
+		await store.json(base, "PUT", { project, created: time });
+		const { lease } = await store.json(base + "/lease", "POST", { owner: randomUUID() });
+		const leasePath = `${base}/lease/${encodeURIComponent(lease)}`;
+		await store.json(base + "/entries", "POST", { lease, entries: [entry("actorJoined", { data: { actor, operatorAdmission: true } })] });
+		for (let i = 0; i < 17; i++) {
+			await store.json(leasePath + "/renew", "POST");
+			const inputId = randomUUID();
+			// Use the shared legacy intake forms so the test isolates fork preflight.
+			const accepted = entry("inputAccepted", { actorId: actor.id, data: { inputId, content, authorizers, rights: actor.rights, when: "now" } });
+			await store.json(base + "/entries", "POST", { lease, entries: [accepted, entry("inputHandedBack", { data: { inputIds: [inputId], reason: "handled" } })] });
+		}
+		await store.json(leasePath, "DELETE");
+		const loaded = await within((await reopenWatchdog()) + 30000, s.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "load oversized fork source");
+		if (!meta(loaded)?.declaration?.forking) {
+			console.log("SKIP  oversized fork (source session does not declare forking)");
+			return;
+		}
+		mutations.length = 0;
+		const r = await within(30000, s.ctx.request(`_${NS}/fork`, { sessionId: sid, entryId: head }), "fork size refusal").catch((e) => e);
+		const destinationWrite = mutations.some((req) => req.path.startsWith("/v1/sessions/") && req.path !== base && !req.path.startsWith(base + "/"));
+		check("Extension methods: oversized history fork refuses before any destination write", r?.code === -32602 && r?.data?.code === "result_too_large" && !destinationWrite,
+			JSON.stringify({ code: r?.code, dataCode: r?.data?.code, message: r?.message, destinationWrite }));
+		await closeSession(s, sid);
+	} finally {
+		await stop(s);
+		tap.stop();
+	}
+});
+
 // Shared data: Setting keys, Append order and the branch, and Session state; Contracts: Authority.
 if (portableChecks) await attempt("portable authority fixture", async () => {
 	const s = connect(second);
@@ -931,7 +1032,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 		const init = await s.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 		const principal = meta(init)?.actor;
 		if (!principal?.id) throw Error("reopener did not identify a principal");
-		const actor = { ...principal, rights: ["watch", "input", "settings", "tools", "approve"] };
+		const actor = { ...principal, rights: ["watch", "input", "settings", "tools", "approve", "jobs"] };
 		const seed = async (mode) => {
 			const sessionId = `kit-portable-${randomUUID()}`;
 			const rows = [
@@ -944,8 +1045,17 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 			if (mode === "approval") rows.push({ kind: "setting", data: { key: "approval", value: "kit-unrecognized-policy" } });
 			if (mode === "rights") rows.push({ kind: "actorJoined", actorId: "kit-granter", data: { actor: { ...actor, rights: ["watch", "input"] } } });
 			if (mode === "revoked") rows.push({ kind: "actorLeft", actorId: "kit-granter", data: { actorId: actor.id } });
+			if (mode === "cleanup") {
+				const jobId = randomUUID(), reported = randomUUID(), report = [{ type: "text", text: "parked fixture report" }];
+				const start = (jobId) => ({ kind: "jobStarted", jobId, actorId: actor.id, writer: "kit-absent-job-owner", data: { kind: "fixture", detail: null, rights: ["watch", "input"], authorizers: [{ sessionId, actorId: actor.id }] } });
+				rows.push(
+					start(jobId), { kind: "jobCleanupUnconfirmed", jobId }, start(reported),
+					{ kind: "jobEnded", jobId: reported, data: { outcome: { kind: "completed" }, report: true, result: report } },
+					{ kind: "inputAccepted", jobId: reported, actorId: actor.id, data: { inputId: randomUUID(), key: `job:${reported}`, when: "after", content: report, parked: true, authorizers: [{ sessionId, actorId: actor.id, jobId: reported }], rights: ["watch", "input"] } },
+				);
+			}
 			rows.push({ kind: "position", data: { to: `${sessionId}-e4` } });
-			const entries = rows.map((e, i) => ({ ...e, id: `${sessionId}-e${i}`, parentId: i ? `${sessionId}-e${i - 1}` : null, sessionId, time: Date.now(), writer: "kit-history-fixture", modelVisible: false }));
+			const entries = rows.map((e, i) => ({ ...e, id: `${sessionId}-e${i}`, parentId: i ? `${sessionId}-e${i - 1}` : null, sessionId, time: Date.now(), writer: e.writer ?? "kit-history-fixture", modelVisible: false }));
 			const base = store.path(sessionId);
 			await store.json(base, "PUT", { project, created: Date.now() });
 			const { lease } = await store.json(base + "/lease", "POST", { owner: randomUUID() });
@@ -978,6 +1088,24 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 			check("portable: unknown approval refuses without asking or dispatching", s.permissions.length === n && !existsSync(join(project, "unknown-approval.txt")) && raw.some((e) => e.kind === "toolResult" && e.data?.status === "refused"));
 		}
 		if (!r?.code && !(r instanceof Error)) await closeSession(s, unknown);
+		const cleanup = await seed("cleanup");
+		const raw = await store.pages(cleanup);
+		const job = raw.find((e) => e.kind === "jobCleanupUnconfirmed");
+		const problems = portableProblems(cleanup, raw);
+		check("Standard kinds: a payload-free jobCleanupUnconfirmed is a shared record", !!job?.jobId && problems.length === 0, problems.join("; "));
+		const openedCleanup = await load(cleanup);
+		const loadedCleanup = !openedCleanup?.code && !(openedCleanup instanceof Error);
+		check("Session state: a portable session with a cleanup marker reopens", loadedCleanup, loadedCleanup ? "" : openedCleanup?.data?.code ?? openedCleanup?.message);
+		if (loadedCleanup && meta(init)?.extensions?.includes("jobs")) {
+			const { jobs } = await s.ctx.request(`_${NS}/jobs`, { sessionId: cleanup });
+			check("Extension methods: off-branch job cleanup is still unconfirmed after reopen", jobs.some((j) => j.id === job.jobId && j.state === "cleanupUnconfirmed"));
+		}
+		if (loadedCleanup) {
+			const { entries } = await history(s, cleanup, { all: true });
+			const report = entries.find((e) => e.kind === "inputAccepted" && e.jobId);
+			check("Job reports: the parked disposition is still recorded after reopen", report?.data?.parked === true &&
+				!entries.some((e) => e.kind === "input" && e.jobId === report.jobId));
+		}
 	} finally { await stop(s); }
 });
 
@@ -1083,7 +1211,7 @@ if (jobChecks && crashChecks) {
 		check("jobs after a crash: the reopening agent's plugin took the job up, and it ended once", ended.length === 1 && ended[0].data?.outcome?.kind === "completed", String(JSON.stringify(ended)).slice(0, 200));
 		// Jobs and Shared data: Job reports. Acceptance is distinct from scheduling.
 		check("Jobs: resuming an already running job on the same plugin connection is invalid_request", trace("jobs").some((x) => x.resumed === jobId && x.duplicateRefused === true));
-		check("jobs after a crash: one resumed execution admits one report", trace("jobs").filter((x) => x.resumed === jobId).length === 1 && entries.filter((e) => e.kind === "inputAccepted" && e.data?.key === `job:${jobId}`).length === 1);
+		check("jobs after a crash: one resumed execution admits one report", trace("jobs").filter((x) => x.resumed === jobId).length === 1 && entries.filter((e) => e.kind === "inputAccepted" && e.jobId === jobId).length === 1);
 		if (meta(loaded)?.declaration?.startsTurnsUnasked === "jobReports") check("jobs after a crash: its report ran as a turn", said(entries, "echo: background: kit-survivor (taken up)"));
 		await agent.ctx.request(methods.agent.session.close, { sessionId: sid });
 		await stop(agent);

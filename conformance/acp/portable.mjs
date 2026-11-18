@@ -13,12 +13,12 @@ const opt = (x, k, pred) => !Object.hasOwn(x, k) || pred(x[k]);
 // Shared data: Entry fields and tombstones.
 const tombstoneAssocs = ["turnId", "stepId", "toolCallId", "jobId", "inputId", "requestId", "continuesTurnId"];
 const assocs = [...tombstoneAssocs, "actorId"];
-const tombstone = ["id", "parentId", "kind", "erased", ...tombstoneAssocs];
+const tombstone = ["id", "parentId", "kind", "erased", ...tombstoneAssocs, "sources", "usage", "writer", "jobKey"];
 const inputIdOf = (e) => e.inputId ?? e.data?.inputId;
 const status = ["completed", "failed", "refused", "cancelled", "notStarted", "outcomeUnknown"];
 
 const valid = {
-	inputAccepted: (e, d) => id(e.actorId) && id(inputIdOf(e)) && content(d.content) && opt(d, "key", id) && ["now", "steer", "after", "propose"].includes(d.when),
+	inputAccepted: (e, d) => id(e.actorId) && id(inputIdOf(e)) && content(d.content) && opt(d, "key", id) && opt(d, "parked", (p) => typeof p === "boolean") && ["now", "steer", "after", "propose"].includes(d.when),
 	inputHandedBack: (e, d) => id(inputIdOf(e)) || ids(d.inputIds),
 	input: (e) => id(e.actorId) && id(e.turnId) && id(inputIdOf(e)) && e.message?.role === "user" && content(e.message.content),
 	turnStart: (e, d) => id(e.turnId) && id(d.startedBy?.id) && ["actor", "job", "plugin", "answer"].includes(d.startedBy.kind) && (d.model === null || model(d.model)) && typeof d.system === "string" && Array.isArray(d.tools) && obj(d.settings) && opt(d, "context", content) && opt(d, "point", id),
@@ -38,10 +38,11 @@ const valid = {
 	position: (_, d) => (d.to === null || id(d.to)) && opt(d, "restore", (v) => id(v?.point) && id(v?.undo)),
 	erasure: (_, d) => ids(d.entryIds),
 	jobStarted: (e, d) => id(e.jobId) && id(e.actorId) && id(d.kind) && Object.hasOwn(d, "detail") && opt(d, "rights", ids),
+	jobCleanupUnconfirmed: (e) => id(e.jobId) && e.modelVisible === false && !Object.hasOwn(e, "data"),
 	jobEnded: (e, d) => id(e.jobId) && outcome(d.outcome, true) && typeof d.report === "boolean" && (!d.report || content(d.result)),
 	plugins: (_, d) => Array.isArray(d.active) && d.active.every((p) => id(p?.name) && opt(p, "origin", (x) => typeof x === "string")),
 };
-const protectedKinds = new Set(["actorJoined", "actorLeft", "limit", "tenant", "position", "turnStart", "modelRequest", "toolStarted", "turnEnd", "jobStarted", "jobEnded", "erasure"]);
+const protectedKinds = new Set(["actorJoined", "actorLeft", "limit", "tenant", "position", "turnStart", "modelRequest", "toolStarted", "turnEnd", "jobStarted", "jobCleanupUnconfirmed", "jobEnded", "erasure"]);
 
 export function portableProblems(sessionId, entries) {
 	const out = [];
@@ -59,7 +60,8 @@ export function portableProblems(sessionId, entries) {
 		if (assocs.some((k) => !opt(e, k, id))) say(e, "invalid association id");
 		const d = obj(e.data) ? e.data : {};
 		if (e.erased === true) {
-			if ((!standard && !custom) || protectedKinds.has(e.kind) || Object.keys(e).some((k) => !tombstone.includes(k))) say(e, "invalid portable tombstone");
+			if ((!standard && !custom) || protectedKinds.has(e.kind) || Object.keys(e).some((k) => !tombstone.includes(k)) ||
+				!opt(e, "sources", ids) || !opt(e, "usage", usage) || !opt(e, "writer", id) || !opt(e, "jobKey", id)) say(e, "invalid portable tombstone");
 			if (e.kind === "inputAccepted") erasedIntake = true;
 		} else {
 			if (e.sessionId !== sessionId || !count(e.time) || !id(e.writer) || typeof e.modelVisible !== "boolean" || !(standard || (custom && !e.modelVisible))) say(e, "invalid live entry envelope");

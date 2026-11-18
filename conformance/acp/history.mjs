@@ -31,11 +31,12 @@ export function historyService(raw, tokenFile) {
 			throw new Error("history fixture exceeded the page watchdog");
 		},
 		// Shared data: Job reports. Observe actual append boundaries, not just two adjacent records.
-		async observe({ beforeReply } = {}) {
+		async observe({ onRequest, beforeReply } = {}) {
 			const batches = [];
 			const server = createServer(async (req, res) => {
 				try {
 					if (!timingSafeEqual(digest(req.headers.authorization ?? ""), digest(`Bearer ${token}`))) return res.writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" }).end(JSON.stringify({ error: "Unauthorized", code: "unauthorized" }));
+					onRequest?.({ method: req.method, path: req.url });
 					const chunks = [];
 					let size = 0;
 					for await (const chunk of req) {

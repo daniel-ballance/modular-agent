@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Disposable-service tests for docs/bindings/history-http.md.
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -7,9 +8,9 @@ import { request as httpsRequest } from "node:https";
 import { isDeepStrictEqual as equal } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const [url, tokenFile] = process.argv.slice(2);
-if (!url || !tokenFile) {
-	console.error("Usage: node run.mjs <service url> <token file>");
+const [url, tokenFile, restartFlag, ...restartCommand] = process.argv.slice(2);
+if (!url || !tokenFile || (restartFlag !== undefined && (restartFlag !== "--restart" || restartCommand[0] !== "--" || !restartCommand[1]))) {
+	console.error("Usage: node run.mjs <service url> <token file> [--restart -- <service command> [args...]]");
 	process.exit(2);
 }
 const base = new URL(url);
@@ -62,7 +63,37 @@ const append = (sid, lease, entries) => req("POST", `${path(sid)}/entries`, { le
 const erase = (sid, lease, entryIds) => req("POST", `${path(sid)}/erase`, { lease, entryIds });
 const read = (sid, query = "") => req("GET", path(sid) + query);
 const pageCap = 4 * 1024 * 1024;
-let ttl;
+let ttl, service;
+async function startService() {
+	const child = spawn(restartCommand[1], restartCommand.slice(2), { stdio: "ignore" });
+	service = { child, stopped: new Promise((resolve) => {
+		child.once("exit", resolve);
+		child.once("error", resolve);
+	}) };
+	for (let i = 0; i < 300; i++) {
+		if (!child.pid || child.exitCode !== null || child.signalCode !== null) break;
+		const r = await req("GET", "/v1").catch(() => null);
+		if (r?.status === 200) return r;
+		await sleep(50);
+	}
+	throw Error("fixture service did not start");
+}
+async function stopService() {
+	service.child.kill("SIGKILL");
+	await service.stopped;
+}
+if (restartFlag) {
+	try {
+		const r = await startService();
+		if (!positive(r.body?.ttlMs) || r.body.ttlMs > 60000) throw Error("restart fixture requires a positive TTL of at most 60 s");
+		// A compliant service can hold all writes for a TTL after initial startup too.
+		await sleep(r.body.ttlMs);
+	} catch (e) {
+		await stopService();
+		console.error(e.message);
+		process.exit(2);
+	}
+}
 
 // History HTTP: The basics; What the service declares.
 await run("declaration and authentication", async () => {
@@ -89,11 +120,15 @@ await run("session lifecycle", async () => {
 	check("lease: acquire and same-owner resend", a.status === 200 && typeof lease === "string" && lease.length > 0 && a.body.ttlMs === ttl && ok(await acquire(sid, owner), a.body));
 	check("lease: a different owner gets held with retryAfterMs", held(await acquire(sid, id()), ttl));
 	check("lease: renewal reports the declared TTL", ok(await renew(sid, lease), { ttlMs: ttl }));
+	const usage = { input: 5, output: 2, cacheRead: 0, cacheWrite: 1, cost: 0.25 };
 	const batch = [
-		{ id: id(), parentId: null, kind: "response", turnId: "turn", stepId: "step", toolCallId: "call", jobId: "job", inputId: "input", requestId: "question", continuesTurnId: "previous-turn", actorId: "not-an-association", message: { role: "private", content: [{ type: "kit.unknown", nested: { b: 2, a: 1 }, value: null }] } },
-		{ id: id(), parentId: "opaque-parent", kind: 42, inputId: 42, requestId: null, continuesTurnId: { invalid: true }, unknown: [true, null, { a: 1 }] },
+		{ id: id(), parentId: null, kind: "response", turnId: "turn", stepId: "step", toolCallId: "call", jobId: "job", inputId: "input", requestId: "question", continuesTurnId: "previous-turn", actorId: "not-an-association", sources: ["origin-1", "origin-2"], writer: "not-a-job-owner", message: { role: "private", usage: { ...usage, opaque: "remove" }, content: [{ type: "kit.unknown", nested: { b: 2, a: 1 }, value: null }] } },
+		{ id: id(), parentId: "opaque-parent", kind: 42, inputId: 42, requestId: null, continuesTurnId: { invalid: true }, sources: ["one", 2], unknown: [true, null, { a: 1 }] },
+		{ id: id(), parentId: "job-parent", kind: "jobStarted", writer: "kit-job-owner", jobId: "job", data: { key: "fixture-key", detail: "remove" } },
+		{ id: id(), parentId: "end-parent", kind: "jobEnded", jobId: "job", data: { usage, result: "remove" } },
+		{ id: id(), parentId: "turn-parent", kind: "turnEnd", turnId: "turn", data: { usage, result: "remove" } },
 	];
-	check("append: equal same-batch duplicates do not count twice", ok(await append(sid, lease, [batch[0], batch[0], batch[1]]), { kept: 2 }));
+	check("append: equal same-batch duplicates do not count twice", ok(await append(sid, lease, [batch[0], ...batch]), { kept: batch.length }));
 	check("append: resend and empty batch keep nothing", ok(await append(sid, lease, batch), { kept: 0 }) && ok(await append(sid, lease, []), { kept: 0 }));
 	const numeric = JSON.stringify({ lease, entries: [batch[0]] }).replace('"b":2,"a":1', '"a":1.0,"b":2');
 	check("append: numbers compare by value and object order is ignored", ok(await req("POST", `${path(sid)}/entries`, numeric, { raw: true }), { kept: 0 }));
@@ -102,7 +137,7 @@ await run("session lifecycle", async () => {
 	check("append: changed already-kept id rejects the batch", err(await append(sid, lease, [third, { ...batch[0], kind: "changed" }]), 409, "conflict"));
 	check("append: malformed entry or supplied tombstone rejects the batch", err(await append(sid, lease, [third, { parentId: null }]), 400, "invalid_request") && err(await append(sid, lease, [{ ...third, erased: true }]), 400, "invalid_request"));
 	check("read: full metadata and full ordered opaque entries round-trip", ok(await read(sid), { session, entries: batch }));
-	check("read: page cursor and boundary", ok(await read(sid, "?limit=1"), { session, entries: [batch[0]], next: batch[0].id }) && ok(await read(sid, `?after=${batch[0].id}`), { session, entries: [batch[1]] }) && err(await read(sid, "?after=nope"), 404, "unknown_entry"));
+	check("read: page cursor and boundary", ok(await read(sid, "?limit=1"), { session, entries: [batch[0]], next: batch[0].id }) && ok(await read(sid, `?after=${batch[0].id}`), { session, entries: batch.slice(1) }) && err(await read(sid, "?after=nope"), 404, "unknown_entry"));
 	check("read: bad and repeated query values are refused", err(await read(sid, "?limit=501"), 400, "invalid_request") && err(await read(sid, "?limit=1&limit=2"), 400, "invalid_request"));
 	for (const [s, m] of [[other, { ...meta, project: `${project}-other` }], [newer, { ...meta, created: meta.created + 1 }]]) {
 		await put(s, m);
@@ -114,15 +149,18 @@ await run("session lifecycle", async () => {
 	const listed = await req("GET", `/v1/sessions${filter}`);
 	check("list: exact project filter, newest first, unused absent", ok(listed, { sessions: [{ ...meta, created: meta.created + 1, id: newer }, session] }));
 	check("list: filter precedes cursor selection", err(await req("GET", `/v1/sessions${filter}&after=${other}`), 404, "unknown_session"));
-	const targets = [batch[1].id, id(), batch[0].id, batch[1].id];
+	const targets = [batch[1].id, id(), batch[0].id, batch[1].id, ...batch.slice(2).map((e) => e.id)];
 	check("erase: held or wrong generation leaves payloads intact", held(await erase(sid, undefined, targets), ttl) && err(await erase(sid, id(), targets), 409, "lost") && ok(await read(sid), { session, entries: batch }));
-	const erased = { erased: [batch[1].id, batch[0].id] };
+	const erased = { erased: [...new Set(targets.filter((target) => batch.some((e) => e.id === target)))] };
 	check("erase: ordered distinct known IDs, also on same-lease retry", ok(await erase(sid, lease, targets), erased) && ok(await erase(sid, lease, targets), erased));
 	const tombstones = [
-		{ id: batch[0].id, parentId: null, kind: "response", erased: true, turnId: "turn", stepId: "step", toolCallId: "call", jobId: "job", inputId: "input", requestId: "question", continuesTurnId: "previous-turn" },
+		{ id: batch[0].id, parentId: null, kind: "response", erased: true, turnId: "turn", stepId: "step", toolCallId: "call", jobId: "job", inputId: "input", requestId: "question", continuesTurnId: "previous-turn", sources: batch[0].sources, usage },
 		{ id: batch[1].id, parentId: "opaque-parent", kind: null, erased: true },
+		{ id: batch[2].id, parentId: "job-parent", kind: "jobStarted", erased: true, jobId: "job", writer: "kit-job-owner", jobKey: "fixture-key" },
+		{ id: batch[3].id, parentId: "end-parent", kind: "jobEnded", erased: true, jobId: "job", usage },
+		{ id: batch[4].id, parentId: "turn-parent", kind: "turnEnd", erased: true, turnId: "turn", usage },
 	];
-	check("Erasure / Entry fields and tombstones: all seven string associations survive, other fields do not", ok(await read(sid), { session, entries: tombstones }));
+	check("Erasure / Entry fields and tombstones: exact associations, sources, usage and keyed job owner survive", ok(await read(sid), { session, entries: tombstones }));
 	check("erase: an erased id cannot regain its payload", err(await append(sid, lease, batch), 409, "conflict"));
 	check("lease: release and release retry", ok(await release(sid, lease), {}) && ok(await release(sid, lease), {}));
 	const fresh = await acquire(sid, owner);
@@ -182,6 +220,39 @@ if (positive(ttl) && ttl <= 60000) await run("expiry", async () => {
 	await release(sid, next.body?.lease);
 });
 else console.log("SKIP  lease expiry (positive TTL of at most 60 s required by this fixture)");
+
+// History HTTP: Writing: one writer at a time. Distinguish preserved leases from global exclusion.
+if (restartFlag) {
+	await run("restart", async () => {
+		const sid = id(), unheld = id(), owner = id();
+		const meta = { project, created: Date.now() };
+		const seed = async (session) => {
+			const entry = { id: id(), parentId: null };
+			await put(session, meta);
+			const lease = (await acquire(session, owner)).body?.lease;
+			if (!lease || !ok(await append(session, lease, [entry]), { kept: 1 })) throw Error("could not seed restart sessions");
+			return { entry, lease };
+		};
+		const free = await seed(unheld);
+		if (!ok(await release(unheld, free.lease), {})) throw Error("could not release restart fixture lease");
+		const current = await seed(sid);
+		const renewedAt = performance.now();
+		if (!ok(await renew(sid, current.lease), { ttlMs: ttl })) throw Error("could not renew restart fixture lease");
+		await stopService();
+		await startService();
+		const keptLease = await renew(sid, current.lease);
+		if (ok(keptLease, { ttlMs: ttl })) {
+			check("Writing: one writer at a time: a preserved lease still excludes another owner", held(await acquire(sid, id()), ttl));
+		} else {
+			// Separate sessions for acquire and erase: an unintended acquire must not mask a missing hold.
+			const [a, e] = await Promise.all([acquire(sid, owner), erase(unheld, undefined, [free.entry.id])]);
+			if (performance.now() - renewedAt >= ttl) console.log("SKIP  restart hold (restart and probes exceeded the TTL)");
+			else check("Writing: one writer at a time: restart holds acquire and unleased erase", err(keptLease, 409, "lost") && held(a, ttl) && held(e, ttl) && ok(await read(unheld), { session: { id: unheld, ...meta }, entries: [free.entry] }));
+		}
+		check("Writing: one writer at a time: acknowledged entries survive restart", ok(await read(sid), { session: { id: sid, ...meta }, entries: [current.entry] }));
+	});
+	await stopService();
+} else console.log("SKIP  restart hold (use --restart with a disposable service command)");
 
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} checks passed`);
