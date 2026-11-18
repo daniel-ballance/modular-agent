@@ -482,7 +482,7 @@ await attempt("hooks", async () => {
 	check("hook output: redacts a secret split across a stream's text events", Array.isArray(red?.events) && joined.includes("[redacted]") && !joined.includes("conformance-secret"), String(JSON.stringify(red)).slice(0, 240));
 	const own = got.find((e) => e.type === "kit.own");
 	check("hook output: redacts strings in a build's own event type, and keeps the rest", own?.data?.n === 7 && own?.data?.flag === true && own?.data?.note === "[redacted]" && got.map((e) => e.type).join() === events.map((e) => e.type).join(), String(JSON.stringify(own)).slice(0, 200));
-	const clean = await p.request("hook/handle", { handlerId: out?.handlerId, hook: "output", payload: { sessionId: "s1", recipient: "kit", events: [{ type: "entry", data: { text: "nothing to hide" } }], final: true } });
+	const clean = await p.request("hook/handle", { handlerId: out?.handlerId, hook: "output", payload: { sessionId: "s1", recipient: "kit", events: [{ type: "entry", data: { entry: { id: "kit-e1", parentId: null, kind: "response", message: { role: "assistant", content: [{ type: "text", text: "nothing to hide" }], stop: "finished" } } } }], final: true } });
 	check("hook output: lets clean output through", clean === null || JSON.stringify(clean).includes("nothing to hide"), JSON.stringify(clean));
 	let err;
 	try {
