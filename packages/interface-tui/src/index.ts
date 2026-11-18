@@ -149,7 +149,7 @@ export class TuiInterface implements InterfaceCapability {
 
 	private follow(): void {
 		this.unfollow?.();
-		this.unfollow = this.api.follow(this.sessionId, { recipient: `tui:${this.actorId}` }, (e) => this.show(e));
+		this.unfollow = this.api.follow(this.sessionId, { recipient: this.actorId }, (e) => this.show(e));
 	}
 
 	private endStream(): void {

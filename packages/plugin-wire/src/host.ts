@@ -27,6 +27,7 @@ import type {
 	ToolSource,
 	WorkingEnvironment,
 } from "@modular-agent/harness";
+import { mapOutput } from "./output.js";
 import { fromWire, toWire } from "./translate.js";
 import { DATA_BINDING, notFoundAsEnoent, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
@@ -114,6 +115,7 @@ export async function startExternalPlugin(spec: ExternalPluginSpec, info: { proj
 		return {
 			registration, plugin: hostPlugin(peer, reg, stop), stop, items, replacements,
 			refusal(harness, externalItems) {
+				if (harness.plugins().includes(reg.name)) return `Plugin ${reg.name} is already loaded`;
 				if (reg.hooks?.some((h) => h.order != null && !["first", "normal", "last"].includes(h.order))) return "Unknown hook order";
 				if (new Set(items).size !== items.length) return "Registration repeats an item";
 				const missing = replacements.find((item) => !items.includes(item));
@@ -138,6 +140,7 @@ const RUNTIME_HOOKS = new Set("turn.start step.after tool.before tool.after mode
 
 interface Parent {
 	actors?: string[];
+	jobs?: string[];
 	runtime?: boolean;
 	provider?: string;
 	sessionId?: string;
@@ -148,9 +151,10 @@ interface Parent {
 function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>): Plugin {
 	const parents = new Map<number | string, Parent>();
 	let workActors: PluginApi["workActors"];
+	let workJobs: PluginApi["workJobs"];
 	const changedBy = new Map<number, Promise<unknown>>();
 	const track = <T>(p: Promise<T> & { id: number }, parent: Parent): Promise<T> => {
-		parents.set(p.id, { ...parent, actors: parent.actors ?? (parent.sessionId ? workActors(parent.sessionId) : []) });
+		parents.set(p.id, { ...parent, actors: parent.actors ?? (parent.sessionId ? workActors(parent.sessionId) : []), jobs: parent.sessionId ? workJobs(parent.sessionId) : [] });
 		return p.then(async (value) => { await changedBy.get(p.id); return value; })
 			.finally(() => { parents.delete(p.id); changedBy.delete(p.id); });
 	};
@@ -159,6 +163,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 		stop,
 		async setup(api: PluginApi) {
 			workActors = api.workActors;
+			workJobs = api.workJobs;
 			const parentOf = (p: any): Parent => {
 				const parent = parents.get(p.parentRequestId);
 				if (!parent || !peer.isWaiting(p.parentRequestId)) throw new WireError("invalid_request", "There is no live parent");
@@ -178,6 +183,9 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				const parent = parentOf(p);
 				if (parent.runtime) throw new WireError("invalid_request", "A Runtime uses host/runtime/runToolCall");
 				const sessionId = sessionOf(p);
+				if ((!parent.tool && !parent.actors?.length) || !api.workMay(sessionId, "tools", parent.actors ?? [], parent.jobs)) {
+					throw new WireError("invalid_request", "The parent does not have tools rights");
+				}
 				const project = api.projectOf(sessionId);
 				const path = typeof p.cwd === "string" ? relative(project, p.cwd) : "..";
 				if (!isAbsolute(p.cwd ?? "") || path === ".." || path.startsWith(".." + sep) || isAbsolute(path)) throw new WireError("invalid_request", "cwd is outside the session project");
@@ -247,10 +255,9 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 					const entry = toWire(all[i]);
 					const size = Buffer.byteLength(JSON.stringify(entry));
 					const nextBytes = i + 1 < all.length ? Buffer.byteLength(JSON.stringify(all[i].id)) + 8 : 0;
-					if (bytes + size + Number(entries.length > 0) + nextBytes > max) {
-						if (!entries.length) throw new WireError("result_too_large", "One entry does not fit in a page");
-						break;
-					}
+					if (entries.length && bytes + size + 1 + nextBytes > max) break;
+					if (!entries.length && bytes + size > max) throw new WireError("result_too_large", "One entry does not fit in a page");
+					// Allow the first entry to fill the result even if only the cursor tips it over.
 					bytes += size + Number(entries.length > 0);
 					entries.push(entry);
 				}
@@ -280,7 +287,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				if (!parent.sessionId || !parent.actors?.length || parent.signal?.aborted ||
 					typeof p.kind !== "string" || (p.key !== undefined && typeof p.key !== "string")) throw new WireError("invalid_request", "Job needs an authorized parent and kind");
 				try {
-					const handle = api.startJob(parent.sessionId, { kind: p.kind, key: p.key, detail: p.detail, actors: parent.actors, toolCallId: parent.tool?.call.id });
+					const handle = api.startJob(parent.sessionId, { kind: p.kind, key: p.key, detail: p.detail, actors: parent.actors, jobs: parent.jobs, toolCallId: parent.tool?.call.id });
 					await handle.ready;
 					return { jobId: handle.id, started: handle.started };
 				} catch (error) { throw new WireError("invalid_request", String(error)); }
@@ -325,16 +332,15 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			for (const h of reg.hooks ?? []) {
 				if (h.hook === "output") {
 					api.on(h.hook, async (p: import("@modular-agent/harness").OutputPayload) => {
-						const events = p.events.map(({ type, data }) => ({ type, data }));
+						const mapped = p.events.map(mapOutput);
+						const events = mapped.map((m) => m.wire);
 						const answer = await peer.request<{ events?: { type: string; data: unknown }[]; block?: boolean } | null>("hook/handle", {
 							handlerId: h.handlerId, hook: h.hook, payload: { sessionId: p.sessionId, recipient: p.recipient, events, final: true },
 						});
 						if (answer === null) return undefined;
 						if (answer?.block === true) return { action: "block" };
-						if (!Array.isArray(answer?.events) || answer.events.some((e) => typeof e?.type !== "string")) throw new WireError("invalid_request", "Invalid output gate answer");
-						return { action: "pass", events: answer.events.map((event, i) => ({
-							...(p.events[i]?.type === event.type ? p.events[i] : p.events.find((e) => e.type === event.type) ?? p.events[0]), ...event,
-						})) };
+						if (!Array.isArray(answer?.events) || answer.events.length !== events.length) throw new WireError("invalid_request", "Invalid output gate answer");
+						return { action: "pass", events: mapped.map((m, i) => m.restore(answer.events![i])) };
 					}, h.order, { stream: true });
 				} else {
 					api.on(h.hook, async (payload: { sessionId?: string }) => fromWire(await track(peer.request("hook/handle", { handlerId: h.handlerId, hook: h.hook, payload: toWire(payload) }), { sessionId: payload.sessionId })) ?? undefined, h.order ?? "normal");
@@ -402,7 +408,7 @@ class WireRuntime implements Runtime {
 		peer.handle("host/runtime/hasSteering", async (p) => ({ waiting: await turn(p).host.hasSteering() }));
 		peer.onNotification("host/runtime/report", (p) => {
 			// The host emits these itself; a Runtime's own copy would duplicate them.
-			if (["model.output", "step.started", "tool.started", "tool.progress", "tool.ended", "entry.added"].includes(p?.type)) return;
+			if (["model.output", "step.started", "tool.started", "tool.progress", "tool.ended", "tool.result.delivered", "entry.added"].includes(p?.type)) return;
 			const t = this.turns.get(p?.parentRequestId);
 			t?.host.report(String(p.type), fromWire(p.data), { ...(p.stepId ? { stepId: p.stepId } : {}), ...(p.toolCallId ? { toolCallId: p.toolCallId } : {}) });
 		});

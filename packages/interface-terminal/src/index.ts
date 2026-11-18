@@ -83,7 +83,7 @@ export class TerminalInterface implements InterfaceCapability {
 
 	private follow(): void {
 		this.unfollow?.();
-		this.unfollow = this.api.follow(this.sessionId, { recipient: `terminal:${this.actorId}` }, (event) => this.show(event));
+		this.unfollow = this.api.follow(this.sessionId, { recipient: this.actorId }, (event) => this.show(event));
 	}
 
 	private show(event: AgentEvent): void {

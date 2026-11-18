@@ -40,7 +40,7 @@ export class HttpInterface implements InterfaceCapability {
 				["POST", /^\/sessions\/([^/]+)\/open$/, async (req) => ({ sessionId: await api.openSession(req.params[0], actor) })],
 				["POST", /^\/sessions\/([^/]+)\/close$/, async (req) => (await api.closeSession(req.params[0]), {})],
 				["GET", /^\/sessions\/([^/]+)$/, (req) => api.session(req.params[0])],
-				["GET", /^\/sessions\/([^/]+)\/history$/, (req) => api.gatedHistory(req.params[0], { all: req.query.get("all") === "1", recipient: `http:${actor.id}` })],
+				["GET", /^\/sessions\/([^/]+)\/history$/, (req) => api.gatedHistory(req.params[0], { all: req.query.get("all") === "1", recipient: actor.id })],
 				["POST", /^\/sessions\/([^/]+)\/input$/, (req) => {
 					if (!req.body?.content) throw new HttpError(400, "content is required");
 					return api.input(req.params[0], { content: req.body.content, when: req.body.when, key: req.body.key, actorId: actor.id });
@@ -62,7 +62,7 @@ export class HttpInterface implements InterfaceCapability {
 						const id = e.type === "entry" || e.type === "entry.added" ? e.data?.id : undefined;
 						res.write(`${id ? `id: ${id}\n` : ""}event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
 					};
-					const stop = api.follow(sessionId, { recipient: `http:${actor.id}`, fromEntry: at + 1 }, write);
+					const stop = api.follow(sessionId, { recipient: actor.id, fromEntry: at + 1 }, write);
 					return new Promise<void>((resolve) => res.on("close", () => (stop(), resolve())));
 				}],
 			],

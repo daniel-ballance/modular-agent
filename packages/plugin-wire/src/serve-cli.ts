@@ -21,5 +21,6 @@ if (parts.has("hooks")) plugins.push(conformanceHooks());
 if (parts.has("runtime") && parts.has("durable-runtime")) throw new Error("runtime and durable-runtime are never served together");
 if (parts.has("runtime")) plugins.push(transientRuntime()), replaces.push("runtime");
 if (parts.has("durable-runtime")) plugins.push(durableRuntime()), replaces.push("runtime");
-await servePlugins({ name: "conformance-typescript", plugins, replaces, containment: process.platform === "linux" ? "strong" : "processGroup" });
+const name = `conformance-typescript:${[...parts].sort().join(",")}`;
+await servePlugins({ name, plugins, replaces, containment: process.platform === "linux" ? "strong" : "processGroup" });
 process.exit(0);

@@ -78,7 +78,7 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 	const plugins = [projectTrust(home), ...vanillaPlugins(options), ...historyService, ...fromSettings.plugins].map((p) => (remote.has(p.name) && p.spawn ? remotePlugin(p) : p));
 	await harness.load(plugins);
 	const owned = new Set<string>();
-	for (const [index, spec] of (options.externalPlugins ?? pluginSpecsFromEnv()).entries()) {
+	for (const spec of options.externalPlugins ?? pluginSpecsFromEnv()) {
 		try {
 			const external = await startExternalPlugin(spec, { project, home });
 			const detail = external.refusal(harness, owned);
@@ -88,7 +88,6 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 				continue;
 			}
 			const plugin = external.plugin;
-			while (harness.plugins().includes(plugin.name)) plugin.name += `#${index + 1}`;
 			for (const item of external.replacements) harness.replacements.set(item, plugin.name);
 			await harness.load([plugin]);
 			if (!harness.plugins().includes(plugin.name)) {

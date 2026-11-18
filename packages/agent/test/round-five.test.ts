@@ -169,6 +169,12 @@ test("plugin binding: the history cursor counts toward the exact 4 MiB result li
 	await api.append(sid, draft("foreign.tail", { id: "tail" }));
 	const output = await api.runCommand(sid, "/wire-page dummy", "user");
 	assert.deepEqual(JSON.parse(output!), { ids: ["edge1"], next: "edge1", bytes: max });
+	const blank = await api.append(sid, draft("foreign.pad", { id: "blank", data: "" }));
+	const alone = Buffer.byteLength(JSON.stringify({ entries: [{ ...blank, id: "edge2", parentId: blank.id }] }));
+	await api.append(sid, draft("foreign.pad", { id: "edge2", data: "x".repeat(max - alone) }));
+	await api.append(sid, draft("foreign.tail", { id: "last" }));
+	const minimum = await api.runCommand(sid, "/wire-page blank", "user");
+	assert.deepEqual(JSON.parse(minimum!), { ids: ["edge2"], next: "edge2", bytes: max + Buffer.byteLength(',"next":"edge2"') });
 });
 
 async function wireHarness(t: TestContext) {

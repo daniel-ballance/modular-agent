@@ -113,6 +113,13 @@ function redactPieces(pieces: { object: Record<string, any>; key: string }[]): v
 	}
 }
 
+function redactStrings(value: unknown): unknown {
+	if (typeof value === "string") return value.replaceAll(SECRET, "[redacted]");
+	if (Array.isArray(value)) return value.map(redactStrings);
+	if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, redactStrings(child)]));
+	return value;
+}
+
 /** The conformance plugin's hook handlers. */
 export function conformanceHooks(): Plugin {
 	return {
@@ -121,15 +128,15 @@ export function conformanceHooks(): Plugin {
 			api.on("tool.before", (p: { call: { input: unknown } }) => (JSON.stringify(p.call.input ?? {}).includes("conformance-forbidden") ? { refuse: "refused by the conformance plugin" } : undefined));
 			api.on("turn.before", () => ({ system: "The conformance plugin is loaded." }));
 			api.on("output", (p: { events: { type: string; data: any }[] }) => {
-				const events = JSON.parse(JSON.stringify(p.events)) as typeof p.events;
+				const events = structuredClone(p.events);
 				for (const type of ["text", "reasoning", "toolInput"]) {
 					redactPieces(events.flatMap(({ type: name, data }) =>
-						name === "model.output" && (data?.type ?? "text") === type && typeof data.delta === "string" ? [{ object: data, key: "delta" }] : []));
+						(name === type || (name === "model.output" && data?.type === type)) && typeof data?.delta === "string" ? [{ object: data, key: "delta" }] : []));
 				}
+				redactPieces(events.flatMap(({ type, data }) => type === "toolOutput" && typeof data?.chunk === "string" ? [{ object: data, key: "chunk" }] : []));
 				redactPieces(events.flatMap(({ type, data }) => type === "tool.progress" && Array.isArray(data?.content)
 					? data.content.filter((part: any) => part?.type === "text" && typeof part.text === "string").map((part: any) => ({ object: part, key: "text" })) : []));
-				const redacted = JSON.parse(JSON.stringify(events, (_key, value) => typeof value === "string" ? value.replaceAll(SECRET, "[redacted]") : value));
-				return { action: "pass", events: redacted };
+				return { action: "pass", events: events.map((event) => ({ ...event, data: redactStrings(event.data) })) };
 			});
 		},
 	};
