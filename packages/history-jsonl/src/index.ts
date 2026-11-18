@@ -21,7 +21,7 @@ function alive(pid: number): boolean {
 }
 
 /** Entries that alone don't make a session worth keeping. */
-const SETUP_KINDS = new Set(["setting", "actorJoined"]);
+const SETUP_KINDS = new Set(["setting", "actorJoined", "plugins"]);
 
 /**
  * Session history as one JSONL file per session. A new session is written only

@@ -83,7 +83,10 @@ class EntryFiles {
 		const next = this.get(id).map((e) => {
 			if (!targets.has(e.id as string)) return e;
 			erased.push(e.id as string);
-			return { id: e.id, parentId: e.parentId, kind: e.kind ?? null, erased: true };
+			return {
+				id: e.id, parentId: e.parentId, kind: e.kind ?? null, erased: true,
+				...Object.fromEntries(["turnId", "stepId", "toolCallId", "jobId"].flatMap((key) => typeof e[key] === "string" ? [[key, e[key]]] : [])),
+			};
 		});
 		if (!erased.length) return [];
 		this.entries.set(id, next);
@@ -282,7 +285,7 @@ export class HttpHistoryStore implements HistoryStore {
 		const pending = this.unsent.get(id);
 		if (pending) {
 			pending.batches.push(batch);
-			if (batch.some((e) => e.kind !== "setting" && e.kind !== "actorJoined")) await this.send(id);
+			if (batch.some((e) => e.kind !== "setting" && e.kind !== "actorJoined" && e.kind !== "plugins")) await this.send(id);
 			return;
 		}
 		await this.post(id, batch);
