@@ -449,8 +449,11 @@ export class AcpInterface implements InterfaceCapability {
 		try { return await work(); }
 		catch (error) {
 			if (error instanceof RequestError) throw error;
-			const code = (error as { code?: string })?.code;
+			const { code, retryAfterMs } = (error ?? {}) as { code?: string; retryAfterMs?: number };
 			const message = error instanceof Error ? error.message : String(error);
+			if (code === "held" && Number.isSafeInteger(retryAfterMs) && retryAfterMs! > 0) {
+				throw new RequestError(-32000, message, { code, retryAfterMs });
+			}
 			throw bindingError(code === "result_too_large" || code === "conflict" || code === "not_found" || code === "forbidden" || code === "busy" || code === "wrong_project" ? code : /Unknown tenant|forbidden/i.test(message) ? "forbidden" : "invalid_params", message);
 		}
 	}

@@ -4,7 +4,7 @@ import { isIP } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { erasedEntry, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
 import { call, type ClientOptions, ServiceError } from "./http.js";
-import { HISTORY_BINDING } from "./history-service.js";
+import { HISTORY_BINDING, MAX_LEASE_BYTES, validLease } from "./history-service.js";
 export { HISTORY_BINDING, historyService } from "./history-service.js";
 
 const segment = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
@@ -16,13 +16,21 @@ const positive = (n: unknown): n is number => typeof n === "number" && Number.is
 const timeout = (ms: number) => AbortSignal.timeout(Math.max(1, Math.min(2 ** 31 - 1, Math.ceil(ms))));
 const bodyCap = 64 * 1024 * 1024;
 
-// Linux CLOCK_BOOTTIME (the first field in /proc/uptime) includes suspension.
-// Add a tick when measuring against a deadline to cover its truncated precision.
-function clock(): number {
-	if (process.platform === "linux") return Number(readFileSync("/proc/uptime", "utf8").split(" ", 1)[0]) * 1000;
-	return performance.now();
+// The first field in Linux /proc/uptime includes suspension and is truncated
+// to centiseconds. Reserve a tick against local deadlines.
+function bootClock(): number {
+	const field = readFileSync("/proc/uptime", "utf8").split(" ", 1)[0];
+	if (!/^\d+\.\d{2}$/.test(field)) throw new Error("Invalid boot clock");
+	return Number(field) * 1000;
 }
-const guard = process.platform === "linux" ? 10 : 0;
+function writerClock(configuredMargin?: number) {
+	if (process.platform === "linux") {
+		try { bootClock(); return { now: bootClock, margin: 10 }; } catch { /* No usable boot clock. */ }
+	}
+	if (!positive(configuredMargin)) throw new Error("Set MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS to a positive integer on platforms without a suspension-aware clock");
+	return { now: () => performance.now(), margin: configuredMargin };
+}
+type HistoryClientOptions = ClientOptions & { leaseMarginMs?: number };
 
 export function historyClientOptions(url: string, token: string): ClientOptions {
 	const address = new URL(url);
@@ -46,8 +54,13 @@ export class HttpHistoryStore implements HistoryStore {
 	private unsent = new Map<string, Pending>();
 	private client: ClientOptions;
 	private ttl?: number;
+	private clock: ReturnType<typeof writerClock>;
 
-	constructor(client: ClientOptions) { this.client = historyClientOptions(client.url, client.token); }
+	constructor(client: HistoryClientOptions) {
+		this.client = historyClientOptions(client.url, client.token);
+		const configured = process.env.MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS;
+		this.clock = writerClock(client.leaseMarginMs ?? (configured === undefined ? undefined : Number(configured)));
+	}
 	async initialize() {
 		const caps = await call<{ binding: string; ttlMs: number; retention?: number | null }>(this.client, "GET", "/v1", { signal: timeout(10_000) });
 		if (caps.binding !== HISTORY_BINDING || !positive(caps.ttlMs) || (caps.retention != null && !positive(caps.retention))) throw new Error("Unsupported history service declaration");
@@ -68,7 +81,7 @@ export class HttpHistoryStore implements HistoryStore {
 		const lease = this.leases.get(id);
 		if (!lease && this.unsent.has(id)) return;
 		if (!lease) throw new Error("Session is not open for writing");
-		if (clock() + guard >= lease.cutoff) this.lose(lease);
+		try { if (this.clock.now() >= lease.cutoff) this.lose(lease); } catch { this.lose(lease); }
 		if (lease.abort.signal.aborted) throw lease.abort.signal.reason;
 	}
 	private lose(lease: Lease) {
@@ -77,26 +90,33 @@ export class HttpHistoryStore implements HistoryStore {
 	}
 	private async takeLease(id: string, wait = false, abort = new AbortController()): Promise<void> {
 		if (this.ttl === undefined) await this.initialize();
-		let budget: number | undefined;
+		let budget = Infinity;
+		let lastHeld: ServiceError | undefined;
 		let lostReply = false;
 		for (;;) {
-			const sent = clock();
-			const remaining = (budget ?? Infinity) - sent;
-			if (remaining <= guard) throw new Error("History lease open budget exhausted");
+			const sent = this.clock.now();
+			const remaining = budget - sent;
+			if (lastHeld && remaining <= 0) throw lastHeld;
+			const signal = timeout(Math.min(remaining, 10_000));
 			let grant: { lease: string; ttlMs: number };
 			try {
-				grant = await call(this.client, "POST", this.path(id, "/lease"), { body: { owner: this.owner }, signal: timeout(Math.min(remaining, 10_000)) });
+				grant = await call(this.client, "POST", this.path(id, "/lease"), { body: { owner: this.owner }, signal });
 			} catch (error) {
+				if (wait && error instanceof ServiceError && error.code === "held" && positive(error.retryAfterMs)) {
+					const now = this.clock.now();
+					if (!lastHeld) budget = now + this.ttl! + 1000;
+					lastHeld = error;
+					if (now + error.retryAfterMs >= budget) throw error;
+					await sleep(error.retryAfterMs);
+					continue;
+				}
+				if (lastHeld && (this.clock.now() >= budget || (signal.aborted && remaining <= 10_000))) throw lastHeld;
 				if (!(error instanceof ServiceError) && !lostReply) { lostReply = true; continue; }
-				if (!wait || !(error instanceof ServiceError) || error.code !== "held" || !positive(error.retryAfterMs)) throw error;
-				budget ??= clock() + this.ttl! + 1000;
-				if (clock() + error.retryAfterMs + guard >= budget) throw error;
-				await sleep(error.retryAfterMs);
-				continue;
+				throw error;
 			}
-			if (typeof grant.lease !== "string" || !positive(grant.ttlMs)) throw new Error("Invalid history lease grant");
-			pathId(grant.lease);
-			const lease: Lease = { value: grant.lease, ttl: grant.ttlMs, cutoff: sent + grant.ttlMs / 2, abort };
+			if (lastHeld && this.clock.now() >= budget) throw lastHeld;
+			if (!validLease(grant.lease) || !positive(grant.ttlMs)) throw new Error("Invalid history lease grant");
+			const lease: Lease = { value: grant.lease, ttl: grant.ttlMs, cutoff: sent + grant.ttlMs / 2 - this.clock.margin, abort };
 			this.leases.set(id, lease);
 			this.checkWriter(id);
 			if (lostReply) await this.renew(id, lease);
@@ -105,19 +125,20 @@ export class HttpHistoryStore implements HistoryStore {
 		}
 	}
 	private schedule(id: string, lease: Lease, sent: number) {
-		lease.timer = setTimeout(() => { void this.renew(id, lease).catch(() => this.lose(lease)); }, Math.max(1, Math.min(2 ** 31 - 1, sent + lease.ttl / 3 - clock())));
+		lease.timer = setTimeout(() => { void this.renew(id, lease).catch(() => this.lose(lease)); }, Math.max(1, Math.min(2 ** 31 - 1, sent + lease.ttl / 3 - this.clock.margin - this.clock.now())));
 		lease.timer.unref();
 	}
 	private async renew(id: string, lease: Lease) {
 		this.checkWriter(id);
-		const sent = clock();
-		const reply = await call<{ ttlMs: number }>(this.client, "POST", this.path(id, `/lease/${pathId(lease.value)}/renew`), { signal: AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - sent - guard)]) });
-		if (!positive(reply.ttlMs) || clock() + guard >= Math.min(lease.cutoff, sent + reply.ttlMs / 2) || lease.abort.signal.aborted) {
+		const sent = this.clock.now();
+		const reply = await call<{ ttlMs: number }>(this.client, "POST", this.path(id, `/lease/${pathId(lease.value)}/renew`), { signal: AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - sent)]) });
+		const cutoff = sent + reply.ttlMs / 2 - this.clock.margin;
+		if (!positive(reply.ttlMs) || this.clock.now() >= Math.min(lease.cutoff, cutoff) || lease.abort.signal.aborted) {
 			this.lose(lease);
 			throw lease.abort.signal.reason;
 		}
 		lease.ttl = reply.ttlMs;
-		lease.cutoff = sent + lease.ttl / 2;
+		lease.cutoff = cutoff;
 		this.schedule(id, lease, sent);
 	}
 	async close(id: string): Promise<void> {
@@ -135,9 +156,8 @@ export class HttpHistoryStore implements HistoryStore {
 			pending.entries.push(...batch);
 			if (!pending.meta.forkedFrom && !batch.some((e) => e.kind === "inputAccepted")) return;
 			const { id: _id, ...body } = pending.meta;
-			// Forks currently use the reference deployment's 32-character lease;
-			// reserve considerably more for deployments with configured longer IDs.
-			if (Buffer.byteLength(JSON.stringify({ lease: "x".repeat(1024), entries: pending.entries })) > bodyCap) {
+			// Use the append encoding and the largest possible unescaped lease.
+			if (Buffer.byteLength(JSON.stringify({ lease: "x".repeat(MAX_LEASE_BYTES), entries: pending.entries })) > bodyCap) {
 				this.unsent.delete(id);
 				throw new ServiceError(413, "Initial history batch is too large", "result_too_large");
 			}
@@ -156,13 +176,13 @@ export class HttpHistoryStore implements HistoryStore {
 		for (let attempt = 0; ; attempt++) {
 			if (lease) this.checkWriter(id);
 			try {
-				await call(this.client, "POST", this.path(id, path), { body, signal: lease ? AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - clock() - guard)]) : timeout(10_000) });
+				await call(this.client, "POST", this.path(id, path), { body, signal: lease ? AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - this.clock.now())]) : timeout(10_000) });
 				if (lease) this.checkWriter(id);
 				return;
 			} catch (error) {
 				if (error instanceof ServiceError && error.code !== "lost" && attempt === 0) throw error;
 				// Retry an identical mutation only if this generation is still proven current.
-				if (!(error instanceof ServiceError) && lease && attempt < 4 && !lease.abort.signal.aborted && clock() + guard < lease.cutoff) continue;
+				if (!(error instanceof ServiceError) && lease && attempt < 4 && !lease.abort.signal.aborted && this.clock.now() < lease.cutoff) continue;
 				if (lease) this.lose(lease);
 				throw error;
 			}

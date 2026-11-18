@@ -12,7 +12,8 @@ const maxPage = 4 * 1024 * 1024;
 const bytes = Buffer.byteLength;
 const decodeBody = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const id = (v: unknown): v is string => typeof v === "string" && v.length > 0;
-const pathId = (v: unknown): v is string => id(v) && v !== "." && v !== "..";
+export const MAX_LEASE_BYTES = 128;
+export const validLease = (v: unknown): v is string => typeof v === "string" && v.length >= 1 && v.length <= MAX_LEASE_BYTES && !/[^A-Za-z0-9_-]/.test(v);
 const ids = (v: Json | undefined): v is string[] => Array.isArray(v) && v.every(id);
 
 class BindingError extends Error {
@@ -315,9 +316,11 @@ export async function historyService(options: HistoryServiceOptions) {
 			pendingBodies++;
 			let raw: Buffer;
 			try { raw = await bodyBytes(req); } finally { pendingBodies--; }
+			if (req.headers["content-encoding"] !== undefined) throw new BindingError(415, "unsupported_media_type", "Content-Encoding must be omitted");
 			if (raw.length && req.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") throw new BindingError(415, "unsupported_media_type", "Expected application/json");
 			const reading = req.method === "GET";
 			const [sid, leaseParam] = re.exec(path)!.slice(1).map(decode);
+			if (leaseParam !== undefined && !validLease(leaseParam)) return invalid("Invalid lease");
 			const { after, limit, project } = query(rawQuery, op === "list" ? ["after", "limit", "project"] : op === "session" && reading ? ["after", "limit"] : []);
 			const b = bodyObject(raw, req.method === "PUT" || op === "acquire" || op === "append" || op === "erase");
 			records.check();
@@ -350,7 +353,7 @@ export async function historyService(options: HistoryServiceOptions) {
 					if (current(sid)?.lease === leaseParam) leases.delete(sid);
 					break;
 				case "append": {
-					if (!pathId(b.lease) || !Array.isArray(b.entries) || !b.entries.every((e) => object(e) && id(e.id) && (e.parentId === null || id(e.parentId)) && e.erased !== true)) return invalid("Invalid lease or entries");
+					if (!validLease(b.lease) || !Array.isArray(b.entries) || !b.entries.every((e) => object(e) && id(e.id) && (e.parentId === null || id(e.parentId)) && e.erased !== true)) return invalid("Invalid lease or entries");
 					const s = known(sid), authorize = () => { requireLease(sid, b.lease); };
 					authorize();
 					result = { kept: records.keep(s, b.entries as JsonObject[], authorize) };
@@ -358,7 +361,7 @@ export async function historyService(options: HistoryServiceOptions) {
 					break;
 				}
 				case "erase": {
-					if (!ids(b.entryIds) || (Object.hasOwn(b, "lease") && !pathId(b.lease))) return invalid("Invalid entry IDs or lease");
+					if (!ids(b.entryIds) || (Object.hasOwn(b, "lease") && !validLease(b.lease))) return invalid("Invalid entry IDs or lease");
 					const s = known(sid);
 					const authorize = () => {
 						if (b.lease !== undefined) { requireLease(sid, b.lease); return; }
