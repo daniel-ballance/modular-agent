@@ -402,9 +402,10 @@ await attempt("environment", async () => {
 	const tl = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "sleep 20", timeoutMs: 300 }, 20000);
 	check("env/exec: a positive timeoutMs stops the command and reports timedOut", tl.timedOut === true && Date.now() - t1 < 5000, `${JSON.stringify(tl)} after ${Date.now() - t1} ms`);
 	const pidFile = join(work, `pid-${randomUUID()}`);
-	const s = p.request("env/exec", { cwd: work, sessionId: "s1", command: `setsid sleep 60 & echo $! > ${pidFile}; sleep 60` }, 20000);
-	for (let i = 0; i < 100 && !existsSync(pidFile); i++) await sleep(50);
-	const pid = Number(readFileSync(pidFile, "utf8"));
+	// The escapee writes a heartbeat file; a PID would mean nothing if the environment has its own PID namespace.
+	const escBeat = join(work, `esc-${randomUUID()}`);
+	const s = p.request("env/exec", { cwd: work, sessionId: "s1", command: `setsid bash -c 'for i in $(seq 600); do date +%s%N > ${escBeat}; sleep 0.1; done' >/dev/null 2>&1 & sleep 60` }, 20000);
+	for (let i = 0; i < 100 && !existsSync(escBeat); i++) await sleep(50);
 	const t0 = Date.now();
 	p.cancel(s.id);
 	try {
@@ -414,10 +415,12 @@ await attempt("environment", async () => {
 	}
 	check("env/exec: cancelling answers within 5 s", Date.now() - t0 < 5000, `${Date.now() - t0} ms`);
 	if (reg.workingEnvironment?.containment === "strong") {
-		for (let i = 0; i < 40 && alive(pid); i++) await sleep(50);
-		check("env/exec: strong containment stops a setsid escapee", !alive(pid), `pid ${pid}`);
+		await sleep(1500);
+		const a = existsSync(escBeat) ? readFileSync(escBeat, "utf8") : "";
+		await sleep(700);
+		const b = existsSync(escBeat) ? readFileSync(escBeat, "utf8") : "";
+		check("env/exec: strong containment stops a setsid escapee", a !== "" && a === b, "its heartbeat still changes after the cancel");
 	}
-	if (alive(pid)) process.kill(pid, "SIGKILL");
 
 	// Saved points, if the environment offers them.
 	if (reg.workingEnvironment?.points === true) {

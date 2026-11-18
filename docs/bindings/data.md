@@ -113,7 +113,7 @@ A receiver keeps a right it doesn't know, and grants nothing for it.
 
 Tenants are defined in the agent's own configuration, outside any project, so a project can't change them. A build that supports them reads the environment variable `MODULAR_AGENT_TENANTS`, a JSON object from tenant name to `{ rights, tokens? }`, as well as any way of its own. A session created in a tenant the agent doesn't know is refused.
 
-**The budget:** a turn starts only while the tenant's used tokens are below its budget. Otherwise it ends at once, without a model request, with outcome `{ kind: "limit", limit: "tenantTokens" }`. A turn running when the budget is reached ends after the step that reached it, with the same outcome. Reopening a session in another build counts what the history records.
+**The budget:** a turn starts only while the tenant's used tokens are below its budget. Otherwise it ends at once, without a model request, with outcome `{ kind: "limit", limit: "tenantTokens" }`. A turn running when the budget is reached ends after the step that reached it, with the same outcome. Nothing is reserved ahead, so steps already running in several sessions may together cross the budget; the next turn in the tenant is then refused. Reopening a session in another build counts what the history records.
 
 Limits, tenants and grants are records of authority: they can't be erased.
 
@@ -135,6 +135,7 @@ What the output gate is given ([plugin binding](plugin.md#the-host-asks-a-hook-h
 
 - **One stream** is the `text` and `reasoning` events of one model response, or the `toolOutput` events of one call. The gate gets the whole stream at once, so text split across pieces can be checked as one.
 - **A gate passes on what it doesn't understand.** It may redact strings anywhere in an event's `data`, whatever the event's type, a build's own included. It leaves everything else as it was: the types, the order, and every value that isn't a redacted string. A gate that fails blocks.
+- **Output not about one session,** such as a reply to `initialize`, has `sessionId: null`.
 - **Mapping is the host's job.** A host translates its own events to these shapes before a remote gate sees them, and translates the gate's answer back. A host that can't map a changed event back blocks it, failing closed.
 
 ## Credentials
@@ -210,7 +211,7 @@ A build that declares `portableSessions` can reopen a session that another such 
   - **An open question** is an `inputRequest` with no `inputAnswer`. A call left open past its turn is in that turn's `turnEnd` `openToolCalls`, with no `toolResult`. Any actor in the session with the right to answer it may, not only the one it was first put to.
   - **Limits and tenants:** the latest `limit`, and the session's `tenant`, if it has one. A build that reopens a session whose tenant it doesn't know refuses to open it.
   - **A job's rights** are its `jobStarted` `data.rights`, narrowed by every limit now in force. A `jobStarted` without them gives the job no rights beyond `watch`.
-  - **The model and settings.** If the session's `model` isn't one the reopening build offers, the session still opens, and every turn fails with the error kind `other` until an actor with `settings` chooses one: a build never substitutes a model silently. A standard setting the session never recorded takes the reopening build's default, except `approval`, below. A `reasoning` level the chosen model doesn't accept is lowered to the nearest level it does, never raised.
+  - **The model and settings.** If the session's `model` isn't one the reopening build offers, the session still opens, and every turn fails with the error kind `other` until an actor with `settings` chooses one: a build never substitutes a model silently. A standard setting the session never recorded takes the reopening build's default, except `approval`, below. A `reasoning` level the chosen model doesn't accept is lowered to the nearest level it does, never raised. If it accepts none at or below, the request leaves `reasoning` out.
 - **Order within a turn:** `turnStart`, then the input it took; then for each step a `response`, then a `toolStarted` before each call runs, and a `toolResult` when it ends; any `inputRequest` and `inputAnswer` as they happen; and `turnEnd` last. Steering input is an `input` with the running turn's id, kept before the next `response`.
 
 **Jobs, plugins and erasure** are part of the promise too:
@@ -225,14 +226,15 @@ A build that declares `rewinding` can move a session and restore the working env
 Rewinding to an entry restores the earliest point recorded after it on the current branch. If there is no such point, nothing outside changed since the entry, and nothing is restored. If an entry after it records work outside the working environment, such as a job, or a point the environment no longer has, the move is refused before anything changes. A point belongs to the working environment that saved it, and no other environment can restore it. So in a session reopened in another build, a rewind that needs a point saved by the first build's environment is refused.
 
 **Rewinding is done in this order,** so a failure part way never leaves files and history disagreeing:
-1. The build checks the point exists, and saves a new point of the files as they are now.
-2. It restores the point.
+1. The build saves a new point of the files as they are now.
+2. It restores the point. A point the environment no longer has gives `not_found` with no file changed, and the move is refused.
 3. It records the move. If recording fails, for example because the history lease was lost, it restores the point it saved in step 1, and the move is refused.
 
 Rewinding is only to an entry on the current branch. A move with `rewind` to another branch is refused. A point lasts at least while its session is open; after that, it lasts as long as the working environment keeps it, and a point it no longer has refuses the move. Restoring changes the project's files, not effects outside it: a call past the point whose tool has `openWorld: true` isn't undone, and the move reports it as out of reach.
 
 ## Changes
 
+- **2026-11-18, after the round-six builds.** A rewind saves first and lets `env/restore` refuse a missing point, since a remote environment has no separate check (TypeScript, Go, Elixir). Concurrent steps may cross a tenant's budget together (Go, Elixir). No accepted reasoning level at or below: leave it out (Go, Elixir). `sessionId: null` for output not about one session (Elixir).
 - **2026-11-18, round six.** Limits and tenants (`limit`, `tenant`, the `administer` right, `MODULAR_AGENT_TENANTS`, the `tenantTokens` limit). Output events: a shared vocabulary for what the output gate is given (Rust R5-05, Go B30, Elixir R5-3). A job's rights on `jobStarted` (Go B29, Elixir R5-5). The order of a rewind, its branch and the life of a point (Rust R5-04, Python G78, Go B32, Elixir R5-6). A reasoning level the new model doesn't accept (Rust R5-03).
 - **2026-11-18, after the round-five matrices.** A job's report is its result, unchanged. The Python agent framed the report of a job it took up in another build's session ("Job <id> reported ..."), so the model saw different text depending on which build took the job up.
 - **2026-11-18, round five.** Jobs and plugins become portable: `jobStarted`, `jobEnded`, a job's report, and `plugins`. Rewinding: `data.point` on `turnStart` and `toolStarted`. Before this, jobs and plugins were each build's own kinds, and no build could rewind. From the gaps the builders logged in round four:

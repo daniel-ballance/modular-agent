@@ -415,7 +415,7 @@ if (decl.tenants) {
 		const broke = await open("kit-broke");
 		const b = await within(15000, prompt(agent, broke, "hello broke"), "budget prompt");
 		check("tenants: an exhausted budget ends the turn as tenantTokens, max_tokens", b.stopReason === "max_tokens" && meta(b)?.outcome?.limit === "tenantTokens", `${b.stopReason} ${JSON.stringify(meta(b)?.outcome)}`);
-		check("tenants: without a model request", !(await history(agent, broke)).entries.some((e) => e.kind === "response"));
+		check("tenants: without a model request", !(await history(agent, broke, { all: true })).entries.some((e) => e.kind === "response" || e.kind === "modelRequest"));
 		for (const id of [ro, broke]) await agent.ctx.request(methods.agent.session.close, { sessionId: id });
 	});
 }
@@ -485,7 +485,7 @@ if (probeChecks) {
 		const seen = existsSync(probeOut("output-observer")) ? readFileSync(probeOut("output-observer"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
 		const events = seen.flatMap((x) => x?.events ?? []);
 		check("output events: the gate was given events", events.length > 0, `${seen.length} payloads`);
-		check("output events: every payload has sessionId, recipient, events and final", seen.every((x) => typeof x?.sessionId === "string" && typeof x?.recipient === "string" && Array.isArray(x?.events) && typeof x?.final === "boolean"), String(JSON.stringify(seen.find((x) => !(typeof x?.sessionId === "string" && Array.isArray(x?.events))))).slice(0, 200));
+		check("output events: every payload has sessionId, recipient, events and final", seen.every((x) => (typeof x?.sessionId === "string" || x?.sessionId === null) && typeof x?.recipient === "string" && Array.isArray(x?.events) && typeof x?.final === "boolean"), String(JSON.stringify(seen.find((x) => !(typeof x?.sessionId === "string" && Array.isArray(x?.events))))).slice(0, 200));
 		const OUT = { text: (d) => typeof d?.delta === "string", reasoning: (d) => typeof d?.delta === "string", toolCall: (d) => typeof d?.call?.id === "string" && typeof d?.call?.name === "string", toolOutput: (d) => typeof d?.toolCallId === "string" && typeof d?.chunk === "string", toolResult: (d) => typeof d?.toolCallId === "string" && typeof d?.status === "string" && Array.isArray(d?.content), entry: (d) => typeof d?.entry?.id === "string", turnEnded: (d) => typeof d?.outcome?.kind === "string", reply: (d) => typeof d?.method === "string" };
 		const bad = events.filter((e) => (OUT[e?.type] ? !OUT[e.type](e.data) : !String(e?.type ?? "").includes(".")));
 		check("output events: every event is a standard type in its shape, or a build's own type with a dot", bad.length === 0, String(JSON.stringify(bad.slice(0, 2))).slice(0, 300));
