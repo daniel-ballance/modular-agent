@@ -916,7 +916,7 @@ export class Harness {
 		}
 		const sources = s.branch().filter((e) => e.turnId === turnId && (e.kind === "response" || e.kind === "toolResult")).map((e) => e.id);
 		await this.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId, sources, data: { outcome: outcome.outcome, result: outcome.result, usage: outcome.usage } }]);
-		if (!state?.endedHook) await this.hooks.observe("turn.end", { sessionId: s.id, turnId, outcome });
+		if (!state?.endedHook) await this.hooks.observe("turn.end", { sessionId: s.id, turnId, outcome: outcome.outcome, result: outcome.result });
 		this.emit(s.id, "turn.ended", outcome, "harness", { turnId });
 		if (open.size) this.maybeContinueOpenCalls(s);
 	}

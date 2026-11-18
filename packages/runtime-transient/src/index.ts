@@ -53,7 +53,8 @@ export class TransientRuntime implements Runtime {
 		} catch (error) {
 			outcome = { outcome: { kind: "failed", error: error instanceof Error ? error.message : String(error) }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
 		}
-		await host.hook("turn.end", { sessionId: input.sessionId, turnId: input.turnId, outcome });
+		// The shared shape (docs/bindings/plugin.md): outcome as on a turnEnd entry, and the result beside it.
+		await host.hook("turn.end", { sessionId: input.sessionId, turnId: input.turnId, outcome: outcome.outcome, result: outcome.result });
 		return outcome;
 	}
 

@@ -87,6 +87,7 @@ The response to `session/new`, `session/load` and `session/resume` also carries 
 - **`session/load`** sends the session's current branch as `session/update` notifications, then answers. Everything sent passes the output gate. **`session/resume`** answers without replaying. If the agent handed back queued input during recovery (`queuedInputAfterRestart: "handedBack"`), the response carries it as `_meta["modular-agent"].handedBack`, in the same shape as a cancelled prompt's.
 - **`session/close`** cancels the running turn and the session's jobs, closes MCP servers the host gave it, and waits for both before answering.
 - **`session/list`** lists kept sessions. With a `cwd`, it lists only that project's.
+- **The connection's actor.** The ACP client acts as the agent's host actor, the one `initialize` names in `_meta["modular-agent"].actor`. Opening or reopening a session, including one another agent wrote, joins that actor to it with the rights the agent gives it, recorded as an `actorJoined` entry, unless the session already has it with those rights. The actor need not be one the session had before: a session written by another agent names that agent's actors, and they stay in the session as they were.
 
 ## Configuration options
 
@@ -213,6 +214,7 @@ The [conformance kit](../../conformance/acp/README.md) uses this mode.
 
 ## Changes
 
+- **2026-11-18, after the portable-session matrix.** The connection's actor joins every session it opens or reopens. The Python agent refused to reopen sessions written by the TypeScript and Elixir agents, because its own actor wasn't among the session's actors. The Elixir builder had logged the same gap (M3-2).
 - **2026-11-18, round four.** The optional declaration key `portableSessions`. The conformance model's "this turn" is everything after the last `user` message (Rust B-14).
 - **2026-11-17, after round two.** Clarifications from the Rust, Python and Go builds' binding gaps. None changes a wire format any build already uses:
   - the echo counts code points;

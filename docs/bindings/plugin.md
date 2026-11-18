@@ -161,7 +161,7 @@ An error answer counts as a failing handler, per [Hook points](../contracts.md#h
 | `tool.after` | transform | `{ sessionId, call, result: ToolResult }` | the same shape |
 | `model.failed` | first answer | `{ sessionId, request, error }` | `{ retry: true, request? }` |
 | `turn.result` | gate | `{ sessionId, turnId, result: { text?, value? }, shape? }` | a refusal sends the model back with the reason |
-| `turn.end` | observe | `{ sessionId, turnId, outcome }` | |
+| `turn.end` | observe | `{ sessionId, turnId, outcome, result }`, as on a `turnEnd` entry: `outcome` is `{ kind, error?, limit? }` | |
 | `provider.request` | transform | `{ sessionId, provider, model, request }` | the same shape |
 | `provider.response` | observe | `{ sessionId, provider, model, message }` | |
 
@@ -269,6 +269,7 @@ The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a
 
 ## Changes
 
+- **2026-11-18, after the round-four Runtime matrix.** The `turn.end` payload's `outcome` is the `{ kind, ... }` object of a `turnEnd` entry, with `result` beside it. TypeScript's Runtime sent the whole TurnOutcome as `outcome`, and the Rust and Python hosts, reading `outcome.kind`, refused the hook request, which failed every turn. The Go and Elixir hosts accepted either.
 - **2026-11-18, round four.** Rules from the 42 binding gaps the Rust, Python and Go builders logged in round three. Where they agreed, their choice became the rule. Where they didn't, the change says which way it went:
   - **Replacing** is by item, not by plugin, and a registration the host can't accept means the plugin isn't loaded, with `plugin/shutdown { reason: "refused" }` (Rust B-08, Python G52 and G65, Go B7).
   - **Which requests need a parent,** which may name a session directly, and that a parent is live only until it's answered (Rust B-10, Python G53, Go B8).
