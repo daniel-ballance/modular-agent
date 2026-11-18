@@ -228,10 +228,19 @@ export type ModelStreamEvent =
 	| { type: "text"; delta: string }
 	| { type: "reasoning"; delta: string }
 	| { type: "toolInput"; delta: string };
-export interface RequestOptions { signal: AbortSignal; sessionId?: string; stepId?: string; onEvent?(event: ModelStreamEvent): void }
+export interface RequestOptions {
+	signal: AbortSignal; sessionId?: string; stepId?: string;
+	onEvent?(event: ModelStreamEvent): void;
+	/** Host and adapter controls. These do not cross the wire. */
+	prepareDispatch?(): Promise<ModelRequest>;
+	requestPrepared?: boolean;
+	exactReplay?: boolean;
+	onEffectiveRequest?(request: ModelRequest): void;
+}
 
 export interface Provider {
 	id: string;
+	readonly prepareOnWire?: boolean;
 	supports: Declaration;
 	models(): ModelInfo[];
 	/** Whether this Provider can be used now, for example because it has credentials. */
@@ -244,6 +253,7 @@ export interface Provider {
 /** What the Runtime is given: the chosen model, without credentials. */
 export interface ModelAccess {
 	model: ModelInfo;
+	readonly prepareOnWire?: boolean;
 	supports: Declaration;
 	request(request: ModelRequest, options: RequestOptions): Promise<AssistantMessage>;
 }

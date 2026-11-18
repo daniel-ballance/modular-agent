@@ -17,9 +17,9 @@ export class ConformanceProvider implements Provider {
 	}
 	async request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
 		const scope = { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: model.id } };
-		const prepared = await this.api?.runHook<{ request: ModelRequest }>("provider.request", { ...scope, request });
+		const prepared = options.requestPrepared ? undefined : await this.api?.runHook<{ request: ModelRequest }>("provider.request", { ...scope, request });
 		const message = this.echo(prepared?.request ?? request, options);
-		await this.api?.runHook("provider.response", { ...scope, message });
+		if (!options.requestPrepared) await this.api?.runHook("provider.response", { ...scope, message });
 		return message;
 	}
 	private echo(request: ModelRequest, options: RequestOptions): AssistantMessage {

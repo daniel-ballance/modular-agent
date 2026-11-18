@@ -143,10 +143,20 @@ interface Parent {
 	actors?: string[];
 	jobs?: string[];
 	runtime?: boolean;
-	provider?: string;
+	provider?: ProviderAttempt;
 	sessionId?: string;
 	tool?: ToolContext;
 	signal?: AbortSignal;
+}
+
+interface ProviderAttempt {
+	model: ModelRef;
+	request: unknown;
+	prepare?: () => Promise<ModelRequest>;
+	begun?: boolean;
+	committed?: boolean;
+	response?: unknown;
+	failure?: unknown;
 }
 
 function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>): Plugin {
@@ -235,10 +245,32 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			});
 			peer.handle("host/hook", async (p) => {
 				const parent = parentOf(p);
-				if (!parent.provider || !["provider.request", "provider.response"].includes(p.hook)
-					|| p.payload?.provider !== parent.provider || (p.payload?.sessionId ?? undefined) !== parent.sessionId) throw new WireError("invalid_request", "Not this Provider's hook");
-				const result = await api.runHook(p.hook, fromWire(p.payload));
-				return p.hook === "provider.response" ? null : toWire(result);
+				const attempt = parent.provider;
+				if (!attempt || !["provider.request", "provider.response"].includes(p.hook)
+					|| p.payload?.provider !== attempt.model.provider || (p.payload?.sessionId ?? undefined) !== parent.sessionId
+					|| !wireEqual(p.payload.model, attempt.model)) throw invalidState("Not this Provider's hook");
+				if (p.hook === "provider.response") {
+					if (!attempt.committed || attempt.response || p.payload.message?.role !== "assistant") throw invalidState("Invalid Provider response phase");
+					attempt.response = p.payload.message;
+					await api.runHook(p.hook, fromWire(p.payload));
+					return null;
+				}
+				if (parent.signal?.aborted) throw new WireError("cancelled", "Parent was cancelled");
+				if (attempt.begun || !wireEqual(p.payload.request, attempt.request)) throw invalidState("Invalid Provider request phase or payload");
+				attempt.begun = true;
+				try {
+					const result = attempt.prepare ? { ...p.payload, request: toWire(await attempt.prepare()) } : toWire(await api.runHook(p.hook, fromWire(p.payload)));
+					parent.signal?.throwIfAborted();
+					if (!peer.isWaiting(p.parentRequestId)) throw invalidState("Parent is no longer live");
+					attempt.committed = true;
+					return result;
+				} catch (error) {
+					attempt.failure = error;
+					const e = error as { code?: string; limit?: string };
+					if (e.code === "turn_limit") throw new WireError("turn_limit", "Turn limit reached", -32000, { limit: e.limit });
+					if (parent.signal?.aborted) throw new WireError("cancelled", "Parent was cancelled");
+					throw error;
+				}
 			});
 			peer.handle("host/credentials/read", async (p) => {
 				noSession(p);
@@ -464,10 +496,12 @@ class WireRuntime implements Runtime {
 			step.request = request;
 			step.sent = true;
 			t.replacement = undefined;
+			const exactReplay = t.replay !== undefined;
 			try {
 				await this.closeReplay(t);
 				step.answer = await withLimit(t, () => t.input.model.request(request, {
-					signal: AbortSignal.any([t.signal, ctx.signal]), sessionId: t.input.sessionId, stepId: p.stepId,
+					signal: AbortSignal.any([t.signal, ctx.signal]), sessionId: t.input.sessionId, stepId: p.stepId, exactReplay,
+					onEffectiveRequest: (effective) => { step.request = effective; },
 					onEvent: (event) => { if (peer.isWaiting(p.parentRequestId)) peer.notify("host/runtime/modelEvent", { parentRequestId: ctx.id, event }); },
 				}));
 			} catch (error) { t.current = undefined; throw error; }
@@ -647,15 +681,19 @@ class WireRuntime implements Runtime {
 				t.usage = addUsage(t.usage, row?.message?.role === "assistant" ? row.message.usage : row?.usage);
 			}
 		}
+		const remaining: InterruptedTurn["calls"] = [];
 		for (const call of interrupted?.calls ?? (extra.calls as InterruptedTurn["calls"] | undefined) ?? []) {
 			const original: ToolCall = { id: call.id, name: call.name, input: call.input, startedBy: "model", stepId: call.stepId };
 			if (interrupted && (!this.supports.continuesAfterRestart || call.started && !call.safeToRepeat)) {
 				await host.record({ kind: "toolResult", writer: "harness", modelVisible: true, stepId: call.stepId, toolCallId: call.id,
 					message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: [text(interruptedNote(call.started))], isError: true },
 					data: { status: call.started ? "outcomeUnknown" : "notStarted" } });
-			} else t.calls.set(call.id, { original, offered: true, phase: "unstarted" });
+			} else {
+				t.calls.set(call.id, { original, offered: true, phase: "unstarted" });
+				remaining.push(call);
+			}
 		}
-		const req = this.peer.request<TurnOutcome>(method, { turn, ...toWire(extra) }, signal);
+		const req = this.peer.request<TurnOutcome>(method, { turn, ...toWire(interrupted ? { interrupted: { ...interrupted, calls: remaining } } : extra) }, signal);
 		this.turns.set(req.id, t);
 		try {
 			const reply = fromWire(await this.track(req, { runtime: true, sessionId: input.sessionId, signal })) as TurnOutcome;
@@ -683,6 +721,7 @@ class WireRuntime implements Runtime {
 type Track = <T>(p: Promise<T> & { id: number }, parent: Parent) => Promise<T>;
 
 class WireProvider implements Provider {
+	readonly prepareOnWire = true;
 	constructor(private peer: WirePeer, readonly id: string, readonly supports: Provider["supports"], private list: ModelInfo[], private track: Track) {}
 	models(): ModelInfo[] {
 		return this.list;
@@ -691,14 +730,19 @@ class WireProvider implements Provider {
 		return (await this.peer.request<{ available: boolean }>("provider/available", { provider: this.id }).catch(() => ({ available: true }))).available;
 	}
 	async request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
-		const req = this.peer.request("provider/request", { provider: this.id, model, request: toWire(request), sessionId: options.sessionId }, options.signal);
+		const attempt: ProviderAttempt = { model, request: toWire(request), prepare: options.prepareDispatch };
+		const req = this.peer.request("provider/request", { provider: this.id, model, request: attempt.request, sessionId: options.sessionId }, options.signal);
 		const onEvent = (p: { parentRequestId: number; event: { type: "text" | "reasoning" | "toolInput"; delta: string } }) => {
-			if (p.parentRequestId === req.id) options.onEvent?.(p.event);
+			if (p.parentRequestId === req.id && attempt.committed && !attempt.response && !options.signal.aborted) options.onEvent?.(p.event);
 		};
 		WireProvider.listen(this.peer, req.id, onEvent);
 		try {
-			return fromWire(await this.track(req, { provider: this.id, sessionId: options.sessionId, signal: options.signal })) as AssistantMessage;
+			const answer = await this.track(req, { provider: attempt, sessionId: options.sessionId, signal: options.signal });
+			if (!attempt.committed || !attempt.response || !wireEqual(answer, attempt.response)) throw invalidState("Provider did not settle the committed attempt consistently");
+			return fromWire(answer) as AssistantMessage;
 		} catch (error) {
+			if (attempt.failure) throw attempt.failure;
+			if (!attempt.committed && options.prepareDispatch) throw error;
 			if (options.signal.aborted) return { role: "assistant", content: [], stop: "aborted" };
 			return { role: "assistant", content: [], stop: "failed", error: { kind: "temporary", message: error instanceof Error ? error.message : String(error) } };
 		} finally {
@@ -785,6 +829,9 @@ class WireEnvironment implements WorkingEnvironment {
 	get safeToRepeat(): boolean { return this.containment === "strong"; }
 	async save(): Promise<string> {
 		return (await this.peer.request<{ point: string }>("env/save", { cwd: this.cwd, sessionId: this.sessionId })).point;
+	}
+	async hasPoint(point: string): Promise<boolean> {
+		return (await this.peer.request<{ exists: boolean }>("env/checkPoint", { cwd: this.cwd, sessionId: this.sessionId, point })).exists === true;
 	}
 	async restore(point: string): Promise<void> {
 		await this.peer.request("env/restore", { cwd: this.cwd, sessionId: this.sessionId, point });

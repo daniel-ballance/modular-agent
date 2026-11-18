@@ -32,11 +32,11 @@ export class LocalEnvironment implements WorkingEnvironment {
 		return this.snapshots.save(this.cwd, this.sessionId);
 	}
 	hasPoint(point: string): Promise<boolean> {
-		return this.snapshots.has(this.cwd, point);
+		return this.snapshots.has(this.cwd, point, this.sessionId);
 	}
 
 	restore(point: string): Promise<void> {
-		return this.snapshots.restore(this.cwd, point);
+		return this.snapshots.restore(this.cwd, point, this.sessionId);
 	}
 	resolve(path: string): string {
 		return isAbsolute(path) ? path : resolve(this.cwd, path);

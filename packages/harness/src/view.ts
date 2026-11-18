@@ -64,6 +64,7 @@ export function pairToolResults(messages: ModelMessage[], pending = new Set<stri
 		if (m.role !== "assistant") { out.push(m); continue; }
 		const offered = m.stop === "finished" || m.stop === "toolUse";
 		const content = m.content.filter((part) => !isToolCall(part) || (offered && (results.has(part.id) || pending.has(part.id))));
+		if (!content.length && (m.stop === "failed" || m.stop === "aborted")) continue;
 		out.push({ ...m, content });
 		for (const call of content.filter(isToolCall)) {
 			out.push(results.get(call.id) ?? { role: "toolResult", toolCallId: call.id, toolName: call.name, content: [text(WAITING_NOTE)], isError: true });

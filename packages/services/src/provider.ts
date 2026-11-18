@@ -54,7 +54,7 @@ export class HttpProvider implements Provider {
 	}
 	async request(ref: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
 		// "Before a model request" runs here: this plugin is the Provider, as far as the agent knows.
-		const { request: req } = await this.api.runHook<{ request: ModelRequest }>("provider.request", { sessionId: options.sessionId, provider: this.id, model: ref.id, request });
+		const { request: req } = options.requestPrepared ? { request } : await this.api.runHook<{ request: ModelRequest }>("provider.request", { sessionId: options.sessionId, provider: this.id, model: ref, request });
 		let message: AssistantMessage | undefined;
 		try {
 			// Not retried: the gateway may have sent the request on, and a model request may cost money or act.
@@ -64,7 +64,7 @@ export class HttpProvider implements Provider {
 			return { role: "assistant", content: [], stop: "failed", error: { kind: "temporary", message: `The model gateway failed: ${error instanceof Error ? error.message : String(error)}` } };
 		}
 		if (!message) return { role: "assistant", content: [], stop: "failed", error: { kind: "temporary", message: "The model gateway ended without an answer" } };
-		await this.api.runHook("provider.response", { sessionId: options.sessionId, provider: this.id, model: ref.id, message });
+		if (!options.requestPrepared) await this.api.runHook("provider.response", { sessionId: options.sessionId, provider: this.id, model: ref, message });
 		return message;
 	}
 }

@@ -212,10 +212,10 @@ export class AcpInterface implements InterfaceCapability {
 		});
 
 		app.onRequest(methods.agent.session.close, async ({ params }) => {
-			if (!this.sessions.has(params.sessionId)) throw RequestError.invalidParams(undefined, "Session is not open on this connection");
+			if (!this.sessions.has(params.sessionId)) throw bindingError("not_open");
+			await this.checked(() => this.api.closeSession(params.sessionId, this.actorId));
 			this.sessions.get(params.sessionId)?.unfollow?.();
 			this.sessions.delete(params.sessionId);
-			await this.api.closeSession(params.sessionId);
 			return {};
 		});
 
@@ -336,9 +336,13 @@ export class AcpInterface implements InterfaceCapability {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
 			const view = this.requestViews(sessionId);
+			for (const q of view.requests) if (q.kind === "approval") this.exactApprovals.delete(q.id);
 			const gated = await this.gateReply(sessionId, "_modular-agent/requests", view);
-			for (const q of gated.requests) if (q.kind === "approval" && q.answerable && isDeepStrictEqual(q, view.requests.find((r) => r.id === q.id))) this.exactApprovals.add(q.id);
-			return gated;
+			return { requests: gated.requests.map((q) => {
+				const answerable = this.canAnswer(sessionId, q.id) && (q.kind !== "approval" || isDeepStrictEqual(q, view.requests.find((r) => r.id === q.id)));
+				if (q.kind === "approval" && answerable) this.exactApprovals.add(q.id);
+				return { ...q, answerable };
+			}) };
 		});
 		extension("answer", async ({ params }) => {
 			const sessionId = open(params.sessionId);
@@ -706,8 +710,13 @@ export class AcpInterface implements InterfaceCapability {
 		return { requests: this.api.openRequests(sessionId).map((r) => ({
 			id: r.id, kind: r.kind, question: r.question, ...(r.options ? { options: r.options } : {}),
 			...(r.toolCallId ? { toolCallId: r.toolCallId } : {}), ...(r.kind === "approval" ? { call: this.approvalCall(r) } : {}),
-			answerable: this.hasRight(sessionId, this.actorId, r.kind === "approval" ? "approve" : "answer") && (!r.answerers.length || r.answerers.includes(this.actorId)),
 		})) };
+	}
+
+	private canAnswer(sessionId: string, id: string): boolean {
+		const request = this.api.openRequests(sessionId).find((q) => q.id === id);
+		return !!request && this.hasRight(sessionId, this.actorId, request.kind === "approval" ? "approve" : "answer") &&
+			(request.kind !== "approval" || this.present(sessionId)) && (!request.answerers.length || request.answerers.includes(this.actorId));
 	}
 
 	private approvalCall(request: InputRequest) {

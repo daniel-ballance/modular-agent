@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { cp, mkdir, mkdtemp, readdir, realpath, rename, rm } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readdir, realpath, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -37,15 +37,17 @@ export class SavedPoints {
 		return id;
 	}
 
-	async has(cwd: string, id: string): Promise<boolean> {
+	async has(cwd: string, id: string, sessionId?: string): Promise<boolean> {
 		const saved = this.points.get(id);
-		return !!saved && saved.project === await realpath(cwd);
+		if (!saved || saved.sessionId !== sessionId || saved.project !== await realpath(cwd)) return false;
+		try { await access(saved.path); return true; }
+		catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 	}
 
-	async restore(cwd: string, id: string): Promise<void> {
+	async restore(cwd: string, id: string, sessionId?: string): Promise<void> {
 		const saved = this.points.get(id);
 		const project = await realpath(cwd);
-		if (!saved || saved.project !== project) throw Object.assign(new Error("Saved point not found in this environment"), { code: "ENOENT" });
+		if (!saved || saved.sessionId !== sessionId || saved.project !== project) throw Object.assign(new Error("Saved point not found in this environment"), { code: "ENOENT" });
 		const stage = await mkdtemp(join(dirname(project), ".ma-restore-"));
 		const next = join(stage, "next");
 		const old = join(stage, "old");

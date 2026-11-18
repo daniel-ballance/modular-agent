@@ -134,7 +134,7 @@ export interface PluginApi {
 	/** Sessions in this project, another project, or every project (null). */
 	listSessions(project?: string | null): Promise<StoredSession[]>;
 	forkSession(sessionId: string, entryId: string): Promise<string>;
-	closeSession(sessionId: string): Promise<void>;
+	closeSession(sessionId: string, actorId?: string): Promise<void>;
 	session(sessionId: string): { id: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
 	// input and turns
 	input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }>;
@@ -193,7 +193,7 @@ export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer"
 
 interface Tenant { rights: Authority[]; tokens?: number }
 interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens: { budget: number; used: number } | null }
-interface TurnState extends TurnSnapshot { endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; resultFeedback?: string }
+interface TurnState extends TurnSnapshot { endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean }
 
 /**
  * The Harness: hosts plugins, offers the plugin API, keeps sessions.
@@ -354,7 +354,7 @@ export class Harness {
 			presenceChanged: (id) => { const s = this.sessions.get(id); if (s) this.closeUnanswerable(s); },
 			listSessions: async (project) => (await this.use<HistoryStore>("history-store")?.list(project === null ? undefined : { project: project ?? this.project })) ?? [],
 			forkSession: (sessionId, entryId) => this.forkSession(sessionId, entryId),
-			closeSession: (id) => this.closeSession(id),
+			closeSession: (id, actorId) => this.closeSession(id, actorId),
 			session: (id) => {
 				const s = this.session(id);
 				return { id: s.id, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
@@ -778,10 +778,17 @@ export class Harness {
 		this.sessions.delete(id);
 	}
 
-	async closeSession(id: string): Promise<void> {
+	async closeSession(id: string, actorId?: string): Promise<void> {
 		const s = this.sessions.get(id);
 		if (!s) return;
-		s.closing = true;
+		await this.admit(s, async () => {
+			if (s.closing || s.reopening) throw Object.assign(new Error("Session is busy"), { code: "busy" });
+			if (actorId !== undefined && (!s.actors.has(actorId) ||
+				((s.running || this.runningJobs(s).length) && !this.rightsOf(s, actorId).includes("cancel")))) {
+				throw Object.assign(new Error("Actor may not close this session"), { code: "forbidden" });
+			}
+			s.closing = true;
+		});
 		await this.cancel(id);
 		for (const { job } of this.runningJobs(s)) await this.cancelJob(s, job.id);
 		for (const r of s.requests.values()) r.resolve({ requestId: r.request.id, declined: true, actorId: "harness", reason: "session closed" });
@@ -872,7 +879,7 @@ export class Harness {
 			try {
 				if (options.rewind) {
 					const env = await this.environmentFor(s);
-					if (!env?.points || !env.restore || !env.save) throw new Error("This environment cannot rewind");
+					if (!env?.points || !env.restore || !env.save || !env.hasPoint) throw new Error("This environment cannot rewind");
 					const branch = s.branch();
 					const at = branch.findIndex((e) => e.id === entryId);
 					if (at < 0) throw new Error("Rewind needs an entry on the current branch");
@@ -890,7 +897,7 @@ export class Harness {
 					if ([...this.sessions.values()].some((other) => other !== s && other.meta.project === s.meta.project)) throw Object.assign(new Error("Another open session uses the project"), { code: "conflict" });
 					const points = after.filter((e) => e.kind === "turnStart" || (e.kind === "toolStarted" && !e.turnId))
 						.map((e) => (e.data as { point?: string } | undefined)?.point);
-					for (const point of points) if (!point || env.hasPoint && !await env.hasPoint(point)) {
+					for (const point of points) if (!point || !await env.hasPoint(point)) {
 						throw Object.assign(new Error("Saved point not found in this environment"), { code: "conflict" });
 					}
 					if (points.length) {
@@ -1456,15 +1463,19 @@ export class Harness {
 				const attempts = s.order.map((id) => s.entries.get(id)!).filter((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary).length;
 				if (state.settings.maxSteps !== undefined && attempts >= state.settings.maxSteps) throw turnLimit("steps");
 				const model = this.modelAccess(s, state.model);
+				const branch = s.branch();
+				const lastAttempt = branch.findLastIndex((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary);
+				const feedback = branch.slice(lastAttempt + 1).filter((e) => !e.erased && e.turnId === turnId && e.kind === "resultFeedback");
+				const messages = s.modelMessages(branch, turnId);
+				for (const e of feedback) messages.push({ role: "user", content: [text((e.data as { reason: string }).reason)] });
 				const request: ModelRequest = {
-					systemPrompt: state.system, messages: s.modelMessages(s.branch(), turnId), tools: state.tools, providerTools: "none",
+					systemPrompt: state.system, messages, tools: state.tools, providerTools: "none",
 					settings: { reasoning: state.settings.reasoning, maxOutput: state.settings.maxOutput },
 				};
 				const payload = { sessionId: s.id, turnId, stepId, usage, model: model?.model, history: s.branch(), request };
 				const prepared = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
-				if (state.resultFeedback) prepared.messages = [...prepared.messages, { role: "user", content: [text(state.resultFeedback)] }];
-				// Hooks may copy or transform messages, so conservatively name every visible source.
-				state.sources.set(stepId, s.branch().filter((e) => e.modelVisible || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length)).map((e) => e.id));
+				// Hooks may copy or transform messages, so conservatively name their visible sources.
+				state.sources.set(stepId, [...new Set([...branch.filter((e) => (e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length)), ...feedback].map((e) => e.id))]);
 				return prepared;
 			},
 			hook: async (name, payload) => {
@@ -1476,7 +1487,9 @@ export class Harness {
 				if (name === "step.after" && await this.tenantBudgetReached(s)) state.tenantLimit = true;
 				const run = () => withAuthority(() => this.hooks.run(name, { ...payload, sessionId: s.id, turnId }));
 				const result = name === "tool.before" && payload.call ? await this.toolWork.run(payload.call, run) : await run();
-				if (name === "turn.result") state.resultFeedback = result?.refused;
+				if (name === "turn.result" && typeof result?.refused === "string") {
+					await this.commit(s, [{ kind: "resultFeedback", writer: "harness", turnId, modelVisible: true, data: { reason: result.refused } }]);
+				}
 				if (name === "model.failed" && result?.retry) {
 					const provider = this.providerFor(s, state.model);
 					if (provider?.supports.keepsState === true) await provider.discardState?.(s.id);
@@ -1526,24 +1539,42 @@ export class Harness {
 				options.signal.throwIfAborted();
 				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 				const stepId = options.stepId ?? [...state.sources.keys()].at(-1) ?? this.newId();
+
+				const scope = { sessionId: s.id, provider: model.model.provider, model: { provider: model.model.provider, id: model.model.id } };
 				const safeToRepeat = model.supports.safeToRepeat === true || (model.supports.keepsState === false && model.supports.runsTools === false);
-				await this.commit(s, [{
-					kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
-					data: { model: { provider: model.model.provider, id: model.model.id }, safeToRepeat, tools: request.tools.map((t) => t.name), ...(safeToRepeat ? { request } : {}) },
-					sources: state.sources.get(stepId),
-				}]);
-				try {
-					if (await this.tenantBudgetReached(s)) {
-						state.tenantLimit = true;
-						await this.commit(s, [{ kind: "response", writer: "harness", turnId, stepId, modelVisible: false, message: { role: "assistant", stop: "aborted", content: [] }, data: { recovery: true } }]);
-						throw turnLimit("tenantTokens");
-					}
+				const check = async () => {
+					options.signal.throwIfAborted();
+					if (await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 					options.signal.throwIfAborted();
 					this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
-					return await model.request(request, { ...options, onEvent: (event) => {
-						this.emit(s.id, "model.output", event, "harness", { turnId, stepId });
-						options.onEvent?.(event);
-					} });
+				};
+				const prepareDispatch = async () => {
+					await check();
+					const input = { ...scope, request };
+					const prepared = options.exactReplay ? input : (await this.hooks.transform("provider.request", input)).value;
+					if (!prepared || !isDeepStrictEqual(prepared.model, scope.model) || prepared.provider !== scope.provider || prepared.sessionId !== scope.sessionId ||
+						!Array.isArray(prepared.request?.tools) || prepared.request.tools.some((tool) => !request.tools.some((offered) => isDeepStrictEqual(offered, tool))) ||
+						!isDeepStrictEqual(prepared.request.providerTools, request.providerTools)) throw new Error("Invalid provider.request transform");
+					await check();
+					await this.commit(s, [{
+						kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
+						data: { model: scope.model, safeToRepeat, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat ? { request: prepared.request } : {}) },
+						sources: state.sources.get(stepId),
+					}]);
+					await check();
+					options.onEffectiveRequest?.(prepared.request);
+					return prepared.request;
+				};
+				const onEvent = (event: import("./types.js").ModelStreamEvent) => {
+					this.emit(s.id, "model.output", event, "harness", { turnId, stepId });
+					options.onEvent?.(event);
+				};
+				try {
+					if (model.prepareOnWire) return await model.request(request, { ...options, prepareDispatch, onEvent });
+					const finalRequest = await prepareDispatch();
+					const message = await model.request(finalRequest, { ...options, requestPrepared: true, onEvent });
+					await this.hooks.observe("provider.response", { ...scope, message });
+					return message;
 				} finally { this.emit(s.id, "model.streamEnd", {}, "harness", { turnId, stepId }); }
 			});
 		} };
@@ -1562,6 +1593,7 @@ export class Harness {
 		return {
 			model: info,
 			supports: provider.supports,
+			prepareOnWire: provider.prepareOnWire,
 			request: (request, options) => provider.request(ref, request, { ...options, sessionId: s.id }),
 		};
 	}
@@ -2188,7 +2220,7 @@ export function parseModel(value: unknown): { provider: string; id: string } | u
 	return undefined;
 }
 
-const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting inputAccepted inputHandedBack input turnStart modelRequest response toolStarted toolPending toolResult inputRequest secretAnswerAccepted inputAnswer turnEnd summary position erasure jobStarted jobCleanupUnconfirmed jobEnded plugins".split(" "));
+const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting inputAccepted inputHandedBack input turnStart modelRequest response toolStarted toolPending toolResult inputRequest secretAnswerAccepted inputAnswer resultFeedback turnEnd summary position erasure jobStarted jobCleanupUnconfirmed jobEnded plugins".split(" "));
 
 function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () => string): HistoryEntry[] {
 	const kept = branch.filter((e) => !e.erased && e.kind !== "position");

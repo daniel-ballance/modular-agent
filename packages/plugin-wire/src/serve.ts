@@ -156,7 +156,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			name: options.name,
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
-			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [{ darwin: "macos", win32: "windows" }[process.platform as "darwin" | "win32"] ?? process.platform], ...(environment.points ? { points: true } : {}) } } : {}),
+			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [{ darwin: "macos", win32: "windows" }[process.platform as "darwin" | "win32"] ?? process.platform], ...(environment.points && environment.save && environment.hasPoint && environment.restore ? { points: true } : {}) } } : {}),
 			...(runtime ? { runtime: { id: runtime.id, supports: Object.fromEntries(Object.entries(runtime.supports).filter(([key]) => key !== "rewinding")) } } : {}),
 			...(handlers.size ? { hooks: [...handlers].map(([handlerId, h]) => ({ hook: h.hook, handlerId, order: h.order })) } : {}),
 			...(commands.size ? { commands: [...commands].map(([name, c]) => ({ name, description: c.description })) } : {}),
@@ -174,11 +174,21 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	peer.handle("provider/discard", async (p) => (await provider(p.provider).discardState?.(String(p.sessionId), p.erase === true ? { erase: true, entryIds: p.entryIds } : undefined)) ?? {});
 	peer.handle("provider/request", async (p, ctx) => {
 		const impl = provider(p.provider);
-		return currentParent.run(ctx.id, async () => toWire(await impl.request(p.model, fromWire(p.request), {
+		if (p.model?.provider !== impl.id || !impl.models().some((m) => m.id === p.model.id) ||
+			(impl.supports.keepsState && !p.sessionId)) throw new WireError("invalid_request", "Invalid model or session");
+		const scope = { provider: impl.id, model: p.model, sessionId: p.sessionId ?? null };
+		const prepared = await peer.request<{ request: unknown }>("host/hook", {
+			parentRequestId: ctx.id, hook: "provider.request", payload: { ...scope, request: p.request },
+		}, ctx.signal);
+		ctx.signal.throwIfAborted();
+		const message = toWire(await currentParent.run(ctx.id, () => impl.request(p.model, fromWire(prepared.request) as ModelRequest, {
 			signal: ctx.signal,
 			sessionId: p.sessionId,
+			requestPrepared: true,
 			onEvent: (event) => peer.notify("provider/event", { parentRequestId: ctx.id, event }),
 		})));
+		await peer.request("host/hook", { parentRequestId: ctx.id, hook: "provider.response", payload: { ...scope, message } });
+		return message;
 	});
 
 	const source = (id: string) => {
@@ -224,6 +234,12 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		const e = await envAt(p);
 		if (!e.points || !e.save) throw new WireError("not_supported", "This environment does not save points");
 		return { point: await e.save() };
+	});
+	peer.handle("env/checkPoint", async (p) => {
+		if (typeof p?.cwd !== "string" || !p.cwd || typeof p.point !== "string" || !p.point) throw new WireError("invalid_request", "Invalid point scope");
+		const e = await envAt(p);
+		if (!e.points || !e.hasPoint) throw new WireError("not_supported", "This environment does not check points");
+		return { exists: await e.hasPoint(p.point) };
 	});
 	peer.handle("env/restore", async (p) => {
 		const e = await envAt(p);
