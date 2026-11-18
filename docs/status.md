@@ -1,6 +1,6 @@
 # Status: the description against the code
 
-## Production edition — TypeScript, round seven
+## Production edition: TypeScript, round seven
 
 **Checked against:** production specification `388cd90`, implementer's guide `1569f84`, conformance kits `1ad258f`, on Linux with Node.js 26.13.1. This records fixture results, not a full production conformance claim or an independent cross-build swap.
 
@@ -17,7 +17,7 @@ The portable runs declare `queuedInputAfterRestart: handedBack`; the kit skips t
 
 **Outstanding production work.** In particular, the matrix does not establish full project and tenant isolation or configured ACP representation, secret staging and recovery, durable coordination for pending cross-session erasure, comprehensive portable-record validation, or all dispatch, metering and cancellation rules under failure. Full production readiness is not claimed. The round-seven handoff records the specific gaps in `/tmp/ma-tools/r7/ts-gaps.md`.
 
-## Historical evidence — before the production edition
+## Historical evidence before the production edition
 
 The rest of this page records pre-edition observations, including the previous independent-build matrix. Those results do not establish interoperability against the production revision.
 
