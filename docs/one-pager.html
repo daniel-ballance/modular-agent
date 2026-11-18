@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modular Agent: one page</title>
+<style>
+  :root {
+    --fg: var(--foreground, #1a1a1a);
+    --mute: var(--muted-foreground, #666);
+    --line: var(--border, #ddd);
+    --box: var(--card, #f7f7f7);
+    --hi: var(--primary, #3b5bdb);
+    --ok: var(--success, #2f9e44);
+    --warn: var(--warning, #e8590c);
+    --r: var(--radius, 8px);
+  }
+  .page { max-width: 1000px; margin: 0 auto; color: var(--fg); font-family: var(--font-sans, system-ui, sans-serif); line-height: 1.45; font-size: 14px; }
+  h1 { font-size: 26px; margin: 4px 0 2px; letter-spacing: -0.01em; }
+  .lede { color: var(--mute); font-size: 15px; margin: 0 0 18px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--hi); margin: 22px 0 8px; }
+  p { margin: 0 0 8px; }
+  ul { margin: 0; padding-left: 18px; }
+  li { margin: 3px 0; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+  .card { background: var(--box); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; }
+  .card h3 { margin: 0 0 6px; font-size: 14px; }
+  .muted { color: var(--mute); }
+  code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12.5px; }
+
+  /* the architecture diagram */
+  .arch { display: grid; gap: 8px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: 12.5px; background: var(--box); }
+  .harness { border: 2px solid var(--hi); border-radius: var(--r); padding: 10px; text-align: center; }
+  .harness b { color: var(--hi); }
+  .cap { flex: 1 1 96px; text-align: center; border: 1px dashed var(--line); border-radius: var(--r); padding: 8px 6px; font-size: 12.5px; }
+  .cap b { display: block; font-size: 13px; }
+  .arrow { text-align: center; color: var(--mute); font-size: 12px; }
+
+  /* the method */
+  .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; counter-reset: s; }
+  .step { border: 1px solid var(--line); border-radius: var(--r); padding: 10px 10px; font-size: 13px; position: relative; }
+  .step::before { counter-increment: s; content: counter(s); position: absolute; top: 8px; right: 10px; color: var(--hi); font-weight: 700; }
+  .step b { display: block; margin-bottom: 2px; padding-right: 14px; }
+
+  /* the evidence */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .stat { border: 1px solid var(--line); border-radius: var(--r); padding: 10px 12px; }
+  .stat .n { font-size: 24px; font-weight: 700; color: var(--ok); line-height: 1.1; }
+  .stat .l { font-size: 12px; color: var(--mute); }
+  .langs { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 0; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--mute); font-size: 12px; }
+  .quote { border-left: 3px solid var(--hi); padding: 6px 12px; margin: 10px 0 0; }
+  .warnbox { border-left: 3px solid var(--warn); }
+  footer { color: var(--mute); font-size: 12px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>Modular Agent</h1>
+<p class="lede">An AI agent made of a small Harness and swappable plugins, written down as contracts, and proven by five independent builds in five languages that run each other's parts.</p>
+
+<h2>Why</h2>
+<div class="grid2">
+  <div class="card">
+    <h3>The problem</h3>
+    <ul>
+      <li>Most agents are one program. The loop, model access, tools, history and safety checks are tangled together, so you can't study or replace one part without the rest.</li>
+      <li>Making an agent survive a crash, run its tools somewhere else, or be driven by another system usually means rewriting it.</li>
+      <li>Extensions written for one agent only work in that agent, in its language.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>The question</h3>
+    <p>Can an agent be described precisely enough, as <em>what</em> each part does rather than <em>how</em>, that independent teams in different languages build parts which plug into each other and keep their promises, even through a crash?</p>
+    <p class="muted">It is a research project: understanding how an agent fits together. Production performance is not a goal.</p>
+  </div>
+</div>
+
+<h2>What</h2>
+<div class="card arch">
+  <div class="row">
+    <span class="pill">users</span><span class="pill">editors</span><span class="pill">hosts such as T3 Code</span><span class="pill">other agents</span><span class="pill">schedules</span>
+  </div>
+  <div class="arrow">Interface plugins (ACP, terminal, HTTP)</div>
+  <div class="harness"><b>Harness</b>: hosts plugins, keeps sessions, enforces authority. It runs no turns, calls no model and runs no tool itself.</div>
+  <div class="row">
+    <div class="cap"><b>Runtime</b>the agent loop, transient or durable</div>
+    <div class="cap"><b>Providers</b>model access, never seen by the Runtime</div>
+    <div class="cap"><b>Tool sources</b>local, MCP, any language</div>
+    <div class="cap"><b>Working environment</b>where commands and files live</div>
+    <div class="cap"><b>History store</b>a tree of entries, local or a service</div>
+  </div>
+  <div class="arrow">every capability above is a plugin, and so is every feature:</div>
+  <div class="row">
+    <span class="pill">approval</span><span class="pill">guardrails / output gate</span><span class="pill">context management</span><span class="pill">subagents and jobs</span><span class="pill">questions and secrets</span><span class="pill">commands</span>
+  </div>
+</div>
+<p class="muted" style="margin-top:8px">Plugins meet at named hook points with fixed rules for combining answers (gate, transform, collect, observe). Whoever owns an operation owns its hook points.</p>
+
+<h2>How</h2>
+<div class="steps">
+  <div class="step"><b>Describe</b>Parts, contracts and guarantees: what passes between parts, never the wiring (ADR 0010).</div>
+  <div class="step"><b>Build clean-room</b>Independent builders get only the documents, and log every gap they had to decide.</div>
+  <div class="step"><b>Bind the wire</b>Small versioned bindings: ACP for hosts, plugins in any language, shared data, history over HTTP.</div>
+  <div class="step"><b>Check</b>A conformance kit per binding: plugin kit (110 checks), ACP kit (109), portable sessions (86).</div>
+  <div class="step"><b>Swap</b>Every build's agent with every build's parts, through a real <code>kill -9</code>. Each failure becomes a rule and a kit check.</div>
+</div>
+
+<h2>Evidence</h2>
+<div class="stats">
+  <div class="stat"><div class="n">5</div><div class="l">independent builds, four made clean-room from the docs alone</div></div>
+  <div class="stat"><div class="n">25/25</div><div class="l">hosts running every build's model, hooks, tools and environment</div></div>
+  <div class="stat"><div class="n">50/50</div><div class="l">hosts running every build's Runtime through <code>kill -9</code>, durable and transient</div></div>
+  <div class="stat"><div class="n">50/50</div><div class="l">sessions written by one language, reopened and recovered by another, jobs included</div></div>
+</div>
+<div class="langs"><span class="pill">TypeScript</span><span class="pill">Rust</span><span class="pill">Python</span><span class="pill">Go</span><span class="pill">Elixir (fifth build, near-perfect first time)</span></div>
+<p style="margin-top:8px">In every crash cell, the interrupted command got exactly one result, "outcome unknown", and never ran twice. Real-model runs on <code>gpt-6-luna</code> and Claude Haiku showed a turn started in one language finished in another, and a job started by one agent taken up by another after a crash.</p>
+
+<h2>Value and differentiation</h2>
+<table>
+  <tr><th style="width:30%">Property</th><th>What it means here</th><th style="width:30%">Usual alternative</th></tr>
+  <tr><td><b>Even the loop is a plugin</b></td><td>Swap a transient Runtime for a durable one, or for one in another language, with no other plugin changed.</td><td>The loop is the framework.</td></tr>
+  <tr><td><b>Plugins in any language</b></td><td>One wire binding of the contracts. A Rust host runs a Python Runtime with Go tools in an Elixir environment.</td><td>Port one plugin API to each language and keep the ports in step.</td></tr>
+  <tr><td><b>Crash safety as a contract</b></td><td>"Safe to repeat" is a promise from the tool and the environment. Starts are recorded before work runs; nothing finished runs twice.</td><td>Best-effort retries, or a durable engine baked in.</td></tr>
+  <tr><td><b>Portable sessions</b></td><td>History in shared shapes, so any build reopens, continues and recovers another's session.</td><td>Sessions locked to one implementation.</td></tr>
+  <tr><td><b>Host-drivable</b></td><td>Speaks ACP with a declared feature set, so a host like T3 Code drives it as it drives other agents.</td><td>A bespoke API per agent.</td></tr>
+  <tr><td><b>Safety in the Harness</b></td><td>Authority only narrows; approvals fail closed; secrets go straight to the credential store; every output passes a gate; erasure follows copies.</td><td>Left to each feature.</td></tr>
+</table>
+
+<h2>What we learned</h2>
+<div class="grid2">
+  <div class="card quote">Each build passed every kit on its own, yet every round of swaps found holes the kits missed: 24 across rounds two to five. Nearly all were the same kind: a receiver relying on a value the binding never defined, such as a timeout of 0, an event name, the names of rights, or a folder replaced on restore.</div>
+  <div class="card quote">The descriptions of the parts held throughout. What kept needing work was the exact values one side relies on from the other. So the recipe is: describe the parts, bind each wire narrowly, write a kit per binding, and run every pairing.</div>
+</div>
+
+<h2>Status</h2>
+<div class="card warnbox">
+  <p><b>Done:</b> 19 decision records; five builds passing every kit and every 5×5 swap matrix; ACP <code>/2</code>, several actors, jobs, rewinding and remote output gates.</p>
+  <p style="margin:0"><b>In progress (round six):</b> listing proposed input, a shared shape for output events, tenant and administrator limits on authority, and one plugin per name.</p>
+</div>
+
+<footer>Repository: <code>~/Code/modular-agent</code>. Start with <code>docs/architecture.md</code>, <code>docs/contracts.md</code> and <code>docs/bindings/</code>; the decisions are in <code>docs/adr/</code>.</footer>
+</div>
+</body>
+</html>
