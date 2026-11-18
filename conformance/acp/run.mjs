@@ -19,12 +19,15 @@ const pluginChecks = argv.includes("--plugin-checks");
 const crashChecks = argv.includes("--crash-checks");
 // With --probe-checks, also load the probe plugin (../plugin/probe.mjs), which checks the host side of the plugin binding.
 const probeChecks = argv.includes("--probe-checks");
+// With --job-checks, also load the jobs plugin (../plugin/jobs.mjs): jobs recorded in the standard kinds, reported,
+// cancelled, and taken up after a kill -9 by whichever agent reopens the session (with --then, the second).
+const jobChecks = argv.includes("--job-checks");
 // With --portable-checks, also check every entry the agents kept in the history service is in the shared shapes
 // (docs/bindings/data.md#portable-sessions). It needs MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE.
 const portableChecks = argv.includes("--portable-checks");
 const dash = argv.indexOf("--");
 if (dash < 0 || dash === argv.length - 1) {
-	console.error("Usage: node run.mjs [--verbose] [--plugin-checks] [--crash-checks] [--probe-checks] [--portable-checks] -- <agent command> [args...] [--then <second agent command> [args...]]");
+	console.error("Usage: node run.mjs [--verbose] [--plugin-checks] [--crash-checks] [--probe-checks] [--job-checks] [--portable-checks] -- <agent command> [args...] [--then <second agent command> [args...]]");
 	process.exit(2);
 }
 // With --then, every reopening in a new process uses the second agent: one agent writes a session and another,
@@ -55,11 +58,17 @@ const dataDir2 = second === command ? dataDir : mkdtempSync(join(tmpdir(), "ma-c
 const probeDir = mkdtempSync(join(tmpdir(), "ma-conf-probe-"));
 const probeOut = (role) => join(probeDir, `${role}.json`);
 const pluginEnv = {};
-if (probeChecks) {
-	const probe = new URL("../plugin/probe.mjs", import.meta.url).pathname;
-	const given = process.env.MODULAR_AGENT_PLUGINS ? JSON.parse(process.env.MODULAR_AGENT_PLUGINS) : [];
-	const roles = ["probe", "refuse-hook", "refuse-replace"];
-	pluginEnv.MODULAR_AGENT_PLUGINS = JSON.stringify([...given, ...roles.map((role) => ({ command: [process.execPath, probe], config: { role, out: probeOut(role) } }))]);
+{
+	const extra = [];
+	if (probeChecks) {
+		const probe = new URL("../plugin/probe.mjs", import.meta.url).pathname;
+		for (const role of ["probe", "refuse-hook", "refuse-replace"]) extra.push({ command: [process.execPath, probe], config: { role, out: probeOut(role) } });
+	}
+	if (jobChecks) extra.push({ command: [process.execPath, new URL("../plugin/jobs.mjs", import.meta.url).pathname], config: { out: probeOut("jobs") } });
+	if (extra.length) {
+		const given = process.env.MODULAR_AGENT_PLUGINS ? JSON.parse(process.env.MODULAR_AGENT_PLUGINS) : [];
+		pluginEnv.MODULAR_AGENT_PLUGINS = JSON.stringify([...given, ...extra]);
+	}
 }
 const sessionsUsed = [];
 const project = mkdtempSync(join(tmpdir(), "ma-conf-project-"));
@@ -128,7 +137,20 @@ async function history(agent, sessionId, params = {}) {
 	return agent.ctx.request(`_${NS}/history`, { sessionId, ...params });
 }
 
+/** Wait until fn(entries) is true, reading the full history; returns the entries. */
+async function waitFor(a, sid, fn, ms = 15000) {
+	let entries = [];
+	for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(150)) {
+		entries = (await history(a, sid, { all: true })).entries;
+		if (fn(entries)) break;
+	}
+	return entries;
+}
+const said = (entries, text) => entries.some((e) => e.kind === "response" && JSON.stringify(e.message ?? {}).includes(text));
+
 let sessionId;
+let decl = {};
+let extensions = [];
 let agent = connect();
 
 await attempt("initialize", async () => {
@@ -137,6 +159,8 @@ await attempt("initialize", async () => {
 	const m = meta(init);
 	check("initialize: _meta binding is modular-agent-acp/1", m?.binding === "modular-agent-acp/1", JSON.stringify(m?.binding));
 	const d = m?.declaration ?? {};
+	decl = d;
+	extensions = m?.extensions ?? [];
 	const missingBool = BOOLEAN_KEYS.filter((k) => typeof d[k] !== "boolean");
 	check("declaration: every boolean key", missingBool.length === 0, `missing or not boolean: ${missingBool.join(", ")}`);
 	const badEnum = Object.entries(ENUM_KEYS).filter(([k, values]) => !values.includes(d[k])).map(([k]) => `${k}=${JSON.stringify(d[k])}`);
@@ -169,7 +193,7 @@ await attempt("prompt", async () => {
 	const r = await within(15000, prompt(agent, sessionId, "hello", "key-1"), "prompt hello");
 	check("prompt: end_turn", r.stopReason === "end_turn", r.stopReason);
 	await sleep(100);
-	check("prompt: streams the echo", textOf(agent.updates, sessionId).includes("echo: hello"), JSON.stringify(textOf(agent.updates, sessionId)).slice(0, 120));
+	check("prompt: streams the echo", textOf(agent.updates, sessionId).includes("echo: hello"), String(JSON.stringify(textOf(agent.updates, sessionId))).slice(0, 120));
 	firstInputId = meta(r)?.inputId;
 	check("prompt: _meta inputId", typeof firstInputId === "string", JSON.stringify(meta(r)));
 	check("prompt: _meta outcome completed", meta(r)?.outcome?.kind === "completed", JSON.stringify(meta(r)?.outcome));
@@ -233,7 +257,99 @@ if (pluginChecks) {
 		check("plugin: the turn still ends", r.stopReason === "end_turn", r.stopReason);
 		const { entries } = await history(agent, sessionId);
 		const refused = entries.filter((e) => e.kind === "toolResult").at(-1);
-		check("plugin: the refusal reason reached the record", JSON.stringify(refused ?? {}).includes("refused by the conformance plugin"), JSON.stringify(refused?.message ?? refused).slice(0, 160));
+		check("plugin: the refusal reason reached the record", JSON.stringify(refused ?? {}).includes("refused by the conformance plugin"), String(JSON.stringify(refused?.message ?? refused)).slice(0, 160));
+		// The conformance plugin's output gate, a stream at a time (docs/bindings/plugin.md, the output hook).
+		const before = agent.updates.length;
+		const g = await within(15000, prompt(agent, sessionId, "conformance-secret"), "secret prompt");
+		const streamed = agent.updates.slice(before).filter((u) => u.sessionId === sessionId && u.update.sessionUpdate === "agent_message_chunk").map((u) => u.update.content?.text ?? "").join("");
+		check("plugin: the output gate redacted the streamed reply", g.stopReason === "end_turn" && streamed.includes("[redacted]") && !streamed.includes("conformance-secret"), String(JSON.stringify(streamed)).slice(0, 160));
+		const after = (await history(agent, sessionId)).entries.filter((e) => e.kind === "response").at(-1);
+		check("plugin: the history extension passes the gate too", JSON.stringify(after ?? {}).includes("[redacted]") && !JSON.stringify(after ?? {}).includes("conformance-secret"), String(JSON.stringify(after?.message ?? after)).slice(0, 160));
+	});
+}
+
+await attempt("failed turn", async () => {
+	const r = await within(15000, prompt(agent, sessionId, "fail:the kit asked for it"), "failing prompt");
+	check("failed turn: /1 reports refusal", r.stopReason === "refusal", r.stopReason);
+	check("failed turn: /1 _meta outcome failed, with the reason", meta(r)?.outcome?.kind === "failed" && String(meta(r)?.outcome?.error ?? "").includes("the kit asked for it"), JSON.stringify(meta(r)?.outcome));
+	const two = connect();
+	try {
+		const init = await within(15000, two.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {}, _meta: { [NS]: { binding: "modular-agent-acp/2" } } }), "initialize /2");
+		check("/2: the agent speaks modular-agent-acp/2 when asked", meta(init)?.binding === "modular-agent-acp/2", JSON.stringify(meta(init)?.binding));
+		const s2 = await two.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+		await setOption(two, s2.sessionId, "model", "conformance/echo");
+		let err;
+		try {
+			await within(15000, prompt(two, s2.sessionId, "fail:the kit asked again"), "failing prompt /2");
+		} catch (e) {
+			err = e;
+		}
+		check("/2: a failed turn is a JSON-RPC error -32000", err?.code === -32000, String(JSON.stringify(err)).slice(0, 200));
+		check("/2: its data carries _meta with outcome failed", err?.data?._meta?.[NS]?.outcome?.kind === "failed", String(JSON.stringify(err?.data)).slice(0, 200));
+		const ok = await within(15000, prompt(two, s2.sessionId, "hello again"), "prompt /2");
+		check("/2: a completed turn is end_turn, as in /1", ok.stopReason === "end_turn", ok.stopReason);
+		await two.ctx.request(methods.agent.session.close, { sessionId: s2.sessionId });
+	} finally {
+		await stop(two);
+	}
+});
+
+if (decl.severalActors) {
+	await attempt("several actors", async () => {
+		const ask = (name, params) => agent.ctx.request(`_${NS}/${name}`, { sessionId, ...params });
+		const refused = async (p) => {
+			try {
+				await p;
+				return false;
+			} catch (e) {
+				return e?.code === -32602;
+			}
+		};
+		check("actors: the several-actors extensions are listed", ["actors", "join", "leave", "release"].every((x) => extensions.includes(x)), JSON.stringify(extensions));
+		const a0 = await ask("actors", {});
+		check("actors: lists the connection's actor", (a0.actors ?? []).some((a) => a.kind === "host"), String(JSON.stringify(a0)).slice(0, 200));
+		check("join: a right the granter lacks is refused", await refused(ask("join", { actor: { id: "kit-greedy", kind: "user", rights: ["watch", "kit-unknown-right"] } })));
+		await ask("join", { actor: { id: "kit-viewer", kind: "user", rights: ["watch"] } });
+		await ask("join", { actor: { id: "kit-guest", kind: "user", rights: ["watch", "propose"] } });
+		const a1 = await ask("actors", {});
+		check("join: both actors are listed with their rights", (a1.actors ?? []).some((a) => a.id === "kit-viewer" && a.rights?.length === 1) && (a1.actors ?? []).some((a) => a.id === "kit-guest"), String(JSON.stringify(a1.actors)).slice(0, 300));
+		check("input: an actor without input is refused", await refused(ask("input", { actorId: "kit-viewer", content: "viewer input", when: "now" })));
+		const turns = (await history(agent, sessionId)).entries.filter((e) => e.kind === "turnEnd").length;
+		const prop = await ask("input", { actorId: "kit-guest", content: "proposed by the guest", when: "propose" });
+		check("propose: proposed input waits", prop.taken === "proposed" && typeof prop.inputId === "string", JSON.stringify(prop));
+		await sleep(500);
+		check("propose: nothing runs before a release", (await history(agent, sessionId)).entries.filter((e) => e.kind === "turnEnd").length === turns);
+		const rel = await ask("release", { inputId: prop.inputId, when: "now" });
+		check("release: the input is taken", ["now", "inTurn", "after"].includes(rel.taken), JSON.stringify(rel));
+		let ran = false;
+		for (let i = 0; i < 100 && !ran; i++) {
+			await sleep(100);
+			ran = (await history(agent, sessionId)).entries.some((e) => e.kind === "response" && JSON.stringify(e.message ?? {}).includes("echo: proposed by the guest"));
+		}
+		check("release: the released input ran as a turn", ran);
+		await ask("join", { actor: { id: "kit-guest", kind: "user", rights: ["watch"] } });
+		check("join again: taking a right away holds", await refused(ask("input", { actorId: "kit-guest", content: "no longer allowed", when: "propose" })));
+		await ask("leave", { actorId: "kit-viewer" });
+		const a2 = await ask("actors", {});
+		check("leave: the actor is gone", !(a2.actors ?? []).some((a) => a.id === "kit-viewer"), String(JSON.stringify(a2.actors)).slice(0, 200));
+		const kinds = (await history(agent, sessionId)).entries.map((e) => e.kind);
+		check("actors: recorded as actorJoined and actorLeft", kinds.includes("actorJoined") && kinds.includes("actorLeft"), [...new Set(kinds)].join(","));
+	});
+}
+
+if (decl.rewinding) {
+	await attempt("rewinding", async () => {
+		const file = join(project, "rewind.txt");
+		await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo one > rewind.txt"}'), "rewind one");
+		const mark = (await history(agent, sessionId)).entries.at(-1)?.id;
+		await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo two > rewind.txt"}'), "rewind two");
+		check("rewinding: the second turn changed the file", readFileSync(file, "utf8").trim() === "two");
+		await agent.ctx.request(`_${NS}/move`, { sessionId, entryId: mark, rewind: true });
+		check("rewinding: move with rewind restores the file", existsSync(file) && readFileSync(file, "utf8").trim() === "one", existsSync(file) ? readFileSync(file, "utf8") : "missing");
+		const branch = (await history(agent, sessionId)).entries;
+		check("rewinding: the branch ends at the entry moved to", branch.at(-1)?.id === mark, `${branch.at(-1)?.kind}`);
+		const r = await within(15000, prompt(agent, sessionId, "after the rewind"), "prompt after rewind");
+		check("rewinding: the session carries on", r.stopReason === "end_turn", r.stopReason);
 	});
 }
 
@@ -270,7 +386,7 @@ await attempt("input extension", async () => {
 
 await attempt("requests and answer", async () => {
 	const r = await agent.ctx.request(`_${NS}/requests`, { sessionId });
-	check("requests: an array", Array.isArray(r.requests), JSON.stringify(r).slice(0, 100));
+	check("requests: an array", Array.isArray(r.requests), String(JSON.stringify(r)).slice(0, 100));
 	const a = await agent.ctx.request(`_${NS}/answer`, { sessionId, requestId: "no-such-request", value: "x" });
 	check("answer: an unknown request is not accepted", a.accepted === false, JSON.stringify(a));
 });
@@ -301,18 +417,51 @@ if (probeChecks) {
 	});
 }
 
+if (jobChecks) {
+	await attempt("jobs", async () => {
+		const r = await within(15000, prompt(agent, sessionId, 'tool:background {"text":"kit-job","ms":300}'), "background prompt");
+		check("jobs: the turn that started the job ends", r.stopReason === "end_turn", r.stopReason);
+		const entries = await waitFor(agent, sessionId, (es) => said(es, "echo: background: kit-job"));
+		const started = entries.find((e) => e.kind === "jobStarted" && e.data?.kind === "background");
+		const jobId = started?.jobId;
+		check("jobs: jobStarted, by the plugin's name", !!jobId && started.writer === "conformance-jobs" && started.data?.detail?.text === "kit-job", String(JSON.stringify(started)).slice(0, 200));
+		const ended = entries.filter((e) => e.kind === "jobEnded" && e.jobId === jobId);
+		check("jobs: one jobEnded, completed and reported", ended.length === 1 && ended[0].data?.outcome?.kind === "completed" && ended[0].data?.report === true, String(JSON.stringify(ended)).slice(0, 200));
+		const report = entries.find((e) => e.kind === "input" && e.data?.key === `job:${jobId}`);
+		check("jobs: the report is input keyed job:<jobId>, after jobEnded", !!report && entries.indexOf(report) > entries.indexOf(ended[0]), JSON.stringify(report?.data));
+		check("jobs: the report started a turn, startedBy the job", entries.some((e) => e.kind === "turnStart" && e.data?.startedBy?.kind === "job" && e.data?.startedBy?.id === jobId));
+		check("jobs: the report reached the model", said(entries, "echo: background: kit-job"));
+		if (extensions.includes("cancel-job")) {
+			await within(15000, prompt(agent, sessionId, 'tool:background {"text":"kit-cancel","ms":600000}'), "long background prompt");
+			const es = await waitFor(agent, sessionId, (x) => x.some((e) => e.kind === "jobStarted" && e.data?.detail?.text === "kit-cancel"));
+			const id = es.find((e) => e.kind === "jobStarted" && e.data?.detail?.text === "kit-cancel")?.jobId;
+			await agent.ctx.request(`_${NS}/cancel-job`, { sessionId, jobId: id });
+			const after = await waitFor(agent, sessionId, (x) => x.some((e) => e.kind === "jobEnded" && e.jobId === id), 8000);
+			const end = after.filter((e) => e.kind === "jobEnded" && e.jobId === id);
+			check("jobs: cancel-job ends the job once, as cancelled, without a report", end.length === 1 && end[0].data?.outcome?.kind === "cancelled" && !after.some((e) => e.kind === "input" && e.data?.key === `job:${id}`), String(JSON.stringify(end)).slice(0, 200));
+		}
+	});
+}
+
 await attempt("load in a new process", async () => {
+	await setOption(agent, sessionId, "approval", "never");
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
 	await stop(agent);
 	agent = connect(second);
 	await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
-	await within(15000, agent.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "session/load");
+	const loaded = await within(45000, agent.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "session/load");
 	const replayed = agent.updates.filter((u) => u.sessionId === sessionId);
 	check("load: replays the session before answering", replayed.length > 0 && JSON.stringify(replayed).includes("echo: hello"), `${replayed.length} updates`);
 	const { entries } = await history(agent, sessionId);
 	check("load: history survives a restart", entries.some((e) => e.kind === "turnEnd"));
 	const r = await within(15000, prompt(agent, sessionId, "hello", "key-1"), "resent prompt after restart");
 	check("load: a key survives a restart", meta(r)?.duplicate === true, JSON.stringify(meta(r)));
+	const approval = (loaded.configOptions ?? []).find((o) => o.id === "approval");
+	check("load: the approval setting survives", approval?.currentValue === "never", JSON.stringify(approval?.currentValue));
+	const n = agent.permissions.length;
+	const nv = await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo yes > never.txt"}'), "prompt under never");
+	check("load: under never, the call is refused without asking", nv.stopReason === "end_turn" && agent.permissions.length === n && !existsSync(join(project, "never.txt")));
+	await setOption(agent, sessionId, "approval", "off");
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
 });
 
@@ -363,6 +512,34 @@ if (crashChecks) {
 
 await stop(agent);
 
+if (jobChecks && crashChecks) {
+	await attempt("jobs after a crash", async () => {
+		await stop(agent);
+		agent = connect(command);
+		await within(15000, agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize");
+		const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+		const sid = s.sessionId;
+		sessionsUsed.push(sid);
+		await setOption(agent, sid, "model", "conformance/echo");
+		await setOption(agent, sid, "approval", "off");
+		await within(15000, prompt(agent, sid, 'tool:background {"text":"kit-survivor","ms":600000}'), "long background prompt");
+		const before = await waitFor(agent, sid, (x) => x.some((e) => e.kind === "jobStarted"));
+		const jobId = before.find((e) => e.kind === "jobStarted")?.jobId;
+		check("jobs after a crash: the job started", !!jobId);
+		agent.child.kill("SIGKILL");
+		await sleep(500);
+		agent = connect(second);
+		await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+		await within(45000, agent.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "session/load after the crash");
+		const entries = await waitFor(agent, sid, (x) => said(x, "echo: background: kit-survivor (taken up)"), 20000);
+		const ended = entries.filter((e) => e.kind === "jobEnded" && e.jobId === jobId);
+		check("jobs after a crash: the reopening agent's plugin took the job up, and it ended once", ended.length === 1 && ended[0].data?.outcome?.kind === "completed", String(JSON.stringify(ended)).slice(0, 200));
+		check("jobs after a crash: its report ran as a turn", said(entries, "echo: background: kit-survivor (taken up)"));
+		await agent.ctx.request(methods.agent.session.close, { sessionId: sid });
+		await stop(agent);
+	});
+}
+
 if (portableChecks) {
 	await attempt("portable", async () => {
 		const url = process.env.MODULAR_AGENT_HISTORY_URL;
@@ -390,7 +567,7 @@ if (portableChecks) {
 function portableProblems(sid, entries) {
 	const out = [];
 	const say = (e, what) => out.push(`${e.kind ?? "?"} ${String(e.id).slice(0, 8)}: ${what}`);
-	const STANDARD = ["input", "turnStart", "response", "toolStarted", "toolResult", "inputRequest", "inputAnswer", "turnEnd", "summary", "setting", "actorJoined", "actorLeft", "position", "erasure"];
+	const STANDARD = ["inputAccepted", "inputHandedBack", "input", "turnStart", "modelRequest", "response", "toolStarted", "toolResult", "inputRequest", "inputAnswer", "turnEnd", "summary", "setting", "actorJoined", "actorLeft", "position", "erasure", "jobStarted", "jobEnded", "plugins"];
 	const seen = new Set();
 	for (const e of entries) {
 		if (e.erased) continue;
@@ -427,13 +604,31 @@ function portableProblems(sid, entries) {
 			case "turnEnd":
 				if (!d.outcome?.kind || !Array.isArray(d.result?.openToolCalls)) say(e, "needs data.outcome and data.result.openToolCalls");
 				break;
+			case "inputAccepted":
+				if (typeof d.inputId !== "string" || !["now", "steer", "after", "propose"].includes(d.when)) say(e, "needs data.inputId and data.when");
+				break;
+			case "modelRequest":
+				if (typeof e.stepId !== "string" || !d.model?.provider || typeof d.safeToRepeat !== "boolean") say(e, "needs stepId, data.model and data.safeToRepeat");
+				break;
+			case "jobStarted":
+				if (typeof e.jobId !== "string" || typeof d.kind !== "string") say(e, "needs jobId and data.kind");
+				break;
+			case "jobEnded":
+				if (typeof e.jobId !== "string" || !d.outcome?.kind || typeof d.report !== "boolean") say(e, "needs jobId, data.outcome and data.report");
+				break;
+			case "plugins":
+				if (!Array.isArray(d.active) || d.active.some((x) => typeof x?.name !== "string")) say(e, "needs data.active, each with a name");
+				break;
 			case "setting":
 				if (typeof d.key !== "string" || !("value" in d)) say(e, "needs data.key and data.value");
+				if (d.key === "approval" && !["off", "ask", "all", "never"].includes(d.value)) say(e, "approval is off, ask, all or never");
 				if (d.key === "model" && (typeof d.value?.provider !== "string" || typeof d.value?.id !== "string")) say(e, "the model setting is { provider, id }");
 				break;
 		}
 		if (e.kind === "toolResult" && seen.has(`started:${e.toolCallId}`) === false && entries.some((x) => x.kind === "toolStarted" && x.toolCallId === e.toolCallId) && entries.indexOf(entries.find((x) => x.kind === "toolStarted" && x.toolCallId === e.toolCallId)) > entries.indexOf(e)) say(e, "kept before its toolStarted");
 		if (e.kind === "toolStarted") seen.add(`started:${e.toolCallId}`);
+		if (e.kind === "input" && !String(e.data?.key ?? "").startsWith("job:") && !entries.some((x) => x.kind === "inputAccepted" && x.data?.inputId === e.data?.inputId && entries.indexOf(x) < entries.indexOf(e))) say(e, "taken without an inputAccepted before it");
+		if (e.kind === "response" && !entries.some((x) => x.kind === "modelRequest" && x.stepId === e.stepId && entries.indexOf(x) < entries.indexOf(e))) say(e, "no modelRequest before it");
 	}
 	return out;
 }

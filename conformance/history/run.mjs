@@ -61,7 +61,7 @@ check("another owner is 409 held", r.status === 409 && r.body.code === "held", `
 r = await req("POST", `/v1/sessions/${id}/lease/${lease}/renew`);
 check("renew a current lease", r.status === 200 && typeof r.body.ttlMs === "number", `${r.status}`);
 
-const batch = [e(1, null), e(2, `${id}-e1`)];
+const batch = [e(1, null, { turnId: "t-1", toolCallId: "c-1" }), e(2, `${id}-e1`)];
 r = await req("POST", `/v1/sessions/${id}/entries`, { lease, entries: batch });
 check("keep entries", r.status === 200 && r.body.kept === 2, `${r.status} ${JSON.stringify(r.body)}`);
 r = await req("POST", `/v1/sessions/${id}/entries`, { lease, entries: batch });
@@ -96,7 +96,7 @@ r = await req("POST", `/v1/sessions/${id}/erase`, { entryIds: [`${id}-e1`], leas
 check("erase with the lease", r.status === 200 && JSON.stringify(r.body.erased) === JSON.stringify([`${id}-e1`]), `${r.status} ${JSON.stringify(r.body)}`);
 r = await req("GET", `/v1/sessions/${id}`);
 const gone = r.body.entries?.[0] ?? {};
-check("an erased entry is only id, parentId, kind and erased", gone.erased === true && Object.keys(gone).sort().join() === "erased,id,kind,parentId" && !JSON.stringify(r.body).includes("secret 1"), JSON.stringify(gone));
+check("an erased entry is only id, parentId, kind, erased, and the identities it had", gone.erased === true && Object.keys(gone).sort().join() === "erased,id,kind,parentId,toolCallId,turnId" && gone.turnId === "t-1" && gone.toolCallId === "c-1" && !JSON.stringify(r.body).includes("secret 1"), JSON.stringify(gone));
 r = await req("POST", `/v1/sessions/${id}/erase`, { entryIds: [`${id}-e1`], lease });
 check("erasing again is harmless", r.status === 200, `${r.status}`);
 r = await req("POST", `/v1/sessions/${id}/entries`, { lease, entries: [batch[0]] });

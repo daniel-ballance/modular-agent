@@ -23,9 +23,12 @@ What it checks:
 - **An unused session** isn't listed after it is closed.
 - **`session/load` in a new process:** replays the session, keeps its history, and remembers its keys.
 
+Every run also checks a failed turn, in `/1` and on a second connection that asks for `/2`; the approval setting surviving a reopening; and, if the agent declares them, several actors (`severalActors`) and rewinding (`rewinding`). With `--plugin-checks`, the conformance plugin's output gate must redact `conformance-secret`.
+
 These options add checks:
 - **`--plugin-checks`:** the conformance plugin's hooks are in force (see the [plugin binding](../../docs/bindings/plugin.md)).
 - **`--crash-checks`:** the agent is killed with SIGKILL during a `bash` call and the session is reopened in a new process. The interrupted call must have exactly one result, with an unknown outcome, and must not run again. The turn must carry on to completion if the agent declares `continuesAfterRestart`, and end as failed if not- **`--probe-checks`:** the kit also loads the probe plugin, `../plugin/probe.mjs`, which checks the host side of the [plugin binding](../../docs/bindings/plugin.md): paging history, which requests need a live parent, an unknown host method, a request cancelled before it started, and refusing a registration the host can't accept.
+- **`--job-checks`:** the kit also loads the jobs plugin, `../plugin/jobs.mjs`. A tool call starts a job that reports later; the job must be recorded in the standard kinds, its report must start a turn, `cancel-job` (if offered) must end it once, and with `--crash-checks`, a job left running by a killed agent must be taken up by the plugin in whichever agent reopens the session.
 - **`--portable-checks`:** with `MODULAR_AGENT_HISTORY_URL` and `MODULAR_AGENT_HISTORY_TOKEN_FILE` set, every entry the agents kept in that history service must be in the [shared shapes](../../docs/bindings/data.md#portable-sessions).
 
 **Reopening with another agent.** After the agent's command, `--then <second command>` gives a second agent. Every reopening in a new process uses it: `session/load` with its replay and keys, and with `--crash-checks`, recovering the killed agent's turn. Point both agents at one history service, and the second agent reopens, continues and recovers a session the first one wrote. The second agent's declaration decides how the recovered turn must end.
