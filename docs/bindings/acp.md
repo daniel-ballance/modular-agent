@@ -132,7 +132,7 @@ The agent MUST apply the [connection actor rules](../contracts.md#authority), in
 | `$/cancel_request` (either direction) | Sender of the matching in-flight JSON-RPC request on that connection | Ignore |
 | `_modular-agent/history`, `_modular-agent/requests`, `_modular-agent/jobs`, `_modular-agent/actors`, `_modular-agent/proposals`, `_modular-agent/tenant` | `watch` | `forbidden` |
 | `_modular-agent/input` | `propose` for `when: "propose"`; `input` otherwise | `forbidden` |
-| `_modular-agent/answer` | `approve` for approvals; `answer` otherwise; also question eligibility | `forbidden` |
+| `_modular-agent/answer` | `approve` for approvals; `answer` otherwise; also question eligibility and the [approval route check](#request) | `forbidden` for missing rights; see [negative acknowledgements](#extension-methods) |
 | `_modular-agent/fork` | `watch` and `settings`; authority to create in the source tenant and project | `forbidden` |
 | `_modular-agent/move` | `settings`; also `cancel` if moving cancels work | `forbidden` |
 | `_modular-agent/erase` | `erase` | `forbidden` |
@@ -162,12 +162,12 @@ Unless another number is specified, the agent MUST return the following errors a
 | `wrong_project` | Authorized session opened with a mismatched canonical project. |
 | `busy` | Conflict with current work, close or recovery. |
 | `held` | `-32000`, with `data: { code: "held", retryAfterMs }`; a retryable [history lease refusal on reopen](history-http.md#writing-one-writer-at-a-time). `retryAfterMs` is a positive integer in milliseconds. |
-| `conflict` | Known item with an invalid transition, such as an already released proposal or prompt input handed back without a turn. |
+| `conflict` | Known item with an invalid transition, such as an already released proposal or prompt input handed back without a turn; also a [rewind target or point refusal](#extension-methods). |
 | `lost` | `-32000`; cleanup of an affected part could not be confirmed. |
 | `cancelled` | Request cancelled before its normal result is available. |
-| `withheld` | `-32000`; gated output unavailable. |
+| `withheld` | `-32000`; the [output gate](#output-gate) withheld the reply, including if it could not fit the gate's limit. |
 | `message_too_large` | `-32000`; message beyond its limit. |
-| `result_too_large` | `-32602` for a fork that cannot fit its initial history HTTP append; `-32000` for a reply beyond its limit. |
+| `result_too_large` | `-32602` for a fork that cannot fit its initial history HTTP append; `-32000` for a reply beyond its wire limit, including a history `result` over its page limit. |
 
 The agent MUST check envelope, initialization and generic parameter syntax first, then mask inaccessible sessions, then check attachment, feature support, current state and action rights. It MUST return -32601 for unknown methods. An authorization or pre-admission error MUST NOT include an `inputId` or turn outcome. The [answer method](#extension-methods) has its own negative acknowledgements.
 
@@ -233,13 +233,13 @@ The agent MUST gate each recipient's outbound session content, including replay,
 |---|---|
 | Live model text and thought chunks | `text`, `reasoning` |
 | Live tool start, progress and terminal result | `toolCall`, `toolOutput`, `toolResult` |
-| Replay or history item | `entry` before rendering it into ACP; a history result also passes `reply` |
+| Replay or history item | `entry` before rendering it into ACP; the page also passes `reply` separately. See [history paging](#extension-methods) for withheld entries. |
 | Settlement of any turn | `turnEnded` before any related prompt `reply`; no separate ACP notification |
 | Request result or error containing content | `reply` with the method and complete `result` or `error`, including metadata |
 | Agent permission or form request | `request` with the method and complete ACP `params` |
 | Config update | `request` with method `session/update` and complete ACP `params` |
 
-The agent MUST apply [shared redaction validation](data.md#output-events). In ACP payloads it MUST limit string changes to display content, readable reasoning, error messages, descriptive labels, and non-approval tool titles and inputs. A value accepted back from the client, a standard permission request or any field outside those display mappings is not redaction text. See [Request](#request) for the effect of redactions on approval projections. If `turnEnded` is blocked, the related prompt MUST return `withheld` in both versions. Otherwise the reply MUST use only the gated settlement, and then pass the reply gate. A later projection cannot reintroduce withheld or redacted fields. The agent MUST suppress a blocked update or request and send `-32000` with `data.code: "withheld"` for a blocked reply. A blocked reply does not roll back state. Hosts SHOULD reconcile lost or withheld mutation replies by authorized read or keyed retry.
+The agent MUST apply the [shared size and redaction rules](data.md#output-events). In ACP payloads it MUST limit string changes to display content, readable reasoning, error messages, descriptive labels, and non-approval tool titles and inputs. A value accepted back from the client, a standard permission request or any field outside those display mappings is not redaction text. See [Request](#request) for the effect of redactions on approval projections. If `turnEnded` is blocked, the related prompt MUST return `withheld` in both versions. Otherwise the reply MUST use only the gated settlement, and then pass the reply gate. A later projection cannot reintroduce withheld or redacted fields. The agent MUST suppress a blocked update or request and send `-32000` with `data.code: "withheld"` for a blocked reply. A blocked reply does not roll back state. Hosts SHOULD reconcile lost or withheld mutation replies by authorized read or keyed retry.
 
 ## Approvals
 
@@ -267,7 +267,7 @@ The agent MUST apply the [core question rules](../contracts.md#questions) to eli
 
 For a form, the agent MUST use the question as `message` and a requested object schema with one required `answer` string, with the exact options as its `enum` for a choice. A form reply with `action: "accept"` MUST supply a valid `content.answer`. The agent MUST treat `decline` as a decline. A `cancel` or malformed reply MUST NOT authorize or settle the question as an actor's answer. The agent MUST NOT decline an ordinary question solely because forms are unsupported. For approval or form dispatch, the agent MUST use each eligible present actor's active route at most once per question at a time. The agent MUST decline a secret question not handled outside ACP without requesting a value. The agent MUST NOT log, record or echo a secret submitted in error.
 
-All channels MUST use the same first-valid-committed check. The agent MUST cancel outstanding RPCs on settlement and remove a lost or invalid route without treating it as assent. It MUST recheck viable approval routes on presence, eligibility, gate or delivery change. A polling route is viable only for a present eligible actor with `watch` whose full exact approval view can pass the `requests` reply gate with post-gate `answerable: true` under [Request](#request). `answer` MUST require that the connection received the unaltered view for that actor and question, by a permission request or by polling. If no route remains, the agent MUST close the approval as `refused`. Ordinary unanswered questions follow [core question rules](../contracts.md#questions).
+All channels MUST use the same first-valid-committed check. The agent MUST cancel outstanding RPCs on settlement and remove a lost or invalid route without treating it as assent. It MUST apply [core approval route rules](../contracts.md#approval-policy) using the mapping in [Request](#request). Ordinary unanswered questions follow [core question rules](../contracts.md#questions).
 
 The agent MUST follow the core [question recovery and continuation rules](../contracts.md#questions). `waitingThroughRestart` covers an interruption inside a turn. `questionsOutlastTurns` with `lateAnswersStartTurns` enables the same late-answer continuation in `/1` and `/2`, regardless of the Runtime's restart support. The host uses `requests` and `answer` after the turn.
 
@@ -288,7 +288,7 @@ Each extension request MUST include `sessionId`. These four methods MUST be list
 | `_modular-agent/requests` | none | `{ requests: [Request] }`, in admission order, including questions left open past their turns |
 | `_modular-agent/answer` | `requestId`, `value?` (string), `declined?` (boolean, default `false`), `actorId?` | `{ accepted: true }` or `{ accepted: false, reason }` |
 
-The agent MUST use a consistent view for each history request. `all: false` walks the current branch oldest first; `all: true` uses kept order across branches. A supplied `after` MUST name a kept entry in that view, including an erased tombstone. A page MUST contain at most `limit` entries and at most 4 MiB of [actual encoded bytes](data.md#general-rules) in the sent `result`, including any `nextEntryId`. The agent MUST return at least one entry when any remain, or `result_too_large` if even the first entry cannot fit. When more remain, `nextEntryId` MUST name the last returned entry and the next request uses it as `after`. If an item is blocked, the agent MUST withhold that page rather than expose its id or advance over it. Hosts MAY retry with a smaller page to get a visible prefix. This binding has no opaque skip cursor; catch-up can stop at withheld history. Pages are live, not a snapshot across calls. If a move invalidates a branch cursor, the host MUST restart at a valid entry or use `all: true` to catch up in kept order.
+The agent MUST use a consistent view for each history request. `all: false` walks the current branch oldest first; `all: true` uses kept order across branches. A supplied `after` MUST name a kept entry in that view, including an erased tombstone. A page MUST contain at most `limit` entries. The final `result` MUST fit in 4 MiB of [actual encoded bytes](data.md#general-rules), including any `nextEntryId` and the post-gate `answerable` fields. When entries remain, the agent MUST return at least one entry unless all entries in the page were withheld or even the first deliverable entry cannot fit the wire page limit. In the latter case the agent MUST return `result_too_large`. The agent MUST omit entries withheld by the [entry gate](#output-gate) before gating the page reply. When more kept entries follow the last returned entry, the agent MUST use that entry's id as `nextEntryId`. The next request uses it as `after`. If all entries in the page were withheld, the agent MUST form the result as `{ entries: [] }` with no cursor. There is no opaque skip cursor, so catch-up can stop at a fully withheld page. Pages are live, not a snapshot across calls. If a move invalidates a branch cursor, the host MUST restart at a valid entry or use `all: true` to catch up in kept order.
 
 Before lookup the agent MUST validate actor and generic syntax and require `answer` or `approve`. Unknown, hidden, ineligible, closed and losing requests MUST all return `{ accepted: false, reason: "not_open" }` without question-specific diagnostics. Once the caller is eligible and authorized to see the question, the agent MUST validate the value for its kind, rejecting invalid values and secret values with `invalid_params`. Missing `value`, explicit decline or approval `"refuse"` is a decline. Explicit decline ignores a non-secret value. Acceptance includes decline.
 
@@ -303,7 +303,7 @@ The following extensions are optional and MUST be listed if offered. Features na
 | `_modular-agent/cancel-job` | `jobId` | `{}` |
 
 - **Fork:** The agent MUST refuse unsupported forking or unfinished work with `not_supported` or `busy`, respectively. A fork MUST target a kept non-`position` entry in the source session and copy its branch with source lineage. The agent MUST apply the [core inheritance rules](../contracts.md#moving-and-rewinding) and [tenant inheritance](../contracts.md#limits-and-tenants). An unknown target MUST fail with `not_found`. A `position` target MUST fail with `conflict`. If the [history HTTP preflight](history-http.md#sessions) cannot fit the initial batch, the agent MUST return `-32602` with `data.code: "result_too_large"`. A fork MUST be reopened explicitly before use on this connection.
-- **Move:** The agent MUST refuse a target outside the session with `not_found`. It MUST refuse a `position` target with `conflict`. For `rewind: true` it MUST refuse if rewinding is undeclared, and otherwise follow the target, environment, unfinished-work, restoration and rollback rules in [Rewinding](data.md#rewinding). The agent MUST map target or point refusal to `conflict` and unfinished work to `busy`. With rewind it MUST include `outOfReach` when there are open-world calls the restore could not undo. Without rewind it MUST follow the [core move rule](../contracts.md#moving-and-rewinding). Neither ACP operation takes a null target.
+- **Move:** The agent MUST refuse a target outside the session with `not_found`. It MUST refuse a `position` target with `conflict`. For `rewind: true` it MUST refuse if rewinding is undeclared, and otherwise follow the target, environment, unfinished-work, restoration and rollback rules in [Rewinding](data.md#rewinding). The agent MUST map target or point refusal, including a point treated as `not_found` in preflight, to `conflict`. It MUST map unfinished work to `busy`. With rewind it MUST include `outOfReach` when there are open-world calls the restore could not undo. Without rewind it MUST follow the [core move rule](../contracts.md#moving-and-rewinding). Neither ACP operation takes a null target.
 - **Erase:** The agent MUST validate and deduplicate targets before deletion, returning `not_found` for unknown and `forbidden` for protected records. An invalid request changes nothing. The agent MUST follow [Erasure](../contracts.md#erasure), listing affected sessions' copies under `pending` when held by another writer. It MUST return `busy` if `erasureDuringTurn` disallows starting the operation. The agent MUST deduplicate `erased` and `pending` by `(sessionId, id)`. For copies in sessions the actor may not see, it MUST omit the pairs and report only `"copies in other sessions"` in `outOfReach`. It MUST return each category at most once. Repeated targets do not cause duplicate erasure.
 - **Jobs:** The agent MUST list unfinished jobs oldest first. It MUST use `state: "cleanupUnconfirmed"` when the [shared job fold](data.md#session-state) marks cleanup unconfirmed, `"running"` for other live jobs or `"unfinished"` otherwise. Cancellation MUST follow [Jobs](../contracts.md#jobs), returning `lost` for unconfirmed cleanup and `not_found` for unknown or foreign ids. Repeating cancellation of a terminal job MUST return `{}` without a second end.
 
@@ -332,9 +332,17 @@ The agent MUST use shared [Content](data.md#content) for `message.content`, `dat
 
 ### Request
 
-The agent MUST project [InputRequest](data.md#questions) as `{ id, kind, question, answerable, options?, details?, toolCallId?, call? }`. `options` is present only for a choice, and `details` only for a link URI. For approval, `call` MUST be `{ name, input }` with the exact approved values. The agent MUST omit credential names and values. A client MAY poll `requests` to receive an approval view when no standard route is offered.
+The agent MUST project [InputRequest](data.md#questions) as `{ id, kind, question, answerable, options?, details?, toolCallId?, call? }`. `options` is present only for a choice, and `details` only for a link URI. For approval, `call` MUST be `{ name, input }` with the exact approved values. The agent MUST omit credential names and values. A client MAY poll `requests` even while a permission RPC is open.
 
-The agent MUST omit `answerable` from each projected request presented to the gate, including nested projections in history. After gating, it MUST set `answerable` per recipient from the question's open state, current eligibility and deliverable view. For an approval it MUST set `answerable: false` if any gate stage changed the recipient's approval view, comparing the projection without `answerable` by [JSON value](data.md#general-rules). A changed approval view is subject to the [core rule against answering through another channel](../contracts.md#approval-policy). A blocked reply remains withheld.
+The agent MUST omit `answerable` from each projected request presented to the gate, including nested projections in history. After gating, it MUST set `answerable` per recipient and route from the question's open state, current eligibility and deliverable view. For an approval it MUST set `answerable: false` on a projection that any gate stage changed, comparing without `answerable` by [JSON value](data.md#general-rules). A blocked reply remains withheld.
+
+For approvals, the agent MUST apply the [core route rule](../contracts.md#approval-policy) as follows:
+
+| Route | Approval view and answer |
+|---|---|
+| Permission RPC | A reply MUST refer to the unchanged `session/request_permission` sent to that actor on that connection. |
+| Polling | The route is viable only for a present eligible actor with `watch` who can receive an unchanged `requests` view. The `answer` extension MUST require that the connection received an unchanged polling view with `answerable: true` for that actor and question. |
+| History | The history projection MUST NOT authorize an approval answer. |
 
 For example, `requests` can return `{ "requests": [{ "id": "q1", "kind": "choice", "question": "Which draft?", "options": ["first", "second"], "toolCallId": "c1", "answerable": true }] }`. Once `q1` settles it disappears from `requests`; a second `answer` gets `{ "accepted": false, "reason": "not_open" }`.
 
@@ -389,6 +397,8 @@ The fixture MUST select the last user message and concatenate its text parts wit
 The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 
 ## Changes
+
+- **Production edition 3.** Approval authority is per recipient and route (TypeScript, Python G100). Gate limits and the history page limit are separate (TypeScript).
 
 - **Production edition 2.** Idle close needs membership, not `cancel` (Elixir PE-1, Python G98). Approval projections compute `answerable` after gating (Elixir PE-8, Python G94). Reopen can return retryable `held` (Go P4, TypeScript). Limits count actual bytes (Go P5), and JSON depth errors and the `resultFeedback` entry projection are specified (TypeScript).
 

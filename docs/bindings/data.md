@@ -9,7 +9,8 @@ This binding defines shared JSON shapes and how to reconstruct a portable sessio
 - Each size limit MUST count the exact UTF-8 bytes sent for the bounded value, including any whitespace or escape sequences in it. A sender's preflight MUST use its own encoding. A receiver that prepares a page in reply to a request MUST measure the page in the encoding it sends. Bindings define what each limit counts: a stdio line, an HTTP body or a value within a message.
 - A field marked `?` MUST default to absent unless a different default is stated. All other listed fields are required and have no default. Only a type that includes `null` or arbitrary JSON admits null; null is not omission.
 - Known fields MUST use the names shown. A receiver MUST keep unknown fields recursively as inert data when storing or relaying a shape, except for explicit projections, redaction or erasure. It MUST NOT use unknown data to grant rights, change a ceiling or change how known fields are checked. Preservation is not permission to disclose a field.
-- Equality MUST compare JSON by value: exact strings without normalization, numbers by numeric value, arrays in order and objects by member name and value regardless of member order. Thus `0`, `-0` and `0.0` compare equal, and absent differs from null. Implementations MUST preserve exact numeric value when comparing or relaying opaque JSON. A relay does not need to preserve a number's spelling or represent it in its own arithmetic.
+- Shared records use the [I-JSON](https://www.rfc-editor.org/rfc/rfc7493#section-2.2) number rules. A sender SHOULD NOT emit a number that is not exactly representable as an IEEE 754 double. A receiver MAY round such a number to the nearest double. A value that needs exact decimal precision MUST travel as a string.
+- Equality MUST compare JSON by value: exact strings without normalization, numbers by their double values, arrays in order and objects by member name and value regardless of member order. Thus `0`, `-0` and `0.0` compare equal, and absent differs from null. A relay does not need to preserve a number's spelling.
 - `Count` is an integer from 0 through 9,007,199,254,740,991. `Time` and `Duration` are Counts in milliseconds, since the Unix epoch for Time. `Id` is a nonempty, case-sensitive string. `object` means a JSON object; `JSON` includes any JSON value. An array admits zero items unless stated otherwise. Lengths stated in characters count Unicode code points.
 
 | Identity | Required scope |
@@ -178,6 +179,8 @@ An event is `{ type: Id, data: object }` with the following payload. The [plugin
 | `reply` | `{ method: Id, result: JSON }` or `{ method: Id, error: object }` (error shape from the recipient binding) |
 | `request` | `{ method: Id, params: object }` (an agent-originated request or notification to the recipient) |
 | Own type containing a dot | An extension object. |
+
+Each output gate and each wire MUST apply its own size limit to its own encoding under [General rules](#general-rules). The host MUST treat an item that cannot fit the gate's limit just as if the gate refused it. For an item in a page, the host MUST still deliver the page with that item withheld, subject to gating and size checks on the page reply itself. See [ACP Output gate](acp.md#output-gate) and [Held output](plugin.md#held-output).
 
 The host MUST give the gate the intended recipient's view, not the raw record. Session-specific output carries the session identity in the enclosing hook payload; non-session output uses null there. A model stream groups the readable text and reasoning of one model attempt; a tool stream groups the chunks of one call attempt. A host MUST preserve arrival order within each stream and place tool output after its call event and before its result. The request ending, cancellation or loss ends that attempt's stream; no later pieces belong to it. Empty streams have no events to gate. Independent streams can overlap.
 
@@ -375,6 +378,8 @@ The following append sequence is one turn with one model attempt and one call. S
 
 [Moving and rewinding](../contracts.md#moving-and-rewinding) defines point checks before the journal, eligible targets and when to refuse. `data.point` on `turnStart` or an out-of-turn `toolStarted` holds the saved point. The working environment keeps points at least while the session is open; later retention is environment-specific.
 
+The Harness MUST NOT infer point ownership from a history entry that references it. A point without an owning session, including a legacy point, MUST be treated as `not_found` in preflight, so a rewind that needs it is refused before any change. On replay of an unresolved journal, the Harness MUST verify ownership before each restore it needs. For a remote point, `exists: true` from [`env/checkPoint`](plugin.md#paths-and-points) confirms ownership. `exists: false` does not say why the point is unavailable. If ownership cannot be verified, the Harness MUST report recovery failure and leave the journal unresolved for repair.
+
 When producing `outOfReach`, the host MUST use `openWorld` recorded on the call's `toolStarted`, treating an absent value as true. It MUST return the IDs of the affected calls in first dispatch order, without repeats.
 
 The Harness MUST use this journal when restoring a point:
@@ -383,11 +388,13 @@ The Harness MUST use this journal when restoring a point:
 2. It MUST commit a `position` to the target with `data.restore: { point, undo: P0 }` before restoring. If the commit is uncertain, it MUST read and reconcile the record under a verified writer lease before restoring or rolling back.
 3. The host MUST restore the target point idempotently. Once restored, it MUST commit a completion `position` to the same target without `restore`.
 4. If the target restore fails, including when its point is missing, the host MUST commit a compensating intent to the previous head with `restore: { point: P0, undo: point }` and attempt to restore P0. After a successful undo restore it MUST commit a completion to the previous head and report the move as failed. The compensating intent immediately follows the unresolved target intent in append order, pointing to the earlier intent's parent with its `point` and `undo` exchanged.
-5. On reopen the Harness MUST replay only a latest `position` with `restore` and no completion. A replay of a target intent follows steps 3 and 4. Points follow the [saving environment rule](../contracts.md#the-working-environment); `not_found` is a failed restore. A replay of a compensating intent MUST restore the undo point and complete to the previous head only on success. If the undo point is missing or cannot be restored, the Harness MUST report failure and leave the journal unresolved.
+5. On reopen the Harness MUST replay only a latest `position` with `restore` and no completion. A replay of a target intent follows steps 3 and 4. After ownership is verified, `not_found` from restore is a failed restore. A replay of a compensating intent MUST restore the undo point and complete to the previous head only on success. If the undo point is missing or cannot be restored, the Harness MUST report failure and leave the journal unresolved.
 
 While an intent is unresolved, the Harness MUST block project work and keep other entries from interleaving with the journal. It MUST resume project work only once the target or undo restore has established the files at the head and the matching completion is committed. A missing point or a partial restore is not evidence of completion. A legacy `data.failed: true` record MUST NOT clear that block.
 
 ## Changes
+
+- **Production edition 3.** Session ownership of saved points (Go P11), independent gate and wire size limits (TypeScript), and I-JSON numbers (Elixir PE2-3, TypeScript).
 
 - **Production edition 2.** Measure actual encoded bytes (Go P5), bound JSON nesting and preserve numeric value without requiring the original spelling (TypeScript), omit empty failed or aborted responses from the default model view (Elixir PE-6), and add the `resultFeedback` record and projection (TypeScript). Rewind preflight has a [remote point check](plugin.md#paths-and-points) (Elixir PE-5, Go P9, TypeScript, Python G82).
 

@@ -127,7 +127,7 @@ See [Erasure](#erasure) under Settled.
 - <a id="plugins-building-on-plugins"></a>**Plugins building on plugins.** Plugins can define capabilities and hook points ([Plugins and capabilities](contracts.md#plugins-and-capabilities), [Hook points](contracts.md#hook-points)).
 - <a id="working-environment"></a>**Working environment.** It is a capability distinct from the project ([Harness and working environment](contracts.md#harness-and-working-environment)).
 - <a id="a-layer-above-the-agent"></a>**A layer above the agent.** A host coordinates agents from outside; it uses their [Interface](contracts.md#interface-and-harness).
-- **Rewind with remote points.** The plugin binding does not have a point probe. Without proof that its required points still exist in this working environment, a rewind is refused rather than testing by restoring files ([Remote paths and points](bindings/plugin.md#paths-and-points)).
+- **Rewind with remote points.** The [point probe](bindings/plugin.md#paths-and-points) checks remote points without restoring files. The [rewind rules](bindings/data.md#rewinding) cover points without session ownership.
 - **History and position.** Normal use appends entries; moving records a new position without deleting the rest. Retention and erasure are separate ([History entries](bindings/data.md#history-entries), [Rewinding](bindings/data.md#rewinding)).
 - **Exchanges.** History represents turns by what started them, not by a separate exchange unit ([History entries](bindings/data.md#history-entries)).
 - **Holding streamed output.** A gate can hold output within the declared stream boundary; the agent declares this behavior ([The output gate](contracts.md#the-output-gate)).

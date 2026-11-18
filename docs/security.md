@@ -63,7 +63,7 @@ See [The output gate](contracts.md#the-output-gate) for raw records, recipient v
 
 The [plugin](bindings/plugin.md#transport) and [ACP](bindings/acp.md#starting) bindings cap single messages and give the errors for oversized messages. The [plugin](bindings/plugin.md#paging-history), [ACP](bindings/acp.md#extension-methods) and [history](bindings/history-http.md#sessions) bindings cap history pages. Wire caps do not bound total work or storage.
 
-The operator MUST bound concurrent connections, queued work, partial-message bytes and time, parser work, output buffering and storage. The agent MUST refuse new work before admission when it cannot reserve capacity to record its terminal state. It MUST reserve capacity for cancellation, revocation, recovery and erasure. Overflow of gated output follows [withholding](contracts.md#the-output-gate), not a successful empty reply. If even a reserved write fails, the agent MUST stop effects under [Recovery](contracts.md#recovery-and-repeating-work). The operator SHOULD test overload and recovery at these limits.
+The operator MUST bound concurrent connections, queued work, partial-message bytes and time, parser work, output buffering and storage. The agent MUST refuse new work before admission when it cannot reserve capacity to record its terminal state. It MUST reserve capacity for cancellation, revocation, recovery and erasure. See [Output events](bindings/data.md#output-events) for gate and wire size limits and the handling of withheld items. If even a reserved write fails, the agent MUST stop effects under [Recovery](contracts.md#recovery-and-repeating-work). The operator SHOULD test overload and recovery at these limits.
 
 ## Crash, failure and what recovery can't promise
 
