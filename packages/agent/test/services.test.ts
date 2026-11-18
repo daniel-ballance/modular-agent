@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -14,7 +15,7 @@ import type { Scripted } from "./fixtures/faux-provider.js";
 // ---------- the services, each a process of its own ----------
 
 const serveJs = fileURLToPath(import.meta.resolve("@modular-agent/services").replace(/index\.js$/, "serve.js"));
-const token = () => Math.random().toString(36).slice(2);
+const token = () => randomBytes(16).toString("hex");
 const services: ChildProcess[] = [];
 
 async function startService(kind: string, settings: Record<string, unknown>): Promise<{ url: string; token: string }> {
@@ -173,8 +174,7 @@ test("services: when the history service's answers are lost, appends are sent ag
 	const stored = await storedEntries(sessionId, flakyHistory);
 	assert.equal(new Set(stored.map((e) => e.id)).size, stored.length, "no entry was kept twice");
 	assert.ok(stored.some((e) => e.kind === "turnEnd"), "the turn was kept in full");
-	const file = readdirSync(flakyDir, { recursive: true }).map(String).find((f) => f.endsWith(".jsonl"))!;
-	assert.equal(readFileSync(join(flakyDir, file), "utf8").split("\n").filter((l) => l.includes('"turnEnd"')).length, 1);
+	assert.equal(stored.filter((e) => e.kind === "turnEnd").length, 1);
 	await a.h.stop();
 });
 

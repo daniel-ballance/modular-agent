@@ -16,7 +16,7 @@ import { systemPrompt } from "@modular-agent/system-prompt";
 import { fileTools } from "@modular-agent/tools-files";
 import { pluginsFromSettings, projectTrust } from "./loading.js";
 import { remotePlugin } from "@modular-agent/plugin-rpc";
-import { historyHttp } from "@modular-agent/services";
+import { historyHttp, HttpHistoryStore } from "@modular-agent/services";
 import { type ExternalPluginSpec, pluginSpecsFromEnv, startExternalPlugin } from "@modular-agent/plugin-wire";
 export { pluginsFromSettings, projectTrust } from "./loading.js";
 
@@ -72,7 +72,13 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 	const remote = new Set(options.remote ?? (process.env.MA_REMOTE ? process.env.MA_REMOTE.split(",").map((s) => s.trim()) : []));
 	// A history service that follows modular-agent-history/1, in any language, can replace the local store.
 	const historyUrl = process.env.MODULAR_AGENT_HISTORY_URL;
-	const historyService = historyUrl ? [historyHttp({ url: historyUrl, token: readFileSync(process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "", "utf8").trim() })] : [];
+	const historyService: Plugin[] = [];
+	if (historyUrl !== undefined) {
+		const client = { url: historyUrl, token: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "")) };
+		const store = new HttpHistoryStore(client);
+		await store.initialize();
+		historyService.push(historyHttp(client, store));
+	}
 	// Load local items first, then validate each external registration against them.
 
 	const plugins = [projectTrust(home), ...vanillaPlugins(options), ...historyService, ...fromSettings.plugins].map((p) => (remote.has(p.name) && p.spawn ? remotePlugin(p) : p));

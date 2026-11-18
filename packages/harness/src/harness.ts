@@ -518,6 +518,7 @@ export class Harness {
 		const match = /^\/(\S+)\s*([\s\S]*)$/.exec(line.trim());
 		if (!match) throw new Error("Not a command");
 		this.requireAuthority(this.session(sessionId), actorId, "input");
+		this.use<HistoryStore>("history-store")?.checkWriter?.(sessionId);
 		const command = this.commandTable.get(match[1]);
 		if (!command) throw new Error(`Unknown command /${match[1]}`);
 		return command.run(match[2], { sessionId, actorId, api: this.api(command.plugin) });
@@ -752,7 +753,14 @@ export class Harness {
 			position = entry.kind === "position" ? (entry.data as { to: string | null }).to : entry.id;
 			return entry;
 		});
-		if (!s.ephemeral) await this.use<HistoryStore>("history-store")?.append(s.id, entries);
+		if (!s.ephemeral) {
+			const store = this.use<HistoryStore>("history-store");
+			try { await store?.append(s.id, entries); }
+			catch (error) {
+				if (store?.writerSignal?.(s.id)?.aborted) { s.suspended = true; s.running?.abort.abort(); }
+				throw error;
+			}
+		}
 		for (const e of entries) {
 			s.apply(e);
 			const ids = { turnId: e.turnId, stepId: e.stepId, toolCallId: e.toolCallId, actorId: e.actorId };
@@ -1149,7 +1157,9 @@ export class Harness {
 	/** Run a turn as the session's running turn, then start any queued input. */
 	private launch(s: Session, turnId: string, body: (signal: AbortSignal, turnId: string) => Promise<void>): Promise<void> {
 		const abort = new AbortController();
-		const done = body(abort.signal, turnId)
+		const writer = this.use<HistoryStore>("history-store")?.writerSignal?.(s.id);
+		const signal = writer ? AbortSignal.any([abort.signal, writer]) : abort.signal;
+		const done = body(signal, turnId)
 			.catch((error) => this.problem("harness", "turn", error))
 			.finally(() => {
 				s.running = undefined;
@@ -1227,7 +1237,7 @@ export class Harness {
 	private async finishTurn(s: Session, turnId: string, outcome: TurnOutcome, state?: TurnState, signal?: AbortSignal): Promise<void> {
 		// The process stopped: the turn is interrupted, not ended. Nothing is recorded or announced here;
 		// reopening the session finds the turn and hands it to the Runtime.
-		if (s.suspended) return;
+		if (s.suspended || this.use<HistoryStore>("history-store")?.writerSignal?.(s.id)?.aborted) return;
 		const responses = s.order.map((id) => s.entries.get(id)!)
 			.filter((e) => e.turnId === turnId && e.kind === "response" && e.message?.role === "assistant");
 		if (responses.length && (state?.tenantLimit || outcome.outcome.kind === "failed" || outcome.outcome.kind === "cancelled")) {
@@ -1400,6 +1410,7 @@ export class Harness {
 					data: { model: { provider: model.model.provider, id: model.model.id }, safeToRepeat },
 				}]);
 				try {
+					this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
 					return await model.request(request, { ...options, onEvent: (event) => {
 						this.emit(s.id, "model.output", event, "harness", { turnId, stepId });
 						options.onEvent?.(event);
@@ -1493,6 +1504,8 @@ export class Harness {
 		if (!allowed()) return refused();
 		await this.commit(s, [{ kind: "toolStarted", writer: "harness", modelVisible: false, turnId, toolCallId: call.id, stepId: call.stepId, data: { call, safeToRepeat, point, ...(found.definition.hints?.openWorld ? { openWorld: true } : {}) } }]);
 		if (!allowed()) return refused();
+		this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
+		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
 		this.emit(s.id, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
 		let asked = 0;
 		try {

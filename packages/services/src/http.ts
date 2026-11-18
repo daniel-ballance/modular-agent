@@ -74,6 +74,7 @@ export async function call<T>(client: ClientOptions, method: string, path: strin
 		try {
 			res = await fetch(client.url + path, {
 				method,
+				redirect: "error",
 				headers: { authorization: `Bearer ${client.token}`, ...(options.body !== undefined ? { "content-type": "application/json" } : {}) },
 				body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
 				signal: options.signal,

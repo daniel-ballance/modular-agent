@@ -271,6 +271,8 @@ export interface HistoryStore {
 	create(meta: StoredSession): Promise<void>;
 	/** Refuses if the session is already open for writing elsewhere. */
 	openForWriting(sessionId: string, options?: { wait?: boolean }): Promise<void>;
+	checkWriter?(sessionId: string): void;
+	writerSignal?(sessionId: string): AbortSignal | undefined;
 	close(sessionId: string): Promise<void>;
 	/** Keep these entries. All of them are kept, or none are. */
 	append(sessionId: string, batch: HistoryEntry[]): Promise<void>;
