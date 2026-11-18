@@ -336,6 +336,7 @@ if (decl.severalActors) {
 		const p2 = await ask("input", { actorId: "kit-guest", content: "a second proposal", when: "propose" });
 		const listed = (await ask("proposals", {})).proposals ?? [];
 		check("proposals: a proposal is listed with its proposer", listed.some((x) => x.inputId === p2.inputId && x.actorId === "kit-guest") && !listed.some((x) => x.inputId === prop.inputId), String(JSON.stringify(listed)).slice(0, 200));
+		check("proposals: content is shared-shape content, every part with a type", listed.every((x) => Array.isArray(x.content) && x.content.every((part) => typeof part?.type === "string")), String(JSON.stringify(listed.map((x) => x.content))).slice(0, 200));
 		await ask("withdraw", { inputId: p2.inputId, actorId: "kit-guest" });
 		await sleep(400);
 		const after = (await ask("proposals", {})).proposals ?? [];
