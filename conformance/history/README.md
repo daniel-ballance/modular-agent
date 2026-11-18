@@ -21,11 +21,11 @@ node packages/services/dist/src/serve.js history \
 From another shell, run the kit against `http://127.0.0.1:39071` with the path to `$scratch/token`. Stop the service and remove the scratch directory after use. An agent using this service takes the same URL and token file via the two variables above.
 
 What it checks:
-- Authentication errors, declaration and lease length, selected response envelopes and input validation.
+- Authentication errors, declaration and lease length, selected response envelopes, and input validation including raw and percent-encoded dot segments sent without URL normalization.
 - Exact metadata resend, conflict on changed metadata, project filtering and list order.
 - Lease generation after release and expiry, renewals, `held` retry timing fields, and concurrent stale requests against a current writer. The expiry check is skipped when the advertised TTL exceeds the kit's 60-second wait budget.
 - Ordered, full JSON round-trip of opaque entries and lineage metadata, numeric equality, equal duplicates and failure atomicity for conflicting or malformed batches.
 - Cursor traversal, item and byte limits, and rejection of an entry that cannot fit a page.
-- Erasure with and without a lease, exact tombstones and ordered idempotent results.
+- Erasure with and without a lease, exact tombstones with all seven association fields, and ordered idempotent results.
 
-It does not restart the service or check durable failover, retention expiry, agent lease renewal after network loss, backup deletion, token entropy on the service, or TLS provisioning. The bearer token is service-wide, not a test of tenant isolation. Passing these checks is not proof of [conformance](../../docs/conformance.md#what-conforms).
+It does not restart the service or check durable failover, retention expiry, all client lease loss paths, backup deletion, token entropy on the service, or TLS provisioning. The [ACP kit](../acp/README.md) with `--crash-checks` and a history service checks the client side of late renewal replies. The bearer token is service-wide, not a test of tenant isolation. Passing these checks is not proof of [conformance](../../docs/conformance.md#what-conforms).

@@ -17,9 +17,14 @@ What it checks:
 - Tool calls through `host/env/*`, parent and session scope, fixture progress and exit text, and cancellation. The early-arrival cancel probe does not prove that dispatch had not started.
 - Environment files, output, deadlines and background process ownership. The descendant test applies to the advertised containment. With `points: true`, it checks point lookup and in-place restore.
 - Hook replies for a refusal, a system contribution, and lossless redaction across text events within a stream segment and within one standalone custom event.
-- Scripted Runtime turns: exact dispatch order, refused calls, host-recorded model intent and result, fresh attempt IDs on retry, cancellation and step limits. Serial and overlapping scheduling are both allowed for parallel-capable calls.
+- Scripted Runtime turns: exact dispatch order, refused calls, host-recorded model intent and result, normal and failed attempt order, fresh attempt ids on retry, preparation after context overflow with a scripted host compaction, cancellation and step limits. Serial and overlapping scheduling are both allowed for parallel-capable calls.
 - `resumeTurn` against synthetic standard history. An unsafe started call is not repeated. A transient Runtime fails and does not dispatch; a durable one runs the calls it can recover. This is not an independent second build's history.
 
-To check a host, use the [ACP kit](../acp/README.md) with `--probe-checks` for host callbacks, Runtime dispatch and output validation, and `--job-checks` for job transitions. Use `--plugin-checks` with conformance parts from another build for an interoperability run. The probe and jobs programs are test fixtures, not production plugins.
+The [ACP kit](../acp/README.md) checks the host side:
+- `--probe-checks`: out-of-phase Runtime callbacks leave no records, exact-call dispatch, output validation, and preservation of a completed result when its catalog refresh fails.
+- `--probe-checks --portable-checks`: interrupted remote model attempts are aborted or replayed as specified in [Model attempt sequences](../../docs/bindings/plugin.md#model-attempt-sequences).
+- `--job-checks --crash-checks`: job recovery refuses a second resume on the same plugin connection.
+
+Use `--plugin-checks` with conformance parts from another build for an interoperability run. The probe, recovery and jobs programs are test fixtures, not production plugins.
 
 The kit tests selected transcripts, not arbitrary schemas, credential handling, credential-bearing Providers, tenant separation, or reliable cleanup of unconfirmed external effects. Use separate acceptance tests for these. A pass is not proof of [conformance](../../docs/conformance.md#what-conforms).

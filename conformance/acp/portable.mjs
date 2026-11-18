@@ -10,21 +10,24 @@ const model = (x) => id(x?.provider) && id(x?.id);
 const usage = (x) => ["input", "output", "cacheRead", "cacheWrite"].every((k) => count(x?.[k])) && typeof x?.cost === "number" && x.cost >= 0;
 const outcome = (x, job = false) => x && (["completed", "cancelled"].includes(x.kind) || (x.kind === "failed" && typeof x.error === "string") || (job ? x.kind === "outcomeUnknown" : x.kind === "limit" && id(x.limit)));
 const opt = (x, k, pred) => !Object.hasOwn(x, k) || pred(x[k]);
-const assocs = ["turnId", "stepId", "toolCallId", "jobId", "actorId"];
-const tombstone = ["id", "parentId", "kind", "erased", ...assocs.slice(0, -1)];
+// Shared data: Entry fields and tombstones.
+const tombstoneAssocs = ["turnId", "stepId", "toolCallId", "jobId", "inputId", "requestId", "continuesTurnId"];
+const assocs = [...tombstoneAssocs, "actorId"];
+const tombstone = ["id", "parentId", "kind", "erased", ...tombstoneAssocs];
+const inputIdOf = (e) => e.inputId ?? e.data?.inputId;
 const status = ["completed", "failed", "refused", "cancelled", "notStarted", "outcomeUnknown"];
 
 const valid = {
-	inputAccepted: (e, d) => id(e.actorId) && id(d.inputId) && content(d.content) && opt(d, "key", id) && ["now", "steer", "after", "propose"].includes(d.when),
-	inputHandedBack: (_, d) => ids(d.inputIds),
-	input: (e, d) => id(e.actorId) && id(e.turnId) && id(d.inputId) && e.message?.role === "user" && content(e.message.content),
+	inputAccepted: (e, d) => id(e.actorId) && id(inputIdOf(e)) && content(d.content) && opt(d, "key", id) && ["now", "steer", "after", "propose"].includes(d.when),
+	inputHandedBack: (e, d) => id(inputIdOf(e)) || ids(d.inputIds),
+	input: (e) => id(e.actorId) && id(e.turnId) && id(inputIdOf(e)) && e.message?.role === "user" && content(e.message.content),
 	turnStart: (e, d) => id(e.turnId) && id(d.startedBy?.id) && ["actor", "job", "plugin", "answer"].includes(d.startedBy.kind) && (d.model === null || model(d.model)) && typeof d.system === "string" && Array.isArray(d.tools) && obj(d.settings) && opt(d, "context", content) && opt(d, "point", id),
 	modelRequest: (e, d) => id(e.stepId) && model(d.model) && typeof d.safeToRepeat === "boolean" && opt(d, "request", obj),
 	response: (e) => id(e.stepId) && e.message?.role === "assistant" && content(e.message.content) && id(e.message.stop) && opt(e.message, "usage", usage),
 	toolStarted: (e, d) => id(e.toolCallId) && id(e.actorId) && d.call?.actorId === e.actorId && d.call?.id === e.toolCallId && id(d.call.name) && obj(d.call.input) && typeof d.safeToRepeat === "boolean",
 	toolResult: (e, d) => id(e.toolCallId) && status.includes(d.status) && e.message?.role === "toolResult" && e.message.toolCallId === e.toolCallId && id(e.message.toolName) && content(e.message.content) && e.message.isError === (d.status !== "completed"),
 	inputRequest: (_, d) => id(d.request?.id) && id(d.request.kind) && id(d.request.sessionId) && typeof d.request.question === "string" && typeof d.request.answerable === "boolean" && opt(d.request, "answerers", ids),
-	inputAnswer: (_, d) => id(d.requestId) && opt(d, "actorId", id),
+	inputAnswer: (e, d) => id(e.requestId ?? d.requestId) && opt(d, "actorId", id),
 	turnEnd: (e, d) => id(e.turnId) && outcome(d.outcome) && ids(d.result?.openToolCalls) && usage(d.usage),
 	summary: (e, d) => ids(e.sources) && e.sources.length > 0 && typeof d.summary === "string",
 	setting: (_, d) => id(d.key) && Object.hasOwn(d, "value") && (d.key !== "model" || model(d.value)),
@@ -67,9 +70,11 @@ export function portableProblems(sessionId, entries) {
 				tenant = d.tenant;
 			}
 			if (e.kind === "jobEnded" && d.report === true) jobReports.set(e.jobId, e);
-			if (e.kind === "inputAccepted") admitted.set(d.inputId, e);
-			if (e.kind === "input" && !admitted.has(d.inputId) && !erasedIntake) say(e, "no earlier admission");
-			if (e.kind === "inputHandedBack" && ids(d.inputIds) && d.inputIds.some((i) => !admitted.has(i)) && !erasedIntake) say(e, "no earlier admission for hand-back");
+			const inputId = inputIdOf(e);
+			if (e.kind === "inputAccepted") admitted.set(inputId, e);
+			if (e.kind === "input" && !admitted.has(inputId) && !erasedIntake) say(e, "no earlier admission");
+			if (e.kind === "inputHandedBack" && !erasedIntake &&
+				(inputId ? !admitted.has(inputId) : ids(d.inputIds) && d.inputIds.some((i) => !admitted.has(i)))) say(e, "no earlier admission for hand-back");
 		}
 		if (e.kind === "turnStart") {
 			if (turns.has(e.turnId)) say(e, "duplicate turn start");

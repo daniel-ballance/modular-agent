@@ -2,6 +2,8 @@
 // Disposable-service tests for docs/bindings/history-http.md.
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { isDeepStrictEqual as equal } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -11,7 +13,7 @@ if (!url || !tokenFile) {
 	process.exit(2);
 }
 const base = new URL(url);
-if (base.username || base.password || base.search || base.hash || (base.protocol !== "https:" && !(base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname)))) {
+if (base.username || base.password || base.search || base.hash || (base.protocol !== "https:" && !(base.protocol === "http:" && (base.hostname.startsWith("127.") || base.hostname === "[::1]")))) {
 	console.error("Use a disposable service. Plain HTTP is allowed only on loopback.");
 	process.exit(2);
 }
@@ -29,6 +31,22 @@ const req = async (method, path, body, { auth = token, raw = false, media = "app
 	});
 	return { status: res.status, headers: res.headers, body: await res.json().catch(() => null) };
 };
+// fetch normalizes dot segments before sending them. Send the request target verbatim.
+const rawPath = (method, route) => new Promise((resolve, reject) => {
+	const request = base.protocol === "https:" ? httpsRequest : httpRequest;
+	const r = request(base, { method, path: base.pathname.replace(/\/+$/, "") + route, headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) }, (res) => {
+		const chunks = [];
+		res.on("data", (chunk) => chunks.push(chunk));
+		res.on("error", reject);
+		res.on("end", () => {
+			let body;
+			try { body = JSON.parse(Buffer.concat(chunks)); } catch { /* not JSON */ }
+			resolve({ status: res.statusCode, headers: new Headers(res.headers), body });
+		});
+	});
+	r.on("error", reject);
+	r.end();
+});
 const ok = (r, expected) => r.status === 200 && equal(r.body, expected);
 const err = (r, status, code) => r.status === status && r.body?.code === code && typeof r.body.error === "string" && r.headers.get("content-type")?.split(";")[0] === "application/json";
 const positive = (x) => Number.isSafeInteger(x) && x > 0;
@@ -72,8 +90,8 @@ await run("session lifecycle", async () => {
 	check("lease: a different owner gets held with retryAfterMs", held(await acquire(sid, id()), ttl));
 	check("lease: renewal reports the declared TTL", ok(await renew(sid, lease), { ttlMs: ttl }));
 	const batch = [
-		{ id: id(), parentId: null, kind: "response", turnId: "turn", stepId: "step", toolCallId: "call", jobId: "job", message: { role: "private", content: [{ type: "kit.unknown", nested: { b: 2, a: 1 }, value: null }] } },
-		{ id: id(), parentId: "opaque-parent", kind: 42, unknown: [true, null, { a: 1 }] },
+		{ id: id(), parentId: null, kind: "response", turnId: "turn", stepId: "step", toolCallId: "call", jobId: "job", inputId: "input", requestId: "question", continuesTurnId: "previous-turn", actorId: "not-an-association", message: { role: "private", content: [{ type: "kit.unknown", nested: { b: 2, a: 1 }, value: null }] } },
+		{ id: id(), parentId: "opaque-parent", kind: 42, inputId: 42, requestId: null, continuesTurnId: { invalid: true }, unknown: [true, null, { a: 1 }] },
 	];
 	check("append: equal same-batch duplicates do not count twice", ok(await append(sid, lease, [batch[0], batch[0], batch[1]]), { kept: 2 }));
 	check("append: resend and empty batch keep nothing", ok(await append(sid, lease, batch), { kept: 0 }) && ok(await append(sid, lease, []), { kept: 0 }));
@@ -101,10 +119,10 @@ await run("session lifecycle", async () => {
 	const erased = { erased: [batch[1].id, batch[0].id] };
 	check("erase: ordered distinct known IDs, also on same-lease retry", ok(await erase(sid, lease, targets), erased) && ok(await erase(sid, lease, targets), erased));
 	const tombstones = [
-		{ id: batch[0].id, parentId: null, kind: "response", erased: true, turnId: "turn", stepId: "step", toolCallId: "call", jobId: "job" },
+		{ id: batch[0].id, parentId: null, kind: "response", erased: true, turnId: "turn", stepId: "step", toolCallId: "call", jobId: "job", inputId: "input", requestId: "question", continuesTurnId: "previous-turn" },
 		{ id: batch[1].id, parentId: "opaque-parent", kind: null, erased: true },
 	];
-	check("erase: exact tombstones replace payloads in kept order", ok(await read(sid), { session, entries: tombstones }));
+	check("Erasure / Entry fields and tombstones: all seven string associations survive, other fields do not", ok(await read(sid), { session, entries: tombstones }));
 	check("erase: an erased id cannot regain its payload", err(await append(sid, lease, batch), 409, "conflict"));
 	check("lease: release and release retry", ok(await release(sid, lease), {}) && ok(await release(sid, lease), {}));
 	const fresh = await acquire(sid, owner);
@@ -114,6 +132,18 @@ await run("session lifecycle", async () => {
 	check("lease: delayed stale release, append, erase and renew cannot fence the new writer", ok(race[0], {}) && race.slice(1, 4).every((r) => err(r, 409, "lost")) && ok(race[4], { kept: 1 }) && ok(await read(sid), { session, entries: [...tombstones, third] }));
 	await release(sid, l2);
 	check("erase: no lease is needed without a writer", ok(await erase(sid, undefined, [third.id]), { erased: [third.id] }));
+});
+
+// History HTTP: The basics (path segments are validated before normalization).
+await run("dot segments", async () => {
+	const sid = id();
+	for (const [label, segments] of [["raw", [".", ".."]], ["encoded", ["%2e", "%2E%2e", ".%2e", "%2E."]]]) {
+		const replies = await Promise.all(segments.flatMap((segment) => [
+			rawPath("GET", `/v1/sessions/${segment}`),
+			rawPath("POST", `/v1/sessions/${sid}/lease/${segment}/renew`),
+		]));
+		check(`The basics: ${label} dot segments in session ids and leases are rejected before normalization`, replies.every((r) => err(r, 400, "invalid_request")));
+	}
 });
 
 // History HTTP: The basics (validation and error order); Sessions (paging bounds); Entries (entry fit).

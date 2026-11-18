@@ -53,8 +53,11 @@ async function takeUp(sessionId) {
 	note({ unfinished: jobs.map((j) => j.jobId) });
 	for (const j of jobs) {
 		await peer.ask("host/jobs/resume", { jobId: j.jobId });
-		await peer.ask("host/jobs/resume", { jobId: j.jobId });
-		note({ resumed: j.jobId });
+		// Jobs: the first successful resume is still running on this connection.
+		const duplicate = await peer.ask("host/jobs/resume", { jobId: j.jobId }).then(
+			() => false, (e) => e?.code === -32602 && e?.data?.code === "invalid_request",
+		);
+		note({ resumed: j.jobId, duplicateRefused: duplicate });
 		const job = { jobId: j.jobId, sessionId };
 		running.set(j.jobId, job);
 		await end(job, "completed", text(`background: ${j.detail?.text} (taken up)`));

@@ -246,7 +246,7 @@ const code = (e) => e?.data?.code;
  * model(request, n) gives the n-th model answer; tool(call) answers runToolCall (may return a promise);
  * gate(call) answers "before a tool call" with a refusal reason, or null.
  */
-function scenario({ model, tool = async (c) => ({ callId: c.id, status: "completed", content: [{ type: "text", text: `ran ${c.name}` }] }), gate = () => null, definitions = {}, retry = false, before = [], abandoned = [] }) {
+function scenario({ model, tool = async (c) => ({ callId: c.id, status: "completed", content: [{ type: "text", text: `ran ${c.name}` }] }), gate = () => null, definitions = {}, retry = false, compact = false, before = [], abandoned = [] }) {
 	// Plugin binding: Runtime callbacks and Runtime records and effects.
 	const rt = { records: [], reports: [], hooks: [], toolCalls: [], modelCalls: 0, steps: 0, running: new Map(), order: [], submitted: [] };
 	const tools = { read: { name: "read", description: "fixture read", parameters: true }, bash: { name: "bash", description: "fixture shell", parameters: true }, ...definitions };
@@ -257,9 +257,9 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 		const content = [{ type: "text", text: "fixture input" }];
 		before = [
 			{ kind: "actorJoined", data: { actor: { id: "kit", kind: "host", rights } } },
-			{ kind: "inputAccepted", actorId: "kit", data: { inputId: "kit-input", content, when: "now", authorizers, rights } },
+			{ kind: "inputAccepted", actorId: "kit", inputId: "kit-input", data: { content, when: "now", authorizers, rights } },
 			{ kind: "turnStart", turnId: "kit-turn", data: { model: modelRef, startedBy: { kind: "actor", id: "kit" }, system: "kit", settings: { maxSteps: 8 }, tools: Object.values(tools), authorizers, rights } },
-			{ kind: "input", turnId: "kit-turn", actorId: "kit", modelVisible: true, message: { role: "user", content }, data: { inputId: "kit-input" } },
+			{ kind: "input", turnId: "kit-turn", actorId: "kit", modelVisible: true, message: { role: "user", content }, inputId: "kit-input" },
 		].map((e, i) => ({ id: `kit-base-${i}`, parentId: i ? `kit-base-${i - 1}` : null, sessionId: "kit-session", time: Date.now(), writer: "kit-host", modelVisible: false, ...e }));
 	}
 	rt.history = () => [...before, ...rt.records];
@@ -288,23 +288,41 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 			case "host/runtime/prepareStep": {
 				rt.steps++;
 				if (attempts.has(p.stepId)) invalid("reused attempt");
-				const messages = [];
-				for (const e of rt.history().filter((x) => x.modelVisible && x.kind !== "toolResult")) {
+				const messages = [], sources = [];
+				if (compact && rt.retried && !rt.summary) {
+					// Model attempt sequences: host-owned auxiliary work is committed inside preparation.
+					const input = rt.history().find((e) => e.kind === "input");
+					const stepId = randomUUID(), request = { systemPrompt: "Summarize fixture input", messages: [input.message], tools: [], settings: {} };
+					const intent = put({ kind: "modelRequest", stepId, modelVisible: false, data: { model: modelRef, request, safeToRepeat: false }, sources: [input.id] });
+					const response = put({ kind: "response", stepId, modelVisible: true, message: say("fixture summary"), sources: [intent.id] });
+					rt.summary = put({ kind: "summary", modelVisible: true, data: { summary: "fixture summary" }, sources: [input.id, response.id] });
+					rt.auxiliary = stepId;
+				}
+				for (const e of rt.history().filter((x) => x.modelVisible && x.kind !== "toolResult" &&
+					!rt.summary?.sources.includes(x.id))) {
+					sources.push(e.id);
+					if (e.kind === "summary") {
+						messages.push({ role: "user", content: [{ type: "text", text: e.data.summary }] });
+						continue;
+					}
 					messages.push(e.message);
 					if (e.kind === "response") for (const c of e.message.content.filter((part) => part.type === "toolCall")) {
 						const result = resultFor(rt, c.id)[0];
-						if (result) messages.push(result.message);
+						if (result) {
+						messages.push(result.message);
+						sources.push(result.id);
+					}
 					}
 				}
 				const request = { systemPrompt: "kit", messages, tools: Object.values(tools), settings: {} };
-				attempts.set(p.stepId, { request });
+				attempts.set(p.stepId, { request, sources });
 				return request;
 			}
 			case "host/runtime/model": {
 				const attempt = attempts.get(p.stepId);
 				if (!attempt || attempt.sent || !equal(attempt.request, p.request)) invalid("not the prepared attempt");
 				attempt.sent = true;
-				put({ kind: "modelRequest", stepId: p.stepId, modelVisible: false, data: { model: modelRef, safeToRepeat: false, request: p.request } });
+				attempt.intent = put({ kind: "modelRequest", stepId: p.stepId, modelVisible: false, data: { model: modelRef, safeToRepeat: false, request: p.request }, sources: attempt.sources });
 				const answer = await model(p.request, rt.modelCalls++);
 				attempt.answer = answer;
 				const text = (answer.content ?? []).filter((x) => x.type === "text").map((x) => x.text).join("");
@@ -360,7 +378,7 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 					if (!attempt?.answer || !equal(e.message, attempt.answer)) invalid("response does not match an attempt");
 					if (attempt.saved) return attempt.saved;
 					for (const c of e.message.content.filter((part) => part.type === "toolCall")) known.set(c.id, { id: c.id, name: c.name, input: c.arguments, startedBy: "model", stepId: e.stepId });
-					return (attempt.saved = put({ kind: "response", stepId: e.stepId, message: e.message, modelVisible: true }, "kit-runtime"));
+					return (attempt.saved = put({ kind: "response", stepId: e.stepId, message: e.message, modelVisible: true, sources: [attempt.intent.id] }, "kit-runtime"));
 				}
 				if (e?.kind === "toolResult") {
 					if (e.data?.status === "notStarted") invalid("notStarted is host-owned");
@@ -675,6 +693,13 @@ async function runtimeChecks(part) {
 		let rt = (q.state.rt = scenario({ model: () => say("plain answer") }));
 		let o = await q.request("runtime/runTurn", { turn: turn() });
 		check(`${tag} a text turn completes with its text`, o.outcome?.kind === "completed" && o.result?.text === "plain answer" && Array.isArray(o.result?.openToolCalls), String(JSON.stringify(o)).slice(0, 200));
+		const ordered = (items, needed) => {
+			let last = -1;
+			return needed.every((item) => (last = items.indexOf(item, last + 1)) >= 0);
+		};
+		const callback = (name) => `host/runtime/${name}`;
+		check(`${tag} Model attempt sequences: normal step prepares, dispatches, commits and closes in order`,
+			ordered(rt.order, [callback("newId"), callback("prepareStep"), callback("model"), callback("record"), "hook:step.after"]));
 		check(`${tag} it recorded the response and listed its entries`, rt.records.some((e) => e.kind === "response") && (o.entries ?? []).length > 0, rt.records.map((e) => e.kind).join(","));
 		check(`${tag} it recorded no turnStart or turnEnd: the host records those`, !rt.submitted.some((e) => !["response", "toolResult"].includes(e.kind) && !e.kind.includes(".")), rt.records.map((e) => e.kind).join(","));
 		check(`${tag} turn.end was its last request`, rt.order.at(-1) === "hook:turn.end", rt.order.slice(-4).join(","));
@@ -686,6 +711,22 @@ async function runtimeChecks(part) {
 		// Plugin binding: Runtime callbacks. Each answered attempt has a separate committed response.
 		const retrySteps = rt.records.filter((e) => e.kind === "modelRequest").map((e) => e.stepId);
 		check(`${tag} retry uses a fresh step ID and pairs both attempts with responses`, retrySteps.length === 2 && retrySteps[0] !== retrySteps[1] && equal(rt.records.filter((e) => e.kind === "response").map((e) => e.stepId), retrySteps));
+
+		// Plugin binding: Model attempt sequences (failed attempt, context overflow).
+		check(`${tag} Model attempt sequences: failed response precedes model.failed and step.after precedes retry`,
+			rt.order.indexOf(callback("record")) >= 0 && rt.order.indexOf(callback("record")) < rt.order.indexOf("hook:model.failed") &&
+			ordered(rt.order, [callback("model"), "hook:step.after", callback("model")]));
+		rt = q.state.rt = scenario({ retry: true, compact: true, model: (_req, n) => n === 0
+			? { role: "assistant", content: [], stop: "failed", error: { kind: "contextTooLarge", message: "fixture overflow" }, usage: usage0 }
+			: say("after compaction") });
+		o = await q.request("runtime/runTurn", { turn: turn() });
+		const intents = rt.records.filter((e) => e.kind === "modelRequest");
+		check(`${tag} Model attempt sequences: context overflow requests fresh preparation after a retry without replacement`,
+			o.outcome?.kind === "completed" && rt.steps === 2 && rt.modelCalls === 2 &&
+			new Set(intents.map((e) => e.stepId)).size === 3 && intents[1]?.stepId === rt.auxiliary &&
+			rt.records.indexOf(rt.summary) < rt.records.indexOf(intents[2]) &&
+			ordered(rt.order, [callback("model"), callback("record"), "hook:model.failed", callback("prepareStep"), callback("model")]) &&
+			ordered(rt.order, [callback("model"), "hook:step.after", callback("prepareStep")]));
 
 		rt = q.state.rt = scenario({ model: (_r, n) => (n === 0 ? callTools(["read", { path: "a" }]) : say("after the tool")) });
 		o = await q.request("runtime/runTurn", { turn: turn() });

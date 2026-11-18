@@ -8,7 +8,7 @@ const digest = (value) => createHash("sha256").update(value).digest();
 export function historyService(raw, tokenFile) {
 	if (!raw || !tokenFile) throw new Error("set MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE to disposable service settings");
 	const url = new URL(raw);
-	if (url.username || url.password || url.search || url.hash || (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))) throw new Error("use a disposable service with HTTPS or loopback HTTP");
+	if (url.username || url.password || url.search || url.hash || (url.protocol !== "https:" && !(url.protocol === "http:" && (url.hostname.startsWith("127.") || url.hostname === "[::1]")))) throw new Error("use a disposable service with HTTPS or loopback HTTP");
 	const token = readFileSync(tokenFile, "utf8").trim();
 	const path = (id) => `/v1/sessions/${encodeURIComponent(id)}`;
 	const request = (route, init = {}) => fetch(url.href.replace(/\/$/, "") + route, { ...init, redirect: "error", signal: AbortSignal.timeout(15000), headers: { authorization: `Bearer ${token}`, ...(init.body ? { "content-type": "application/json" } : {}) } });
@@ -31,7 +31,7 @@ export function historyService(raw, tokenFile) {
 			throw new Error("history fixture exceeded the page watchdog");
 		},
 		// Shared data: Job reports. Observe actual append boundaries, not just two adjacent records.
-		async observe() {
+		async observe({ beforeReply } = {}) {
 			const batches = [];
 			const server = createServer(async (req, res) => {
 				try {
@@ -50,7 +50,9 @@ export function historyService(raw, tokenFile) {
 						if (events.length) batches.push(events);
 					}
 					const headers = Object.fromEntries(["content-type", "www-authenticate"].flatMap((k) => r.headers.has(k) ? [[k, r.headers.get(k)]] : []));
-					res.writeHead(r.status, headers).end(Buffer.from(await r.arrayBuffer()));
+					const bytes = Buffer.from(await r.arrayBuffer());
+					await beforeReply?.({ method: req.method, path: req.url, ok: r.ok });
+					res.writeHead(r.status, headers).end(bytes);
 				} catch { res.destroy(); }
 			});
 			await new Promise((resolve, reject) => server.once("error", reject).listen(0, "127.0.0.1", resolve));

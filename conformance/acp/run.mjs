@@ -351,12 +351,17 @@ if (decl.severalActors) {
 		const a0 = await ask("actors", {});
 		check("actors: lists the connection's actor", (a0.actors ?? []).some((a) => a.kind === "host"), String(JSON.stringify(a0)).slice(0, 200));
 		await ask("join", { actor: { id: "kit-viewer", kind: "user", rights: ["watch"] } });
-		await ask("join", { actor: { id: "kit-guest", kind: "user", rights: ["watch", "propose"] } });
+		const guest = `kit-guest-${randomUUID()}`;
+		await ask("join", { actor: { id: guest, kind: "user", rights: ["watch", "input", "propose", "answer"] } });
 		const a1 = await ask("actors", {});
-		check("join: both actors are listed with their rights", (a1.actors ?? []).some((a) => a.id === "kit-viewer" && a.rights?.length === 1) && (a1.actors ?? []).some((a) => a.id === "kit-guest"), String(JSON.stringify(a1.actors)).slice(0, 300));
-		check("input: an actor without input is refused", await refused(ask("input", { actorId: "kit-viewer", content: "viewer input", when: "now" })));
-		const turns = (await history(agent, sessionId)).entries.filter((e) => e.kind === "turnEnd").length;
-		const prop = await ask("input", { actorId: "kit-guest", content: "proposed by the guest", when: "propose" });
+		check("join: both actors are listed with their rights", (a1.actors ?? []).some((a) => a.id === "kit-viewer" && a.rights?.length === 1) && (a1.actors ?? []).some((a) => a.id === guest && a.rights.includes("input")), String(JSON.stringify(a1.actors)).slice(0, 300));
+		// ACP: Several actors. No launcher config represents this fresh actor id.
+		const before = await history(agent, sessionId, { all: true });
+		const deniedInput = await refused(ask("input", { actorId: guest, content: "unrepresented input", when: "propose" }));
+		const deniedAnswer = await refused(ask("answer", { actorId: guest, requestId: randomUUID(), value: "not represented" }));
+		check("Several actors: join confers neither presence nor authority to input or answer as that actor", deniedInput && deniedAnswer && !a1.present?.includes(guest) && equal(await history(agent, sessionId, { all: true }), before));
+		const turns = before.entries.filter((e) => e.kind === "turnEnd").length;
+		const prop = await ask("input", { content: "kit proposal for release", when: "propose" });
 		check("propose: proposed input waits", prop.taken === "proposed" && typeof prop.inputId === "string", JSON.stringify(prop));
 		await sleep(500);
 		check("propose: nothing runs before a release", (await history(agent, sessionId)).entries.filter((e) => e.kind === "turnEnd").length === turns);
@@ -367,30 +372,43 @@ if (decl.severalActors) {
 			await sleep(100);
 			const es = (await history(agent, sessionId)).entries;
 			// The released input's turn has replied and ended.
-			ran = said(es, "echo: proposed by the guest") && es.filter((e) => e.kind === "turnEnd").length > turns;
+			ran = said(es, "echo: kit proposal for release") && es.filter((e) => e.kind === "turnEnd").length > turns;
 		}
 		check("release: the released input ran as a turn", ran);
 		check("proposals: the proposals extensions are listed", ["proposals", "withdraw"].every((x) => extensions.includes(x)), JSON.stringify(extensions));
-		const p2 = await ask("input", { actorId: "kit-guest", content: "a second proposal", when: "propose" });
+		const p2 = await ask("input", { content: "a second proposal", when: "propose" });
 		const listed = (await ask("proposals", {})).proposals ?? [];
-		check("proposals: a proposal is listed with its proposer", listed.some((x) => x.inputId === p2.inputId && x.actorId === "kit-guest") && !listed.some((x) => x.inputId === prop.inputId), String(JSON.stringify(listed)).slice(0, 200));
+		check("proposals: a proposal is listed with its proposer", listed.some((x) => x.inputId === p2.inputId && a0.present?.includes(x.actorId)) && !listed.some((x) => x.inputId === prop.inputId), String(JSON.stringify(listed)).slice(0, 200));
 		check("proposals: content is shared-shape content, every part with a type", listed.every((x) => Array.isArray(x.content) && x.content.every((part) => typeof part?.type === "string")), String(JSON.stringify(listed.map((x) => x.content))).slice(0, 200));
 		await ask("withdraw", { inputId: p2.inputId });
 		await sleep(400);
 		const after = (await ask("proposals", {})).proposals ?? [];
 		const es2 = (await history(agent, sessionId)).entries;
 		check("withdraw: the proposal is gone, handed back, and never ran", !after.some((x) => x.inputId === p2.inputId) && es2.some((e) => e.kind === "inputHandedBack" && (e.data?.inputIds ?? []).includes(p2.inputId)) && !said(es2, "echo: a second proposal"), String(JSON.stringify(after)).slice(0, 200));
-		await ask("join", { actor: { id: "kit-guest", kind: "user", rights: ["watch"] } });
-		check("join again: taking a right away holds", await refused(ask("input", { actorId: "kit-guest", content: "no longer allowed", when: "propose" })));
+		await ask("join", { actor: { id: guest, kind: "user", rights: ["watch"] } });
+		check("join again: replaces recorded rights", (await ask("actors", {})).actors.some((a) => a.id === guest && equal(a.rights, ["watch"])));
 		await ask("leave", { actorId: "kit-viewer" });
 		const a2 = await ask("actors", {});
-		// ACP: Several actors. A durable leave also removes this connection's delegate binding.
-		check("leave: a revoked delegate cannot give input", await refused(ask("input", { actorId: "kit-viewer", content: "revoked input", when: "now" })));
 		check("leave: the actor is gone", !(a2.actors ?? []).some((a) => a.id === "kit-viewer"), String(JSON.stringify(a2.actors)).slice(0, 200));
 		const kinds = (await history(agent, sessionId)).entries.map((e) => e.kind);
 		check("actors: recorded as actorJoined and actorLeft", kinds.includes("actorJoined") && kinds.includes("actorLeft"), [...new Set(kinds)].join(","));
 	});
 }
+
+// ACP: Extension methods (Move); Contracts: Moving and rewinding.
+if (extensions.includes("move")) await attempt("move to an entry inside a settled turn", async () => {
+	const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+	sessionsUsed.push(s.sessionId);
+	try {
+		await setOption(agent, s.sessionId, "model", "conformance/echo");
+		await within(15000, prompt(agent, s.sessionId, "move fixture"), "seed move fixture");
+		const before = await history(agent, s.sessionId, { all: true });
+		const target = before.entries.find((e) => e.kind === "response" && e.turnId && before.entries.some((end) => end.kind === "turnEnd" && end.turnId === e.turnId));
+		if (!target) throw Error("fixture did not record a response inside a settled turn");
+		const e = await agent.ctx.request(`_${NS}/move`, { sessionId: s.sessionId, entryId: target.id }).catch((e) => e);
+		check("Moving and rewinding: a plain move to a non-quiescent entry is refused without a position record", e?.code === -32602 && e?.data?.code === "conflict" && equal(await history(agent, s.sessionId, { all: true }), before));
+	} finally { await closeSession(agent, s.sessionId); }
+});
 
 if (decl.rewinding) {
 	await attempt("rewinding", async () => {
@@ -403,6 +421,17 @@ if (decl.rewinding) {
 		check("rewinding: move with rewind restores the file", existsSync(file) && readFileSync(file, "utf8").trim() === "one", existsSync(file) ? readFileSync(file, "utf8") : "missing");
 		const branch = (await history(agent, sessionId)).entries;
 		check("rewinding: the branch ends at the entry moved to", branch.at(-1)?.id === mark, `${branch.at(-1)?.kind}`);
+		// Shared data: Rewinding. No new history entry intervenes before reopen.
+		if (store) {
+			const positions = (await store.pages(sessionId)).slice(-2);
+			check("Rewinding: restore intent is followed by a completed position before success", positions.length === 2 &&
+				positions.every((e) => e.kind === "position" && e.data?.to === mark) &&
+				!!positions[0].data.restore?.point && !!positions[0].data.restore?.undo && !Object.hasOwn(positions[1].data, "restore") && !positions[1].data.failed);
+		}
+		await closeSession(agent, sessionId);
+		writeFileSync(file, "edited after completed rewind\n");
+		await within(await reopenWatchdog(), agent.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "reopen after rewind");
+		check("Rewinding: a completed rewind is not replayed on reopen", readFileSync(file, "utf8").trim() === "edited after completed rewind");
 		const r = await within(15000, prompt(agent, sessionId, "after the rewind"), "prompt after rewind");
 		check("rewinding: the session carries on", r.stopReason === "end_turn", r.stopReason);
 	});
@@ -628,6 +657,42 @@ if (probeChecks) {
 		await closeSession(agent, s.sessionId);
 	});
 
+	// ACP: Approvals and Questions. Reject both forms of the changed view.
+	if (agent.state.hasApproval) await attempt("approval view rejected by the gate", async () => {
+		const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+		sessionsUsed.push(s.sessionId);
+		const sid = s.sessionId;
+		const permissions = agent.permissions.length;
+		let release;
+		agent.state.permissionHandler = () => new Promise((r) => { release = r; });
+		try {
+			await setOption(agent, sid, "model", "conformance/echo");
+			await setOption(agent, sid, "approval", "all");
+			const pending = prompt(agent, sid, 'tool:bash {"command":"echo ran > kit-gated-approval.txt"}');
+			void pending.catch(() => undefined);
+			const find = (es) => es.find((e) => e.kind === "inputRequest" && e.data?.request?.kind === "approval");
+			const question = find(await waitFor(agent, sid, (es) => !!find(es), 5000));
+			const id = question?.requestId ?? question?.data?.request?.id;
+			if (!id) throw Error("fixture approval request not recorded");
+			const view = await agent.ctx.request(`_${NS}/requests`, { sessionId: sid }).catch((e) => e);
+			const answer = await agent.ctx.request(`_${NS}/answer`, { sessionId: sid, requestId: id, value: "allow" }).catch((e) => e);
+			const gated = trace("output-observer").some((p) => p.approvalView && p.sessionId === sid);
+			check("Approvals / Questions: an altered approval view cannot authorize this recipient's answer", gated &&
+				agent.permissions.length === permissions && !view?.requests?.some((q) => q.id === id && q.answerable) &&
+				equal(answer, { accepted: false, reason: "not_open" }));
+			release?.({ outcome: { outcome: "cancelled" } });
+			await within(10000, pending, "approval with no usable route");
+			const { entries } = await history(agent, sid, { all: true });
+			check("Questions: with no exact approval route the call is refused without dispatch", !!question.toolCallId &&
+				entries.some((e) => e.kind === "toolResult" && e.toolCallId === question.toolCallId && e.data?.status === "refused") &&
+				!existsSync(join(project, "kit-gated-approval.txt")));
+		} finally {
+			release?.({ outcome: { outcome: "cancelled" } });
+			delete agent.state.permissionHandler;
+			await closeSession(agent, sid);
+		}
+	});
+
 	// Plugin binding: Runtime records and effects and Runtime callbacks.
 	await attempt("remote Runtime host", async () => {
 		const plugin = { command: [process.execPath, new URL("../plugin/probe.mjs", import.meta.url).pathname], config: { role: "runtime", out: probeOut("runtime") } };
@@ -645,14 +710,32 @@ if (probeChecks) {
 				const c = log.find((x) => x.test === name)?.checks ?? {};
 				check(`remote Runtime ${name}: host rejects record of a host-owned setting`, c.hostKind);
 				check(`remote Runtime ${name}: host commits exact modelRequest`, c.modelIntent);
-				check(`remote Runtime ${name}: dispatch requires exact allowed decision`, c.dispatch && equal(log.filter((x) => x.effect).slice(before).map((x) => x.effect), name === "exact" ? [{ value: "original" }] : []));
+				check(`remote Runtime ${name}: dispatch requires exact allowed decision`, c.dispatch && equal(log.filter((x) => x.effect).slice(before).map((x) => x.effect), name === "changed" ? [] : [{ value: "original" }]));
 				check(`remote Runtime ${name}: host commits toolResult before replying`, c.resultCommit);
-				if (name === "exact") check("remote Runtime exact: repeating the matching record returns the committed result", c.cachedResult);
+				if (name === "omitted") check("Runtime callbacks: runToolCall before allowance returns invalid_request without writing", c.earlyDispatch);
+				if (name === "exact") {
+					check("Runtime callbacks: tool.before on an allowed or settled call returns invalid_request without writing", c.repeatedGate && c.settledGate);
+					check("Runtime callbacks: runToolCall after settlement returns invalid_request without writing", c.settledDispatch);
+					check("remote Runtime exact: repeating the matching record returns the committed result", c.cachedResult);
+				}
 			}
 			await closeSession(remote, s.sessionId);
 		} finally { await stop(remote); }
 	});
 }
+
+// Plugin binding: The host asks a tool source. Run last for this source: its catalog stays unavailable.
+if (probeChecks) await attempt("tool catalog refresh fails", async () => {
+	const sid = sessionId;
+	const n = trace("probe-events").filter((e) => e.refreshFailed).length;
+	await within(15000, prompt(agent, sid, 'tool:probe-refresh {"fail":true}'), "tool returns despite failed refresh").catch(() => undefined);
+	const { entries } = await history(agent, sid, { all: true });
+	const result = entries.find((e) => e.kind === "toolResult" && e.message?.content?.some((p) => p.text === "fixture result before list failure"));
+	check("The host asks a tool source: failed refresh does not replace or withhold the triggering result", trace("probe-events").filter((e) => e.refreshFailed).length > n &&
+		result?.data?.status === "completed" &&
+		agent.updates.some((u) => u.sessionId === sid && u.update.sessionUpdate === "tool_call_update" &&
+			u.update.toolCallId === result.toolCallId && u.update.status === "completed"));
+});
 
 if (jobChecks) {
 	await attempt("jobs", async () => {
@@ -726,6 +809,70 @@ await attempt("load in a new process", async () => {
 		}
 	}
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
+});
+
+// ACP: Input admission and Extension methods (Erase). Resend through both admission routes.
+if (decl.erasure && extensions.includes("erase")) await attempt("erased input key", async () => {
+	const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+	sessionsUsed.push(s.sessionId);
+	const sid = s.sessionId;
+	try {
+		await setOption(agent, sid, "model", "conformance/echo");
+		const key = randomUUID(), content = "erase this fixture input";
+		const first = await within(15000, prompt(agent, sid, content, key), "admit erasable input");
+		const id = meta(first)?.inputId;
+		const log = (await history(agent, sid, { all: true })).entries;
+		const input = log.find((e) => e.kind === "input" && (e.inputId ?? e.data?.inputId) === id)
+			?? log.find((e) => e.kind === "input" && e.message?.content?.some((p) => p.text === content));
+		if (!id || !input) throw Error("erasable fixture input was not admitted and consumed");
+		const erased = await agent.ctx.request(`_${NS}/erase`, { sessionId: sid, entryIds: [input.id] });
+		check("Input admission: selected input was erased", erased.erased.includes(input.id));
+		await closeSession(agent, sid);
+		await within(await reopenWatchdog(), agent.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "load erased input fixture");
+		const before = await history(agent, sid, { all: true });
+		const inputReply = await agent.ctx.request(`_${NS}/input`, { sessionId: sid, content, when: "now", key }).catch((e) => e);
+		const promptReply = await within(15000, prompt(agent, sid, content, key), "resend erased prompt").catch((e) => e);
+		const receipt = { duplicate: true, erased: true };
+		check("Input admission: erased input key returns only the erased duplicate receipt", equal(inputReply, receipt));
+		check("Input admission: erased prompt key returns end_turn without an old input id or outcome", promptReply.stopReason === "end_turn" && equal(meta(promptReply), receipt));
+		check("Input admission: resending an erased key does not write or start work", equal(await history(agent, sid, { all: true }), before));
+	} finally { await closeSession(agent, sid).catch(() => undefined); }
+});
+
+// History HTTP: Writing: one writer at a time. The upstream writer is still current;
+// the fault is the late reply, not service-side rejection of an expired generation.
+if (crashChecks && store) await attempt("delayed history renewal", async () => {
+	const { ttlMs } = await store.json("/v1");
+	if (!(ttlMs >= 1000 && ttlMs <= 10000)) {
+		console.log("SKIP  delayed renewal fixture needs a service TTL between 1 and 10 seconds");
+		return;
+	}
+	let sid, markHeld, markLate;
+	const held = new Promise((r) => { markHeld = r; });
+	const late = new Promise((r) => { markLate = r; });
+	const proxy = await store.observe({ beforeReply: async (r) => {
+		if (!sid || r.method !== "POST" || !r.ok || !r.path.startsWith(store.path(sid) + "/lease/") || !r.path.endsWith("/renew")) return;
+		markHeld();
+		await sleep(Math.ceil(ttlMs * 0.6));
+		markLate();
+	} });
+	const writer = connect(command, { MODULAR_AGENT_HISTORY_URL: proxy.url, MODULAR_AGENT_PLUGINS: "[]" });
+	const marker = join(project, "after-late-renewal.txt");
+	try {
+		await writer.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+		const s = await writer.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+		sid = s.sessionId;
+		await setOption(writer, sid, "model", "conformance/echo");
+		if ((s.configOptions ?? []).some((o) => o.id === "approval")) await setOption(writer, sid, "approval", "off");
+		await within(15000, prompt(writer, sid, "seed delayed renewal fixture"), "start history writer");
+		await within(ttlMs * 2, held, "capture a successful upstream renewal");
+		await within(ttlMs, late, "release the renewal after the writer's cutoff");
+		await sleep(Math.ceil(ttlMs / 12));
+		const prior = new Set((await store.pages(sid)).map((e) => e.id));
+		await within(15000, prompt(writer, sid, 'tool:bash {"command":"echo ran > after-late-renewal.txt"}'), "input after late lease success").catch(() => undefined);
+		const later = (await store.pages(sid)).filter((e) => !prior.has(e.id));
+		check("Writing: one writer at a time: a delayed renewal success cannot revive dispatch authority", !existsSync(marker) && !later.some((e) => e.kind === "modelRequest" || e.kind === "toolStarted"));
+	} finally { await stop(writer); proxy.stop(); }
 });
 
 if (crashChecks) {
@@ -834,6 +981,83 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 	} finally { await stop(s); }
 });
 
+// Plugin binding: Model attempt sequences (crash recovery). Seed interrupted attempts in shared data.
+if (probeChecks && portableChecks) for (const [mode, safe] of [
+	["transient", false], ["fresh", false], ["fresh", true], ["repeat", true],
+]) await attempt(`remote recovery: ${mode} with ${safe ? "repeatable" : "unsafe"} attempt`, async () => {
+	const sid = `kit-runtime-${randomUUID()}`, turnId = "interrupted-turn";
+	const model = { provider: "kit-recovery", id: "echo" };
+	const role = `runtime-${mode}-${safe}`;
+	const plugin = { command: [process.execPath, new URL("../plugin/recovery.mjs", import.meta.url).pathname],
+		config: { sessionId: sid, mode, safe, out: probeOut(role) } };
+	const remote = connect(command, { MODULAR_AGENT_PLUGINS: JSON.stringify([plugin]) });
+	try {
+		const init = await remote.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+		const principal = meta(init)?.actor;
+		if (!principal?.id || !principal.kind) throw Error("reopener did not identify a configured actor");
+		const rights = ["watch", "input", "settings", "cancel"];
+		const actor = { id: principal.id, kind: principal.kind, rights };
+		const authorizers = [{ sessionId: sid, actorId: actor.id }];
+		const content = [{ type: "text", text: "Recover this fixture input" }];
+		const message = { role: "user", content };
+		const system = "Fixture checkpoint";
+		const request = { systemPrompt: system, messages: [message], tools: [], settings: {} };
+		const inputId = "fixture-input";
+		const entryId = (i) => `entry-${i}`;
+		const rows = [
+			{ kind: "actorJoined", data: { actor, operatorAdmission: true } },
+			{ kind: "setting", data: { key: "model", value: model } },
+			{ kind: "inputAccepted", inputId, actorId: actor.id, data: { when: "now", taken: "now", content, authorizers, rights } },
+			{ kind: "turnStart", turnId, data: { startedBy: { kind: "actor", id: actor.id }, model, system, tools: [], settings: {}, authorizers, rights } },
+			{ kind: "input", turnId, inputId, actorId: actor.id, message, modelVisible: true },
+			{ kind: "modelRequest", turnId, stepId: "old-step", data: { model, safeToRepeat: safe, ...(safe ? { request } : {}) }, sources: [entryId(4)] },
+		];
+		const time = Date.now();
+		const entries = rows.map((row, i) => ({ sessionId: sid, time, writer: "kit-history-fixture", modelVisible: false,
+			id: entryId(i), parentId: i ? entryId(i - 1) : null, ...row }));
+		const base = store.path(sid);
+		await store.json(base, "PUT", { project, created: time });
+		const { lease } = await store.json(base + "/lease", "POST", { owner: randomUUID() });
+		await store.json(base + "/entries", "POST", { lease, entries });
+		await store.json(base + "/lease/" + encodeURIComponent(lease), "DELETE");
+		await within(await reopenWatchdog(), remote.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "load interrupted remote Runtime");
+		const terminal = (es) => es.find((e) => e.kind === "turnEnd" && e.turnId === turnId);
+		const kept = await waitFor(remote, sid, (es) => !!terminal(es), 8000);
+		const aborted = (es) => es.filter((e) => e.kind === "response" && e.turnId === turnId && e.stepId === "old-step" &&
+			e.message?.stop === "aborted" && e.data?.recovery === true && e.modelVisible === false).length === 1;
+		const intent = (es) => es.filter((e) => e.kind === "modelRequest" && e.turnId === turnId && e.stepId !== "old-step");
+		const log = trace(role);
+		const resume = log.find((x) => x.resume);
+		const prepared = log.find((x) => x.prepared);
+		const dispatched = log.filter((x) => x.provider);
+		const label = `Model attempt sequences (${mode}, safeToRepeat=${safe})`;
+		check(`${label}: resume uses the interrupted turn id and checkpoint`, resume?.turnId === turnId &&
+			resume.resume.turnId === turnId && equal(resume.resume.calls, []) &&
+			resume.log.some((e) => e.kind === "turnStart" && e.turnId === turnId && e.data?.system === system) &&
+			resume.log.some((e) => e.kind === "input" && e.turnId === turnId && equal(e.message, message)));
+		if (!safe) check(`${label}: unsafe attempt is aborted before resumeTurn`, !!resume && aborted(resume.log));
+		if (mode === "transient") {
+			check(`${label}: transient recovery ends the turn without a new model attempt`, !!terminal(kept) &&
+				terminal(kept).data?.outcome?.kind !== "completed" && !dispatched.length && intent(await store.pages(sid)).length === 0);
+		} else {
+			const saved = dispatched[0]?.log ?? [];
+			const beforeEffect = intent(saved);
+			check(`${label}: old attempt closes before one fresh checkpointed dispatch`, dispatched.length === 1 &&
+				aborted(saved) && beforeEffect.length === 1 && equal(beforeEffect[0].data?.model, model) &&
+				terminal(kept)?.data?.outcome?.kind === "completed");
+			if (mode === "repeat") {
+				check(`${label}: exact repeat stays unmatched at resume and replays the effective request without prepareStep`,
+					!!resume && !resume.log.some((e) => e.kind === "response" && e.stepId === "old-step") && !prepared &&
+					equal(dispatched[0]?.provider, request) && equal(beforeEffect[0]?.data?.request, request));
+			} else {
+				check(`${label}: fresh prepareStep has already settled the old intent`, !!prepared && aborted(prepared.log) &&
+					prepared.prepared === beforeEffect[0]?.stepId);
+			}
+		}
+		await closeSession(remote, sid);
+	} finally { await stop(remote); }
+});
+
 if (jobChecks && crashChecks) {
 	await attempt("jobs after a crash", async () => {
 		await stop(agent);
@@ -858,6 +1082,7 @@ if (jobChecks && crashChecks) {
 		const ended = entries.filter((e) => e.kind === "jobEnded" && e.jobId === jobId);
 		check("jobs after a crash: the reopening agent's plugin took the job up, and it ended once", ended.length === 1 && ended[0].data?.outcome?.kind === "completed", String(JSON.stringify(ended)).slice(0, 200));
 		// Jobs and Shared data: Job reports. Acceptance is distinct from scheduling.
+		check("Jobs: resuming an already running job on the same plugin connection is invalid_request", trace("jobs").some((x) => x.resumed === jobId && x.duplicateRefused === true));
 		check("jobs after a crash: one resumed execution admits one report", trace("jobs").filter((x) => x.resumed === jobId).length === 1 && entries.filter((e) => e.kind === "inputAccepted" && e.data?.key === `job:${jobId}`).length === 1);
 		if (meta(loaded)?.declaration?.startsTurnsUnasked === "jobReports") check("jobs after a crash: its report ran as a turn", said(entries, "echo: background: kit-survivor (taken up)"));
 		await agent.ctx.request(methods.agent.session.close, { sessionId: sid });

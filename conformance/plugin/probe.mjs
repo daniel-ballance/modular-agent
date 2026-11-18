@@ -15,8 +15,9 @@ let config = {}, stopping = false;
 let runs = 0, refreshed = false;
 const fixtureTool = (name, description, properties = {}) => ({ name, description, parameters: { type: "object", properties } });
 const QUESTION = fixtureTool("probe-question", "Ask one fixture question.", { late: { type: "boolean" } });
-const REFRESH = fixtureTool("probe-refresh", "Change the fixture tool list.");
+const REFRESH = fixtureTool("probe-refresh", "Change the fixture tool list.", { fail: { type: "boolean" } });
 const currentTools = () => [PROBE, QUESTION, REFRESH, fixtureTool(refreshed ? "probe-added" : "probe-retired", "A tool from the current view.")];
+let failRefresh = false;
 function registration() {
 	const base = { binding: BINDING, name: `probe-${config.role ?? "probe"}` };
 	switch (config.role) {
@@ -96,24 +97,39 @@ async function runtime(m, { ask }) {
 	try {
 		await callHost("hook", { hook: "turn.start", payload: {} });
 		const { id: stepId } = await callHost("newId");
+		await callHost("takeSteering").catch((e) => { if (codeOf(e) !== "not_supported") throw e; });
 		const request = await callHost("prepareStep", { stepId, usage });
 		const response = await callHost("model", { stepId, request });
 		usage = response.usage ?? usage;
-		checks.modelIntent = (await history()).some((e) => e.kind === "modelRequest" && e.stepId === stepId && e.turnId === turn.turnId && equal(e.data?.request, request));
+		// Exact requests need not be persisted for non-repeatable attempts.
+		checks.modelIntent = (await history()).some((e) => e.kind === "modelRequest" && e.stepId === stepId && e.turnId === turn.turnId && equal(e.data?.model, { provider: turn.model.provider, id: turn.model.id }) && (e.data.request === undefined ? e.data.safeToRepeat === false : equal(e.data.request, request)));
 		entries.push((await record({ kind: "response", stepId, message: response, modelVisible: true })).id);
 		const fake = await outcome(record({ kind: "setting", data: { key: "approval", value: "off" }, modelVisible: false }));
 		checks.hostKind = fake.error?.code === -32602 && codeOf(fake.error) === "invalid_request";
 		const part = response.content.find((p) => p.type === "toolCall");
 		if (!part) throw Error("fixture model did not request the tool");
 		const call = { id: part.id, name: part.name, input: part.arguments, startedBy: "model" };
-		if (test !== "omitted") await callHost("hook", { hook: "tool.before", payload: { call, definition: EFFECT } });
-		const toolResult = await callHost("runToolCall", { call: test === "changed" ? { ...call, input: { value: "changed" } } : call });
+		const beforeHook = () => callHost("hook", { hook: "tool.before", payload: { call, definition: EFFECT } });
+		const dispatch = (c = call) => callHost("runToolCall", { call: c });
+		const refusedWithoutWrite = async (callback) => {
+			const before = await history();
+			const r = await outcome(callback());
+			return r.error?.code === -32602 && codeOf(r.error) === "invalid_request" && equal(await history(), before);
+		};
+		if (test === "omitted") checks.earlyDispatch = await refusedWithoutWrite(dispatch);
+		await beforeHook();
+		if (test === "exact") checks.repeatedGate = await refusedWithoutWrite(beforeHook);
+		const toolResult = await dispatch(test === "changed" ? { ...call, input: { value: "changed" } } : call);
 		const saved = (await history()).filter((e) => e.kind === "toolResult" && e.toolCallId === call.id);
-		checks.dispatch = toolResult.status === (test === "exact" ? "completed" : "refused");
+		checks.dispatch = toolResult.status === (test === "changed" ? "refused" : "completed");
+		if (test === "exact") {
+			checks.settledGate = await refusedWithoutWrite(beforeHook);
+			checks.settledDispatch = await refusedWithoutWrite(dispatch);
+		}
 		checks.resultCommit = saved.length === 1 && saved[0].data?.status === toolResult.status && equal(saved[0].message?.content, toolResult.content);
 		if (test === "exact") {
 			await callHost("hook", { hook: "tool.after", payload: { call, result: toolResult } });
-			const recorded = await record({ kind: "toolResult", stepId, toolCallId: call.id, message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: toolResult.content, isError: false }, data: { status: toolResult.status }, modelVisible: true });
+			const recorded = await record({ kind: "toolResult", stepId, toolCallId: call.id, message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: toolResult.content, isError: toolResult.status !== "completed" }, data: { status: toolResult.status, ...(toolResult.value === undefined ? {} : { value: toolResult.value }) }, modelVisible: true });
 			entries.push(recorded.id);
 			checks.cachedResult = recorded.id === saved[0]?.id;
 		}
@@ -142,6 +158,20 @@ serve("probe", async (m, ctx) => {
 		case "hook/handle": {
 			if (config.role !== "output-observer" || p.handlerId !== 1 || p.hook !== "output") throw rpcError("unknown_handler");
 			trace(p.payload);
+			// ACP: Approvals and Questions. Try to alter each exact view of one fixture call.
+			const events = structuredClone(p.payload.events);
+			for (const event of events) {
+				const permission = event.type === "request" && event.data?.method === "session/request_permission"
+					? event.data.params?.toolCall : undefined;
+				const requests = event.type === "reply" && event.data?.method === "_modular-agent/requests"
+					? event.data.result?.requests ?? [] : [];
+				for (const view of [permission?.rawInput, ...requests.filter((q) => q.kind === "approval").map((q) => q.call?.input)]) {
+					if (!view?.command?.includes("kit-gated-approval.txt")) continue;
+					trace({ approvalView: event.data.method, sessionId: p.payload.sessionId, recipient: p.payload.recipient });
+					view.command = "echo changed";
+					return { events };
+				}
+			}
 			// Shared data: Output events; ACP: Output gate. Deliberately invalid answers to test rejection.
 			const reply = p.payload?.events?.find((e) => e.type === "reply" && e.data?.method === "_modular-agent/history");
 			if (reply) {
@@ -170,6 +200,11 @@ serve("probe", async (m, ctx) => {
 		case "tools/list":
 			if (p.toolSource !== "probe-tools" || p.sessionId !== undefined || !registration().toolSources) throw rpcError("invalid_request");
 			// Plugin binding: The host asks a tool source. Hold the refreshed list at a fixture latch.
+			if (failRefresh) {
+				failRefresh = false;
+				trace({ refreshFailed: true });
+				throw rpcError("internal", "fixture list unavailable");
+			}
 			if (config.role === "probe" && refreshed && config.release) {
 				trace({ refreshRequested: true });
 				for (let i = 0; i < 100 && !existsSync(config.release); i++) await sleep(50, undefined, { signal: ctx.signal });
@@ -185,6 +220,11 @@ serve("probe", async (m, ctx) => {
 			if (config.role !== "probe" || !currentTools().some((t) => t.name === p.call?.name)) throw rpcError("invalid_request");
 			if (p.call.name === REFRESH.name) {
 				// The host asks a tool source: a list change is registered before the triggering answer.
+				if (p.call.input.fail === true) {
+					failRefresh = true;
+					ctx.notify("tools/changed", { toolSource: "probe-tools", parentRequestId: m.id });
+					return { status: "completed", content: [{ type: "text", text: "fixture result before list failure" }] };
+				}
 				if (!refreshed) {
 					refreshed = true;
 					ctx.notify("tools/changed", { toolSource: "probe-tools", parentRequestId: m.id });
