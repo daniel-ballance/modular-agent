@@ -5,9 +5,11 @@ This binding defines shared JSON shapes and how to reconstruct a portable sessio
 ## General rules
 
 - A sender MUST encode JSON as UTF-8 without a byte order mark. A receiver MUST reject invalid UTF-8, unpaired surrogates, duplicate object member names and malformed known fields. A malformed known variant is not an extension. The enclosing binding defines its errors and size limits.
+- Receivers MUST accept valid JSON nested up to 64 levels, counting an outermost object or array as level 1 and each nested object or array as another level. A scalar does not add a level. Receivers MAY refuse deeper JSON with `invalid_request` as mapped by the enclosing binding.
+- Each size limit MUST count the exact UTF-8 bytes sent for the bounded value, including any whitespace or escape sequences in it. A sender's preflight MUST use its own encoding. A receiver that prepares a page in reply to a request MUST measure the page in the encoding it sends. Bindings define what each limit counts: a stdio line, an HTTP body or a value within a message.
 - A field marked `?` MUST default to absent unless a different default is stated. All other listed fields are required and have no default. Only a type that includes `null` or arbitrary JSON admits null; null is not omission.
 - Known fields MUST use the names shown. A receiver MUST keep unknown fields recursively as inert data when storing or relaying a shape, except for explicit projections, redaction or erasure. It MUST NOT use unknown data to grant rights, change a ceiling or change how known fields are checked. Preservation is not permission to disclose a field.
-- Equality MUST compare JSON by value: exact strings without normalization, numbers by numeric value, arrays in order and objects by member name and value regardless of member order. Thus `0`, `-0` and `0.0` compare equal, and absent differs from null. Implementations MUST compare number literals as exact decimal values, including when they relay opaque JSON. A build does not need to represent arbitrary JSON numbers in its own arithmetic.
+- Equality MUST compare JSON by value: exact strings without normalization, numbers by numeric value, arrays in order and objects by member name and value regardless of member order. Thus `0`, `-0` and `0.0` compare equal, and absent differs from null. Implementations MUST preserve exact numeric value when comparing or relaying opaque JSON. A relay does not need to preserve a number's spelling or represent it in its own arithmetic.
 - `Count` is an integer from 0 through 9,007,199,254,740,991. `Time` and `Duration` are Counts in milliseconds, since the Unix epoch for Time. `Id` is a nonempty, case-sensitive string. `object` means a JSON object; `JSON` includes any JSON value. An array admits zero items unless stated otherwise. Lengths stated in characters count Unicode code points.
 
 | Identity | Required scope |
@@ -105,7 +107,7 @@ An InputRequestDraft has `kind: "approval" | "choice" | "text" | "link" | "secre
 | `link` | `details: string` (absolute URI) | Any string acknowledgment |
 | `secret` | `credential: Id`, the storage name | The value goes only to the credential store, not in the Answer |
 
-A recorded InputRequest includes the draft plus `id: Id`, `sessionId: Id`, `answerable: boolean`, `toolCallId?: Id`, `askedBy?: Id`, `deadlineAt?: Time` and `relayedFrom?: { sessionId: Id, requestId: Id }` (the child request for a relay, otherwise absent). The host MUST fill the IDs and `answerable`, name the authenticated asker in `askedBy` for new records and persist `deadlineAt` for a timed request before publishing it. The deadline is the request entry's time plus the time limit; zero means immediate expiry. Legacy timed requests without a deadline MUST use that same calculation. A receiver MUST refuse an unrepresentable deadline or a supplied deadline inconsistent with the question time. An untimed request MUST NOT carry a deadline. `answerable` is the state at publication, not authority.
+A recorded InputRequest includes the draft plus `id: Id`, `sessionId: Id`, `answerable: boolean`, `toolCallId?: Id`, `askedBy?: Id`, `deadlineAt?: Time` and `relayedFrom?: { sessionId: Id, requestId: Id }` (the child request for a relay, otherwise absent). The host MUST fill the IDs and `answerable`, name the authenticated asker in `askedBy` for new records and persist `deadlineAt` for a timed request before publishing it. The deadline is the request entry's time plus the time limit; zero means immediate expiry. Legacy timed requests without a deadline MUST use that same calculation. A receiver MUST refuse an unrepresentable deadline or a supplied deadline inconsistent with the question time. An untimed request MUST NOT carry a deadline. `answerable` is the state at publication, not authority. [ACP Request](acp.md#request) defines the value for each recipient's projection.
 
 For approval, the host MUST keep the exact bound `call: ToolCall`, `source` and `definition` on the `inputRequest` entry, in `data` alongside `request`. The registration fields use the `toolStarted` shape. [Core approval policy](../contracts.md#approval-policy) governs reuse.
 
@@ -140,7 +142,7 @@ Actor is `{ id: Id, kind: "user" | "host" | "agent" | "program", rights: Rights 
 | `answer` | Answer questions other than approvals. |
 | `approve` | Answer approvals. |
 | `tools` | Have tools run for this actor. |
-| `cancel` | Cancel turns and jobs. |
+| `cancel` | Cancel turns, calls and jobs, including on [session close](../contracts.md#authority). |
 | `settings` | Change session settings. |
 | `erase` | Erase entries. |
 | `grant` | Give or take away another actor's rights. |
@@ -241,6 +243,7 @@ The host and Runtime MUST write the shapes and visibility shown. Associations be
 | `inputRequest` | Host | No | `requestId`, `toolCallId?`, `turnId?`, `stepId?`; `request: InputRequest`, `call: ToolCall`, `source: { plugin: Id, toolSource: Id }` and `definition: ToolDefinition` (last three for approvals only) |
 | `secretAnswerAccepted` | Host | No | `requestId`, `actorId`, `toolCallId?`, `turnId?`, `stepId?`; no payload |
 | `inputAnswer` | Host | No | `requestId`, `toolCallId?`, `turnId?`, `stepId?`; `data: Answer` |
+| `resultFeedback` | Host | Yes, in its next prepared request only | `turnId`; `reason: string` |
 | `turnEnd` | Host | No | `turnId`; `outcome: Outcome`, `result: TurnResult`, `usage: Usage` |
 | `summary` | Host | Yes | `sources: Id[]` (nonempty); `summary: string`, `summarizes?: Id[]` (copied summary's remapped context sources only) |
 | `setting` | Host | No | `actorId?` (defaults or inherited settings if absent); `key: Id`, `value: JSON` (see [setting keys](#setting-keys)) |
@@ -343,7 +346,9 @@ The Harness MUST NOT reopen an unfinished job under a different owner name. The 
 
 - The default view MUST use current-branch model-visible messages, skipping tombstones and private records. It MUST append the current turn's `turnStart.data.system` additions to the base system prompt, with one newline between them when both are nonempty. This binding does not prescribe a base prompt. A context handler MAY project a different view.
 - Before applying summaries, the default view MUST place each included turn's `turnStart.data.context`, when present, as one `user` message at the original first `input` position, just before the input, with the `turnStart` entry ID as its effective source. Without a first input position there is no separate context message. Replacing that `turnStart` removes its context message; replacing the first input alone does not. The reader MUST NOT synthesize or re-anchor context after replacement.
+- The Harness MUST append pending `resultFeedback` to the other messages in the next step preparation, as one `user` message with one text part containing `data.reason`. A feedback entry is pending if it is live on the current branch, belongs to that turn and no later step `modelRequest` in that turn has committed. Its ID is a [request source](#recording-order-and-ownership). Feedback is not part of auxiliary attempts or later turns. An exact replay follows the recorded request rather than projecting feedback again.
 - A summary MUST replace at least one visible effective source on that branch, name all summarized records and keep call/result pairs together. In a fork prefix the reader MUST use `data.summarizes` in place of `sources`, including the destination `turnStart` ID for copied turn context. The default view MUST project the summary as one `user` message with one text part holding `data.summary`, at the earliest removed source. A replacement summary MUST name the summary it replaces. The reader MUST omit a summary with an erased source and refuse malformed summary lineage.
+- The default view MUST omit a `response` with `stop` `failed` or `aborted` and no content. This does not remove the attempt or settlement from history.
 - For an assistant message with calls, the reader MUST place their terminal tool messages immediately after it, in the order of the call parts, regardless of completion order. It MUST omit orphan results and remove call parts whose counterparts cannot be reconstructed due to erasure. It MUST omit call parts from failed, refused, aborted or length-limited responses; partial readable text can remain visible. For a call left open after its turn, the reader MUST use a model-only tool result with `isError: true` and text `This call is waiting for an answer. It has no result yet.` in place of the missing result. It MUST NOT record that projection as a terminal status. Other unresolved calls cannot enter a later step's context. Provider-only data follows [Content](#content).
 - For a new turn the Harness MUST use the current settings. If the recorded model is unavailable, it MUST fail with model error kind `other` and put the explanatory message in the failed turn outcome, without substituting a model. When a selected model advertises a set of accepted reasoning levels, it MUST use the nearest one no higher than the selected level, or omit reasoning if none qualifies.
 - A non-copied `turnStart` on the branch is interrupted only if no `turnEnd` for that ID exists anywhere in the session. The Harness MUST use the recorded model, system, context, offer, settings and shape. It MUST fail the turn and settle unresolved calls if an essential part is unavailable. A turn started by an admission MUST fail without consuming its receipt if its first `input` is missing. A late-answer continuation's checkpoint is its `turnStart` with `continuesTurnId`, the originating turn and the recorded call and question dispositions. The Harness MUST identify starts and questions in the executing turn using [Call identities and mappings](#call-identities-and-mappings). It has no first-input requirement.
@@ -368,7 +373,7 @@ The following append sequence is one turn with one model attempt and one call. S
 
 ## Rewinding
 
-[Moving and rewinding](../contracts.md#moving-and-rewinding) defines when to save points, which target and point are eligible, and when to refuse. `data.point` on `turnStart` or an out-of-turn `toolStarted` holds the saved point. The working environment keeps points at least while the session is open; later retention is environment-specific.
+[Moving and rewinding](../contracts.md#moving-and-rewinding) defines point checks before the journal, eligible targets and when to refuse. `data.point` on `turnStart` or an out-of-turn `toolStarted` holds the saved point. The working environment keeps points at least while the session is open; later retention is environment-specific.
 
 When producing `outOfReach`, the host MUST use `openWorld` recorded on the call's `toolStarted`, treating an absent value as true. It MUST return the IDs of the affected calls in first dispatch order, without repeats.
 
@@ -383,6 +388,8 @@ The Harness MUST use this journal when restoring a point:
 While an intent is unresolved, the Harness MUST block project work and keep other entries from interleaving with the journal. It MUST resume project work only once the target or undo restore has established the files at the head and the matching completion is committed. A missing point or a partial restore is not evidence of completion. A legacy `data.failed: true` record MUST NOT clear that block.
 
 ## Changes
+
+- **Production edition 2.** Measure actual encoded bytes (Go P5), bound JSON nesting and preserve numeric value without requiring the original spelling (TypeScript), omit empty failed or aborted responses from the default model view (Elixir PE-6), and add the `resultFeedback` record and projection (TypeScript). Rewind preflight has a [remote point check](plugin.md#paths-and-points) (Elixir PE-5, Go P9, TypeScript, Python G82).
 
 - Production round two: erasure identities and keys, display-only fork copies, global settlement, request lineage and rewind completion.
 

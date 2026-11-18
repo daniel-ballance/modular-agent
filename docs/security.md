@@ -81,6 +81,7 @@ The operator MUST NOT enable or keep enabled a production path that cannot enfor
 - [Command containment and file confinement](contracts.md#the-working-environment). The operator MUST use a sandboxed working environment if policy limits what commands can reach. The operator MUST NOT enable rewind if agents in different processes share the project.
 - [Authentication, tokens and TLS](#authentication-on-each-wire).
 - [Resource limits and cancellation](#resource-limits-and-denial-of-service).
+- [History writer clock](bindings/history-http.md#writing-one-writer-at-a-time). If the platform has no monotonic clock that advances during suspension, the operator MUST configure the deadline margin.
 - [Retention, audit access and backup restore](#data-the-record-views-the-output-gate-and-erasure). The operator MUST set a retention policy for history and backups, including whether either is kept indefinitely.
 
 ## Deliberate limits
@@ -88,3 +89,6 @@ The operator MUST NOT enable or keep enabled a production path that cannot enfor
 - This edition defines no named production profile or common policy management protocol. It does not define a wire for network Interfaces or other services beyond the bindings listed here.
 - The bindings do not prove human presence or define portable delegation credentials, project trust attestations, tenant-scoped service roles or scoped credential handles. These are deployment concerns.
 - There is no hard tenant budget, cross-deployment quota or general protocol to reconcile unknown external effects or erase and restore backups. Erasure cannot recall data already delivered.
+- Cross-session erasure is not atomic. The Harness MUST hold the lease of each affected session when erasing its copies. It MUST leave copies in sessions held elsewhere `pending`. See [Erasure](contracts.md#erasure).
+- There is no portable reconciliation for an initial create whose acknowledgement was lost.
+- A legacy history store with no recorded TTL bound needs an offline migration.

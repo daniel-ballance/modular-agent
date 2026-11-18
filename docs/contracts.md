@@ -242,7 +242,7 @@ Loss before dispatch is distinct from loss after a call may have started.
 | Asks | Carrying | Answers |
 |---|---|---|
 | run a command; read or write a file | session project, command and working directory or file path and data, cancellation signal | result, failure, or environment lost |
-| save or restore a point | project and environment identity; saved point for restore | saved, restored or refused |
+| save, check or restore a point | project and environment identity; saved point for check or restore | saved, exists, restored or refused |
 | end a session | session | cleanup outcome within the declared containment scope |
 
 ### Harness and history store
@@ -295,7 +295,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 | Runtime | before a call | call and definition | allow, refuse, change input, or leave pending under [Questions](#questions) (gate) |
 | Runtime | after a call | call and result | keep or change result content or value (transform) |
 | Runtime | model request failed | request and failure | retry, optionally with changes, or give up (first answer) |
-| Runtime | turn result ready | result and expected shape | accept or ask the model to try again (gate) |
+| Runtime | turn result ready | result and expected shape | accept or refuse with [feedback](#hook-execution) (gate) |
 | Runtime | turn ends | outcome | observe |
 | Provider | before a request | model request | change request (transform) |
 | Provider | response arrives | each piece in process | observe |
@@ -367,7 +367,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 - A model request for a plugin's own work, such as compaction, is an auxiliary attempt, not a step. The Harness MUST record auxiliary attempts with their usage and lineage. The Harness MUST count auxiliary usage toward budgets without counting those attempts toward `maxSteps`.
 - The Runtime MUST run `step.after` once per live answered step, after every call from its response is settled or left open, and before the next model request or the end of the turn. Auxiliary attempts and recovery bookkeeping settlements have no `step.after`. On refusal the Runtime MUST end the turn as failed with the gate's reason, and make no further model request. Checks on individual calls belong to `tool.before`.
 - The Runtime MUST end confirmed cancellation as cancelled and output exhaustion as `limit: output`, without running partial calls. A recovery bookkeeping abort does not confirm cancellation. The Runtime MUST end a failed attempt or model refusal as failed unless an applicable retry rule permits another attempt.
-- If the turn declares a result shape, the Harness MUST require `value` on completion and validate it against the shape. Missing `value` is distinct from JSON null. On rejection the Runtime MUST give the model the reason before retry, if the turn can still run. Before a new attempt the Harness MUST check cancellation before step and usage limits. Before recording a step's attempt, the Harness MUST refuse it with `limit: steps` if the number of committed step attempts in that turn already meets `maxSteps`. The count includes retries of step attempts.
+- If the turn declares a result shape, the Harness MUST require `value` on completion and validate it against the shape. Missing `value` is distinct from JSON null. On refusal by `turn.result`, including result shape rejection, the Harness MUST commit [`resultFeedback`](bindings/data.md#standard-kinds) before reporting the refusal to the Runtime. A retry uses the [feedback projection](bindings/data.md#context-and-interrupted-work). Before a new attempt the Harness MUST check cancellation before step and usage limits. Before recording a step's attempt, the Harness MUST refuse it with `limit: steps` if the number of committed step attempts in that turn already meets `maxSteps`. The count includes retries of step attempts.
 - A handler with outside effects MUST make them safe to repeat. Recovery can run hooks again and does not guarantee exactly-once effects.
 
 ### Tool dispatch
@@ -419,7 +419,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 - The Harness MUST compute the transitive copy set, including controlled copies outside the history store. It follows requests into responses, prompts and context into turn snapshots, calls into results, and responses and results into turn results. It follows summaries, fork copies, jobs and reports, and both admission and taking of input. See [shared record lineage](bindings/data.md#recording-order-and-ownership).
 - The history store MUST apply erasure to the exact ids sent by the Harness and leave tombstones without erased content. The Harness MUST preserve authority, accounting and the control facts needed to prevent replay of erased work, following the [shared erasure fold](bindings/data.md#session-state).
 - Before deletion, the Harness MUST durably mark the known copy set pending. It MUST honor `erasureDuringTurn` and prevent affected work and output from recreating or exposing pending content. It MUST refuse a fork that would copy pending content or a replay that would disclose it.
-- The Harness MUST erase only in sessions whose lease it holds or can take. It MUST report copies held by another writer as pending and retry them across restart. It MUST report erased, pending and out-of-reach copies separately. A deployment unable to enforce pending marks across readers cannot promise complete shared erasure.
+- The Harness MUST follow the [cross-session erasure limit](security.md#deliberate-limits). It MUST retry pending erasures across restart. It MUST report erased, pending and out-of-reach copies separately. A deployment unable to enforce pending marks across readers cannot promise complete shared erasure.
 - The Harness MUST request Provider state discard and deletion of known remote copies. Unconfirmed deletion is not success.
 - The record MUST preserve permitted content losslessly, including unknown types, except for retention or erasure. Secret values and protected launch material are excluded at write time. The core does not promise deletion of copies it cannot identify or control.
 
@@ -427,7 +427,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 
 A commit is a successful write to the session's store. For an ephemeral session the record is in memory and has no restart guarantee.
 
-- The Harness MUST commit `turnStart` and the input it takes before invoking the Runtime. It MUST commit each `modelRequest` and `toolStarted` before dispatching that request or call.
+- The Harness MUST commit `turnStart` and the input it takes before invoking the Runtime. It MUST commit each `modelRequest` and `toolStarted` before dispatching to inference or executing the call. For wire Providers, the [Provider request boundary](bindings/plugin.md#the-host-asks-a-provider) separates request preparation from inference.
 - Each model attempt MUST have a fresh `stepId` and a recorded repeat-safety decision from the Provider's declared support. A retry is a new request/response pair, not a second response to the old step. The [recorded final offer](bindings/data.md#recording-order-and-ownership) governs which calls from that attempt can run.
 - The Runtime MUST record a response before agent-executed calls from it start. It MUST record in-process Provider-run calls and results on receipt without dispatching them again.
 - For in-process dispatch, the Runtime MUST run `tool.after` on the terminal result and commit the checked result before the next step. For `/1`, the host MUST finalize and commit the checked result before returning it to the Runtime, as in [Runtime records and effects](bindings/plugin.md#runtime-records-and-effects).
@@ -475,7 +475,7 @@ A commit is a successful write to the session's store. For an ephemeral session 
   | `answer` | answer a question other than approval |
   | `approve` | answer an approval |
   | `tools` | dispatch a call; admit host-supplied MCP servers |
-  | `cancel` | cancel a turn, call or job; close a session |
+  | `cancel` | cancel a turn, call or job, including on session close |
   | `settings` | change session settings; move, rewind or fork |
   | `erase` | erase history |
   | `grant` | join, change rights or remove another actor |
@@ -483,7 +483,7 @@ A commit is a successful write to the session's store. For an ephemeral session 
   | `delegate` | start a subagent |
   | `administer` | set or remove the session ceiling |
 
-- The Harness MUST check project and tenant scope on creation, open, discovery and fork. Detaching a view is not session close. An actor can withdraw its own input or leave without `grant`.
+- The Harness MUST check project and tenant scope on creation, open, discovery and fork. For a connection's request to close the session, the Harness MUST require membership and require `cancel` only if a running turn or unfinished jobs would be cancelled. The Harness MUST check this at the close cutoff before stopping admission or making any other change. A connection MAY always detach its own view without closing the session. An actor can withdraw its own input or leave without `grant`.
 - The Harness MUST keep unknown fields and names inert. No unknown field or right widens authority or changes how known fields are checked.
 - The Harness MUST treat project files (including `AGENTS.md`), tool and Provider output, and peer and subagent messages as untrusted content. They can shape what the model says, not what it is allowed to do. Tool names and model claims do not establish read-only status.
 - The Interface MUST clear a connection's presence on disconnect. An actor counts as present while at least one open connection acts for it and marks it present. Following events alone is not presence.
@@ -577,7 +577,7 @@ A commit is a successful write to the session's store. For an ephemeral session 
 - Every move MUST target a quiescent entry on the current branch: a `turnEnd` or an entry recorded outside all turns. The Harness MUST commit a `position` for a plain move without restoring files. The Harness MUST cancel and settle unfinished work left behind or refuse before moving, as `movingWithUnfinishedWork` declares. Cancellation requires `cancel`.
 - The Harness MUST refuse a fork without `forking` support or while the source session has unfinished work. A fork MUST inherit the source's current settings, recorded actor state and session ceiling, not their values at the fork point. The Harness MUST NOT carry live work, connection presence or host-supplied MCP servers into the fork. Copied history does not authorize replay of source inputs, questions, calls or jobs as new work.
 - With `rewinding`, the Harness MUST save a project point before each turn or out-of-turn tool execution and record it on its start entry.
-- The Harness MUST refuse rewind without `rewinding` support or while another hosted session uses the same canonical project. It MUST refuse before changing anything if the session has unfinished work, a job started after the target, or a later turn or out-of-turn call lacks a verifiable point from the same environment and project. The Harness MUST serialize restore with its own opening and use of that project by other sessions. Rewind restores the whole project. See [Security](security.md#what-an-operator-configures) for shared projects.
+- The Harness MUST refuse rewind without `rewinding` support or while another hosted session uses the same canonical project. It MUST refuse before changing anything if the session has unfinished work, a job started after the target, or any later turn or out-of-turn call lacks a point from the same environment and project. The Harness MUST check every such point without changing anything before starting the [rewind journal](bindings/data.md#rewinding), using [`env/checkPoint`](bindings/plugin.md#paths-and-points) for a remote environment. It MUST refuse rewind if any required point cannot be verified. The Harness MUST serialize rewind, including preflight and restore, with its own opening and use of that project by other sessions. Rewind restores the whole project. See [Security](security.md#what-an-operator-configures) for shared projects.
 - The Harness MUST select the earliest recorded point in branch order after the target. With no later turn or out-of-turn call it MUST move without restoring a point.
 - The Harness MUST follow the [rewind journal](bindings/data.md#rewinding). It MUST report calls not covered by the snapshot as `outOfReach`, using recorded `openWorld` and the shared missing-value rule. Non-call outside effects are not undone. [Provider state](#provider-state) applies to both moves.
 
