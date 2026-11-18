@@ -375,6 +375,8 @@ A plugin is trusted code. It runs with the agent's permissions unless separately
 - The host MUST start only programs approved by the operator. The host MUST check [project trust](../contracts.md#configuration-and-trust) before starting a project plugin. The host MUST validate registration before enabling the plugin's callbacks or replacements.
 - The host MUST read `MODULAR_AGENT_PLUGINS` at startup if set. It is a JSON array of `{ command: string[], env?: object, config?: object }`. `command` is a nonempty argument vector; its first item is the executable, with no shell expansion. `env` maps names to strings. Both optional objects default to `{}`. The host MUST reject malformed configuration before spawning programs from it. A build MAY support other configuration sources.
 - The host MUST initialize these programs in array order after its own plugins. The host MUST apply approved `env` values to the minimal environment in [Security](../security.md#plugins), not inherit the host environment.
+- If a configured program fails to start, exits before registration, or has its registration refused, the host MUST NOT run without it. It MUST tear down the programs it started and fail its own startup; over ACP the agent exits with a nonzero status before answering `initialize`, or answers it with `internal`. The host MUST NOT substitute a built-in part for a failed configured one.
+- A plugin program MUST start in the minimal environment. It MUST NOT need variables the host isn't required to pass, such as `HOME`; its state folder is `home` from `plugin/initialize`.
 
 ## The conformance plugin
 
@@ -396,7 +398,7 @@ A build serving the conformance plugin MUST document its command and support the
 
 ## Changes
 
-- **Production edition 3.** Optional project reads (Go P12, Rust PE2-02), Provider replies without the request callback (Go P13), unowned points (Go P11), the gate's own size limit (TypeScript), and callback lifetime on `session.start` (Elixir PE2-1).
+- **Production edition 3.** A configured plugin that fails to start stops the host, with no built-in substitute, and plugins start in the minimal environment (supervisor's cross-language matrix: a TypeScript host ran without Elixir's crashed gate plugin). Optional project reads (Go P12, Rust PE2-02), Provider replies without the request callback (Go P13), unowned points (Go P11), the gate's own size limit (TypeScript), and callback lifetime on `session.start` (Elixir PE2-1).
 
 - **Production edition 2.** Non-mutating `env/checkPoint` (Elixir PE-5, Go P9, TypeScript, Python G82), commit at the wire Provider's `provider.request` callback (Elixir PE-3, TypeScript), terminal refusal for a changed allowed call (Python G92), and filtering settled calls at resume (Rust PE-09, TypeScript). A registration change requires a fresh allowance (Elixir PE-4). Size caps use actual bytes (Go P5). Depth errors and result feedback in `prepareStep` are specified (TypeScript).
 
