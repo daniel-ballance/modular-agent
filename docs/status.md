@@ -1,5 +1,24 @@
 # Status: the description against the code
 
+## Production edition 2: TypeScript
+
+Verified against specification `74aa4af` and kits `f59d2a8`, on Linux with Node.js 26.13.1.
+
+| Run | Result |
+|---|---|
+| `npx tsc -b && npm test`, normal and with `MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local` | 90/90 tests in each |
+| History HTTP kit with decreased TTL on restart | 42/42 |
+| Served plugin kit, including both Runtime tiers | 139/139 |
+| Local ACP, with crash, plugin, probe and job checks | 199/199 in each layout: `provider,hooks`; plus `durable-runtime`; plus `tools,environment` |
+| Portable ACP, with crash and job checks against the supplied history service | 150/150 transient and 150/150 durable |
+| Portable ACP, with the extra probes against the repository's edition 2 history service | 244/244 transient and 244/244 durable |
+
+The supplied service's `UPDATED` marker still identified `f161432` when tested. The additional portable runs used the repository's updated service. They include a retryable reopen hold, rejection of a late renewal, and Provider checkpoint and recovery probes. No real-model run was repeated.
+
+The tested layouts declare both ACP versions and the supported full fixture profile: portable sessions, several actors, rewind when the environment can verify points, fork, erasure, limits, tenants, input during a turn, and late question answers. Runtime continuation after restart depends on the selected Runtime. These are fixture results, not a claim of production security or complete conformance. Outstanding work includes operator isolation and representation, secret staging, exact opaque numeric relaying outside the history service, full shaped-result validation, auxiliary attempt accounting, and cross-session erasure coordination. The edition 2 gap log is `/tmp/ma-tools/r7/ts-gaps.md`.
+
+The history client uses `/proc/uptime` on Linux where available. On platforms without a suspension-aware clock, configure a positive `MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS` (or `leaseMarginMs` for an embedded client). The margin is subtracted from the renewal and loss deadlines.
+
 ## Production edition: TypeScript, round seven
 
 **Checked against:** production specification `388cd90`, implementer's guide `1569f84`, conformance kits `1ad258f`, on Linux with Node.js 26.13.1. This records fixture results, not a full production conformance claim or an independent cross-build swap.
