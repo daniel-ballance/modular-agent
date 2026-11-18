@@ -183,6 +183,7 @@ function start(extraEnv = {}) {
 		},
 		/** Cancel a request this kit sent, as a host would, including the plugin's work for it here. */
 		cancel(id) {
+			if (state.rt) state.rt.cancelled = true;
 			send({ method: "$/cancel", params: { id } });
 			for (const e of execs.values()) if (e.parent === id) process.kill(-e.proc.pid, "SIGKILL");
 		},
@@ -222,6 +223,8 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 			}
 			case "host/runtime/hook":
 				rt.hooks.push(p.hook);
+				// A host may answer requests about a cancelled turn with the error `cancelled`, as the binding allows.
+				if (rt.cancelled && p.hook !== "turn.end") throw Object.assign(new Error("the turn was cancelled"), { code: "cancelled" });
 				if (p.hook === "tool.before") {
 					const g = gate(p.payload?.call);
 					return g ? { value: p.payload, refused: g } : { value: p.payload };
@@ -531,7 +534,7 @@ async function runtimeChecks(part) {
 		q.cancel(running.id);
 		o = await running.catch((e) => ({ error: e }));
 		check(`${tag} cancelling a turn answers within 5 s`, Date.now() - t0 < 5000, `${Date.now() - t0} ms`);
-		check(`${tag} a cancelled turn's outcome is cancelled`, o.outcome?.kind === "cancelled", JSON.stringify(o).slice(0, 200));
+		check(`${tag} a cancelled turn's outcome is cancelled, though the host answered its later hooks with the error cancelled`, o.outcome?.kind === "cancelled", JSON.stringify(o).slice(0, 200));
 		check(`${tag} the cancelled call still gets exactly one result`, !!rt.toolCalls[0] && resultFor(rt, rt.toolCalls[0].id).length === 1, JSON.stringify(recordedResults(rt)).slice(0, 200));
 
 		q.state.rt = undefined;

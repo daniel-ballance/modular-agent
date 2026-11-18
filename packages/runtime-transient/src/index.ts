@@ -42,16 +42,19 @@ export class TransientRuntime implements Runtime {
 	constructor(protected options: TransientRuntimeOptions = {}) {}
 
 	runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome> {
-		return this.withHooks(input, host, () => this.loop(input, host, signal));
+		return this.withHooks(input, host, () => this.loop(input, host, signal), true, signal);
 	}
 
-	protected async withHooks(input: TurnInput, host: RuntimeHost, run: () => Promise<TurnOutcome>, starting = true): Promise<TurnOutcome> {
+	protected async withHooks(input: TurnInput, host: RuntimeHost, run: () => Promise<TurnOutcome>, starting = true, signal?: AbortSignal): Promise<TurnOutcome> {
 		let outcome: TurnOutcome;
 		try {
 			if (starting) await host.hook("turn.start", { sessionId: input.sessionId, turnId: input.turnId });
 			outcome = await run();
 		} catch (error) {
-			outcome = { outcome: { kind: "failed", error: error instanceof Error ? error.message : String(error) }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
+			// A cancelled turn ends as cancelled, whatever errors the cancelling caused, such as a host answering `cancelled`.
+			outcome = signal?.aborted
+				? { outcome: { kind: "cancelled" }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() }
+				: { outcome: { kind: "failed", error: error instanceof Error ? error.message : String(error) }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
 		}
 		// The shared shape (docs/bindings/plugin.md): outcome as on a turnEnd entry, and the result beside it.
 		await host.hook("turn.end", { sessionId: input.sessionId, turnId: input.turnId, outcome: outcome.outcome, result: outcome.result });
@@ -60,7 +63,7 @@ export class TransientRuntime implements Runtime {
 
 	/** A transient Runtime ends a turn whose process stopped. Each pending call gets one result. */
 	resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
-		return this.withHooks(input, host, () => this.recover(input, host, signal, interrupted), false);
+		return this.withHooks(input, host, () => this.recover(input, host, signal, interrupted), false, signal);
 	}
 
 	protected async recover(_input: TurnInput, host: RuntimeHost, _signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
@@ -73,7 +76,7 @@ export class TransientRuntime implements Runtime {
 
 	/** Run calls left open past an earlier turn, which now have their answers, then carry on. */
 	continueOpenCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
-		return this.withHooks(input, host, () => this.continueCalls(input, host, signal, calls));
+		return this.withHooks(input, host, () => this.continueCalls(input, host, signal, calls), true, signal);
 	}
 
 	private async continueCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
@@ -235,8 +238,13 @@ export class TransientRuntime implements Runtime {
 		if (prepared.pending) return this.leaveOpen(host, call, prepared.pending);
 		if (ran && isPending(ran)) return this.leaveOpen(host, call, ran.pending);
 		let result: ToolResult = prepared.refused || !ran ? { callId: call.id, status: "refused", content: [text(`Refused: ${prepared.refused}`)] } : (ran as ToolResult);
-		const after = await host.hook<{ result: ToolResult }>("tool.after", { call, result });
-		result = after?.result ?? result;
+		try {
+			const after = await host.hook<{ result: ToolResult }>("tool.after", { call, result });
+			result = after?.result ?? result;
+		} catch (error) {
+			// A host may answer `cancelled` once the turn is cancelled. The call still gets its one result, unchanged.
+			if ((error as { code?: string })?.code !== "cancelled") throw error;
+		}
 		host.report("tool.result", { status: result.status }, { stepId, toolCallId: call.id });
 		return host.record({
 			kind: "toolResult", writer: "runtime", modelVisible: true, stepId, toolCallId: call.id,

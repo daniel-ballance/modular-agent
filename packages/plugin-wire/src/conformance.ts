@@ -16,7 +16,7 @@ export class ConformanceProvider implements Provider {
 		return [{ provider: "conformance", id: "echo", name: "Conformance echo", contextWindow: 1_000_000, maxOutput: 4096, reasoning: false, input: ["text"] }];
 	}
 	async request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
-		const scope = { sessionId: options.sessionId, provider: this.id, model: model.id };
+		const scope = { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: model.id } };
 		const prepared = await this.api?.runHook<{ request: ModelRequest }>("provider.request", { ...scope, request });
 		const message = this.echo(prepared?.request ?? request, options);
 		await this.api?.runHook("provider.response", { ...scope, message });

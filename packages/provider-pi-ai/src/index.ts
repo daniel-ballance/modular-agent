@@ -46,7 +46,7 @@ export class PiAiProvider implements Provider {
 		const model = this.collection.getModel(this.id, ref.id);
 		if (!model) return failed(`Unknown model ${this.id}/${ref.id}`, "other");
 		// "Before a model request": Provider middleware may change the request.
-		const { request: req } = await this.api.runHook<{ request: ModelRequest }>("provider.request", { sessionId: options.sessionId, provider: this.id, model: ref.id, request });
+		const { request: req } = await this.api.runHook<{ request: ModelRequest }>("provider.request", { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: ref.id }, request });
 		const context: Context = {
 			systemPrompt: req.systemPrompt || undefined,
 			messages: req.messages.map((m) => toPi(m, model)),
@@ -70,7 +70,7 @@ export class PiAiProvider implements Provider {
 			return failed(error instanceof Error ? error.message : String(error), "other");
 		}
 		const message = fromPi(final, model);
-		await this.api.runHook("provider.response", { sessionId: options.sessionId, provider: this.id, model: ref.id, message });
+		await this.api.runHook("provider.response", { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: ref.id }, message });
 		return message;
 	}
 }
