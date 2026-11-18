@@ -22,3 +22,4 @@ Each record explains one decision that is hard to reverse and would surprise a r
 | [0016](0016-rules-from-three-clean-room-builds.md) | The rules three clean-room builds agreed on become part of the contracts | stands |
 | [0017](0017-plugins-in-any-language.md) | A plugin in any language, through one binding of the contracts | stands |
 | [0018](0018-portable-sessions.md) | Portable sessions: one shared format for what history holds | stands |
+| [0019](0019-acp-2-and-several-actors.md) | ACP `/2`, several actors, jobs, rewinding and the output gate across processes | stands |

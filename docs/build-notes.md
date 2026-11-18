@@ -289,6 +289,32 @@ The matrix found three more holes before it passed:
 - whether a Runtime may read history. It may, with `host/history`.
 - a host that didn't answer a cancelled request. The binding says it must.
 
+## Round five: the open items
+
+Round five closed what round four left open ([ADR 0019](adr/0019-acp-2-and-several-actors.md)), and the binding gaps the five builders logged in round four:
+- **ACP `/2`,** asked for in `initialize`, reports a failed turn as an error rather than `refusal`.
+- **Several actors** through ACP extensions, with proposed input that another actor releases.
+- **Jobs over the plugin binding,** in standard kinds, so a job a killed agent left is taken up by the same plugin in whichever build reopens the session.
+- **Rewinding,** with the working environment's saved points.
+- **The output gate in another process,** a stream at a time.
+- **Portable sessions, extended:** queued input, model requests, why a question closed, a question's implicit key, the `approval` setting, and a recorded model the reopening build doesn't offer.
+
+**What this build changed.** It does all of the above, and passes the plugin kit (110 checks), the ACP kit with the probe and jobs plugins (109), and portable sessions with jobs (86). Its Runtime reported the wrong `turn.end` payload and, under a host answering `cancelled`, a cancelled turn as failed; both were found by swaps in round four and fixed.
+
+**The matrices,** across TypeScript, Rust, Python, Go and Elixir:
+- plugins 25/25;
+- Runtimes through `kill -9`: 25/25 durable and 25/25 transient;
+- portable sessions with jobs: 25/25 durable and 25/25 transient.
+
+The first pass found five holes, each fixed and then held by a binding rule or a kit check:
+- a job's report framed by the build that took it up;
+- rewinding refused with another build's environment;
+- an output gate handler failing on another host's event shapes;
+- a restore that replaced the project folder, stranding the agent working in it;
+- a kit race.
+
+**Real models.** In two runs, an agent in one language started a background job and was killed, and an agent in another language took the job up and reported it. A guest actor's proposed question was then released and answered. In the second run the session was written under Haiku and reopened by an agent offering only `gpt-6-luna`: the next turn failed, as the binding now says, instead of switching models, then carried on once a model was chosen.
+
 ## Round four: portable sessions, and a fifth build
 
 **What changed in the bindings.** All 42 binding gaps the Rust, Python and Go builders logged in round three went into the bindings: where they agreed, as the rule; where they didn't, with a choice. Then came [portable sessions](bindings/data.md#portable-sessions) ([ADR 0018](adr/0018-portable-sessions.md)): one shared format for what history holds, so any build's agent can reopen another's session.
