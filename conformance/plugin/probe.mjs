@@ -1,192 +1,209 @@
 #!/usr/bin/env node
-// The probe plugin: checks the host side of modular-agent-plugin/1 (docs/bindings/plugin.md) from inside a host.
-// The ACP kit loads it with --probe-checks. It has no dependencies.
-//
-// Its config chooses what it does:
-//   { "role": "probe", "out": "<file>" }   registers the tool `probe`. Calling it runs the host checks, and
-//                                          writes them to <file> as JSON: [{ name, ok, detail }].
-//   { "role": "refuse-hook", "out": "<file>" }     registers a handler for a hook point no host offers.
-//   { "role": "refuse-replace", "out": "<file>" }  names `tool:probe-absent` in replaces, and registers no such tool.
-//   { "role": "refuse-duplicate", "out": "<file>" } registers the name `probe-probe`, which the probe role already has.
-//   { "role": "output-observer", "out": "<file>" }  registers an `output` gate that lets everything through, and appends
-//                                          each payload it is given to <file>, one JSON line each.
-// A refused probe appends the plugin/shutdown it gets to <file>, as one JSON line.
-import { appendFileSync, writeFileSync } from "node:fs";
+// Host-side fixtures for docs/bindings/plugin.md. The ACP kit loads these with --probe-checks.
+import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
+import { isDeepStrictEqual as equal } from "node:util";
+import { codeOf, outcome, rpcError, serve } from "./peer.mjs";
 
 const BINDING = "modular-agent-plugin/1";
-let config = {};
-let nextId = 1;
-const pending = new Map();
-const answered = []; // ids of host requests this plugin has answered
-let buffer = "";
-
-const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
-const reply = (id, result) => {
-	answered.push(id);
-	send({ id, result });
-};
-function request(method, params, ms = 15000) {
-	const id = `probe-${nextId++}`;
-	const p = new Promise((resolve, reject) => {
-		const timer = setTimeout(() => {
-			pending.delete(id);
-			reject({ timeout: true, message: `timed out after ${ms} ms: ${method}` });
-		}, ms);
-		pending.set(id, { resolve: (r) => (clearTimeout(timer), resolve(r)), reject: (e) => (clearTimeout(timer), reject(e)) });
-	});
-	p.id = id;
-	return { id, promise: p, write: () => send({ id, method, params }) };
-}
-async function ask(method, params, ms) {
-	const r = request(method, params, ms);
-	r.write();
-	return r.promise;
-}
-const outcome = (p) => p.then((result) => ({ result }), (error) => ({ error }));
-const codeOf = (e) => e?.data?.code;
-
+const DATA = "modular-agent-data/1";
+const PROBE = { name: "probe", description: "Check the host callbacks.", parameters: { type: "object", properties: {} } };
+const EFFECT = { name: "probe-effect", description: "Record a fixture invocation.", parameters: { type: "object", properties: { value: { type: "string" } } }, hints: { readOnly: true, openWorld: false } };
+const trace = (data) => { const out = config.traceOut ?? config.out; if (out) appendFileSync(out, JSON.stringify(data) + "\n"); };
+let config = {}, stopping = false;
+let runs = 0, refreshed = false;
+const fixtureTool = (name, description, properties = {}) => ({ name, description, parameters: { type: "object", properties } });
+const QUESTION = fixtureTool("probe-question", "Ask one fixture question.", { late: { type: "boolean" } });
+const REFRESH = fixtureTool("probe-refresh", "Change the fixture tool list.");
+const currentTools = () => [PROBE, QUESTION, REFRESH, fixtureTool(refreshed ? "probe-added" : "probe-retired", "A tool from the current view.")];
 function registration() {
 	const base = { binding: BINDING, name: `probe-${config.role ?? "probe"}` };
-	if (config.role === "refuse-hook") return { ...base, hooks: [{ hook: "probe.no-such-point", handlerId: 1, order: "normal" }] };
-	if (config.role === "refuse-replace") return { ...base, replaces: ["tool:probe-absent"] };
-	if (config.role === "refuse-duplicate") return { ...base, name: "probe-probe" };
-	if (config.role === "output-observer") return { ...base, hooks: [{ hook: "output", handlerId: 1, order: "last" }] };
-	return {
-		...base,
-		toolSources: [
-			{ id: "probe-tools", perSession: false, tools: [{ name: "probe", description: "Checks the host side of the plugin binding.", parameters: { type: "object", properties: {} } }] },
-		],
-	};
+	switch (config.role) {
+		// Starting: the handshake. Deliberately invalid registrations for rollback tests.
+		case "refuse-hook": return { ...base, hooks: [{ hook: "probe.no-such-point", handlerId: 1 }] };
+		case "refuse-replace": return { ...base, replaces: ["tool:probe-absent"] };
+		case "refuse-duplicate": return { ...base, name: "probe-probe" };
+		case "output-observer": return { ...base, hooks: [{ hook: "output", handlerId: 1, order: "last" }] };
+		case "runtime": return { ...base, replaces: ["runtime"], runtime: { id: "probe-runtime", supports: {} }, toolSources: [{ id: "probe-tools", tools: [EFFECT] }] };
+		default: return { ...base, toolSources: [{ id: "probe-tools", tools: currentTools() }] };
+	}
 }
 
-async function runChecks(callRequestId, sessionId) {
+async function runChecks(m, { ask, request, recent, signal }) {
+	const { sessionId, project: cwd } = m.params;
+	const scope = { sessionId, parentRequestId: m.id };
 	const checks = [];
 	const check = (name, ok, detail = "") => checks.push({ name, ok: !!ok, detail: ok ? "" : String(detail).slice(0, 300) });
-	const tryCheck = async (name, fn) => {
-		try {
-			await fn();
-		} catch (e) {
-			check(name, false, JSON.stringify(e));
-		}
+	const group = async (name, fn) => {
+		if (signal.aborted) throw rpcError("cancelled");
+		try { await fn(); } catch (e) { check(name, false, JSON.stringify(e)); }
 	};
-	let cwd = ".";
-	await tryCheck("host/session", async () => {
-		const s = await ask("host/session", { sessionId });
-		check("host/session: gives the session's project", typeof s.project === "string" && s.id === sessionId, JSON.stringify(s).slice(0, 200));
-		cwd = s.project ?? cwd;
+	const invalid = async (method, params) => {
+		const r = await outcome(ask(method, params));
+		return r.error?.code === -32602 && codeOf(r.error) === "invalid_request";
+	};
+	// What a plugin may ask the host; Paging history; Authority.
+	await group("host/session", async () => {
+		const s = await ask("host/session", scope);
+		check("host/session: id and project agree with the parent", s.project === cwd && s.id === sessionId);
 	});
-
-	await tryCheck("host/history: pages by after and next", async () => {
-		const all = await ask("host/history", { sessionId, parentRequestId: callRequestId, all: true });
-		const entries = all.entries ?? [];
-		check("host/history: entries for the session", entries.length >= 2, `${entries.length} entries`);
-		const first = await ask("host/history", { sessionId, parentRequestId: callRequestId, all: true, limit: 1 });
-		check("host/history: limit 1 gives one entry", first.entries?.length === 1, JSON.stringify(first).slice(0, 200));
-		check("host/history: next is the last entry's id when more remain", first.next === first.entries?.[0]?.id, JSON.stringify({ next: first.next, id: first.entries?.[0]?.id }));
-		const second = await ask("host/history", { sessionId, parentRequestId: callRequestId, all: true, limit: 1, after: first.next });
-		check("host/history: after next gives the following entry", second.entries?.[0]?.id === entries[1]?.id, JSON.stringify({ got: second.entries?.[0]?.id, want: entries[1]?.id }));
-		const last = await ask("host/history", { sessionId, parentRequestId: callRequestId, all: true, after: entries.at(-1)?.id });
-		check("host/history: no next on the last page", (last.entries ?? []).length === 0 && last.next == null, JSON.stringify(last).slice(0, 200));
+	await group("host/history: pages by after and next", async () => {
+		const all = { ...scope, all: true };
+		const { entries } = await ask("host/history", all);
+		const first = await ask("host/history", { ...all, limit: 1 });
+		const second = await ask("host/history", { ...all, limit: 1, after: first.next });
+		const last = await ask("host/history", { ...all, after: entries.at(-1)?.id });
+		check("host/history: pre-seeded turn and current call appear in kept order", entries.some((e, i) => e.kind === "turnEnd" && entries.slice(i + 1).some((x) => x.kind === "toolStarted" && x.toolCallId === m.params.call.id)));
+		check("host/history: limit and next delimit the exact same records", equal(first, { entries: [entries[0]], next: entries[0]?.id }) && equal(second.entries, [entries[1]]) && equal(last, { entries: [] }));
+		check("host/history: unknown cursor and limits 0 and 501 are invalid_request", await invalid("host/history", { ...all, after: "probe-no-such-entry" }) && await invalid("host/history", { ...all, limit: 0 }) && await invalid("host/history", { ...all, limit: 501 }));
+		check("host/history: direct read of an open session is allowed", Array.isArray((await ask("host/history", { sessionId })).entries));
+		check("host/history: unknown session is refused", await invalid("host/history", { sessionId: randomUUID() }));
 	});
-	await tryCheck("host/history: an unknown after", async () => {
-		const r = await outcome(ask("host/history", { sessionId, parentRequestId: callRequestId, after: "probe-no-such-entry" }));
-		check("host/history: an unknown after is invalid_request, -32602", codeOf(r.error) === "invalid_request" && r.error?.code === -32602, JSON.stringify(r));
+	await group("callback authority", async () => {
+		check("authority: environment callback without parent is refused", await invalid("host/env/exists", { sessionId, cwd, path: "absent" }));
+		check("authority: answered parent is refused", await invalid("host/env/exists", { ...scope, parentRequestId: recent[0], cwd, path: "absent" }));
+		check("authority: live parent cannot name a different session", await invalid("host/env/exists", { ...scope, sessionId: randomUUID(), cwd, path: "absent" }));
+		check("authority: tool source cannot use the Runtime port", await invalid("host/runtime/newId", { parentRequestId: m.id }));
+		check("authority: credential for an unregistered Provider is refused", await invalid("host/credentials/read", { provider: "probe-not-mine" }));
+		check("authority: environment read with a live parent works", (await ask("host/env/exists", { ...scope, cwd, path: "probe-no-such-file" })).exists === false);
 	});
-	await tryCheck("host/history: limit 0", async () => {
-		const r = await outcome(ask("host/history", { sessionId, parentRequestId: callRequestId, limit: 0 }));
-		check("host/history: limit 0 is invalid_request", codeOf(r.error) === "invalid_request", JSON.stringify(r));
-	});
-	await tryCheck("host/history: by session", async () => {
-		const r = await outcome(ask("host/history", { sessionId }));
-		check("host/history: may name an open session directly", Array.isArray(r.result?.entries), JSON.stringify(r).slice(0, 200));
-	});
-	await tryCheck("authority: no parent", async () => {
-		const r = await outcome(ask("host/env/exists", { cwd, sessionId, path: "x" }));
-		check("authority: host/env/* without a parent is invalid_request", codeOf(r.error) === "invalid_request", JSON.stringify(r));
-	});
-	await tryCheck("authority: an answered parent", async () => {
-		const stale = answered.find((id) => id !== callRequestId);
-		const r = await outcome(ask("host/ask", { parentRequestId: stale, request: { kind: "text", question: "never shown" } }));
-		check("authority: a parent already answered is invalid_request", stale !== undefined && codeOf(r.error) === "invalid_request", JSON.stringify({ stale, r }));
-	});
-	await tryCheck("authority: another provider's credential", async () => {
-		const r = await outcome(ask("host/credentials/read", { provider: "probe-not-mine" }));
-		check("authority: another plugin's provider credential is invalid_request", codeOf(r.error) === "invalid_request", JSON.stringify(r));
-	});
-	await tryCheck("unknown host method", async () => {
-		const r = await outcome(ask("host/probe-no-such-method", { parentRequestId: callRequestId }));
-		check("an unknown host method is JSON-RPC -32601", r.error?.code === -32601, JSON.stringify(r));
-	});
-	await tryCheck("cancel before start", async () => {
-		// The request and its cancel in one write, so the host reads both before it starts the work.
-		const r = request("host/env/exec", { parentRequestId: callRequestId, cwd, sessionId, command: "sleep 20" }, 8000);
-		process.stdout.write(
-			JSON.stringify({ jsonrpc: "2.0", id: r.id, method: "host/env/exec", params: { parentRequestId: callRequestId, cwd, sessionId, command: "sleep 20" } }) +
-				"\n" +
-				JSON.stringify({ jsonrpc: "2.0", method: "$/cancel", params: { id: r.id } }) +
-				"\n",
-		);
+	// Transport: Errors and connection loss; cancellation. This probes an early arrival, not pre-dispatch.
+	await group("transport", async () => {
+		const r = await outcome(ask("host/probe-no-such-method", {}));
+		check("unknown host method has the method_not_found envelope", r.error?.code === -32601 && codeOf(r.error) === "method_not_found");
+		const exec = request("host/env/exec", { ...scope, cwd, command: "sleep 8" });
 		const t0 = Date.now();
-		const o = await outcome(r.promise);
-		check("cancelling: a request cancelled before it started is still answered", !o.error?.timeout, JSON.stringify(o));
-		check("cancelling: that answer is a result or cancelled, within 5 s", (o.result !== undefined || codeOf(o.error) === "cancelled") && Date.now() - t0 < 5000, JSON.stringify({ o, ms: Date.now() - t0 }));
-	});
-	await tryCheck("parent in flight", async () => {
-		const r = await outcome(ask("host/env/exists", { parentRequestId: callRequestId, cwd, sessionId, path: "probe-no-such-file" }));
-		check("authority: host/env/* with a live parent works", r.result?.exists === false, JSON.stringify(r));
+		exec.cancel();
+		const c = await outcome(exec.promise);
+		check("early cancel: exec answers cancelled or lost within five seconds", ["cancelled", "lost"].includes(codeOf(c.error)) && Date.now() - t0 <= 5000);
 	});
 	return checks;
 }
 
-async function onRequest(m) {
-	const p = m.params ?? {};
-	switch (m.method) {
-		case "plugin/initialize":
-			config = p.config ?? {};
-			if (p.binding !== BINDING) return send({ id: m.id, error: { code: -32000, message: "unknown binding", data: { code: "not_supported" } } });
-			return reply(m.id, registration());
-		case "plugin/shutdown":
-			if (config.out && config.role !== "probe" && config.role !== "output-observer") appendFileSync(config.out, JSON.stringify({ method: m.method, params: p }) + "\n");
-			return reply(m.id, {});
-		case "hook/handle":
-			if (config.role === "output-observer" && config.out) appendFileSync(config.out, JSON.stringify(p.payload ?? null) + "\n");
-			return reply(m.id, null);
-		case "$/ping":
-			return reply(m.id, {});
-		case "tools/list":
-			return reply(m.id, { tools: registration().toolSources?.[0]?.tools ?? [] });
-		case "tools/call": {
-			const checks = await runChecks(m.id, p.sessionId);
-			if (config.out) writeFileSync(config.out, JSON.stringify(checks, null, 1));
-			const failed = checks.filter((c) => !c.ok);
-			return reply(m.id, { status: "completed", content: [{ type: "text", text: `probe: ${checks.length - failed.length}/${checks.length} host checks passed` }] });
+async function runtime(m, { ask }) {
+	// Runtime callbacks; Runtime records and effects. Only this negative fixture sends forbidden requests.
+	const { turn } = m.params;
+	const test = ["omitted", "changed", "exact"][runs++];
+	const callHost = (method, params = {}) => ask(`host/runtime/${method}`, { parentRequestId: m.id, ...params });
+	const record = (entry) => callHost("record", { entry });
+	const history = () => ask("host/history", { sessionId: turn.sessionId, parentRequestId: m.id, all: true }).then((r) => r.entries);
+	const checks = {};
+	const entries = [];
+	let usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	let terminal = { kind: "completed" };
+	const result = { openToolCalls: [] };
+	try {
+		await callHost("hook", { hook: "turn.start", payload: {} });
+		const { id: stepId } = await callHost("newId");
+		const request = await callHost("prepareStep", { stepId, usage });
+		const response = await callHost("model", { stepId, request });
+		usage = response.usage ?? usage;
+		checks.modelIntent = (await history()).some((e) => e.kind === "modelRequest" && e.stepId === stepId && e.turnId === turn.turnId && equal(e.data?.request, request));
+		entries.push((await record({ kind: "response", stepId, message: response, modelVisible: true })).id);
+		const fake = await outcome(record({ kind: "setting", data: { key: "approval", value: "off" }, modelVisible: false }));
+		checks.hostKind = fake.error?.code === -32602 && codeOf(fake.error) === "invalid_request";
+		const part = response.content.find((p) => p.type === "toolCall");
+		if (!part) throw Error("fixture model did not request the tool");
+		const call = { id: part.id, name: part.name, input: part.arguments, startedBy: "model" };
+		if (test !== "omitted") await callHost("hook", { hook: "tool.before", payload: { call, definition: EFFECT } });
+		const toolResult = await callHost("runToolCall", { call: test === "changed" ? { ...call, input: { value: "changed" } } : call });
+		const saved = (await history()).filter((e) => e.kind === "toolResult" && e.toolCallId === call.id);
+		checks.dispatch = toolResult.status === (test === "exact" ? "completed" : "refused");
+		checks.resultCommit = saved.length === 1 && saved[0].data?.status === toolResult.status && equal(saved[0].message?.content, toolResult.content);
+		if (test === "exact") {
+			await callHost("hook", { hook: "tool.after", payload: { call, result: toolResult } });
+			const recorded = await record({ kind: "toolResult", stepId, toolCallId: call.id, message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: toolResult.content, isError: false }, data: { status: toolResult.status }, modelVisible: true });
+			entries.push(recorded.id);
+			checks.cachedResult = recorded.id === saved[0]?.id;
 		}
-		default:
-			return send({ id: m.id, error: { code: -32601, message: `Method not found: ${m.method}`, data: { code: "unknown_handler" } } });
+		await callHost("hook", { hook: "step.after", payload: { stepId, response } });
+	} catch (e) {
+		terminal = { kind: "failed", error: codeOf(e) ?? "fixture callback failed" };
 	}
+	trace({ test, checks, terminal: terminal.kind });
+	await callHost("hook", { hook: "turn.end", payload: { outcome: terminal, result } });
+	return { outcome: terminal, result, entries, usage };
 }
 
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-	buffer += chunk;
-	for (let i = buffer.indexOf("\n"); i >= 0; i = buffer.indexOf("\n")) {
-		const line = buffer.slice(0, i).trim();
-		buffer = buffer.slice(i + 1);
-		if (!line) continue;
-		let m;
-		try {
-			m = JSON.parse(line);
-		} catch {
-			continue;
+serve("probe", async (m, ctx) => {
+	const p = m.params ?? {};
+	if (stopping) throw rpcError("invalid_request");
+	switch (m.method) {
+		case "$/ping": return {};
+		case "plugin/initialize":
+			if (p.binding !== BINDING || p.data !== DATA) throw rpcError("not_supported");
+			config = p.config ?? {};
+			return registration();
+		case "plugin/shutdown":
+			stopping = true;
+			if (config.role?.startsWith("refuse-")) trace({ method: m.method, params: p });
+			return {};
+		case "hook/handle": {
+			if (config.role !== "output-observer" || p.handlerId !== 1 || p.hook !== "output") throw rpcError("unknown_handler");
+			trace(p.payload);
+			// Shared data: Output events; ACP: Output gate. Deliberately invalid answers to test rejection.
+			const reply = p.payload?.events?.find((e) => e.type === "reply" && e.data?.method === "_modular-agent/history");
+			if (reply) {
+				const body = JSON.stringify(reply.data);
+				if (body.includes("kit-gate-change-type")) {
+					trace({ fixtureMutation: "type", sessionId: p.payload.sessionId });
+					return { events: [{ ...reply, type: "kit.not-a-reply" }] };
+				}
+				if (body.includes("kit-gate-change-id")) {
+					const events = structuredClone(p.payload.events);
+					const entry = events[0]?.data?.result?.entries?.[0];
+					if (entry) {
+						trace({ fixtureMutation: "id", sessionId: p.payload.sessionId });
+						entry.id = "kit-changed-id";
+						return { events };
+					}
+				}
+			}
+			return null;
 		}
-		if (m.method && m.id !== undefined) void onRequest(m);
-		else if (m.method) continue; // notifications: $/cancel for a tools/call is ignored; the checks are short
-		else if (pending.has(m.id)) {
-			const { resolve, reject } = pending.get(m.id);
-			pending.delete(m.id);
-			if (m.error) reject(m.error);
-			else resolve(m.result);
+		case "runtime/runTurn":
+			if (config.role !== "runtime" || !p.turn) throw rpcError("invalid_request");
+			return runtime(m, ctx);
+		case "runtime/continueOpenCalls":
+		case "runtime/resumeTurn": throw rpcError("not_supported");
+		case "tools/list":
+			if (p.toolSource !== "probe-tools" || p.sessionId !== undefined || !registration().toolSources) throw rpcError("invalid_request");
+			// Plugin binding: The host asks a tool source. Hold the refreshed list at a fixture latch.
+			if (config.role === "probe" && refreshed && config.release) {
+				trace({ refreshRequested: true });
+				for (let i = 0; i < 100 && !existsSync(config.release); i++) await sleep(50, undefined, { signal: ctx.signal });
+				trace({ refreshReturned: true });
+			}
+			return { tools: registration().toolSources[0].tools };
+		case "tools/call": {
+			if (p.toolSource !== "probe-tools" || !p.sessionId || !p.project) throw rpcError("invalid_request");
+			if (config.role === "runtime" && p.call?.name === EFFECT.name) {
+				trace({ effect: p.call.input });
+				return { status: "completed", content: [{ type: "text", text: "fixture effect" }] };
+			}
+			if (config.role !== "probe" || !currentTools().some((t) => t.name === p.call?.name)) throw rpcError("invalid_request");
+			if (p.call.name === REFRESH.name) {
+				// The host asks a tool source: a list change is registered before the triggering answer.
+				if (!refreshed) {
+					refreshed = true;
+					ctx.notify("tools/changed", { toolSource: "probe-tools", parentRequestId: m.id });
+				}
+				return { status: "completed", content: [{ type: "text", text: "fixture list changed" }] };
+			}
+			if (p.call.name === QUESTION.name) {
+				// Shared data: Questions. No effects precede this ask, including on continuation.
+				const late = p.call.input?.late === true;
+				const reply = await ctx.ask("host/ask", { parentRequestId: m.id, request: { kind: "text", question: "Fixture question", ...(late ? { timeLimitMs: 200, whenTimeLimit: "leaveOpen" } : {}) } });
+				if (reply.pending === true) return { pending: "Waiting for the fixture text answer." };
+				trace({ questionResult: reply.requestId, callId: p.call.id, declined: reply.declined === true, value: reply.value });
+				return { status: "completed", content: [{ type: "text", text: reply.declined ? "fixture declined" : `fixture answer: ${reply.value}` }] };
+			}
+			if (p.call.name !== PROBE.name) return { status: "completed", content: [{ type: "text", text: p.call.name }] };
+			const checks = await runChecks(m, ctx);
+			if (config.out) writeFileSync(config.out, JSON.stringify(checks));
+			return { status: "completed", content: [{ type: "text", text: `probe: ${checks.filter((c) => c.ok).length}/${checks.length} host checks passed` }] };
 		}
+		default: throw rpcError("method_not_found");
 	}
 });
-process.stdin.on("end", () => process.exit(0));

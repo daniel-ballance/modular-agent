@@ -1,21 +1,31 @@
 # History service conformance kit
 
-Checks that a running history service follows the [history service binding](../../docs/bindings/history-http.md), `modular-agent-history/1`. It needs nothing but Node.
+Checks a disposable [history service](../../docs/bindings/history-http.md) over HTTP on loopback or HTTPS. The kit writes, lists and erases records, and leaves test sessions in the store. Use a test-only bearer token with at least 128 bits of entropy. Do not point this kit at production data, even if the service shares only a project with the tests.
 
 ```sh
-node run.mjs <service url> <token file>
+node conformance/history/run.mjs "$MODULAR_AGENT_HISTORY_URL" "$MODULAR_AGENT_HISTORY_TOKEN_FILE"
 ```
 
-It creates sessions with random ids. It checks:
-- tokens;
-- `GET /v1`;
-- creating a session, safely and against a conflict;
-- leases: the same owner, another owner, renewing, releasing, and a lost lease;
-- keeping entries: all or none, resending, key order, and conflicts;
-- `?after`, and unknown sessions and entries;
-- listing, which leaves out sessions with no entries;
-- erasure: refused without the lease, what an erased entry keeps, and erasing twice.
+To start the TypeScript reference service from the repository root:
 
-Exit code 0 means every check passed.
+```sh
+npm ci && npm run build
+umask 077
+scratch=$(mktemp -d)
+token=$(openssl rand -hex 16)
+printf '%s\n' "$token" > "$scratch/token"
+node packages/services/dist/src/serve.js history \
+  "{\"dir\":\"$scratch/store\",\"token\":\"$token\",\"port\":39071,\"leaseMs\":2500}"
+```
 
-To swap history services across builds, point an agent at one. The TypeScript agent uses `MODULAR_AGENT_HISTORY_URL` and `MODULAR_AGENT_HISTORY_TOKEN_FILE`.
+From another shell, run the kit against `http://127.0.0.1:39071` with the path to `$scratch/token`. Stop the service and remove the scratch directory after use. An agent using this service takes the same URL and token file via the two variables above.
+
+What it checks:
+- Authentication errors, declaration and lease length, selected response envelopes and input validation.
+- Exact metadata resend, conflict on changed metadata, project filtering and list order.
+- Lease generation after release and expiry, renewals, `held` retry timing fields, and concurrent stale requests against a current writer. The expiry check is skipped when the advertised TTL exceeds the kit's 60-second wait budget.
+- Ordered, full JSON round-trip of opaque entries and lineage metadata, numeric equality, equal duplicates and failure atomicity for conflicting or malformed batches.
+- Cursor traversal, item and byte limits, and rejection of an entry that cannot fit a page.
+- Erasure with and without a lease, exact tombstones and ordered idempotent results.
+
+It does not restart the service or check durable failover, retention expiry, agent lease renewal after network loss, backup deletion, token entropy on the service, or TLS provisioning. The bearer token is service-wide, not a test of tenant isolation. Passing these checks is not proof of [conformance](../../docs/conformance.md#what-conforms).

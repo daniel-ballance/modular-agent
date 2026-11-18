@@ -1,35 +1,25 @@
 # Plugin binding conformance kit
 
-Checks that a build's conformance plugin follows the [plugin binding](../../docs/bindings/plugin.md), `modular-agent-plugin/1`. The kit plays the host: it starts the plugin and serves the `host/*` callbacks from a temporary folder. It needs no network and no model.
+Checks a build's conformance plugin against the [plugin binding](../../docs/bindings/plugin.md), `modular-agent-plugin/1`. The kit is the host. It uses a temporary project and home, a scripted Provider and an environment that accepts only fixture callbacks. There is no external model or network dependency.
+
+Run on a disposable Linux environment with Node.js, Bash, `setsid` and GNU coreutils. The command and its arguments should use absolute paths. The project directory is not a sandbox. Only run trusted test programs with no ambient credentials or production configuration.
 
 ```sh
-node run.mjs -- <the command that serves the build's conformance plugin> [args...]   # use absolute paths: the plugin starts in a temporary folder
-node run.mjs --verbose -- ...
+node conformance/plugin/run.mjs -- <plugin command> [args...]
+node conformance/plugin/run.mjs -- node "$PWD/packages/plugin-wire/dist/src/serve-cli.js"
 ```
+
+Use `--verbose` before `--` for stderr and passing details. Use `--no-runtime` for the baseline roles alone.
 
 What it checks:
-- **The handshake:** the version, the registration, `replaces`, and that an unknown version gets `not_supported`.
-- **The Provider:** `conformance/echo` streaming, asking for a tool call, and `done:` counted in code points. "As the response arrives" runs once, through `host/hook`, with the complete message. An unknown provider is `invalid_request`, JSON-RPC -32602.
-- **The tools:** `read` and `bash` reach the environment only through `host/env/*`, linked by `parentRequestId` and carrying the `sessionId`; progress; cancelling within 5 seconds; and an answer to a request cancelled before it started.
-- **The working environment:** reading, writing, `exists` and `exec`, with streamed output and cancelling. With `strong` containment, a `setsid` escapee must die. A background process outlives its call, and `env/sessionEnded` stops it, but not another session's. With `points: true`, `env/save` and `env/restore` put files back, and an unknown point is `not_found`.
-- **The hooks:** the `tool.before` gate, the `turn.before` contribution, the `output` gate redacting `conformance-secret`, split across a stream's `text` events and inside a build's own event type, changing nothing else, and `unknown_handler`.
-- **The Runtime,** served as `runtime` and as `durable-runtime`, with the kit as the host and a scripted model:
-  - plain turns, tool rounds and refused calls. The Runtime records no `turnStart` or `turnEnd`, and `turn.end` is its last request;
-  - a failed model request retried, with the step prepared again;
-  - cancelling, step limits and parallel calls. A parallel result is recorded as soon as it is ready;
-  - `resumeTurn` in a new process, with history another build wrote, in the standard kinds only. The transient Runtime must end the turn as failed. The durable one must run the call that never started, run again the started call that is safe to repeat, and carry on. Neither may repeat a started call that isn't.
+- Handshake, supported version, selected parts, registration, replacement names, ping, framing and error envelopes, shutdown and natural EOF exit.
+- The fixture Provider: stream order, the complete-response hook, a valid and an unoffered tool directive, and exact truncation to 200 Unicode code points from the first result after the latest user message.
+- Tool calls through `host/env/*`, parent and session scope, fixture progress and exit text, and cancellation. The early-arrival cancel probe does not prove that dispatch had not started.
+- Environment files, output, deadlines and background process ownership. The descendant test applies to the advertised containment. With `points: true`, it checks point lookup and in-place restore.
+- Hook replies for a refusal, a system contribution, and lossless redaction across text events within a stream segment and within one standalone custom event.
+- Scripted Runtime turns: exact dispatch order, refused calls, host-recorded model intent and result, fresh attempt IDs on retry, cancellation and step limits. Serial and overlapping scheduling are both allowed for parallel-capable calls.
+- `resumeTurn` against synthetic standard history. An unsafe started call is not repeated. A transient Runtime fails and does not dispatch; a durable one runs the calls it can recover. This is not an independent second build's history.
 
-  Use `--no-runtime` for a build that serves no Runtime.
-- **`MODULAR_AGENT_PLUGIN_PARTS`,** ping, an unknown method, shutdown, and exiting when stdin closes.
+To check a host, use the [ACP kit](../acp/README.md) with `--probe-checks` for host callbacks, Runtime dispatch and output validation, and `--job-checks` for job transitions. Use `--plugin-checks` with conformance parts from another build for an interoperability run. The probe and jobs programs are test fixtures, not production plugins.
 
-To check a host, run the [ACP kit](../acp/README.md) against it with `MODULAR_AGENT_PLUGINS` naming conformance plugins, and `--plugin-checks`. The plugins may come from any build. For example:
-
-```sh
-MODULAR_AGENT_PLUGINS='[{"command":["<rust plugin command>"],"env":{"MODULAR_AGENT_PLUGIN_PARTS":"provider,hooks"}},
-                        {"command":["<python plugin command>"],"env":{"MODULAR_AGENT_PLUGIN_PARTS":"tools,environment"}}]' \
-  node ../acp/run.mjs --plugin-checks -- <go agent command>
-```
-
-The host side of the binding is checked from inside a host, by the probe plugin, `probe.mjs`. The [ACP kit](../acp/README.md) loads it with `--probe-checks`.
-
-The jobs plugin, `jobs.mjs`, checks the host side of jobs. The ACP kit loads it with `--job-checks`.
+The kit tests selected transcripts, not arbitrary schemas, credential handling, credential-bearing Providers, tenant separation, or reliable cleanup of unconfirmed external effects. Use separate acceptance tests for these. A pass is not proof of [conformance](../../docs/conformance.md#what-conforms).

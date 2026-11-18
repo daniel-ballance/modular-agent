@@ -1,122 +1,118 @@
 #!/usr/bin/env node
-// The jobs plugin: checks that a host records jobs in the standard kinds, reports them, and lets the same plugin
-// take up an unfinished job after a restart, in whichever build reopens the session (docs/bindings/plugin.md#jobs).
-// The ACP kit loads it with --job-checks. It has no dependencies.
-//
-// It registers the tool `background` ({ text, ms }). A call starts a job that ends after ms milliseconds with the
-// result "background: <text>", reported as input. When a session starts again (session.start, resumed), the plugin
-// takes up its unfinished jobs and ends each with "background: <text> (taken up)". jobs/cancel ends a job as cancelled.
+// Disposable background-job fixture for Plugin binding: Jobs. It does not run an external executor.
 import { appendFileSync } from "node:fs";
+import { isDeepStrictEqual as equal } from "node:util";
+import { rpcError, serve } from "./peer.mjs";
 
-const BINDING = "modular-agent-plugin/1";
-let config = {};
-let nextId = 1;
-const pending = new Map();
-const timers = new Map(); // jobId -> timer
-let buffer = "";
-
-const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
-const note = (what) => config.out && appendFileSync(config.out, JSON.stringify(what) + "\n");
-function ask(method, params, ms = 15000) {
-	const id = `jobs-${nextId++}`;
-	return new Promise((resolve, reject) => {
-		const timer = setTimeout(() => (pending.delete(id), reject({ message: `timed out: ${method}` })), ms);
-		pending.set(id, { resolve: (r) => (clearTimeout(timer), resolve(r)), reject: (e) => (clearTimeout(timer), reject(e)) });
-		send({ id, method, params });
-	});
-}
-const text = (t) => [{ type: "text", text: t }];
-
-async function end(jobId, outcome, result, report) {
-	clearTimeout(timers.get(jobId));
-	timers.delete(jobId);
-	try {
-		await ask("host/jobs/end", { jobId, outcome, ...(result ? { result } : {}), report });
-		note({ ended: jobId, outcome: outcome.kind });
-	} catch (e) {
-		note({ endFailed: jobId, error: e });
+const binding = "modular-agent-plugin/1";
+const name = "conformance-jobs";
+const toolSource = "conformance-jobs-tools";
+const tools = [{ name: "background", description: "Start a test job that reports later.", parameters: { type: "object", properties: { text: { type: "string" }, ms: { type: "number", minimum: 0 } }, required: ["text", "ms"] } }];
+const running = new Map();
+let config = {}, stopping = false;
+const note = (event) => config.out && appendFileSync(config.out, JSON.stringify(event) + "\n");
+const text = (value) => [{ type: "text", text: value }];
+const all = async (ask, sessionId) => {
+	const entries = [];
+	for (let after, page = 0; page < 50; page++) {
+		const r = await ask("host/history", { sessionId, all: true, ...(after ? { after } : {}) });
+		entries.push(...r.entries);
+		if (!r.next) return entries;
+		after = r.next;
 	}
+	throw rpcError("internal", "fixture history too long");
+};
+
+function end(job, kind, result) {
+	if (job.ending) return job.ending;
+	clearTimeout(job.timer);
+	const { jobId, sessionId } = job;
+	const p = { jobId, outcome: { kind }, ...(result ? { result } : {}), report: !!result };
+	job.ending = (async () => {
+		await peer.ask("host/jobs/end", p);
+		// Jobs and Shared data: Job reports. The first read after acknowledgement sees the end and its admission.
+		const entries = await all(peer.ask, sessionId);
+		const ended = entries.filter((e) => e.kind === "jobEnded" && e.jobId === jobId);
+		const receipts = entries.filter((e) => e.kind === "inputAccepted" && e.data?.key === `job:${jobId}`);
+		const commit = ended.length === 1 && ended[0].data?.report === !!result && ended[0].data?.outcome?.kind === kind;
+		const admission = result ? receipts.length === 1 && equal(receipts[0].data?.content, result) && receipts[0].jobId === jobId && receipts[0].data?.when === "after" && entries.indexOf(ended[0]) < entries.indexOf(receipts[0]) : receipts.length === 0;
+		note({ ended: jobId, outcome: kind, commit, admission });
+		// Jobs: an identical end is an acknowledgement, not a second transition.
+		if (result) {
+			await peer.ask("host/jobs/end", p);
+			const after = await all(peer.ask, sessionId);
+			note({ repeatedEnd: jobId, once: after.filter((e) => e.kind === "jobEnded" && e.jobId === jobId).length === 1 && after.filter((e) => e.kind === "inputAccepted" && e.data?.key === `job:${jobId}`).length === 1 });
+		}
+		if (!commit || !admission) throw rpcError("lost", "job transition not visible at acknowledgement");
+	})().catch((error) => { note({ endFailed: jobId, code: error?.data?.code }); throw error; });
+	return job.ending;
 }
 
 async function takeUp(sessionId) {
-	try {
-		const { jobs } = await ask("host/jobs/unfinished", { sessionId });
-		note({ unfinished: (jobs ?? []).map((j) => j.jobId) });
-		for (const j of jobs ?? []) {
-			await ask("host/jobs/resume", { jobId: j.jobId });
-			await end(j.jobId, { kind: "completed" }, text(`background: ${j.detail?.text} (taken up)`), true);
-		}
-	} catch (e) {
-		note({ takeUpFailed: e });
+	const { jobs } = await peer.ask("host/jobs/unfinished", { sessionId });
+	note({ unfinished: jobs.map((j) => j.jobId) });
+	for (const j of jobs) {
+		await peer.ask("host/jobs/resume", { jobId: j.jobId });
+		await peer.ask("host/jobs/resume", { jobId: j.jobId });
+		note({ resumed: j.jobId });
+		const job = { jobId: j.jobId, sessionId };
+		running.set(j.jobId, job);
+		await end(job, "completed", text(`background: ${j.detail?.text} (taken up)`));
 	}
 }
 
-async function onRequest(m) {
+const peer = serve("jobs", async (m, { ask, signal }) => {
 	const p = m.params ?? {};
+	if (stopping) throw rpcError("invalid_request");
 	switch (m.method) {
 		case "plugin/initialize":
+			if (p.binding !== binding || p.data !== "modular-agent-data/1") throw rpcError("not_supported");
 			config = p.config ?? {};
-			if (p.binding !== BINDING) return send({ id: m.id, error: { code: -32000, message: "unknown binding", data: { code: "not_supported" } } });
-			return send({
-				id: m.id,
-				result: {
-					binding: BINDING,
-					name: "conformance-jobs",
-					toolSources: [{ id: "conformance-jobs-tools", perSession: false, tools: [{ name: "background", description: "Start a background job that reports later.", parameters: { type: "object", properties: { text: { type: "string" }, ms: { type: "number" } }, required: ["text", "ms"] } }] }],
-					hooks: [{ hook: "session.start", handlerId: 1, order: "normal" }],
-				},
-			});
+			return { binding, name, toolSources: [{ id: toolSource, tools }], hooks: [{ hook: "session.start", handlerId: 1 }] };
 		case "plugin/shutdown":
-			for (const t of timers.values()) clearTimeout(t);
-			return send({ id: m.id, result: {} });
-		case "$/ping":
-			return send({ id: m.id, result: {} });
+			stopping = true;
+			for (const j of running.values()) clearTimeout(j.timer);
+			await Promise.allSettled([...running.values()].map((j) => j.ending));
+			return {};
+		case "$/ping": return {};
 		case "tools/list":
-			return send({ id: m.id, result: { tools: [] } });
+			if (p.toolSource !== toolSource || p.sessionId !== undefined) throw rpcError("invalid_request");
+			return { tools };
 		case "tools/call": {
-			const call = p.call ?? {};
+			const { call, sessionId } = p;
+			if (p.toolSource !== toolSource || call?.name !== "background" || typeof call.id !== "string" || !sessionId) throw rpcError("invalid_request");
+			const { text: message, ms } = call.input ?? {};
+			if (typeof message !== "string" || !Number.isFinite(ms) || ms < 0) throw rpcError("invalid_request");
 			try {
-				const { jobId, started } = await ask("host/jobs/start", { parentRequestId: m.id, kind: "background", key: `background:${call.id}`, detail: { text: call.input?.text, ms: call.input?.ms } });
-				note({ started: jobId, fresh: started });
-				if (started !== false) timers.set(jobId, setTimeout(() => void end(jobId, { kind: "completed" }, text(`background: ${call.input?.text}`), true), Number(call.input?.ms ?? 0)));
-				return send({ id: m.id, result: { status: "completed", content: text(`started job ${jobId}`) } });
-			} catch (e) {
-				return send({ id: m.id, result: { status: "failed", content: text(`could not start a job: ${e?.message ?? JSON.stringify(e)}`) } });
+				const start = { parentRequestId: m.id, kind: "background", key: `background:${call.id}`, detail: { text: message, ms } };
+				const { jobId, started } = await ask("host/jobs/start", start);
+				if (started) {
+					const job = { jobId, sessionId };
+					running.set(jobId, job);
+					job.timer = setTimeout(() => void end(job, "completed", text(`background: ${message}`)).catch(() => undefined), ms);
+				}
+				if (signal.aborted) throw rpcError("cancelled");
+				// Jobs: commit before start acknowledgement, then same-key start is idempotent.
+				const saved = (await all(ask, sessionId)).filter((e) => e.kind === "jobStarted" && e.jobId === jobId);
+				const duplicate = await ask("host/jobs/start", start);
+				note({ started: jobId, fresh: started, commit: saved.length === 1 && saved[0].writer === name, duplicate: duplicate.jobId === jobId && duplicate.started === false });
+				return { status: "completed", content: text(`started job ${jobId}`) };
+			} catch (error) {
+				if (signal.aborted) throw rpcError("cancelled");
+				note({ startFailed: call.id, code: error?.data?.code });
+				return { status: "failed", content: text("Could not start the fixture job.") };
 			}
 		}
 		case "hook/handle":
-			send({ id: m.id, result: null });
-			if (p.hook === "session.start" && p.payload?.resumed) void takeUp(p.payload.sessionId);
-			return;
-		case "jobs/cancel":
-			await end(p.jobId, { kind: "cancelled" }, undefined, false);
-			return send({ id: m.id, result: {} });
-		default:
-			return send({ id: m.id, error: { code: -32601, message: `Method not found: ${m.method}` } });
-	}
-}
-
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-	buffer += chunk;
-	for (let i = buffer.indexOf("\n"); i >= 0; i = buffer.indexOf("\n")) {
-		const line = buffer.slice(0, i).trim();
-		buffer = buffer.slice(i + 1);
-		if (!line) continue;
-		let m;
-		try {
-			m = JSON.parse(line);
-		} catch {
-			continue;
+			if (p.hook !== "session.start" || p.handlerId !== 1) throw rpcError("unknown_handler");
+			if (p.payload?.resumed) setImmediate(() => void takeUp(p.payload.sessionId).catch((e) => note({ takeUpFailed: e?.data?.code ?? "internal" })));
+			return null;
+		case "jobs/cancel": {
+			const job = running.get(p.jobId);
+			if (!job) throw rpcError("invalid_request");
+			await end(job, "cancelled");
+			return {};
 		}
-		if (m.method && m.id !== undefined) void onRequest(m);
-		else if (m.method) continue;
-		else if (pending.has(m.id)) {
-			const { resolve, reject } = pending.get(m.id);
-			pending.delete(m.id);
-			if (m.error) reject(m.error);
-			else resolve(m.result);
-		}
+		default: throw rpcError("method_not_found");
 	}
 });
-process.stdin.on("end", () => process.exit(0));
