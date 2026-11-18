@@ -149,6 +149,7 @@ async function waitFor(a, sid, fn, ms = 15000) {
 const said = (entries, text) => entries.some((e) => e.kind === "response" && JSON.stringify(e.message ?? {}).includes(text));
 
 let sessionId;
+let erasedForPortable;
 let decl = {};
 let extensions = [];
 let agent = connect();
@@ -462,6 +463,13 @@ await attempt("load in a new process", async () => {
 	const nv = await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo yes > never.txt"}'), "prompt under never");
 	check("load: under never, the call is refused without asking", nv.stopReason === "end_turn" && agent.permissions.length === n && !existsSync(join(project, "never.txt")));
 	await setOption(agent, sessionId, "approval", "off");
+	if (portableChecks && extensions.includes("erase")) {
+		const result = (await history(agent, sessionId)).entries.find((e) => e.kind === "toolResult" && e.toolCallId && e.turnId);
+		if (result) {
+			await agent.ctx.request(`_${NS}/erase`, { sessionId, entryIds: [result.id] });
+			erasedForPortable = { sid: sessionId, id: result.id, turnId: result.turnId, toolCallId: result.toolCallId };
+		}
+	}
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
 });
 
@@ -560,6 +568,11 @@ if (portableChecks) {
 		}
 		check("portable: the sessions are in the history service", count > 0, `${count} entries`);
 		check("portable: every entry is in the shared shapes", problems.length === 0, problems.slice(0, 6).join("; "));
+		if (erasedForPortable) {
+			const res = await fetch(`${url.replace(/\/$/, "")}/v1/sessions/${encodeURIComponent(erasedForPortable.sid)}`, { headers: { authorization: `Bearer ${token}` } });
+			const kept = (await res.json()).entries?.find((e) => e.id === erasedForPortable.id);
+			check("portable: an erased tool result keeps its turnId and toolCallId in the service", kept?.erased === true && kept.turnId === erasedForPortable.turnId && kept.toolCallId === erasedForPortable.toolCallId && !("message" in kept), String(JSON.stringify(kept)).slice(0, 200));
+		}
 	});
 }
 

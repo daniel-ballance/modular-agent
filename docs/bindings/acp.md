@@ -192,9 +192,9 @@ A history entry, as the `history` extension returns it, has at least:
 - `time`, in milliseconds since 1970;
 - `turnId`, `toolCallId` and `actorId`, where they apply;
 - `message`, where the entry carries one, as `{ "role": "user" | "assistant" | "toolResult", "content": [blocks] }`. Text and images are ACP content blocks. A tool call is `{ "type": "toolCall", "id", "name", "arguments" }`. Any other block keeps its own `type`, and a host may skip types it doesn't know. Reasoning that isn't readable text is never shown as text.
-- an erased entry keeps only `id`, `parentId`, `kind`, and `erased: true`.
+- an erased entry keeps only `id`, `parentId`, `kind`, and `erased: true`, plus whichever of `turnId`, `stepId`, `toolCallId` and `jobId` it had, as in the [shared data](data.md#history-entries).
 
-These kinds have fixed names: `input`, `response`, `toolResult`, `turnStart` and `turnEnd`. A `turnEnd` entry's `data.outcome` is the turn's outcome. Other kinds are the build's own.
+The kinds with fixed names and meanings are those of the [shared data](data.md#history-entries), which include `input`, `response`, `toolResult`, `turnStart` and `turnEnd`. A `turnEnd` entry's `data.outcome` is the turn's outcome. Other kinds are the build's own.
 
 ### Request
 
@@ -234,6 +234,7 @@ The [conformance kit](../../conformance/acp/README.md) uses this mode.
 
 ## Changes
 
+- **2026-11-18, round five.** The Entry section points to the shared data's kinds, and erased entries keep their identities there too (found by the TypeScript builder).
 - **2026-11-18, round five.** `/2`, asked for in `initialize`, reports a failed turn as a JSON-RPC error rather than `refusal`; the conformance model's `fail:` makes one. Several actors: the extensions `actors`, `join`, `leave` and `release`, `actorId` on `input` and `answer`, and proposed input (Python G76, Go B26). `move` with `rewind`.
 - **2026-11-18, after the portable-session matrix.** The connection's actor joins every session it opens or reopens. The Python agent refused to reopen sessions written by the TypeScript and Elixir agents, because its own actor wasn't among the session's actors. The Elixir builder had logged the same gap (M3-2).
 - **2026-11-18, round four.** The optional declaration key `portableSessions`. The conformance model's "this turn" is everything after the last `user` message (Rust B-14).
