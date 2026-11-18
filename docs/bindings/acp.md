@@ -79,6 +79,8 @@ These keys are optional. A build that needs to say what they say uses these name
 | `lateAnswersStartTurns` | boolean | An answer to a question left open past its turn starts a new turn. `startsTurnsUnasked` covers job reports only. |
 | `queuedJobReportsAfterRestart` | `"handedBack"` or `"run"` | When job reports are treated differently from other queued input after a restart. |
 | `portableSessions` | boolean | The agent writes and reads [portable sessions](data.md#portable-sessions): it can reopen a session another such agent wrote, in any language. Left out, `false`. |
+| `sessionLimits` | boolean | The agent offers session limits and the `limit` extension. Left out, `false`. |
+| `tenants` | boolean | The agent offers tenants, read from `MODULAR_AGENT_TENANTS`, and the `tenant` extension. Left out, `false`. |
 | `projectRoot` | string | The agent serves only this project. `session/new`, `session/load` and `session/resume` with another `cwd` are refused before anything changes, so a host starts one agent per project. |
 
 When a build's policy is mixed, it declares the more restrictive value, and says the rest in its own keys. For example, a build might cancel open calls when moving but refuse to move while jobs run. It declares `movingWithUnfinishedWork: "refused"`.
@@ -164,7 +166,7 @@ Only the outcome `selected` with `optionId: "allow"` allows the call. Every othe
 
 ## Extension methods
 
-Each extension is a JSON-RPC request with a `sessionId` in its params. These four are required:
+Each extension is a JSON-RPC request with a `sessionId` in its params. A reply the output gate blocks, or that a failing gate handler withholds, is the JSON-RPC error `-32000` with `data.code` `"withheld"`. The request's effect, if it had one, still happened. These four are required:
 
 | Method | Params | Result |
 |---|---|---|
@@ -178,7 +180,7 @@ These are optional. If offered, they use these names and shapes, and appear in `
 | Method | Params | Result |
 |---|---|---|
 | `_modular-agent/fork` | `sessionId`; `entryId` | `{ "sessionId" }`. Refused while the session has unfinished work. |
-| `_modular-agent/move` | `sessionId`; `entryId`; `rewind` *(optional; boolean)* | `{}`. Follows `movingWithUnfinishedWork`. With `rewind`, in an agent that declares `rewinding`, the working environment's files are restored as they were at the entry ([Rewinding](data.md#rewinding)), or the move is refused with `-32602` before anything changes. |
+| `_modular-agent/move` | `sessionId`; `entryId`; `rewind` *(optional; boolean)* | `{}`. Follows `movingWithUnfinishedWork`. With `rewind`, in an agent that declares `rewinding`, the working environment's files are restored as they were at the entry ([Rewinding](data.md#rewinding)), or the move is refused with `-32602` before anything changes. With `rewind`, the result may be `{ "outOfReach": [toolCallId] }`, naming calls past the point that reached outside the project. |
 | `_modular-agent/erase` | `sessionId`; `entryIds` | `{ "erased": [id], "pending": [id], "outOfReach": [string] }`. `pending` lists entries whose remote copies the agent knows of but hasn't yet confirmed deleted; the agent retries, and erasing again finishes the job. `outOfReach` names kinds of copies, such as `"delivered output"`, `"working environment effects"` or `"vendor retention"`. |
 | `_modular-agent/jobs` | `sessionId` | `{ "jobs": [{ "id", "kind", "state" }] }` |
 | `_modular-agent/cancel-job` | `sessionId`; `jobId` | `{}` |
@@ -213,13 +215,29 @@ An agent that declares `severalActors` offers these extensions too, and lists th
 | Method | Params | Result |
 |---|---|---|
 | `_modular-agent/actors` | `sessionId` | `{ "actors": [Actor], "present": [actorId] }` |
-| `_modular-agent/join` | `sessionId`; `actor` (`{ id, kind, rights }`) | `{}`, recorded as `actorJoined`. Needs the `grant` right, and every right given must be one the connection's actor has. Joining an actor again replaces its rights, which is how rights are taken away. Otherwise `-32602`, and nothing changes. |
+| `_modular-agent/join` | `sessionId`; `actor` (`{ id, kind, rights }`); `present` *(optional; boolean, default `true`)* | `{}`, recorded as `actorJoined`. Needs the `grant` right, and every right given must be one the connection's actor has. Joining an actor again replaces its rights, which is how rights are taken away. Otherwise `-32602`, and nothing changes. An actor joined through a connection is present while the connection is open, unless joined with `present: false`. |
 | `_modular-agent/leave` | `sessionId`; `actorId` | `{}`, recorded as `actorLeft`. Needs `grant`, unless the actor is leaving itself. |
 | `_modular-agent/release` | `sessionId`; `inputId`; `when` (`"now"`, `"steer"` or `"after"`); `declined` *(optional)* | `{ "inputId", "taken" }`. Releases proposed input, recorded as an `inputAccepted` with the same `inputId`, the new `when` and `data.releasedBy`. Needs `input`. With `declined`, the input is handed back instead. |
+| `_modular-agent/proposals` | `sessionId` | `{ "proposals": [{ "inputId", "actorId", "content", "time" }] }`: proposed input not yet released, declined or withdrawn, oldest first. Needs `watch`. |
+| `_modular-agent/withdraw` | `sessionId`; `inputId`; `actorId` *(optional)* | `{}`. Withdraws a proposal, recorded as `inputHandedBack`. Only its proposer may, or an actor with `input`. |
 
 - **Acting for another actor.** `_modular-agent/input` and `_modular-agent/answer` take an optional `actorId`: an actor in the session. The request acts with only the rights that actor and the connection's actor both have. A request whose rights don't hold is refused with `-32602`.
 - **Proposed input.** `_modular-agent/input` with `when: "propose"` needs only `propose`. The answer is `{ "inputId", "taken": "proposed" }`, and nothing runs until an actor with `input` releases it. Released input acts with the rights the proposer and the releaser share.
 - **Questions** go to every present actor who may answer them. An answer from an actor without the right is refused.
+- **A declined release** answers `{ "inputId", "taken": "handedBack" }`.
+
+## Limits and tenants
+
+An agent that declares `sessionLimits` offers `limit`, and one that declares `tenants` offers `tenant`, as [shared data](data.md#limits-and-tenants) defines them. Both are listed in `extensions`.
+
+| Method | Params | Result |
+|---|---|---|
+| `_modular-agent/limit` | `sessionId`; `rights` (an array, or `null` for none) | `{}`, recorded as `limit`. Needs `administer`, and every right given must be one the connection's actor has. Otherwise `-32602`, and nothing changes. |
+| `_modular-agent/tenant` | `sessionId` | `{ "tenant": string | null, "rights": [string] | null, "tokens": { "budget": number, "used": number } | null }` |
+
+- **Choosing a tenant:** `session/new` may carry `_meta["modular-agent"].tenant`. A tenant the agent doesn't know is refused with `-32602`, and nothing is created.
+- **The connection's actor** has `administer` among its rights, unless a tenant's or session's limit leaves it out.
+- **A turn that hits the tenant's budget** ends with `outcome.limit` `"tenantTokens"`, and stop reason `max_tokens`.
 
 ## Conformance mode
 
@@ -234,6 +252,7 @@ The [conformance kit](../../conformance/acp/README.md) uses this mode.
 
 ## Changes
 
+- **2026-11-18, round six.** Listing and withdrawing proposals; presence on `join` (Go B28, Elixir R5-4); limits and tenants; a reply the gate withholds (Go B35); what a rewind couldn't reach (Go B34).
 - **2026-11-18, round five.** The Entry section points to the shared data's kinds, and erased entries keep their identities there too (found by the TypeScript builder).
 - **2026-11-18, round five.** `/2`, asked for in `initialize`, reports a failed turn as a JSON-RPC error rather than `refusal`; the conformance model's `fail:` makes one. Several actors: the extensions `actors`, `join`, `leave` and `release`, `actorId` on `input` and `answer`, and proposed input (Python G76, Go B26). `move` with `rewind`.
 - **2026-11-18, after the portable-session matrix.** The connection's actor joins every session it opens or reopens. The Python agent refused to reopen sessions written by the TypeScript and Elixir agents, because its own actor wasn't among the session's actors. The Elixir builder had logged the same gap (M3-2).

@@ -77,7 +77,7 @@ The plugin answers with its registration. Registration is the only source of wha
 }
 ```
 
-- **`name` is the plugin's identity,** the same in every build and every version of it. Jobs belong to a plugin by name ([Jobs](#jobs)), so a renamed plugin loses its unfinished jobs.
+- **`name` is the plugin's identity,** the same in every build and every version of it. Jobs belong to a plugin by name ([Jobs](#jobs)), so a renamed plugin loses its unfinished jobs. **A host loads at most one plugin of each name,** counting its own plugins and external ones. A second plugin with a name already loaded is [refused](#starting-the-handshake), so a job never has two owners. A plugin program that serves several parts in several processes gives each process its own name, and only the one that starts a job can take it up.
 - **Every field but `binding` and `name` is optional.** A binding the plugin can't speak gets the error `not_supported`.
 - **`order`** is `first`, `normal` or `last`, as in [Hook points](../contracts.md#hook-points).
 - **`replaces`** names items the host leaves out of its own plugins in favour of this one: `runtime`, `working-environment`, `provider:<id>`, `tool:<name>` or `command:<name>`.
@@ -175,7 +175,7 @@ An error answer counts as a failing handler, per [Hook points](../contracts.md#h
 
 - **Only the standard hook points** are offered to a plugin in another process in `/1`. A plugin can't define hook points over the wire, and a handler for any other point is [refused](#starting-the-handshake).
 - **"Before output reaches a recipient" is offered a stream at a time,** as the hook point `output`. A handler in another process would cost a round trip per streamed piece, so the host holds each stream for each recipient until the stream's declared end: the end of a model response, or of a tool's output ([The output gate](../contracts.md#the-output-gate)). It then sends one `hook/handle` with the whole stream. Output that isn't streamed goes one item at a time: a recorded entry, a turn's outcome, or an answer to an Interface's request, such as a page of history, as one event. A held stream reaches the recipient before the answer to the request that caused it, such as a prompt's response.
-  - The payload is `{ sessionId, recipient, events, final }`. `events` are the events to deliver, in order, each `{ type, data }`; `final` is `true`. The answer is `null` to let them through, `{ "events": [...] }` to deliver others in their place, such as a redacted copy, or `{ "block": true }`.
+  - The payload is `{ sessionId, recipient, events, final }`. `recipient` is the actor id the output is for. `events` are the events to deliver, in order, in the [shared shapes](data.md#output-events); `final` is `true`. The answer is `null` to let them through, `{ "events": [...] }` to deliver others in their place, such as a redacted copy, or `{ "block": true }`.
   - Handlers combine as a gate, in order: a block stops the rest, and each handler sees the events the previous one left.
   - A recipient with such a handler sees no live pieces, only each stream when it ends. The host declares `holdsOutput: true`.
   - A handler that fails, or a plugin lost, blocks: the gate fails closed.
@@ -196,7 +196,7 @@ A turn is one request from the host. The Runtime runs it, asking the host for wh
 - **Who records what.** The host records `turnStart` and the input the turn takes before it sends `runtime/runTurn`, so a turn lost at once is still on the record. It records `turnEnd` from the TurnOutcome. It records each call's `toolStarted` before the call runs. The Runtime records the rest: responses, tool results and anything of its own. A Runtime doesn't record `turnStart` or `turnEnd`; a host given one returns the entry it has, or takes it as the turn's end, and never keeps two.
 - **Parallel calls.** The Runtime records each result as soon as it has it, so a crash loses none. `host/runtime/prepareStep` gives the model the results in the order the response asked for them, whatever order they were recorded in.
 - **A failed model request.** When `model.failed` answers `{ retry: true }`, the host discards any state the turn's Provider keeps. The Runtime then sends the answer's `request` if it has one, or asks `host/runtime/prepareStep` again.
-- **Cancelling:** the host cancels a turn with `$/cancel` on its request. The Runtime stops at the next safe point, cancels what it asked the host for, records a result for every started call, and answers with outcome `cancelled`.
+- **Cancelling:** the host cancels a turn with `$/cancel` on its request. The Runtime stops at the next safe point, cancels what it asked the host for, records a result for every started call, and answers with outcome `cancelled`. Once the host has sent the cancel, the turn ends as `cancelled`, whatever the Runtime answers, unless it answers `completed`: a callback may see the cancel before the Runtime does, and fail because of it.
 - **The Runtime's state lives in the history.** After a restart, the host starts the Runtime plugin's process again and sends `runtime/resumeTurn`. Nothing in the old process survives. The Runtime reads the turn back with `host/history`: its responses, results and step count are in the [standard kinds](data.md#history-entries). It may record kinds of its own through `host/runtime/record` too, but only to save work: a Runtime must recover a turn from the standard kinds alone, since another build may have started it ([portable sessions](data.md#portable-sessions)).
 - **What stays with the host.** A tool call an Interface starts outside a turn is the host's to run, not the Runtime's. So is rewinding: the host moves the session and restores the working environment's saved point ([Rewinding](data.md#rewinding)), with no request to the Runtime. A Runtime's `supports` says nothing about rewinding.
 
@@ -233,7 +233,7 @@ A job is work a plugin starts that outlives a turn, such as a subagent or a back
 |---|---|---|
 | `host/jobs/start` | `parentRequestId`, `kind`, `key` *(optional)*, `detail` | `{ jobId, started }`. The host records `jobStarted` before it answers. The job acts as the actor behind the parent, narrowed as for any work that actor started, and needs the `jobs` right. With a `key` the session has seen, it answers the first job's `jobId` with `started: false`, and starts nothing. |
 | `host/jobs/progress` | `jobId`, `content` | a notification: progress, passed on as an event |
-| `host/jobs/end` | `jobId`, `outcome` (`{ kind, error? }`), `result` *(optional; content)*, `report` (boolean) | `{}`, once `jobEnded` is recorded, and with `report`, the report taken as input, keyed `job:<jobId>`. A job already ended is `invalid_request`. |
+| `host/jobs/end` | `jobId`, `outcome` (`{ kind, error? }`), `result` *(optional; content)*, `report` (boolean) | `{}`, once `jobEnded` is recorded, and with `report`, the report taken as input, keyed `job:<jobId>`. A job already ended is `invalid_request`. The report is taken as accepted input (`inputAccepted`, keyed `job:<jobId>`) before the answer; the turn it starts runs when the session is free, which the answer doesn't wait for. |
 | `host/jobs/unfinished` | `sessionId` | `{ "jobs": [{ jobId, kind, key?, detail, actorId }] }`: this plugin's jobs in the session that have a `jobStarted` and no `jobEnded` |
 | `host/jobs/resume` | `jobId` | `{}`. The plugin takes up an unfinished job of its own, after a restart. The host records nothing; the plugin ends the job when it can. |
 
@@ -262,7 +262,7 @@ Every request below names its session, directly or through `parentRequestId`.
 | `host/problem` | `where`, `message` | a notification: a problem the plugin carried on past |
 | `host/jobs/*` | see [Jobs](#jobs) | |
 
-**Paging history.** `after` is an entry id; the page starts with the entry after it. `next` is the id of the page's last entry, given only when more remain, so the plugin passes it as `after` for the next page. An `after` that isn't in the list asked for is refused with `invalid_request`. An entry is never split or skipped: one that alone is over 4 MiB gives `result_too_large`. The 4 MiB counts the UTF-8 JSON of the whole `result` object, `entries` and `next` included, not the JSON-RPC envelope.
+**Paging history.** A page always holds at least one entry, when one remains: an entry that fits alone is sent with its `next`, even if the cursor takes the page over 4 MiB. `after` is an entry id; the page starts with the entry after it. `next` is the id of the page's last entry, given only when more remain, so the plugin passes it as `after` for the next page. An `after` that isn't in the list asked for is refused with `invalid_request`. An entry is never split or skipped: one that alone is over 4 MiB gives `result_too_large`. The 4 MiB counts the UTF-8 JSON of the whole `result` object, `entries` and `next` included, not the JSON-RPC envelope.
 
 **Authority.** A request whose authority, session or ownership doesn't hold is refused with `invalid_request`.
 - **Requests that need a parent:** `host/ask`, `host/env/*`, `host/hook`, `host/runtime/*` and `host/jobs/start`. They act with the authority of the work behind the parent, never more, and only in its session. `host/hook` also needs the parent to be a request to the Provider whose hook points it runs.
@@ -299,6 +299,7 @@ The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a
 
 ## Changes
 
+- **2026-11-18, round six.** One plugin of each name (Python G81, Go B29). The output gate's payload uses the shared [output events](data.md#output-events). A job's report is accepted before `host/jobs/end` answers, not run (Rust R5-07). A cancelled turn ends as cancelled even if a callback failed first (Rust R5-01). A page always holds at least one entry (Rust R5-08).
 - **2026-11-18, after the round-five matrices.** `env/restore` restores in place. Elixir's environment replaced the project folder, so the Rust host, whose working directory it was, failed its next file operation with "no such file or directory".
 - **2026-11-18, round five.** The open items left after round four, and the gaps the builders logged in it:
   - **Jobs** over the binding: `host/jobs/*` and `jobs/cancel`, recorded in standard kinds, so a reopening build with the same plugin finds a job's unfinished work. A plugin's `name` is its identity.

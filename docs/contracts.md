@@ -439,6 +439,7 @@ These rules come from three independent builds of this description, in Rust, Pyt
 
 - **Authority is a set of named rights.** An actor acts with its own rights, narrowed by the session's limit. For work another actor started, such as a job or a child session, they are narrowed further by every ancestor's current rights.
 - **An actor may grant only rights it has.** Grants and revocations apply on every branch.
+- **A session can have a limit, and belong to a tenant,** each a ceiling on every actor's rights in it. Only an administrator sets a session's limit, never above its own rights. A tenant is fixed when the session is created, is configured outside any project, and may carry a token budget across all its sessions. **Decided** in round six.
 - **Work keeps the authority of everyone who contributed to it.** A turn that took input from several actors acts with only the rights they all share, or refuses mixed input. Which one is declared.
 - **A job's report acts as the job,** with the job's narrowed authority, never as the actor who started the job.
 - **Content is never authority.** Text in a message or a tool's input can't grant a right.
