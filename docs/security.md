@@ -1,6 +1,6 @@
 # Security
 
-Read this before choosing an agent and its parts for production. [Contracts](contracts.md#rules-every-implementation-follows) defines what the agent enforces. The [bindings](bindings/README.md) define how parts exchange messages. [Conformance](conformance.md) checks interoperability, not the safety of a deployment.
+This document defines trust boundaries and security rules for a deployment. [Contracts](contracts.md#rules-every-implementation-follows) defines core behavior. The [bindings](bindings/README.md) specify wire checks. [Conformance](conformance.md) describes interoperability, not production readiness.
 
 ## Trust boundaries
 
@@ -28,17 +28,17 @@ See [MCP servers](contracts.md#mcp-servers) for programs an Interface asks the a
 
 ## Authority
 
-[Authority](contracts.md#authority) defines which actor a connection acts for, which rights it needs, and which rights it can grant. Reopening is not a new grant or a reset of recorded rights. The [ACP binding](bindings/acp.md#several-actors) maps those rules to requests on behalf of another actor.
+[Authority](contracts.md#authority) defines which actor a connection acts for, which rights it needs, and which rights it can grant. Reopening does not reset a recorded grant. The [ACP binding](bindings/acp.md#several-actors) maps those rules to requests on behalf of another actor.
 
-See [ACP Sessions](bindings/acp.md#sessions) for the `joinOnOpen` defaults and [Limits and tenants](contracts.md#limits-and-tenants) for tenant selection, access and inheritance and who can change a session ceiling.
+The connection rules also give the `joinOnOpen` default. See [Limits and tenants](contracts.md#limits-and-tenants) for tenant access, inheritance and session ceilings.
 
 ## Plugins
 
 [Configuration and trust](contracts.md#configuration-and-trust) covers approved code and project options. The operator SHOULD review the project's executable code, settings and dependencies before granting trust and when they change.
 
-The [plugin API](contracts.md#plugins-and-capabilities) is not a sandbox. The host sees effects through the API, not effects outside it. See the [Runtime wire rules](bindings/plugin.md#the-host-asks-the-runtime) for host-owned checks and records.
+The [plugin API](contracts.md#plugins-and-capabilities) is not a sandbox. Plugins run with the agent's permissions, even in another process unless separately confined. The host sees interactions through the API, not effects outside it. See the [Runtime wire rules](bindings/plugin.md#runtime-records-and-effects) for host-owned checks and records. Loaded `/1` plugins have [raw read access](bindings/plugin.md#authority) to every open session in their host. An operator who needs isolation between tenants at this boundary MUST run separate agents for them.
 
-A host SHOULD start plugin processes with only the environment variables they need. A host MUST NOT pass credentials it holds in a plugin process's environment.
+A host MUST build a minimal launch environment for each plugin process, with only approved variables the process needs. It MUST NOT pass credentials it holds in the launch environment, arguments, configuration or inherited descriptors. The [credential callback](bindings/plugin.md#what-a-plugin-may-ask-the-host) is a separate, scoped exchange.
 
 ## Untrusted content and prompt injection
 
@@ -52,7 +52,7 @@ See [Secrets](contracts.md#secrets) for credential access and storing secret ans
 
 ## Data: the record, views, the output gate and erasure
 
-See [The output gate](contracts.md#the-output-gate) for raw records, recipient views and when bypass is disallowed, [Shared data](bindings/data.md#output-events) for valid redactions, and [ACP](bindings/acp.md#extension-methods) for withheld replies. Even without Provider-side tools or conversation state, a model request can disclose data, incur costs or leave records with the Provider.
+See [The output gate](contracts.md#the-output-gate) for raw records, recipient views and when bypass is disallowed, [Shared data](bindings/data.md#output-events) for valid redactions, and [ACP](bindings/acp.md#output-gate) for withheld replies. Even without Provider-side tools or conversation state, a model request can disclose data, incur costs or leave records with the Provider.
 
 [Erasure](contracts.md#erasure) defines which copies the Harness tracks and what it reports. The [history binding](bindings/history-http.md#erasure) defines the service's role. The operator MUST keep restored backups out of use until current authority and prior erasures can be enforced.
 
@@ -60,9 +60,9 @@ See [The output gate](contracts.md#the-output-gate) for raw records, recipient v
 
 ## Resource limits and denial of service
 
-The [plugin](bindings/plugin.md#transport) and [ACP](bindings/acp.md#starting) bindings cap single messages and give the errors for oversized messages. The [plugin](bindings/plugin.md#what-a-plugin-may-ask-the-host) and [history](bindings/history-http.md#sessions) bindings cap history pages. Wire caps do not bound total work or storage.
+The [plugin](bindings/plugin.md#transport) and [ACP](bindings/acp.md#starting) bindings cap single messages and give the errors for oversized messages. The [plugin](bindings/plugin.md#paging-history), [ACP](bindings/acp.md#extension-methods) and [history](bindings/history-http.md#sessions) bindings cap history pages. Wire caps do not bound total work or storage.
 
-The operator MUST set finite limits for concurrent connections, queued work, output buffering and storage in the agent or its environment. The operator MUST set deadlines for cancelling or stopping unresponsive parts. See [Parts that are lost](contracts.md#parts-that-are-lost) for reply deadlines, and [Limits and tenants](contracts.md#limits-and-tenants) for job and session bounds and soft tenant budgets.
+The operator MUST set finite limits for concurrent connections, queued work, output buffering and storage in the agent or its environment. The operator MUST set deadlines for cancellation or shutdown of unresponsive parts, within any tighter binding deadline. See [Parts that are lost](contracts.md#parts-that-are-lost) for reply deadlines, and [Limits and tenants](contracts.md#limits-and-tenants) for job and session bounds and soft tenant budgets.
 
 ## Crash, failure and what recovery can't promise
 

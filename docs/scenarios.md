@@ -8,11 +8,11 @@ Unless noted, the agent uses a terminal Interface, a transient Runtime, a statel
 
 The user types "Read config.json and summarize it."
 
-1. The Harness takes the Interface's keyed input. It records acceptance and the receipt together. The input hook passes the text on. The Harness records the input and turn start before work starts.
+1. The input hook passes the Interface's keyed input through. The Harness commits its admission before returning the receipt. After the before-turn hook, it records `turnStart` followed by `input` in one batch.
 2. The prompt plugin adds instructions and supplies the project's `AGENTS.md` as untrusted project content. Context management selects the permitted model-visible entries. The Runtime gets model access, not credentials.
 3. The Harness commits the first `modelRequest` before sending it. The model asks for `read` with `config.json`. The response is recorded before any call from it is dispatched. Streamed pieces pass the output gate before the UI sees them.
 4. The trusted `read` definition marks the tool read-only, so `ask` does not open a question. The Harness checks the caller's effective `tools` right, the tool offer and the gate decision for these exact arguments. The working environment checks the resolved path stays in the project. In this deployment, the file is also cleared for disclosure to this Provider. An escaped path or disallowed disclosure is blocked even though `read` does not write.
-5. The Harness commits `toolStarted` before sending the call. The result is recorded when known, completing the step. The next request uses the call and result and gets its own `modelRequest` and response records.
+5. The Harness commits `toolStarted` before sending the call. The Runtime runs `tool.after` and commits the checked result. The `step.after` gate runs now, not before the call. The next request includes the call and result and has its own `modelRequest` and response records.
 6. There are no further calls. The turn ends as `completed`, with the summary, two steps and their usage. Records carry only the identities that apply to them.
 
 ## 2. A tool call that needs approval
@@ -23,14 +23,14 @@ The model requests a shell command to delete generated build files.
 2. The user answers allow. The Harness checks the user's current `approve` right and records the answer before the gate continues. The answer is not model context.
 3. The Harness checks the current rights behind the work and consumes the gate decision for the unchanged call. It records `toolStarted` before dispatch.
 
-**Variations:** Refusal or no present eligible answerer gives the call a `refused` result. `never` refuses without opening a request. If a handler changes the input after approval, the whole gate chain sees the revised call on its second pass. The old approval is not approval for the new arguments. A second change on that pass refuses the call.
+**Variations:** Refusal or no present eligible answerer gives the call a `refused` result. `never` refuses without opening a request. If the approval deadline expires, the Harness declines it. A later check for the exact call asks again under current rights. If a handler changes the input after approval, the whole gate chain sees the revised call on its second pass. The old approval is not approval for the new arguments. A second change on that pass refuses the call.
 
 ## 3. A question nobody answers in time
 
 A read-only reporting tool asks which database to query. It asks before doing any outside work. The agent declares `questionsOutlastTurns` and `lateAnswersStartTurns`.
 
 1. The tool opens a keyed choice with a time limit and chooses to leave the call open when the limit passes.
-2. The deadline ends the wait, not the question. The turn ends with the call listed as open and no tool result. This works with either Runtime.
+2. The deadline ends the wait, not the question. The turn ends with the call listed as open and no tool result. This works with either Runtime. An ACP host can use `requests` and `answer` in either binding version when the agent declares support.
 3. An hour later the user answers. Once all the originating turn's open calls have their answers, the Harness queues one keyed continuation behind any running turn. Repeating the answer does not start another turn.
 4. The continuation reruns the call from the top, with the current checks. It reuses the recorded answer only if the answerer is still eligible. The call's execution or refusal produces its result, not the answer itself.
 
@@ -51,7 +51,7 @@ A long shell command is running when the user presses Escape.
 
 1. The Interface acts with the user's `cancel` right. The Harness asks the Runtime to cancel the turn, stops starting new work and asks running calls and model requests to stop.
 2. The executor confirms that the running call stopped. Its result is `cancelled`; any effects it already had remain. If the executor cannot be reached and the call may have run, the result is `outcomeUnknown`, not proof of a stop or rollback.
-3. Open questions tied to the turn close. A cancelled permission response refuses the pending call. Queued input not yet taken goes back to its author or an authorized recipient. Resending it needs a fresh key.
+3. The Harness closes unanswered questions tied to the cancelled work with reason `cancelled`. A call abandoned without dispatch or a gate refusal gets `notStarted`. Input in the queue and not yet taken at the cutoff is handed back to its author or an authorized reader. Resending it needs a fresh key.
 4. The turn ends as `cancelled`. Recorded work stays in history. Here `cancellingTurnCancelsJobs` is false, so the jobs keep running. Closing the session would cancel them and wait for cleanup.
 
 ## 6. The conversation outgrows the model's context
@@ -65,7 +65,7 @@ The next request would be too large. The context plugin asks a model to summariz
 A turn has a recorded result for its first call. The process stops with the second call in flight and the third not yet dispatched. The history store survives.
 
 - **Transient Runtime:** reopening ends the interrupted turn as `failed`. The first result stands. The second call gets `outcomeUnknown`; the third gets `notStarted`. The next turn sees those results and does not silently repeat unknown work.
-- **Durable Runtime:** recovery starts from recorded progress and never reruns the first call. It can repeat the second call if its committed start says it was safe to repeat and the current tool and working environment both still promise that. It checks authority and gates again. If those safety promises are missing, or the repeat is refused, the earlier attempt remains unknown. A call not yet dispatched can run for the first time through the same checks.
+- **Durable Runtime:** recovery starts from recorded progress and never reruns the first call. It can repeat the second call if its committed start says it was safe to repeat and the current tool and working environment still promise repeat safety and the environment confirms prior work cannot race it. It checks authority and gates again. If those safety promises are missing, or the repeat is refused, the earlier attempt remains unknown. A call not yet dispatched can run for the first time through the same checks.
 - **No history store:** the session was ephemeral. There is nothing to reopen.
 
 See [Recovery and repeating work](contracts.md#recovery-and-repeating-work) and [Portable sessions](bindings/data.md#portable-sessions) for the records used on reopen.
@@ -98,13 +98,13 @@ The user switches models with the `settings` right. This agent declares `setting
 
 ## 11. Two people in one session
 
-The owner has `grant`, `watch`, `propose`, `input`, `steer`, `tools` and `approve`. The agent declares `severalActors` and `mixedActorInput: "shared"`.
+The owner has `grant`, `watch`, `propose`, `input`, `tools` and `approve`. The agent declares `severalActors` and `mixedActorInput: "shared"`.
 
 1. The owner grants a colleague `watch` and `propose`. The Harness records the grant and its issuer. The colleague proposes "also check the tests". Nothing runs until the owner releases it with `input`.
-2. The accepted proposal records both actors. The turn acts with their shared rights, which do not include `tools`. A destructive call is refused before approval. The owner's approval cannot add a missing right.
+2. The accepted proposal records both actors. The turn acts with their shared rights, which do not include `tools`. This deployment refuses a destructive call before asking for approval. The owner's approval cannot add a missing right.
 3. In a separate turn started solely by the owner, the same tool call needs approval. Only the owner is named as an answerer and the owner explicitly allows it. If another actor with `grant` removes the owner's `tools` right before dispatch, the Harness refuses the call despite that answer.
-4. The Harness takes inputs in admission order. A colleague with only `propose` cannot steer. If both actors are later granted `steer` and their input joins one turn, that work uses shared rights; an agent declaring `mixedActorInput: "refused"` refuses mixed input instead.
-5. A permitted tool returns sensitive account details. The deployment excludes known credentials before writing history. An account detail that remains in history is visible only in an authorized view. The output gate redacts it for the colleague on live delivery and again on replay. With `holdsOutput` declared, the gate can see a whole number before releasing redacted streamed pieces.
+4. The Harness takes inputs in admission order. A colleague with only `propose` cannot steer. If the colleague later gains `input` and both actors steer one turn, that work uses shared rights; an agent declaring `mixedActorInput: "refused"` refuses mixed input instead.
+5. A permitted tool returns sensitive account details. The deployment excludes known credentials before writing history. An account detail that remains in history is visible only in an authorized view. The output gate redacts it for the colleague on live delivery and again on replay. The number appears within one stream segment. The gate sees it before releasing the redacted pieces.
 
 ## 12. The Provider runs a tool itself
 

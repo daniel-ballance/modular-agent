@@ -125,7 +125,7 @@ Feature plugins add behaviour through the plugin API. For example:
 
 ## What plugins can do
 
-The plugin API lets a plugin register and use capabilities, hooks, tools and commands, and use session services. A tool source can announce a changed catalog. A plugin can explicitly replace a loaded Modular Agent plugin, for example one MCP tool source with another. [Plugins and capabilities](contracts.md#plugins-and-capabilities) describes selection and replacement. [Interactions](contracts.md#interactions) describes the services; the [Plugin binding](bindings/plugin.md) covers the subset available in another process.
+The plugin API lets a plugin register and use capabilities, hooks, tools and commands, and use session services. A tool source can announce a changed catalog. A plugin can explicitly replace a loaded plugin, for example one MCP tool source with another. The [plugin binding](bindings/plugin.md#starting-the-handshake) replaces named local registrations instead of whole plugins. [Plugins and capabilities](contracts.md#plugins-and-capabilities) describes selection and replacement. [Interactions](contracts.md#interactions) describes the services; the [Plugin binding](bindings/plugin.md) covers the subset available in another process.
 
 The API is not a sandbox. Plugins are trusted code with the agent's permissions even when they run in another process. Using the API is a design rule. The Harness can observe interactions that go through it, not effects a plugin causes outside it. See [Security](security.md) for the operator's trust boundary.
 
@@ -138,7 +138,7 @@ The API is not a sandbox. Plugins are trusted code with the agent's permissions 
 | Step | A model request and response plus the round of calls it asks for, through settlement of the round; in a live extension it can be a stretch between turn-taking points | a unit within a turn |
 | Job | Session work outside a turn, which can outlive the turn that started it | the owning plugin, for the session |
 
-The turn's initiator links it to actor input, a job report, a plugin or a late answer. Steering is another input to the same turn, taken at a tool-round boundary when supported. See [Turn input and outcome](contracts.md#turn-input-and-turn-outcome) and [Input](contracts.md#input). The hook named `step.after` runs once a step's calls are settled, before the next model request; see [Hook execution](contracts.md#hook-execution).
+The turn's initiator links it to actor input, a job report, a plugin or a late answer. Steering is another input to the same turn, taken at a tool-round boundary when supported. See [Turn input and outcome](contracts.md#turn-input-and-turn-outcome) and [Input](contracts.md#input). The `step.after` hook marks the end of the round, after calls settle or are left open. See [Hook execution](contracts.md#hook-execution).
 
 ## Actors and authority
 
@@ -148,7 +148,7 @@ An **actor** is a user, host, agent or program. Some agents support several acto
 
 ## The Runtime and the Harness
 
-The Runtime owns the turn loop. It uses the Harness for model access, tool execution, hook answers and session services such as ids, history and steering. The Harness owns durable session changes and checks the final tool call at dispatch. The Runtime reports the outcome and usage. See [Harness and Runtime](contracts.md#harness-and-runtime), [Tool dispatch](contracts.md#tool-dispatch) and [Recovery](contracts.md#recovery-and-repeating-work).
+The Runtime owns the turn loop. It uses the Harness for model access, tool execution, hook answers and session services such as ids, history and steering. The Harness owns durable session changes and checks the final tool call at dispatch. For a remote Runtime, it also commits each checked tool result before returning it. The Runtime reports the outcome and usage. See [Harness and Runtime](contracts.md#harness-and-runtime), [Tool dispatch](contracts.md#tool-dispatch) and [Recovery](contracts.md#recovery-and-repeating-work).
 
 ## Where plugins can step in
 
@@ -156,7 +156,7 @@ A **hook point** is a place for a plugin to observe, change or stop an operation
 
 ## Waiting for an answer
 
-An **input request** asks an actor to approve, choose, type, sign in or give a secret. Seeing a question does not imply eligibility to answer. A turn can wait for an answer, or a supported call can stay open past the turn. Once the group of open calls has its answers, a continuation reruns those calls through their checks. An answer is not a tool result. A question interrupted inside a turn follows a different recovery path. See [Questions](contracts.md#questions), [Secrets](contracts.md#secrets) and [Tool dispatch](contracts.md#tool-dispatch).
+An **input request** asks an actor to approve, choose, type, sign in or give a secret. Seeing a question does not imply eligibility to answer. A turn can wait for an answer. An eligible non-approval question can keep a call open past the turn if the build declares support. Once the group of open calls has its answers, a continuation reruns those calls through their checks. An answer is not a tool result. A question interrupted inside a turn follows a different recovery path. See [Questions](contracts.md#questions), [Secrets](contracts.md#secrets) and [Tool dispatch](contracts.md#tool-dispatch).
 
 ## Jobs
 
@@ -166,7 +166,7 @@ A schedule or webhook is an outside program giving ordinary authorized input, no
 
 ## History
 
-History normally grows by appending. The model sees a view of the current branch. [Compaction](contracts.md#compaction) adds a summary rather than deleting entries. A [move](contracts.md#moving-and-rewinding) changes position without restoring files. A rewind also restores a saved project point if the target and available points allow it. Both reset Provider conversation state. Neither promises to undo outside effects.
+History normally grows by appending. The [default model view](contracts.md#hook-execution) follows the current branch. [Shared data](bindings/data.md#append-order-and-the-branch) describes which records instead apply to the whole session. [Compaction](contracts.md#compaction) adds a summary rather than deleting entries. A [move](contracts.md#moving-and-rewinding) changes position without restoring files. A rewind also restores a saved project point if the target and available points allow it. Both reset Provider conversation state. Neither promises to undo outside effects.
 
 [Erasure](contracts.md#erasure), when supported, follows copies. The record distinguishes cleared content, pending deletions and out-of-reach copies. Authority records and tombstones remain while kept under retention. Secret values and protected launch material never belong in the record.
 

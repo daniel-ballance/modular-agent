@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-18
 ---
 
-**Current rule:** The [tenant budget](../bindings/data.md#limits-and-tenants) is soft, checked before each turn and after each step; already running steps can overshoot, an unknown tenant is refused, and a rights ceiling is not membership ([Security](../security.md)). A [session limit](../contracts.md#limits-and-tenants) does not narrow `administer`, and [tool results](../contracts.md#tool-result) distinguish work that did not run from started work and unknown outcomes.
+**Current rule:** The [tenant budget](../contracts.md#limits-and-tenants) is soft, checked before each turn and after each step; already running steps can overshoot, an unknown tenant is refused, and a rights ceiling is not membership ([Security](../security.md)). A [session limit](../contracts.md#limits-and-tenants) does not narrow `administer`. [Output redaction](../bindings/data.md#output-events) preserves protected strings. [Tool dispatch](../contracts.md#tool-dispatch) distinguishes work that did not run from started work and unknown outcomes.
 
 # Tenants, session limits, output events, and one plugin per name
 

@@ -1,6 +1,6 @@
 # History service binding: `modular-agent-history/1`
 
-An HTTP history store. The service keeps JSON records in order. It does not interpret agent history. Reopening another build's session is a promise between agents that declare [portable sessions](data.md#portable-sessions), not a property of the store.
+This binding defines the HTTP wire for keeping ordered JSON records. The service does not interpret agent history. [Contracts](../contracts.md) defines core behavior, [Security](../security.md) defines deployment trust, and [Shared data](data.md#portable-sessions) defines portable reconstruction by agents.
 
 ## The basics
 
@@ -62,7 +62,7 @@ A Session is `{ id: Id, project: string, created: Time, parentSessionId?: Id, fo
 
 The service MUST list sessions with kept entries only, by descending `created`, then by ascending UTF-8 byte order of `id`. It MUST apply `project` before finding the cursor or taking a page. It MUST return session entries in append order. Each page MUST take the longest prefix after the cursor that fits the requested item limit and 4 MiB of compact UTF-8 response JSON, including all metadata and the cursor. A page MUST contain at least one item when any remain. If more remain, `next` MUST be the ID of the last item; the client passes it as `after` on the next request. Reads need no lease and do not take a snapshot across pages.
 
-The agent MUST defer PUT and append for a new session until its [first admitted input](data.md#portable-sessions). A failure between PUT and that append can leave an unlisted metadata-only record. There is no endpoint to delete that record.
+For a newly created empty session, the agent MUST defer PUT and append until its [first admitted input](data.md#setup-records). A failure between PUT and that append can leave an unlisted metadata-only record. There is no endpoint to delete that record.
 
 ## Choosing a service at start
 
@@ -91,7 +91,7 @@ An owner is a run identifier, not a credential. A writer MUST generate a fresh o
 
 The service MUST measure expiry with its monotonic clock. On `held`, it MUST report the remaining time rounded up to milliseconds when it forms the response. An ended lease MUST NOT become valid again.
 
-The writer MUST renew at least every `ttlMs / 3`. If no renewal has succeeded within `ttlMs / 2` of the last success (initial acquire or renewal), or if a request reports `lost`, the writer MUST treat the lease as lost. A retry of acquire after a lost reply MUST be followed by a successful renew before use; acquire by the same owner does not prove a fresh expiry. The writer SHOULD time its local renewal and loss deadlines from sending the successful request, not from receiving its reply. It MUST NOT replay an old acquire after ending or declaring that lease lost. A delayed reply for a lease already treated as lost MUST NOT re-enable writes or effects. The writer MUST follow [persistence before effects](data.md#recording-order-and-ownership); the lease does not fence outside services.
+The writer MUST renew at least every `ttlMs / 3`. If no renewal has succeeded within `ttlMs / 2` of the last success (initial acquire or renewal), or if a request reports `lost`, the writer MUST treat the lease as lost. A retry of acquire after a lost reply MUST be followed by a successful renew before use; acquire by the same owner does not prove a fresh expiry. The writer SHOULD time its local renewal and loss deadlines from sending the successful request, not from receiving its reply. It MUST NOT replay an old acquire after ending or declaring that lease lost. A delayed reply for a lease already treated as lost MUST NOT re-enable writes or effects. The writer MUST follow [persistence before effects](../contracts.md#recovery-and-repeating-work); the lease does not fence outside services.
 
 An agent reopening a held session MUST retry no earlier than `retryAfterMs`, and fail the open if it cannot acquire by `GET /v1`'s `ttlMs` plus 1,000 milliseconds after the first `held`. It MUST read and reconcile the session under the new lease before recovering work. An append or erasure resend MUST use the same still-current lease. After loss or an uncertain lease the client MUST reconcile by reading rather than blindly resending. Lease-less erasure is a single atomic operation, not a retry across an intervening writer.
 
@@ -105,7 +105,7 @@ The service MUST reject a new entry if that entry or its eventual tombstone, alo
 
 ## Erasure
 
-The Harness MUST authorize erasure, exclude authority and accounting records, and compute all copies to erase before sending exact IDs for each session. The service MUST check the lease and tombstone the requested records in one atomic operation. Without a lease it MUST erase only when no lease is current. A supplied stale lease gives `lost` even if the session is now unheld or another writer holds it.
+The Harness MUST send the exact ids for each session after applying the [core erasure rules](../contracts.md#erasure). The service MUST check the lease and tombstone the requested records in one atomic operation. Without a lease it MUST erase only when no lease is current. A supplied stale lease gives `lost` even if the session is now unheld or another writer holds it.
 
 The service MUST return distinct known IDs from the request in first occurrence order, including IDs already erased. Unknown IDs are ignored. It MUST replace each erased record with the [shared tombstone](data.md#history-entries), using `kind: null` when the old `kind` is missing or not a string and retaining only string-valued associations. The service MUST remove the other fields from its live copies. It MUST NOT serve pre-erasure data after a restart or restore.
 

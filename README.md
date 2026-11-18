@@ -1,8 +1,8 @@
 # Modular Agent
 
-A specification for an AI agent made of a small **Harness** and **plugins** that can each be replaced: the model Providers, the tools, the working environment, where history is kept, the Interfaces, and the Runtime that runs the agent loop itself.
+A specification for an AI agent made of a small **Harness** and replaceable **plugins**: the model Providers, the tools, the working environment, where history is kept, the Interfaces, and the Runtime that runs the agent loop itself.
 
-The specification says **what** each part does, what passes between the parts, and what must always hold. It doesn't prescribe how a part works inside. The core prescribes no transport. Optional **bindings** fix the wire where two builds need to work together: ACP for hosts, a plugin protocol, an HTTP history service, and shared JSON shapes.
+The specification says **what** each part does, what passes between the parts, and what must always hold. It doesn't prescribe how a part works inside. The core prescribes no transport. Optional **bindings** fix the wire where two builds need to work together: ACP for hosts, a plugin protocol, and an HTTP history service. The bindings share JSON shapes.
 
 ## Why it holds up
 
@@ -17,7 +17,7 @@ The swaps found gaps that led to rules and kit checks. [Build notes](docs/build-
 
 | Read | To learn | Status |
 |---|---|---|
-| [Conformance](docs/conformance.md) | which documents are requirements, what conforming means, the keywords, versioning | normative |
+| [Conformance](docs/conformance.md) | which documents set requirements, how to claim conformance, and how bindings change | normative |
 | [Glossary](GLOSSARY.md) | the vocabulary | informative |
 | [Architecture](docs/architecture.md) | the parts, their responsibilities, and why | informative |
 | [Contracts](docs/contracts.md) | what passes between the parts, and the rules every implementation follows | normative |

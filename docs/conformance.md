@@ -1,6 +1,6 @@
 # Conformance and versioning
 
-This document defines conformance for agents, plugins, services and hosts, and how the bindings change over time.
+This document defines conformance for agents, plugins, services and hosts, and how the bindings change. Core behavior, trust and wire rules are in the documents below.
 
 ## The documents
 
@@ -44,15 +44,15 @@ Lowercase words carry their ordinary meanings. Examples, explanatory text and de
 
 ### An agent
 
-An agent MUST follow the applicable rules in [Contracts](contracts.md) and [Security](security.md). An agent MUST publish an accurate [declaration](contracts.md#declaration) of its supported features. It MUST implement the specified fallback for any feature it does not support.
+An agent MUST follow the applicable rules in [Contracts](contracts.md) and [Security](security.md), including the [declaration rules](contracts.md#declaration-rules). It MUST implement the specified fallback for any feature it does not support.
 
-An agent MAY conform without any binding. A single-process agent with local history is one example. The core prescribes no transport. An agent MUST name the bindings and versions it claims. It MUST follow each claimed binding, including any shared data rules it uses. The core and each binding give the required behavior and identify optional features; support for one optional feature does not imply support for another.
+An agent MAY conform without any binding. A single-process agent with local history is one example. The core prescribes no transport. An agent MUST follow each binding it claims, including any shared data rules it uses. The core and each binding give the required behavior and identify optional features; support for one optional feature does not imply support for another.
 
 ### A plugin, a service or a host
 
 - A plugin that claims the [plugin binding](bindings/plugin.md) MUST follow it and applicable [shared data rules](bindings/data.md) for everything it registers.
 - A service claiming the [history service binding](bindings/history-http.md) MUST follow it.
-- A host driving an agent over ACP MUST follow the client side of the [ACP binding](bindings/acp.md). Its declaration and `outcome` rules define how a host learns the supported features and turn result.
+- A host driving an agent over ACP MUST follow the client side of the [ACP binding](bindings/acp.md). The binding's declaration and `outcome` rules define how a host learns the supported features and turn result.
 
 ### The conformance kits
 

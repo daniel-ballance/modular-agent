@@ -94,7 +94,7 @@ One period of work by the Runtime, with zero or more steps. Waiting in place for
 _Avoid_: Run, agent run, task, prompt turn
 
 **Step**:
-One model request and its response, or one stretch of a live session, plus the tool calls it asks for, up to their results.
+One model request and its response, plus any calls it asks for, until each call settles or is left open. In a live session a step can be one stretch of the connection.
 _Avoid_: Turn (Pi's word for it), iteration
 
 **Outcome**:
@@ -115,6 +115,15 @@ Input carrying a job's result back to its session, acting with the job's authori
 **Live session**:
 A model connection where input and output flow both ways at once, such as voice.
 _Avoid_: Realtime session, stream
+
+**Input admission**:
+The Harness's acceptance of input. A receipt identifies that admission, even when the input waits in a queue or is handed back before a turn takes it.
+
+**Steering**:
+Input admitted to join a running turn when the Runtime supports it.
+
+**Proposal**:
+Admitted input that waits for an authorized actor to release it.
 
 ## Tools
 
@@ -142,9 +151,17 @@ _Avoid_: Memory, transcript, log
 **History entry**:
 One item in a history, such as an input, a model response, a tool result, a summary or a setting change.
 
+**Commit**:
+A successful write to the session's store. A commit in an ephemeral session does not survive a restart.
+
+**Tombstone**:
+The record that stands in place of an erased entry. It preserves identity and links, not erased content.
+
 **Current position**:
-The history entry a session is at. Moving it changes which branch the view follows, and the move is recorded.
-_Avoid_: Head, cursor
+The history entry a session is at. The shared data binding calls it the *head*. The current branch is that entry and its ancestors. A page cursor identifies where to continue reading a view, not the session's position.
+
+**Fork**:
+A separate session based on history from a source session at a selected entry.
 
 **Point**:
 A saved snapshot of project files from a working environment, or the reference to that snapshot.
@@ -247,8 +264,11 @@ An actor with `administer`, the right to set the session limit.
 A question for an actor, such as an approval, a choice, a sign-in or a secret. Its *answerers* are the actors eligible to answer it.
 _Avoid_: Prompt, dialog, interrupt, elicitation
 
+**Presence**:
+Whether an open connection acts for an actor in a session and marks that actor present. Presence is not proof of a person's approval.
+
 **Late answer**:
-An answer to a question left open after its originating turn ended.
+An answer to a non-approval question left open after its originating turn ended. Not a late batch model response.
 
 **Continuation**:
 A keyed turn that settles a previous turn's open calls once their questions are answered.

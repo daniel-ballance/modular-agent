@@ -3,6 +3,8 @@ status: withdrawn
 date: 2026-11-14
 ---
 
+**Current rule:** [Bindings](../bindings/README.md) lists the adopted wire profiles. The [ACP projection](../bindings/acp.md#entry) need not preserve every field in the shared record.
+
 > **Withdrawn** on 2026-11-16 by [ADR 0010](0010-describe-parts-not-wiring.md). Which protocols to define or reuse is a wiring decision, set aside until we design wiring. The question is kept in [open questions](../open-questions.md#parked-wiring).
 
 # Define our own messages for Harness ↔ Runtime, and adapt to existing standards elsewhere

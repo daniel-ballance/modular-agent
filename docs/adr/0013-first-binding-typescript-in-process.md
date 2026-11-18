@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-16
 ---
 
+**Current rule:** The design below describes the first build. [Conformance](../conformance.md#what-conforms) does not require its language, process layout or storage format.
+
 # The first implementation is TypeScript in one process, with a package per part
 
 The first implementation of the description runs in one Node.js process. Every part talks to the others through function calls. It is written in TypeScript, as one workspace in this repository, with a package for the Harness, the Runtime and each plugin. The Provider plugin wraps pi-ai, so we don't rewrite vendor adapters. The Harness and Runtime are written fresh, because they are what the project studies. File tools may copy from Pi, which is MIT-licensed. The first Interface is a line-based terminal with a JSON mode for scripts and tests. The history store writes one JSONL file per session, appending each batch of changes as one write.

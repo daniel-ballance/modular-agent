@@ -3,6 +3,8 @@ status: superseded by 0010
 date: 2026-11-14
 ---
 
+**Current rule:** The core prescribes no transport or encoding; see [Contracts](../contracts.md). [Security](../security.md#plugins) limits the observability claim to mediated interactions and excludes protected data.
+
 > **Superseded** on 2026-11-16 by [ADR 0010](0010-describe-parts-not-wiring.md): we now describe parts and how they fit together, and leave wiring to each implementation. The aim of making every interaction observable and recordable is kept as a requirement.
 
 # Every contract is a message, and bindings are separate

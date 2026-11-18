@@ -24,7 +24,7 @@ See [Terminology](#terminology) under Settled.
 
 ### Waiting for an answer
 
-**Limit: late approvals.** Late-answer continuation does not declare a separate late-approval policy. Default: decline an unanswered approval at a finite deadline rather than leave it open. A new check asks about the exact call under current rights. See [Question lifecycle](#question-lifecycle).
+**Choice: question deadlines.** Use finite deadlines for unattended work. Approvals never outlast their turn; expiration declines the request. See [Question lifecycle](#question-lifecycle).
 
 ### Input during a turn
 
@@ -68,7 +68,7 @@ See [Model changes](#model-changes) under Settled.
 
 ### Tool calls outside a turn
 
-**Limit: model visibility.** The edition does not specify a portable model-context placement for calls a UI or plugin starts outside a turn. Default: record the call and its result without adding it to model context unless explicitly supplied as authorized input. A UI call uses the same checked Harness path, not direct access to the tool source.
+**Limit: injecting direct results.** The default portable context excludes out-of-turn tool calls. There is no common operation for inserting their results into model context. Use an authorized input or a deployment's context handler, not direct access to the tool source. See [Tool dispatch](#tool-dispatch).
 
 ### Parallel tool calls
 
@@ -113,13 +113,13 @@ See [Erasure](#erasure) under Settled.
 - <a id="plugin-registration"></a>**Plugin registration.** Singleton capabilities are selected per session; names do not shadow, and replacement uses the [registration rules](contracts.md#plugins-and-capabilities).
 - <a id="active-plugin-set"></a>**Active plugin set.** An open session cannot add plugins; offering an already registered tool is not loading one. A child inherits the set except host-supplied MCP servers ([Plugins and capabilities](contracts.md#plugins-and-capabilities), [Subagents](contracts.md#subagents), [MCP servers](contracts.md#mcp-servers)).
 - <a id="terminology"></a>**Terminology.** A capability is a role a plugin can provide ([Glossary](../GLOSSARY.md#the-system)).
-- <a id="waiting-for-the-user"></a><a id="question-lifecycle"></a>**Question lifecycle.** The asker sets the deadline and the permitted wait behavior. A late answer leads to a keyed continuation through current checks, not a tool result ([Questions](contracts.md#questions), [ACP approvals](bindings/acp.md#approvals)).
+- <a id="waiting-for-the-user"></a><a id="question-lifecycle"></a>**Question lifecycle.** The asker sets the deadline and the permitted wait behavior. A late answer to an eligible non-approval question can make a continuation ready; it is not a tool result ([Questions](contracts.md#questions), [ACP questions](bindings/acp.md#questions)).
 - <a id="steering"></a>**Steering.** Supported steering joins after the current tool round; next-turn input and unsupported steering wait ([Input](contracts.md#input)).
-- <a id="turn-and-job-cancellation"></a>**Turn and job cancellation.** Cancellation hands back untaken input and refuses pending ACP permissions. Jobs survive turn cancellation unless declared otherwise, and closing cancels and waits for jobs ([Input](contracts.md#input), [Jobs](contracts.md#jobs), [ACP cancelling](bindings/acp.md#cancelling)).
+- <a id="turn-and-job-cancellation"></a>**Turn and job cancellation.** Cancellation hands back untaken input at the cutoff and closes unanswered questions of the cancelled work. Jobs survive turn cancellation unless declared otherwise, and closing cancels and waits for jobs ([Input](contracts.md#input), [Jobs](contracts.md#jobs), [ACP cancelling](bindings/acp.md#cancelling)).
 - <a id="model-changes"></a>**Model changes.** A change applies from the next turn and resets Provider state. Fallback to another model takes a new turn ([Settings](contracts.md#settings), [Provider state](contracts.md#provider-state)).
 - <a id="actor-grants-and-reopening"></a>**Actor grants and reopening.** Grants need `grant` and cannot widen rights. Reopening checks the tenant and keeps recorded rights; a departed actor is refused ([Authority](contracts.md#authority), [ACP sessions](bindings/acp.md#sessions)).
-- <a id="tenant-budgets"></a>**Tenant budgets.** The budget is checked before each turn and after each step. Already running steps can overshoot; usage is counted per deployment and not reduced by erasure or retention ([Limits and tenants](bindings/data.md#limits-and-tenants)).
-- <a id="parallel-calls"></a>**Parallel calls.** A round runs in parallel only if every call permits it. Results are recorded as known and passed to the model in call order ([Recovery and repeating work](contracts.md#recovery-and-repeating-work)).
+- <a id="tenant-budgets"></a>**Tenant budgets.** The budget is checked before each turn and after each step. Already running steps can overshoot; usage is counted per deployment and not reduced by erasure or retention ([Limits and tenants](contracts.md#limits-and-tenants)).
+- <a id="parallel-calls"></a>**Parallel calls.** A round runs in parallel only if every call permits it. Results are recorded as known and passed to the model in call order ([Tool dispatch](contracts.md#tool-dispatch)).
 - <a id="tool-dispatch"></a>**Tool dispatch.** The Harness checks exact calls before dispatch. Provider-run tools follow separate pre-request rules and are not portable ([Tool dispatch](contracts.md#tool-dispatch), [Provider state](contracts.md#provider-state), [Portable sessions](bindings/data.md#portable-sessions)).
 - <a id="recovery"></a>**Recovery.** Record intent before effects. Durable recovery never reruns finished calls and retries interrupted effects only under the documented promises ([Recovery and repeating work](contracts.md#recovery-and-repeating-work)).
 - <a id="erasure"></a>**Erasure.** The Harness follows copies transitively and reports erased, pending and out of reach ([Erasure](contracts.md#erasure)).
@@ -127,11 +127,12 @@ See [Erasure](#erasure) under Settled.
 - <a id="plugins-building-on-plugins"></a>**Plugins building on plugins.** Plugins can define capabilities and hook points ([Plugins and capabilities](contracts.md#plugins-and-capabilities), [Hook points](contracts.md#hook-points)).
 - <a id="working-environment"></a>**Working environment.** It is a capability distinct from the project ([Harness and working environment](contracts.md#harness-and-working-environment)).
 - <a id="a-layer-above-the-agent"></a>**A layer above the agent.** A host coordinates agents from outside; it uses their [Interface](contracts.md#interface-and-harness).
+- **Rewind with remote points.** The plugin binding does not have a point probe. Without proof that its required points still exist in this working environment, a rewind is refused rather than testing by restoring files ([Remote paths and points](bindings/plugin.md#paths-and-points)).
 - **History and position.** Normal use appends entries; moving records a new position without deleting the rest. Retention and erasure are separate ([History entries](bindings/data.md#history-entries), [Rewinding](bindings/data.md#rewinding)).
 - **Exchanges.** History represents turns by what started them, not by a separate exchange unit ([History entries](bindings/data.md#history-entries)).
 - **Holding streamed output.** A gate can hold output within the declared stream boundary; the agent declares this behavior ([The output gate](contracts.md#the-output-gate)).
 - <a id="what-the-harness-keeps"></a><a id="configuration"></a>**Harness and configuration.** The Harness owns sessions and the plugin API; configuration is a plugin capability ([Plugins and capabilities](contracts.md#plugins-and-capabilities), [Configuration and trust](contracts.md#configuration-and-trust)).
-- <a id="how-handlers-combine"></a>**Handler order.** Hook owners fix the combining rule and handlers run in the specified order ([Hook points](contracts.md#hook-points)).
+- <a id="how-handlers-combine"></a>**Handler order.** Hook owners fix the combining rule and handlers run in the specified order ([Hook execution](contracts.md#hook-execution)).
 - **Plugin trust.** The operator chooses which code to run; project plugins need project trust. The API is not an isolation boundary ([Configuration and trust](contracts.md#configuration-and-trust), [Security](security.md)).
 - **Input keys and reconnect.** Input keys last for the session until erasure. The [input](contracts.md#input) and [following](contracts.md#following-a-session) rules define replay and retry behavior.
 - **Versions.** The claimed binding sets its own handshake, error rules and versions; the core picks no transport ([Bindings](bindings/README.md), [Versioning](conformance.md#versioning)).
