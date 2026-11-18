@@ -5,7 +5,7 @@
 // and checks every part of the conformance plugin. No network, no model. Exit code 0 means all passed.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -422,10 +422,12 @@ await attempt("environment", async () => {
 	// Saved points, if the environment offers them.
 	if (reg.workingEnvironment?.points === true) {
 		writeFileSync(join(work, "pt.txt"), "before");
+		const folderBefore = statSync(work).ino;
 		const { point } = await p.request("env/save", { cwd: work, sessionId: "s1" });
 		writeFileSync(join(work, "pt.txt"), "after");
 		writeFileSync(join(work, "pt-new.txt"), "new");
 		await p.request("env/restore", { cwd: work, sessionId: "s1", point });
+		check("env/restore: restores in place; the project folder is the same folder", statSync(work).ino === folderBefore, `inode ${folderBefore} -> ${statSync(work).ino}`);
 		check("env/restore: files are as they were at the saved point", readFileSync(join(work, "pt.txt"), "utf8") === "before" && !existsSync(join(work, "pt-new.txt")), JSON.stringify({ pt: readFileSync(join(work, "pt.txt"), "utf8"), added: existsSync(join(work, "pt-new.txt")) }));
 		let gone;
 		try {

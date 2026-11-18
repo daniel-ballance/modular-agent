@@ -127,7 +127,7 @@ Every request carries `cwd`, the session's project or a folder in it, and `sessi
 | `env/write` | `cwd`, `path`, `data` (base64) | `{}` |
 | `env/exists` | `cwd`, `path` | `{ "exists": boolean }` |
 | `env/save` | `cwd` | `{ "point": string }`: a saved point, from which `env/restore` can put the project's files back as they are now. Only if the registration says `points: true`. |
-| `env/restore` | `cwd`, `point` | `{}`, with the files as they were at the point; or `not_found` for a point it no longer has. |
+| `env/restore` | `cwd`, `point` | `{}`, with the files as they were at the point; or `not_found` for a point it no longer has. It restores in place: the project folder stays the same folder, and only the files in it change, so the agent and any process working in the folder keep working. |
 | `env/exec` | `cwd`, `command`, `timeoutMs` *(optional)* | an ExecResult. `timeoutMs` is a positive number of milliseconds. A sender leaves it out for no limit, and a receiver treats `0` the same as leaving it out. When it passes, the command is stopped and the result has `timedOut: true`. |
 
 - **A session's background work:** processes a command leaves running outlive the call and a cancelled turn, as [the working environment](../contracts.md#the-working-environment) requires. When the session closes, the host sends `env/sessionEnded { sessionId }`, which answers `{}` once they have stopped. They all stop when the plugin stops.
@@ -299,6 +299,7 @@ The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a
 
 ## Changes
 
+- **2026-11-18, after the round-five matrices.** `env/restore` restores in place. Elixir's environment replaced the project folder, so the Rust host, whose working directory it was, failed its next file operation with "no such file or directory".
 - **2026-11-18, round five.** The open items left after round four, and the gaps the builders logged in it:
   - **Jobs** over the binding: `host/jobs/*` and `jobs/cancel`, recorded in standard kinds, so a reopening build with the same plugin finds a job's unfinished work. A plugin's `name` is its identity.
   - **The output gate,** offered as `output`, a stream at a time: the host holds each stream to its end and asks once. The conformance plugin's `hooks` part redacts `conformance-secret`.
