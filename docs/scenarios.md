@@ -123,14 +123,14 @@ This is a design sketch, not a portable or wire scenario. A live Provider could 
 The user wants to go back to the first `turnEnd`. The session is on that branch, with no running turn or unfinished work. This agent declares `rewinding: true` and `movingWithUnfinishedWork: "refused"`.
 
 - **Moving only.** The Harness checks that moving is allowed, then records the new position. The view follows that position without deleting later history. The Provider starts again from the new view. Files are unchanged. If work is unfinished, this agent refuses before changing anything.
-- **Rewinding.** There are points from this working environment on every later `turnStart` and out-of-turn `toolStarted`, and no job started after the target. The Harness selects the earliest such point after the target. It saves the current files as P0, records the new `position` with the chosen point and P0 as undo, then restores the point. The Provider starts again here too. The move reports any later `openWorld` call ids as `outOfReach`; their effects were not undone.
-- **If interrupted or refused.** Reopen retries the restore before work when the last entry is that `position`. If restore fails, the Harness records a return to the previous head, restores P0 and refuses. Unconfirmed rollback blocks further effects until reconciled. A missing qualifying point, an unfinished-work refusal or a later job start prevents the rewind before anything changes. Lack of points alone does not prevent a move without rewind.
+- **Rewinding.** No other session uses this project, and each later turn or direct call has a point from this environment. The Harness saves the current files as P0 and commits a `position` with the earliest later point and P0 as undo. It restores the point, then commits a second `position` without `restore`. The Provider starts fresh. The reply lists later open-world calls in `outOfReach`.
+- **If interrupted or refused.** Reopen retries only an unresolved restore, not one with a completion. If that point is now missing, the Harness leaves the files alone, records a failed completion and reports it. An immediate restore failure instead rolls back to P0 before refusing. See the [rewind journal](bindings/data.md#rewinding).
 
 ## 15. Erasing personal data
 
 An actor with `erase` asks an agent that supports erasure to delete a user's personal data.
 
-1. The Harness finds the entries and their transitive copies, including summaries and forked entries. It leaves authority and accounting records alone. It sends exact IDs to the history store; the store does not infer copies. If this Harness holds the lease, it uses that lease. If another writer holds it, the request is refused. With no writer, erasure is atomic for the session.
+1. The Harness finds the entries and their copies, including model requests, summaries and forked entries. It records what is pending before deleting and leaves authority and accounting records alone. A fork held by another writer stays pending; the Harness does not replay or fork the pending entries.
 2. The history store removes the identified content and keeps the tombstone. The agent resets Provider conversation state and requests deletion of known remote copies. One remote deletion fails. The reply lists local success, the pending copy and anything out of reach, such as output already delivered.
 3. During the pending deletion and after a crash, the data is not replayed or sent back as context. The agent uses its recorded deletion work to retry the same remote copy, not recreate it. If the reply were lost and the lease were no longer current, the Harness would read the session to see whether the tombstone was committed. It does not blindly resend under a new lease.
 
@@ -142,7 +142,7 @@ The model starts a dev server. This agent declares `startsTurnsUnasked: "jobRepo
 
 1. The shell tool starts a session job. Its tool result identifies the job. The turn ends and the Interface still lists the job as running.
 2. The server crashes. The Harness commits `jobEnded` with the failed outcome and the keyed report's acceptance in one batch. The report enters as the job's input and starts a turn to look at the error. The job's usage counts once.
-3. Cancelling a turn would leave the job running. Closing the session cancels the job and waits. A process stop instead leaves unfinished work for recovery.
+3. Cancelling a turn would leave the job running. Closing the session cancels the job and waits. An unconfirmed cleanup leaves the job unfinished and visible as such without blocking close. A process stop instead interrupts it.
 
 ## 17. Driven by a host
 

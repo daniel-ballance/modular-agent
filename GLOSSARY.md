@@ -274,7 +274,7 @@ An answer to a non-approval question left open after its originating turn ended.
 A keyed turn that settles a previous turn's open calls once their questions are answered.
 
 **Approval**:
-An input request about one exact tool call. An authorized, explicit allow answer satisfies the approval check when the call needs approval.
+An input request about one exact tool call and its tool registration. The recipient's approval view shows the tool name and input for that call.
 _Avoid_: Permission request, confirmation
 
 **Approval policy**:

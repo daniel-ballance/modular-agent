@@ -22,7 +22,8 @@ This document defines trust boundaries and security rules for a deployment. [Con
 
 - **Stdio.** In [ACP](bindings/acp.md#starting) and the [plugin binding](bindings/plugin.md#transport), the launcher and its child are the authenticated peers. The peers MUST keep the stdio connection private to those two processes. There is no further authentication exchange.
 - **History service.** See [history HTTP](bindings/history-http.md#the-basics) for authentication, TLS and isolation of raw records.
-- **Other network transports.** The receiver MUST authenticate every request, including on loopback, using a bearer token generated with at least 128 bits of entropy or mutual TLS. Peers MUST use TLS except on loopback. Clients MUST verify the server's identity when using TLS. Receivers MUST compare bearer tokens in constant time. Peers MUST NOT log bearer tokens.
+- **Other network transports.** The receiver MUST authenticate every request using a bearer token with at least 128 bits of entropy or mutual TLS. Receivers MUST compare bearer tokens in constant time. Peers MUST NOT log them.
+- **TLS for all network transports.** Peers MUST use TLS, including on loopback, unless the destination and listener are loopback-only and the operator trusts every local account on the host. Clients MUST verify the server identity before sending credentials or protected data over TLS.
 
 See [MCP servers](contracts.md#mcp-servers) for programs an Interface asks the agent to start and [ACP initialization](bindings/acp.md#initialize) for client file and terminal methods.
 
@@ -54,7 +55,7 @@ See [Secrets](contracts.md#secrets) for credential access and storing secret ans
 
 See [The output gate](contracts.md#the-output-gate) for raw records, recipient views and when bypass is disallowed, [Shared data](bindings/data.md#output-events) for valid redactions, and [ACP](bindings/acp.md#output-gate) for withheld replies. Even without Provider-side tools or conversation state, a model request can disclose data, incur costs or leave records with the Provider.
 
-[Erasure](contracts.md#erasure) defines which copies the Harness tracks and what it reports. The [history binding](bindings/history-http.md#erasure) defines the service's role. The operator MUST keep restored backups out of use until current authority and prior erasures can be enforced.
+[Erasure](contracts.md#erasure) defines the Harness's role; [history HTTP](bindings/history-http.md#erasure) defines the service's. The operator MUST verify restored records against an authority and erasure freshness source independent of the restored backup. Without proof that newer revocations and deletions are enforced, the operator MUST keep the restore unavailable.
 
 [Authority](contracts.md#authority) lists the audit events and entries the operator needs. Operational logs SHOULD omit raw session content.
 
@@ -62,7 +63,7 @@ See [The output gate](contracts.md#the-output-gate) for raw records, recipient v
 
 The [plugin](bindings/plugin.md#transport) and [ACP](bindings/acp.md#starting) bindings cap single messages and give the errors for oversized messages. The [plugin](bindings/plugin.md#paging-history), [ACP](bindings/acp.md#extension-methods) and [history](bindings/history-http.md#sessions) bindings cap history pages. Wire caps do not bound total work or storage.
 
-The operator MUST set finite limits for concurrent connections, queued work, output buffering and storage in the agent or its environment. The operator MUST set deadlines for cancellation or shutdown of unresponsive parts, within any tighter binding deadline. See [Parts that are lost](contracts.md#parts-that-are-lost) for reply deadlines, and [Limits and tenants](contracts.md#limits-and-tenants) for job and session bounds and soft tenant budgets.
+The operator MUST bound concurrent connections, queued work, partial-message bytes and time, parser work, output buffering and storage. The agent MUST refuse new work before admission when it cannot reserve capacity to record its terminal state. It MUST reserve capacity for cancellation, revocation, recovery and erasure. Overflow of gated output follows [withholding](contracts.md#the-output-gate), not a successful empty reply. If even a reserved write fails, the agent MUST stop effects under [Recovery](contracts.md#recovery-and-repeating-work). The operator SHOULD test overload and recovery at these limits.
 
 ## Crash, failure and what recovery can't promise
 
@@ -77,7 +78,7 @@ The operator MUST NOT enable or keep enabled a production path that cannot enfor
 - [Principals, rights, tenant access and joining on open](#authority).
 - [Project trust](#plugins), allowed plugins and destinations for model context and tool data, and [host-supplied MCP servers](contracts.md#mcp-servers).
 - The [approval policy](contracts.md#tool-dispatch), including its default. Check whether policy requires an approval plugin, [output gating](#data-the-record-views-the-output-gate-and-erasure), or both.
-- [Command containment and file confinement](contracts.md#the-working-environment). The operator MUST use a sandboxed working environment if policy limits what commands can reach.
+- [Command containment and file confinement](contracts.md#the-working-environment). The operator MUST use a sandboxed working environment if policy limits what commands can reach. The operator MUST NOT enable rewind if agents in different processes share the project.
 - [Authentication, tokens and TLS](#authentication-on-each-wire).
 - [Resource limits and cancellation](#resource-limits-and-denial-of-service).
 - [Retention, audit access and backup restore](#data-the-record-views-the-output-gate-and-erasure). The operator MUST set a retention policy for history and backups, including whether either is kept indefinitely.

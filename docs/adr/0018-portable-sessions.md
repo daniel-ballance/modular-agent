@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-18
 ---
 
-**Current rule:** [Portable sessions](../bindings/data.md#portable-sessions) now include jobs, plugin-set records, authority ceilings and erasure, with selected properties checked by the kit, not every stored entry ([ADR 0019](0019-acp-2-and-several-actors.md), [ADR 0020](0020-tenants-limits-and-output-events.md)). Portability does not authorize access: [ACP opening](../bindings/acp.md#sessions) and [Security](../security.md) govern tenant checks, recorded rights, and trusted provenance.
+**Current rule:** [Portable sessions](../bindings/data.md#portable-sessions) cover jobs, plugin-set records, authority ceilings, display-only fork copies and erasure with stable lifecycle identities. The kit checks selected properties, not every entry. [ACP opening](../bindings/acp.md#sessions) and [Security](../security.md) govern access, recorded rights and trusted provenance.
 
 # Portable sessions: one shared format for what history holds
 

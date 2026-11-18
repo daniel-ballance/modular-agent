@@ -5,10 +5,10 @@ This binding defines the HTTP wire for keeping ordered JSON records. The service
 ## The basics
 
 - The service MUST authenticate every request, including `GET /v1`, using a bearer token with at least 128 bits of entropy or mutual TLS. A bearer token MUST be sent as `Authorization: Bearer <token>` and compared in constant time.
-- Clients and services MUST use TLS except on loopback. TLS peers MUST verify the identity of the other party they authenticate. A client MUST NOT forward credentials to a redirect target. Clients and services MUST NOT log credentials or lease values, including lease values in URLs.
-- One credential authorizes the whole service, including listing, raw reads, writes and erasure. A project filter is not an access boundary. Operators who need isolation between tenants or agents MUST use separate services with separate credentials.
+- Clients and services MUST follow [Security's TLS rule](../security.md#authentication-on-each-wire). For the plaintext exception the client MUST require a numeric address in `127.0.0.0/8` or `::1`, with the service listening only on loopback. A client MUST NOT forward credentials to redirects. Peers MUST NOT log credentials or lease values.
+- One credential authorizes raw reads, creation, append and erasure for every session, including authority records. It grants write trust, not just observation. Operators MUST share a service only among trusted writers and MUST NOT give its credentials to read-only observers. Isolation requires separate services and credentials.
 - A nonempty body MUST be one UTF-8 JSON object with media type `application/json`, using the [shared JSON rules](data.md#general-rules). Responses MUST use that media type, including errors and `{}`. The service MUST reject request bodies over 64 MiB, measured in decoded body bytes.
-- The client MUST percent-encode each path parameter as one UTF-8 segment and each query value as one UTF-8 value, leaving only RFC 3986 unreserved bytes unescaped. The service MUST decode exactly once without converting `+` to space or treating a decoded slash as a path separator. The service MUST reject invalid encoding, unknown or repeated query parameters, and queries on endpoints that do not list parameters.
+- A path-scoped ID or lease MUST NOT be `.` or `..`. Clients MUST percent-encode each path segment and query value in UTF-8, escaping bytes other than RFC 3986 unreserved bytes. The service MUST reject raw or encoded dot segments before normalization. It MUST decode once without treating a decoded slash as a separator or `+` as space. It MUST reject invalid encodings and unknown or repeated query parameters.
 - The service MUST check errors in this order: authentication, route, method, size, media type, request shape, session existence, then the operation's preconditions. An error response MUST leave session state unchanged. If the service cannot tell whether a mutation committed, it MUST close the request without a success or error response.
 
 The two tables are the request and response definitions. `?` means optional; an omitted query has the default shown in the table. Where the table says none, the client MUST omit that query or body.
@@ -62,13 +62,13 @@ A Session is `{ id: Id, project: string, created: Time, parentSessionId?: Id, fo
 
 The service MUST list sessions with kept entries only, by descending `created`, then by ascending UTF-8 byte order of `id`. It MUST apply `project` before finding the cursor or taking a page. It MUST return session entries in append order. Each page MUST take the longest prefix after the cursor that fits the requested item limit and 4 MiB of compact UTF-8 response JSON, including all metadata and the cursor. A page MUST contain at least one item when any remain. If more remain, `next` MUST be the ID of the last item; the client passes it as `after` on the next request. Reads need no lease and do not take a snapshot across pages.
 
-For a newly created empty session, the agent MUST defer PUT and append until its [first admitted input](data.md#setup-records). A failure between PUT and that append can leave an unlisted metadata-only record. There is no endpoint to delete that record.
+For a new session the agent MUST defer PUT until its [first admitted input](data.md#setup-records). A fork instead MUST append the complete copied prefix and fresh setup in one initial batch. The service MUST keep a metadata-only record unlisted, and GET returns an empty `entries` array for it. An agent MUST NOT open such a record as a durable session or infer setup from metadata. It MAY finish a known initial batch after identical PUT under a current lease; otherwise the record remains unlisted until retention or operator reclamation. There is no wire delete. Operators MUST bound unpublished metadata and ID reservations with quotas and retention or reclamation. On creation quota exhaustion the service MUST refuse new IDs with `503 unavailable`, preserving capacity for reads, release, erasure and settlement of existing work.
 
 ## Choosing a service at start
 
 An agent that supports this binding MUST read these variables at startup:
-- `MODULAR_AGENT_HISTORY_URL`: the base URL, without the `/v1` path.
-- `MODULAR_AGENT_HISTORY_TOKEN_FILE`: the path to a UTF-8 bearer token file. The client MUST strip surrounding whitespace and use the rest verbatim. An empty token or an unreadable file is a configuration error. A configured service URL without usable bearer or mTLS credentials is a configuration error.
+- `MODULAR_AGENT_HISTORY_URL`: absolute `http` or `https` base URL, without userinfo, query or fragment. The client MUST append `/v1` after removing trailing slashes, preserving any configured path prefix.
+- `MODULAR_AGENT_HISTORY_TOKEN_FILE`: UTF-8 bearer token file. The client MUST trim ASCII space, tab, CR and LF from both ends. The remaining value MUST be nonempty and use the HTTP Bearer token alphabet (`A-Z`, `a-z`, `0-9`, `-._~+/`, with optional trailing `=` characters). An unreadable file or configured URL without usable credentials is a configuration error.
 
 When configured, the client MUST use this URL in preference to its local store. Operators SHOULD restrict the token file to the agent's account. The binding does not prescribe credential rotation or mTLS provisioning.
 
@@ -91,9 +91,17 @@ An owner is a run identifier, not a credential. A writer MUST generate a fresh o
 
 The service MUST measure expiry with its monotonic clock. On `held`, it MUST report the remaining time rounded up to milliseconds when it forms the response. An ended lease MUST NOT become valid again.
 
-The writer MUST renew at least every `ttlMs / 3`. If no renewal has succeeded within `ttlMs / 2` of the last success (initial acquire or renewal), or if a request reports `lost`, the writer MUST treat the lease as lost. A retry of acquire after a lost reply MUST be followed by a successful renew before use; acquire by the same owner does not prove a fresh expiry. The writer SHOULD time its local renewal and loss deadlines from sending the successful request, not from receiving its reply. It MUST NOT replay an old acquire after ending or declaring that lease lost. A delayed reply for a lease already treated as lost MUST NOT re-enable writes or effects. The writer MUST follow [persistence before effects](../contracts.md#recovery-and-repeating-work); the lease does not fence outside services.
+The writer MUST use a monotonic clock that accounts for suspension, with renewal due at `ttlMs / 3` and loss at `ttlMs / 2` from sending the latest successful grant or renewal. It MUST treat a success received at or beyond the earlier of the existing loss cutoff (if any) and `ttlMs / 2` from sending that request as loss. It MUST check that cutoff immediately before every new effect. A reported `lost` or uncertain writer access ends dispatch authority. A repeated acquire after a lost reply MUST be followed by a timely renew before use. A lost generation MUST NOT be revived. See [core recovery](../contracts.md#recovery-and-repeating-work); no lease fences outside effects.
 
-An agent reopening a held session MUST retry no earlier than `retryAfterMs`, and fail the open if it cannot acquire by `GET /v1`'s `ttlMs` plus 1,000 milliseconds after the first `held`. It MUST read and reconcile the session under the new lease before recovering work. An append or erasure resend MUST use the same still-current lease. After loss or an uncertain lease the client MUST reconcile by reading rather than blindly resending. Lease-less erasure is a single atomic operation, not a retry across an intervening writer.
+An agent reopening a held session MUST use a monotonic open budget of the declared `ttlMs` plus 1,000 ms from receiving the first `held`. It MUST respect `retryAfterMs`, fail if no retry fits, and cap each acquire wait to the remaining budget. On a new lease it MUST reconcile committed state before effects.
+
+| Uncertain mutation | Required client action |
+|---|---|
+| Still-current proven lease | The client MAY resend the identical append or erase under that lease. |
+| Append under a lost or uncertain lease | The client MUST read under a new lease. All equal entries mean committed; none mean not found, not permission to dispatch. Tombstones bar replay. Partial or conflicting entries require reconciliation before more work. |
+| Erase under a lost, uncertain or absent lease | The client MUST verify tombstones under a new lease. Remaining live targets stay pending until validated for deletion under that lease. Missing records do not confirm erasure. |
+
+Neither `kept` nor an equal entry establishes whether an outside effect ran. Branch changes do not undo commits.
 
 ## Entries
 
@@ -113,9 +121,11 @@ The Harness MUST keep a durable erasure intent before sending the deletion, and 
 
 ## What the service declares
 
-The client MUST check `GET /v1` before using the service and refuse a binding it does not speak. `ttlMs` is the full lease length; the service MUST use that value for grants and renewals. If `retention` is absent or null there is no automatic expiry. Otherwise it measures milliseconds since the last commit that changed session metadata or entries, including erasure. The service MUST NOT expire a session with a current lease. Once expired, the session and its cursors are unknown, but its ID remains reserved. Retention is not an erasure acknowledgment or a reset of tenant usage.
+The client MUST check `GET /v1` before use and refuse a binding it does not speak. The service MUST use the declared `ttlMs` for grants and renewals. Absent or null `retention` disables expiry. Otherwise the service MUST treat the session as expired at operation lookup when it has no current lease and the declared interval since its last metadata or entry change has elapsed. An expired session and its cursors are unknown; its ID stays reserved. Sweeps reclaim storage, not authority. Expiry does not confirm erasure or reset usage.
 
 ## Changes
+
+- Production round two: conservative lease timing, reconciliation, path and bootstrap validation, retention cutoff and the [expanded tombstone identities](data.md#entry-fields-and-tombstones).
 
 - **Production edition.** Defines the request and response shapes, paging, authentication, lease generations, durable writes and fenced erasure. The binding remains `modular-agent-history/1`.
 

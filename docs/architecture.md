@@ -156,7 +156,7 @@ A **hook point** is a place for a plugin to observe, change or stop an operation
 
 ## Waiting for an answer
 
-An **input request** asks an actor to approve, choose, type, sign in or give a secret. Seeing a question does not imply eligibility to answer. A turn can wait for an answer. An eligible non-approval question can keep a call open past the turn if the build declares support. Once the group of open calls has its answers, a continuation reruns those calls through their checks. An answer is not a tool result. A question interrupted inside a turn follows a different recovery path. See [Questions](contracts.md#questions), [Secrets](contracts.md#secrets) and [Tool dispatch](contracts.md#tool-dispatch).
+An **input request** asks an actor to approve, choose, type, sign in or give a secret. Seeing a question does not imply eligibility to answer. A turn can wait for an answer. An eligible non-approval question can keep a call open past the turn if the build declares support. Once the group of questions closes, a continuation can rerun only unsettled calls through their checks. An answer is not a tool result. A question interrupted inside a turn follows a different recovery path. See [Questions](contracts.md#questions), [Secrets](contracts.md#secrets) and [Tool dispatch](contracts.md#tool-dispatch).
 
 ## Jobs
 
@@ -166,7 +166,7 @@ A schedule or webhook is an outside program giving ordinary authorized input, no
 
 ## History
 
-History normally grows by appending. The [default model view](contracts.md#hook-execution) follows the current branch. [Shared data](bindings/data.md#append-order-and-the-branch) describes which records instead apply to the whole session. [Compaction](contracts.md#compaction) adds a summary rather than deleting entries. A [move](contracts.md#moving-and-rewinding) changes position without restoring files. A rewind also restores a saved project point if the target and available points allow it. Both reset Provider conversation state. Neither promises to undo outside effects.
+History normally grows by appending. The [default model view](contracts.md#hook-execution) follows the current branch. [Shared data](bindings/data.md#append-order-and-the-branch) describes which records instead apply to the whole session. [Compaction](contracts.md#compaction) adds a summary rather than deleting entries. A [move](contracts.md#moving-and-rewinding) changes position without restoring files. A rewind also restores a saved project point and records completion. The [rewind journal](bindings/data.md#rewinding) distinguishes a completed restore from one that recovery still needs to finish. Both reset Provider conversation state. Neither promises to undo outside effects.
 
 [Erasure](contracts.md#erasure), when supported, follows copies. The record distinguishes cleared content, pending deletions and out-of-reach copies. Authority records and tombstones remain while kept under retention. Secret values and protected launch material never belong in the record.
 

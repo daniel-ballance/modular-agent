@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-18
 ---
 
-**Current rule:** [Rewinding](../bindings/data.md#rewinding) uses points from `turnStart` and out-of-turn `toolStarted`; [ADR 0020](0020-tenants-limits-and-output-events.md) adds ceilings and [shared output events](../bindings/data.md#output-events). The [remote output gate](../bindings/plugin.md#held-output) now receives a finished stream in bounded segments. [Contracts](../contracts.md#authority) defines `grant` and the connection's actor.
+**Current rule:** [Rewinding](../bindings/data.md#rewinding) journals restore and completion; it is not available on shared projects. [Several actors](../bindings/acp.md#several-actors) separates operator-configured representation from session grants. [ADR 0020](0020-tenants-limits-and-output-events.md) adds ceilings and [shared output events](../bindings/data.md#output-events). The [remote output gate](../bindings/plugin.md#held-output) receives finished streams in bounded segments.
 
 # ACP `/2`, several actors, jobs, rewinding and the output gate across processes
 

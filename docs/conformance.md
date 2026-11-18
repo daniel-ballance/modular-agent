@@ -38,7 +38,7 @@ The capitalized keywords have their [RFC 2119](https://www.rfc-editor.org/rfc/rf
 
 A build MUST document each departure from a recommendation and its reason. A peer MUST handle the documented fallback for an optional feature it does not get.
 
-Lowercase words carry their ordinary meanings. Examples, explanatory text and descriptive tables do not create requirements. The requirements in Contracts are under [Rules every implementation follows](contracts.md#rules-every-implementation-follows).
+Lowercase words carry their ordinary meanings. Examples do not create requirements. Contracts defines the core types, operations and hook signatures before [Rules every implementation follows](contracts.md#rules-every-implementation-follows). Those definitions give the rules their meaning and scope.
 
 ## What conforms
 
@@ -50,9 +50,16 @@ An agent MAY conform without any binding. A single-process agent with local hist
 
 ### A plugin, a service or a host
 
-- A plugin that claims the [plugin binding](bindings/plugin.md) MUST follow it and applicable [shared data rules](bindings/data.md) for everything it registers.
-- A service claiming the [history service binding](bindings/history-http.md) MUST follow it.
-- A host driving an agent over ACP MUST follow the client side of the [ACP binding](bindings/acp.md). The binding's declaration and `outcome` rules define how a host learns the supported features and turn result.
+A component claiming a role MUST follow the rules for that side of the connection and the applicable shared data rules. It MUST declare its supported options and implement their fallbacks. A role without applicable kit checks does not have to pass the opposite role's kit as that role.
+
+| Binding | Role | Coverage |
+|---|---|---|
+| [ACP](bindings/acp.md) | Agent | ACP kit, including checks for declared features |
+| [ACP](bindings/acp.md) | Client host | No standalone client kit |
+| [Plugin](bindings/plugin.md) | Plugin | Plugin kit for its registered roles |
+| [Plugin](bindings/plugin.md) | Host | Plugin-host probes driven through the ACP kit where applicable |
+| [History HTTP](bindings/history-http.md) | Service | History kit |
+| [History HTTP](bindings/history-http.md) | Client | History-backed agent checks in the ACP kit where applicable; no standalone client kit |
 
 ### The conformance kits
 
