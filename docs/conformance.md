@@ -20,6 +20,7 @@ Informative documents explain and illustrate. Where one disagrees with a normati
 |---|---|
 | [README](../README.md) | Reading order and production acceptance |
 | [Glossary](../GLOSSARY.md) | Vocabulary |
+| [Implementer's guide](implementers-guide.md) | Build order, a turn walked through end to end, what goes wrong, and which kit checks each part |
 | [Architecture](architecture.md) | Parts, responsibilities and design |
 | [Scenarios](scenarios.md) | Worked examples |
 | [Bindings index](bindings/README.md) | Map of the wire profiles |

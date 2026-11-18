@@ -18,6 +18,7 @@ The swaps found gaps that led to rules and kit checks. [Build notes](docs/build-
 | Read | To learn | Status |
 |---|---|---|
 | [Conformance](docs/conformance.md) | which documents set requirements, how to claim conformance, and how bindings change | normative |
+| [Implementer's guide](docs/implementers-guide.md) | what to build, how a turn runs, and which kit checks each milestone | informative |
 | [Glossary](GLOSSARY.md) | the vocabulary | informative |
 | [Architecture](docs/architecture.md) | the parts, their responsibilities, and why | informative |
 | [Contracts](docs/contracts.md) | what passes between the parts, and the rules every implementation follows | normative |
