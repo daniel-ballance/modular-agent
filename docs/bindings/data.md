@@ -6,6 +6,7 @@ The JSON shapes for the [information in Contracts](../contracts.md#information),
 
 - **Field names are camelCase.** A field marked *(optional)* may be left out; `null` means the same as leaving it out.
 - **Unknown fields are kept.** A receiver passes on, and returns, fields it doesn't know, so a newer sender loses nothing through an older build.
+- **Numbers are compared by value.** `0` and `0.0` are the same number, and a receiver never treats a change in how a number is written as a change. Languages write numbers differently; JavaScript, for one, writes `0.0` as `0`.
 - **Identities are strings,** unique in their scope. Times are milliseconds since 1970, as numbers.
 - **Text is UTF-8.** Where a length is counted, it is in Unicode code points.
 
@@ -234,6 +235,7 @@ Rewinding is only to an entry on the current branch. A move with `rewind` to ano
 
 ## Changes
 
+- **2026-11-18, after the round-six matrices.** Numbers are compared by value. TypeScript's output gate returned `cost: 0` for Rust's `cost: 0.0`, and the Rust host took every response and turn end as changed by the gate, could not map them back, and blocked them: its history pages came back without them.
 - **2026-11-18, after the round-six builds.** A rewind saves first and lets `env/restore` refuse a missing point, since a remote environment has no separate check (TypeScript, Go, Elixir). Concurrent steps may cross a tenant's budget together (Go, Elixir). No accepted reasoning level at or below: leave it out (Go, Elixir). `sessionId: null` for output not about one session (Elixir).
 - **2026-11-18, round six.** Limits and tenants (`limit`, `tenant`, the `administer` right, `MODULAR_AGENT_TENANTS`, the `tenantTokens` limit). Output events: a shared vocabulary for what the output gate is given (Rust R5-05, Go B30, Elixir R5-3). A job's rights on `jobStarted` (Go B29, Elixir R5-5). The order of a rewind, its branch and the life of a point (Rust R5-04, Python G78, Go B32, Elixir R5-6). A reasoning level the new model doesn't accept (Rust R5-03).
 - **2026-11-18, after the round-five matrices.** A job's report is its result, unchanged. The Python agent framed the report of a job it took up in another build's session ("Job <id> reported ..."), so the model saw different text depending on which build took the job up.
