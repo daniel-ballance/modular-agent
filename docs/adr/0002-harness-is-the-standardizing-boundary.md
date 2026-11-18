@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-14
 ---
 
+**Current rule:** The Runtime uses standard [model access](../contracts.md#model-access) and [tool definitions](../contracts.md#tool-definition), not vendor or tool-source APIs. Provider identity and declared differences are visible.
+
 > **Amended** on 2026-11-16 by [ADR 0011](0011-minimal-harness-everything-is-a-plugin.md): the Harness still defines the standard forms, but plugins do the adapting. Interfaces, Providers and tool sources are all plugins.
 
 # The Harness is the centre, and the boundary where things are standardized

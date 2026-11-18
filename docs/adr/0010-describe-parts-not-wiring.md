@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-16
 ---
 
+**Current rule:** Core contracts such as [Interface and Harness](../contracts.md#interface-and-harness) pick no transport, but the [bindings](../bindings/README.md), including ACP, define optional wire profiles. Observability covers mediated interactions, not all effects or secret-bearing payloads; [Security](../security.md) governs what can be recorded or disclosed.
+
 # Describe the parts and how they fit together, not how they are wired
 
 We describe the system the way a product requirements document would: which parts it has, what each is responsible for and owns, what each needs from the others, what happens when they work together, and what must always be true. We do not define message formats, transports, process layout or wire protocols. An implementation may put every part in one process, as Pi does, or put them behind wire protocols as separate services. Both should fit the description unchanged.

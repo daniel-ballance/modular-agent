@@ -9,26 +9,26 @@ The Harness plus a chosen set of plugins. To the outside world it is one agent, 
 _Avoid_: Assistant, bot
 
 **Harness**:
-The one part that is always present. It hosts plugins, offers the plugin API and keeps sessions, and does nothing else.
+The part that hosts plugins, offers the plugin API and owns sessions.
 _Avoid_: Core, host, application layer, orchestrator
 
 **Plugin**:
-A unit that adds to the agent using only the plugin API. Everything beyond the Harness is a plugin, including the Runtime.
+Trusted code that adds a capability or feature to the agent. Plugins run with the agent's permissions, even when hosted in another process.
 _Avoid_: Extension (Pi's word), capability (Pydantic AI's word), add-on, module
 
 **Plugin API**:
-Everything the Harness lets a plugin do. A plugin can do nothing else.
+The supported interface for plugins to act on the agent. It exposes mediated interactions, not confinement of code or visibility into effects outside the API.
 _Avoid_: Extension API (Pi's word)
 
 **Capability**:
-A named job the agent needs a plugin to do, such as Runtime, Provider or Interface. A plugin that does it provides the capability.
+A named role a plugin can provide, such as Runtime, Provider or Interface.
 _Avoid_: Seam (DeepSeek Harness's word), service, slot
 
 **Feature plugin**:
 A plugin that provides no capability and only adds behaviour, such as approval or context management.
 
 **Declaration**:
-What a part says it supports, such as taking input during a turn, rewinding, or keeping state at the Provider. For each feature a part lacks, the description says what happens instead.
+A description of the behavior a part supports, such as taking input during a turn, rewinding or keeping state at the Provider.
 _Avoid_: Capability flags (T3 Code's term), feature flags
 
 ## Capabilities
@@ -60,28 +60,37 @@ The capability that provides where files live and commands run: the local machin
 _Avoid_: Workspace, sandbox (one kind of it), environment (too vague)
 
 **Project**:
-The folder the user is working on, which context files, skills and prompt templates read. It is separate from the working environment.
+The folder the user is working on, as distinct from the working environment that contains it.
 _Avoid_: Repo, workspace root
+
+**Project trust**:
+The operator's authorization to load executable plugins and plugin settings from a project.
+
+**Configuration**:
+The capability that supplies the agent's settings and plugin selection from sources such as global and project files.
 
 **History store**:
 The capability that keeps session history beyond the process.
 _Avoid_: Storage, database, persistence
 
 **Credential store**:
-The capability that keeps credentials and hands them to the Providers and tool sources that need them.
+The capability that keeps credentials, supplies them to authorized Providers, tool sources and working environments, and supports sign-in with an actor's help. See [Asking the credential store](docs/contracts.md#asking-the-credential-store).
 _Avoid_: Secrets manager, keychain
 
 ## Units of work
 
 **Session**:
-Turns and jobs that share a history. Owned by the Harness.
+A history and its associated work, including any turns and jobs. Owned by the Harness.
 _Avoid_: Conversation, thread, context
 
 **Ephemeral session**:
 A session with no history store. Its history is gone when the process stops.
 
+**Portable session**:
+A session stored in the [shared format](docs/bindings/data.md#portable-sessions) that another supporting agent can reopen and continue. Portability describes the record, not permission to use it.
+
 **Turn**:
-The agent working until it has nothing more to do for now, or it stops. Waiting for an answer is part of a turn, not its end. Owned by the Runtime.
+One period of work by the Runtime, with zero or more steps. Waiting in place for an answer is part of the turn.
 _Avoid_: Run, agent run, task, prompt turn
 
 **Step**:
@@ -97,8 +106,11 @@ What a turn returns to whoever started it: text, structured data, or the tool ca
 _Avoid_: Output, return value, final answer
 
 **Job**:
-Work a session owns that runs outside any turn and can outlive the turn that started it, such as a background command, a subagent or a remote task. Its report enters the session as input.
+Work owned by a session that runs outside any turn and can outlive the turn that started it, such as a background command, a subagent or a remote task.
 _Avoid_: Task (A2A's word for a turn), background task, activity
+
+**Job report**:
+Input carrying a job's result back to its session, acting with the job's authority.
 
 **Live session**:
 A model connection where input and output flow both ways at once, such as voice.
@@ -107,7 +119,7 @@ _Avoid_: Realtime session, stream
 ## Tools
 
 **Tool definition**:
-A tool's name, description, the input it takes, and hints about its effects.
+A tool's name, description, input schema and declarations about its effects.
 _Avoid_: Tool schema
 
 **Tool call**:
@@ -115,7 +127,7 @@ A request to run a named tool with some input, made by the model, a UI, a plugin
 _Avoid_: Function call, tool use
 
 **Tool result**:
-The single outcome of one tool call: what the model sees, and whether it completed, failed, was refused, was cancelled, never started, or has an unknown outcome. It can arrive after the call's turn has ended. An approval is not a result.
+One tool call's settlement: its final status and any returned content or value. An answer to a question about the call is not a tool result.
 
 **Open tool call**:
 A tool call still waiting for its result after its turn has ended.
@@ -134,8 +146,11 @@ One item in a history, such as an input, a model response, a tool result, a summ
 The history entry a session is at. Moving it changes which branch the view follows, and the move is recorded.
 _Avoid_: Head, cursor
 
+**Point**:
+A saved snapshot of project files from a working environment, or the reference to that snapshot.
+
 **Rewind**:
-Moving the current position and also restoring outside state to match, such as files or a Provider's state.
+A move on the current branch that also restores project files from a point. Like any move, it resets Provider conversation state; it does not reverse effects outside the snapshot.
 _Avoid_: Rollback, undo, revert
 
 **View**:
@@ -143,7 +158,7 @@ What one recipient receives of the record. It may leave out or redact content.
 _Avoid_: Projection, copy
 
 **Model context**:
-What the model sees on one step: a view worked out from the history on the current branch, plus whatever a Provider keeps or adds.
+The view supplied to the model for a step. Retained Provider conversation state represents an exact prefix of that view, not extra history.
 _Avoid_: Prompt, context window (that is the size limit)
 
 **Compaction**:
@@ -157,6 +172,9 @@ _Avoid_: Deletion (too general), purge
 **Retention**:
 How long a history store keeps a session's history.
 
+**Lease**:
+A time-limited claim to be the only writer of a session in a history service.
+
 **Model access**:
 What the Runtime is given so it can make model requests to the chosen model, without the credentials.
 _Avoid_: Provider handle (our earlier name), client, API key
@@ -168,7 +186,7 @@ A moment in an operation where plugins can observe, change or stop it. Whoever o
 _Avoid_: Callback, middleware, interceptor
 
 **Hook handler**:
-A plugin's response at one hook point.
+A plugin operation registered at a hook point. It observes the operation or supplies an answer, depending on the point.
 _Avoid_: Hook (unclear whether it means the point or the handler)
 
 **Provider middleware**:
@@ -182,6 +200,9 @@ _Avoid_: Output filter, post-processing
 A report that something happened. It can't change what happened.
 _Avoid_: Notification, message
 
+**Output event**:
+An item passed to the output gate in a [shared format](docs/bindings/data.md#output-events), such as streamed text, a history entry or a reply.
+
 **Command**:
 An instruction a user gives through an Interface, such as `/model` or `/compact`, that a plugin carries out without starting a turn. Most commands make no model request; one that does, as `/compact` does to write a summary, says so.
 _Avoid_: Slash command (one form of it), tool
@@ -189,31 +210,55 @@ _Avoid_: Slash command (one form of it), tool
 ## Actors
 
 **Actor**:
-Whoever acts on the agent: a user, another agent, a host or a program such as a scheduler. Every input, answer and approval records its actor.
-_Avoid_: Principal, caller, participant
+An identity acting within a session, with an id, one kind (`user`, `host`, `agent` or `program`) and recorded rights.
+_Avoid_: Caller, participant
+
+**Principal**:
+A stable identity recognized by the operator for authentication and authority, whether a person or a system. An Interface connection acts as its configured principal's actor.
 
 **User**:
 A person acting on the agent through an Interface. One kind of actor.
 _Avoid_: Human, operator, person
 
 **Host**:
-A system outside this one that drives whole agents, such as T3 Code. It is an actor of this agent.
+A system that drives agents from outside, such as T3 Code. In the [plugin binding](docs/bindings/plugin.md), *host* instead names the process running the Harness, not an actor kind for that process.
 _Avoid_: Orchestrator, coordinator
 
+**Operator**:
+The person or organization responsible for deployment configuration, including which principals and plugins it trusts.
+
 **Authority**:
-What an actor may do in a session, under limits that only narrow from administrator to tenant to session to actor.
+What an actor may do in a session, represented by named rights.
 _Avoid_: Permissions, access level, runtime mode
 
+**Effective rights**:
+The rights available to an actor after applicable ceilings. For work with more than one source of authority, the available rights are their intersection, bounded by the rights recorded for the work. See [Authority](docs/contracts.md#authority).
+
+**Tenant**:
+An operator-configured scope for sessions that share a rights ceiling and, if configured, a usage budget. A session's tenant is part of its identity.
+
+**Session limit**:
+A ceiling on session rights other than `administer`, distinct from a limit on work or usage.
+
+**Administrator**:
+An actor with `administer`, the right to set the session limit.
+
 **Input request**:
-A request for something only an actor can give: an approval, an answer, a choice, a sign-in or a secret. It says who may answer it and how.
+A question for an actor, such as an approval, a choice, a sign-in or a secret. Its *answerers* are the actors eligible to answer it.
 _Avoid_: Prompt, dialog, interrupt, elicitation
 
+**Late answer**:
+An answer to a question left open after its originating turn ended.
+
+**Continuation**:
+A keyed turn that settles a previous turn's open calls once their questions are answered.
+
 **Approval**:
-An input request that decides whether one tool call may run. Only an explicit "allow" lets it run.
+An input request about one exact tool call. An authorized, explicit allow answer satisfies the approval check when the call needs approval.
 _Avoid_: Permission request, confirmation
 
 **Approval policy**:
-A session setting that says when approval is asked for, including "never ask", which refuses every approval without asking.
+The session setting for the approval check: `off` skips it, `ask` asks except for tools a trusted definition marks read-only, `all` asks for every call, and `never` refuses every call without asking. See [Tool dispatch](docs/contracts.md#tool-dispatch) and the [ACP options](docs/bindings/acp.md#configuration-options).
 _Avoid_: Permission mode, runtime mode
 
 **Subagent**:

@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-16
 ---
 
+**Current rule:** The Harness owns sessions and the API boundary, including [plugin registration](../contracts.md#plugins-and-capabilities) and [dispatch checks](../contracts.md#tool-dispatch). [Plugins run with the agent's permissions](../security.md), even in other processes; the API exposes mediated interactions and is not a sandbox.
+
 # The base Harness does the minimum and exposes an API, and everything else is a plugin
 
 The base Harness does as little as it can. It hosts plugins, connects the parts, and exposes a **plugin API**. Everything with behaviour of its own is a plugin that uses that API. That includes:

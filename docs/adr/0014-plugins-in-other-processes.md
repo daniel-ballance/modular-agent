@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-16
 ---
 
+**Current rule:** This is evidence about the private, trusted TypeScript proxy, not `modular-agent-plugin/1` ([ADR 0017](0017-plugins-in-any-language.md), [plugin binding](../bindings/plugin.md)). The failed RPC is not a known tool outcome: [Parts that are lost](../contracts.md#parts-that-are-lost) handles a dispatched effect without a confirmed result.
+
 # A plugin can run in another process, through one generic RPC
 
 [ADR 0013](0013-first-binding-typescript-in-process.md) deferred a wire binding. The description claims an agent can be built in one process, over RPC, or as services. To test the RPC claim, any plugin can now run in a process of its own. The plugin is unchanged. A proxy plugin in the Harness's process starts a child process. That child loads the real plugin and reaches the plugin API over JSON-RPC 2.0, one message per line on the child's stdin and stdout.

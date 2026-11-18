@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-14
 ---
 
+**Current rule:** Pi is a reference implementation, not a wire or conformance dependency. The original message-restatement claim was superseded by [ADR 0010](0010-describe-parts-not-wiring.md); see the current [interactions](../contracts.md#interactions).
+
 > **Amended** on 2026-11-16 by [ADR 0010](0010-describe-parts-not-wiring.md): we describe Pi's essentials as parts and how they fit together, not as messages. The rest of this decision stands.
 
 # Pi is the reference implementation, and the spec restates its essentials as messages

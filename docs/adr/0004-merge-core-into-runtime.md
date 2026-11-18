@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-14
 ---
 
+**Current rule:** The Runtime initiates model requests with [model access](../contracts.md#model-access); a remote Runtime uses `host/runtime/model` through the host ([plugin binding](../bindings/plugin.md#the-host-asks-the-runtime), [ADR 0017](0017-plugins-in-any-language.md)). The three original loop boundaries below are only part of the current [Interactions](../contracts.md#interactions).
+
 # There is no separate Core: the Runtime owns turns and makes the model call
 
 We first split the agent loop into a Core, which executed one step, and a Runtime, which ran the turn. Our later decisions emptied the Core out. The Context hook point decides what the model sees (0007). The Harness supplies the tools. The Provider returns normalized tool calls and a finish reason. Whether to continue is the Runtime's decision, with a vote from the Harness. What was left only repackaged data between the Runtime and the Provider.

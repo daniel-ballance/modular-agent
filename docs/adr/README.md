@@ -1,26 +1,26 @@
 # Decision records
 
-Each record explains one decision that is hard to reverse and would surprise a reader without its reasons. Records are kept even when later ones change them, so the reasoning stays visible. The current state of the design is in [Architecture](../architecture.md); this list says which records still stand.
+The records keep the original decisions and evidence. [Contracts](../contracts.md), [Security](../security.md) and the applicable [bindings](../bindings/README.md) give the current rules. A **Current rule** note points to later changes without rewriting the record. Implementation choices and swap results are not portable requirements.
 
-| Record | Decision | Status |
-|---|---|---|
-| [0001](0001-contracts-are-messages.md) | Every contract is a message, with bindings kept separate | superseded by 0010 |
-| [0002](0002-harness-is-the-standardizing-boundary.md) | The Harness is the centre, where the outside world is turned into standard forms | stands, amended by 0011 |
-| [0003](0003-session-turn-step-ownership.md) | Sessions, turns and steps are nested, each with one owner | stands, amended by the pressure test |
-| [0004](0004-merge-core-into-runtime.md) | There is no separate Core: the Runtime runs turns and makes model requests | stands |
-| [0005](0005-provider-handles-from-the-harness.md) | The Runtime gets access to a model without its credentials, and never chooses the model | stands, amended by the pressure test |
-| [0006](0006-hook-points-belong-to-the-operation-owner.md) | Whoever owns an operation defines its hook points; the Runtime never runs handlers itself | stands, amended by 0011 |
-| [0007](0007-context-management-is-a-hook.md) | What the model sees is decided at a hook point before each step | stands, amended by 0011 and the pressure test |
-| [0008](0008-pi-is-the-reference-implementation.md) | Pi is the reference implementation | stands, amended by 0010 |
-| [0009](0009-own-protocol-south-adapters-north.md) | Our own protocol between Harness and Runtime, adapters elsewhere | withdrawn by 0010 |
-| [0010](0010-describe-parts-not-wiring.md) | Describe the parts and how they fit, not how they are wired | stands |
-| [0011](0011-minimal-harness-everything-is-a-plugin.md) | The Harness does the minimum, and everything else is a plugin | stands |
-| [0012](0012-one-agent-is-the-scope.md) | One agent is the scope; hosts that coordinate several agents drive it from outside | stands |
-| [0013](0013-first-binding-typescript-in-process.md) | The first implementation is TypeScript in one process, with a package per part | stands, extended by 0014 |
-| [0014](0014-plugins-in-other-processes.md) | A plugin can run in another process, through one generic RPC | stands, extended across languages by 0017 |
-| [0015](0015-parts-as-services.md) | Parts can be services, each with its own HTTP API | stands, extended by 0018 |
-| [0016](0016-rules-from-three-clean-room-builds.md) | The rules three clean-room builds agreed on become part of the contracts | stands |
-| [0017](0017-plugins-in-any-language.md) | A plugin in any language, through one binding of the contracts | stands |
-| [0018](0018-portable-sessions.md) | Portable sessions: one shared format for what history holds | stands |
-| [0019](0019-acp-2-and-several-actors.md) | ACP `/2`, several actors, jobs, rewinding and the output gate across processes | stands |
-| [0020](0020-tenants-limits-and-output-events.md) | Tenants, session limits, output events, and one plugin per name | stands |
+| Record | Decision | Status | Current rule |
+|---|---|---|---|
+| [0001](0001-contracts-are-messages.md) | Every contract is a message, with bindings kept separate | Superseded by [0010](0010-describe-parts-not-wiring.md) | [Interactions](../contracts.md#interactions) |
+| [0002](0002-harness-is-the-standardizing-boundary.md) | The Harness is the standardizing boundary | Accepted; amended by [0011](0011-minimal-harness-everything-is-a-plugin.md) | [Model access](../contracts.md#model-access) |
+| [0003](0003-session-turn-step-ownership.md) | Harness owns sessions; Runtime owns turns; steps are not parts | Accepted; amended by the [pressure test](../pressure-test/round-2/synthesis.md#decisions) and later lifetime rules | [Harness and Runtime](../contracts.md#harness-and-runtime) |
+| [0004](0004-merge-core-into-runtime.md) | There is no separate Core: the Runtime runs turns and initiates model requests | Accepted; extended by [0017](0017-plugins-in-any-language.md) for remote Runtimes | [Runtime wire](../bindings/plugin.md#the-host-asks-the-runtime) |
+| [0005](0005-provider-handles-from-the-harness.md) | The Runtime gets model access without credentials | Accepted; amended by the [pressure test](../pressure-test/round-2/synthesis.md#decisions) and [0016](0016-rules-from-three-clean-room-builds.md) on model choice and retry | [Settings](../contracts.md#settings), [recovery](../contracts.md#recovery-and-repeating-work) |
+| [0006](0006-hook-points-belong-to-the-operation-owner.md) | The operation owner defines its hook points | Accepted; amended by [0011](0011-minimal-harness-everything-is-a-plugin.md), [0016](0016-rules-from-three-clean-room-builds.md) and [0017](0017-plugins-in-any-language.md) on dispatch, ordering and remote handlers | [Hook execution](../contracts.md#hook-execution), [wire hooks](../bindings/plugin.md#the-host-asks-a-hook-handler) |
+| [0007](0007-context-management-is-a-hook.md) | The view for a step is selected at a hook point | Accepted; amended by [0011](0011-minimal-harness-everything-is-a-plugin.md), the [pressure test](../pressure-test/round-2/synthesis.md#decisions) and this edition's context rules | [Default view](../contracts.md#hook-execution), [Provider state](../contracts.md#provider-state) |
+| [0008](0008-pi-is-the-reference-implementation.md) | Pi is a reference implementation | Accepted; message restatement superseded by [0010](0010-describe-parts-not-wiring.md) | [Interactions](../contracts.md#interactions) |
+| [0009](0009-own-protocol-south-adapters-north.md) | Own protocol between Harness and Runtime, adapters elsewhere | Withdrawn by [0010](0010-describe-parts-not-wiring.md) | [Wire profiles](../bindings/README.md) |
+| [0010](0010-describe-parts-not-wiring.md) | Describe the parts and how they fit, not how they are wired | Accepted for the core; extended by [0017](0017-plugins-in-any-language.md) and [0019](0019-acp-2-and-several-actors.md) with optional profiles | [Interface and Harness](../contracts.md#interface-and-harness), [ACP](../bindings/acp.md) |
+| [0011](0011-minimal-harness-everything-is-a-plugin.md) | The Harness is small; capabilities and features are plugins | Accepted; the current rules define the API and trust boundary | [Plugins and capabilities](../contracts.md#plugins-and-capabilities), [Security](../security.md) |
+| [0012](0012-one-agent-is-the-scope.md) | Outside hosts drive individual agents | Accepted; extended by [0016](0016-rules-from-three-clean-room-builds.md) and [0018](0018-portable-sessions.md) on keys and replay | [Input](../contracts.md#input), [Following a session](../contracts.md#following-a-session) |
+| [0013](0013-first-binding-typescript-in-process.md) | The first implementation is TypeScript in one process | Historical implementation choice; extended by [0014](0014-plugins-in-other-processes.md) | [Conformance](../conformance.md#what-conforms) |
+| [0014](0014-plugins-in-other-processes.md) | A plugin can run in another process through a private RPC | Historical experiment; portable profile defined by [0017](0017-plugins-in-any-language.md) | [Plugin binding](../bindings/plugin.md), [Parts that are lost](../contracts.md#parts-that-are-lost) |
+| [0015](0015-parts-as-services.md) | Parts can run as HTTP services | Historical experiment; portable history extended by [0018](0018-portable-sessions.md) | [History binding](../bindings/history-http.md), [Security](../security.md) |
+| [0016](0016-rules-from-three-clean-room-builds.md) | Rules agreed by three clean-room builds become part of Contracts | Accepted; extended by later rules and bindings | [Core rules](../contracts.md#rules-every-implementation-follows) |
+| [0017](0017-plugins-in-any-language.md) | Plugins in any language use a common binding | Accepted; amended by [0019](0019-acp-2-and-several-actors.md) for jobs and stream-at-a-time output gating and by [0020](0020-tenants-limits-and-output-events.md) for shared output events and unique names | [Plugin binding](../bindings/plugin.md) |
+| [0018](0018-portable-sessions.md) | Portable sessions use a shared history format | Accepted; amended by [0019](0019-acp-2-and-several-actors.md) for jobs and plugin sets and by [0020](0020-tenants-limits-and-output-events.md) for limits and tenants | [Portable sessions](../bindings/data.md#portable-sessions) |
+| [0019](0019-acp-2-and-several-actors.md) | ACP `/2`, actors, jobs, rewinding and remote output gating | Accepted; amended by [0020](0020-tenants-limits-and-output-events.md) for ceilings, job ownership and shared output events | [ACP versions](../bindings/acp.md#versions), [Rewinding](../bindings/data.md#rewinding) |
+| [0020](0020-tenants-limits-and-output-events.md) | Tenants, session limits, output events and unique plugin names | Accepted; this edition clarifies limits, soft budgets and result status | [Limits and tenants](../contracts.md#limits-and-tenants), [Output events](../bindings/data.md#output-events), [Tool result](../contracts.md#tool-result) |

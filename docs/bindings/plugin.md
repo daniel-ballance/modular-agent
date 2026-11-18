@@ -1,304 +1,391 @@
 # Plugin binding: `modular-agent-plugin/1`
 
-How a Harness hosts a plugin that runs as a separate program, in any language. The binding turns the [interactions in Contracts](../contracts.md#interactions) into messages: what the Harness asks a tool source, a Provider or a working environment, and what a hook handler is given and may answer. A plugin is never sent a build's own plugin API, only these messages. So a plugin written once runs under any build that follows the binding, and one build's plugins run under any other.
+This binding connects the Harness to a plugin in another process. It covers tool sources, Providers, working environments, hook handlers, commands, Runtimes and jobs. History has [its own binding](history-http.md). Credential and configuration stores are not served over this binding.
 
-All data uses the [shared data](data.md) shapes.
-
-It covers:
-- tool sources;
-- Providers;
-- the working environment;
-- handlers at the standard hook points;
-- commands;
-- the Runtime (stage 2): a Runtime in one language running turns for another language's Harness;
-- jobs: work a plugin starts that outlives a turn;
-- the output gate, a stream at a time.
-
-History, credential and configuration stores are not hosted this way: history has [its own binding](history-http.md), and the other two hold secrets or are trivial.
-
-The design follows prior art in PiG, which hosts extensions in four languages over one wire ([PiG reference](../research/pig-reference.md)). It takes PiG's:
-- registration handshake;
-- separation of host requests from plugin callbacks, linked by request;
-- on-demand, paged history;
-- frame cap, heartbeat and shutdown.
-
-It doesn't copy PiG's approach of porting one plugin API to every language.
+Both peers MUST use the [shared data](data.md) shapes. The tables define method schemas: fields are required unless marked `?`; `Id` is a shared string identity and `RpcId` is a transport request id. `JSON` is any JSON value and `object` is a JSON object. `notify` means a notification with no response. The errors in the tables are in addition to [common protocol errors](#transport).
 
 ## Transport
 
-- **The host starts the plugin** as a child process, and speaks JSON-RPC 2.0 on its stdin and stdout, one message per line. The plugin writes nothing else to stdout. Its stderr is the host's to show or log.
-- **Requests go both ways,** with independent ids.
-  - The host's requests are named `plugin/*`, `tools/*`, `provider/*`, `env/*`, `hook/*` and `command/*`.
-  - The plugin's requests to the host are named `host/*`.
-- **A plugin's request about a host request** carries `parentRequestId`: the id of the host request it belongs to. The host uses it to find the session, the actor and the authority. It also uses it to cancel the plugin's request when the parent request is cancelled. The parent must be a request this host sent on this connection and hasn't had answered yet. Once it is answered, a request naming it is refused with `invalid_request`.
-- **Cancelling:** either side sends the notification `$/cancel { id }` for a request it sent. The receiver stops the work, and still answers: a result, or the error `cancelled`. That holds for the host's answers to `host/*` requests as much as for a plugin's, and for a request whose work hadn't started when the cancel arrived. A cancel for an id already answered, or never sent, is ignored. Cancelling never claims an outside effect was undone.
-- **Both sides keep reading** while they work. A side handling a request may send a request of its own and wait for the answer, so it never stops reading its input to wait. Notifications are handled in the order they arrive, and before any answer that arrives after them.
-- **Heartbeat:** either side may send `$/ping`. The answer is `{}`. Work has no timeout of its own; the caller's cancelling owns it.
-- **Limits:** a message is at most 64 MiB. A result that would be larger is replaced by the error `result_too_large`.
-- **Errors** are JSON-RPC errors whose `data` is `{ "code": "<code>" }`. The JSON-RPC `code` is -32601 for a method the receiver doesn't have, -32602 for `invalid_request`, and -32000 for the rest. A receiver reads `data.code`, never the number or the message. The codes:
-  - `invalid_request`;
-  - `not_found`: a file the request names doesn't exist;
-  - `unknown_handler`;
-  - `cancelled`;
-  - `not_supported`;
-  - `result_too_large`;
-  - `lost`: a part this request needed was lost;
-  - `internal`.
-- **Ending:** the host sends `plugin/shutdown { reason }`, where the reason is `stop`, `reload` or `refused`, waits for the answer, then closes the plugin's stdin. A plugin exits when its stdin closes, whatever else it is doing. Whatever it started stops with it, as the working environment's rule requires.
-- **A lost plugin:** if the plugin's process ends early, every request waiting on it fails with `lost`, and the host follows [Parts that are lost](../contracts.md#parts-that-are-lost).
+- The host MUST start the plugin as a child process and send and receive JSON-RPC 2.0 over its stdin and stdout. The launching process is the authenticated peer on stdio; there is no extra authentication. The plugin MUST NOT write anything else to stdout. The host MAY route stderr to operator diagnostics. Each peer MUST NOT include secrets in errors, traces or diagnostics.
+- Each peer MUST send one UTF-8 JSON-RPC object per line, with no byte order mark or batch. Receivers MUST accept LF and CRLF. The 64 MiB cap is 67,108,864 bytes, excluding the line ending. Receivers MUST bound input before decoding or parsing and close the connection on an oversized frame, including a frame with no newline. Senders MUST substitute `result_too_large` for an oversized success result. For an oversized outgoing error, senders MUST replace its diagnostic text and data with the minimal envelope for the same code. A sender MUST NOT send an oversized request or notification.
+- Request ids MUST be strings or integers in the inclusive range −(2^53 − 1) to 2^53 − 1. Peers MUST compare ids by type and value, independently in each direction. A sender MUST NOT reuse an id on the same connection, even after its request settles. A parent is live from send until its answer is received. A peer MUST close on a reused request id, an unsolicited or duplicate answer, or an invalid response envelope.
+- Each side MUST keep reading while work is pending. A receiver MUST register notifications in arrival order before settling a later answer, without blocking the reader on notification work. Only the method's stated completion barriers delay handing an answer back to the caller. Stream notifications MUST precede their request's answer. A receiver MUST discard notifications for a closed or wrong-kind request.
+- A caller MAY send `$/cancel { id: RpcId }` for its own request. The receiver MUST ignore cancels for unknown or settled ids and treat duplicate cancels as one. On cancellation, the receiver MUST stop work in scope and answer within five seconds, with its result if the work already settled, or `cancelled` unless the method defines a cancellation result. A cancellation does not undo an outside effect.
+- After sending cancel for a parent, the host MUST cancel active effect callbacks under it and reject new `host/env/exec`, `host/env/write`, `host/ask`, `host/runtime/runToolCall`, `host/runtime/model` and `host/jobs/start` with `cancelled`. Until the answer arrives, the host MUST still accept authorized reads, `host/runtime/record` and the `turn.end` hook. Other callbacks under a cancelled parent cannot start work. On receipt of the parent answer, the host MUST reject new requests naming it with `invalid_request` and cancel any unsettled effect callbacks. A plugin MUST settle its callbacks before answering their parent.
+
+### Errors and connection loss
+
+| JSON-RPC code | `data.code` | What it means |
+|---|---|---|
+| -32700 | `parse_error` | Invalid JSON or UTF-8, including an empty frame |
+| -32600 | `invalid_request` | Invalid request envelope or batch |
+| -32601 | `method_not_found` | The receiver has no such method |
+| -32602 | `invalid_request` | Invalid params, identity, scope, authorization or state |
+| -32000 | `not_found` | Named file or saved point does not exist |
+| -32000 | `unknown_handler` | No such registered handler at this hook |
+| -32000 | `cancelled` | Request cancelled |
+| -32000 | `not_supported` | Unsupported version or capability |
+| -32000 | `result_too_large` | The result does not fit its limit |
+| -32000 | `lost` | The connection or a required part was lost |
+| -32000 | `internal` | Other operation failure |
+
+A receiver MUST return one error for a bad request frame, with the valid request id if known, else `null`. It MUST NOT answer a notification, including one with unknown method or bad params. Senders MUST include `data.code`. Receivers MUST use it rather than message text or the numeric code to identify an operation error. An unrecognized code is a failure of that operation. Neither `internal` nor `lost` is evidence that retrying is safe. Unknown fields follow the [shared data rules](data.md#general-rules).
+
+Each peer SHOULD bound queued work and concurrent requests and callbacks. A peer MUST fail an over-limit request with `internal` before admitting the work and drop an over-limit notification rather than bypass validation.
+
+Both directions offer `$/ping` with params `{}`, result `{}` and no method-specific error. Either peer MAY use it to check liveness. Normal work has no transport timeout. The host MUST bound initialization, any ping it sends, shutdown acknowledgement and process exit, with a default of five seconds per wait, configurable by the operator.
+
+The host MUST treat unexpected EOF, process exit, an unusable stream, a required protocol close or a missed control or cancellation deadline as loss. On loss, each peer MUST end the connection, settle unanswered work once as `lost` and cancel callbacks still in flight. The host MUST terminate a lost child process still running and apply [Parts that are lost](../contracts.md#parts-that-are-lost) and [persistence before effects](#runtime-records-and-effects). Working-environment cleanup is limited by its declared containment. Process loss is not proof a durable job ended.
 
 ## Starting: the handshake
 
-The host's first message is `plugin/initialize`:
+| Host request | Params | Result | Errors |
+|---|---|---|---|
+| `plugin/initialize` | `{ binding: string, data: string, host: { name: string, version: string }, project: string, home: string, config: object }` | `Registration` | `not_supported` for an unsupported version |
+| `plugin/shutdown` | `{ reason: "stop" \| "reload" \| "refused", detail?: string }` | `{}` | Common errors only |
 
-```json
-{ "binding": "modular-agent-plugin/1", "data": "modular-agent-data/1",
-  "host": { "name": "...", "version": "..." }, "project": "/abs/path", "home": "/abs/path",
-  "config": { } }
-```
+The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"` and `data: "modular-agent-data/1"`. `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
 
-- `project` is the Harness's project.
-- `home` is the data folder the plugin may use for its own state.
-- `config` holds the plugin's own settings, from the host's configuration.
+**Registration**
 
-The plugin answers with its registration. Registration is the only source of what the plugin provides. Nothing appears later, except a tool source's changed list.
+| Field | Type and default |
+|---|---|
+| `binding` | `"modular-agent-plugin/1"` |
+| `name` | Nonempty string, stable plugin identity |
+| `providers?` | `{ id: Id, supports: ProviderSupports, models: ModelInfo[] }[]`; default `[]` |
+| `toolSources?` | `{ id: Id, tools: ToolDefinition[], perSession?: boolean }[]`; defaults `[]` and `perSession: false` |
+| `workingEnvironment?` | `{ containment: "strong" \| "processGroup" \| "none", platforms?: string[], points?: boolean, confinesFiles?: boolean }`; default absent; omitted platforms makes no platform claim; omitted flags are false |
+| `hooks?` | `{ hook: HookName, handlerId: integer, order?: "first" \| "normal" \| "last" }[]`; defaults `[]` and `order: "normal"` |
+| `commands?` | `{ name: string, description: string }[]`; default `[]` |
+| `runtime?` | `{ id: Id, supports: RuntimeSupports }`; default absent |
+| `replaces?` | `string[]`; default `[]` |
+
+`ProviderSupports` is `{ keepsState: boolean, runsTools: false, safeToRepeat?: boolean }`; the explicit repeat promise defaults to false. `RuntimeSupports` is `{ inputDuringTurn?: boolean, waitingThroughRestart?: boolean, continuesAfterRestart?: boolean }`; omitted flags default to false. `HookName` is a wire name from the [hook table](#the-host-asks-a-hook-handler). Handler ids are unique safe integers per registration. Tool source ids are unique per plugin. Provider ids, command names and tool names are unique in the host's registry for their kind, including within one registration or a refreshed tool view. A Runtime id identifies the single Runtime. Platform names name the systems on which the advertised containment applies.
+
+Example:
 
 ```json
 {
   "binding": "modular-agent-plugin/1",
-  "name": "my-plugin",
-  "providers": [ { "id": "conformance", "supports": { "keepsState": false, "runsTools": false }, "models": [ ModelInfo ] } ],
-  "toolSources": [ { "id": "files", "tools": [ ToolDefinition ], "perSession": false } ],
-  "workingEnvironment": { "containment": "strong" | "processGroup" | "none", "platforms": ["linux"], "points": false },
-  "hooks": [ { "hook": "tool.before", "handlerId": 1, "order": "normal" } ],
-  "commands": [ { "name": "hello", "description": "..." } ],
-  "runtime": { "id": "durable", "supports": { "inputDuringTurn": true, "waitingThroughRestart": true, "continuesAfterRestart": true } },
-  "replaces": [ "provider:conformance", "tool:bash", "working-environment" ]
+  "name": "filter",
+  "hooks": [{ "hook": "tool.before", "handlerId": 1 }]
 }
 ```
 
-- **`name` is the plugin's identity,** the same in every build and every version of it. Jobs belong to a plugin by name ([Jobs](#jobs)), so a renamed plugin loses its unfinished jobs. **A host loads at most one plugin of each name,** counting its own plugins and external ones. A second plugin with a name already loaded is [refused](#starting-the-handshake), so a job never has two owners. A plugin program that serves several parts in several processes gives each process its own name, and only the one that starts a job can take it up.
-- **Every field but `binding` and `name` is optional.** A binding the plugin can't speak gets the error `not_supported`.
-- **`order`** is `first`, `normal` or `last`, as in [Hook points](../contracts.md#hook-points).
-- **`replaces`** names items the host leaves out of its own plugins in favour of this one: `runtime`, `working-environment`, `provider:<id>`, `tool:<name>` or `command:<name>`.
-  - **Only the named items go.** A host's own plugin that registered other items keeps them. Replacing `tool:bash` and `tool:read` leaves the host's `write` and `edit`. This is narrower than [replacing a plugin](../contracts.md#plugins-and-capabilities) inside a build, because a build's own plugins aren't visible on the wire.
-  - **A named item the host doesn't have** is simply added, but the plugin must register it. Naming an item and not registering it is refused.
-  - **Only the host's own items can be replaced.** An item another external plugin registered can't be, so naming one is refused.
-  - **A plugin that registers a `runtime` replaces the host's Runtime,** whether or not it names `runtime`, since a session has only one.
-  - **Otherwise a name the host already has is refused,** as [never shadowed](../contracts.md#plugins-and-capabilities) requires. A plugin that replaces nothing adds to the host.
-- **A registration the host can't accept,** such as a refused replacement or a handler for a hook point it doesn't offer, means the host doesn't load the plugin. It sends `plugin/shutdown { reason: "refused", detail }`, reports the problem, and leaves its own items as they were. Nothing the plugin registered remains.
-- **`perSession: true`** means the tool list can differ by session.
+- The host MUST validate the entire registration and run the already loaded [plugin load gate](#the-host-asks-a-hook-handler) before publishing any item. A plugin MUST serve the methods for each role it registers. A host MUST NOT send work for a role the plugin did not register. Only model catalogs, availability and tool lists can change without a new load.
+- The host MUST load at most one plugin per name across local and external plugins. The host MUST compose plugins in load order as in [Contracts](../contracts.md#configuration-and-trust). The host MUST NOT change the plugin set while a session is open.
+- A replacement MUST name an item it registers using `runtime`, `working-environment`, `provider:<id>`, `tool:<name>` or `command:<name>`. The host MUST refuse a duplicate replacement name, an unlisted collision (including a second Runtime or environment) or replacement of another external plugin's item. A registered replacement with no collision adds the item. The host MUST remove only the named local items and keep the rest of each local plugin.
+- On refusal the host MUST leave the prior registry unchanged, report the reason and send `plugin/shutdown` with `reason: "refused"` and a diagnostic `detail`. A failed handshake loads nothing.
+- When draining, the host MUST stop dispatching new work and cancel unsettled work. A plugin MUST stop accepting new work after receiving shutdown, settle it, and answer `{}` when cleanup in scope is complete. The host MUST close stdin after the answer. A plugin MUST exit on stdin EOF. The [connection loss rules](#errors-and-connection-loss) apply if shutdown or exit misses its deadline.
 
 ## The host asks a tool source
 
-| Request | Params | Result |
+| Host method | Params | Result | Errors |
+|---|---|---|---|
+| `tools/list` | `{ toolSource: Id, sessionId?: Id }` | `{ tools: ToolDefinition[] }` | `invalid_request` for unknown source or wrong session scope |
+| `tools/call` | `{ toolSource: Id, sessionId: Id, project: string, call: ToolCall }` | ToolResult without `callId`, or `{ pending: string }` | `invalid_request` for unknown source or tool, wrong scope or malformed call |
+
+| Plugin notification | Params | Result / errors |
 |---|---|---|
-| `tools/list` | `toolSource`; `sessionId` *(optional)* | `{ "tools": [ToolDefinition] }` |
-| `tools/call` | `toolSource`, `sessionId`, `project`, `call` (a ToolCall) | a ToolResult without `callId`, or `{ "pending": "<why>" }` |
+| `tools/progress` | `{ parentRequestId: RpcId, content: Content }` | notify |
+| `tools/changed` | `{ toolSource: Id, parentRequestId?: RpcId }` | notify |
 
-While a call runs, the plugin may:
-- **send progress:** the notification `tools/progress { parentRequestId, content }`;
-- **ask a question:** `host/ask { parentRequestId, request }`, with an InputRequestDraft, which returns an Answer. Questions in one call are keyed by their order in the run, as in Contracts. A call that left a question open answers `{ pending }`, and runs again from the top once the question is answered.
-- **use the session's working environment** through `host/env/*` (below). A tool never uses a working environment of its own, unless its plugin is the session's working environment. Swapping the working environment then moves every tool with it.
-
-When its list changes, the plugin sends the notification `tools/changed { toolSource, parentRequestId? }`, with the id of the request that caused the change, if one did. It sends it before it answers the request that caused the change. The host then reads the list again before it passes that answer on.
+- Registration supplies the initial tool list. A source MUST return its full current list from `tools/list`, including entries it still provides from registration. The host MUST use a session id for per-session lists and omit it for other lists. The host MUST fetch a per-session list before first use in that session.
+- A source MUST send `tools/changed` before answering a request that caused its list to change, with that request id. `tools/list` is read-only and MUST NOT cause a change. The notification affects only the parent's session for a per-session source with a session-scoped parent, all open sessions for other per-session changes, or the one shared list for a source that is not per-session.
+- The host MUST invalidate affected lists on receipt and serialize refreshes for each affected view. The host MUST validate and publish each refreshed list atomically, discarding a refresh superseded by a later change. It MUST finish the refresh before passing on the triggering answer, without blocking the reader. If querying or validation fails, the host MUST leave that source unavailable in the affected view until a successful refresh and fail the triggering operation with `internal`. The host MUST NOT dispatch using an invalidated list or use a refresh to shadow another tool.
+- The host MUST accept progress only for its live `tools/call`. A plugin MUST report ordinary tool failures as ToolResults and MUST NOT send further progress after its terminal answer. The host supplies `callId` from the call.
+- A tool MAY ask through `host/ask` and use the session's environment through `host/env/*`. A tool MUST use that environment, not one of its own, for these operations. A tool provided by the environment itself need not route its own operations back through the host. This is a plugin design rule, not confinement.
+- The plugin MUST answer `{ pending }` only when `host/ask` left a qualifying question open for the call. Question keys and answer shapes are in [Questions](data.md#questions); the [core question rules](../contracts.md#questions) govern persistence, reuse and effects before asking. A late continuation reruns the call from the top.
 
 ## The host asks a Provider
 
-| Request | Params | Result |
-|---|---|---|
-| `provider/models` | `provider` | `{ "models": [ModelInfo] }` |
-| `provider/available` | `provider` | `{ "available": boolean }` |
-| `provider/request` | `provider`, `model` (`{ provider, id }`), `request` (a ModelRequest), `sessionId` *(optional)* | an assistant message |
-| `provider/discard` | `provider`, `sessionId`, `erase` *(optional)*, `entryIds` *(with `erase`)* | `{}`. For a Provider that keeps state ([Provider state](../contracts.md#provider-state)). With `erase: true`, for [erasure](../contracts.md#erasure), the Provider also deletes the remote copies it knows of, of the entries named, and answers `{ "pending"?: [entryId], "outOfReach"?: [string] }`. `pending` lists the entries whose remote copies it couldn't delete yet; it deletes them when asked again. `outOfReach` names kinds of copies it never can, as in the ACP `erase` result. The host awaits it before reporting the erasure. |
+| Host method | Params | Result | Errors |
+|---|---|---|---|
+| `provider/models` | `{ provider: Id }` | `{ models: ModelInfo[] }` | `invalid_request` for unknown Provider |
+| `provider/available` | `{ provider: Id }` | `{ available: boolean }` | `invalid_request` for unknown Provider |
+| `provider/request` | `{ provider: Id, model: ModelRef, request: ModelRequest, sessionId?: Id }` | Assistant message | `invalid_request` for unknown Provider or model, mismatched identity or missing required session |
+| `provider/discard` | `{ provider: Id, sessionId: Id, erase?: boolean, entryIds?: Id[] }` | `{}`, or `{ pending?: Id[], outOfReach?: string[] }` when erasing | `invalid_request` for bad scope or erasure params; `not_supported` for a stateless Provider |
 
-- **The response streams** as notifications `provider/event { parentRequestId, event }`, all before the result.
-- **A model's failure is a result, not an error:** an assistant message with `stop: "failed"` and an `error`.
-- **The Provider plugin runs its own hook points,** "before a model request" and "as the response arrives". It does so through `host/hook` (below), because the host owns the handlers. Over the wire, "as the response arrives" runs once per response, with the complete message, after the last `provider/event` and before the result. A handler that needs each piece runs in the host's own process.
-- **Credentials:** a Provider plugin reads them with `host/credentials/read { provider }`, which returns `{ "credential": Credential | null }`, in the [shared shape](data.md#credentials). `null` means the host has none. The host refuses a provider this plugin didn't register. The Runtime never sees them.
+| Plugin notification | Params | Result / errors |
+|---|---|---|
+| `provider/event` | `{ parentRequestId: RpcId, event: ModelStreamEvent }` | notify |
+
+`ModelRef` is defined in [Messages](data.md#messages). `ModelStreamEvent` is the stream event in [Models](data.md#models).
+
+- A Provider MUST register `runsTools: false`. A Provider MUST NOT run tools over this binding. This is the request/response profile; live sessions and late model (batch) answers are out of scope.
+- A Provider MUST return its full current catalog for `provider/models`. The registration catalog is the initial view. Each catalog entry MUST name the registered Provider and a distinct model id. A Provider MUST report `available: false` if it cannot take requests with its current configuration and credentials. `true` does not guarantee the next request succeeds. A model failure after admission, including credentials rejected by the model service, MUST be an assistant message with `stop: "failed"` and an `error`, not a protocol error.
+- The host and Provider MUST validate `model.provider == provider` and the model's identity against the Provider's catalog. The host MUST give a `sessionId` for a stateful request. A stateful Provider MUST isolate state by session and follow [Provider state](../contracts.md#provider-state). Requests and discards for one Provider and session MUST be serialized, including erasure.
+- The host's Provider adapter MUST run the `provider.request` transform once before [recording](data.md#recording-order-and-ownership) and sending the effective `provider/request`. The Provider MUST call `host/hook` for `provider.request` before calling the model and use the returned request. The host MUST return the effective payload bound to that parent without running the transform again. The Provider MUST call `host/hook` for `provider.response` once with the complete message, after the last `provider/event` and before the answer. The Provider MUST return that same message. The host MUST run the response observers once, on that callback. The Runtime does not dispatch either Provider hook. An in-process Provider uses its own hook interface, not `host/hook`.
+- `erase` defaults to false. The host MUST send a deduplicated `entryIds` list if and only if `erase` is true. The Provider MUST reject `entryIds` with duplicate ids, a missing list when `erase` is true, or a supplied list when `erase` is false or absent. A stateful Provider MUST discard conversation state when asked and, for erasure, attempt to delete the named remote copies it knows of. It MUST return `pending` as a subset of the requested ids without duplicates and `outOfReach` as kinds of copies it cannot delete. Omitted lists mean empty. The host MUST await the answer before reporting erasure and retain pending ids for a retry. Erasure retries identify the same copies.
+- Credentials are returned by [`host/credentials/read`](#what-a-plugin-may-ask-the-host). A Runtime has no credential access as a Runtime.
 
 ## The host asks the working environment
 
-Every request carries `cwd`, the session's project or a folder in it, and `sessionId`, the session whose work it is.
+| Host method | Params | Result | Errors |
+|---|---|---|---|
+| `env/read` | `{ sessionId: Id, cwd: string, path: string }` | `{ data: string }`, base64 | `not_found` for missing file; `invalid_request` for invalid or denied path; `internal` for I/O failure |
+| `env/write` | `{ sessionId: Id, cwd: string, path: string, data: string }`, base64 | `{}` | `not_found` for missing parent directory; `invalid_request` for invalid or denied path or bad base64; `internal` for I/O failure |
+| `env/exists` | `{ sessionId: Id, cwd: string, path: string }` | `{ exists: boolean }` | `invalid_request` for invalid or denied path; `internal` for I/O failure |
+| `env/save` | `{ sessionId: Id, cwd: string }` | `{ point: Id }` | `not_supported` without points; `internal` for save failure |
+| `env/restore` | `{ sessionId: Id, cwd: string, point: Id }` | `{}` | `not_supported` without points; `not_found` for unknown, expired or foreign point; `internal` for restore failure |
+| `env/exec` | `{ sessionId: Id, cwd: string, command: string, timeoutMs?: integer }` | [ExecResult](data.md#working-environment) | `invalid_request` for invalid cwd or timeout; `internal` for launch failure; `lost` if cleanup in scope cannot be confirmed |
+| `env/sessionEnded` | `{ sessionId: Id }` | `{}`, including when the session never used the environment | `lost` if cleanup in scope cannot be confirmed |
 
-| Request | Params | Result |
+| Plugin notification | Params | Result / errors |
 |---|---|---|
-| `env/read` | `cwd`, `path` | `{ "data": "<base64>" }` |
-| `env/write` | `cwd`, `path`, `data` (base64) | `{}` |
-| `env/exists` | `cwd`, `path` | `{ "exists": boolean }` |
-| `env/save` | `cwd` | `{ "point": string }`: a saved point, from which `env/restore` can put the project's files back as they are now. Only if the registration says `points: true`. |
-| `env/restore` | `cwd`, `point` | `{}`, with the files as they were at the point; or `not_found` for a point it no longer has. It restores in place: the project folder stays the same folder, and only the files in it change, so the agent and any process working in the folder keep working. |
-| `env/exec` | `cwd`, `command`, `timeoutMs` *(optional)* | an ExecResult. `timeoutMs` is a positive number of milliseconds. A sender leaves it out for no limit, and a receiver treats `0` the same as leaving it out. When it passes, the command is stopped and the result has `timedOut: true`. |
+| `env/output` | `{ parentRequestId: RpcId, chunk: string }` | notify |
 
-- **A session's background work:** processes a command leaves running outlive the call and a cancelled turn, as [the working environment](../contracts.md#the-working-environment) requires. When the session closes, the host sends `env/sessionEnded { sessionId }`, which answers `{}` once they have stopped. They all stop when the plugin stops.
-- **"Safe to repeat":** a working environment promises that nothing from an interrupted command is still running only when its `containment` is `strong`. A call's `safeToRepeat` needs that promise as well as the tool's ([Recovery](../contracts.md#recovery-and-repeating-work)).
-- **Saved points** are the working environment's own: one environment can't restore another's. A point covers the project's files, not processes or anything outside the project.
-- **A missing file:** `env/read` of a file that doesn't exist answers the error `not_found`, and so does `host/env/read`. A reader tells a missing file apart from other failures by that code, never by the error's message, which is in each build's own words.
-- **Output streams** as notifications `env/output { parentRequestId, chunk }`.
-- **Cancelling `env/exec`** stops the command and everything it started, within 5 seconds, as the declared `containment` promises.
-- **A plugin that isn't the working environment** reaches it with the same requests, prefixed `host/`: `host/env/read`, `host/env/write`, `host/env/exists` and `host/env/exec`, each with a `parentRequestId`. The host routes them to whichever plugin is the session's working environment, local or not. Output comes back as the notification `host/env/output { parentRequestId, chunk }`, where `parentRequestId` is the id of the plugin's `host/env/exec`.
+### Paths and points
+
+- The host MUST route by its trusted session-to-environment and session-to-project mappings, never by a plugin's claimed project. The host MUST reject a supplied session or project that disagrees with the parent and validate authority before forwarding each callback.
+- `cwd` MUST be an absolute path resolving to the project root or a directory inside it. A relative `path` MUST be resolved against `cwd`; an absolute path is resolved as given. The [core confinement rule](../contracts.md#the-working-environment) covers file paths after following symlinks. An environment that registers `confinesFiles: true` MUST enforce that boundary at the operation, including if paths change between check and use. The host MUST report the declaration in [ACP](acp.md#the-declaration). Process containment limits lifetime, not reach.
+- `read` and `write` operate on regular files, including symlinks to such files if allowed by confinement. The environment MUST reject directory or special-file read and write targets with `invalid_request`. The environment MUST return `exists: false` for an admissible missing target. The environment MUST distinguish denied access from missing data. File writes have no portable atomicity promise on failure.
+- The host MUST ask for points only from an environment that advertises `points: true`. A point covers the project files, not processes or external effects. The environment MUST scope points to the saving environment, session and project. It MUST keep them at least while the session is open. Retention after close or restart depends on that environment. A foreign or missing point MUST leave files unchanged.
+- An environment MUST restore idempotently and in place, preserving the project directory itself. The host MUST exclude concurrent work it controls in that workspace during save and restore. An I/O failure can leave a partial restore; rewind and rollback follow [Rewinding](data.md#rewinding). The host MUST suspend new work in the session if restoration and rollback cannot establish the expected files.
+
+### Command lifetime
+
+- `command` is a string for the working environment's shell. The interpreter and shell syntax outside the fixture are deployment choices. `timeoutMs` MUST be a safe integer from 0 upwards. Omission and 0 both mean no requested deadline. The operator MAY set a shorter command deadline.
+- The environment MUST decode stdout and stderr as UTF-8, replacing invalid input with U+FFFD, and merge chunks in observed order. The final `output` MUST be their concatenation. No relative ordering of simultaneous writes on the two pipes is guaranteed. The environment MUST send chunks only during the exec request, not after the answer. The host MUST forward allowed chunks on its corresponding `host/env/output`.
+- An exit code MUST be an integer or `null` when killed. A command stopped by a deadline MUST return `timedOut: true` and `exitCode: null`. A wire cancel that wins the race MUST return `cancelled`, not a timeout result. The environment MUST stop a timed-out or cancelled command within the scope advertised below, within five seconds of timeout or cancel, or answer `lost` if that cleanup is unconfirmed.
+- A normal exec answer and cancellation of a later turn MUST NOT by themselves stop background processes left by that command. The host MUST request `env/sessionEnded` on close and not issue new work for that session while it closes. The environment MUST clean up only that session's processes in scope and settle its outstanding commands before acknowledging. Repeating `env/sessionEnded` is safe. Agent or worker loss follows [connection loss](#errors-and-connection-loss); unconfirmed cleanup is not proof an interrupted command is safe to repeat.
+
+| Containment | Scope on exec cancel or deadline, session close, or agent/worker loss |
+|---|---|
+| `strong` | The environment MUST stop the affected commands and all their descendants, including ones that left the original process group. This supplies the environment's promise for [safe repetition](../contracts.md#recovery-and-repeating-work). |
+| `processGroup` | The environment MUST stop processes still within the affected commands' managed process groups. Processes that escape them are outside the promise. |
+| `none` | The environment SHOULD attempt to stop the direct commands. No descendant or post-loss cleanup guarantee applies. |
 
 ## The host asks a hook handler
 
-`hook/handle { handlerId, hook, payload }` runs one handler. The host combines the answers itself, by the hook point's rule: a plugin never sees another plugin's answer, except through the payload it is given.
-
-| Rule | The handler answers |
-|---|---|
-| observe | `null` |
-| gate | `null` to allow; `{ "refuse": "<reason>" }`; `{ "change": payload }` to allow with a changed payload; or `{ "pending": "<why>" }` to leave a tool call open |
-| transform | `null` to pass on; `{ "value": payload }`; or `{ "value": payload, "stop": true }` |
-| first answer | `null` to pass; or its answer |
-| collect | `null`; or its contribution |
-
-An error answer counts as a failing handler, per [Hook points](../contracts.md#hook-points).
-
-**The standard hook points:**
-
-| `hook` | Rule | `payload` | Answer, where it has one |
+| Host request | Params | Result | Errors |
 |---|---|---|---|
-| `plugin.load` | gate | `{ name, origin, project }` | |
-| `session.start` | observe | `{ sessionId, resumed }` | |
-| `session.end` | observe | `{ sessionId }` | |
-| `input` | transform | `{ sessionId, actorId, content, when }` | the same shape |
-| `turn.before` | collect | `{ sessionId, turnId, input }`, where `input` is content | `{ system?: string, context?: content }` |
-| `turn.start` | observe | `{ sessionId, turnId }` | |
-| `step.before` | transform | `{ sessionId, turnId, stepId, model: ModelInfo, request: ModelRequest }` | the same shape |
-| `step.after` | gate | `{ sessionId, turnId, stepId, response }`, where `response` is an assistant message | a refusal ends the turn |
-| `tool.before` | gate | `{ sessionId, turnId?, call: ToolCall, definition: ToolDefinition }` | `change` is `{ call }`, where only the call's `input` may differ |
-| `tool.after` | transform | `{ sessionId, call, result: ToolResult }` | the same shape |
-| `model.failed` | first answer | `{ sessionId, request, error }` | `{ retry: true, request? }` |
-| `turn.result` | gate | `{ sessionId, turnId, result: { text?, value? }, shape? }` | a refusal sends the model back with the reason |
-| `turn.end` | observe | `{ sessionId, turnId, outcome, result }`, as on a `turnEnd` entry: `outcome` is `{ kind, error?, limit? }` | |
-| `provider.request` | transform | `{ sessionId, provider, model, request }`, where `model` is `{ provider, id }`, as on `provider/request` | the same shape |
-| `provider.response` | observe | `{ sessionId, provider, model, message }`, with `model` as above | |
-| `output` | gate, a stream at a time | `{ sessionId, recipient, events, final }`, as below | `null`, `{ events }` or `{ block: true }` |
+| `hook/handle` | `{ handlerId: integer, hook: HookName, payload: object }` | The answer in the hook table | `unknown_handler` if the id does not identify a handler for that hook; `invalid_request` for a malformed payload |
 
-- **Only the standard hook points** are offered to a plugin in another process in `/1`. A plugin can't define hook points over the wire, and a handler for any other point is [refused](#starting-the-handshake).
-- **"Before output reaches a recipient" is offered a stream at a time,** as the hook point `output`. A handler in another process would cost a round trip per streamed piece, so the host holds each stream for each recipient until the stream's declared end: the end of a model response, or of a tool's output ([The output gate](../contracts.md#the-output-gate)). It then sends one `hook/handle` with the whole stream. Output that isn't streamed goes one item at a time: a recorded entry, a turn's outcome, or an answer to an Interface's request, such as a page of history, as one event. A held stream reaches the recipient before the answer to the request that caused it, such as a prompt's response.
-  - The payload is `{ sessionId, recipient, events, final }`. `recipient` is the actor id the output is for. `events` are the events to deliver, in order, in the [shared shapes](data.md#output-events); `final` is `true`. The answer is `null` to let them through, `{ "events": [...] }` to deliver others in their place, such as a redacted copy, or `{ "block": true }`.
-  - Handlers combine as a gate, in order: a block stops the rest, and each handler sees the events the previous one left.
-  - A recipient with such a handler sees no live pieces, only each stream when it ends. The host declares `holdsOutput: true`.
-  - A handler that fails, or a plugin lost, blocks: the gate fails closed.
+### From core hooks to wire hooks
+
+The first column names the operation in [Contracts](../contracts.md#hook-points). The table projects those hooks onto the wire; it does not expose every core payload. In the table, field names ending in `Id` are shared ids. `Gate` is `null` or `{ refuse: string }`. `Transform` is `null` or `{ value: payload }`, replacing that hook's full payload. `InputWhen` and `StartedBy` are the forms used by `inputAccepted` and `turnStart` in [History entries](data.md#history-entries). `TurnResult` and `Outcome` are `data.result` and `data.outcome` on `turnEnd`.
+
+| Core hook | /1 hook | Payload | Handler answer |
+|---|---|---|---|
+| Plugin about to load | `plugin.load` | `{ name: string, origin: "global" \| "project", project: string }` | Gate |
+| Session starts | `session.start` | `{ sessionId, resumed: boolean }`; false on first start, true on reopen | `null` |
+| Session joined or left | Not carried | | |
+| Session ends | `session.end` | `{ sessionId }` | `null` |
+| Input arrives | `input` | `{ sessionId, actorId, content: Content, when: InputWhen }` | Transform, or `{ value: payload, stop: true }` to handle the input |
+| Before a turn | `turn.before` | `{ sessionId, turnId, input: Content }` | `null` or `{ system?: string, context?: Content }` |
+| Turn starts | `turn.start` | `{ sessionId, turnId }` | `null` |
+| Before each step | `step.before` | `{ sessionId, turnId, stepId, model: ModelInfo, request: ModelRequest }` | Transform |
+| After each step | `step.after` | `{ sessionId, turnId, stepId, response: AssistantMessage }` | Gate; refusal ends the turn |
+| Before a tool call | `tool.before` | `{ sessionId, turnId?, call: ToolCall, definition: ToolDefinition }` | Gate, `{ change: { call: ToolCall } }`, or `{ pending: string }` |
+| After a tool call | `tool.after` | `{ sessionId, call: ToolCall, result: ToolResult }` | Transform |
+| Model request failed | `model.failed` | `{ sessionId, request: ModelRequest, error: ModelError }` | `null` to pass, `{ retry: false }` to stop, or `{ retry: true, request?: ModelRequest }` |
+| Turn result ready | `turn.result` | `{ sessionId, turnId, result: { text?: string, value?: JSON }, shape?: Schema }` | Gate; refusal sends the model back with the reason |
+| Turn ends | `turn.end` | `{ sessionId, turnId, outcome: Outcome, result: TurnResult }` | `null` |
+| Before a model request | `provider.request` | `{ sessionId: Id \| null, provider: Id, model: ModelRef, request: ModelRequest }` | Transform |
+| As each Provider piece arrives | Not carried | | |
+| Complete Provider response, wire projection | `provider.response` | `{ sessionId: Id \| null, provider: Id, model: ModelRef, message: AssistantMessage }` | `null` |
+| Before output reaches a recipient | `output` | `{ sessionId: Id \| null, recipient: Id, events: OutputEvent[], final: true }` | `null`, `{ events: OutputEvent[] }` or `{ block: true }` |
+
+`AssistantMessage` and `ModelError` use [Messages](data.md#messages). For sessionless Provider work, the host MUST normalize an omitted `sessionId` to `null`. `turn.before` collects additions before the turn is recorded; `turn.start` observes the start. The wire step hook carries the prepared request and model limits, not a history or usage snapshot. Permitted handlers can read recorded input, history and usage through `host/history`.
+
+- The host MUST combine handlers according to the [core hook rules](../contracts.md#hook-points), with registration order breaking ties within one plugin. The host MUST reject registration of hooks not carried here. This binding has no plugin-defined hooks.
+- The host MUST treat an illegal answer as a handler failure under those same rules. A transform MUST leave the enclosing scope, identity and authority fields unchanged. An `input` transform can change only `content`; `stop: true` ends the chain and consumes the input without sending it to the model. Handled input uses the core admission and command rules; this shape carries no command reply.
+- The host MUST splice only `change.call.input` from a `tool.before` answer into the payload for the next handler. The host MUST apply the [input change and recheck rule](../contracts.md#tool-dispatch) before allowing dispatch. A `pending` answer is valid only for a question the host has persisted for this call that can outlast its turn. A `tool.after` transform can change only `result.content` and `result.value`.
+- A `step.before` or `provider.request` transform MUST change only the `request` field. A changed or retried ModelRequest MUST NOT add a tool or expand its definition beyond what the turn and its current authority allow. The host MUST enforce the chosen model, current limits and tool offer at dispatch.
+
+### Held output
+
+The [core output gate](../contracts.md#the-output-gate) defines which deliveries are covered. The host MUST check each answer against the [shared event shapes and redaction rules](data.md#output-events) before using it.
+
+- For a recipient covered by a remote output gate, the host MUST hold model response and tool output streams until their declared end, using the gate chain in effect when the stream began. The host MUST declare `holdsOutput: true`. The host MUST deliver a held stream before the reply to the request that caused it.
+- At the end the host MUST send ordered segments of at most 4 MiB of compact UTF-8 JSON for the `events` array, splitting only at event boundaries. For other output, the host MUST send one item at a time, with the same byte limit. `final: true` means the gate has to decide on this batch now, even if another segment follows. Redaction across segment boundaries is not guaranteed.
+- The host MUST bound the bytes held per recipient and stream, including replacement events. The host MUST block the stream on overflow or if one event cannot fit in a segment. For one non-stream item over 4 MiB, the host MUST block that item. The total buffer limit is a deployment setting.
+- The host MUST pass each segment through the chain in order, giving each handler the events the previous one left. The host MUST NOT release any part before validating the whole delivery. The host MUST block delivery on a block, an oversized, malformed or unmappable replacement, an error or a lost handler. While awaiting a gate, the host MUST queue other output for that recipient separately, subject to the same limits and gate. The gate MUST NOT bypass itself by emitting output from its callback.
+- The host MUST suppress withheld events and use the [ACP withheld response](acp.md#updates) for blocked replies to ACP clients. Raw history returned to a trusted plugin is not a recipient delivery.
 
 ## The host asks the Runtime
 
-A turn is one request from the host. The Runtime runs it, asking the host for what it needs through `host/runtime/*`, with the turn's request id as `parentRequestId`. It also reads the session's history with `host/history`, for example to rebuild its own records after a restart. Those two are all it uses. It never chooses the model, never sees credentials and never runs a tool itself ([Contracts](../contracts.md#harness-and-runtime)).
+| Host request | Params | Result | Errors |
+|---|---|---|---|
+| `runtime/runTurn` | `{ turn: Turn }` | TurnOutcome | `not_supported` without a Runtime; `invalid_request` for malformed turn |
+| `runtime/resumeTurn` | `{ turn: Turn, interrupted: { turnId: Id, calls: PendingCall[] } }` | TurnOutcome | As for `runTurn`; `invalid_request` for mismatched turn or calls |
+| `runtime/continueOpenCalls` | `{ turn: Turn, calls: PendingCall[] }` | TurnOutcome | As for `runTurn`; `invalid_request` for invalid continuation |
 
-| Request | Params | Result |
+| Shape | Fields |
+|---|---|
+| Turn | `{ sessionId: Id, turnId: Id, startedBy: StartedBy, model: ModelInfo, modelSupports: ProviderSupports, settings: TurnSettings, resultShape?: Schema }` |
+| PendingCall | `{ id: Id, name: Id, input: object, stepId?: Id, started: boolean, safeToRepeat: boolean }` |
+| TurnOutcome | `{ outcome: Outcome, result: TurnResult, entries: Id[], usage: Usage }` |
+
+`StartedBy`, `Outcome` and `TurnResult` are the [history shapes](data.md#history-entries). `Usage` is the [shared total](data.md#messages). `TurnSettings` is defined in [Models](data.md#models) and `Schema` in [Tools](data.md#tools). `entries` lists the ids returned by `record` and `takeSteering` for this Runtime request, once each in commit order. It does not include `turnEnd`.
+
+- The host MUST have at most one Runtime parent in flight per session. The Runtime MUST ask the host for model and tool work, not choose a model, read its credentials or run a tool itself. Out-of-turn Interface calls and [rewinding](data.md#rewinding) stay with the host.
+- `runtime/resumeTurn` MUST use the interrupted turn's id in both places. The host MUST give unsettled calls in their original request order, with ids, original step and attribution taken from history. `started` means a `toolStarted` was recorded. `safeToRepeat` MUST be false unless a started call's recorded and current promises both hold. The [recovery rules](data.md#portable-sessions) govern interrupted model attempts, the transient or durable path, fresh authority checks and outcomes when a call cannot run again. The Runtime MUST recover from standard history kinds alone. [Questions](../contracts.md#questions) govern interrupted in-turn questions.
+- For [late answers to questions](../contracts.md#questions), the host MUST send `runtime/continueOpenCalls` only after committing the one continuation for the original turn. Its new `turnId` and `startedBy: { kind: "answer", id }` identify the continuation and the last answered request. The host MUST record the [continuation link](data.md#history-entries) to the original turn. The host MUST use the original call order, ids and attribution, as read from the original turn and its question records. Calls rerun with current authority. Reopening an interrupted continuation uses `resumeTurn` for its existing id, not a second continuation.
+- The host MUST serialize cancellation against a committed turn outcome. If cancellation wins, the host MUST record one cancelled outcome, settle calls and hand back queued input by the [core rules](../contracts.md#input). The Runtime MUST stop, cancel its in-flight work and report a cancelled outcome, even if a callback saw the cancellation first. A late reply claiming completion cannot override a winning cancel. Process loss is interruption, not cancellation.
+- The host MUST validate `TurnOutcome` against committed entries, accounted usage and actual open calls. Only calls with a qualifying open question can appear in `openToolCalls`; a cancelled turn cannot leave a call open. An invalid outcome is a Runtime failure, not authority to write a forged `turnEnd`.
+
+### Runtime callbacks
+
+Every method or notification in this table also carries `parentRequestId: RpcId` for the turn. Bad scope, phase or identity is `invalid_request`; see [authority](#authority) and [transport](#transport).
+
+| Plugin method | Other params | Result | Errors |
+|---|---|---|---|
+| `host/runtime/newId` | `{}` | `{ id: Id }` | Common errors only |
+| `host/runtime/prepareStep` | `{ stepId: Id, usage: Usage }` | ModelRequest | `invalid_request` for an unallocated/reused step id or mismatched usage |
+| `host/runtime/model` | `{ request: ModelRequest, stepId: Id }` | Assistant message | `invalid_request` for an unauthorized request or attempt; `lost` for Provider loss |
+| `host/runtime/hook` | `{ hook: HookName, payload: object }` | Combined answer below | `invalid_request` for a wrong hook, payload or phase; `internal` for a failing non-gate, non-observe chain |
+| `host/runtime/definition` | `{ toolName: string }` | ToolDefinition or `null` if not offered | Common errors only |
+| `host/runtime/runToolCall` | `{ call: ToolCall }` | ToolResult or `{ callId: Id, pending: string }` | `invalid_request` for an unknown or settled call id; a known call denied dispatch gets a refused result |
+| `host/runtime/record` | `{ entry: object }`, a draft [History entry](data.md#history-entries) | Committed history entry | `invalid_request` for a forbidden kind or mismatched entry; `lost` if the commit cannot be confirmed |
+| `host/runtime/takeSteering` | `{}` | `{ entries: HistoryEntry[] }` | `not_supported` if steering is not offered |
+| `host/runtime/hasSteering` | `{}` | `{ waiting: boolean }` | Common errors only |
+| `host/runtime/report` | `{ type: string, data: JSON, stepId?: Id, toolCallId?: Id }` | notify | No reply |
+
+| Host notification | Params | Result / errors |
 |---|---|---|
-| `runtime/runTurn` | `turn` | a TurnOutcome |
-| `runtime/resumeTurn` | `turn`; `interrupted`: `{ turnId, calls }` | a TurnOutcome. The host sends it on reopening a session with a turn whose process stopped. A transient Runtime ends the turn; a durable one carries on. Every pending call ends with exactly one result. |
-| `runtime/continueOpenCalls` | `turn`; `calls` | a TurnOutcome. The host sends it when every question behind calls left open past an earlier turn has its answer. Its `turn.startedBy` is `{ kind: "answer", id }`, with the last answer's request id. |
+| `host/runtime/modelEvent` | `{ parentRequestId: RpcId, event: ModelStreamEvent }`; id of the `host/runtime/model` callback | notify |
 
-- **`turn`** is `{ sessionId, turnId, startedBy, model: ModelInfo, modelSupports, settings: { maxSteps?, reasoning?, maxOutput? }, resultShape? }`. `startedBy` is as on a `turnStart` entry. `modelSupports` is the Provider's `supports`.
-- **Each of `calls`** is `{ id, name, input, stepId?, started, safeToRepeat }`. `started` says whether the call's start was recorded. `safeToRepeat` is `true` only if the recorded `toolStarted` said so, and the tool and the working environment promise it now. The Runtime runs a started call again only when it is `true`.
-- **A TurnOutcome** is `{ outcome, result: { text?, value?, openToolCalls }, entries, usage }`. `outcome` is as on a `turnEnd` entry. `openToolCalls` lists call ids. `entries` lists the ids of the entries the turn recorded. `usage` adds up the turn's model responses; work the host does on its own, such as compacting, is recorded and counted by the host.
-- **Who records what.** The host records `turnStart` and the input the turn takes before it sends `runtime/runTurn`, so a turn lost at once is still on the record. It records `turnEnd` from the TurnOutcome. It records each call's `toolStarted` before the call runs. The Runtime records the rest: responses, tool results and anything of its own. A Runtime doesn't record `turnStart` or `turnEnd`; a host given one returns the entry it has, or takes it as the turn's end, and never keeps two.
-- **Parallel calls.** The Runtime records each result as soon as it has it, so a crash loses none. `host/runtime/prepareStep` gives the model the results in the order the response asked for them, whatever order they were recorded in.
-- **A failed model request.** When `model.failed` answers `{ retry: true }`, the host discards any state the turn's Provider keeps. The Runtime then sends the answer's `request` if it has one, or asks `host/runtime/prepareStep` again.
-- **Cancelling:** the host cancels a turn with `$/cancel` on its request. The Runtime stops at the next safe point, cancels what it asked the host for, records a result for every started call, and answers with outcome `cancelled`. Once the host has sent the cancel, the turn ends as `cancelled`, whatever the Runtime answers, unless it answers `completed`: a callback may see the cancel before the Runtime does, and fail because of it.
-- **The Runtime's state lives in the history.** After a restart, the host starts the Runtime plugin's process again and sends `runtime/resumeTurn`. Nothing in the old process survives. The Runtime reads the turn back with `host/history`: its responses, results and step count are in the [standard kinds](data.md#history-entries). It may record kinds of its own through `host/runtime/record` too, but only to save work: a Runtime must recover a turn from the standard kinds alone, since another build may have started it ([portable sessions](data.md#portable-sessions)).
-- **What stays with the host.** A tool call an Interface starts outside a turn is the host's to run, not the Runtime's. So is rewinding: the host moves the session and restores the working environment's saved point ([Rewinding](data.md#rewinding)), with no request to the Runtime. A Runtime's `supports` says nothing about rewinding.
+- `host/runtime/hook` MUST accept only `turn.start`, `step.after`, `tool.before`, `tool.after`, `model.failed`, `turn.result` and `turn.end`. The payload uses the [hook table](#from-core-hooks-to-wire-hooks) without `sessionId` and `turnId`, which the host derives from the parent and validates if supplied. The host MUST derive the tool definition and call attribution from its own state. Observe returns `null`; a gate returns `{ value: payload, refused?: string, pending?: string }` with at most one reason; a transform returns the complete payload; first answer returns the deciding answer or `null`. The Runtime MUST use `turn.end` at most once, as its last callback before answering; this is a pre-commit observation. If cancel has won, the host MUST present the cancelled outcome to the observers.
+- For each attempt the Runtime MUST allocate a fresh `stepId` through `newId` and pass the cumulative usage of prior attempts to `prepareStep`. The host MUST verify usage from its own Provider responses and account for its own work separately. The host MUST freeze the [steering input](../contracts.md#input) it takes for that attempt before preparing it. `takeSteering` records and returns newly taken input in order; during a model request or tool round it returns no entries and leaves input queued.
+- `prepareStep` runs `step.before` and returns the prepared request. The host MUST allow only that request, or a replacement from a validated `model.failed` retry of the last failed attempt. The host MUST permit one model attempt at a time per turn and reject a repeated send for the same step id. A retry MUST use a fresh attempt id, current limits and the same authority checks. On an allowed retry, the host MUST discard Provider state before resending. The [context-overflow limit](../contracts.md#compaction) still applies.
+- The Runtime MUST submit a response for every answered model attempt, including a failure it will retry, before asking for a retry or dispatching calls. The Runtime runs `step.after` after the step's calls are settled, as in [Hook execution](../contracts.md#hook-execution); a refusal ends the turn. The host MUST bind `tool.before` to a call from a committed response or a pending call passed to this turn. The host MUST validate the id, name and original input before running the chain. The host MUST enforce the [all-parallel-or-serial tool round](../contracts.md#tool-dispatch). The host MUST NOT prepare the next step before the current round is settled. The next request receives the committed results in the original call order.
+- At `runToolCall`, the host MUST check that every actor behind the work has the current effective `tools` right, that the tool is offered to the turn and still callable, and that an allowed `tool.before` decision matches the exact id, name and input. The host MUST retain that decision from its own hook chain under the live turn and consume it at most once. The host MUST serialize check and dispatch for each call against another dispatch, cancellation or change of authority. A missing or nonmatching decision, or failed authority or offer check, MUST produce one recorded `refused` result for the known call without dispatch. A call with a valid pending decision remains open without dispatch or result.
 
-**What the Runtime asks the host.** Every request carries `parentRequestId`, the turn's request id.
+### Runtime records and effects
 
-| Request | Params | Result |
-|---|---|---|
-| `host/runtime/newId` | | `{ id }` |
-| `host/runtime/prepareStep` | `stepId`, `usage` | the ModelRequest for this step, after "before each step": the context, tools and settings |
-| `host/runtime/model` | `request` (a ModelRequest), `stepId` | an assistant message, from the turn's model. The host runs the Provider's hook points. Pieces stream to the Runtime as the notification `host/runtime/modelEvent { parentRequestId, event }`, where `parentRequestId` is this request's id. A model's failure is a result with `stop: "failed"`. |
-| `host/runtime/hook` | `hook`, `payload` | the combined answer, by the hook point's rule: observe `null`; gate `{ value, refused?, pending? }`, where `value` is the whole payload as the handlers left it, and `refused` and `pending` are the reasons, as strings; transform the payload; first answer the answer or `null`; collect a list. Only for the Runtime's own hook points: `turn.start`, `step.after`, `tool.before`, `tool.after`, `model.failed`, `turn.result` and `turn.end`. The host adds `sessionId` and `turnId`. `turn.end` is the Runtime's last request in a turn, before it answers with the outcome, so its observers may not find `turnEnd` in the history yet. |
-| `host/runtime/definition` | `toolName` | a ToolDefinition, or `null` |
-| `host/runtime/runToolCall` | `call` (a ToolCall) | a ToolResult, or `{ callId, pending }` for a call left open. The host runs the tool and records its start. "Before a tool call" is the Runtime's to run, through `host/runtime/hook`, before it asks. |
-| `host/runtime/record` | `entry`: an entry without `id`, `parentId`, `sessionId`, `time` or `turnId` | the recorded entry. The host adds those fields. |
-| `host/runtime/takeSteering` | | `{ entries }`: input given for the running turn, now recorded |
-| `host/runtime/hasSteering` | | `{ waiting: boolean }` |
-| `host/runtime/report` | `type`, `data`, `stepId?`, `toolCallId?` | a notification, never a request: an event of the Runtime's own, which the host may pass on as it is |
+The host is the sole history writer. The Runtime port can submit only the kinds below.
 
-`host/runtime/*` requests about a turn the host already has the outcome of are refused with `invalid_request`.
+| Owner | Entry kinds and commit point |
+|---|---|
+| Host | `inputAccepted`, `inputHandedBack`, `input` and `turnStart`; the host commits the turn start and the input it takes before dispatching the turn |
+| Host | `modelRequest` at `host/runtime/model`, before sending to the Provider; fresh `stepId` each attempt and `safeToRepeat` from the Provider's declared support |
+| Host | `toolStarted` before dispatch; `turnEnd` from the validated outcome |
+| Host | `setting`, `actorJoined`, `actorLeft`, `limit`, `tenant`, `position`, `erasure`, `jobStarted`, `jobEnded`, `plugins`, `inputRequest` and `inputAnswer` |
+| Runtime via `record` | `response` for a host-recorded attempt, `toolResult` for a call the host started or refused, and Runtime-owned kinds containing a dot |
 
-**The host emits the standard events about a turn itself,** since everything they describe passes through it:
-- streamed model output, as `host/runtime/model` streams;
-- a step starting, at `host/runtime/prepareStep`;
-- tool calls starting, progressing and ending, as it runs them;
-- every recorded entry.
+- The host MUST refuse any other kind from `record` with `invalid_request`. It MUST fill `id`, `parentId`, `sessionId`, `time`, `turnId` and `writer` itself, and derive attribution from the parent and tracked work. A custom kind cannot stand for a standard record or change authority. Custom records are optional; their submission has no portable deduplication key.
+- A `response` MUST match the host's `modelRequest` for that step and the assistant message returned by the host, with [canonical call ids](data.md#call-identities-and-mappings). The host MUST keep only one response per attempt and one terminal result per call. Repeating the same standard record under an eligible parent MUST return its existing entry; conflicting content is `invalid_request`.
+- The host MUST run `tool.after` once while finalizing a known terminal tool result and commit the checked result before returning it to the Runtime. If the transform fails, the host MUST retain the factual result in history and fail the operation without returning unchecked output to the Runtime. A later `tool.after` for a settled call returns the cached outcome of that hook. A matching `record` returns the committed entry.
+- A pending call has no terminal result. The host MUST retain its gate refusals and settle them even if the Runtime does not ask to dispatch. For cancellation and interruption the host MUST use the [core recovery rules](../contracts.md#recovery-and-repeating-work) to settle calls, not accept an unverified outcome from the Runtime. For a known call that will not be dispatched, the host MUST register the refusal or non-start in its call state before accepting a `toolResult` for it.
+- The host MUST apply the [core persistence and lease rules](../contracts.md#recovery-and-repeating-work) to all dispatch through the Runtime port. An unconfirmed commit is not authority to start an effect. The host MUST treat the session as interrupted on such a failure, not replace the Runtime or retry the effect in the same session.
 
-A Runtime doesn't report these, and a host ignores a report that duplicates one. A host never depends on a report: a Runtime that sends none loses nothing. Interfaces then show a turn the same way whichever language its Runtime is written in.
+### Turn events
+
+The host MUST emit standard [events](../contracts.md#event) once, through the output gate. Turn start and end follow their commits. Step start follows successful preparation. Step end follows the recorded response and disposition of its calls, or the failure or cancellation of the attempt, and carries accounted usage. Tool progress is live; a tool's terminal event follows its committed result, including refusal without dispatch. The host also emits model pieces and history entry events. A Runtime report MUST use a dotted custom event name, not a standard event name. The host MUST ignore a report impersonating a standard event and MUST NOT depend on reports to recover.
 
 ## Jobs
 
-A job is work a plugin starts that outlives a turn, such as a subagent or a background check ([Contracts](../contracts.md#plugin-and-harness-jobs)). A job belongs to the plugin that started it, by the plugin's `name`. It is recorded in the [standard kinds](data.md#history-entries), so a session's jobs survive a restart, and a session reopened by another build, with the same plugin loaded, finds them.
+A job belongs to its plugin by registered name. The host records jobs in the [shared history kinds](data.md#history-entries).
 
-| Request | Params | Result |
-|---|---|---|
-| `host/jobs/start` | `parentRequestId`, `kind`, `key` *(optional)*, `detail` | `{ jobId, started }`. The host records `jobStarted` before it answers. The job acts as the actor behind the parent, narrowed as for any work that actor started, and needs the `jobs` right. With a `key` the session has seen, it answers the first job's `jobId` with `started: false`, and starts nothing. |
-| `host/jobs/progress` | `jobId`, `content` | a notification: progress, passed on as an event |
-| `host/jobs/end` | `jobId`, `outcome` (`{ kind, error? }`), `result` *(optional; content)*, `report` (boolean) | `{}`, once `jobEnded` is recorded, and with `report`, the report taken as input, keyed `job:<jobId>`. A job already ended is `invalid_request`. The report is taken as accepted input (`inputAccepted`, keyed `job:<jobId>`) before the answer; the turn it starts runs when the session is free, which the answer doesn't wait for. |
-| `host/jobs/unfinished` | `sessionId` | `{ "jobs": [{ jobId, kind, key?, detail, actorId }] }`: this plugin's jobs in the session that have a `jobStarted` and no `jobEnded` |
-| `host/jobs/resume` | `jobId` | `{}`. The plugin takes up an unfinished job of its own, after a restart. The host records nothing; the plugin ends the job when it can. |
+| Host request | Params | Result | Errors |
+|---|---|---|---|
+| `jobs/cancel` | `{ jobId: Id }` | `{}` after the job's end is committed | `invalid_request` for an unknown job; `lost` if cleanup cannot be confirmed |
 
-**The host asks the plugin** `jobs/cancel { jobId }` to cancel a job, when an actor with the `cancel` right asks, or when its session closes. The plugin stops the job and ends it with `host/jobs/end` before it answers `{}`. If the job had already finished, the plugin ends it with its result instead. If the answer comes without the job ended, the host records it ended as `cancelled`.
+| Plugin method | Params | Result | Errors |
+|---|---|---|---|
+| `host/jobs/start` | `{ parentRequestId: RpcId, kind: string, key?: string, detail: JSON }` | `{ jobId: Id, started: boolean }` | `invalid_request` for an unauthorized start or a closing session |
+| `host/jobs/unfinished` | `{ sessionId: Id }` | `{ jobs: { jobId: Id, kind: string, key?: string, detail: JSON, actorId: Id }[] }` in start order | `invalid_request` for a session that is not open |
+| `host/jobs/resume` | `{ jobId: Id }` | `{}` | `invalid_request` for unknown, ended or foreign job, or closing session |
+| `host/jobs/progress` | `{ jobId: Id, content: Content }` | notify | No reply |
+| `host/jobs/end` | `{ jobId: Id, outcome: JobOutcome, result?: Content, report: boolean }` | `{}` | `invalid_request` for unknown/foreign job, conflicting end or inadmissible report; `lost` for an unconfirmed commit |
 
-**After a restart:** a job the stopped process left unfinished stays unfinished. The host never ends it by itself. Its plugin, given `session.start` with `resumed: true`, finds it with `host/jobs/unfinished`, then takes it up with `host/jobs/resume` or ends it. A session whose jobs belong to a plugin that isn't loaded keeps them unfinished, and the host lists them as such.
+`JobOutcome` is `data.outcome` on `jobEnded` in [History entries](data.md#history-entries).
+
+- The host MUST generate job ids unique across sessions, using at least 122 random bits or an equivalent source of uniqueness. For a provided key, the host MUST deduplicate by session and plugin name, even for a job already ended. It MUST return the original `jobId` with `started: false` on a duplicate and commit `jobStarted` before answering a new start. The host MUST check `jobs` against the current effective rights of everyone behind the parent before admitting the request.
+- After a restart, unfinished jobs remain in history. On `session.start` with `resumed: true`, the plugin MAY find, resume or end its unfinished jobs. The host MUST allow resume or end only from the owning plugin's current connection while the host holds session write authority. A repeated resume on the same connection returns `{}` and does not start another execution. Resume grants that connection the job until the job ends, the connection is lost or the writer loses authority. The host MUST ignore progress without an active unfinished job on that connection. Progress is an event, not a commit.
+- The host MUST serialize resume, cancel and end for a job. The first committed end wins. A repeated identical `end` from the current owner in an open session MUST return `{}` without a second end or report; a conflicting end is `invalid_request`. A plugin MAY end its unfinished job without resuming its work. A request that exceeds the owner's current authority cannot take effect.
+- The host MUST check the job's [current narrowed rights](../contracts.md#authority), including `input` for a report. The plugin MUST NOT request a report for a result it already returned in the starting call or when the session is closing. The host MUST apply [atomic admission and recovery](data.md#job-reports) before acknowledging `end`. The acknowledgement does not wait for a turn. Scheduling follows `startsTurnsUnasked` and the session's input queue. There is no wire field for externally measured job usage; the host accounts once for work it tracks.
+- The host MUST use the [core job rules](../contracts.md#jobs) to decide when turn cancellation or session close cancels jobs, and when an absent owner leaves work unfinished. Process stop interrupts jobs and does not end them.
+- To cancel a job with a live owner, the host MUST send `jobs/cancel` to the owner and wait at most five seconds for confirmation. The plugin MUST stop the job and have its end committed through `host/jobs/end` before answering `{}`. If the work already finished, the plugin MUST use its actual result. An answer without a committed end, a lost owner or an unconfirmed cleanup is not a successful cancellation. The host MUST report `lost`, block further progress and late reports from that execution and retain the unfinished record rather than invent a clean end. A failed cleanup does not keep a closing session open.
 
 ## The host asks a command
 
-`command/run { name, args, sessionId, actorId }` returns `{ "output"?: string }`.
+| Host request | Params | Result | Errors |
+|---|---|---|---|
+| `command/run` | `{ name: string, args: string, sessionId: Id, actorId: Id }` | `{ output?: string }` | `invalid_request` for unknown command or invalid scope; `internal` for command failure |
+
+`args` is the command's argument text, `""` if empty. The host MUST bind the command to the actor who gave it, including commands handled by an input transform. The [core command rules](../contracts.md#commands) govern dispatch.
 
 ## What a plugin may ask the host
 
-Every request below names its session, directly or through `parentRequestId`.
+| Plugin method | Params | Result | Errors |
+|---|---|---|---|
+| `host/ask` | `{ parentRequestId: RpcId, request: InputRequestDraft }` | [Answer or pending reply](data.md#questions) | `invalid_request` for bad question or parent; `not_supported` for unsupported waiting mode |
+| `host/env/read` | `env/read` params plus `parentRequestId: RpcId` | As for `env/read` | As for `env/read`; `not_supported` if no environment |
+| `host/env/write` | `env/write` params plus `parentRequestId: RpcId` | As for `env/write` | As for `env/write`; `not_supported` if no environment |
+| `host/env/exists` | `env/exists` params plus `parentRequestId: RpcId` | As for `env/exists` | As for `env/exists`; `not_supported` if no environment |
+| `host/env/exec` | `env/exec` params plus `parentRequestId: RpcId` | As for `env/exec` | As for `env/exec`; `not_supported` if no environment |
+| `host/hook` | `{ parentRequestId: RpcId, hook: "provider.request" \| "provider.response", payload: object }` from the [hook table](#from-core-hooks-to-wire-hooks) | Full transformed payload for `provider.request`; `null` for `provider.response` | `invalid_request` for wrong hook, scope, phase or payload; `internal` for a failed request transform |
+| `host/credentials/read` | `{ provider: Id }` | `{ credential: Credential \| null }`, in the [shared shape](data.md#credentials); `null` if none | `invalid_request` for a Provider not registered by that connection |
+| `host/history` | `{ sessionId: Id, parentRequestId?: RpcId, after?: Id, limit?: integer, all?: boolean }` | `{ entries: HistoryEntry[], next?: Id }` | `invalid_request` for invalid cursor, limit or session; `result_too_large` for an entry that cannot fit |
+| `host/session` | `{ sessionId: Id, parentRequestId?: RpcId }` | `{ id: Id, project: string, settings: object, busy: boolean, actors: Actor[] }` | `invalid_request` for invalid session or parent |
+| `host/declaration` | `{ sessionId?: Id, parentRequestId?: RpcId }` | [Declaration](acp.md#the-declaration) | `invalid_request` for invalid session or parent |
+| `host/emit` | `{ sessionId: Id, parentRequestId?: RpcId, type: string, data: JSON }` | notify | No reply |
+| `host/problem` | `{ where: string, message: string }` | notify | No reply |
 
-| Request | Params | Result |
+| Host notification | Params | Result / errors |
 |---|---|---|
-| `host/ask` | `parentRequestId`, `request` | an Answer |
-| `host/env/*` | see [the working environment](#the-host-asks-the-working-environment) | |
-| `host/hook` | `parentRequestId`, `hook`, `payload` | the combined result: the transformed payload, `{ refused }`, the collected list, or the first answer. Only for hook points this plugin's capability owns: "before a model request" and "as the response arrives" for a Provider. |
-| `host/credentials/read` | `provider` | `{ "credential": Credential | null }`, only for a Provider this plugin registered |
-| `host/history` | `sessionId`; `parentRequestId` *(optional)*; `after` *(optional)*; `limit` *(optional)*; `all` *(optional)* | `{ "entries": [entry], "next"?: id }`: the current branch, or with `all` every entry, in pages of at most `limit` (a whole number from 1 to 500; 500 if left out) entries and 4 MiB. Read only when the plugin asks; the host never pushes history. Raw, not gated: plugins may read the raw record. |
-| `host/session` | `sessionId` | `{ id, project, settings, busy, actors }` |
-| `host/declaration` | `sessionId` *(optional)* | the declaration, as in the [ACP binding](acp.md#the-declaration) |
-| `host/emit` | `sessionId`, `type`, `data` | a notification: an event of the plugin's own |
-| `host/problem` | `where`, `message` | a notification: a problem the plugin carried on past |
-| `host/jobs/*` | see [Jobs](#jobs) | |
+| `host/env/output` | `{ parentRequestId: RpcId, chunk: string }`; id of `host/env/exec` | notify |
 
-**Paging history.** A page always holds at least one entry, when one remains: an entry that fits alone is sent with its `next`, even if the cursor takes the page over 4 MiB. `after` is an entry id; the page starts with the entry after it. `next` is the id of the page's last entry, given only when more remain, so the plugin passes it as `after` for the next page. An `after` that isn't in the list asked for is refused with `invalid_request`. An entry is never split or skipped: one that alone is over 4 MiB gives `result_too_large`. The 4 MiB counts the UTF-8 JSON of the whole `result` object, `entries` and `next` included, not the JSON-RPC envelope.
+`host/ask` MUST NOT return a secret value, only its stored name or the non-value fields of the [shared Answer](data.md#questions). For `host/emit`, the host MUST accept only dotted custom event names that do not impersonate standard events. The host MUST attribute them to the sending plugin and gate them as output. `host/problem` is operator diagnostics, not an event or a history write.
 
-**Authority.** A request whose authority, session or ownership doesn't hold is refused with `invalid_request`.
-- **Requests that need a parent:** `host/ask`, `host/env/*`, `host/hook`, `host/runtime/*` and `host/jobs/start`. They act with the authority of the work behind the parent, never more, and only in its session. `host/hook` also needs the parent to be a request to the Provider whose hook points it runs.
-- **Requests that may name a session directly:** `host/history`, `host/session` and `host/emit`. The session must be open in the host, with this plugin loaded. They read or report; they never act. With a `parentRequestId`, they belong to that work, as a Runtime's `host/history` does.
-- **Requests about a job:** `host/jobs/progress`, `host/jobs/end` and `host/jobs/resume` name a job of this plugin's; `host/jobs/unfinished` names a session open in the host, with this plugin loaded. A job's report acts as the job, never as the plugin.
-- **Requests about no session:** `host/declaration` without a `sessionId`, `host/credentials/read` and `host/problem`.
+### Paging history
+
+`all` defaults to false. The host MUST return the current branch in root-to-head order, or all entries in kept order with `all: true`, as defined in [Shared data](data.md#history-entries). `limit` MUST be from 1 to 500 inclusive, default 500. The host MUST page from immediately after `after`, or from the start when it is absent. A cursor not in the selected view is `invalid_request`. Each request reads the current view; the cursor is an entry id, not a snapshot. Appends, moves and erasure can change the view between pages.
+
+The host MUST fit the whole compact UTF-8 JSON result, including any `next`, in 4 MiB. It MUST return `next` as the last returned id only when more entries remain. The host MUST include at least one entry when entries remain; if that entry and any required cursor do not fit, the host MUST return `result_too_large` rather than split or skip it. A host MUST NOT commit an entry that would make its own Runtime unable to page it. An external record already too large is a recovery failure, not an empty page.
+
+### Authority
+
+The host MUST reject invalid authority, session, role, ownership or parent with `invalid_request`, or drop an invalid notification. Parent scope comes from the host's record of the request, not callback parameters. If both a parent and a session are supplied, they MUST match. The host MUST apply the current effective rights of all actors behind the work and all relevant job ceilings at dispatch. The [cancellation rules](#transport) further narrow valid parents.
+
+| Plugin method | Caller and required parent or scope |
+|---|---|
+| `host/ask` | Tool source, under its own live `tools/call`; question belongs to that call |
+| `host/env/read`, `host/env/exists`, `host/env/write`, `host/env/exec` | Tool source under its own live `tools/call`, or command handler under its own live `command/run`; requires `tools` |
+| `host/hook` | Provider under its own live `provider/request`, same Provider, model and session; sessionless only if the parent is sessionless |
+| `host/runtime/*` | Registered Runtime under its own live `runtime/runTurn`, `runtime/resumeTurn` or `runtime/continueOpenCalls`; restricted to that turn and callback phase |
+| `host/jobs/start` | Tool source under its own `tools/call` or command handler under its own `command/run`; session and actor from the parent; requires `jobs` |
+| `host/jobs/unfinished` | Loaded plugin, own jobs in the named open session |
+| `host/jobs/progress`, `host/jobs/resume`, `host/jobs/end` | Owning plugin connection, in the state allowed by [Jobs](#jobs); no parent |
+| `host/history`, `host/session`, `host/emit` | Loaded plugin, open session; no parent required |
+| `host/declaration` | Loaded plugin; open session when scoped; no parent for the unscoped declaration |
+| `host/credentials/read` | Loaded plugin, for its own registered Provider only; no parent or session |
+| `host/problem` | Sending plugin, including during handshake; no parent or session |
+
+A Runtime registration grants no direct access to `host/env/*`, `host/ask` or credentials. An output hook grants no effect authority. The host MUST permit raw reads of any session open in that host to its loaded plugins. The host MUST NOT expose other sessions through these methods. The binding has no callback for erasing copies held independently by other plugins. Those copies are out of reach under [Erasure](../contracts.md#erasure).
 
 ## Choosing plugins at start
 
-A build reads the environment variable `MODULAR_AGENT_PLUGINS` when it starts. It holds a JSON array of plugins to start:
+A plugin is trusted code. It runs with the agent's permissions. Process separation and use of the plugin API do not make a sandbox. The host observes interactions through the API, not effects a plugin causes outside it. An operator needing tenant isolation uses separate agents per tenant. See [Security](../security.md) for trust and deployment boundaries.
 
-```json
-[ { "command": ["/path/to/program", "arg"], "env": { "NAME": "value" }, "config": { } } ]
-```
-
-Each is started with its `env` added to the host's environment, then initialized, in order, after the host's own plugins. A build may offer its own way to choose plugins too.
+- The host MUST start only programs approved by the operator. The host MUST check project trust before starting a project plugin. The host MUST validate registration before enabling the plugin's callbacks or replacements.
+- The host MUST read `MODULAR_AGENT_PLUGINS` at startup if set. It is a JSON array of `{ command: string[], env?: object, config?: object }`. `command` is a nonempty argument vector; its first item is the executable, with no shell expansion. `env` maps names to strings. Both optional objects default to `{}`. The host MUST reject malformed configuration before spawning programs from it. A build MAY support other configuration sources.
+- The host MUST initialize these programs in array order after its own plugins. The host SHOULD start plugins with a minimal environment, adding only approved variables and passing only needed descriptors and configuration. The host MUST NOT pass credentials it holds in the process environment, arguments, configuration or inherited descriptors. Provider credentials requested through the credential method are a separate, scoped exchange.
 
 ## The conformance plugin
 
-Every build can serve a conformance plugin, from a command it documents. It is used to test hosts and plugins across languages.
+A host's conformance tests exercise the baseline roles and any Runtime tier the host claims. The transient and durable Runtime tiers are optional; neither is part of the baseline fixture. An environment's fixture advertises its actual containment, supported platforms and point support.
 
-The environment variable `MODULAR_AGENT_PLUGIN_PARTS` chooses its parts. It is a comma-separated list from `provider`, `tools`, `environment`, `hooks`, `runtime` and `durable-runtime`. The default is the first four. `runtime` and `durable-runtime` are never served together:
+A build serving the conformance plugin MUST document its command and support the four baseline parts below. It MUST read `MODULAR_AGENT_PLUGIN_PARTS` as a comma-separated list of exact part names. If unset it MUST serve `provider,tools,environment,hooks`. The build MUST serve exactly the selected parts and reject empty, repeated or unknown names, unavailable parts and the combination of `runtime` and `durable-runtime`. Normal validation applies to fixture messages.
 
 | Part | Registers | Replaces |
 |---|---|---|
-| `provider` | Provider `conformance`, model `echo`, exactly as in the [ACP binding's conformance mode](acp.md#conformance-mode) | `provider:conformance` |
-| `tools` | tool source `conformance-tools`, with `bash` (`{ command }`, using `host/env/exec`) and `read` (`{ path }`, using `host/env/read`); results as the build's own tools give them | `tool:bash`, `tool:read` |
-| `environment` | a working environment on the local machine, with its true `containment`. It keeps each session's background processes until `env/sessionEnded` for that session. It saves points (`points: true`) if the build's own working environment does. | `working-environment` |
-| `runtime` | the build's transient Runtime | `runtime` |
-| `durable-runtime` | the build's durable Runtime. It recovers a turn from the standard kinds alone, whatever wrote them. | `runtime` |
-| `hooks` | a `tool.before` gate that refuses, with the reason `refused by the conformance plugin`, any call whose input, as JSON, contains `conformance-forbidden`; and a `turn.before` collect that contributes `{ "system": "The conformance plugin is loaded." }`; and an `output` gate that replaces every `conformance-secret` in the strings of the events it is given with `[redacted]`, including one split across the `text` events of a stream, and changes nothing else | nothing |
+| `provider` | Provider `conformance`, model `echo`, as in [ACP conformance mode](acp.md#conformance-mode) | `provider:conformance` |
+| `tools` | Source `conformance-tools` with `bash { command: string }` using `host/env/exec` and `read { path: string }` using `host/env/read` | `tool:bash`, `tool:read` |
+| `environment` | Local environment; executes the fixture commands with Bash | `working-environment` |
+| `runtime` | Transient Runtime | `runtime` |
+| `durable-runtime` | Durable Runtime | `runtime` |
+| `hooks` | `tool.before`, `turn.before` and `output`, as below | Nothing |
 
-`tools` uses `host/env/*`, never its own environment. So tools from one build run commands in another build's working environment, under a third build's Harness.
+- `read` MUST return `completed` with one text part containing the file decoded as UTF-8, or `failed` with an explanation if the read fails. `bash` MUST forward each output chunk as a text progress part and return one text part containing combined output followed by a newline and `[exit code N]`, where `N` is the returned exit code or `null`. Its status MUST be `completed` only for exit code 0, and `failed` otherwise. Wire cancellation follows [Transport](#transport).
+- The `tool.before` fixture MUST refuse a call whose input JSON contains `conformance-forbidden`, with reason `refused by the conformance plugin`. The `turn.before` fixture MUST contribute `{ "system": "The conformance plugin is loaded." }`. The `output` fixture MUST replace `conformance-secret` with `[redacted]` in editable strings, including a match across text events within one segment, without making other changes.
 
 ## Changes
 
+- **Production edition.** Defines protocol lifecycle, method schemas, callback authority, Runtime commit and dispatch ownership, environment confinement and containment, exclusive jobs and atomic reports, and validation of segmented held output. The binding remains `/1`.
 - **2026-11-18, round six.** One plugin of each name (Python G81, Go B29). The output gate's payload uses the shared [output events](data.md#output-events). A job's report is accepted before `host/jobs/end` answers, not run (Rust R5-07). A cancelled turn ends as cancelled even if a callback failed first (Rust R5-01). A page always holds at least one entry (Rust R5-08).
 - **2026-11-18, after the round-five matrices.** `env/restore` restores in place. Elixir's environment replaced the project folder, so the Rust host, whose working directory it was, failed its next file operation with "no such file or directory".
 - **2026-11-18, round five.** The open items left after round four, and the gaps the builders logged in it:

@@ -1,148 +1,224 @@
 # ACP host binding: `modular-agent-acp/1` and `/2`
 
-How a host drives a Modular Agent over the [Agent Client Protocol](https://agentclientprotocol.com) v1. ACP covers sessions, prompts, streamed updates, permissions and cancelling. This binding fixes everything else a host relies on across builds:
-- where the declaration and the input key go;
-- how approvals and questions map onto ACP;
-- the extension methods for what ACP has no method for;
-- a conformance mode for testing.
-
-Everything here is in addition to ACP v1. Where ACP already says how something works, this binding doesn't repeat it.
+This binding describes how a host drives a Modular Agent over [Agent Client Protocol](https://agentclientprotocol.com) (ACP) v1. The host is the ACP client. The reference schema is `schema/v1/schema.json` in [`@agentclientprotocol/sdk@2.7.0`](https://www.npmjs.com/package/@agentclientprotocol/sdk/v/2.7.0). A build MUST use those ACP message shapes except where this binding specifies otherwise. The [conformance and versioning rules](../conformance.md) apply to both versions.
 
 ## Names
 
-- All binding data in `_meta` lives under the key `"modular-agent"`.
-- Extension methods are named `_modular-agent/<name>`. ACP reserves names that start with an underscore for extensions.
+Binding metadata MUST be an object under `_meta["modular-agent"]`. Each extension method name MUST start with `_modular-agent/`. Unknown fields MUST remain inert as in [shared data](data.md#general-rules).
 
 ## Versions
 
-There are two versions, which differ in one thing: how a failed turn is reported ([Prompts](#prompts)). A client asks for `/2` by sending `_meta["modular-agent"].binding: "modular-agent-acp/2"` in `initialize`. The agent answers with the version it will speak on this connection, in the same place. A client that asks for nothing gets `/1`. A build that follows this binding as revised in round five speaks both.
+The agent MUST speak both binding versions over ACP `protocolVersion: 1`. The agent MUST select `/1` if `initialize` omits `binding`, and the exact requested version otherwise. The agent MUST reject an unsupported ACP protocol or binding version with `unsupported_version`, without falling back. The agent MUST reject malformed metadata, including a present non-object namespace or non-string `binding`, with `invalid_params`. A second `initialize` after success MUST fail with `already_initialized`. A withheld initialization reply MUST leave the connection uninitialized. The agent MUST refuse all other requests before successful initialization with `not_initialized`.
 
 ## Starting
 
-The agent speaks ACP v1 over its stdin and stdout, one JSON-RPC message per line.
+The agent MUST use stdin and stdout for newline-delimited UTF-8 JSON-RPC, with one message per line and no other stdout output. Each message MUST fit in 64 MiB (67,108,864 bytes, excluding the line ending). The receiver MUST reject an oversized request with `-32000` and `data.code: "message_too_large"` if it can safely recover its id, or close the connection otherwise. A sender with an oversized result or error MUST replace it with `-32000` and `data.code: "result_too_large"`. The agent MUST treat an oversized outbound update or question as withheld. A receiver of any other oversized frame MUST close the connection. IDs MUST be strings or integers, compared by type and value and never reused in the same direction on a connection.
 
-If the environment variable `MODULAR_AGENT_DATA_DIR` is set, the agent keeps all its state under that folder: history, settings, trust and anything else. It overrides any path flags the agent takes. Otherwise the agent uses its usual place. The conformance kit depends on this, so it can run each agent in a fresh, empty folder. A history service the agent was explicitly pointed at keeps its own state.
+Over private stdio the process that launched the agent is its authenticated peer, with no further ACP authentication. The [connection actor rules](../contracts.md#authority) apply. The operator MUST configure the connection's allowed project scope outside client and project control, alongside its actor and allowed tenants (including whether no tenant is permitted). The operator MUST NOT expose the private pipe as an unauthenticated proxy. This binding defines no network ACP transport; network Interfaces follow [Security](../security.md#authentication-on-each-wire).
+
+When the operator sets `MODULAR_AGENT_DATA_DIR`, the agent MUST keep its agent-managed state under that directory instead of any default or path flag. This includes local history, settings, trust, and local credentials. Explicitly configured external stores and credentials supplied by the operator are not relocated. Without the variable the agent MUST use its configured paths or its normal defaults. The agent MUST reject client or project attempts to override its trusted state location or substitute the directory. The chosen directory MUST be writable only by the operator, the agent and other processes the operator trusts with its state.
 
 ## `initialize`
 
-The response's `agentCapabilities` say what ACP features the agent offers, as ACP defines:
-- `loadSession`;
-- `sessionCapabilities`: list, resume and close;
-- `mcpCapabilities`;
-- `promptCapabilities`.
+The agent MUST advertise `loadSession: true` and `sessionCapabilities.list`, `.resume` and `.close` as `{}`. It MUST advertise only the ACP `promptCapabilities` and `mcpCapabilities` it supports. It MUST return `authMethods: []` and the initialization fields in the [metadata table](#metadata). The connection's `actor` is the configured [Actor](data.md#actors), not a grant in any session. The agent MUST NOT use the client's `fs/*` or `terminal/*` methods, even if offered. Tools run in the agent's working environment.
 
-Its `_meta["modular-agent"]` holds:
+### Metadata
 
-| Field | Value |
-|---|---|
-| `binding` | `"modular-agent-acp/1"`, or `"modular-agent-acp/2"` if the client asked for it |
-| `declaration` | the agent's [declaration](#the-declaration) |
-| `extensions` | the names of the extension methods offered, without the prefix, for example `["history", "input", "requests", "answer"]` |
-| `actor` | the actor the connection acts for: `{ "id": "...", "kind": "host" }` |
+Peers MUST use the following fields under `_meta["modular-agent"]` on the indicated messages. Fields marked optional are omitted when not applicable. For an update the namespace is on the ACP update payload (`params.update`); for a `/2` failed prompt it is under `error.data._meta`.
 
-The connection acts for one actor. Whatever the client sends about itself, it can't choose another actor or widen this one's authority. In an agent with `severalActors`, the connection may also act for other actors in a session, as a host does for its users ([Several actors](#several-actors)), but only with the rights both have.
+| Field | Where | Type and values |
+|---|---|---|
+| `binding` | `initialize` request (optional) and result | `"modular-agent-acp/1"` or `"modular-agent-acp/2"` |
+| `declaration` | `initialize`, `session/new`, `session/load`, `session/resume` and `session/set_config_option` results; `config_option_update` when the declaration changes | Complete [declaration](#the-declaration) |
+| `extensions` | `initialize` result | Array of offered extension names without `_modular-agent/` |
+| `actor` | `initialize` result | [Actor](data.md#actors), with kind `user`, `host`, `agent` or `program` |
+| `tenant` | `session/new` request (optional) | Tenant name (string); omitted for no tenant |
+| `key` | `session/prompt` request (optional) | [Input key](#input-admission) |
+| `inputId` | Prompt result or `/2` failed-turn error | Admission id (string) |
+| `duplicate` | Prompt result or `/2` failed-turn error (optional) | `true` for a duplicate; omission means false |
+| `outcome` | Prompt result or `/2` failed-turn error | [Outcome](#prompts): kind `completed`, `cancelled`, `limit` or `failed`; limit `steps`, `output`, `sessionTokens`, `tenantTokens` or a build-specific name |
+| `openToolCalls` | Prompt result or `/2` failed-turn error (optional) | Nonempty array of call ids left open; omission means none |
+| `handedBack` | Cancelled prompt result; recovery result for `session/load` or `session/resume` when nonempty | Array of `{ inputId, content }`, with content in [shared Content](data.md#content) projected as in [Entry](#entry); `[]` if a cancelled prompt has nothing to report |
+| `requestId`, `actorId` | `session/request_permission` and `elicitation/create` requests | Shared question id and the addressed actor id, both strings |
+| `status` | Terminal `tool_call_update` | Shared [ToolResult status](data.md#tools): `completed`, `failed`, `refused`, `cancelled`, `notStarted` or `outcomeUnknown` |
 
 ## The declaration
 
-The declaration is an object with these keys. A build may add keys of its own, but must give every key listed, so a host never has to guess.
+An agent MUST send every non-optional key and use only the values below. The session declaration is authoritative for that session. A build MUST declare the more restrictive supported behavior when it varies across cases. It MAY describe exceptions in build-specific keys.
 
-| Key | Type | Meaning |
+| Key | Allowed values | Meaning or default |
 |---|---|---|
 | `inputDuringTurn` | boolean | Input can steer a running turn. |
-| `waitingThroughRestart` | boolean | A turn waiting for an answer survives a restart. |
-| `continuesAfterRestart` | boolean | An interrupted turn carries on after a restart. |
-| `rewinding` | boolean | Moving with `rewind` also restores the working environment's files ([Rewinding](data.md#rewinding)). |
-| `forking` | boolean | Sessions can be forked. |
-| `keepsStateAtProvider` | boolean | The session's Provider keeps conversation state. |
-| `runsToolsAtProvider` | boolean | The Provider runs tools itself. |
-| `liveSessions` | boolean | Voice or other live sessions. |
-| `severalActors` | boolean | A session can have several actors, and the agent offers the [several-actors extensions](#several-actors). |
-| `holdsOutput` | boolean | The output gate may hold streamed output. |
-| `outputBypassesAgent` | boolean | Some output reaches recipients without passing the gate. |
-| `cancellingTurnCancelsJobs` | boolean | Cancelling a turn also cancels its jobs. |
-| `pluginsDuringSession` | boolean | Plugins can be added while a session is open. |
-| `erasure` | boolean | Entries can be erased. |
-| `inputKeys` | boolean | Input with a key is taken once. |
-| `questionsOutlastTurns` | boolean | A question can stay open past its turn. |
-| `startsTurnsUnasked` | `"never"` or `"jobReports"` | When the agent starts a turn nobody asked for. |
-| `queuedInputAfterRestart` | `"handedBack"` or `"run"` | What a restart does with input that was queued but not taken. |
-| `movingWithUnfinishedWork` | `"cancels"` or `"refused"` | What moving away from open calls, questions or jobs does. |
-| `mixedActorInput` | `"shared"` or `"refused"` | A turn with input from several actors acts with their shared rights, or such input is refused. |
-| `settingsDuringTurn` | `"nextTurn"` or `"refused"` | A settings change while a turn runs applies from the next turn, or is refused. |
-| `erasureDuringTurn` | `"allowed"` or `"refused"` | Whether erasure is allowed while a turn runs. |
-| `commandContainment` | `"strong"`, `"processGroup"` or `"none"` | How strongly the working environment keeps "nothing outlives the agent": against anything, against the command's process group only, or not at all. |
+| `waitingThroughRestart` | boolean | Recovery can ask an interrupted in-turn question again. |
+| `continuesAfterRestart` | boolean | An interrupted turn can continue. |
+| `rewinding` | boolean | `move` accepts `rewind: true`; implies `move` is offered. |
+| `forking` | boolean | Implies `fork` is offered and usable for the session when quiescent. |
+| `keepsStateAtProvider` | boolean | The Provider keeps conversation state. |
+| `runsToolsAtProvider` | boolean | The Provider runs tools. Such sessions are not portable. |
+| `liveSessions` | boolean | The agent supports live sessions outside this ACP profile. |
+| `severalActors` | boolean | Implies all the [several-actors extensions](#several-actors). |
+| `holdsOutput` | boolean | The output gate can hold streams. |
+| `outputBypassesAgent` | boolean | Some output outside this binding bypasses the gate. |
+| `cancellingTurnCancelsJobs` | boolean | Turn cancellation also cancels its jobs. |
+| `pluginsDuringSession` | `false` | Fixed in this edition. |
+| `erasure` | boolean | Implies `erase` is offered. |
+| `inputKeys` | `true` | Fixed in this edition. |
+| `questionsOutlastTurns` | boolean | A question can stay open past its turn. Requires `lateAnswersStartTurns: true`. |
+| `startsTurnsUnasked` | `never`, `jobReports` | Whether job reports start turns. Late answers are separate. |
+| `queuedInputAfterRestart` | `handedBack`, `run` | Recovery policy for queued input. |
+| `movingWithUnfinishedWork` | `cancels`, `refused` | Behavior when moving away from unfinished work. |
+| `mixedActorInput` | `shared`, `refused` | Mixed input acts with shared rights, or is refused. |
+| `settingsDuringTurn` | `nextTurn`, `refused` | Change from the next turn, or refuse during a turn. |
+| `erasureDuringTurn` | `allowed`, `refused` | Whether erasure can run during a turn. |
+| `commandContainment` | `strong`, `processGroup`, `none` | Lifetime containment as in [Working environment](../contracts.md#the-working-environment), not a limit on command reach. |
+| `lateAnswersStartTurns` (optional) | boolean | One continuation when all the turn's open questions are answered. Default `false`. |
+| `queuedJobReportsAfterRestart` (optional) | `handedBack`, `run` | Default: `queuedInputAfterRestart`. |
+| `portableSessions` (optional) | boolean | [Portable sessions](data.md#portable-sessions). Default `false`. |
+| `sessionLimits` (optional) | boolean | Implies `limit` is offered. Default `false`. |
+| `tenants` (optional) | boolean | Implies `tenant` is offered. Default `false`. |
+| `projectRoot` (optional) | string | Canonical absolute path of the sole served project. Omitted for no binding-level single-root restriction. |
+| `confinesFiles` (optional) | boolean | File operations refuse paths resolving outside the project after symlinks. Default `false`. |
 
-These keys are optional. A build that needs to say what they say uses these names:
-
-| Key | Type | Meaning |
-|---|---|---|
-| `lateAnswersStartTurns` | boolean | An answer to a question left open past its turn starts a new turn. `startsTurnsUnasked` covers job reports only. |
-| `queuedJobReportsAfterRestart` | `"handedBack"` or `"run"` | When job reports are treated differently from other queued input after a restart. |
-| `portableSessions` | boolean | The agent writes and reads [portable sessions](data.md#portable-sessions): it can reopen a session another such agent wrote, in any language. Left out, `false`. |
-| `sessionLimits` | boolean | The agent offers session limits and the `limit` extension. Left out, `false`. |
-| `tenants` | boolean | The agent offers tenants, read from `MODULAR_AGENT_TENANTS`, and the `tenant` extension. Left out, `false`. |
-| `projectRoot` | string | The agent serves only this project. `session/new`, `session/load` and `session/resume` with another `cwd` are refused before anything changes, so a host starts one agent per project. |
-
-When a build's policy is mixed, it declares the more restrictive value, and says the rest in its own keys. For example, a build might cancel open calls when moving but refuse to move while jobs run. It declares `movingWithUnfinishedWork: "refused"`.
-
-The response to `session/new`, `session/load` and `session/resume` also carries `_meta["modular-agent"].declaration`: the declaration for that session, which may differ from the agent's, for example because of the session's Provider.
+`waitingThroughRestart: true` MUST imply `continuesAfterRestart: true`. A host MUST treat an inconsistent declaration as a protocol error, not as permission to use the feature. The agent MUST send a complete session declaration on open and include a changed declaration in ACP `config_option_update` to authorized followers before streaming work under the new declaration. A settings reply MUST also carry the current session declaration. The connection's `extensions` lists the union of available methods; a declared feature disabled for a session MUST fail there with `not_supported`.
 
 ## Sessions
 
-- **`session/new`** creates a session in the given `cwd`. A session that is created and closed without being used is not listed afterwards, and leaves nothing behind.
-- **`session/load`** sends the session's current branch as `session/update` notifications, then answers. Everything sent passes the output gate. **`session/resume`** answers without replaying. If the agent handed back queued input during recovery (`queuedInputAfterRestart: "handedBack"`), the response carries it as `_meta["modular-agent"].handedBack`, in the same shape as a cancelled prompt's.
-- **`session/close`** cancels the running turn and the session's jobs, closes MCP servers the host gave it, and waits for both before answering.
-- **`session/list`** lists kept sessions. With a `cwd`, it lists only that project's.
-- **The connection's actor.** The ACP client acts as the agent's host actor, the one `initialize` names in `_meta["modular-agent"].actor`. Opening or reopening a session, including one another agent wrote, joins that actor to it with the rights the agent gives it, recorded as an `actorJoined` entry, unless the session already has it with those rights. The actor need not be one the session had before: a session written by another agent names that agent's actors, and they stay in the session as they were.
+- **`session/new`:** The agent MUST validate the canonical project, the tenant and all supplied MCP server specifications before creating a session. It MUST stage setup entries until the first admitted input, in their original order and with their original times. A session closed without admitted input MUST NOT leave a kept session or appear in later lists.
+- **`session/load` / `session/resume`:** The agent MUST check the requested project against the stored project and apply the [connection actor rule](#authorization). On a closed session it MUST acquire the writer lease and complete [recovery](../contracts.md#recovery-and-repeating-work) before accepting new work. It MUST reuse an already open session rather than recovering twice. A concurrent open while recovery or close is in progress MUST fail with `busy`. A held history lease follows the [history service's bound](history-http.md#writing-one-writer-at-a-time). Both results MUST include authorized `handedBack` from that recovery, in admission order. The agent MUST restrict that content to the actor who admitted it or a reader with `watch`.
+- **Replay and live output:** `session/load` MUST present the current branch oldest first, mapping model and tool entries as in [Updates](#updates) and user messages to `user_message_chunk`. It MUST finish replay before answering. It MUST switch from that snapshot to live updates without interleaving replay with new output or losing a kept entry from history. `session/resume` MUST NOT replay updates. Hosts catching up from an entry id MUST use `history` with `all: true`. ACP has no live entry cursor. A slow client follows the [core buffering rule](../contracts.md#following-a-session).
+- **`session/close`:** The agent MUST stop admission, cancel the turn and jobs, and close host-supplied MCP servers. It MUST wait for turn and job settlement and server shutdown before answering `{}`. Other connections MUST stop receiving updates for the closed session. Close on a session not open on the connection MUST fail with `not_open`. During close it MUST fail with `busy`.
+- **`session/list`:** The agent MUST list only kept sessions the connection may discover. With `cwd` it MUST filter by canonical project, not path spelling. Listing MUST NOT join an actor. The agent MAY page the list using ACP's cursor fields.
+
+A `cwd` MUST be an absolute existing directory canonicalized after resolving symlinks. The agent MUST refuse a canonical directory outside the connection's allowed project scope or different from a declared `projectRoot` before discovery, plugin loading or effects. Knowledge of a path or an id is not authority.
+
+The agent MUST apply the [`hostMcpServers` policy](../contracts.md#mcp-servers), including the `tools` check, to all supplied specifications before starting or connecting any server. The agent MUST return `forbidden` for a denied specification, `invalid_params` for a malformed one, and `not_supported` for an unoffered transport. An already open session MUST NOT change its server set on another load or resume. The agent MUST refuse a nonempty resupply that differs from the active specifications with `conflict`. Reopening a closed session takes a fresh list, never definitions from history. The agent MUST NOT put private headers, credentials or launch environments in logs.
+
+### Authorization
+
+The agent MUST check tenant and project access and the rights below before admitting work or returning session content. Rights in a session are [effective rights](data.md#actors), checked again at the point of action. The agent MUST NOT admit a tenant outside the connection's allowance, including no tenant when a tenant is required. The agent MUST return the same `forbidden` response for an unknown session and for an inaccessible session, without revealing its project, tenant or existence. `not_open` is only for an accessible session not open on this connection. Every session call other than list, new, load and resume MUST name a session open on this connection.
+
+On open the agent MUST use the configured actor's recorded rights if that actor has joined and not left. It MUST refuse an actor recorded as having left. An unrecorded actor MUST be joined only if `joinOnOpen` allows it, with configured rights narrowed by the session limit and tenant and recorded as `actorJoined`. The configuration MUST default `joinOnOpen` to true for single-user local agents and false otherwise. An agent without `severalActors` MUST refuse opening as a different actor in a session with an existing member rather than replacing that member. For a new session the agent MUST record the configured actor as its first actor, narrowed by the tenant. It MUST check the opening right against prospective effective rights before making any implicit join. Reopening never resets a recorded grant.
+
+| Method (extension names include the prefix below) | Required authority | Denied |
+|---|---|---|
+| `initialize` | Authenticated connection | Close unauthenticated transport |
+| `session/new` | `input`, under configured project and tenant policy | `forbidden` |
+| `session/list` | `watch` for each listed session; discovery uses the same recorded-or-prospective test as open | Omit inaccessible sessions |
+| `session/load`, `session/resume` | `watch`; `tools` also for supplied MCP servers | `forbidden` |
+| `session/close`, `session/cancel` | `cancel` | `forbidden`; for notifications ignore |
+| `session/prompt` | `input` | `forbidden` |
+| `session/set_config_option` | `settings` | `forbidden` |
+| `session/update` (agent to client) | `watch` for recipient | Suppress |
+| `session/request_permission` and its reply | Present addressed actor with `approve`, eligible for this question | Do not offer or accept |
+| `elicitation/create` and its reply | Present addressed actor with `answer`, eligible for this question | Do not offer or accept |
+| `$/cancel_request` (either direction) | Sender of the matching in-flight JSON-RPC request on that connection | Ignore |
+| `_modular-agent/history`, `_modular-agent/requests`, `_modular-agent/jobs`, `_modular-agent/actors`, `_modular-agent/proposals`, `_modular-agent/tenant` | `watch` | `forbidden` |
+| `_modular-agent/input` | `propose` for `when: "propose"`; `input` otherwise | `forbidden` |
+| `_modular-agent/answer` | `approve` for approvals; `answer` otherwise; also question eligibility | `forbidden` |
+| `_modular-agent/fork` | `watch` and `settings`; authority to create in the source tenant and project | `forbidden` |
+| `_modular-agent/move` | `settings`; also `cancel` if moving cancels work | `forbidden` |
+| `_modular-agent/erase` | `erase` | `forbidden` |
+| `_modular-agent/cancel-job` | `cancel` | `forbidden` |
+| `_modular-agent/join` | `grant`; only rights the granter effectively holds | `forbidden` |
+| `_modular-agent/leave` | `grant` for another actor; membership for self | `forbidden` |
+| `_modular-agent/release` | `input` | `forbidden` |
+| `_modular-agent/withdraw` | The connection's actor is the proposer, or has `input` | `forbidden` |
+| `_modular-agent/limit` | `administer` and the [ceiling rule](data.md#limits-and-tenants) | `forbidden` |
+| `authenticate`, `logout`, `session/delete`, `session/set_mode`, `elicitation/complete`, ACP `session/fork`, `fs/*`, `terminal/*`, other ACP additions | Not part of this profile | `-32601` if requested; ignore notifications |
+
+For a request with valid syntax but no required right, the agent MUST return `-32602` with `data.code: "forbidden"`, except for filtered lists and unauthorized agent-originated messages as above. A denied, unknown or stale notification MUST NOT change state. For agent-originated requests the agent MUST use the addressed actor's effective rights at send and answer time, including the rights of the actor behind a delegated connection.
+
+### Errors
+
+Unless another number is specified, the agent MUST return the following errors as JSON-RPC `-32602` with `data: { code }`. The JSON-RPC message is human-readable, not a machine discriminator. Validation and authorization errors contain no session content and take no effect.
+
+| `data.code` | Condition |
+|---|---|
+| `invalid_params` | Malformed parameter or invalid option/value. |
+| `unsupported_version`, `already_initialized`, `not_initialized` | Negotiation or initialization state as above. |
+| `forbidden` | Inaccessible resource or missing authority as above. |
+| `not_supported` | Known feature disabled or not offered, including `rewind: true` without `rewinding`. |
+| `not_open` | Accessible session not open on this connection. |
+| `not_found` | Unknown item in the authorized session/view, including an invalid history `after`. |
+| `wrong_project` | Authorized session opened with a mismatched canonical project. |
+| `busy` | Conflict with current work, close, recovery or an unavailable writer lease. |
+| `conflict` | Known item with an invalid transition, such as an already released proposal or prompt input handed back without a turn. |
+| `cancelled` | Request cancelled before its normal result is available. |
+| `withheld` | `-32000`; gated output unavailable. |
+| `message_too_large`, `result_too_large` | `-32000`; message or result beyond its limit. |
+
+The agent MUST return JSON-RPC `-32601` for unknown request methods and follow JSON-RPC for parse and invalid-envelope errors. An authorization or pre-admission error MUST NOT include an `inputId` or turn outcome. The [`answer`](#extension-methods) result has its own non-error negative acknowledgements.
 
 ## Configuration options
 
-Each session offers these as ACP `select` configuration options, with these ids:
+The agent MUST use ACP `select` options with `id`, `currentValue` and `options` as in the pinned schema. Values MUST compare as exact strings. The agent MUST use these ids and values:
 
 | Id | Values |
 |---|---|
-| `model` | `"provider/model"` for each model the agent can use. Provider identities other than `conformance` are the build's own, so a host reads the options rather than assuming a value. |
-| `thinking` | the reasoning levels the current model supports, from `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
-| `approval` | `off`; `ask` (ask unless the tool is read-only); `all` (ask always); `never` (refuse without asking) |
+| `model` | `provider/model`, with `%` and `/` in each component encoded as `%25` and `%2F` before joining. |
+| `thinking` | Supported levels in order: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. |
+| `approval` | `off`, `ask`, `all`, `never`. |
 
-A change applies from the next turn. If the declaration says `settingsDuringTurn: "refused"`, a change while a turn runs is refused instead.
+An agent MUST omit `thinking` if the model declares no levels. On model switch it MUST apply the [portable reasoning fallback](data.md#context-and-interrupted-work), even for a non-portable session. For an unset reasoning level the agent MUST show `off` as `currentValue` if offered without setting reasoning on the request. The agent MUST omit `thinking` when reasoning is unset and `off` is unavailable, or when no supported level is at or below the prior selection. A recorded model no longer offered MUST stay selected, but not selectable, until changed. The agent MUST NOT substitute another model. Without any selected or offered model the agent MUST omit `model`. The agent MUST refuse unadvertised option ids or values with `invalid_params`, except that an explicit supported thinking level for the selected model can be set when the selector is omitted because there is no current level.
+
+A settings change MUST apply from the next turn. With `settingsDuringTurn: "refused"`, the agent MUST reject a change during a turn with `busy`. The agent MUST return the full current `configOptions` after open and on a successful change, with model-dependent choices recomputed.
+
+The agent MUST omit `approval` when no approval plugin is loaded. With the plugin loaded, ACP `currentValue` MUST show the effective [approval setting](data.md#setting-keys), including `all` for no recorded value and `never` for an unknown one. Changing the option does not change rights or bypass other gates.
 
 ## Prompts
 
-`session/prompt` may carry `_meta["modular-agent"] = { "key": "..." }`.
+`session/prompt` takes ACP prompt content and an optional [key](#metadata). A successfully admitted prompt MUST wait for the turn that takes its input, or until the input is handed back. The agent MUST return the same `inputId` as the admission record and the `input` entry when taken. If cancellation hands the prompt's own input back, the agent MUST answer with outcome `cancelled`. Another hand-back with no turn MUST fail with `conflict`.
 
-The response carries `_meta["modular-agent"]`:
+The agent MUST use the shared [`turnEnd`](data.md#history-entries) outcome and the following ACP mapping. In the prompt projection `outcome` contains `kind`, `error` (a string only for `failed`), and `limit` (a string only for `limit`). The agent MUST use `"Turn failed"` if a failed outcome has no message.
 
-| Field | Value |
+| Outcome | ACP result |
 |---|---|
-| `inputId` | the identity of the admission this prompt made. The `input` entry that took it carries the same value at `data.inputId`. |
-| `duplicate` | `true` when the key was already known. No turn was started, and the response describes the turn that took the first prompt's input. If that turn hasn't ended, the response waits for it. If the input was handed back without any turn taking it, the prompt is refused with error code `-32602`. |
-| `outcome` | `{ "kind": "completed" | "failed" | "cancelled" | "limit", "error"?: string, "limit"?: string }`. `limit` is `"steps"`, `"output"` (one model response hit its output limit), `"sessionTokens"` (a session-wide budget), or a name of the build's own. |
-| `openToolCalls` | the identities of calls left open past the turn, if any |
-| `handedBack` | on a cancelled turn: the input that was queued and not taken, as `[{ "inputId", "content" }]` |
+| `completed`, including a timed-out question leaving open calls | `stopReason: "end_turn"`; `openToolCalls` lists any open calls |
+| `cancelled` | `stopReason: "cancelled"`; `handedBack` as in [Cancelling](#cancelling) |
+| `limit` with `steps` or a build-specific name | `stopReason: "max_turn_requests"` |
+| `limit` with `output`, `sessionTokens` or `tenantTokens` | `stopReason: "max_tokens"` |
+| `failed` in `/1` | `stopReason: "refusal"`, with `outcome.kind: "failed"` |
+| `failed` in `/2` | JSON-RPC `-32000`, message equal to `outcome.error`, and `data: { _meta: { "modular-agent": { ... } } }` with the prompt metadata; no `stopReason` |
 
-Stop reasons map as follows:
+The agent MUST keep failed turns in history in both versions. The agent MUST report a Provider stop of `refused` that ends the turn as `failed`, retaining its history. This is not an ACP refusal that discards context. An aborted attempt that settles the turn as cancelled uses `cancelled`. A refused tool call is a tool result, not a turn outcome. Hosts MUST read `outcome` rather than infer success or failure from the stop reason. A turn settled as failed stays failed even if cancellation arrives later.
 
-| Outcome | `stopReason` |
-|---|---|
-| completed, including with open calls | `end_turn` |
-| cancelled | `cancelled` |
-| a step limit | `max_turn_requests` |
-| an output limit, or a session-wide token budget | `max_tokens`. `outcome.limit` tells them apart. |
-| a question's time limit passed, leaving calls open | `end_turn`, with `openToolCalls` |
-| failed | in `/1`, `refusal`, with the reason in `outcome.error`. In `/2`, no stop reason: a JSON-RPC error instead (below). |
+### Input admission
 
-**A failed turn.** In ACP, `refusal` means the agent refused, and that the refused prompt and what follows won't enter the next prompt. A failed turn is neither: the history is kept, and the next prompt sees it. So `/1`, which reports it as `refusal`, needs the host to read `outcome.kind`, not infer anything from the stop reason. `/2` reports a failed turn as a JSON-RPC error on `session/prompt`: code `-32000`, the message from `outcome.error`, and `data: { "_meta": { "modular-agent": { ... } } }`, carrying the same fields a response's `_meta` would. The turn's history is kept either way. All three clean-room builds found the `/1` mismatch.
+The agent MUST share one atomic input key lookup and admission between `session/prompt` and `input`, scoped to the session across branches and restarts. A supplied key MUST be a nonempty string, compared exactly. Clients MUST NOT use the reserved `job:` prefix. Admission MUST serialize with cancellation, release and withdrawal. A refused admission MUST NOT claim the key. Reuse MUST return the first admission regardless of changed content or `when`, until erasure removes it, as in [Input](../contracts.md#input). A caller that does not own the admission MUST have `watch` to receive a duplicate receipt; it still needs the normal right to submit the new request. A duplicate MUST NOT start or cancel work.
+
+| `when` | When no turn runs | When a turn runs |
+|---|---|---|
+| `now` (also `session/prompt`) | Start a turn; receipt `now`. | Queue a new turn; receipt `after`. |
+| `steer` | Start a turn; receipt `now`. | With `inputDuringTurn`, queue steering; receipt `inTurn`. Otherwise queue a new turn; receipt `after`. |
+| `after` | Start a turn; receipt `now`. | Queue a new turn; receipt `after`. |
+| `propose` | Keep a proposal; receipt `proposed`. | Keep a proposal; receipt `proposed`. |
+
+The agent MUST refuse input that would mix actors when `mixedActorInput: "refused"` with `conflict`. It MUST acknowledge extension admissions without waiting for a turn to end. `taken` is the initial admission disposition, not proof that a turn used the input. An extension duplicate MUST return the original `taken`, even after release or hand-back, plus `duplicate: true`. A duplicate prompt MUST wait for the first admission's turn, including if the first admission came from `input`, and translate the same outcome into the duplicate's negotiated version. A duplicate prompt against an unreleased proposal or a handed-back input without a turn MUST fail with `conflict`. Cancelling or disconnecting a duplicate waiter MUST NOT cancel the original admission or turn. After disconnect, a host MAY retry a keyed input to reconcile admission; the key does not guarantee delivery of a reply through the gate.
 
 ## Updates
 
-The agent streams the turn as standard `session/update` notifications. Every update passes the output gate.
-- **Model text** is sent as `agent_message_chunk`, and **reasoning** as `agent_thought_chunk`.
-- **Each tool call** is a `tool_call`, then `tool_call_update` notifications. The `toolCallId` is the call's identity in the session, `title` is the tool's name, and `rawInput` its input. The final status is `completed` or `failed`. A call left open past the turn ends the turn with status `pending`.
+The agent MUST use `session/update` for live updates and replay. It MUST send `agent_message_chunk` for model text and `agent_thought_chunk` for readable reasoning only. The first update for a displayed call MUST be `tool_call` with the session's stable call id as `toolCallId`, the name as `title`, and the tool input as `rawInput` after gating. Calls MUST start with ACP `pending`, or `in_progress` if dispatch already started. Progress MUST use `tool_call_update` with `in_progress`. A call left open MUST have status `pending` until it settles, including if it settles in a continuation. A blocked initial call MUST NOT be followed by orphan updates on that connection.
+
+The agent MUST send a terminal `tool_call_update` after the final result is recorded, with status `completed` for a completed result and `failed` for each other terminal result. It MUST include the shared status in metadata and use ACP tool content blocks for renderable result content. Each result MUST settle its call exactly once; replay uses the same id. Final live updates for a turn MUST precede its prompt reply on that connection.
+
+### Output gate
+
+The agent MUST gate each recipient's outbound session content, including replay, raw tool inputs, permission and form requests, metadata, result bodies and error data. It MUST gate the content of non-session replies, including `initialize`, with `sessionId: null`. The agent MUST use the acting actor as recipient for a reply and the configured actor as recipient for updates and replay. It MUST use the addressed actor as recipient for permission and form requests. It MUST recheck the delivery rights of all actors behind a recipient, including `watch` for updates and replay. The agent MUST map output to [shared events](data.md#output-events) before sending ACP messages:
+
+| ACP output | Gate event |
+|---|---|
+| Live model text and thought chunks | `text`, `reasoning` |
+| Live tool start, progress and terminal result | `toolCall`, `toolOutput`, `toolResult` |
+| Replay or history item | `entry` before rendering it into ACP; a history result also passes `reply` |
+| Settlement of any turn, even without a prompt | `turnEnded` before any prompt `reply`; there is no separate ACP turn-end notification |
+| Request result or error containing content | `reply` with the method and complete `result` or `error`, including metadata |
+| Agent permission/form request or config update | `reply` with the method and complete ACP params in `result` |
+
+The agent MUST apply the [shared redaction validation](data.md#output-events). It MUST block an answer it cannot render without changing routing, authority, negotiation, answer choices, correlation, cursors or protocol discriminators. These include `stopReason`, `binding`, declared extension names, rights and `outcome.limit`. It MUST suppress a permission request if redaction changed the tool identity or input shown for approval. It MUST return `-32000` with `data.code: "withheld"` for a blocked reply, with no original content, and suppress a blocked update or request. It MUST NOT interpret a blocked question as an affirmative answer. A blocked reply does not roll back a mutation. Hosts MUST NOT treat `withheld` or a lost reply as proof that the operation failed. Hosts SHOULD reconcile with an authorized read or keyed input retry before attempting a mutation again. This edition has no general operation receipt or retry key for unkeyed mutations.
 
 ## Approvals
 
-An approval is a `session/request_permission` with exactly two options:
+The agent MUST use exactly the following options in `session/request_permission`:
 
 ```json
 [
@@ -151,113 +227,147 @@ An approval is a `session/request_permission` with exactly two options:
 ]
 ```
 
-Only the outcome `selected` with `optionId: "allow"` allows the call. Every other answer refuses it: `refuse`, `cancelled`, an error, or a closed connection. An "always allow" option is never offered.
+The agent MUST interpret a valid `selected` with `allow` as approval of only the exact call behind that question. It MUST treat a valid `selected` with `refuse` or an explicit `cancelled` permission response as a decline. A lost RPC or disconnected peer MUST NOT authorize the call. The agent MUST close an approval as `refused` if it has no present eligible answerer. A failed or withheld route MUST NOT displace a valid answer on another route. The agent MUST NOT offer persistent approval through this method.
 
 ## Questions
 
-- **Free text or a choice** is asked with ACP form elicitation, and only if the client declared it supports forms. The form has one field, `answer`. Its schema is a string for free text, or an enum of the options for a choice.
-- **Without form support,** or for a question left open past its turn, the host uses the `requests` and `answer` extensions. A question is never declined just because the client doesn't support forms. It stays open.
-- **A secret is never asked through a form,** because ACP forbids it. It is declined, unless the agent has another way to collect it.
-- **Only a declared present actor counts as an answerer.** The ACP connection is present while it is open.
+The agent MUST apply [question eligibility](../contracts.md#questions) against the current branch, deadline, effective rights and `answerers` at acceptance and when reusing a recorded answer. Presence is not proof of human assent. Standard ACP responses MUST act only as the actor to whom the agent addressed that RPC, on the same authenticated connection. The client MUST NOT override that actor in its reply. The authorization and scope of `actorId` in the extension are in [Several actors](#several-actors).
+
+| Kind | Standard ACP route while in the turn | Extension route |
+|---|---|---|
+| `approval` | `session/request_permission` to eligible present actors. | `allow` or `refuse`. Presence still required. |
+| `text`, `choice` | `elicitation/create` with `mode: "form"` if the client advertised forms. | String or exact choice option. Also used with no forms or when left open past the turn. |
+| `link` | No ACP URL/completion handshake in this profile. | The request supplies the link URI in `details`; the answer is a string acknowledgment, not proof of an external action. |
+| `secret` | None. | Decline only; no secret value crosses ACP. |
+
+For a form, the agent MUST use the question as `message` and a requested object schema with one required `answer` string, with the exact options as its `enum` for a choice. A form reply with `action: "accept"` MUST supply a valid `content.answer`. The agent MUST treat `decline` as a decline. A `cancel` or malformed reply MUST NOT authorize or settle the question as an actor's answer. The agent MUST NOT decline an ordinary question solely because forms are unsupported. For approval or form dispatch, the agent MUST use each eligible present actor's active route at most once per question at a time. The agent MUST decline a secret question not handled outside ACP without requesting a value. The agent MUST NOT log, record or echo a secret submitted in error.
+
+The agent MUST atomically accept the first valid answer, positive or negative, through any of permission, form, `answer` or another connection. It MUST close or cancel the outstanding standard RPCs for that question when it settles, and refuse all later answers without another effect. If an RPC route vanishes without an answer, the agent MUST remove that route and recheck whether the question still has an eligible answerer under the core rules. System closures MUST use the shared [InputAnswer reason](data.md#history-entries), not an actor's decline.
+
+The agent MUST follow the core [question recovery and continuation rules](../contracts.md#questions). `waitingThroughRestart` applies to a question interrupted inside its turn; `lateAnswersStartTurns` applies to the single continuation of a turn that already ended with open calls.
 
 ## Cancelling
 
-`session/cancel` ends the running turn as cancelled. The pending prompt's response then carries `handedBack`. Permission requests still waiting are refused. Jobs keep running, unless `cancellingTurnCancelsJobs` is true.
+`session/cancel` is a notification. For authorized cancellation, the agent MUST target the running turn at the moment the notification is accepted, without altering a turn already settled. With no running turn the notification MUST do nothing. The agent MUST record the hand-back of accepted unconsumed turn input at that cutoff before acknowledging cancellation in a prompt reply. Unreleased proposals are not turn input. Input admitted after the cutoff MUST NOT be cancelled by that notification. Unanswered questions of the cancelled work MUST close with `cancelled`. Each affected call MUST settle once. Job scope follows the [core cancellation rules](../contracts.md#jobs).
+
+The agent MUST answer a cancelled request within five seconds, without waiting beyond that bound for cleanup; when `session/close` is not cancelled, its reply still waits for cleanup. For a cancelled prompt it MUST include authorized `handedBack` in original admission order. Readers without `watch` MUST receive only their own items. If there was no prompt waiting, the recorded `turnEnd` and `inputHandedBack` provide the outcome via `history`. There is no general work timeout. `$/cancel_request` MUST cancel only the matching RPC, without stopping a session's turn. Use `session/cancel` to stop the turn. Cancelling a request does not imply rollback of an admission or any other committed effect.
 
 ## Extension methods
 
-Each extension is a JSON-RPC request with a `sessionId` in its params. A reply the output gate blocks, or that a failing gate handler withholds, is the JSON-RPC error `-32000` with `data.code` `"withheld"`. The request's effect, if it had one, still happened. These four are required:
+Each extension request MUST include `sessionId`. These four methods MUST be listed in `extensions` and implemented. Identifiers are nonempty strings. Optional fields are omitted unless supplied; `null` is allowed only where shown.
 
-| Method | Params | Result |
+| Method | Params beyond `sessionId` | Result |
 |---|---|---|
-| `_modular-agent/history` | `sessionId`; `after` (an entry identity, optional); `all` (boolean, optional) | `{ "entries": [Entry] }`: the current branch, or with `all` every entry, after `after` if given, through the output gate. `after` must name an entry in the view asked for: an entry on another branch needs `all`. Otherwise it is refused with error code `-32602`. |
-| `_modular-agent/input` | `sessionId`; `content` (a string or ACP content blocks); `when` (`"now"`, `"steer"` or `"after"`); `key` (optional) | `{ "inputId", "taken": "now" | "inTurn" | "after", "duplicate"?: true }`. Answers once the input is admitted, without waiting for the turn. |
-| `_modular-agent/requests` | `sessionId` | `{ "requests": [Request] }`: open questions, including those waiting past their turn |
-| `_modular-agent/answer` | `sessionId`; `requestId`; `value` (a string; for a choice, one of its options; for an approval, `"allow"`); `declined` (optional) | `{ "accepted": boolean, "reason"?: string }`. Leaving out `value` declines. |
+| `_modular-agent/history` | `after?` (entry id), `all?` (boolean, default `false`), `limit?` (integer 1 to 500, default 500) | `{ entries: [Entry], nextEntryId? }` |
+| `_modular-agent/input` | `content` (string or ACP prompt blocks), `when` (from [Input admission](#input-admission)), `key?`, `actorId?` | `{ inputId, taken, duplicate? }` as in [Input admission](#input-admission) |
+| `_modular-agent/requests` | none | `{ requests: [Request] }`, in admission order, including questions left open past their turns |
+| `_modular-agent/answer` | `requestId`, `value?` (string), `declined?` (boolean, default `false`), `actorId?` | `{ accepted: true }` or `{ accepted: false, reason }` |
 
-These are optional. If offered, they use these names and shapes, and appear in `extensions`:
+The agent MUST use a consistent view for each history request. `all: false` walks the current branch oldest first; `all: true` uses kept order across branches. A supplied `after` MUST name a kept entry in that view, including an erased tombstone. A page MUST contain at most `limit` entries and at most 4 MiB of compact UTF-8 JSON in `result`, including any `nextEntryId`. The agent MUST return at least one entry when any remain, or `result_too_large` if even the first entry cannot fit. When more remain, `nextEntryId` MUST name the last returned entry and the next request uses it as `after`. If an item of the page is blocked, the agent MUST withhold the page rather than advance the cursor. Pages are live, not a snapshot across calls. If a move invalidates a branch cursor, the host MUST restart at a valid entry or use `all: true` to catch up in kept order.
 
-| Method | Params | Result |
+The agent MUST treat omission of `value`, `declined: true`, or an approval value `"refuse"` as a decline. With `declined: true` the agent MUST ignore any non-secret supplied string value. It MUST reject malformed fields, invalid values and any secret value with `invalid_params`. Before lookup the agent MUST check the acting identity and require at least one of `answer` and `approve`. For an open request it MUST enforce the specific right, the `answerers` restriction and presence for approvals, returning `forbidden` if any of those fail. It MUST return `{ accepted: false, reason: "not_open" }` for an unknown question, one no longer answerable, or one already closed, including a losing answer in a race. Acceptance includes a valid decline.
+
+The following extensions are optional and MUST be listed if offered. Features named in the declaration table also follow its requirements.
+
+| Method | Params beyond `sessionId` | Result |
 |---|---|---|
-| `_modular-agent/fork` | `sessionId`; `entryId` | `{ "sessionId" }`. Refused while the session has unfinished work. |
-| `_modular-agent/move` | `sessionId`; `entryId`; `rewind` *(optional; boolean)* | `{}`. Follows `movingWithUnfinishedWork`. With `rewind`, in an agent that declares `rewinding`, the working environment's files are restored as they were at the entry ([Rewinding](data.md#rewinding)), or the move is refused with `-32602` before anything changes. With `rewind`, the result may be `{ "outOfReach": [toolCallId] }`, naming calls past the point that reached outside the project. |
-| `_modular-agent/erase` | `sessionId`; `entryIds` | `{ "erased": [id], "pending": [id], "outOfReach": [string] }`. `pending` lists entries whose remote copies the agent knows of but hasn't yet confirmed deleted; the agent retries, and erasing again finishes the job. `outOfReach` names kinds of copies, such as `"delivered output"`, `"working environment effects"` or `"vendor retention"`. |
-| `_modular-agent/jobs` | `sessionId` | `{ "jobs": [{ "id", "kind", "state" }] }` |
-| `_modular-agent/cancel-job` | `sessionId`; `jobId` | `{}` |
+| `_modular-agent/fork` | `entryId` | `{ sessionId }` with a fresh id |
+| `_modular-agent/move` | `entryId`, `rewind?` (boolean, default `false`) | `{}` or `{ outOfReach: [toolCallId] }` |
+| `_modular-agent/erase` | `entryIds` (nonempty array of entry ids) | `{ erased: [id], pending: [id], outOfReach: [string] }` |
+| `_modular-agent/jobs` | none | `{ jobs: [{ id, kind, state }] }` |
+| `_modular-agent/cancel-job` | `jobId` | `{}` |
+
+- **Fork:** The agent MUST refuse unsupported forking or unfinished work with `not_supported` or `busy`, respectively. A fork MUST target a kept non-`position` entry in the source session and copy its branch with source lineage. The fork MUST inherit the source's current settings, tenant and session ceiling. It MUST derive actor membership and grants from the source's current authority records, not from the copied branch alone. An unknown target MUST fail with `not_found`. A `position` target MUST fail with `conflict`. The agent MUST NOT copy running jobs, live questions, presence or host-supplied MCP servers. A fork MUST be reopened explicitly before use on this connection.
+- **Move:** The agent MUST refuse a target outside the session with `not_found`. It MUST refuse a `position` target with `conflict`. For `rewind: true` it MUST refuse if rewinding is undeclared, and otherwise follow the target, environment, unfinished-work, restoration and rollback rules in [Rewinding](data.md#rewinding). The agent MUST map target or point refusal to `conflict` and unfinished work to `busy`. With rewind it MUST include `outOfReach` when there are open-world calls the restore could not undo. Without rewind it MUST follow `movingWithUnfinishedWork` and restore nothing. Either successful move MUST reset Provider conversation state. Neither ACP operation takes a null target.
+- **Erase:** The agent MUST validate all target ids before erasing, deduplicate repeats, and refuse an unknown id with `not_found` or a protected record with `forbidden`. It MUST use [Erasure](../contracts.md#erasure) for protected records, copies and remote deletion. A failed validation MUST leave every target unchanged. It MUST return `busy` when another writer holds an affected session or `erasureDuringTurn` disallows the operation. Names in `outOfReach` describe categories of copies, for example `"delivered output"`. An agent MUST return each id or category at most once. A repeat on a tombstoned id MUST NOT erase it twice. It MAY retry outstanding remote deletion.
+- **Jobs:** The agent MUST list unfinished jobs oldest first, with `state: "running"` for a live owner running the job and `"unfinished"` for an interrupted job not taken up yet. A missing owner leaves a job unfinished. For cancellation it MUST wait for terminal record and normal cleanup before a successful reply. Unknown or foreign job ids MUST fail with `not_found`. Repeating cancellation of a terminal job in that session MUST return `{}` without another terminal record. A job without its owning plugin is handled as in [Jobs](../contracts.md#jobs).
 
 ### Entry
 
-A history entry, as the `history` extension returns it, has at least:
-- `id`;
-- `parentId`, or null;
-- `kind`;
-- `time`, in milliseconds since 1970;
-- `turnId`, `toolCallId` and `actorId`, where they apply;
-- `message`, where the entry carries one, as `{ "role": "user" | "assistant" | "toolResult", "content": [blocks] }`. Text and images are ACP content blocks. A tool call is `{ "type": "toolCall", "id", "name", "arguments" }`. Any other block keeps its own `type`, and a host may skip types it doesn't know. Reasoning that isn't readable text is never shown as text.
-- an erased entry keeps only `id`, `parentId`, `kind`, and `erased: true`, plus whichever of `turnId`, `stepId`, `toolCallId` and `jobId` it had, as in the [shared data](data.md#history-entries).
+An ACP `Entry` is a recipient projection of a [shared history entry](data.md#history-entries), not a portable record. The agent MUST use the shared tombstone shape for erased entries. For other entries it MUST keep `id`, `parentId`, `kind`, `time`, and applicable `turnId`, `stepId`, `toolCallId`, `jobId`, `actorId` and `sources`. It MUST keep the shared message fields except Provider-private fields. For `data` it MUST keep only the applicable fields below, in their shared shapes, subject to the gate:
 
-The kinds with fixed names and meanings are those of the [shared data](data.md#history-entries), which include `input`, `response`, `toolResult`, `turnStart` and `turnEnd`. A `turnEnd` entry's `data.outcome` is the turn's outcome. Other kinds are the build's own.
+| Entry kinds | Fields in `data` |
+|---|---|
+| `inputAccepted`, `input`, `inputHandedBack` | `inputId`, `inputIds`, `when`, `content`, `releasedBy` where present; no input keys |
+| `turnStart`, `modelRequest` | `startedBy`, `model` where present |
+| `toolStarted`, `toolResult` | `call`, `status` where present |
+| `inputRequest`, `inputAnswer` | `request` using [Request](#request) below, or the shared Answer without `stored` |
+| `turnEnd` | `outcome`, `result`, `usage` |
+| `actorJoined`, `actorLeft`, `limit`, `tenant`, `erasure` | Standard fields from [Shared data](data.md#standard-kinds) |
+| `setting` | `key`, `value` for standard keys only; only standard children of a `settings` object |
+| `jobStarted`, `jobEnded` | `kind`, `outcome`, `result`, `report`, `usage` where present |
+| `summary`, `position` | `summary`, `to` respectively |
+| Other kinds | No `data` |
+
+The agent MUST omit credential values, Provider-private state, working-environment points and launch details from this view. An unknown kind retains its envelope only.
+
+The agent MUST use shared [Content](data.md#content) for `message.content`, `data.content`, handed-back input and proposals. It MUST preserve text, image `data` and `mimeType`, readable reasoning text, and tool-call `id`, `name` and `arguments`, subject to the gate. It MUST omit opaque reasoning and Provider data anywhere in that projection. A host MAY ignore unknown part types. For rendering ACP chunks, the agent MUST convert text and images to the matching ACP block, render readable reasoning only as thoughts, and leave other parts to their explicit tool or application mapping. For admission a plain string MUST become one text part. The agent MUST convert recognized ACP text and image blocks to the matching shared parts. It MUST reject other blocks unless handled by the declared ACP capabilities or the pinned ACP resource rules. The same normalization applies to both input methods.
 
 ### Request
 
-An open question, as the `requests` extension returns it, has at least:
-- `id`;
-- `kind`: `approval`, `choice`, `text`, `link` or `secret`;
-- `question`;
-- `options`, for a choice;
-- `toolCallId`, where it applies;
-- `answerable`: whether it can still be answered.
+The agent MUST project [InputRequest](data.md#questions) as `{ id, kind, question, answerable, options?, details?, toolCallId? }`. `kind` MUST be `approval`, `choice`, `text`, `link` or `secret`. `options` MUST be present for a choice, as an array of strings. `details` MUST contain the URI for a link and be omitted for other kinds. The agent MUST compute `answerable` for the requesting connection and show false when none of its bound actors can answer now. The agent MUST NOT expose credential names or secret values in an ACP question projection. A client without a standard question route MAY poll `requests`.
+
+For example, `requests` can return `{ "requests": [{ "id": "q1", "kind": "choice", "question": "Which draft?", "options": ["first", "second"], "toolCallId": "c1", "answerable": true }] }`. Once `q1` settles it disappears from `requests`; a second `answer` gets `{ "accepted": false, "reason": "not_open" }`.
 
 ## Several actors
 
-An agent that declares `severalActors` offers these extensions too, and lists them in `extensions`. They let a host act for several people in one session. Each records the [standard entries](data.md#history-entries); the rights are the [standard names](data.md#actors).
+An agent with `severalActors` MUST offer and list all the following extensions. Without `severalActors` it MUST refuse `when: "propose"` and represented actors with `not_supported`. The actor shape and rights are those of [shared data](data.md#actors).
 
-| Method | Params | Result |
+| Method | Params beyond `sessionId` | Result |
 |---|---|---|
-| `_modular-agent/actors` | `sessionId` | `{ "actors": [Actor], "present": [actorId] }` |
-| `_modular-agent/join` | `sessionId`; `actor` (`{ id, kind, rights }`); `present` *(optional; boolean, default `true`)* | `{}`, recorded as `actorJoined`. Needs the `grant` right, and every right given must be one the connection's actor has. Joining an actor again replaces its rights, which is how rights are taken away. Otherwise `-32602`, and nothing changes. An actor joined through a connection is present while the connection is open, unless joined with `present: false`. |
-| `_modular-agent/leave` | `sessionId`; `actorId` | `{}`, recorded as `actorLeft`. Needs `grant`, unless the actor is leaving itself. |
-| `_modular-agent/release` | `sessionId`; `inputId`; `when` (`"now"`, `"steer"` or `"after"`); `declined` *(optional)* | `{ "inputId", "taken" }`. Releases proposed input, recorded as an `inputAccepted` with the same `inputId`, the new `when` and `data.releasedBy`. Needs `input`. With `declined`, the input is handed back instead. |
-| `_modular-agent/proposals` | `sessionId` | `{ "proposals": [{ "inputId", "actorId", "content", "time" }] }`: proposed input not yet released, declined or withdrawn, oldest first. Needs `watch`. |
-| `_modular-agent/withdraw` | `sessionId`; `inputId`; `actorId` *(optional)* | `{}`. Withdraws a proposal, recorded as `inputHandedBack`. Only its proposer may, or an actor with `input`. |
+| `_modular-agent/actors` | none | `{ actors: [Actor], present: [actorId] }` |
+| `_modular-agent/join` | `actor`, `present?` (boolean, default `true`) | `{}` |
+| `_modular-agent/leave` | `actorId` | `{}` |
+| `_modular-agent/release` | `inputId`, `when` (`now`, `steer`, `after`), `declined?` (boolean, default `false`) | `{ inputId, taken }`; `handedBack` for a declined release |
+| `_modular-agent/proposals` | none | `{ proposals: [{ inputId, actorId, content, time }] }`, pending proposals oldest first |
+| `_modular-agent/withdraw` | `inputId` | `{}` |
 
-- **Acting for another actor.** `_modular-agent/input` and `_modular-agent/answer` take an optional `actorId`: an actor in the session. The request acts with only the rights that actor and the connection's actor both have. A request whose rights don't hold is refused with `-32602`.
-- **Proposed input.** `_modular-agent/input` with `when: "propose"` needs only `propose`. The answer is `{ "inputId", "taken": "proposed" }`, and nothing runs until an actor with `input` releases it. Released input acts with the rights the proposer and the releaser share.
-- **Questions** go to every present actor who may answer them. An answer from an actor without the right is refused.
-- **A declined release** answers `{ "inputId", "taken": "handedBack" }`.
+The agent MUST record successful `join` and `leave` as session-wide grants and revocations, with the granter's id for grants. A rejoin MUST replace rights without changing the actor's kind. The agent MUST NOT let `join` bind a connection to a different operator-configured principal id or reclassify an existing id. Self-leave MUST revoke the configured actor, not an actor selected for delegation. Disconnect MUST remove that connection's presence and bindings without revoking durable rights.
+
+An actor MUST count as present only while at least one open connection acts for it and marks it present. A successful open MUST mark that connection's actor present. A successful `join` MUST set presence only for the target on that connection; `present: false` keeps the binding but not presence. A durable leave MUST remove all live bindings and presence for the target. On `input` and `answer` the agent MUST accept another `actorId` only if this connection successfully joined that actor and the actor is still a member. The agent MUST intersect both actors' effective rights and record the attributed actor and delegating actor. Without `actorId` the request acts as the configured actor. Other methods MUST NOT use `actorId` to select the acting identity.
+
+For `release` or `withdraw` the agent MUST check the proposal and commit its transition atomically with authorization. A successful release MUST record another `inputAccepted` with the same `inputId`, the new `when` and `data.releasedBy`. Its work MUST act with the proposer and releaser's shared rights, including any delegating actor's rights. A decline or withdrawal MUST record `inputHandedBack` and take no turn. The agent MUST fail an unknown proposal id with `not_found` and a known no-longer-pending proposal with `conflict`.
+
+For example, `proposals` can return `{ "proposals": [{ "inputId": "i1", "actorId": "guest", "content": [{ "type": "text", "text": "Check the draft" }], "time": 1760000000000 }] }`. A declined `release` of `i1` returns `{ "inputId": "i1", "taken": "handedBack" }` and removes it from this list.
 
 ## Limits and tenants
 
-An agent that declares `sessionLimits` offers `limit`, and one that declares `tenants` offers `tenant`, as [shared data](data.md#limits-and-tenants) defines them. Both are listed in `extensions`.
+The agent MUST list `limit` if it declares `sessionLimits` and `tenant` if it declares `tenants`.
 
-| Method | Params | Result |
+| Method | Params beyond `sessionId` | Result |
 |---|---|---|
-| `_modular-agent/limit` | `sessionId`; `rights` (an array, or `null` for none) | `{}`, recorded as `limit`. Needs `administer`, and every right given must be one the connection's actor has. Otherwise `-32602`, and nothing changes. |
-| `_modular-agent/tenant` | `sessionId` | `{ "tenant": string | null, "rights": [string] | null, "tokens": { "budget": number, "used": number } | null }` |
+| `_modular-agent/limit` | `rights` (standard right names as an array, or `null`) | `{}`, after recording `limit` |
+| `_modular-agent/tenant` | none | `{ tenant, rights, tokens }` |
 
-- **Choosing a tenant:** `session/new` may carry `_meta["modular-agent"].tenant`. A tenant the agent doesn't know is refused with `-32602`, and nothing is created.
-- **The connection's actor** has `administer` among its rights, unless a tenant's or session's limit leaves it out.
-- **A turn that hits the tenant's budget** ends with `outcome.limit` `"tenantTokens"`, and stop reason `max_tokens`.
+The agent MUST apply the [session ceiling rule](data.md#limits-and-tenants) to `limit`, including the tenant-narrowed administrator check for `null`. No right, including `administer`, comes from using ACP.
+
+The agent MUST return `tenant: null`, `rights: null` and `tokens: null` for a session without a tenant. Otherwise it MUST return the tenant name, its configured ceiling as an array of standard rights, and `tokens: null` if unbudgeted or `tokens: { budget, used }` if budgeted. Tenant inheritance, budget checks and deployment-local accounting follow [Limits and tenants](data.md#limits-and-tenants). The stop reason is in [Prompts](#prompts).
 
 ## Conformance mode
 
-When the environment variable `MODULAR_AGENT_CONFORMANCE=1` is set, the agent offers one extra model, `conformance/echo`. It needs no network and no credentials, and it behaves exactly as follows. It reads the text of the latest input, ignoring tool results. The latest input is the last `user` message in the request's `messages`, and "this turn" is everything after it. A model sees only the request, so this is the same in every build, whatever the host:
-- **Text that starts with `fail:`** gets a failed response: `stop: "failed"`, with an error of kind `other` whose message is the rest of the text. So the turn ends as failed.
-- **Text that starts with `tool:`** has the form `tool:<name> <json>`. On a step with no tool result yet in this turn, the model calls tool `<name>` with `<json>` as its input. On the step after the result, it replies with the text `done: ` followed by the first 200 characters of the result's text, counted in Unicode code points.
-- **Any other text** gets the reply `echo: <text>`.
+With `MODULAR_AGENT_CONFORMANCE=1` the agent MUST offer the fixture model `conformance/echo` and fixture tools `bash` (`{ command: string }`) and `read` (`{ path: string }`). The operator MUST use isolated, disposable test state and a test working environment. The agent MUST refuse conformance startup with production credentials, Providers or service endpoints configured. The fixture MUST NOT require or use network access or credentials. It MAY use a separately configured isolated test history service for portability tests. Fixture tools MUST use the normal checks and working environment; the fixture does not confer authority.
 
-Usage is reported as zero. It may offer any thinking levels. In conformance mode, the agent also offers the tools `bash`, taking `{ "command": string }`, and `read`, taking `{ "path": string }`. Conformance mode needs no credentials, gateway or other service. The agent's other Providers may still be offered.
+The fixture MUST select the last user message, concatenate its text parts without separators, and read no earlier message or earlier result. Missing user or text yields the empty string. For each model attempt it MUST return exactly the first matching case below and a shared Usage with every number zero. It MAY offer any thinking levels from the binding's list.
 
-The [conformance kit](../../conformance/acp/README.md) uses this mode.
+| Input | Required reply |
+|---|---|
+| Text starts with `fail:` | The model MUST return `stop: "failed"`, `error.kind: "other"`, and the suffix as its message. |
+| Text starts with `tool:` but has no nonempty name before the first ASCII space, no JSON object after that space, or a name not in the request's tools | The model MUST return `stop: "failed"` with error `{ kind: "other", message: "Invalid tool directive" }`. |
+| Valid `tool:<name> <json>` with no tool result after the latest user message | The model MUST return `stop: "toolUse"` with one call to that name and the parsed object as its input. |
+| Valid `tool:<name> <json>` with a tool result after the latest user message | The model MUST return `stop: "finished"` and `done: ` followed by the first 200 Unicode code points of the first such result's text parts, concatenated without separators. |
+| Other text | The model MUST return `stop: "finished"` and one text part `echo: <text>`. |
+
+The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 
 ## Changes
 
+- **Production edition.** Pinned ACP schemas and declaration values; specified connection identity, tenant and method checks, answer races, gating and history bounds, cancellation and recovery, and deterministic fixtures. Binding versions are unchanged.
 - **2026-11-18, round six.** Listing and withdrawing proposals; presence on `join` (Go B28, Elixir R5-4); limits and tenants; a reply the gate withholds (Go B35); what a rewind couldn't reach (Go B34).
 - **2026-11-18, round five.** The Entry section points to the shared data's kinds, and erased entries keep their identities there too (found by the TypeScript builder).
 - **2026-11-18, round five.** `/2`, asked for in `initialize`, reports a failed turn as a JSON-RPC error rather than `refusal`; the conformance model's `fail:` makes one. Several actors: the extensions `actors`, `join`, `leave` and `release`, `actorId` on `input` and `answer`, and proposed input (Python G76, Go B26). `move` with `rewind`.
-- **2026-11-18, after the portable-session matrix.** The connection's actor joins every session it opens or reopens. The Python agent refused to reopen sessions written by the TypeScript and Elixir agents, because its own actor wasn't among the session's actors. The Elixir builder had logged the same gap (M3-2).
+- **2026-11-18, after the portable-session matrix.** Opening joined the connection's actor to sessions written by another build (Elixir M3-2). The production edition replaces unconditional join on reopen.
 - **2026-11-18, round four.** The optional declaration key `portableSessions`. The conformance model's "this turn" is everything after the last `user` message (Rust B-14).
-- **2026-11-17, after round two.** Clarifications from the Rust, Python and Go builds' binding gaps. None changes a wire format any build already uses:
+- **2026-11-17, after round two.** Clarifications from the Rust, Python and Go builds' binding gaps:
   - the echo counts code points;
   - the data folder overrides path flags;
   - duplicates whose turn hasn't ended, or whose input was handed back;

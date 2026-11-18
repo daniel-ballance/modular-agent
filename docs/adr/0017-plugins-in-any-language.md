@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-17
 ---
 
+**Current rule:** The evidence below is from round three; [ADR 0019](0019-acp-2-and-several-actors.md) added jobs and stream-at-a-time output gating to `/1`, and [ADR 0020](0020-tenants-limits-and-output-events.md) added shared output events and unique plugin names. Check required hooks at [registration](../bindings/plugin.md#starting-the-handshake) against the current binding; `/1` alone does not identify an earlier snapshot.
+
 # A plugin in any language, through one binding of the contracts
 
 [ADR 0014](0014-plugins-in-other-processes.md) let a plugin run in another process, but only a TypeScript plugin under the TypeScript build: its RPC carried that build's own objects and callbacks. Four builds now exist, in TypeScript, Rust, Python and Go, each with its own plugin API. A plugin written for one couldn't run under another.

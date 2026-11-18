@@ -1,512 +1,558 @@
 # Contracts: what passes between the parts
 
-**Status:** draft, revised 2026-11-16 after two rounds of [pressure testing](pressure-test/README.md). Everything here is **proposed** unless a decision is linked.
+[Architecture](architecture.md) explains the parts. This document describes their information and interactions and states the rules they follow. [Security](security.md) covers trust boundaries, authentication and limits. [Conformance](conformance.md) defines the keywords and the role of each document.
 
-[Architecture](architecture.md) says what each part is responsible for. This document says what passes between the parts: the information each interaction carries and the answers it can get. It should be detailed enough that two implementations built from it can be swapped without breaking a plugin or a host. How each part behaves inside is left to [implementation](research/implementation-concerns.md).
-
-It does not say how anything is sent. There are no signatures, message formats or transports here ([ADR 0010](adr/0010-describe-parts-not-wiring.md)). "Asks" means one part depends on another for an answer. A function call, an RPC request or an HTTP call can all satisfy it.
+The core prescribes no transport, message encoding or process layout. An interaction can be a function call or a request to another process or service. The [bindings](bindings/README.md) define optional wire profiles.
 
 ## Information
 
-These are the things that pass between parts, and what each contains. A field marked *(optional)* may be missing.
+These tables describe the information the parts exchange. A field marked *(optional)* can be absent. Field names and encodings on the wire are in [Shared data](bindings/data.md) and the applicable binding.
 
 ### Content
 
-Content is an ordered list of typed parts. Every message, tool result and answer carries content.
+Content is an ordered list of typed parts. What a recipient sees is a view, not the raw record.
 
 | Part type | Contains |
 |---|---|
-| text | the text |
-| image, audio, file | the data or a reference to it, its media type, a name *(optional)* |
-| reasoning | the model's reasoning text, or a value only its Provider can read |
+| text | text |
+| image, audio, file | data or a reference, media type, name *(optional)* |
+| reasoning | readable text or an opaque value for the Provider that produced it |
 | tool call | see [Tool call](#tool-call) |
-| other | anything else, such as an MCP Apps UI or A2UI data, with its type |
-
-The record keeps every part as it arrived, including types nobody understands. What a recipient receives is a view, which may leave parts out ([Who sees what](architecture.md#who-sees-what)). Which types every part must understand is [open](open-questions.md#content-model).
+| other | typed data, such as an MCP Apps UI or A2UI data |
 
 ### Actor
 
-| Contains | Notes |
+| Field | Meaning |
 |---|---|
-| identity | |
-| kind | user, agent, host, or program (such as a scheduler or webhook) |
-| tenant *(optional)* | |
-| authority in this session | what it may do: watch, propose input, give input, answer requests, approve, change settings, erase |
+| `id` | stable principal identity |
+| `kind` | `user`, `host`, `agent`, or `program` (for example, a scheduler) |
+| `rights` | named rights assigned to the actor, before ceilings |
 
 ### Session
 
 | Contains | Notes |
 |---|---|
-| identity | |
-| settings | model and reasoning level, approval policy, limits and budgets, and any setting a plugin adds |
-| actors | at least one. Several only when the agent supports it. |
-| the active plugins | |
-| current position | the entry the session is at in its tree of history entries |
-| its history | |
-| retention | how long its history is kept, or ephemeral |
-| its jobs | |
-| where it came from *(optional)* | the session and point it was forked from, or the parent session if it belongs to a subagent |
+| identity and project | |
+| tenant *(optional)* | fixed at creation |
+| settings | for example, model, reasoning level and approval policy |
+| actors and session limit *(if set)* | recorded grants and the ceiling on their use |
+| active plugins | the set for this opening of the session |
+| current position and history | the head of the current branch and the session's record |
+| retention | the history store's retention, or ephemeral |
+| jobs | |
+| source session and point *(optional)* | for a fork |
+| parent session *(optional)* | for a subagent; independent of fork origin |
 
 ### History entry
 
 | Contains | Notes |
 |---|---|
-| identity | |
-| the entry before it | History is a tree. An entry follows one earlier entry. |
-| the session, and the turn, step, tool call and job it belongs to *(where they apply)* | |
-| who wrote it | which part or plugin, and for which actor |
-| when | |
-| kind | input, model response, tool call, tool result, summary, setting change, position move, approval record, erasure record, plugin state, … |
-| whether the model sees it | Plugin state, approval records and erasure records are kept for the record only. |
-| what it copies *(optional)* | the entries whose content it copies, such as those a summary summarizes. Erasing any of them erases this entry too. |
-| content | Removed by erasure. The entry then becomes an erasure record. |
+| identity, session and time | |
+| parent | an earlier entry in the session; `null` at the root |
+| turn, step, call, job and actor identities *(where applicable)* | references to the work the entry concerns |
+| writer and kind | for example, model response, tool start, summary, setting, move, erasure or plugin state |
+| model visibility | control records such as grants, approvals and erasure are not model context |
+| sources *(optional)* | links to entries whose content was copied or used to derive this entry |
+| content and data | what was kept; a tombstone stands in place of erased content |
 
 ### Tool definition
 
 | Contains | Notes |
 |---|---|
-| name | unique among the tools a session can use ([open](open-questions.md#how-many-of-each-capability) what happens on a clash) |
-| description | for the model |
-| the input it takes | a schema |
-| what it returns *(optional)* | a schema |
-| hints | read-only, destructive, safe to repeat, reaches outside the system. These are hints, not promises. |
-| whether it may run alongside other calls | |
-| who may call it | the model, a UI, a plugin |
-| how to show it *(optional)* | for Interfaces, including a UI it brings (as MCP Apps do) |
+| name and description | names are unique in the session's catalog |
+| input schema, result schema *(optional)* | |
+| effect annotations | read-only, destructive, outside the project or system (`openWorld`), safe to repeat (`safeToRepeat`, an explicit promise) |
+| parallel | whether the tool permits concurrent calls |
+| callers | allowed origins such as model, UI or plugin |
+| presentation *(optional)* | display hints, including a UI the tool brings |
 
-A tool can be available without the model being told about it.
+A catalog can include tools that are not offered to the model. [Shared data](bindings/data.md#tools) specifies the schema dialect and wire defaults.
 
 ### Tool call
 
 | Contains | Notes |
 |---|---|
-| identity | |
-| the tool's name | |
-| its input | |
-| who started it | the model, the Provider (it ran the call itself), a UI, a plugin, or another tool call |
-| the actor it acts for | |
-| the step that asked for it *(optional)* | missing for calls a UI or plugin started outside a turn |
+| id, name and input | the call's identity and payload |
+| caller and acting actor | caller is the origin, such as model, Provider, UI, plugin or another call; the actor is the principal behind the work |
+| step *(optional)* and parent operation *(if any)* | an out-of-turn call has no step |
+| Provider reference *(optional)* | the vendor's call identity, distinct from the agent's |
 
 ### Tool result
 
 | Contains | Notes |
 |---|---|
-| the tool call it answers | |
-| status | completed, failed, refused, cancelled, not started, outcome unknown |
-| content | what the model will see. A refused call explains why. |
-| structured value *(optional)* | for other tools and programs |
-| how to show it *(optional)* | for Interfaces |
+| call identity | |
+| status | `completed`, `failed`, `refused`, `cancelled`, `notStarted`, or `outcomeUnknown` |
+| content | including the reason for a refusal |
+| structured value and presentation *(optional)* | |
 
-Every tool call ends with exactly one result, even if it arrives after its turn. An approval is not a result.
+A pending reply is not a result. An approval answer is not a result either.
 
 ### Model access
 
-What the Runtime is given so it can use the chosen model. **Decided** ([ADR 0005](adr/0005-provider-handles-from-the-harness.md)).
-
 | Contains | Notes |
 |---|---|
-| which model, and its limits | context window, output limit, accepted input types, reasoning levels |
-| a way to use the model | Credentials are not included. The Provider gets them itself. |
-| what the Provider supports | whether it keeps state, runs tools itself, offers live sessions or answers later |
+| model and limits | context window, output limit, input types and reasoning levels |
+| a way to use the model | no credentials |
+| Provider support | state, safe repeat, Provider-run tools, live sessions or late responses |
 
 ### Model request and response
 
-The usual shape: one request, one response.
-
-| Model request contains | Model response contains |
+| Request | Response |
 |---|---|
-| the model context: system prompt and messages | content: text, reasoning, tool calls |
-| the tool definitions the model may use | tool calls the Provider ran itself, with their results *(optional)* |
-| whether the Provider may run tools itself, and which | why it stopped: finished, wants tool calls, reached the output limit, refused, failed |
-| settings: reasoning level, output limit, and others the model accepts | usage |
+| system prompt and messages | content: text, reasoning, requested tool calls |
+| tool definitions offered to the model | already-run Provider calls and their results *(if any)* |
+| allowed Provider-run tools | relevant only in process, outside `/1` wire and portability |
+| reasoning, output limit and other model settings | stop reason, usage and error *(if any)* |
 
-The response arrives piece by piece as the model produces it, then complete. A failed request says why: a temporary problem worth retrying, the context is too large, the credentials were refused, or the model refused.
-
-The other two shapes:
-- **A live session,** such as voice. Input and output flow both ways at the same time, and either side can interrupt. Each stretch between turn-taking points is a step, with its tool calls and usage.
-- **A late answer,** such as a batch request. The request is accepted, and its answer arrives later. Waiting for it is a job.
+Output can arrive in pieces before the complete response. A failure describes its cause, such as a temporary issue, context overflow, refused credentials or model refusal. Live two-way sessions and delayed batch responses have no common wire or portable profile.
 
 ### Turn input and turn outcome
 
 | Turn input | Turn outcome |
 |---|---|
-| the session | how it ended: completed, cancelled, failed (with the error), or stopped at a limit (which one) |
-| the input, and what started the turn: an actor, a job's report, or a plugin | the result: text, structured data, or the tool calls still open |
-| the tools the model may use | the history entries the turn produced |
-| model access | usage |
-| settings and limits | open input requests *(if any)* |
-| the shape the result must have *(optional)* | |
+| session and input | `completed`, `cancelled`, `failed` with error, or `limit` with its name |
+| initiator: actor, job, plugin or late answer | result: text, structured data or calls still open |
+| model access, offered tools, settings and limits | history produced and usage |
+| result shape *(optional)* | open questions *(if any)* |
 
 ### Job
 
 | Contains | Notes |
 |---|---|
-| identity | |
-| kind | such as background command, watcher, subagent, remote task, late model answer |
-| the session it belongs to, the turn that started it, and the plugin that runs it | |
-| the actor it acts for | |
-| state | running, completed, failed, cancelled, or outcome unknown |
-| result | when it ends |
-| usage | counts toward the session's limits and budgets |
+| identity, kind and key *(optional)* | for example, a subagent or background command |
+| session, owning plugin and starting actor | and the turn or call that started it, where applicable |
+| starting rights and state | unfinished (possibly running), completed, failed, cancelled, or outcome unknown |
+| result and usage *(as available)* | result at end; usage attributed to the job's session |
 
 ### Event
 
-An event says that something happened. It can't change what happened.
+An event reports an occurrence. It does not change it.
 
 | Contains |
 |---|
-| what happened |
-| when |
-| the session, and the turn, step, tool call and job it belongs to |
-| which part or plugin reported it, and for which actor |
-| content *(optional)* |
+| type and time |
+| associated session, turn, step, call, job, actor and reporting part *(where applicable)* |
+| data or content *(optional)* |
 
-The standard events:
-
-| Event | Notes |
+| Standard event | Notes |
 |---|---|
-| session started, joined, left, ended | joined and left are for sessions with several actors |
-| input accepted, withdrawn | accepted says when it will be taken: now, in the running turn, or after it |
-| turn started, turn ended | turn ended carries the outcome and result |
-| step started, step ended | step ended carries usage |
-| model output arriving | text, reasoning, audio, or a tool call's input, as it is produced. Live only, not kept in history. |
-| tool call requested, started, progress, ended | |
-| input request opened, answered, closed, no longer answerable | |
+| session started, joined, left, ended | join and leave relate to actors |
+| input accepted, withdrawn or handed back | the receipt is separate from taking the input |
+| turn started, ended | end carries outcome and result |
+| step started, ended | end carries usage |
+| model output arriving | text, reasoning, audio or tool input; live pieces, not history entries |
+| tool requested, started, progress, ended | |
+| question opened, answered, closed, no longer answerable | |
 | job started, progress, ended | |
-| history entry added, position moved, entries erased | |
-| setting changed | such as the model |
-| plugin loaded, replaced, unloaded | |
+| entry added, position moved, entries erased | |
+| setting changed; plugin loaded, replaced, unloaded | |
 
-Plugins can report events of their own.
+Plugins can also report their own events, distinct from the Harness's records and standard events.
 
 ### Input request and answer
 
-An input request asks for something only an actor can give.
-
-| Input request contains | Notes |
+| Request | Meaning |
 |---|---|
-| identity | |
-| kind | approval, choice, free text, sign-in link, secret |
-| what is asked, and details to help decide | |
-| options *(for approval and choice)* | Approval options are at least "allow" and "refuse". "Always allow" is an option only when the asker can honour it. |
-| the tool call it is tied to *(optional)* | |
-| the session and agent asking | |
-| who may answer | which actors, such as the user, the parent agent, or a program. They must be within the authority the asker has. |
-| whether it can still be answered | |
-| a time limit *(optional)* | |
-| a key *(optional)* | Asking again with the same key reopens the same question, or reuses its recorded answer. |
-| where to keep it *(secret only)* | the name the credential store keeps the answer under. Without one, or without a credential store, the request is declined before anyone is asked. |
+| id, session, asker and tool call *(if any)* | the work the question belongs to |
+| kind, text, details and options *(where applicable)* | approval, choice, free text, sign-in link or secret |
+| `answerers` *(optional)* | list of actor ids; absent means any session actor with the appropriate right |
+| answerable, time limit *(optional)*, key *(optional)* | current state, wait policy and identity for reopening |
+| credential name *(secret only)* | where the answer is stored |
 
-| Answer contains |
-|---|
-| the request it answers |
-| the value, or "declined". For a secret, only where it was kept. |
-| the actor who answered |
-
-The first accepted answer closes the request. An answer to a secret request goes only to the credential store: the asker, the record and every event see only the name it was kept under. That is why a recorded secret answer can be reused like any other.
+| Answer | Meaning |
+|---|---|
+| request id | the question it closes |
+| answering actor *(absent on system closure)* | |
+| value, stored name, or decline | a refusal by the system includes a reason; a pending wait is not an answer |
 
 ### Declaration
 
-What the session, as set up, supports. The agent declares it, and declares it again if it changes. It covers each feature in [Declared support](architecture.md#declared-support), and any hook points offered beyond the standard set.
+The agent's and session's profile: selected capabilities, supported features and the fallbacks the build uses. See [Declaration rules](#declaration-rules) and the [ACP keys](bindings/acp.md#the-declaration). A declaration is separate from the session's settings and from current availability.
 
 ### Usage
 
-Input tokens, output tokens, cached tokens, audio time where it applies, and cost where known. Reported for each step and job, and totalled for each turn, session and, where budgets apply, tenant.
+Additive input and output token counts, cache counts, and cost in US dollars where known. Audio duration, where applicable, is an additional core measure outside the common `/1` usage shape. Attribution is to work such as a step or job, with totals for its turn, session and tenant as applicable.
 
 ## Interactions
 
-Each interaction is listed by who asks, what it carries, and the possible answers. Every ask from an Interface carries the actor it acts for, and is refused if the actor lacks the authority.
-
-**An answer comes after its effects.** Once an interaction is answered, whoever asks next sees what it changed. A part that keeps a copy of another part's answers, such as a list of tools, refreshes the copy before the answer that changed it is passed on. **Decided while building** ([ADR 0014](adr/0014-plugins-in-other-processes.md)).
+These tables list what an operation receives and returns. Rights, ordering and failure rules are in [Rules every implementation follows](#rules-every-implementation-follows). The tables are not a list of wire methods.
 
 ### Interface and Harness
 
-An Interface is a plugin, so these are things it does through the plugin API.
-
-| Interface asks | Carrying | Answers |
-|---|---|---|
-| what does this agent support? | | the session's [declaration](#declaration) |
-| start a session | settings *(optional)*, a session and point to fork from *(optional)* | the session |
-| list sessions, open a session, join a session | | sessions; the session and its history |
-| give input | the session, the content, when to take it (now, in the running turn, after it), a key *(optional)* | accepted, with when it will be taken; or refused. Input with a key already taken returns the earlier answer, and is not taken again. |
-| withdraw input | the input | withdrawn, with its content; or too late, already taken |
-| cancel | the session | the running turn ends as cancelled. Its jobs keep running. Input queued for the turn or after it is handed back to the Interface, with its content. |
-| move to a point | the session, the entry to move to, whether to rewind outside state too | moved; or refused, saying which part can't rewind |
-| list commands, run a command | the command and its arguments | the command's result, or an error |
-| follow a session | the session, and a point to start from | its history from that point, as this actor may see it, then its events as they happen |
-| answer an input request | the [answer](#input-request-and-answer) | accepted; or refused because it is already closed, no longer answerable, or the actor may not answer it |
-| list jobs, cancel a job | the session; the job | jobs; the job ends as cancelled |
-| erase | what to erase | erased, listing any copies out of reach; or refused |
-
-| Harness tells the Interface | Carrying |
-|---|---|
-| an input request opened | the [input request](#input-request-and-answer), to Interfaces whose actor may see it. Only those whose actor may answer it can answer. |
-| an event happened | the [event](#event), after the output gate |
-
-### Harness and Runtime
-
-**Decided** ([ADR 0006](adr/0006-hook-points-belong-to-the-operation-owner.md)), except the details.
-
-| Harness asks the Runtime | Carrying | Answers |
-|---|---|---|
-| what do you support? | | what it supports |
-| run a turn | the [turn input](#turn-input-and-turn-outcome) | the [turn outcome](#turn-input-and-turn-outcome) |
-| cancel the turn | the turn | the turn ends as cancelled |
-| take this input in the running turn | the content | taken, or refused ([open](open-questions.md#input-during-a-turn)) |
-| resume an interrupted turn | the turn input, and the tool calls the history shows without a result, each marked started or not | the [turn outcome](#turn-input-and-turn-outcome). A transient Runtime ends the turn as failed. A durable one carries on. Either way, every pending call gets one result. |
-| rewind to a point | the history entry | rewound, or refused before anything changes |
-
-| Runtime asks the Harness | Carrying | Answers |
-|---|---|---|
-| run this tool call | the [tool call](#tool-call) | progress, then the [tool result](#tool-result); or "still open" if the call waits past the turn. If no answer comes, the outcome is unknown. |
-| let plugins step in | the hook point and what is at stake (see [hook points](#hook-points)) | the plugins' combined answer |
-
-| Runtime tells the Harness | Carrying |
-|---|---|
-| this happened | an [event](#event) |
-
-### Runtime and Provider
-
-Through the [model access](#model-access) it was given:
-
-| Runtime asks | Carrying | Answers |
-|---|---|---|
-| make a model request | the [model request](#model-request-and-response) | the response as it arrives, then complete; or a failure and why; or, for a late answer, "accepted" |
-| open a live session | the model context and settings | a session that carries input and output both ways until either side closes it |
-| cancel | the request or live session | cancelled; or already finished |
-| discard your state | the session | discarded; or "I keep none" |
-
-### Harness and tool source
-
-| Harness asks | Carrying | Answers |
-|---|---|---|
-| which tools do you offer? | the session *(optional)* | [tool definitions](#tool-definition), including any only that session has. A tool source says when its list changes. |
-| run this call | the [tool call](#tool-call), and a way to cancel it | progress, then the [tool result](#tool-result). If no answer comes, the outcome is unknown. |
-
-### Harness and working environment
-
-| Harness asks | Carrying | Answers |
-|---|---|---|
-| run a command; read or write a file | what to do | the result; or failed; or "environment lost" |
-| save this point; return to a saved point | the point | saved; returned; or refused |
-
-### Harness and history store
-
-| Harness asks | Carrying | Answers |
-|---|---|---|
-| keep these entries | the session, the [history entries](#history-entry) | kept safely; or failed. Keeping the same entries again keeps them once, so a writer that lost the answer can send them again. **Decided while building** ([ADR 0015](adr/0015-parts-as-services.md)). |
-| give me this session's history | the session, a point to start from *(optional)* | the entries |
-| list sessions | filters *(optional)* | sessions |
-| open a session for writing | the session | opened; or refused because it is already open elsewhere |
-| erase | the session, what to erase | erased, including summaries and forks it holds, with erasure records left in place; or not supported |
-
-### Asking the credential store
+The Interface uses the plugin API. Authority comes from the authenticated connection, not from a claimed identity in its request.
 
 | Asks | Carrying | Answers |
 |---|---|---|
-| give me this credential | which credential | the credential; or "sign-in needed", which the credential store turns into an [input request](#input-request-and-answer) |
+| describe support; list sessions | session *(if selected)*; project or other filters *(optional)* | declaration; authorized sessions |
+| create; open; close | project and optional settings or tenant; session id | session or refusal; closed or refusal |
+| fork; move | source session and entry; rewind flag for a move | new session; moved, with `outOfReach` call ids for rewind when applicable; or refusal |
+| list, join or remove actors; set presence | session, target actor or connection state as applicable | actors and presence; recorded change or refusal |
+| read or change settings; set a limit | session and keys or ceiling | current view; recorded change or refusal |
+| give input or propose it | session, content, timing, key *(optional)* | first admission receipt, or refusal |
+| list, release or decline proposals; withdraw input | session and input id as applicable | proposals; new disposition, or refusal (including already taken) |
+| cancel a turn or call; list or cancel jobs | session and target where applicable | state, including idle/already ended, or refusal; authorized jobs |
+| list or run commands; call a tool directly | session, name, arguments or tool input | available operations; result, pending for a supported call, or refusal |
+| follow | session and cursor *(optional)* | authorized catch-up then live events, or refusal |
+| list or answer questions | session and answer where applicable | visible requests; accepted or refused (closed, no longer answerable or ineligible) |
+| erase | session and entries | erased, pending and out-of-reach copies, or refusal |
 
-Providers, tool sources and working environments ask. The Runtime never does.
+The Harness delivers authorized question views and events through the [output gate](#the-output-gate). [ACP](bindings/acp.md#extension-methods) defines the subset available through that binding and its errors.
+
+### Harness and Runtime
+
+| Harness asks | Carrying | Answers |
+|---|---|---|
+| describe support | | Runtime support |
+| run, cancel or resume a turn | turn input or identity; on resume, the recorded checkpoint and unsettled work, distinguishing started from not started | turn outcome |
+| take steering | admitted input | taken or refused |
+
+| Runtime asks | Carrying | Answers |
+|---|---|---|
+| use session services | session work identity, request for ids, history, tools, queued steering or recording | scoped data or acknowledgement |
+| make a model request | selected model access and request | streamed pieces and final response, or failure |
+| invoke a hook | point and its payload | the combined answer |
+| run a tool | call | progress and result, or pending; see [Tool dispatch](#tool-dispatch) |
+
+The Runtime can report events. The Harness owns the session's standard records and events. For the remote Runtime interface, see [Plugin binding](bindings/plugin.md#the-host-asks-the-runtime).
+
+### Runtime and Provider
+
+Using model access supplied by the Harness, the Runtime requests inference and can cancel it. In a local extension it can open or interrupt a live session or ask for a late response. The Harness, not the Runtime, asks the Provider to discard session state or delete known remote copies. Replies include success, no state, or failure.
+
+### Harness and tool source
+
+| Asks | Carrying | Answers |
+|---|---|---|
+| list tools | session *(if scoped)* | definitions; change notice when the list changes |
+| run a call | authorized call and cancellation signal | progress then result, or a typed pending reply tied to a question |
+
+Loss before dispatch is distinct from loss after a call may have started.
+
+### Harness and working environment
+
+| Asks | Carrying | Answers |
+|---|---|---|
+| run a command; read or write a file | session project, command and working directory or file path and data, cancellation signal | result, failure, or environment lost |
+| save or restore a point | project and environment identity; saved point for restore | saved, restored or refused |
+| end a session | session | cleanup outcome within the declared containment scope |
+
+### Harness and history store
+
+| Asks | Carrying | Answers |
+|---|---|---|
+| acquire, renew or release writer access | session and writer or current lease | access, held or lost |
+| append a batch | session, current writer access and entries | committed or failed |
+| read history; list sessions | session, optional cursor and filters | entries or matching sessions |
+| erase | exact entry ids, with writer access when required | tombstones or refusal |
+
+The Harness computes the copy set. The store does not interpret the contents. [History service](bindings/history-http.md) defines remote leases, retries and paging.
+
+### Asking the credential store
+
+An authorized Provider, tool source or working environment asks for a named credential in its scope. The answer is the credential, unavailable, or sign-in needed. Sign-in can use an input request. The Runtime gets model access instead of credentials. See [Secrets](#secrets).
 
 ### Plugin and Harness: jobs
 
-| Plugin asks | Carrying | Answers |
+| Asks | Carrying | Answers |
 |---|---|---|
-| start a job | the session, its kind, the actor, and the plugin's own detail | the [job](#job), recorded with the detail |
-| report on a job | progress or result, and whether to report the result | recorded. A reported result enters the session as input, and may start a turn. |
-| list its unfinished jobs | the session | the jobs this plugin started that the history shows never ended, with their detail |
-| take up an unfinished job | the job | the job, running again, for this plugin to report on |
-
-The Harness can ask the plugin to cancel a job. Its answer is "cancelled", or the job's result if it had already finished.
-
-A job left unfinished by a stopped process stays unfinished until its plugin takes it up or ends it. The Harness never ends it by itself.
+| start | session, work identity, kind, key *(optional)* and plugin detail | recorded job or refusal |
+| report progress or end | job, progress or outcome, result, usage and report flag as applicable | acknowledgement or refusal |
+| list unfinished; take up | owning plugin and session; job to claim | unfinished jobs or exclusive take-up |
+| cancel (Harness asks the owner) | job | cancellation outcome, or the already recorded outcome |
 
 ## Hook points
 
-Whoever owns an operation defines its hook points, including plugins ([ADR 0006](adr/0006-hook-points-belong-to-the-operation-owner.md)). Every Runtime offers the same standard set.
+The operation owner defines its hook points, including points owned by plugins. The table describes the core points; [Hook handlers](bindings/plugin.md#the-host-asks-a-hook-handler) maps them to the `/1` payloads and lists omissions, including session join/leave and per-piece Provider response.
 
-| Owner | Hook point | Plugins are given | Plugins can answer | Rule |
-|---|---|---|---|---|
-| Harness | plugin about to load | the plugin and the project | allow or refuse | gate |
-| Harness | session starts, joined, left, ends | the session and actor | nothing: observe only | observe |
-| Harness | input arrives | the input and its actor | pass it on; change it; or handle it, so it never reaches the model | transform |
-| Harness | before a turn | the session and the input | additions to the system prompt and the context | collect |
-| Harness | before output reaches a recipient | the output and the recipient | let it through, redact it, block it, or hold it until more arrives | gate, applied by the Harness |
-| Runtime | turn starts | the turn input | nothing: observe only | observe |
-| Runtime | before each step | the history so far, usage so far, the model's limits | the model context for this step; the tools the model may use; whether the Provider may run tools itself | transform |
-| Runtime | after each step | the model response, including tools the Provider ran | continue or end the turn | gate: a refusal ends the turn |
-| Runtime | before a tool call | the tool call and its definition | allow it; refuse it, with a reason; or allow it with changed input | gate |
-| Runtime | after a tool call | the tool call and its result | keep the result, or replace it | transform |
-| Runtime | a model request failed | the request and why it failed | retry, perhaps after changing something such as the context; or let it fail | first answer |
-| Runtime | the turn's result is ready | the result and the shape it must have | accept it; or send the model back with a reason | gate: a refusal sends the model back |
-| Runtime | turn ends | the outcome | nothing: observe only | observe |
-| Provider | before a model request | the request | a changed request | transform |
-| Provider | as the response arrives | each piece | nothing: observe only | observe |
-
-"Before a tool call" also applies to calls a UI or plugin starts. Tools a Provider runs itself can't be stopped one by one. They are allowed or refused before the request.
-
-When several plugins handle one hook point, the hook point's owner fixes one rule for combining their answers. **Decided** ([open questions](open-questions.md#settled)). The rules are:
-- **observe:** every handler sees it, and answers are ignored.
-- **gate:** handlers answer in turn. A refusal wins and stops the rest. A handler may allow with changed input, and later handlers see the change. A handler that fails counts as a refusal.
-- **transform:** each handler gets the previous handler's result and may change it. A handler may also stop the chain, as when input is handled as a command.
-- **first answer:** the first handler that answers decides.
-- **collect:** every handler's contribution is gathered.
-
-Handlers run in the order their plugins were loaded. A plugin can ask to run first or last. Handlers that ask to run first form a group, in load order, then those with no preference, then those that ask to run last, again in load order. Neither group is reversed. **Decided** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)).
-
-**When a handler fails:** at a gate, it counts as a refusal. At an observe point, the failure is reported and the operation carries on. At a transform, first-answer or collect point, the operation that ran the hook point fails, and says which handler failed. **Decided** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)).
-
-**A handler may run more than once for the same work.** After a restart, a recovered turn runs its checks again from the last recorded point. A handler with an outside effect must make that effect safe to repeat, for example by keying it. Neither the Harness nor the Runtime makes a handler's effects happen exactly once. **Decided** ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)).
+| Owner | Point | Payload | Answer and combination |
+|---|---|---|---|
+| Harness | plugin about to load | plugin and project | allow or refuse (gate) |
+| Harness | session starts, joined, left, ends | session and actor where applicable | observe |
+| Harness | input arrives | input and actor | pass, change or handle (transform) |
+| Harness | before a turn | session and input | prompt fragments and context additions (collect) |
+| Harness | before output | recipient and output | allow, redact or block (gate); buffering belongs to the Harness |
+| Runtime | turn starts | turn input | observe |
+| Runtime | before each step | prepared request, history, usage and model limits | change context, offered tools or Provider-tool allowance (transform) |
+| Runtime | after each step (`step.after`) | recorded model response, including any already-run Provider calls | continue or end (gate after the step's calls are settled, before the next model request) |
+| Runtime | before a call | call and definition | allow, refuse, change input, or leave pending under [Questions](#questions) (gate) |
+| Runtime | after a call | call and result | keep or change result content or value (transform) |
+| Runtime | model request failed | request and failure | retry, optionally with changes, or give up (first answer) |
+| Runtime | turn result ready | result and expected shape | accept or ask the model to try again (gate) |
+| Runtime | turn ends | outcome | observe |
+| Provider | before a request | model request | change request (transform) |
+| Provider | response arrives | each piece in process | observe |
 
 ## Rules every implementation follows
 
-These rules come from three independent builds of this description, in Rust, Python and Go, each made from the docs alone ([ADR 0016](adr/0016-rules-from-three-clean-room-builds.md)). Each builder logged where the description left a choice open, and whether two builds that chose differently would break a plugin or a host. Where they would, and the builds agreed, the choice is now a rule. Where they would and the builds disagreed, the rule says what must be declared. All are **decided**.
+### Declaration rules
+
+- The agent MUST publish its declaration, provide the selected session's declaration on opening, and publish changes before using the changed features.
+- The declaration MUST name the bindings and versions the build claims and any additional hook points it offers.
+- The declaration MUST reflect the rules below and use the more restrictive value when behavior varies within the scope being declared.
+- The declaration MUST set `inputKeys: true` and `pluginsDuringSession: false`.
+- The declaration MUST set `continuesAfterRestart: true` when `waitingThroughRestart` is true.
+- The agent MUST refuse unsupported capabilities with no applicable fallback. The wire names and defaults are in [ACP](bindings/acp.md#the-declaration).
 
 ### Plugins and capabilities
 
-- **Some capabilities a session has only one of:** the Runtime, the history store, the working environment, the credential store and configuration. A second plugin providing one is refused, unless it names the plugin it replaces.
-- **Names are never shadowed.** Two tools with one name, two commands with one name, or two Providers with one identity: the second is refused when it loads. Nothing is silently hidden by load order.
-- **Replacing a plugin** names one that is loaded. Everything the replaced plugin registered goes. If the replacement fails to set up, nothing of it remains.
-- **The set of plugins is fixed** while a session is open. Reopening a session records the plugins active now, beside what history says was active before.
-- **Programs and servers a plugin starts** come from the current configuration and current trust. Nothing recorded in history can make the agent start a program.
-- **Some settings are the Harness's own,** such as a session's parent or an actor's authority. Configuration files can't set them.
+- The Harness MUST select at most one Runtime, history store, working environment, credential store and Configuration for a session. Providers, tool sources and Interfaces can have multiple registrations.
+- The Harness MUST refuse a turn without a selected Runtime and available model access before starting effects. Missing services MUST return unavailable for operations that need them. A session can open without a Runtime or selected model.
+- Without a history store, the Harness MUST treat the session as ephemeral across process stops.
+- The Harness MUST refuse a second singleton, tool name, command name or Provider identity unless a valid replacement removes the conflict.
+- A replacement MUST name a loaded plugin and replace all its registrations atomically after setup and collision checks. Failed replacement leaves the old plugin in place.
+- The Harness MUST reject a later tool-list refresh that would introduce a clash, retaining the last valid list.
+- The Harness MUST keep the plugin set fixed while a session is open and record the active set when it reopens.
+- The Harness MUST use only current trusted configuration to launch programs or servers. History is not launch authority.
+- A plugin MUST use the plugin API for supported interactions with the agent. This is a design rule, not confinement. Plugins are trusted code with the agent's permissions, including when they run in another process. Only interactions through the API are observable by the Harness.
+- The Harness MUST refuse a plugin whose declared dependencies cannot be satisfied, including a dependency cycle. A plugin MAY define a capability for other plugins in the same build.
 
 ### Input
 
-- **Steering joins the running turn** after the current round of tool calls, before the next model request. Input for after the turn starts a turn of its own.
-- **One session takes one input at a time.** Two inputs arriving together are taken in some order, never both lost or merged.
-- **A key is remembered for the session's life,** across branches and restarts, until the input it admitted is erased. Input given again with a known key gets the first receipt, whatever its content, and starts nothing.
-- **Cancelling hands back all input not yet taken.** Input handed back keeps its key, so resending it needs a new key.
-- **After a restart,** input that was queued but not taken is either handed back or run. Which one is declared.
+- The Harness MUST serialize admission, taking and withdrawal in commit order, with at most one turn running per session.
+- The Harness MUST take `now` input when idle, or queue it for the next turn if busy. It MUST give `after` input its own turn and take eligible queued input in admission order.
+- With `inputDuringTurn`, the Runtime MUST check for eligible steering after the current tool round, before the next model request or the decision to end. The Harness MUST queue steering for a new turn without that support.
+- The Harness MUST record admission before acknowledging it, including when input is queued or proposed. For a known key it MUST return the first receipt to an authorized actor, regardless of new content or whether it was taken, without starting work. A key does not authorize receipt access.
+- The Harness MUST remember keys across branches and restarts for the session's life, until the admitting input is erased. It MUST reserve internal work keys, including `job:<jobId>`, from actor-supplied keys.
+- On turn cancellation the Harness MUST hand back input not yet taken at the cancellation cutoff, without affecting later admissions. It MUST keep the keys and show handed-back content only to authorized recipients. Resending requires a fresh key.
+- On restart, the Harness MUST run or hand back queued input as `queuedInputAfterRestart` declares, using `queuedJobReportsAfterRestart` for reports if present.
+- The Harness MUST append buffered setup records in original order and with original times at first admitted input. It MUST NOT keep a session closed without admitted input.
 
 ### Settings
 
-- **Settings belong to the session, not to a branch.** Moving keeps the current settings. A fork starts with its source session's current settings, whichever entry it was forked at.
-- **A change never alters a running turn.** It applies from the next turn. An Interface may refuse a change while a turn runs, and declares whether it does.
-- **A turn records what it started with:** the model, the tools offered and the system prompt. Recovery uses that record.
+- The Harness MUST apply settings to the whole session, across branches. It MUST copy the source session's current settings on fork, not its settings at the fork point.
+- The Harness MUST apply changes from the next turn or refuse changes during a turn, as `settingsDuringTurn` declares. Rights, ceilings, answer eligibility and deployment policy remain current at each action; they are not pinned settings.
+- The Harness MUST select and record the turn's model, settings, offered tools and system prompt and supply them on recovery. The Runtime MUST NOT choose a different model. Step preparation still applies.
 
 ### Commands
 
-- **A command never starts a turn.** Most make no model request either. A command that does, such as `/compact`, which asks a model for a summary, says so.
-- **A command that only reads,** such as listing settings, doesn't make a session worth keeping.
+- A command MUST NOT start a turn.
+- A command that asks a model, such as `/compact`, MUST declare that fact. The model request follows the same authority, persistence and usage rules as a request in a turn.
+- A read-only command MUST NOT cause an otherwise unused session to be kept.
+- A transform of actor input into a command MUST preserve the authority of the actor who gave the input. The command MUST check the right for each operation it performs. Text from a tool, Provider, peer or subagent is not command authority.
 
 ### Compaction
 
-- **Compaction never leaves a tool call without its result,** or a result without its call, in the model context. If the newest part can't be summarized without splitting a pair, the pair is summarized whole, or compaction is refused.
-- **A summary names every entry it summarizes.** Erasure follows those names.
-- **After a context-overflow failure,** a step is compacted and retried at most once. A summary that fails fails the turn. Nothing is deleted either way.
+- The Runtime MUST keep settled call/result pairs together, either in the view or summarized as a pair. It MUST keep an open call explicitly pending in the view or refuse compaction that would break that association.
+- A summary MUST name every entry it summarizes, including earlier summaries it uses.
+- The Runtime MUST limit recovery from a context-overflow failure to one compaction and one retry of the step. It MUST fail the turn if the summary request fails. Compaction leaves the record intact.
+
+### Hook execution
+
+- Each operation owner MUST offer its standard core points in [Hook points](#hook-points), subject to the selected binding's coverage.
+- The owner MUST apply the combination in [Hook points](#hook-points): observe calls all handlers and ignores answers; gate stops at the first refusal or permitted pending; transform passes the current value along until handled or finished; first answer skips passes and stops at the first decision; collect gathers contributions in order. A first-answer chain without a decision does not request a retry.
+- The owner MUST order handlers in three groups: first, unspecified, last, each in plugin load order.
+- At an observe point the owner MUST report a failed handler without stopping the operation. At a gate it MUST treat a failed or invalid answer as refusal. At a transform, first-answer or collect point it MUST fail the operation and identify the failed handler. Cancellation is not permission to continue.
+- The Harness MUST assemble prompt contributions in handler order, separated by newlines, and append context contributions in handler order.
+- Without a context-management handler, the Runtime MUST use only model-visible entries from the current branch. The initial request for a transform includes this view (or its managed replacement), the assembled prompt, the selected tools and pinned settings.
+- The Runtime MUST run `step.after` once per step, after every call from the step's response is settled or left open, and before the next model request or the end of the turn. On refusal the Runtime MUST end the turn as failed with the gate's reason, and make no further model request. Checks on individual calls belong to `tool.before`.
+- The Runtime MUST end an aborted attempt as a cancelled turn and an output-limited response as `limit: output`, without running partial calls. For a failed request or model refusal it MUST end the turn as failed unless an applicable retry rule permits another attempt.
+- On a result-shape rejection, the Runtime MUST give the model the reason before another step, if the turn can still run. Step and usage limits still apply.
+- A handler with outside effects MUST make them safe to repeat. Recovery can run hooks again and does not guarantee exactly-once effects.
+
+### Tool dispatch
+
+- Every agent-executed call MUST go through the Harness, whether it comes from a model, Interface, plugin or another call.
+- Before dispatch, the Harness MUST verify current `tools` rights for every actor behind the work, the tool's availability to that turn or out-of-turn operation and caller, valid input against the definition, and a gate allowance for this exact call id, name and input. Approval cannot supply missing rights.
+- In `tool.before`, each handler MUST see the call as changed so far. If a pass ends with changed input or any handler changed it during the pass, the Harness MUST run the whole chain again once from its first handler with the resulting input before allowing dispatch.
+- The Harness MUST refuse a second pass that changes input again, or any change to id, name, actor or caller. `tool.after` MAY change only result content and value, not the call id or status.
+- The Harness MUST consume an allowance once. For a remote Runtime, the [Plugin binding](bindings/plugin.md#the-host-asks-the-runtime) maps this check to `host/runtime/hook` and `host/runtime/runToolCall`.
+- An agent with an approval plugin MUST apply the recorded policy as follows:
+
+  | Policy | Required approval behavior |
+  |---|---|
+  | `off` | The approval check MUST NOT ask. |
+  | `ask` | The approval check MUST ask unless a trusted tool definition declares the tool read-only. |
+  | `all` | The approval check MUST ask for every call. |
+  | `never` | The approval check MUST refuse every call without asking. |
+
+- With an approval plugin, the agent MUST use `all` when no policy was recorded and `never` for an unrecognized recorded value until an actor with `settings` chooses a recognized one.
+- When approval is required, the gate MUST require an explicit eligible allow for the exact call before dispatch. It MUST refuse at once if an approval request has no present eligible answerer.
+- Without an approval plugin, the agent MUST apply rights and other gates alone and signal the absence of approval support (no `approval` option in [ACP](bindings/acp.md#configuration-options)). No approval setting bypasses other gates.
+- Except for a call left pending under [Questions](#questions), the Harness MUST settle each call once with one recorded result, ignoring late or duplicate completions.
+- The Harness MUST use `refused` for pre-dispatch policy denial, `notStarted` for a call abandoned before dispatch, `failed` for known failure (including invalid input), `cancelled` for confirmed cancellation, and `outcomeUnknown` when dispatch may have occurred and the outcome cannot be established. Refusal of a retry does not settle an ambiguous original attempt.
+- The Harness MUST check authority and gates independently for each sibling call. It MUST dispatch in model order unless every call permits parallel execution. It MUST record final results as they become known and present them to the model in call order. It MUST NOT cancel siblings merely because one is refused or pending.
 
 ### The output gate
 
-- **Everything that leaves the agent for a recipient passes the gate.** That includes live events, replayed history, answers to an Interface's requests, command results and turn outcomes, not only streamed pieces.
-- **A stream has a declared end:** the end of a model response, or of a tool's output. A guardrail that holds output releases or redacts it no later than that end.
-- **Plugins may read the raw record.** An Interface never passes the raw record to a recipient.
+- The Harness MUST authorize each recipient view under current rights and tenant before gating it. All recipient output sent by the agent is in scope, including replay, replies and errors, approvals, command results and streamed events.
+- The Harness MUST keep internal capability calls and authorized internal raw access separate from recipient delivery. A plugin gets raw records only when explicitly allowed by the Harness; being an Interface or following events does not confer raw access.
+- The gate MAY answer `null` to allow, `{ block: true }` to block, or `{ events }` to redact.
+- The Harness MUST accept `{ events }` only if event count, order, types and structure are unchanged and every changed value is a string replaced by another string. It MUST block changes to strings under keys named `type`, `kind`, `status`, `method`, `stop`, `id`, or ending in `Id` or `Ids`.
+- The Harness MUST block invalid answers and gate failures rather than send unchecked output. A withheld reply uses the binding's content-free error; see [ACP](bindings/acp.md#output-gate). Without a gate handler, authorized views pass unchanged.
+- The Harness MUST submit any held stream by its end, including interruption, loss or pending for a tool, and block held output it cannot safely buffer or gate. `holdsOutput: false` means no whole-stream buffering guarantee.
+- The agent MUST declare bypassed output before enabling it. The operator MUST NOT enable it where policy requires gating. Bypassed output never reaches the gate.
 
 ### Erasure
 
-- **What counts as a copy.** Erasure follows copies, and copies of copies. Erasing too much is preferred to leaving a copy behind. The following count as copies:
-  - a model response, of every model-visible entry in the request that produced it;
-  - a tool result, of its call;
-  - a turn's result, of its responses and tool results;
-  - a summary, of what it summarizes;
-  - a fork's entries, of the entries they were copied from;
-  - a job's start, of the call that started it; its end, of the child's result; its report, of its end;
-  - the record of taking an input, of the input. The two are one.
-- **Erasure is refused** while another writer holds a session it would change. Whether it is also refused while a turn runs is declared.
-- **Records of authority can't be erased.** Erasing a revocation must not widen anyone's authority.
-- **Erasure reports three things:** what was erased; what is still pending, such as a remote deletion that failed and will be retried; and what is out of reach, such as output already delivered or a vendor's own logs.
-- **A Provider that keeps state** discards it, and deletes the remote copies it knows of.
+- In normal use the history store MUST append without modifying or deleting committed entries. Erasure and retention are separate operations.
+- The Harness MUST compute the transitive copy set, including controlled copies outside the history store. A model response copies its model-visible sources, including added context with known lineage. A tool result copies its call; a turn result copies its responses and results. A summary copies what it summarizes; a fork copies its source entries. A job's start copies its originating call, its end copies its child's result, and its report copies its end. The admission and taking of input refer to the same content.
+- The history store MUST apply erasure to the exact ids sent by the Harness and leave tombstones without erased content. The Harness MUST preserve records of authority, accounting and the control facts needed to prevent replay of erased work.
+- The Harness MUST refuse erasure if another writer holds any affected session. It MUST honor `erasureDuringTurn` and prevent affected running work, buffered output and recovered work from recreating or exposing content pending deletion.
+- The Harness MUST retain and retry pending deletions across restart. It MUST report erased, pending and out-of-reach copies separately. Delivered output and unknown vendor copies can be out of reach.
+- The Harness MUST request Provider state discard and deletion of known remote copies. Unconfirmed deletion is not success.
+- The record MUST preserve permitted content losslessly, including unknown types, except for retention or erasure. Secret values and protected launch material are excluded at write time. The core does not promise deletion of copies it cannot identify or control.
 
 ### Recovery and repeating work
 
-- **A turn's start, and the input it takes, are recorded before the Runtime runs it,** so a turn lost at once is still on the record. **Decided** in round four, from the Rust, Python and Go builds, which all did this.
-- **A model response is recorded before any tool call it asks for starts.** A call's start is recorded before the call runs. A finished call never runs again.
-- **"Safe to repeat" is a promise, not a hint.** A call that started and didn't finish runs again only if both of these promise it is safe:
-  - the tool's definition, both as recorded and as it is now;
-  - the working environment: nothing from the first attempt is still running.
+A commit is a successful write to the session's store. For an ephemeral session the record is in memory and has no restart guarantee.
 
-  A missing promise means unsafe. "Read-only" does not imply safe to repeat.
-- **An interrupted model request is repeated** only if its Provider declares it keeps no state and runs no tools, or declares its requests safe to repeat.
-- **Parallel tool calls** run together only if every call's tool allows it. Otherwise the whole round runs one call at a time. Each finished result is recorded at once, so a crash loses none, but the model sees results in the order it asked for them.
+- The Harness MUST commit `turnStart` and the input it takes before invoking the Runtime. It MUST commit each `modelRequest` and `toolStarted` before dispatching that request or call.
+- Each model attempt MUST have a fresh `stepId` and a recorded repeat-safety decision from the Provider's declared support. A retry is a new request/response pair, not a second response to the old step.
+- The Runtime MUST record a response before agent-executed calls from it start. It MUST record in-process Provider-run calls and results on receipt without dispatching them again.
+- The Harness MUST commit a mutation before reporting success and make it visible to the next request. It MUST refresh any cache affected by the mutation before passing on the reply.
+- A writer MUST renew its lease at least every `ttlMs / 3`. It MUST treat the lease as lost if no renewal succeeds within `ttlMs / 2` of its last success.
+- If a commit fails or writer access is lost or uncertain, the Harness MUST stop starting effects in the session, cancel running calls and leave the session interrupted for recovery on reopen. See [History service](bindings/history-http.md) for reconciliation, lease bounds and resend rules.
+- The Harness MUST recover only from durably committed state. A transient Runtime MUST end an interrupted turn as failed. A durable Runtime can continue when its dependencies and checkpoints permit. Interrupted in-turn questions follow [Questions](#questions).
+- The Runtime MUST NOT repeat a call with a committed result. It MAY repeat a started call without a result only if the recorded and current tool definition both promise safe repeat, and the working environment confirms that nothing from the first attempt is still running. Missing promises are unsafe; read-only is not a repeat promise.
+- The Runtime MUST use `outcomeUnknown` for an unsettled started call that it cannot safely repeat or otherwise settle from confirmed facts. A known unstarted call that is abandoned settles as `notStarted`.
+- After an ambiguous model failure, during the same turn or on reopen, the Runtime MUST repeat only when the same effective request is recoverable and the recorded and current Provider both support safe repeat. A stateless Provider that runs no tools qualifies; otherwise an explicit promise is needed. If an effective request cannot be reconstructed, the turn fails rather than guessing.
+- The Harness MUST assign history metadata and retain ownership of authority, admission, dispatch and lifecycle records. It MUST NOT accept Runtime assertions as proof of authority, dispatch or outcome. It MUST validate that a submitted response matches a model attempt it recorded and that a submitted tool result names a call it started or refused. The [Plugin binding](bindings/plugin.md#the-host-asks-the-runtime) specifies which record kinds the remote Runtime can submit, and the error for other kinds.
 
 ### The working environment
 
-- **A command's background processes** outlive the call that started them, and a cancelled turn. They stop when the session closes or the agent stops.
-- **The working environment declares how strongly it keeps "nothing outlives the agent",** and on which platforms. Where it can't keep the promise, it refuses to run commands, or declares a weaker promise. Recovery treats a weaker promise as an unknown outcome.
-- **What a stopped agent left running is cleaned up** before any recovered work runs.
+- The working environment MUST declare `commandContainment` for the current platform: `strong` covers all descendants; `processGroup` covers only the command's process group; `none` makes neither promise.
+- The Harness MUST stop background commands when their session or process ends within that scope. Outliving a call or cancelled turn is not itself a fault.
+- Before resuming work after interruption, the Harness MUST confirm cleanup of prior work that could race it or refuse automatic recovery of the affected work. An affected tool call with an unconfirmed outcome is `outcomeUnknown`.
+- The working environment SHOULD refuse file operations that resolve outside the session's project after following symlinks. The `confinesFiles` declaration reports this property; absence means false. Command containment limits process lifetime, not what a command can reach. See [Security](security.md) for when to use a sandbox.
 
 ### Authority
 
-- **Authority is a set of named rights.** An actor acts with its own rights, narrowed by the session's limit. For work another actor started, such as a job or a child session, they are narrowed further by every ancestor's current rights.
-- **An actor may grant only rights it has.** Grants and revocations apply on every branch.
-- **A session can have a limit, and belong to a tenant,** each a ceiling on every actor's rights in it. Only an administrator sets a session's limit, never above its own rights. A tenant is fixed when the session is created, is configured outside any project, and may carry a token budget across all its sessions. **Decided** in round six.
-- **Work keeps the authority of everyone who contributed to it.** A turn that took input from several actors acts with only the rights they all share, or refuses mixed input. Which one is declared.
-- **A job's report acts as the job,** with the job's narrowed authority, never as the actor who started the job.
-- **Content is never authority.** Text in a message or a tool's input can't grant a right.
-- **Presence is declared.** An Interface says when its actor is present to answer. Following events is not presence. An approval with no present actor who may answer is refused at once.
+- The Harness MUST use one Actor shape `{ id, kind, rights }` and read a recorded `plugin` kind as `program`. The Actor table lists the current kinds.
+- The operator MUST configure each Interface connection's stable actor id, kind, rights and allowed tenants. Authentication rules are in [Security](security.md). The Harness MUST derive the acting principal and scope from authenticated context, not body fields. A supplied actor id can identify a target, not prove who made the request.
+- On creation, the Harness MUST record the connection's configured actor with rights narrowed by the tenant. On opening or reopening, the Harness MUST use the recorded rights of an existing actor who has not left. It MUST refuse an actor recorded as having left. For an unrecorded actor it MUST allow a join on open only when `joinOnOpen` is enabled and the session supports another member if it already has one, narrowing configured rights by the session and tenant ceilings and recording `actorJoined`. The default for `joinOnOpen` is true for a single-user local agent; see [Security](security.md) for other deployments.
+- Builds sharing sessions SHOULD configure the same stable principal ids. Rights are session-wide, not branch history that a move can undo.
+- The Harness MUST check effective rights at each action and delivery, including plugin callbacks. Effective rights are recorded rights intersected with current tenant and session ceilings, except that the session ceiling does not remove `administer`.
+- The Harness MUST record who caused work and who authorized it, including releases, represented actors, steering and ancestors. Work MUST stay within its recorded starting rights and the current rights of every contributing actor and ancestor, under every applicable ceiling. If required provenance is unavailable the action is refused. `mixedActorInput` chooses intersection or refusal, not a more privileged actor.
+- A job MUST act with its `jobStarted.data.rights` intersected with its starting actor's current effective rights and every current ceiling. The starting ceiling is `watch` only when that field is missing. A report MUST act as the job, not its starter.
+- Joining, changing rights or removing another actor MUST require `grant`. A grant MUST NOT exceed the granter's current effective rights. The Harness MUST record the granter's id with the grant.
+- The Harness MUST apply the following rights at minimum. Compound operations check each constituent action.
+
+  | Right | Operation that requires it |
+  |---|---|
+  | `watch` | discover, open and read visible sessions; follow; list visible actors, proposals, jobs and requests |
+  | `propose` | admit input that awaits release |
+  | `input` | create a session; give, steer, release or decline input; withdraw another actor's proposal |
+  | `answer` | answer a question other than approval |
+  | `approve` | answer an approval |
+  | `tools` | dispatch a call; admit host-supplied MCP servers |
+  | `cancel` | cancel a turn, call or job; close a session |
+  | `settings` | change session settings; move, rewind or fork |
+  | `erase` | erase history |
+  | `grant` | join, change rights or remove another actor |
+  | `jobs` | start a job |
+  | `delegate` | start a subagent |
+  | `administer` | set or remove the session ceiling |
+
+- The Harness MUST check project and tenant scope on creation, open, discovery and fork. Detaching a view is not session close. An actor can withdraw its own input or leave without `grant`.
+- The Harness MUST keep unknown fields and names inert. No unknown field or right widens authority or changes how known fields are checked.
+- The Harness MUST treat project files (including `AGENTS.md`), tool and Provider output, and peer and subagent messages as untrusted content. They can shape what the model says, not what it is allowed to do. Tool names and model claims do not establish read-only status.
+- The Interface MUST scope reported presence to its authenticated connection and clear it on disconnect. Following events alone is not presence.
+- The agent SHOULD keep grants, revocations, limits, tenant assignment, approval answers, gate refusals, secret storage by name, erasure and plugin loading reachable to the operator for as long as history is kept. These are existing entries or standard events, not a new audit channel.
+
+### Limits and tenants
+
+- The Harness MUST require `administer` to set a session limit. The replacement set MUST fit within the administrator's own rights narrowed by its tenant, not by the limit being replaced.
+- Removing the ceiling with `null` MUST require every standard right under that same tenant check. A session ceiling cannot remove `administer`.
+- A connection MUST use only tenants the operator allows it to create, list, open, fork or follow. The Harness MUST refuse an unauthorized tenant and refuse omission when that connection must use one.
+- The Harness MUST keep the creation tenant fixed and pass it to every fork and child. Tenant policy comes from outside the project.
+- The Harness MUST check the tenant's input plus output token budget before each turn and after each step. If used tokens meet or exceed the budget, the Harness MUST end the turn with `{ kind: "limit", limit: "tenantTokens" }` without dispatching another step. Steps already running can overshoot. Hard caps are out of scope.
+- The agent MUST keep a durable deployment-local tally of reported tokens in each tenant, including retries, child work and model requests outside turns, counted once per attempt before the next effect. It MUST NOT add imported or copied uses to the tally or reduce it for erasure or retention. Unreported tokens do not supply a charge. Deployments sharing a tenant each count only work they run.
+- The agent SHOULD bound jobs per session and sessions per process in deployment configuration. These bounds are not wire declaration keys.
 
 ### Questions
 
-- **A key binds the whole question:** its kind, text, options, credential name and tool call. Asking again with the same key and different details doesn't reuse the earlier answer.
-- **Without a time limit,** a question waits in its turn. With one, the asker chooses what happens when it passes: decline, or leave the call open past its turn.
-- **When every question behind a turn's open calls is answered,** one new turn starts. It is keyed, so answering again starts none. It runs the calls again from the top, through every check, and each open call gets exactly one result.
-- **A call still waiting has no result in the record.** Only the model's view of the history describes it as waiting.
-- **Moving away from unfinished work** either cancels the open calls, questions and jobs left on the abandoned branch, or is refused before anything changes. Which one is declared. Forking at unfinished work is refused.
+- The Harness MUST record the question before asking and keep its `answerers` restriction, if supplied. Absent means any session actor with the required right. An answerer need not have all the asker's rights.
+- The Harness MUST check current effective rights, answerer membership and branch eligibility when accepting or reusing an answer. It MUST serialize answers and system closures and accept only the first valid committed decision. It MUST record a system closure as `inputAnswer` with no `actorId`, `declined: true` and a reason.
+- A question key MUST bind the question to its session and originating work, including the exact call when applicable, kind, text, details, options, answerers, deadline policy and credential name. The Harness MUST reject changed bindings under the same key. A recorded allow for a changed effect is not reusable.
+- A question without a time limit MUST wait in its turn until answered or closed. The Harness MUST preserve the original deadline of a timed wait across recovery and decline on expiry unless the asker chose to leave the call open and the build supports it.
+- The agent MUST NOT let a question outlast its turn without `lateAnswersStartTurns` and `questionsOutlastTurns`. A pending reply MUST refer to a committed, answerable question tied to the call. Only `tool.before` can return pending among the gates.
+- The Harness MUST close unanswered requests with reason `cancelled` when it cancels their work. Seeing a question or its link does not authorize acting on it.
+- A tool that can leave its call open MUST ask before outside effects or make effects before the question safe to repeat, for example with a key.
+- When every question behind a turn's open calls is answered, the Harness MUST admit exactly one continuation keyed by the originating turn, behind any running turn. It MUST rerun the calls from the top through every check, including reuse of eligible answers. A declined answer is not permission; a still-waiting call has no recorded result.
+- After interruption of an in-turn wait, a durable Runtime with `waitingThroughRestart` MUST ask again with the same key. Without that support the Harness MUST close it as `noLongerAnswerable`; the Runtime handles the closure as declared. Only calls already left open past their turn use late-answer continuation.
 
 ### Secrets
 
-- **A secret goes straight from the Interface to the credential store,** in one atomic write. Only the credential's name is recorded, sent in events or given to the asker.
-- **If the write fails,** the question stays unanswered, and no error message contains the value.
-- **A question can't replace a Provider's credential.** Those names are reserved.
-- **With no credential store, or no name,** the question is declined before anyone is asked.
-- **A protocol that forbids secrets in a form,** as ACP does, never carries one. The question is declined instead.
+- The Harness MUST enforce credential access by capability, name and authorized scope. A plugin MUST NOT read credentials for Providers it did not register. The Harness MUST NOT give credentials to the Runtime.
+- If the store or name is missing, the Harness MUST decline a secret question before asking. A secret question MUST NOT target registered Provider credentials.
+- The Interface MUST send a secret only to the credential store through an authorized path. The Harness MUST serialize competing answers and commit the secret write before committing question closure, using the request identity to recognize a completed write on retry. If closure fails, the Harness MUST close on retry using the existing write rather than storing the value again.
+- The agent MUST NOT put the value in history, model context, hooks, events, errors or logs. Only the stored name is returned to the asker and recorded.
+- A protocol that forbids secret entry MUST NOT carry the value. An independently authorized path to the store can answer it; otherwise the question is declined.
 
 ### Jobs
 
-- **A job started with a key starts once.**
-- **A job's end is recorded before its report is taken as input,** and the report is keyed by the job. A crash in between loses or repeats neither.
-- **A job whose result goes back in the call that started it doesn't also report.**
-- **Cancelling a job waits for it to clean up.** Closing a session cancels its jobs and waits for them. Stopping the process does neither: its jobs are interrupted, not ended.
-- **A job's usage counts once** toward its session, however its result travels.
+- A plugin MUST start a job through the Harness for its session and actor. The Harness MUST record the start, owner, effective starting rights and cause before the job runs. A keyed start is unique per owning plugin and session.
+- The Harness MUST accept one terminal outcome per job and acknowledge a retry of that same outcome without creating a second end or report. Taking up an unfinished job is exclusive to its owning plugin.
+- For a report, the Harness MUST commit `jobEnded` with `report: true` and `inputAccepted` with reserved key `job:<jobId>` in one batch. On reopen it MUST restore a missing legacy admission before any work runs.
+- With `startsTurnsUnasked: jobReports`, the Harness MUST schedule a turn for a report, behind any running turn. Otherwise it MUST NOT start a turn from a report alone. Scheduler and webhook submissions are authorized actor input, not unasked turns. No other autonomous initiator is defined by the core.
+- A job whose result returns in its starting call MUST NOT also report that result as input.
+- The Harness MUST await the owning plugin's cleanup on cancellation. It MUST cancel and await jobs when closing their session. An authorized close requests cancellation of the session's jobs. Turn cancellation MUST leave its jobs running unless `cancellingTurnCancelsJobs` is true, in which case it cancels them. Process stop MUST interrupt jobs rather than end them.
+- Without the owning plugin, the Harness MUST leave unfinished jobs listed as unfinished on reopen. It MUST NOT end a job itself except on explicit cancellation of a job whose plugin is gone, by an actor with `cancel`. For that cancellation it MUST record `jobEnded` with outcome `cancelled`. That record does not prove an external effect stopped.
+- Job usage MUST count once toward its session, whichever way the result travels.
 
 ### Subagents
 
-- **A child session gets** the same plugins and project, a copy of its parent's settings, only its task, and authority no wider than its parent's.
-- **Subagents have a depth limit.** The default is three levels. The limit is declared.
-- **A follow-up to a finished child** is a new job on the same child. A child that is busy refuses another message.
-- **A child's question reaches the top one level at a time.** Each level records its link, and the answer goes back the same way. A secret's answer passes only its credential name.
-- **A child's job isn't finished** while the child still has calls open.
+- The Harness MUST start a child as a job with the parent's project, tenant, plugins and copied settings, excluding host-supplied MCP servers. It MUST give the child only its task, not the parent's history by default. A model override MUST pass the applicable settings and model availability checks.
+- The Harness MUST check the child depth limit before starting work, with root depth zero and default maximum three. The build MUST declare the maximum. The core names no wire key for it.
+- A follow-up to a finished child MUST start a new job on the same child. The Harness MUST refuse a follow-up to a busy child.
+- Each relay MUST record its parent link, route a child's question and answer one hop at a time, and recheck eligibility and authority at each hop. A secret answer relays only its stored name.
+- The owning plugin MUST keep the child's job unfinished while that child has calls open.
 
 ### Configuration and trust
 
-- **Trust is given outside the project and kept outside it.** A project's own files can't grant it. It is checked again every time plugins are composed.
-- **Global plugins load first.** A trusted project's plugins and options load after them, merged by plugin name.
+- The Harness MUST load only operator-approved plugins and dependencies. Project trust MUST be granted and stored outside the project and checked at composition time. A project without trust cannot select launchable code or alter policy or credentials.
+- The Harness MUST compose global plugins first, then trusted project plugins and options, merged by plugin name, within operator and tenant policy. It MUST use a stable configured order and refuse composition errors without partially installing registrations.
+- Configuration files MUST NOT set Harness-owned authority or parentage. The Harness MUST record changes to live session settings under [Settings](#settings). The deployment defines how it identifies and revokes project trust; see [Security](security.md).
 
 ### MCP servers
 
-- **Servers a host gives a session** serve only that session. Subagents don't inherit them. They close with the session, and must be given again when it reopens. Their environment and headers are never recorded.
-- **A failure before a call reaches the server** is a failed result. Losing the server after the call was sent is an unknown outcome.
-- **A tool's missing annotations are read cautiously:** it may change things, it may reach outside, and it is not safe to repeat.
+- The Harness MUST start host-supplied MCP servers only with the connection actor's current `tools` right and operator permission (`hostMcpServers`). The default is allowed for ACP over stdio and denied for network Interfaces. Such servers run with the agent's permissions.
+- The Harness MUST validate the supplied server specifications before starting or connecting to any of them. It MUST scope these servers to the session that received them, close them with it, and require them to be supplied again on reopen. It MUST NOT record their environment values or headers or disclose them in output.
+- Before exposing any tools from a host-supplied set, the Harness MUST validate authorization and collisions with the session catalog. It MUST refuse a conflicting list rather than shadow a tool.
+- The Harness MUST report a definite pre-dispatch server failure as `failed` and a loss after send without a confirmed result as `outcomeUnknown`.
+- The Harness MUST treat missing tool annotations conservatively: potentially side-effecting and open-world, not safe to repeat, not parallel.
 
 ### Parts that are lost
 
-A part reached over a connection, such as a plugin in another process or a service, can be lost while the agent runs. Then:
-- calls waiting on it fail, saying which part was lost;
-- a tool call it had started gets one unknown outcome;
-- a lost observer is skipped and reported, a lost gate refuses, and a lost transform fails its operation;
-- a lost Runtime or history store is reported, not silently replaced.
+- The Harness MUST identify a lost part to affected callers without claiming results it cannot establish. Known unstarted and possibly dispatched work follow different statuses in [Tool dispatch](#tool-dispatch).
+- Lost handlers MUST follow the failure rules in [Hook execution](#hook-execution). The Harness MUST report a lost Runtime or store rather than silently replace it. [Recovery and repeating work](#recovery-and-repeating-work) applies to interrupted work.
+- Work MUST have no implicit timeout except where the selected binding provides one. A cancelled request MUST be answered within five seconds, without implying termination when it cannot be confirmed.
 
 ### Provider state
 
-- **A Provider that keeps state never supplies context missing from the agent's view.** It continues its state only when a request extends exactly what that state holds. Otherwise it starts again from what the agent sends.
-- **Moving, forking, compacting, erasing and changing the model** all mean it starts again.
+- The Provider MUST continue conversation state only for an exact prefix of the effective context in the same authorized session and branch. It MUST start fresh otherwise, without adding omitted history or passing opaque state to another Provider.
+- The Harness MUST reset Provider conversation state on move, fork, compaction, erasure or model change before any affected request. If reset cannot be made safe, that request is refused.
+- Before dispatching a model request, the Harness MUST authorize its final Provider and context under current deployment policy. For in-process Provider-run tools, it MUST send an explicit list of allowed tools with the request, empty by default. It MUST NOT allow a tool that fails current rights, approval or other gates, or whose Provider cannot honor the list.
+- The agent MUST declare `runsToolsAtProvider: true` for a session using Provider-run tools. Such sessions, live sessions and late batch responses are outside `/1` wire and portability. See [Plugin binding](bindings/plugin.md#the-host-asks-a-provider).
+
+### Moving and rewinding
+
+- The Harness MUST record a plain move without restoring files. For unfinished work it MUST cancel and settle the work left behind or refuse before changing position, as `movingWithUnfinishedWork` declares.
+- The Harness MUST refuse a fork without `forking` support or while the session has unfinished work.
+- With `rewinding`, the Harness MUST save a project point before each turn or out-of-turn tool execution and record it on its start entry.
+- The Harness MUST accept rewind targets only at a quiescent entry on the current branch: a `turnEnd` or an entry outside a turn. It MUST refuse before changing anything if work is unfinished under `movingWithUnfinishedWork`, any job started after the target, or any later turn or out-of-turn call lacks a verifiable point from this working environment and project.
+- The Harness MUST select the earliest recorded `data.point` in branch order after the target from a `turnStart` or out-of-turn `toolStarted`. With no later turn or out-of-turn call it MUST move without restoring a point.
+- To restore, the Harness MUST save the current files as P0, commit a `position` entry with `data.restore: { point, undo: P0 }`, then restore `point` idempotently. On reopen if that position is the latest entry, it MUST restore its point again before any work.
+- If restore fails, the Harness MUST commit a compensating `position` to the previous head with P0 as its restore point, restore P0 and refuse. If any commit or rollback is uncertain, it MUST NOT start effects in the session until the committed position and its files are reconciled.
+- A rewind MUST report the ids of later open-world calls as `outOfReach`, not claim their effects were undone. [Provider state](#provider-state) applies to both move and rewind. See [Shared data](bindings/data.md#rewinding) for wire records.
 
 ### Identities and usage
 
-- **Every tool call has an identity unique in its session.** A vendor's own reference for the call is kept beside it, for the Provider.
-- **Usage is plain numbers that add up:** input, output and cached tokens, and cost. A vendor's own breakdown stays in the Provider's data.
+- The Harness MUST keep tool call identities unique within a session and preserve the distinct Provider reference when supplied. Session and entry ids are never reused.
+- The Harness MUST attribute reported usage once to the work that incurred it and roll it up without counting a copied entry or a child report as new usage. Input and output counts are tokens; the Provider's extra breakdown stays in Provider data. See [Shared data](bindings/data.md#messages) for the wire mapping.
 
 ### Following a session
 
-- **A follower resumes from an entry's identity.** It gets every entry recorded after that one, then live events. An unknown entry is refused.
-- **A slow follower may miss streamed pieces, but never entries.** The entries hold the final content of every piece it missed.
+- The Harness MUST emit standard events for actions and states the build supports. It MUST commit the associated entry before emitting an event that claims a recorded transition. Unrecorded progress and stream pieces can arrive before the completed step or call is committed.
+- A follower with an authorized cursor MUST receive visible committed entries in recording order after it, then authorized live events. The Harness MUST establish a single catch-up watermark so that entries are not lost or repeated at cutover. The ACP branch history page is not this subscription.
+- The Harness MUST refuse a cursor it cannot resolve for that viewer, including after expiry. It MUST recheck delivery rights and apply the output gate on replay. Replay covers recorded content, not missed live chunks.
+- The Harness MUST bound follower queues and disconnect a follower that cannot keep up with committed entries, allowing it to resume from its last visible cursor. Live pieces can be dropped.
+
+### Deliberate limits
+
+- The core has no general transaction across plugin state and input, common custom capability discovery protocol or common command argument and error format.
+- Exact recording of every effective model request is not a portability guarantee. [Recovery](#recovery-and-repeating-work) defines when missing request data blocks retry. There is no common retry schedule beyond the compaction limit, and no step cap unless one is configured.
+- There is no common portable approval grant beyond a decision on the exact call. Deployment-specific policy, trust grants and access to credentials are separate from question answers.
+- The core has no common mechanism for reconciling arbitrary external effects, tracking delivery of individual live pieces or recovering job ownership after replacement by a different plugin.
+- The core has no shared working environment sandbox or command execution profile. File confinement and command containment describe different properties; [Security](security.md) covers deployment requirements.

@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-18
 ---
 
+**Current rule:** [Portable sessions](../bindings/data.md#portable-sessions) now include jobs, plugin-set records, authority ceilings and erasure, with selected properties checked by the kit, not every stored entry ([ADR 0019](0019-acp-2-and-several-actors.md), [ADR 0020](0020-tenants-limits-and-output-events.md)). Portability does not authorize access: [ACP opening](../bindings/acp.md#sessions) and [Security](../security.md) govern tenant checks, recorded rights, and trusted provenance.
+
 # Portable sessions: one shared format for what history holds
 
 Five builds now share a [history service](../bindings/history-http.md), and each could keep its sessions in another language's service. But the service stores entries without reading them. Each build wrote its own shapes: the Go agent wrote Go field names, times as strings, kinds such as `turn.start`, and whole-session snapshots. So no agent could reopen a session another language's agent wrote, let alone recover its interrupted turn. That was the main thing round three left undone.

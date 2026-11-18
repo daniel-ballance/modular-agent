@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-14
 ---
 
+**Current rule:** The operation owner defines each point and the Harness dispatches and combines handlers in the [specified order](../contracts.md#hook-execution), including handlers in other processes. Core plugins can define extra points; [plugin `/1`](../bindings/plugin.md#the-host-asks-a-hook-handler) carries only its named points and specifies [the Runtime's other exchanges](../bindings/plugin.md#the-host-asks-the-runtime).
+
 > **Amended** on 2026-11-16 by [ADR 0011](0011-minimal-harness-everything-is-a-plugin.md): hook handlers come from plugins rather than Harness configuration. The Runtime still never runs them itself.
 
 # Whoever owns an operation defines its hook points, and handlers always run in the Harness

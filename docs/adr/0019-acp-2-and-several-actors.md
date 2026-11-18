@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-18
 ---
 
+**Current rule:** [Rewinding](../bindings/data.md#rewinding) uses points from `turnStart` and out-of-turn `toolStarted`; [ADR 0020](0020-tenants-limits-and-output-events.md) adds ceilings and [shared output events](../bindings/data.md#output-events). The current kit and binding, not the five binding findings and two separate kit findings below, define the acceptance evidence and rules respectively.
+
 # ACP `/2`, several actors, jobs, rewinding and the output gate across processes
 
 After round four, five builds interoperated, but some of what the description promises had never been tested across them, and two things the bindings knew were wrong had been left for later:

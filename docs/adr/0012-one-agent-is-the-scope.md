@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-16
 ---
 
+**Current rule:** [Keyed input](../contracts.md#input) and [ordered catch-up](../contracts.md#following-a-session) are core behavior, and [shared data](../bindings/data.md#portable-sessions) defines records for portable replay. The build chooses the mechanism, not the guarantees.
+
 # One agent is the scope, and hosts drive it from outside
 
 This system describes one agent: a Harness and its plugins. A system that coordinates several whole agents, such as T3 Code driving Pi, Codex and Claude Code, is a **host**. It is outside this system. The agent must let a host drive it fully through an Interface, and must say what it supports, so that a host never needs anything else.

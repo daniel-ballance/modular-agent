@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-14
 ---
 
+**Current rule:** The Harness owns sessions and the Runtime owns turns; a step is not a separate part. A session can have no turns and a turn no steps; another step can follow steering, retry or result correction as well as tool results, as described in [Harness and Runtime](../contracts.md#harness-and-runtime) and [Hook execution](../contracts.md#hook-execution).
+
 > **Amended** on 2026-11-16 by the [pressure test](../pressure-test/synthesis.md#4-a-turn-returns-a-result-and-can-wait): a turn now runs until the agent has nothing more to do for now, or it stops. Waiting for an answer is part of a turn, not its end, and a turn returns a result. **Jobs** run beside turns. An exchange unit was added between session and turn, then dropped in round 2. See [Units of work](../architecture.md#units-of-work).
 
 # Sessions, turns and steps are nested lifetimes with one owner each

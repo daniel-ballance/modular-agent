@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-17
 ---
 
+**Current rule:** The gaps below describe the builds at adoption, not their current status. The current [core rules](../contracts.md#rules-every-implementation-follows) include later amendments; see [Status](../status.md) for TypeScript evidence, not portable requirements.
+
 # The rules three clean-room builds agreed on become part of the contracts
 
 The description was tested by building it three more times. Each build used a different language (Rust, Python and Go) and a different binding (one process, plugins in other processes, and HTTP services). Each was built by GPT-6.1 Sol from the description alone. None saw the TypeScript build or the others. All three finished every milestone, and each logged where the description left a choice open: 112 entries in all. For each one, the builder said whether two builds that chose differently would break a plugin or a host.

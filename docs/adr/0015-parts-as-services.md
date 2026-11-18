@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-16
 ---
 
+**Current rule:** The demo had five processes: the agent, three services and a following client; its private APIs and retry choices are not production profiles. [Security](../security.md), [recovery rules](../contracts.md#recovery-and-repeating-work), and the [history service's lease and resend rules](../bindings/history-http.md#writing-one-writer-at-a-time) apply now.
+
 # Parts can be services, each with its own HTTP API
 
 The description claims an agent can be built as services over a network. To test that, three parts now run as services, each with its own small HTTP API and its own bearer token:
