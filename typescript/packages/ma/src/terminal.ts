@@ -104,7 +104,7 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
     }
     eof = true;
     for (const answer of waiting.values()) answer("decline");
-    await session.waitForIdle();
+    await session.waitIdle();
   } finally {
     process.off("SIGINT", cancel);
     io.close();

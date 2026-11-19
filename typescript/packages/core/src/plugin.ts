@@ -15,10 +15,11 @@ type ResultFields = { content: Content; value?: unknown };
 type After = Observe & { call: ToolCall; result: ResultFields & { status: ToolStatus; callId: string } };
 type Hooks = {
   "plugin.load": [{ name: string; origin: string }, "allow" | { refuse: string }];
+  "session.prepare": [{ sessionId: string; project: string; resumed: boolean }, void];
   "session.start": [{ sessionId: string; resumed: boolean }, void];
   "session.end": [{ sessionId: string }, void];
   input: [{ sessionId: string; actorId: string; content: Content; when: string }, { change: Content } | { handle: true }];
-  "turn.before": [Observe & { input: Content }, { add: { system?: string; context?: Content } }];
+  "turn.before": [Observe & { input: Content; project?: string; tools?: ToolDefinition[] }, { add: { system?: string; context?: Content } }];
   "turn.start": [Observe, void];
   "step.before": [Observe & { stepId: string; request: ModelRequest }, { change: ModelRequest }];
   "step.after": [Observe & { stepId: string; response: AssistantMessage }, "continue" | { end: string }];
@@ -246,7 +247,7 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
     on(point, handler, order, options) {
       check();
       if (served && (options?.inProcessOnly || !points.has(point))) unavailable(`hook ${point}`);
-      if (!points.has(point)) throw new AgentError("not_supported", `Hook ${point} is not supported`);
+      if (point !== "session.prepare" && !points.has(point)) throw new AgentError("not_supported", `Hook ${point} is not supported`);
       if (order !== undefined && !["first", "normal", "last"].includes(order)) throw new AgentError("invalid_composition", "Unknown hook order");
       registrations.push(api => api.on(point, async (payload: Hooks[typeof point][0], work?: Work) => {
         const p = payload as Observe & { actorId?: string; stepId?: string; call?: ToolCall };
@@ -255,7 +256,11 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
           turnId: p.turnId, stepId: p.stepId ?? p.call?.stepId, callId: p.call?.id,
         }, work, options?.inProcessOnly);
         try {
-          const answer = await handler(structuredClone(payload), cx);
+          const snapshot = structuredClone(payload);
+          if (!served && point === "turn.before" && p.sessionId) Object.assign(snapshot, {
+            project: api.session(p.sessionId).project, tools: structuredClone(api.tools(p.sessionId)),
+          });
+          const answer = await handler(snapshot, cx);
           if (answer === undefined || answer === null) return;
           if ((point === "tool.before" || point === "plugin.load") && answer === "allow" ||
               point === "step.after" && answer === "continue" || point === "turn.result" && answer === "accept") return;
