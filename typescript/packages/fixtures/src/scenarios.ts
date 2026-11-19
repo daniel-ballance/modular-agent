@@ -38,7 +38,7 @@ export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Pla
   return out;
 }
 
-type Expect = { outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string }[]; records?: string[]; count?: number; error?: string };
+type Expect = { outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string; contains?: string }[]; records?: string[]; count?: number; error?: string };
 type Crash = { record: string } | { count: number };
 type Step = { prompt: string; crashWhen?: Crash; expect?: Expect } | { reopen: true; expect?: Expect };
 export interface Scenario {
@@ -94,7 +94,9 @@ async function waitGroup(pid: number) {
 async function crashRun(path: string, dir: string, p: Placement, i: number, when: Crash, previous?: string) {
   const child = spawn(process.execPath, [fileURLToPath(new URL("./scenario-agent.js", import.meta.url)),
     path, dir, String(i), JSON.stringify(p), previous ?? ""], { detached: true, stdio: ["ignore", "pipe", "inherit"] });
-  const exited = new Promise<void>(resolve => child.once("close", () => resolve()));
+  // Node has reaped the direct child by the time it emits close, even if
+  // orphaned grandchildren in the group are still awaiting reaping.
+  const reaped = new Promise<void>(resolve => child.once("close", () => resolve()));
   let failure: unknown;
   child.on("error", error => { failure = error; });
   let sessionId: string | undefined;
@@ -118,7 +120,7 @@ async function crashRun(path: string, dir: string, p: Placement, i: number, when
       try { process.kill(-pid, "SIGKILL"); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
     }
-    await exited;
+    await reaped;
     if (pid) await waitGroup(pid);
     lines.close();
   }
@@ -170,7 +172,9 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
         for (const [j, item] of want.toolResults.entries()) {
           compare(`toolResults[${j}].name`, item.name, got[j]?.name);
           compare(`toolResults[${j}].status`, item.status, got[j]?.status);
-          compare(`toolResults[${j}].text`, item.text, got[j]?.text());
+          const text = got[j]?.text();
+          compare(`toolResults[${j}].text`, item.text, text);
+          if (item.contains !== undefined && !text?.includes(item.contains)) fail(`toolResults[${j}].contains`, item.contains, text);
         }
       }
       if (want.records) {

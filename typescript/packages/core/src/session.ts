@@ -72,9 +72,10 @@ function readTurn(entries: HistoryEntry[], end: HistoryEntry): PromptResult {
   const results = turn.flatMap(e => {
     if (e.erased || e.kind !== "toolResult" || e.message?.role !== "toolResult") return [];
     const { content, toolCallId: callId, toolName: name } = e.message;
+    if (!order.has(callId)) return [];
     const { status, value } = e.data as { status: ToolStatus; value?: unknown };
     return [{ callId, name, content, status, value, text: () => textOf(content) }];
-  }).sort((a, b) => (order.get(a.callId) ?? Infinity) - (order.get(b.callId) ?? Infinity));
+  }).sort((a, b) => order.get(a.callId)! - order.get(b.callId)!);
   return {
     inputId: turn.find(e => e.kind === "input")?.inputId ?? "", disposition: "turn", turnId: end.turnId,
     text: result.text ?? "", value: result.value, openToolCalls: result.openToolCalls, outcome, usage,
@@ -149,6 +150,7 @@ export class Session {
     let result: PromptResult | undefined;
     let failure: unknown;
     let overflow = false;
+    let cursor: string | null = null;
     let admission: string | undefined;
     let turn: string | undefined;
     const run = this.#run(input, options, {
@@ -160,7 +162,7 @@ export class Session {
       admitted(id) { admission = id; wake(); },
     }).then(r => { result = r; }, e => { failure = e; }).finally(() => { settled = true; wake(); });
     while (!settled || queue.length) {
-      if (overflow) throw new AgentError("lost", "Prompt event reader fell behind");
+      if (overflow) throw new AgentError("lost", "Prompt event reader fell behind", { fromEntry: cursor });
       if (settled) turn ??= result?.turnId;
       if (admission && !turn) turn = this.#api.history(this.id, { all: true })
         .find(e => e.kind === "input" && inputIdOf(e) === admission)?.turnId;
@@ -168,6 +170,8 @@ export class Session {
         for (const e of queue.splice(0)) {
           if (e.turnId !== turn && !((e.type === "entry" || e.type === "entry.added") && e.data?.turnId === turn)) continue;
           const event = eventOf(e);
+          if (overflow) throw new AgentError("lost", "Prompt event reader fell behind", { fromEntry: cursor });
+          if (event?.type === "entry") cursor = event.data.id;
           if (event && event.type !== "turnEnded") yield event;
         }
       } else if (settled) break;
@@ -183,21 +187,20 @@ export class Session {
     };
   }
 
-  async *events(fromEntry?: string): AsyncIterable<Event> {
+  async *events(fromEntry?: string | null): AsyncIterable<Event> {
     this.#check();
     const entries = this.#api.history(this.id, { all: true });
-    const index = fromEntry === undefined ? -1 : entries.findIndex(e => e.id === fromEntry);
-    if (fromEntry !== undefined && index < 0) throw new AgentError("not_found", "Unknown entry cursor");
+    const index = fromEntry == null ? -1 : entries.findIndex(e => e.id === fromEntry);
+    if (fromEntry != null && index < 0) throw new AgentError("not_found", "Unknown entry cursor");
     let wake = () => {};
     const queue: AgentEvent[] = [];
     let dropped = false;
-    let cursor = fromEntry;
+    let cursor: string | null = null;
     const lag = () => { dropped = true; wake(); };
     // Snapshot the committed watermark and subscribe synchronously. Gate replay
     // on demand so a long history alone cannot make a new subscriber lag.
     const off = this.#api.follow(this.id, { recipient: local, onLag: lag }, e => {
       if (queue.length >= 1024) {
-        if (e.type === "model.output" || e.type === "tool.progress") return;
         lag();
         off();
       } else queue.push(e);
