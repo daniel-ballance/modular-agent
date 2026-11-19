@@ -295,6 +295,16 @@ class Harness(Authority):
         if target != "tools" or operation != "run" or "call" not in data:
             return clone(await method(data, emit))
         call = data["call"]
+        if call.get("parentCallId") and (definition := data.get("definition")):
+            tools = await self.call("@harness", "tools", "definitions", {"session": sid})
+            current = next((t for t in tools if t["name"] == call["name"]), None)
+            if current != definition:
+                return {
+                    "call": call["id"],
+                    "status": "refused",
+                    "content": content("Tool registration changed before dispatch"),
+                }
+            await self._assert_writable(sid)
         if "tools" not in self.permissions(
             self.sessions[sid], call["actor"], call.get("authority")
         ):
@@ -310,7 +320,8 @@ class Harness(Authority):
             for task in children:
                 if not task.done() and not task.cancelling():
                     task.cancel()
-            await asyncio.gather(*children, return_exceptions=True)
+            if children:
+                await asyncio.gather(*children, return_exceptions=True)
             self.tool_dispatches.pop(token, None)
 
     async def nested_tools(self, token, name=None, arguments=None):
