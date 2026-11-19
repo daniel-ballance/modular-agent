@@ -171,6 +171,7 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 	// Some admission/settlement records in the base do not yet have a live event.
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
+	cursor := ""
 	for {
 		if yield == nil || r.Duplicate {
 			snap, err := s.view(ctx)
@@ -188,7 +189,7 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 		case <-ctx.Done():
 			return PromptResult{}, appError(ctx.Err(), CancelledCode)
 		case <-overflow:
-			return PromptResult{}, &Error{Code: Lost, Message: "prompt stream fell behind; read history to resume"}
+			return PromptResult{}, &Error{Code: Lost, Message: "prompt stream fell behind", Data: map[string]any{"fromEntry": cursor}}
 		case <-wake:
 		case <-tick.C:
 			if yield != nil {
@@ -212,6 +213,9 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 				continue
 			}
 			e := sdkEvent(raw)
+			if raw.Kind == "history.added" {
+				cursor = api.Decode[api.Entry](raw.Data).ID
+			}
 			if e != nil && !yield(e, nil) {
 				return PromptResult{}, nil
 			}
@@ -382,6 +386,11 @@ func (s *Session) Settings(ctx context.Context) (Settings, error) {
 	}
 	b := snap.Settings
 	out := Settings{"reasoning": b.Thinking, "approval": api.ApprovalWire(b.Approval), "maxSteps": b.MaxSteps, "maxOutput": b.MaxOutput}
+	if b.ModelTools == nil {
+		out["modelTools"] = nil
+	} else {
+		out["modelTools"] = slices.Clone(*b.ModelTools)
+	}
 	for _, m := range s.agent.Models() {
 		if m.ModelRef.String() == b.Model {
 			out["model"] = m.ModelRef

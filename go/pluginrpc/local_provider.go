@@ -72,6 +72,12 @@ func (a *localAccess) Generate(ctx context.Context, request api.Request, emit fu
 		return api.Response{}, err
 	}
 	response, err := a.ModelAccess.Generate(ctx, requestIn(final), emit)
+	if ctx.Err() != nil {
+		return api.Response{}, ctx.Err()
+	}
+	if errors.Is(err, context.Canceled) || Code(err) == "cancelled" {
+		return api.Response{}, err
+	}
 	msg := responseOut(response)
 	if err != nil {
 		msg["stop"] = "failed"

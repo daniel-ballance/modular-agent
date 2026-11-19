@@ -1407,6 +1407,18 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 			return nil, err
 		}
 		check = changed.(api.ToolCheck)
+		if check.Call.ParentCall != "" && check.InputChanged && !check.Open && check.Refused == "" {
+			check.InputChanged, check.Validate = false, nil
+			ctx = api.WithExecution(ctx, api.Execution{Session: p.s.id, Turn: p.id, Call: check.Call, ToolSource: p.toolRegistration(check.Call.Name)})
+			changed, err = p.c.Invoke(ctx, name, check)
+			if err != nil {
+				return nil, err
+			}
+			check = changed.(api.ToolCheck)
+			if check.InputChanged {
+				return nil, errors.New("tool gate changed input on its second pass")
+			}
+		}
 		validate := check.Validate
 		check.Validate = func(call api.Call) error {
 			if validate != nil {
@@ -1647,7 +1659,7 @@ func (p *turnPorts) RunTool(ctx context.Context, call api.Call) api.ToolResult {
 	}
 	result, err := p.executeTool(ctx, source, snap, call, api.ToolRegistration{Plugin: plugin, ToolSource: id}, 0)
 	if err != nil {
-		p.Emit(context.WithoutCancel(ctx), api.Event{Kind: "plugin.problem", Call: call.ID, Data: api.JSON(err.Error())})
+		result.ProcessingError = err
 	}
 	return result
 }

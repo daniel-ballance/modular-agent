@@ -32,7 +32,8 @@ type ProviderErasure struct {
 	ErasedPairs  []EntryPair `json:"-"`
 	PendingPairs []EntryPair `json:"-"`
 	Pending      []string    `json:"pending,omitempty"`
-	OutOfReach   []string    `json:"outOfReach,omitempty"`
+	// OutOfReach describes out-of-reach copies for people; these are not codes.
+	OutOfReach []string `json:"outOfReach,omitempty"`
 }
 
 // ProviderEraser is implemented by Providers that delete remote copies when

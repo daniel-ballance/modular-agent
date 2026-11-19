@@ -50,8 +50,18 @@ func TestServeACP(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if _, err = conn.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: 1}); err != nil {
+	init, err := conn.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: 1})
+	if err != nil {
 		t.Fatal(err)
+	}
+	var metadata struct{ Declaration Declaration }
+	if err := json.Unmarshal(init.Meta["modular-agent"], &metadata); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := json.Marshal(metadata.Declaration)
+	want, _ := json.Marshal(a.Declaration())
+	if string(got) != string(want) {
+		t.Fatalf("ACP declaration %s does not match SDK %s", got, want)
 	}
 	session, err := conn.NewSession(t.Context(), acp.NewSessionRequest{Cwd: project, McpServers: []acp.McpServer{}})
 	if err != nil {

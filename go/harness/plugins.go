@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
 	"sort"
 	"strings"
 	"sync"
@@ -287,6 +288,15 @@ func (c *client) Invoke(ctx context.Context, name string, v any) (any, error) {
 				return nil, errors.New("hook refused operation")
 			}
 			if d.Value != nil {
+				if before, ok := v.(api.ToolCheck); ok && before.Call.ParentCall != "" {
+					after, ok := d.Value.(api.ToolCheck)
+					a, b := before.Call, after.Call
+					if !ok || a.ID != b.ID || a.Name != b.Name || a.Actor != b.Actor || a.Origin != b.Origin || a.ParentCall != b.ParentCall || a.Step != b.Step {
+						return nil, errors.New("tool gate changed protected call fields")
+					}
+					after.InputChanged = before.InputChanged || !portable.EqualJSON(a.Input, b.Input)
+					d.Value = after
+				}
 				v = d.Value
 			}
 			// Only refusal can short-circuit a gate. Allow cannot bypass a later guard.

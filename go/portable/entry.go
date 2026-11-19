@@ -69,7 +69,7 @@ func settingsOut(s api.Settings) object {
 	v := object{"reasoning": s.Thinking, "maxSteps": s.MaxSteps, "maxOutput": s.MaxOutput}
 	set(v, "model", ref(s.Model, ""), s.Model != "")
 	set(v, "approval", api.ApprovalWire(s.Approval), s.Approval != "")
-	v["modelTools"] = s.ModelTools
+	set(v, "modelTools", s.ModelTools, s.ModelTools != nil)
 	set(v, "go.contextLimit", s.ContextLimit, s.ContextLimit != 0)
 	return v
 }
@@ -368,7 +368,10 @@ func Entry(e api.Entry) map[string]any {
 		}
 	case "setting":
 		if _, ok := d["key"]; !ok {
-			d["key"], d["value"] = "settings", settingsOut(api.Decode[api.Settings](e.Data))
+			settings := api.Decode[api.Settings](e.Data)
+			values := settingsOut(settings)
+			values["modelTools"] = settings.ModelTools
+			d["key"], d["value"] = "settings", values
 		}
 	case "actor.set":
 		a := asObject(d["actor"])

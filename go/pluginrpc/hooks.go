@@ -108,7 +108,16 @@ func hookAnswer(point string, v any, answer any) (api.Decision, error) {
 				return api.Decision{}, nil
 			}
 			check := v.(api.ToolCheck)
-			changed := callIn(asObject(asObject(result["change"])["call"]))
+			raw := asObject(asObject(result["change"])["call"])
+			if check.Call.ParentCall != "" {
+				original := callOut(check.Call)
+				for _, key := range []string{"id", "name", "actorId", "startedBy", "parentCallId", "stepId"} {
+					if has(raw, key) && !sameJSON(raw[key], original[key]) {
+						return api.Decision{}, errors.New("tool gate changed protected call fields")
+					}
+				}
+			}
+			changed := callIn(raw)
 			check.Call.Input = changed.Input
 			check.Call.Wire = changed.Wire
 			return api.Decision{Value: check}, nil

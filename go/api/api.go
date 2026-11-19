@@ -62,16 +62,17 @@ type Call struct {
 	Actor      string          `json:"actor,omitempty"`
 }
 type ToolResult struct {
-	NotDispatched bool            `json:"-"` // result reports a local preflight failure, not execution
-	Wire          json.RawMessage `json:"wire,omitempty"`
-	Name          string          `json:"name,omitempty"`
-	Structured    json.RawMessage `json:"structured,omitempty"`
-	Data          json.RawMessage `json:"data,omitempty"`
-	Copies        []string        `json:"copies,omitempty"`
-	Reference     string          `json:"reference,omitempty"`
-	Call          string          `json:"call"`
-	Status        string          `json:"status"`
-	Content       Content         `json:"content"`
+	ProcessingError error           `json:"-"`
+	NotDispatched   bool            `json:"-"` // result reports a local preflight failure, not execution
+	Wire            json.RawMessage `json:"wire,omitempty"`
+	Name            string          `json:"name,omitempty"`
+	Structured      json.RawMessage `json:"structured,omitempty"`
+	Data            json.RawMessage `json:"data,omitempty"`
+	Copies          []string        `json:"copies,omitempty"`
+	Reference       string          `json:"reference,omitempty"`
+	Call            string          `json:"call"`
+	Status          string          `json:"status"`
+	Content         Content         `json:"content"`
 }
 type Tool struct {
 	UsesWorkingEnvironment bool            `json:"-"` // set by the host adapter, not a wire hint
@@ -461,6 +462,7 @@ type Failure struct {
 	Retry   bool
 }
 type ToolCheck struct {
+	InputChanged  bool
 	Session, Turn string
 	Open          bool
 	Validate      func(Call) error

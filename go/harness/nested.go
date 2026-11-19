@@ -131,7 +131,7 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 		}
 		binding := api.ToolRegistration{Plugin: plugin, ToolSource: source}
 		definition := portable.Tool(def)
-		changed, err := p.Hook(ctx, "runtime.tool.before", api.ToolCheck{Session: p.s.id, Turn: p.id, Call: call, Definition: def})
+		changed, err := p.Hook(api.WithNestedTools(ctx, nil), "runtime.tool.before", api.ToolCheck{Session: p.s.id, Turn: p.id, Call: call, Definition: def})
 		check, _ := changed.(api.ToolCheck)
 		if errors.Is(err, api.ErrQuestionOpen) || check.Open {
 			fail("refused", "Nested calls cannot be left open.")
@@ -193,6 +193,13 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 			return api.ToolResult{}, err
 		}
 		p.Emit(ctx, api.Event{Kind: "tool.started", Step: call.Step, Call: call.ID})
+		if ctx.Err() != nil || p.CheckWriter() != nil || !p.canRunTools(call.Actor) {
+			fail("not_started", "Nested dispatch is no longer authorized.")
+			break
+		}
+		if !same() {
+			continue
+		}
 		result, processing = p.executeTool(ctx, executor, snap, final, binding, depth)
 		call = final
 		if result.Status == "open" {
@@ -212,7 +219,7 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 		}
 	}
 	result.Call, result.Name = call.ID, call.Name
-	changed, err := p.Hook(ctx, "runtime.tool.after", api.AfterTool{Call: call, Result: result})
+	changed, err := p.Hook(api.WithNestedTools(ctx, nil), "runtime.tool.after", api.AfterTool{Call: call, Result: result})
 	if check, ok := changed.(api.AfterTool); err == nil && ok {
 		result.Content, result.Structured = check.Result.Content, check.Result.Structured
 	} else if err != nil {

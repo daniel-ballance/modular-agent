@@ -12,6 +12,10 @@ func (a *Agent) RestartForTest(ctx context.Context) (*Agent, error) {
 	if a.closed.Load() {
 		return nil, &Error{Code: NotOpen, Message: "agent is closed"}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, appError(err, CancelledCode)
+	}
+	a.restarting.Store(true)
 	if err := a.Close(ctx); err != nil {
 		return nil, err
 	}

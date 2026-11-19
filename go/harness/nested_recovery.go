@@ -7,7 +7,9 @@ import (
 
 // Resolve child checkpoints before any Runtime sees the interrupted turn.
 func (c *client) recoverNested(s *session) error {
+	s.mu.Lock()
 	entries := s.data.LiveEntries()
+	s.mu.Unlock()
 	children := map[string]api.Entry{}
 	started := map[string]bool{}
 	settled := map[string]bool{}

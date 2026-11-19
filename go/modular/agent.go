@@ -136,6 +136,7 @@ type Agent struct {
 	scratch    string
 	persistent bool
 	closed     atomic.Bool
+	restarting atomic.Bool
 	lifecycle  sync.Mutex
 	settingsMu sync.Mutex
 	pluginHost bool
@@ -281,6 +282,14 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	own = append(own, o.plugins...)
 	for _, p := range own {
+		if stop := p.Stop; stop != nil {
+			p.Stop = func() error {
+				if a.restarting.Load() {
+					return nil
+				}
+				return stop()
+			}
+		}
 		if err := loadPlugin(h, p); err != nil {
 			var e *Error
 			if errors.As(err, &e) && e.Code == NotSupported {
