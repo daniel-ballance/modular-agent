@@ -8,7 +8,7 @@ use crate::{
 use agent_api as base;
 use base::AgentApi;
 use futures_util::Stream;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// A stream of events. Use it with `StreamExt::next`.
@@ -109,6 +109,18 @@ impl ToolResult {
     }
 }
 
+/// Per-admission options for a prompt.
+#[derive(Clone, Debug, Default)]
+pub struct PromptOptions {
+    pub key: Option<String>,
+    pub result: Option<Value>,
+}
+impl From<Option<String>> for PromptOptions {
+    fn from(key: Option<String>) -> Self {
+        Self { key, result: None }
+    }
+}
+
 /// What `prompt` returns.
 #[derive(Clone, Debug)]
 pub struct PromptResult {
@@ -158,14 +170,17 @@ impl Session {
         self.prompt_with(input, None).await
     }
 
-    /// Prompt with an optional admission key. Retrying a key waits for its original turn.
+    /// Prompt with options. Retrying a key waits for its original turn.
     pub async fn prompt_with(
         &self,
         input: impl Into<String>,
-        key: Option<String>,
+        options: impl Into<PromptOptions>,
     ) -> Result<PromptResult> {
         let mut events = self.inner.hub.events.subscribe();
-        let receipt = self.admit(input.into(), Timing::Now, key).await?;
+        let options = options.into();
+        let receipt = self
+            .admit(input.into(), Timing::Now, options.key, options.result)
+            .await?;
         if receipt.taken == "handled" {
             return Ok(no_turn(receipt.input_id, Disposition::Handled));
         }
@@ -189,10 +204,84 @@ impl Session {
         }
     }
 
+    /// Replay committed entries after a cursor (or from the beginning), then follow live events.
+    /// If the reader falls behind, the stream ends with `lost` and `data.fromEntry`.
+    pub fn events(&self, from_entry: Option<&str>) -> Result<EventStream> {
+        // Subscribe first so commits during snapshot/replay are never missed.
+        let events = self.inner.hub.events.subscribe();
+        let data = self.snapshot()?;
+        let mut cursor = from_entry.map(str::to_owned);
+        let at = if let Some(id) = from_entry {
+            data.entries
+                .iter()
+                .position(|e| e.id == id && e.writer != "rust.derived")
+                .ok_or_else(|| Error::new(Code::NotFound, "unknown event cursor"))?
+                + 1
+        } else {
+            0
+        };
+        let scope = base::Scope::session(&self.id);
+        base::require(self.inner.harness.as_ref(), &scope, "watch")?;
+        let existing = data
+            .entries
+            .iter()
+            .map(|e| e.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let rows = data.entries[at..]
+            .iter()
+            .filter(|e| e.writer != "rust.derived")
+            .map(|e| base::portable::entry(e, &data))
+            .collect::<base::Result<Vec<_>>>()?;
+        let me = self.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut events = events;
+            for row in rows {
+                if let Some(view) = me.inner.harness.output(&scope, base::Output {
+                    recipient: "interface.sdk".into(), value: json!({"entry":row}), stream: None, end: true,
+                }).await? {
+                    cursor = row["id"].as_str().map(str::to_owned);
+                    yield Event::Entry { session_id: me.id.clone(), entry: view["entry"].clone() };
+                }
+            }
+            loop {
+                match events.recv().await {
+                    Ok((_, event)) if event.session_id() == me.id => {
+                        base::require(me.inner.harness.as_ref(), &scope, "watch")?;
+                        if let Event::Entry { entry, .. } = &event {
+                            let Some(id) = entry["id"].as_str() else { continue };
+                            if existing.contains(id) { continue; }
+                            cursor = Some(id.into());
+                        }
+                        let ended = matches!(&event, Event::Other { kind, .. } if kind == "session.end");
+                        yield event;
+                        if ended { break; }
+                    }
+                    Ok(_) => (),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        Err(Error::new(Code::Lost, "event reader fell behind; resume with events(from_entry)")
+                            .with_data(json!({"fromEntry":cursor})))?;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }))
+    }
+
     /// The events of the turn this input starts, ending with its `TurnEnded`.
     pub async fn prompt_stream(&self, input: impl Into<String>) -> Result<EventStream> {
+        self.prompt_stream_with(input, PromptOptions::default())
+            .await
+    }
+
+    pub async fn prompt_stream_with(
+        &self,
+        input: impl Into<String>,
+        options: PromptOptions,
+    ) -> Result<EventStream> {
         let events = self.inner.hub.events.subscribe();
-        let receipt = self.admit(input.into(), Timing::Now, None).await?;
+        let receipt = self
+            .admit(input.into(), Timing::Now, options.key, options.result)
+            .await?;
         if receipt.taken == "handled" {
             return Ok(Box::pin(futures_util::stream::empty()));
         }
@@ -263,11 +352,16 @@ impl Session {
         text: String,
         timing: Timing,
         key: Option<String>,
+        shape: Option<Value>,
     ) -> Result<InputReceipt> {
         self.snapshot()?;
         let h = &self.inner.harness;
-        let receipt = h
-            .submit(
+        let receipt = if let Some(shape) = shape {
+            base::schema::compile(&shape)
+                .map_err(|e| Error::new(Code::InvalidParams, e.to_string()))?;
+            h.submit_shaped(&self.id, LOCAL, &text, key, shape).await?
+        } else {
+            h.submit(
                 &self.id,
                 LOCAL,
                 &text,
@@ -279,7 +373,8 @@ impl Session {
                 },
                 key,
             )
-            .await?;
+            .await?
+        };
         let taken = if receipt.erased {
             "handedBack".into()
         } else {
@@ -315,10 +410,16 @@ impl Session {
 
     fn drive(&self) -> tokio::task::JoinHandle<Result<()>> {
         let me = self.clone();
-        tokio::spawn(async move {
-            let _lock = me.driver.run.lock().await;
-            while me.inner.harness.run_next(&me.id).await?.is_some() {}
-            Ok(())
+        self.inner.workers.spawn(async move {
+            tokio::select! {
+                biased;
+                _ = me.inner.crash.cancelled() => Err(Error::new(Code::Lost, "the agent was restarted")),
+                result = async {
+                    let _lock = me.driver.run.lock().await;
+                    while me.inner.harness.run_next(&me.id).await?.is_some() {}
+                    Ok(())
+                } => result,
+            }
         })
     }
 
@@ -333,7 +434,7 @@ impl Session {
         timing: Timing,
         key: Option<String>,
     ) -> Result<InputReceipt> {
-        let receipt = self.admit(input.into(), timing, key).await?;
+        let receipt = self.admit(input.into(), timing, key, None).await?;
         if !receipt.duplicate && !matches!(receipt.taken.as_str(), "handled" | "proposed") {
             // Dropping the handle detaches the waiter, not the work.
             drop(self.drive());
@@ -397,8 +498,7 @@ impl Session {
         let id = self
             .inner
             .harness
-            .fork(&base::Scope::session(&self.id), entry_id.map(str::to_owned))
-            .map_err(|e| Error::new(Code::Busy, format!("{e:#}")))?;
+            .fork(&base::Scope::session(&self.id), entry_id.map(str::to_owned))?;
         let agent = crate::Agent {
             inner: self.inner.clone(),
         };

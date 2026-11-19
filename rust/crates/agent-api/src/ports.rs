@@ -1,5 +1,25 @@
 use crate::*;
 
+/// Common agent failures distinguishable without interpreting diagnostics.
+#[derive(Debug)]
+pub enum OperationError {
+    NotFound(String),
+    Busy(String),
+    Forbidden(String),
+}
+
+impl std::fmt::Display for OperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::Busy(message) | Self::Forbidden(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for OperationError {}
+
 /// A portable session is held longer than this open can wait.
 #[derive(Debug)]
 pub struct HistoryHeld {
@@ -194,6 +214,12 @@ pub trait Lease: Send + Sync {
     }
 }
 pub trait HistoryStore: Send + Sync {
+    /// Opt in to storing opaque HTTP service snapshots. `save` must durably
+    /// replace a whole snapshot, and `acquire` must exclude another server,
+    /// even before the first `save`.
+    fn supports_service_snapshots(&self) -> bool {
+        false
+    }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>>;
     fn load(&self, session: &str) -> Result<SessionData>;
     fn save(&self, session: &SessionData) -> Result<()>;

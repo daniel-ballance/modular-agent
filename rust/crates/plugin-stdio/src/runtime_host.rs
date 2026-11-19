@@ -916,6 +916,27 @@ impl TurnWork {
         } else {
             result
         };
+        let mut result = result;
+        let mut invalid = None;
+        if result.status == ToolStatus::Completed {
+            let data = api.snapshot(&scope.session)?;
+            if let Some(start) = data
+                .entries
+                .iter()
+                .rev()
+                .find(|entry| entry.kind == "tool.started" && entry.scope.call == scope.call)
+                .and_then(|e| e.content.as_ref())
+                .and_then(|e| e.get("definition"))
+            {
+                let definition = wire::parse_definition(start)?;
+                if let Err(error) = schema::tool_result(&definition, &result) {
+                    result.text =
+                        "The call completed, but its result did not match its schema.".into();
+                    result.value = None;
+                    invalid = Some(error);
+                }
+            }
+        }
         api.append(
             scope,
             "external.runtime",
@@ -923,6 +944,9 @@ impl TurnWork {
         )?;
         api.emit(Event::new(scope, "tool.ended", json!(result)))
             .await?;
+        if let Some(error) = invalid {
+            return Err(error);
+        }
         Ok(result)
     }
     fn record_feedback(&self, api: &Api, scope: &Scope, reason: &str) -> Result<()> {
@@ -1147,15 +1171,10 @@ impl TurnWork {
                 let mut payload = json!({"text":value["result"]["text"]});
                 if let Some(shape) = self.input.settings.get("result_shape") {
                     payload["shape"] = shape.clone();
-                    let reason = if value["result"].get("value").is_none() {
-                        Some("A shaped result requires a value.")
-                    } else if shape == &Value::Bool(false) {
-                        Some("The result shape does not accept this value.")
-                    } else {
-                        None
-                    };
-                    if let Some(reason) = reason {
-                        self.record_feedback(api, &scope, reason)?;
+                    if let Err(error) = schema::check(shape, value["result"].get("value")) {
+                        let reason =
+                            format!("The result shape does not accept this value: {error}");
+                        self.record_feedback(api, &scope, &reason)?;
                         return Ok(json!({"value":value,"refused":reason}));
                     }
                 }

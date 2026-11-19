@@ -1,6 +1,8 @@
 //! A synchronous HistoryStore port backed by a separately driven HTTP client.
 use agent_api::*;
+mod server;
 use reqwest::{Client, Method, StatusCode, Url};
+pub use server::{ServeHistoryOptions, serve_history};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -259,6 +261,9 @@ fn escape(value: &str) -> String {
     out
 }
 fn checked((status, value): (StatusCode, Value)) -> Result<Value> {
+    if status == StatusCode::NOT_FOUND && value["code"] == "unknown_session" {
+        return Err(OperationError::NotFound("unknown session".into()).into());
+    }
     ensure!(
         status.is_success(),
         "history service {} ({})",

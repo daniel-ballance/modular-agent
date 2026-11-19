@@ -83,6 +83,9 @@ pub struct Agent {
 }
 
 pub(crate) struct Inner {
+    pub crash: tokio_util::sync::CancellationToken,
+    pub workers: tokio_util::task::TaskTracker,
+    pub restart: Option<AgentBuilder>,
     pub harness: Arc<Harness>,
     pub hub: Arc<Hub>,
     pub project: PathBuf,
@@ -98,7 +101,7 @@ pub(crate) struct Inner {
 }
 
 /// Options for `Agent::builder()`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 #[must_use]
 pub struct AgentBuilder {
     project: Option<PathBuf>,
@@ -117,6 +120,7 @@ pub struct AgentBuilder {
     settings: serde_json::Map<String, Value>,
     approval: Option<Approval>,
     on_question: Option<QuestionHandler>,
+    pub(crate) restartable: bool,
 }
 
 impl Agent {
@@ -126,6 +130,7 @@ impl Agent {
 
     /// Create a session.
     pub async fn session(&self) -> Result<Session> {
+        self.check_crashed()?;
         let id = self
             .inner
             .harness
@@ -138,16 +143,17 @@ impl Agent {
     /// Reopen a kept session. Interrupted work is recovered, as the Runtime declares,
     /// before this returns.
     pub async fn open_session(&self, id: &str) -> Result<Session> {
-        self.inner.harness.open(id).await.map_err(|e| {
-            let e = Error::from(e);
-            if matches!(e.code(), Code::NotFound | Code::Held | Code::Lost) {
-                e
-            } else {
-                Error::new(Code::Busy, e.message())
-            }
-        })?;
+        self.check_crashed()?;
+        self.inner.harness.open(id).await?;
         self.attach(id)?;
         Ok(Session::new(self.inner.clone(), id.to_string()))
+    }
+
+    fn check_crashed(&self) -> Result<()> {
+        if self.inner.crash.is_cancelled() {
+            return Err(Error::new(Code::Lost, "the agent was restarted"));
+        }
+        Ok(())
     }
 
     pub(crate) fn attach(&self, id: &str) -> Result<()> {
@@ -290,6 +296,11 @@ impl AgentBuilder {
     }
     /// Load every part and check the composition. Nothing runs until this succeeds.
     pub async fn build(self) -> Result<Agent> {
+        let mut restart = (self.restartable
+            && self.process_plugins.is_empty()
+            && self.wire_plugins.is_empty()
+            && self.plugin_host != Some(true))
+        .then(|| self.clone());
         let project = match self.project {
             Some(p) => p,
             None => std::env::current_dir()?,
@@ -332,11 +343,17 @@ impl AgentBuilder {
             None if self.durability == Durability::Ephemeral => memory_history(),
             None => file_history(state.join("sessions"))?,
         };
+        if let Some(recipe) = &mut restart {
+            recipe.project = Some(project.clone());
+            recipe.history = Some(History(history.clone(), persistent));
+        }
         let mut defaults = base::portable::settings_from_wire(&Value::Object(self.settings));
         if let Some(policy) = self.approval {
             defaults["approval"] = json!(policy.native());
         }
-        let hub = Hub::new(self.on_question);
+        let crash = tokio_util::sync::CancellationToken::new();
+        let workers = tokio_util::task::TaskTracker::new();
+        let hub = Hub::new(self.on_question, crash.clone(), workers.clone());
         let runtime: Arc<dyn base::Plugin> = match self.durability {
             Durability::Durable => Arc::new(runtime_durable::DurablePlugin),
             _ => Arc::new(runtime_transient::TransientPlugin),
@@ -489,6 +506,9 @@ impl AgentBuilder {
         }
         Ok(Agent {
             inner: Arc::new(Inner {
+                crash,
+                workers,
+                restart,
                 harness,
                 hub,
                 project,

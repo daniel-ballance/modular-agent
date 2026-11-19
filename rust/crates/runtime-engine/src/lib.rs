@@ -551,6 +551,19 @@ impl Engine {
                 )
             }
         }
+        if let Some((_, definition)) = registration
+            && let Err(error) = schema::tool_result(&definition, &result)
+        {
+            // Execution was confirmed. Settle once without exposing the invalid payload.
+            let safe = ToolResult::new(
+                call,
+                result.status,
+                "The call completed, but its result did not match its schema.",
+            );
+            self.publish_tool_result(api, scope, call_entry, safe)
+                .await?;
+            return Err(error);
+        }
         Ok(result)
     }
     async fn tools(
@@ -841,6 +854,7 @@ impl Engine {
             .await?;
             let refusal = self.step_after(api, &scope, &response).await?;
             result.text = response.text_content();
+            result.value = None;
             let mut carry_on = false;
             if input.cancel.is_cancelled() {
                 result.outcome = Outcome::Cancelled;
@@ -854,19 +868,44 @@ impl Engine {
                 result.outcome = Outcome::Failed;
                 result.error = Some(reason.clone());
             } else if !result.open_calls.is_empty() {
-                result.outcome = Outcome::Completed;
+                if input.settings.get("result_shape").is_some() {
+                    result.outcome = Outcome::Failed;
+                    result.error =
+                        Some("The turn left calls open without a structured result.".into());
+                } else {
+                    result.outcome = Outcome::Completed;
+                }
             } else {
                 if !response.tool_calls().is_empty() || !api.take_steering(&scope)?.is_empty() {
                     carry_on = true;
                 } else {
-                    let checked = self
-                        .hook(api, "result.ready", &scope, json!(result))
-                        .await?;
-                    if let Some(reason) = checked
-                        .refused
-                        .as_deref()
-                        .or_else(|| checked.value["retry_reason"].as_str())
-                    {
+                    let mut payload = json!(result);
+                    let mut reason = None;
+                    if let Some(shape) = input.settings.get("result_shape") {
+                        let value = wire::decode_json(result.text.as_bytes());
+                        reason = match value {
+                            Ok(value) => match schema::check(shape, Some(&value)) {
+                                Ok(()) => {
+                                    payload["value"] = value.clone();
+                                    result.value = Some(value);
+                                    None
+                                }
+                                Err(error) => Some(format!(
+                                    "The result shape does not accept this value: {error}"
+                                )),
+                            },
+                            Err(_) => Some("The final answer must be a JSON value.".into()),
+                        };
+                        payload["shape"] = shape.clone();
+                    }
+                    if reason.is_none() {
+                        let checked = self.hook(api, "result.ready", &scope, payload).await?;
+                        reason = checked
+                            .refused
+                            .or_else(|| checked.value["retry_reason"].as_str().map(str::to_owned));
+                    }
+                    if let Some(reason) = reason {
+                        result.value = None;
                         self.record(
                             api,
                             &scope,

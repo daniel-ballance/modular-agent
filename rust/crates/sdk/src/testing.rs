@@ -193,7 +193,8 @@ impl TestAgentBuilder {
         self.builder = self.builder.process_plugin(plugin);
         self
     }
-    pub async fn build(self) -> Result<Agent> {
+    pub async fn build(mut self) -> Result<Agent> {
+        self.builder.restartable = true;
         let (project, keep) = match self.project {
             Some(p) => (p, None),
             None => {
@@ -216,6 +217,28 @@ impl TestAgentBuilder {
         }
         Ok(agent)
     }
+}
+
+/// Simulate a crash without cancelling or settling the interrupted turn. Rebuild a
+/// test agent over its original store; reopen sessions explicitly on the returned agent.
+/// This cannot stop work a plugin detached from its call or kill external processes.
+pub async fn restart(agent: Agent) -> Result<Agent> {
+    let recipe = agent.inner.restart.clone().ok_or_else(|| {
+        crate::Error::new(
+            crate::Code::NotSupported,
+            "restart requires an in-process test agent",
+        )
+    })?;
+    agent.inner.crash.cancel();
+    agent.inner.workers.close();
+    agent.inner.workers.wait().await;
+    agent.inner.harness.abandon_sessions_for_test();
+    let kept = std::mem::take(&mut *agent.inner.kept.lock().unwrap());
+    let next = recipe.build().await?;
+    for dir in kept {
+        next.keep(dir);
+    }
+    Ok(next)
 }
 
 /// The fixture plugins every SDK implements identically (docs/sdk/testing.md#the-fixture-plugins).

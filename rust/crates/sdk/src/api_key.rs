@@ -128,6 +128,7 @@ impl Provider for ApiKeyProvider {
                 "offline-fixture".into()
             } else {
                 cx.credential()
+                    .await
                     .map_err(|_| ModelError::new(Kind::Credentials, "API key is not set"))?
             };
             let native = base::wire::parse_request(&request.0, cx.session_id()).map_err(other)?;

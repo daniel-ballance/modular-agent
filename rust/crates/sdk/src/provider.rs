@@ -106,17 +106,45 @@ pub trait Provider: Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct ProviderContext {
-    api: base::Api,
-    scope: base::Scope,
-    claim: base::CredentialClaim,
+    backend: ProviderBackend,
+    session: String,
     name: String,
     cancelled: CancellationToken,
     done: CancellationToken,
     stream: String,
 }
+#[derive(Clone)]
+enum ProviderBackend {
+    Local {
+        api: base::Api,
+        scope: Box<base::Scope>,
+        claim: base::CredentialClaim,
+    },
+    Remote {
+        peer: Arc<plugin_stdio::rpc::Peer>,
+        parent: Value,
+    },
+}
 impl ProviderContext {
+    pub(crate) fn remote(
+        peer: Arc<plugin_stdio::rpc::Peer>,
+        parent: Value,
+        session: String,
+        name: String,
+        cancelled: CancellationToken,
+        done: CancellationToken,
+    ) -> Self {
+        Self {
+            backend: ProviderBackend::Remote { peer, parent },
+            session,
+            name,
+            cancelled,
+            done,
+            stream: String::new(),
+        }
+    }
     pub fn session_id(&self) -> &str {
-        &self.scope.session
+        &self.session
     }
     pub fn cancelled(&self) -> &CancellationToken {
         &self.cancelled
@@ -130,11 +158,30 @@ impl ProviderContext {
         }
         Ok(())
     }
-    pub fn credential(&self) -> Result<String> {
+    pub async fn credential(&self) -> Result<String> {
         self.check()?;
-        let store =
-            base::capability::<dyn base::CredentialStore>(self.api.as_ref(), "credentials")?;
-        Ok(store.provider(&self.claim, &self.name)?)
+        match &self.backend {
+            ProviderBackend::Local { api, claim, .. } => {
+                let store =
+                    base::capability::<dyn base::CredentialStore>(api.as_ref(), "credentials")?;
+                Ok(store.provider(claim, &self.name)?)
+            }
+            ProviderBackend::Remote { peer, .. } => {
+                let reply = peer
+                    .call(
+                        "host/credentials/read",
+                        json!({"provider":self.name}),
+                        None,
+                        self.cancelled.clone(),
+                    )
+                    .await
+                    .map_err(crate::serve::from_fault)?;
+                reply["credential"]["key"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| Error::new(Code::NotFound, "Provider credential unavailable"))
+            }
+        }
     }
     pub async fn piece(
         &self,
@@ -143,20 +190,35 @@ impl ProviderContext {
         tool_call_id: Option<&str>,
     ) -> Result<()> {
         self.check()?;
+        let delta = delta.into();
+        let ProviderBackend::Local { api, scope, .. } = &self.backend else {
+            let ProviderBackend::Remote { peer, parent } = &self.backend else {
+                unreachable!()
+            };
+            let mut event = json!({"type":match kind { Piece::Text => "text", Piece::Reasoning => "reasoning", Piece::ToolInput => "toolInput" }, "delta":delta});
+            if let (Piece::ToolInput, Some(id)) = (kind, tool_call_id) {
+                event["toolCallId"] = json!(id);
+            }
+            peer.notify(
+                "provider/event",
+                json!({"parentRequestId":parent,"event":event}),
+            );
+            return Ok(());
+        };
         let mut event = base::Event::new(
-            &self.scope,
+            scope,
             match kind {
                 Piece::Text => "model.delta",
                 Piece::Reasoning => "model.thought",
                 Piece::ToolInput => "model.tool_input",
             },
-            json!(delta.into()),
+            json!(delta),
         );
         if let Some(id) = tool_call_id {
             event.scope.call = Some(id.into());
         }
         event.stream = Some(self.stream.clone());
-        Ok(self.api.emit(event).await?)
+        Ok(api.emit(event).await?)
     }
 }
 
@@ -261,9 +323,12 @@ impl base::ModelAccess for Bound {
         let done = CancellationToken::new();
         let _on_drop = done.clone().drop_guard();
         let cx = ProviderContext {
-            api: api.clone(),
-            scope: scope.clone(),
-            claim: self.adapter.claim.clone(),
+            backend: ProviderBackend::Local {
+                api: api.clone(),
+                scope: Box::new(scope.clone()),
+                claim: self.adapter.claim.clone(),
+            },
+            session: scope.session.clone(),
             name: self.adapter.provider.id().into(),
             cancelled,
             done: done.clone(),

@@ -28,6 +28,7 @@ pub struct Plugin {
 pub struct Registrar {
     config: Value,
     pub(crate) tools: Vec<Tool>,
+    pub(crate) providers: Vec<Arc<dyn crate::Provider>>,
     pub(crate) hooks: Vec<Hook>,
     pub(crate) commands: Vec<Command>,
     defined: Vec<(String, HookRule)>,
@@ -101,6 +102,13 @@ impl Plugin {
             Ok(())
         })
     }
+    pub fn provider(self, provider: impl crate::Provider) -> Self {
+        let provider: Arc<dyn crate::Provider> = Arc::new(provider);
+        self.setup(move |r| {
+            r.providers.push(provider.clone());
+            Ok(())
+        })
+    }
     pub fn command(mut self, command: Command) -> Self {
         if command.local {
             self.local_items.push(format!("command:{}", command.name));
@@ -130,6 +138,7 @@ impl Plugin {
         let mut r = Registrar {
             config: config.clone(),
             tools: vec![],
+            providers: vec![],
             hooks: vec![],
             commands: vec![],
             defined: vec![],
@@ -147,6 +156,9 @@ impl Registrar {
     }
     pub fn tool(&mut self, tool: Tool) {
         self.tools.push(tool);
+    }
+    pub fn provider(&mut self, provider: impl crate::Provider) {
+        self.providers.push(Arc::new(provider));
     }
     pub fn command(&mut self, command: Command) {
         self.commands.push(command);
@@ -196,6 +208,15 @@ impl base::Plugin for InProcess {
         &self.name
     }
     fn install(&self, r: &mut base::Registrar<'_>) -> base::Result<()> {
+        for provider in &self.registered.providers {
+            base::Plugin::install(
+                &crate::provider::ProviderPlugin {
+                    name: format!("provider.{}", provider.id()),
+                    provider: provider.clone(),
+                },
+                r,
+            )?;
+        }
         if !self.registered.tools.is_empty() {
             r.provide::<dyn base::ToolSource>(
                 &format!("tools.{}", self.name),
@@ -293,7 +314,11 @@ impl base::ToolSource for Source {
         let settled = execute(tool, call.input.clone(), cx).await;
         // ToolResult::new words a refusal itself.
         let mut result = base::ToolResult::new(&call, settled.status.to_base(), settled.text);
-        result.value = settled.value;
+        // Preserve the distinction between an omitted value and JSON null, and
+        // keep developer-owned objects opaque even if they contain `_pluginWire`.
+        result.value = settled
+            .value
+            .map(|value| json!({"_pluginWire":{"value":value}}));
         result
     }
 }

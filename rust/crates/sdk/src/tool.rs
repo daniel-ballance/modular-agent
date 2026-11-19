@@ -29,6 +29,8 @@ pub struct ToolBuilder {
     safe_to_repeat: bool,
     parallel: bool,
     in_process_only: bool,
+    input: Option<Value>,
+    output: Option<Value>,
 }
 
 impl Tool {
@@ -45,6 +47,8 @@ impl Tool {
             safe_to_repeat: false,
             parallel: false,
             in_process_only: false,
+            input: None,
+            output: None,
         }
     }
     pub fn name(&self) -> &str {
@@ -84,6 +88,20 @@ impl ToolBuilder {
         self.in_process_only = true;
         self
     }
+    /// Override the generated input schema. The checked input is still deserialized as `I`.
+    pub fn input_schema(mut self, schema: Value) -> Self {
+        self.input = Some(schema);
+        self
+    }
+    /// Declare a completed result's value using a Rust type.
+    pub fn output<T: JsonSchema>(self) -> Self {
+        self.output_schema(type_schema::<T>())
+    }
+    /// Declare a completed result's value using Draft 2020-12 JSON Schema.
+    pub fn output_schema(mut self, schema: Value) -> Self {
+        self.output = Some(schema);
+        self
+    }
     /// Give the function. `I` is the input: its JSON Schema is the tool's `parameters`.
     pub fn run<I, O, F, Fut>(self, f: F) -> Tool
     where
@@ -92,12 +110,9 @@ impl ToolBuilder {
         F: Fn(I, ToolContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<O>> + Send + 'static,
     {
-        let mut schema = serde_json::to_value(schemars::schema_for!(I)).expect("schema is JSON");
-        if let Some(object) = schema.as_object_mut() {
-            object.remove("$schema");
-            object.remove("title");
-        }
-        let definition = base::ToolDefinition {
+        let schema = self.input.unwrap_or_else(type_schema::<I>);
+        let validator = Arc::new(base::schema::compile(&schema).map_err(|e| e.to_string()));
+        let mut definition = base::ToolDefinition {
             name: self.name,
             description: self.description,
             input: schema,
@@ -111,13 +126,34 @@ impl ToolBuilder {
                 "safeToRepeat": self.safe_to_repeat,
             }}}),
         };
+        let mut wire = base::wire::definition(&definition);
+        if let Some(output) = self.output {
+            wire["returns"] = output;
+        }
+        definition.hints["_wire"] = wire;
         let f = Arc::new(f);
         Tool {
             definition,
             in_process_only: self.in_process_only,
             run: Arc::new(move |input, cx| {
                 let f = f.clone();
+                let validator = validator.clone();
                 Box::pin(async move {
+                    let invalid = |message: &str| {
+                        Error::new(
+                            Code::InvalidParams,
+                            format!("the input does not match the tool's schema: {message}"),
+                        )
+                    };
+                    if !input.is_object() {
+                        return Err(invalid("expected a JSON object"));
+                    }
+                    validator
+                        .as_ref()
+                        .as_ref()
+                        .map_err(|e| invalid(e))?
+                        .validate(&input)
+                        .map_err(|e| invalid(&format!("at {}: {e}", e.instance_path())))?;
                     let input: I = serde_json::from_value(input).map_err(|e| {
                         Error::new(
                             Code::InvalidParams,
@@ -131,12 +167,33 @@ impl ToolBuilder {
     }
 }
 
+fn type_schema<T: JsonSchema>() -> Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(T)).expect("schema is JSON");
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("$schema");
+        object.remove("title");
+    }
+    schema
+}
+
 /// What a tool returns, when plain text is not enough.
 #[derive(Clone, Debug)]
 pub struct ToolOutput {
     pub status: ToolStatus,
     pub text: String,
     pub value: Option<Value>,
+}
+
+impl ToolOutput {
+    /// A completed structured value, with its JSON encoding as text content.
+    pub fn value(value: impl serde::Serialize) -> Result<Self> {
+        let value = serde_json::to_value(value)?;
+        Ok(Self {
+            status: ToolStatus::Completed,
+            text: value.to_string(),
+            value: Some(value),
+        })
+    }
 }
 
 impl From<String> for ToolOutput {

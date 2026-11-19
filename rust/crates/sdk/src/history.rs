@@ -1,7 +1,13 @@
 //! History choices. The HTTP client uses the base's lease and portable-record implementation.
 use crate::{Code, Error, Result, core::MemoryHistory};
 use agent_api as base;
+pub use history_http::ServeHistoryOptions;
 use std::{path::Path, sync::Arc};
+
+/// Serve a dedicated history store on loopback.
+pub async fn serve_history(store: History, options: ServeHistoryOptions) -> Result<()> {
+    Ok(history_http::serve_history(store.0, options).await?)
+}
 
 #[derive(Clone)]
 pub struct History(pub(crate) Arc<dyn base::HistoryStore>, pub(crate) bool);

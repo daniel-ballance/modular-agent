@@ -64,10 +64,9 @@ pub fn actors(data: &SessionData) -> std::collections::BTreeMap<String, Value> {
 }
 
 pub fn require(api: &dyn AgentApi, scope: &Scope, right: &str) -> Result<()> {
-    ensure!(
-        work_authority(api, scope)?.has(right),
-        "actor lacks {right} authority"
-    );
+    if !work_authority(api, scope)?.has(right) {
+        return Err(OperationError::Forbidden(format!("actor lacks {right} authority")).into());
+    }
     Ok(())
 }
 /// Work retains admission-time limits as well as each contributor's current rights.

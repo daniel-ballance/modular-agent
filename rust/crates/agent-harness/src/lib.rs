@@ -247,6 +247,13 @@ impl Harness {
         }
         Ok(id)
     }
+    /// Test-only crash seam. The caller has already dropped or stopped every worker.
+    /// Release writer leases without orderly shutdown, cancellation or settlement.
+    #[doc(hidden)]
+    pub fn abandon_sessions_for_test(&self) {
+        self.sessions.lock().unwrap().clear();
+    }
+
     pub async fn open(&self, id: &str) -> Result<()> {
         let _erasure = self
             .erasure
@@ -254,7 +261,7 @@ impl Harness {
             .map_err(|_| anyhow!("erasure in progress"))?;
         ensure!(
             !self.sessions.lock().unwrap().contains_key(id),
-            "session already open here"
+            OperationError::Busy("session already open here".into())
         );
         let store = self.store().ok_or_else(|| anyhow!("no history store"))?;
         let session_id = id.to_owned();
@@ -282,7 +289,10 @@ impl Harness {
         let project = data.project.clone();
         {
             let mut sessions = self.sessions.lock().unwrap();
-            ensure!(!sessions.contains_key(id), "session already open here");
+            ensure!(
+                !sessions.contains_key(id),
+                OperationError::Busy("session already open here".into())
+            );
             self.check_project_open(&sessions, &data)?;
             if recovery {
                 self.blocked_projects
@@ -458,7 +468,7 @@ impl Harness {
             .lock()
             .unwrap()
             .remove(id)
-            .ok_or_else(|| anyhow!("unknown session"))?;
+            .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
         Ok(())
     }
     fn invalidate_providers(&self, session: &str) -> Result<()> {
@@ -538,7 +548,24 @@ impl Harness {
             actor: actor.into(),
             ..Scope::session(session)
         };
-        self.admit(&scope, text, timing, key, None).await
+        self.admit(&scope, text, timing, key, None, None).await
+    }
+    /// Admit a prompt with a schema attached to this admission, not to the session.
+    pub async fn submit_shaped(
+        &self,
+        session: &str,
+        actor: &str,
+        text: &str,
+        key: Option<String>,
+        shape: Value,
+    ) -> Result<Receipt> {
+        schema::compile(&shape)?;
+        let scope = Scope {
+            actor: actor.into(),
+            ..Scope::session(session)
+        };
+        self.admit(&scope, text, Timing::Now, key, None, Some(shape))
+            .await
     }
     async fn admit(
         &self,
@@ -547,6 +574,7 @@ impl Harness {
         timing: Timing,
         key: Option<String>,
         sponsor: Option<&str>,
+        result_shape: Option<Value>,
     ) -> Result<Receipt> {
         let session = scope.session.as_str();
         let actor = scope.actor.as_str();
@@ -561,7 +589,7 @@ impl Harness {
             } else {
                 "input"
             }),
-            "actor lacks input authority"
+            OperationError::Forbidden("actor lacks input authority".into())
         );
         let admission = self
             .admissions
@@ -681,7 +709,7 @@ impl Harness {
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
             .get_mut(session)
-            .ok_or_else(|| anyhow!("unknown session"))?;
+            .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
         let mut next = open.data.clone();
         if !next.settings.as_object().is_none_or(|o| o.is_empty())
             && !next.entries.iter().any(|e| e.kind == "settings")
@@ -711,7 +739,11 @@ impl Harness {
                        "authority":authority,"sponsor":sponsor,"submittedBy":submitter,"taken":input_taken(open.active, timing)}),
             ),
         );
-        entry.content.as_mut().unwrap()["inputId"] = json!(entry.id);
+        let content = entry.content.as_mut().unwrap();
+        content["inputId"] = json!(entry.id);
+        if let Some(shape) = result_shape {
+            content["resultShape"] = shape;
+        }
         next.position = Some(entry.id.clone());
         next.entries.push(entry.clone());
         self.save(&next)?;
@@ -752,7 +784,7 @@ impl Harness {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
                 .get_mut(session)
-                .ok_or_else(|| anyhow!("unknown session"))?;
+                .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
             open.cancel.cancel();
             open.queue.drain(..).collect::<Vec<_>>()
         };
@@ -819,7 +851,7 @@ impl Harness {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
                 .get_mut(session)
-                .ok_or_else(|| anyhow!("unknown session"))?;
+                .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
             let i = open
                 .queue
                 .iter()
@@ -933,9 +965,12 @@ impl Harness {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
                 .get_mut(session)
-                .ok_or_else(|| anyhow!("unknown session"))?;
+                .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
             open.check_rewind()?;
-            ensure!(!open.active, "a turn is already running");
+            ensure!(
+                !open.active,
+                OperationError::Busy("a turn is already running".into())
+            );
             let input = if !resume.is_empty() {
                 let source = branch
                     .iter()
@@ -1074,7 +1109,7 @@ impl Harness {
             )
             .await?
             .value;
-        let system = contributions
+        let mut system = contributions
             .as_array()
             .into_iter()
             .flatten()
@@ -1144,6 +1179,13 @@ impl Harness {
             settings["thinking"].as_str().unwrap_or("low"),
             &info.thinking
         ));
+        if let Some(shape) = source
+            .and_then(|e| e.content.as_ref())
+            .and_then(|v| v.get("resultShape"))
+        {
+            settings["result_shape"] = shape.clone();
+            system.push_str(&format!("\n\nFor the final answer, return only one JSON value matching this schema:\n{shape}"));
+        }
         let mut start = json!({"startedBy":started_by,"model":info,"system":system,"tools":tools,"settings":settings,"resume":resume,"context":context});
         if let Some(origin) = resume
             .first()
@@ -1409,7 +1451,8 @@ impl AgentApi for Harness {
         timing: Timing,
         key: Option<String>,
     ) -> Result<Receipt> {
-        self.admit(scope, text, timing, key, Some(sponsor)).await
+        self.admit(scope, text, timing, key, Some(sponsor), None)
+            .await
     }
     async fn release(
         &self,
@@ -1770,7 +1813,7 @@ impl AgentApi for Harness {
             .lock()
             .unwrap()
             .get(session)
-            .ok_or_else(|| anyhow!("unknown session"))?
+            .ok_or_else(|| OperationError::NotFound("unknown session".into()))?
             .queue
             .iter()
             .any(|i| i.timing == Timing::Steer))
@@ -1798,12 +1841,12 @@ impl AgentApi for Harness {
         );
         ensure!(
             !self.is_running(&scope.session),
-            "settings cannot change during a turn"
+            OperationError::Busy("settings cannot change during a turn".into())
         );
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
             .get_mut(&scope.session)
-            .ok_or_else(|| anyhow!("unknown session"))?;
+            .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
         open.check_rewind()?;
         let mut next = open.data.clone();
         let model_changed = patch
@@ -1872,12 +1915,12 @@ impl AgentApi for Harness {
         );
         ensure!(
             !self.is_running(&scope.session),
-            "cannot move during a turn"
+            OperationError::Busy("cannot move during a turn".into())
         );
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
             .get_mut(&scope.session)
-            .ok_or_else(|| anyhow!("unknown session"))?;
+            .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
         open.check_rewind()?;
         ensure!(
             position
@@ -1962,7 +2005,7 @@ impl AgentApi for Harness {
         let _workspace = self.begin_environment_work(&scope.session)?;
         ensure!(
             !self.is_running(&scope.session),
-            "cannot fork during a turn"
+            OperationError::Busy("cannot fork during a turn".into())
         );
         let mut source = self.snapshot(&scope.session)?;
         if let Some(p) = position {
@@ -2299,7 +2342,7 @@ impl Harness {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
                 .get_mut(&scope.session)
-                .ok_or_else(|| anyhow!("unknown session"))?;
+                .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
             let mut inputs = vec![];
             let mut rest = VecDeque::new();
             for i in open.queue.drain(..) {
