@@ -718,6 +718,9 @@ if (probeChecks) {
 			await within(10000, pending, "original turn leaves a question open");
 			originatingTurn = (await history(agent, sessionId, { all: true })).entries.find((e) => e.kind === "turnEnd" && e.data?.result?.openToolCalls?.includes(question.toolCallId))?.turnId;
 			check("late question: the original turn ends with its call open", typeof originatingTurn === "string");
+			// Contracts, Hook execution: step.after runs once the step's calls are settled or left open, so leaving a call open is a normal end.
+			const originatingEnd = (await history(agent, sessionId, { all: true })).entries.find((e) => e.kind === "turnEnd" && e.turnId === originatingTurn);
+			check("late question: the original turn completed, with step.after accepted for its open call", originatingEnd?.data?.outcome?.kind === "completed", JSON.stringify(originatingEnd?.data?.outcome ?? null));
 		}
 		const answer = () => agent.ctx.request(`_${NS}/answer`, { sessionId, requestId: question.id, value: "fixture value" });
 		const pair = await Promise.all([answer(), answer()]);
