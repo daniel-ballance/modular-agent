@@ -1,13 +1,13 @@
 //! MCP servers from configuration, in the `mcpServers` form Pi and most
 //! clients share. Each server is started on its own: one that fails is
 //! reported and skipped, and the session opens with the rest.
-use agent_api::*;
+use anyhow::{Result, anyhow, bail};
+use modular_agent_mcp::Server;
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
 };
-use tools_mcp::{Mcp, Server};
 
 /// `${NAME}` in a configured value is the environment variable's value, so
 /// that a secret can stay out of the file.
@@ -115,7 +115,6 @@ fn name(server: &Server) -> &str {
 }
 
 pub struct McpConfig {
-    pub service: Arc<Mcp>,
     /// The person's servers, for every project.
     pub global: PathBuf,
     /// Whether the project's own `.mcp.json` may start programs. The operator
@@ -142,48 +141,6 @@ impl McpConfig {
         (servers, problems)
     }
 }
-impl Plugin for McpConfig {
-    fn name(&self) -> &str {
-        "tools.mcp.config"
-    }
-    fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        let this = Arc::new(Self {
-            service: self.service.clone(),
-            global: self.global.clone(),
-            project_trusted: self.project_trusted,
-        });
-        r.on(
-            "session.prepare",
-            Order::Normal,
-            handler(move |api, scope, _| {
-                let this = this.clone();
-                Box::pin(async move {
-                    let project = api.snapshot(&scope.session)?.project;
-                    let (servers, problems) = this.servers(&project);
-                    for problem in problems {
-                        eprintln!("MCP: {problem}");
-                    }
-                    let starts = servers.into_iter().map(|server| {
-                        let (this, project, session) =
-                            (this.clone(), project.clone(), scope.session.clone());
-                        async move {
-                            let label = name(&server).to_owned();
-                            if let Err(error) =
-                                this.service.attach(&session, &project, vec![server]).await
-                            {
-                                eprintln!("MCP: server {label} is not available: {error:#}");
-                            }
-                        }
-                    });
-                    futures_util::future::join_all(starts).await;
-                    Ok(HookResult::default())
-                })
-            }),
-        );
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,7 +178,6 @@ mod tests {
         )
         .unwrap();
         let config = |trusted| McpConfig {
-            service: Arc::default(),
             global: file.clone(),
             project_trusted: trusted,
         };

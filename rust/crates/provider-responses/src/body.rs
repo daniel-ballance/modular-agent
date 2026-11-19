@@ -1,102 +1,86 @@
-//! The Responses API request and response, to and from the agent's shapes.
+//! Translate the SDK's shared ModelRequest and AssistantMessage to Responses API data.
 use crate::{Model, Vendor};
-use agent_api::*;
+use anyhow::{Result, anyhow};
+use modular_agent::{AssistantMessage, ModelRequest};
+use serde_json::{Value, json};
 
-/// The vendor's own output items are kept on the assistant message so its
-/// reasoning can be sent back as it was. They are only ever returned to the
-/// vendor that wrote them.
-fn replayable(message: &Message, vendor: Vendor) -> Option<&Vec<Value>> {
-    (message.opaque["provider"] == vendor.id())
-        .then(|| message.opaque["output"].as_array())
-        .flatten()
+fn parts(message: &Value) -> impl Iterator<Item = &Value> {
+    message["content"].as_array().into_iter().flatten()
 }
 
-fn images(message: &Message) -> Vec<Value> {
-    message
-        .parts
-        .iter()
-        .filter_map(|part| match part {
-            Part::Other { name, data } if name == "image" => Some(json!({
-                "type": "input_image",
-                "image_url": format!(
-                    "data:{};base64,{}",
-                    data["mimeType"].as_str()?,
-                    data["data"].as_str()?
-                ),
-            })),
-            _ => None,
-        })
+fn text(message: &Value) -> String {
+    parts(message)
+        .filter(|p| p["type"] == "text")
+        .filter_map(|p| p["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn images(message: &Value) -> Vec<Value> {
+    parts(message).filter(|p| p["type"] == "image")
+        .filter_map(|p| Some(json!({"type":"input_image","image_url":format!("data:{};base64,{}", p["mimeType"].as_str()?, p["data"].as_str()?)})))
         .collect()
 }
 
 fn input(vendor: Vendor, request: &ModelRequest) -> Result<Vec<Value>> {
     let mut input = vec![];
-    for message in &request.messages {
-        match message.role.as_str() {
+    for message in request.0["messages"].as_array().into_iter().flatten() {
+        match message["role"].as_str().unwrap_or("user") {
             "assistant" => {
-                let calls: Vec<&ToolCall> = message
-                    .parts
-                    .iter()
-                    .filter_map(|part| match part {
-                        Part::ToolCall { call } => Some(call),
-                        _ => None,
-                    })
-                    .collect();
-                if let Some(output) = replayable(message, vendor) {
-                    // The agent may have given a call its own id. The result
-                    // that follows uses that id, so the call must too.
-                    let mut calls = calls.iter();
+                let mut calls = parts(message).filter(|p| p["type"] == "toolCall");
+                let data = &message["providerData"];
+                if data["provider"] == vendor.id()
+                    && let Some(output) = data["output"].as_array()
+                {
                     for item in output {
                         let mut item = item.clone();
                         if item["type"] == "function_call"
                             && let Some(call) = calls.next()
                         {
-                            item["call_id"] = json!(call.id);
+                            item["call_id"] = call["id"].clone();
                         }
                         input.push(item);
                     }
                     continue;
                 }
-                let text = message.text_content();
+                let text = text(message);
                 if !text.is_empty() {
                     input.push(json!({"role":"assistant","content":text}));
                 }
                 for call in calls {
-                    input.push(json!({"type":"function_call","call_id":call.id,"name":call.name,"arguments":serde_json::to_string(&call.input)?}));
+                    input.push(json!({"type":"function_call","call_id":call["id"],"name":call["name"],"arguments":serde_json::to_string(&call["arguments"])?}));
                 }
             }
-            "tool" => {
-                input.push(
-                    json!({"type":"function_call_output","call_id":message.call,"output":message.text_content()}),
-                );
-                // A tool result is text on this API. Its images follow as a user item.
+            "toolResult" => {
+                input.push(json!({"type":"function_call_output","call_id":message["toolCallId"],"output":text(message)}));
                 let images = images(message);
                 if !images.is_empty() {
                     input.push(json!({"role":"user","content":images}));
                 }
             }
             role => {
-                let images = images(message);
+                let mut images = images(message);
+                let text = text(message);
                 if images.is_empty() {
-                    input.push(json!({"role":role,"content":message.text_content()}));
+                    input.push(json!({"role":role,"content":text}));
                 } else {
-                    let mut content =
-                        vec![json!({"type":"input_text","text":message.text_content()})];
-                    content.extend(images);
-                    input.push(json!({"role":role,"content":content}));
+                    images.insert(0, json!({"type":"input_text","text":text}));
+                    input.push(json!({"role":role,"content":images}));
                 }
             }
         }
     }
     Ok(input)
 }
-
-pub fn request(vendor: Vendor, model: &Model, request: &ModelRequest) -> Result<Value> {
+pub fn request(
+    vendor: Vendor,
+    model: &Model,
+    request: &ModelRequest,
+    session: &str,
+) -> Result<Value> {
     let mut input = input(vendor, request)?;
-    let tools: Vec<_> = request
-        .tools
-        .iter()
-        .map(|t| json!({"type":"function","name":t.name,"description":t.description,"parameters":t.input,"strict":false}))
+    let tools: Vec<_> = request.0["tools"].as_array().into_iter().flatten()
+        .map(|t| json!({"type":"function","name":t["name"],"description":t["description"],"parameters":t["parameters"],"strict":false}))
         .collect();
     let mut body = json!({
         "model": model.id,
@@ -111,9 +95,13 @@ pub fn request(vendor: Vendor, model: &Model, request: &ModelRequest) -> Result<
     }
     // A level the model does not list is lowered to the nearest it does, or
     // left out if there is none. It is never raised.
+    let system = request.0["systemPrompt"].as_str().unwrap_or_default();
+    let max_output = request.0["settings"]["maxOutput"]
+        .as_u64()
+        .unwrap_or_default();
     let level = crate::LEVELS
         .iter()
-        .position(|level| *level == request.thinking)
+        .position(|level| Some(*level) == request.0["settings"]["reasoning"].as_str())
         .and_then(|asked| {
             crate::LEVELS[..=asked]
                 .iter()
@@ -126,20 +114,20 @@ pub fn request(vendor: Vendor, model: &Model, request: &ModelRequest) -> Result<
     match vendor {
         Vendor::Codex => {
             // The Codex backend sets its own output limit and refuses one.
-            body["instructions"] = json!(if request.system.is_empty() {
+            body["instructions"] = json!(if system.is_empty() {
                 "You are a helpful assistant."
             } else {
-                request.system.as_str()
+                system
             });
             body["text"] = json!({"verbosity": "low"});
-            body["prompt_cache_key"] = json!(request.session);
+            body["prompt_cache_key"] = json!(session);
         }
         Vendor::Xai => {
-            if !request.system.is_empty() {
-                input.insert(0, json!({"role":"system","content":request.system}));
+            if !system.is_empty() {
+                input.insert(0, json!({"role":"system","content":system}));
             }
-            if request.output_limit > 0 {
-                body["max_output_tokens"] = json!(request.output_limit.min(model.max_tokens));
+            if max_output > 0 {
+                body["max_output_tokens"] = json!(max_output.min(model.max_tokens));
             }
         }
     }
@@ -147,7 +135,7 @@ pub fn request(vendor: Vendor, model: &Model, request: &ModelRequest) -> Result<
     Ok(body)
 }
 
-pub fn response(vendor: Vendor, response: &Value) -> Result<ModelResponse> {
+pub fn response(vendor: Vendor, response: &Value) -> Result<AssistantMessage> {
     let output = response["output"]
         .as_array()
         .ok_or_else(|| anyhow!("the model response has no output"))?;
@@ -156,18 +144,11 @@ pub fn response(vendor: Vendor, response: &Value) -> Result<ModelResponse> {
         match item["type"].as_str().unwrap_or("") {
             "message" => {
                 for part in item["content"].as_array().into_iter().flatten() {
-                    match part["type"].as_str().unwrap_or("") {
-                        "output_text" => parts.push(Part::Text {
-                            text: part["text"].as_str().unwrap_or("").into(),
-                        }),
-                        "refusal" => parts.push(Part::Text {
-                            text: part["refusal"].as_str().unwrap_or("model refused").into(),
-                        }),
-                        other => parts.push(Part::Other {
-                            name: other.into(),
-                            data: part.clone(),
-                        }),
-                    }
+                    parts.push(match part["type"].as_str().unwrap_or("") {
+                        "output_text" => json!({"type":"text","text":part["text"].as_str().unwrap_or("")}),
+                        "refusal" => json!({"type":"text","text":part["refusal"].as_str().unwrap_or("model refused")}),
+                        _ => part.clone(),
+                    });
                 }
             }
             "function_call" => {
@@ -179,52 +160,36 @@ pub fn response(vendor: Vendor, response: &Value) -> Result<ModelResponse> {
                         anyhow!("the model sent tool arguments that are not JSON: {e}")
                     })?
                 };
-                parts.push(Part::ToolCall {
-                    call: ToolCall {
-                        id: item["call_id"]
-                            .as_str()
-                            .ok_or_else(|| anyhow!("missing tool call id"))?
-                            .into(),
-                        name: item["name"]
-                            .as_str()
-                            .ok_or_else(|| anyhow!("missing tool name"))?
-                            .into(),
-                        input,
-                        started_by: "model".into(),
-                        extra: Value::Null,
-                    },
-                })
+                let id = item["call_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("missing tool call id"))?;
+                let name = item["name"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("missing tool name"))?;
+                parts.push(json!({"type":"toolCall","id":id,"name":name,"arguments":input}));
             }
-            "reasoning" => parts.push(Part::Reasoning { data: item.clone() }),
-            other => parts.push(Part::Other {
-                name: other.into(),
-                data: item.clone(),
-            }),
+            "reasoning" => parts.push(json!({"type":"reasoning","data":item})),
+            _ => parts.push(item.clone()),
         }
     }
     let stop = if response["status"] == "incomplete" {
-        "limit"
-    } else if parts.iter().any(|p| matches!(p, Part::ToolCall { .. })) {
-        "tools"
+        "length"
+    } else if parts.iter().any(|p| p["type"] == "toolCall") {
+        "toolUse"
     } else {
         "finished"
     };
     let usage = &response["usage"];
-    Ok(ModelResponse {
-        parts,
-        opaque: json!({"provider": vendor.id(), "output": output}),
-        stop: stop.into(),
-        usage: Usage {
-            input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
-            output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-            cached_tokens: usage["input_tokens_details"]["cached_tokens"]
-                .as_u64()
-                .unwrap_or(0),
-            ..Usage::default()
-        },
-    })
+    Ok(AssistantMessage(json!({
+        "role":"assistant", "content":parts, "stop":stop,
+        "providerData":{"provider":vendor.id(),"output":output},
+        "usage":{
+            "input":usage["input_tokens"].as_u64().unwrap_or(0),
+            "output":usage["output_tokens"].as_u64().unwrap_or(0),
+            "cacheRead":usage["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0)
+        }
+    })))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,24 +202,13 @@ mod tests {
             .find(|m| m.id == id)
             .unwrap()
     }
-    fn ask(thinking: &str, messages: Vec<Message>) -> ModelRequest {
-        ModelRequest {
-            session: "s1".into(),
-            system: "Be brief.".into(),
-            messages,
-            tools: vec![ToolDefinition {
-                name: "codemode".into(),
-                description: "Run Python".into(),
-                input: json!({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}),
-                read_only: false,
-                safe_to_repeat: false,
-                parallel: false,
-                hints: json!({}),
-            }],
-            thinking: thinking.into(),
-            output_limit: 4096,
-            extra: Value::Null,
-        }
+    fn ask(thinking: &str, messages: Vec<Value>) -> ModelRequest {
+        ModelRequest(json!({"systemPrompt":"Be brief.","messages":messages,
+            "tools":[{"name":"codemode","description":"Run Python","parameters":{"type":"object"}}],
+            "settings":{"reasoning":thinking,"maxOutput":4096}}))
+    }
+    fn message(role: &str, text: &str) -> Value {
+        json!({"role":role,"content":[{"type":"text","text":text}]})
     }
 
     #[test]
@@ -262,7 +216,8 @@ mod tests {
         let codex = request(
             Vendor::Codex,
             &model(Vendor::Codex, "gpt-6.1-sol"),
-            &ask("minimal", vec![Message::text("user", "hi")]),
+            &ask("minimal", vec![message("user", "hi")]),
+            "s1",
         )
         .unwrap();
         assert_eq!(codex["instructions"], "Be brief.");
@@ -276,6 +231,7 @@ mod tests {
             Vendor::Codex,
             &model(Vendor::Codex, "gpt-6.1-sol"),
             &ask("off", vec![]),
+            "s1",
         )
         .unwrap();
         assert!(off.get("reasoning").is_none());
@@ -286,6 +242,7 @@ mod tests {
                 Vendor::Xai,
                 &model(Vendor::Xai, "grok-4.7"),
                 &ask(level, vec![]),
+                "s1",
             )
             .unwrap();
             assert!(body.get("reasoning").is_none(), "{level}");
@@ -293,20 +250,16 @@ mod tests {
         // A model with a gap takes the nearest level below it.
         let mut gapped = model(Vendor::Xai, "grok-4.7");
         gapped.effort.remove("high");
-        let body = request(Vendor::Xai, &gapped, &ask("high", vec![])).unwrap();
+        let body = request(Vendor::Xai, &gapped, &ask("high", vec![]), "s1").unwrap();
         assert_eq!(body["reasoning"]["effort"], "medium");
 
         // An image in a tool result follows it as a user item.
-        let mut result = Message::text("tool", "Read image file [image/png]");
-        result.call = Some("c1".into());
-        result.parts.push(Part::Other {
-            name: "image".into(),
-            data: json!({"type":"image","mimeType":"image/png","data":"AAAA"}),
-        });
+        let result = json!({"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"Read image file [image/png]"},{"type":"image","mimeType":"image/png","data":"AAAA"}]});
         let body = request(
             Vendor::Codex,
             &model(Vendor::Codex, "gpt-6.1-sol"),
             &ask("low", vec![result]),
+            "s1",
         )
         .unwrap();
         assert_eq!(body["input"][0]["type"], "function_call_output");
@@ -319,7 +272,8 @@ mod tests {
         let xai = request(
             Vendor::Xai,
             &model(Vendor::Xai, "grok-4.7"),
-            &ask("high", vec![Message::text("user", "hi")]),
+            &ask("high", vec![message("user", "hi")]),
+            "s1",
         )
         .unwrap();
         assert!(xai.get("instructions").is_none());
@@ -337,21 +291,13 @@ mod tests {
             {"type":"reasoning","id":"rs_1","encrypted_content":"opaque"},
             {"type":"function_call","call_id":"vendor-id","name":"codemode","arguments":"{\"code\":\"1\"}"}
         ],"usage":{"input_tokens":10,"output_tokens":4,"input_tokens_details":{"cached_tokens":6}}});
-        let answer = response(Vendor::Codex, &raw).unwrap();
-        assert_eq!(answer.stop, "tools");
-        assert_eq!(answer.usage.cached_tokens, 6);
-        let mut call = answer.tool_calls().remove(0);
-        assert_eq!(call.input, json!({"code":"1"}));
-        // The agent renames the call; the replayed item must follow.
-        call.id = "agent-id".into();
-        let assistant = Message {
-            role: "assistant".into(),
-            parts: vec![Part::ToolCall { call }],
-            call: None,
-            opaque: answer.opaque.clone(),
-        };
-        let mut result = Message::text("tool", "1");
-        result.call = Some("agent-id".into());
+        let mut assistant = response(Vendor::Codex, &raw).unwrap().0;
+        assert_eq!(assistant["stop"], "toolUse");
+        assert_eq!(assistant["usage"]["cacheRead"], 6);
+        assert_eq!(assistant["content"][1]["arguments"], json!({"code":"1"}));
+        assistant["content"][1]["id"] = json!("agent-id");
+        let mut result = message("toolResult", "1");
+        result["toolCallId"] = json!("agent-id");
         let history = vec![assistant, result];
         let same = input(Vendor::Codex, &ask("low", history.clone())).unwrap();
         assert_eq!(same[0]["encrypted_content"], "opaque");

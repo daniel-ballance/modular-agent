@@ -4,14 +4,13 @@
 //! question. Providers refresh their own tokens through [`AuthFile::update`],
 //! which holds a lock across processes so two agents never spend the same
 //! refresh token.
-use agent_api::*;
+use anyhow::{Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
-    sync::Arc,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -88,7 +87,7 @@ impl AuthFile {
             .parent()
             .ok_or_else(|| anyhow!("credential file has no directory"))?;
         std::fs::create_dir_all(parent)?;
-        let temporary = parent.join(format!(".auth-{}.tmp", id()));
+        let temporary = parent.join(format!(".auth-{}.tmp", uuid::Uuid::new_v4()));
         let result: Result<()> = (|| {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -123,7 +122,7 @@ impl AuthFile {
         Ok(Locked(file))
     }
     /// Operator use, as `ma auth` and `ma login` do. Plugins get a sign-in
-    /// through [`Logins`], against their claim.
+    /// from their own bounded sign-in handle.
     pub fn login(&self, provider: &str) -> Result<Option<Login>> {
         Ok(self.read()?.logins.remove(provider))
     }
@@ -143,28 +142,27 @@ impl AuthFile {
     /// instead of being spent again.
     pub async fn current<F, Fut>(
         &self,
-        claim: &CredentialClaim,
         provider: &str,
+        rejected: Option<&str>,
         refresh: F,
     ) -> Result<Login>
     where
         F: FnOnce(Login) -> Fut,
         Fut: std::future::Future<Output = Result<Login>>,
     {
-        ensure!(
-            claim.covers(provider),
-            "{} did not register the credential {provider}",
-            claim.owner()
-        );
+        let needs_refresh = |login: &Login| {
+            login.expired()
+                || matches!(login, Login::Oauth { access, .. } if Some(access.as_str()) == rejected)
+        };
         let missing = || anyhow!("not signed in to {provider}; run `ma login {provider}`");
         let login = self.login(provider)?.ok_or_else(missing)?;
-        if !login.expired() {
+        if !needs_refresh(&login) {
             return Ok(login);
         }
         let this = self.clone();
         let lock = tokio::task::spawn_blocking(move || this.lock()).await??;
         let login = self.login(provider)?.ok_or_else(missing)?;
-        if !login.expired() {
+        if !needs_refresh(&login) {
             return Ok(login);
         }
         let fresh = refresh(login).await?;
@@ -190,182 +188,88 @@ impl AuthFile {
         Ok(())
     }
 }
-impl Plugin for AuthFile {
-    fn name(&self) -> &str {
-        "credentials.auth"
-    }
-    fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        r.provide::<dyn CredentialStore>("credentials", Arc::new(self.clone()))?;
-        r.provide::<Logins>("credentials.logins", Arc::new(Logins(self.clone())))
-    }
-}
-/// What a Provider plugin may do with sign-ins: read and refresh its own.
-pub struct Logins(AuthFile);
-impl Logins {
-    pub async fn current<F, Fut>(
-        &self,
-        claim: &CredentialClaim,
-        provider: &str,
-        refresh: F,
-    ) -> Result<Login>
-    where
-        F: FnOnce(Login) -> Fut,
-        Fut: std::future::Future<Output = Result<Login>>,
-    {
-        self.0.current(claim, provider, refresh).await
-    }
-    /// Mark the Provider's own token as spent, so the next read refreshes it.
-    pub fn expire(&self, claim: &CredentialClaim, provider: &str) -> Result<()> {
-        ensure!(
-            claim.covers(provider),
-            "{} did not register the credential {provider}",
-            claim.owner()
-        );
-        if let Some(Login::Oauth {
-            access,
-            refresh,
-            account,
-            ..
-        }) = self.0.login(provider)?
-        {
-            self.0.set_login(
-                provider,
-                Some(Login::Oauth {
-                    access,
-                    refresh,
-                    expires: 0,
-                    account,
-                }),
-            )?;
-        }
-        Ok(())
-    }
-}
-impl CredentialStore for AuthFile {
-    fn get(&self, name: &str) -> Result<String> {
-        ensure!(
-            !self.providers.iter().any(|p| p == name),
-            "a Provider sign-in is read only by its Provider"
-        );
+
+impl AuthFile {
+    pub fn answer(&self, name: &str) -> Result<String> {
+        self.answer_name(name)?;
         self.read()?
             .answers
             .remove(name)
             .ok_or_else(|| anyhow!("no credential named {name}"))
     }
-    fn provider(&self, claim: &CredentialClaim, name: &str) -> Result<String> {
-        ensure!(
-            claim.covers(name),
-            "{} did not register the credential {name}",
-            claim.owner()
-        );
-        self.read()?
-            .logins
-            .get(name)
-            .map(|login| login.secret().to_owned())
-            .ok_or_else(|| anyhow!("not signed in to {name}"))
+
+    pub fn accepts(&self, name: &str) -> bool {
+        self.answer_name(name).is_ok()
     }
-    fn put(&self, name: &str, value: &str) -> Result<()> {
+
+    pub fn put_answer(&self, name: &str, value: &str) -> Result<()> {
         self.answer_name(name)?;
         let _lock = self.lock()?;
         let mut contents = self.read()?;
         contents.answers.insert(name.into(), value.into());
         self.write(&contents)
     }
-    fn writable(&self) -> bool {
-        true
-    }
-    fn accepts(&self, name: &str) -> bool {
-        self.answer_name(name).is_ok()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-    /// A Provider plugin, as far as credentials go: it claims a name.
-    struct Claims(&'static str, Arc<Mutex<Option<CredentialClaim>>>);
-    impl Plugin for Claims {
-        fn name(&self) -> &str {
-            self.0
-        }
-        fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-            *self.1.lock().unwrap() = Some(r.claim_credentials(&["xai"])?);
-            Ok(())
-        }
+    #[test]
+    fn rust_auth_fixture_round_trips_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = AuthFile::new(dir.path().join("auth.json"), &["openai-codex", "xai"]);
+        let fixture = include_bytes!("../tests/fixtures/auth.json");
+        std::fs::write(&auth.path, fixture).unwrap();
+        assert_eq!(auth.answer("named-answer").unwrap(), "fixture");
+        assert!(auth.put_answer("xai", "refused").is_err());
+        auth.set_login("openai-codex", auth.login("openai-codex").unwrap())
+            .unwrap();
+        assert_eq!(std::fs::read(&auth.path).unwrap(), fixture);
+        assert_eq!(
+            std::fs::metadata(&auth.path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[tokio::test]
-    async fn a_login_is_refreshed_once_kept_private_and_given_only_to_its_provider() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    async fn refresh_competes_under_the_file_lock_and_only_spends_once() {
+        let dir = tempfile::tempdir().unwrap();
         let auth = AuthFile::new(dir.path().join("auth.json"), &["xai"]);
-        let harness = agent_harness::Harness::new();
-        harness.load(Arc::new(auth.clone())).await?;
-        let slot = Arc::new(Mutex::new(None));
-        harness
-            .load(Arc::new(Claims("provider.xai", slot.clone())))
-            .await?;
-        let claim = slot.lock().unwrap().clone().unwrap();
-        // A second plugin cannot take the same name: its load is refused.
-        let thief = Arc::new(Mutex::new(None));
-        assert!(
-            harness
-                .load(Arc::new(Claims("provider.other", thief.clone())))
-                .await
-                .is_err()
-        );
-        assert!(thief.lock().unwrap().is_none());
-
-        let store: Arc<dyn CredentialStore> = capability(harness.as_ref(), "credentials")?;
-        let logins: Arc<Logins> = capability(harness.as_ref(), "credentials.logins")?;
-        assert!(
-            logins
-                .current(&claim, "xai", |l| async { Ok(l) })
-                .await
-                .is_err()
-        );
-        let stale = Login::Oauth {
-            access: "old".into(),
-            refresh: "r1".into(),
-            expires: 1,
-            account: None,
-        };
-        auth.set_login("xai", Some(stale))?;
-        let mode = std::fs::metadata(&auth.path)?.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        let fresh = |login: Login| async move {
-            let Login::Oauth { refresh, .. } = login else {
-                unreachable!()
-            };
-            assert_eq!(refresh, "r1");
-            Ok(Login::Oauth {
-                access: "new".into(),
-                refresh: "r2".into(),
-                expires: now_ms() + 60_000,
+        auth.set_login(
+            "xai",
+            Some(Login::Oauth {
+                access: "before".into(),
+                refresh: "fixture".into(),
+                expires: 0,
                 account: None,
-            })
+            }),
+        )
+        .unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = count.clone();
+        let refresh = move |_| {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                Ok(Login::Oauth {
+                    access: "after".into(),
+                    refresh: "next".into(),
+                    expires: u64::MAX,
+                    account: None,
+                })
+            }
         };
-        assert_eq!(logins.current(&claim, "xai", fresh).await?.secret(), "new");
-        // Now current: the refresh must not run again.
-        let again = logins
-            .current(&claim, "xai", |_| async {
-                bail!("refreshed a current token")
-            })
-            .await?;
-        assert_eq!(again.secret(), "new");
-        // The sign-in goes to its Provider and to nobody who only has the store.
-        assert_eq!(store.provider(&claim, "xai")?, "new");
-        assert!(store.get("xai").is_err());
-        assert!(store.provider(&claim, "openai-codex").is_err());
-        assert!(!store.accepts("xai") && store.put("xai", "x").is_err());
-        store.put("deploy-key", "s3")?;
-        assert_eq!(store.get("deploy-key")?, "s3");
-        // Marked as spent, the next read refreshes.
-        logins.expire(&claim, "xai")?;
-        assert!(auth.login("xai")?.unwrap().expired());
-        auth.set_login("xai", None)?;
-        assert!(store.provider(&claim, "xai").is_err());
-        Ok(())
+        let a = auth.current("xai", None, refresh.clone());
+        let b = auth.current("xai", Some("before"), refresh);
+        let (a, b) = tokio::join!(a, b);
+        assert_eq!(a.unwrap(), b.unwrap());
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        assert!(dir.path().join("auth.lock").is_file());
     }
 }

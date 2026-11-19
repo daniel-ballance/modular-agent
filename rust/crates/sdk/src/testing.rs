@@ -19,6 +19,12 @@ use std::{
 mod environment;
 pub use environment::{ExecOutput, MemoryEnvironment, memory_environment, memory_environment_with};
 
+/// Add the offline fixtures required by the ACP kit.
+pub fn acp_conformance(mut builder: crate::AgentBuilder) -> crate::AgentBuilder {
+    builder.acp_conformance = true;
+    builder.approval(crate::Approval::Off)
+}
+
 /// The scripted model's id.
 pub const SCRIPTED_MODEL: &str = "scripted/script";
 

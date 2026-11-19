@@ -1,8 +1,13 @@
-use agent_api::*;
-use interface_terminal::{Mode, TerminalOptions, TerminalPlugin};
+use anyhow::{Result, anyhow, bail, ensure};
+use modular_agent::{self as sdk, testing::SCRIPTED_MODEL};
+use modular_agent_mcp::{Mcp, Server};
 use provider_responses::{Vendor, oauth};
-use standard::{Standard, compose, sink::Sink};
-use std::{path::PathBuf, sync::Arc};
+use serde_json::json;
+use standard::terminal::TerminalOptions;
+use standard::{
+    Standard, builder,
+    terminal::{Mode, Questions},
+};
 
 const HELP: &str = "ma, the standard Modular Agent
 
@@ -36,7 +41,7 @@ turn; /cancel or Ctrl-C stops the turn. /commands lists the rest, including
 /model, /thinking, /compact, /skills and /skill:NAME.
 
 Files: settings.json, mcp.json, models.json, AGENTS.md and skills/ in
-~/.config/modular-agent. Sessions are kept in ~/.local/state/modular-agent.";
+~/.config/modular-agent. Sessions are kept in ~/.local/state/modular-agent/rust.";
 
 fn take(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
     args.next().ok_or_else(|| anyhow!("{flag} needs a value"))
@@ -147,11 +152,6 @@ fn auth_status(standard: &Standard) -> Result<()> {
     Ok(())
 }
 
-struct Quiet;
-impl EventSink for Quiet {
-    fn send(&self, _: Event) {}
-}
-
 async fn start() -> Result<()> {
     let mut standard = Standard::from_env()?;
     let mut args = std::env::args().skip(1).peekable();
@@ -172,23 +172,19 @@ async fn start() -> Result<()> {
         Some("auth") => return auth_status(&standard),
         Some("models") => {
             standard.claude = standard.claude_launch().is_some();
-            let api = compose(
-                &standard,
-                Arc::new(TerminalPlugin {
-                    sink: Arc::new(Quiet),
-                }),
-                &project,
-            )
-            .await?;
-            for model in standard::models(api.as_ref())? {
+            let agent = builder(&standard, &project, &Mcp::default(), vec![])?
+                .build()
+                .await?;
+            for model in agent.models()? {
                 println!(
                     "{:<34} context {:>7}  thinking {}",
-                    model.name,
+                    format!("{}/{}", model.model.provider, model.model.id),
                     model.context_window,
                     model.thinking.join(",")
                 );
             }
-            return api.shutdown().await;
+            agent.close().await?;
+            return Ok(());
         }
         Some("skills") => {
             let plugin = standard.skills();
@@ -209,14 +205,13 @@ async fn start() -> Result<()> {
         }
         Some("mcp") => {
             let config = standard::mcp::McpConfig {
-                service: Arc::default(),
                 global: standard.config.join("mcp.json"),
                 project_trusted: standard.configuration().trusted(&project.canonicalize()?)?,
             };
             let (servers, problems) = config.servers(&project);
             for server in servers {
                 match server {
-                    tools_mcp::Server::Stdio {
+                    Server::Stdio {
                         name,
                         command,
                         args,
@@ -224,7 +219,7 @@ async fn start() -> Result<()> {
                     } => {
                         println!("{name:<20} stdio  {command} {}", args.join(" "))
                     }
-                    tools_mcp::Server::Http { name, url, .. } => {
+                    Server::Http { name, url, .. } => {
                         println!("{name:<20} http   {url}")
                     }
                 }
@@ -237,7 +232,6 @@ async fn start() -> Result<()> {
         _ => (),
     }
     let mut terminal = TerminalOptions {
-        project: project.clone(),
         session: None,
         prompt: None,
         settings: json!({}),
@@ -246,9 +240,9 @@ async fn start() -> Result<()> {
         all_projects: false,
         history: false,
         declaration: false,
+        verbose: false,
     };
-    let (mut acp, mut trust, mut resume, mut verbose) = (false, false, false, false);
-    let mut fake = None;
+    let (mut acp, mut trust, mut resume) = (false, false, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
@@ -256,7 +250,7 @@ async fn start() -> Result<()> {
                 return Ok(());
             }
             "--version" | "-V" => {
-                println!("ma {}", env!("CARGO_PKG_VERSION"));
+                println!("ma {} (rust)", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "sessions" => terminal.list = true,
@@ -279,48 +273,43 @@ async fn start() -> Result<()> {
                 terminal.prompt = Some(take(&mut args, &arg)?);
                 terminal.mode = Mode::Print;
             }
-            "--verbose" | "-v" => verbose = true,
+            "--verbose" | "-v" => terminal.verbose = true,
             "--json" => terminal.mode = Mode::Json,
             "--history" => terminal.history = true,
             "--declaration" => terminal.declaration = true,
-            // Tests only: answers scripted in a file instead of a model.
-            "--fake-script" => fake = Some(PathBuf::from(take(&mut args, &arg)?)),
             _ => bail!("unknown argument {arg}; use --help"),
         }
-    }
-    if let Some(path) = fake {
-        let values: Vec<Value> = serde_json::from_slice(&std::fs::read(path)?)?;
-        let scripts = values
-            .into_iter()
-            .map(|v| -> Result<_> {
-                let response = match v.as_str() {
-                    Some(text) => ModelResponse::text(text),
-                    None => serde_json::from_value(v)?,
-                };
-                Ok(provider_fake::Script::response(response))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        terminal.settings["model"] = json!("fake");
-        standard.scripted = Some(Arc::new(provider_fake::FakePlugin::new(scripts)));
     }
     if acp {
         ensure!(
             terminal.prompt.is_none() && terminal.session.is_none() && !trust && !resume,
             "with --acp the client creates sessions and grants trust"
         );
-        standard.claude = standard.claude_launch().is_some();
-        return interface_acp::run(Arc::new(standard::acp::Factory {
+        sdk::serve_acp(standard::acp::Factory {
             standard,
             settings: terminal.settings,
-        }))
-        .await;
+            mcp: Mcp::default(),
+        })
+        .await?;
+        return Ok(());
+    }
+    if terminal.list {
+        let project = project.canonicalize()?;
+        let sessions = standard
+            .history()?
+            .sessions((!terminal.all_projects).then_some(project.as_path()))?;
+        println!("{}", serde_json::to_string_pretty(&sessions.into_iter().map(|s| {
+            json!({"id":s.id,"project":s.project,"lastActive":s.last_active,"model":s.settings["model"]})
+        }).collect::<Vec<_>>())?);
+        return Ok(());
     }
     if resume && terminal.session.is_none() {
         let canonical = project.canonicalize()?;
         terminal.session = standard
-            .list(Some(&canonical))?
+            .history()?
+            .sessions(Some(&canonical))?
             .into_iter()
-            .max_by_key(|s| s.entries.last().map_or(0, |e| e.at))
+            .max_by_key(|s| s.last_active)
             .map(|s| s.id);
         ensure!(
             terminal.session.is_some(),
@@ -329,19 +318,17 @@ async fn start() -> Result<()> {
     }
     let recorded = match &terminal.session {
         Some(session) => {
-            let data = standard.load(session)?;
-            project = data.project.clone();
+            let data = standard.history()?.session(session)?;
+            project = data.project;
             data.settings["model"].as_str().map(str::to_owned)
         }
         None => None,
     };
-    terminal.project = project.clone();
     if trust {
         standard.configuration().trust(&project)?;
     }
     // Which model this run will use decides whether the Claude sidecar starts.
     let configured = {
-        use agent_api::Configuration;
         standard
             .configuration()
             .settings(&project.canonicalize()?)?["model"]
@@ -353,26 +340,38 @@ async fn start() -> Result<()> {
         .map(str::to_owned)
         .or(recorded)
         .or(configured);
-    let inspecting = terminal.list || terminal.history || terminal.declaration;
-    match &chosen {
-        Some(model) => standard.claude = model.starts_with("claude/"),
-        None if inspecting || standard.scripted.is_some() => (),
-        None => match standard::default_model(&standard) {
-            Some(model) => terminal.settings["model"] = json!(model),
-            None if standard.claude_launch().is_some() => {
-                standard.claude = true;
-                terminal.settings["model"] = json!("claude/claude-sonnet-5-5");
-            }
-            None => bail!(
-                "no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`."
-            ),
-        },
+    let inspecting = terminal.history || terminal.declaration;
+    let chosen = if standard.scripted.is_some() {
+        Some(SCRIPTED_MODEL.into())
+    } else if standard.conformance {
+        chosen.or_else(|| Some("conformance/echo".into()))
+    } else {
+        chosen.or_else(|| standard::default_model(&standard).map(str::to_owned))
+    };
+    if chosen.is_none() && !inspecting {
+        bail!(
+            "no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`."
+        );
     }
-    let interface = Arc::new(TerminalPlugin {
-        sink: Arc::new(Sink::new(terminal.mode, verbose)),
-    });
-    let api = compose(&standard, interface, &project).await?;
-    let result = interface_terminal::run(api.clone(), terminal).await;
-    let shutdown = api.shutdown().await;
-    result.and(shutdown)
+    standard.claude = chosen.as_ref().is_some_and(|m| m.starts_with("claude/"));
+    if standard.scripted.is_some() {
+        terminal.settings["model"] = json!(SCRIPTED_MODEL);
+    }
+    let mut b = builder(&standard, &project, &Mcp::default(), vec![])?;
+    if let Some(model) = chosen {
+        b = b.model(model);
+    }
+    let questions = Questions::default();
+    if terminal.prompt.is_none() && !inspecting {
+        b = questions.install(b);
+    }
+    let agent = b.build().await?;
+    if terminal.declaration {
+        println!("{}", serde_json::to_string_pretty(&agent.declaration()?)?);
+        agent.close().await?;
+        return Ok(());
+    }
+    let result = standard::terminal::run(&agent, terminal, questions).await;
+    let shutdown = agent.close().await;
+    result.and(shutdown.map_err(Into::into))
 }

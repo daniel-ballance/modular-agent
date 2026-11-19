@@ -1,7 +1,20 @@
 //! Tools as Python functions: names, signatures, argument binding and the
 //! prompt section that lists them.
 use crate::convert;
-use agent_api::*;
+use anyhow::{Result, anyhow, bail, ensure};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+#[derive(Deserialize, Serialize)]
+pub struct Definition {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(rename = "parameters")]
+    pub input: Value,
+    #[serde(default)]
+    pub hints: Value,
+}
 use monty_types::CallArgs;
 
 /// Tools listed with their full description. Past this, each gets one line
@@ -11,7 +24,7 @@ const FULL_DESCRIPTIONS: usize = 12;
 pub struct Function {
     /// The Python name: the tool's name with other characters as '_'.
     pub name: String,
-    pub tool: ToolDefinition,
+    pub tool: Definition,
     /// Parameter names in call order: required first, as declared, then the
     /// optional ones by name.
     pub parameters: Vec<String>,
@@ -48,7 +61,8 @@ fn python_type(schema: &Value) -> String {
 }
 
 impl Function {
-    pub fn new(tool: ToolDefinition) -> Self {
+    pub fn new(tool: Value) -> Result<Self> {
+        let tool: Definition = serde_json::from_value(tool)?;
         let required: Vec<String> = tool.input["required"]
             .as_array()
             .into_iter()
@@ -59,12 +73,12 @@ impl Function {
         if let Some(properties) = tool.input["properties"].as_object() {
             parameters.extend(properties.keys().filter(|k| !required.contains(k)).cloned());
         }
-        Self {
+        Ok(Self {
             name: identifier(&tool.name),
             tool,
             parameters,
             required,
-        }
+        })
     }
     pub fn signature(&self) -> String {
         let parameters: Vec<String> = self
@@ -87,7 +101,7 @@ impl Function {
             "signature": self.signature(),
             "description": self.tool.description,
             "parameters": self.tool.input,
-            "read_only": self.tool.read_only,
+            "read_only": self.tool.hints["readOnly"] == true,
         })
     }
     /// The tool input for a Python call. Keywords, positions, or one dict.

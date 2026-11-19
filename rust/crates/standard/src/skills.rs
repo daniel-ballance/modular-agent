@@ -2,11 +2,12 @@
 //! with a `SKILL.md`: a name and a description up front, then instructions.
 //! The prompt lists each skill's name, description and file. The model reads
 //! the file when a task matches, and a person can load one with `/skill:name`.
-use agent_api::*;
+use anyhow::{Result, anyhow, ensure};
+use modular_agent::{Command, InputChange, Order, Plugin};
+use serde_json::json;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 const MAX_NAME: usize = 64;
@@ -222,6 +223,7 @@ pub fn expand(skills: &[Skill], text: &str) -> Result<Option<String>> {
 
 /// Where skills are looked for: the configuration folder, the shared
 /// `~/.agents/skills`, extra folders from settings, then the project's own.
+#[derive(Clone)]
 pub struct SkillsPlugin {
     pub global: Vec<PathBuf>,
 }
@@ -236,52 +238,42 @@ impl SkillsPlugin {
         discover(&self.folders(project)).0
     }
 }
-impl Plugin for SkillsPlugin {
-    fn name(&self) -> &str {
-        "feature.skills"
-    }
-    fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        let this = Arc::new(Self {
-            global: self.global.clone(),
-        });
-        r.provide::<SkillsPlugin>("skills", this.clone())?;
-        // Runs ahead of command handling, which would take "/skill:x" for a command.
-        let expanding = this.clone();
-        r.on(
-            "input",
-            Order::First,
-            handler(move |api, scope, mut value| {
-                let this = expanding.clone();
-                Box::pin(async move {
-                    let text = value["text"].as_str().unwrap_or("");
-                    if text.starts_with("/skill:") {
-                        let project = api.snapshot(&scope.session)?.project;
-                        if let Some(expanded) = expand(&this.for_project(&project), text)? {
-                            value["text"] = json!(expanded);
-                        }
+impl SkillsPlugin {
+    pub fn plugin(self, project: PathBuf) -> Plugin {
+        let (input_skills, input_project) = (self.clone(), project.clone());
+        Plugin::new("skills")
+            .on_input_with(Order::First, move |p| {
+                let (skills, project) = (input_skills.clone(), input_project.clone());
+                async move {
+                    let text = p
+                        .content
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|part| part["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if let Some(expanded) = expand(&skills.for_project(&project), &text)? {
+                        return Ok(InputChange::Change(
+                            json!([{"type":"text","text":expanded}]),
+                        ));
                     }
-                    Ok(answer(value))
-                })
-            }),
-        );
-        r.command(
-            "skills",
-            handler(move |api, scope, _| {
-                let this = this.clone();
-                Box::pin(async move {
-                    let project = api.snapshot(&scope.session)?.project;
-                    Ok(answer(json!(
-                        this.for_project(&project)
-                            .iter()
-                            .map(
-                                |s| json!({"name":s.name,"description":s.description,"file":s.file})
-                            )
-                            .collect::<Vec<_>>()
-                    )))
-                })
-            }),
-        )?;
-        Ok(())
+                    Ok(InputChange::Pass)
+                }
+            })
+            .command(Command::new(
+                "skills",
+                "List the available skills.",
+                move |_, _| {
+                    let (skills, project) = (self.clone(), project.clone());
+                    async move {
+                        let skills = skills.for_project(&project).into_iter()
+                        .map(|s| json!({"name":s.name,"description":s.description,"file":s.file}))
+                        .collect::<Vec<_>>();
+                        Ok(Some(serde_json::to_string_pretty(&skills)?))
+                    }
+                },
+            ))
     }
 }
 

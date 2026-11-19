@@ -2,9 +2,10 @@
 //! and endpoints are the ones Pi uses (pi-ai 1.5.2, `auth/oauth/openai-codex`
 //! and `auth/oauth/xai`).
 use crate::Vendor;
-use agent_api::*;
+use anyhow::{Result, anyhow, bail, ensure};
 use base64::Engine;
 use credentials_auth::{Login, now_ms};
+use serde_json::{Value, json};
 use sha2::Digest;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

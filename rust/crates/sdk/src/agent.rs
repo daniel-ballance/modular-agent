@@ -108,6 +108,10 @@ pub struct AgentBuilder {
     data_dir: Option<PathBuf>,
     durability: Durability,
     history: Option<History>,
+    configuration: Option<crate::FilesConfiguration>,
+    tenants: Option<String>,
+    pub(crate) acp_conformance: bool,
+    no_default_prompt: bool,
     job_reports_start_turns: bool,
     providers: Vec<Arc<dyn base::Plugin>>,
     tools: Vec<Tool>,
@@ -167,6 +171,23 @@ impl Agent {
             base::requests(self.inner.harness.as_ref())?.presence(id, LOCAL, true);
         }
         Ok(())
+    }
+
+    /// Follow live events on this agent, including during session open and recovery.
+    pub fn events(&self) -> crate::EventStream {
+        let mut live = self.inner.hub.events.subscribe();
+        Box::pin(async_stream::stream! {
+            loop {
+                match live.recv().await {
+                    Ok((_, event)) => yield Ok(event),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        yield Err(Error::new(Code::Lost, "event reader fell behind"));
+                        break;
+                    }
+                }
+            }
+        })
     }
 
     /// What this agent supports, as the ACP declaration.
@@ -248,6 +269,24 @@ impl AgentBuilder {
         self.history = Some(history);
         self
     }
+    /// Use a settings file and an external project trust ledger.
+    pub fn configuration(mut self, configuration: crate::FilesConfiguration) -> Self {
+        self.configuration = Some(configuration);
+        self
+    }
+
+    /// Deployment limits and rights, in the binding's tenant configuration format.
+    pub fn tenants(mut self, tenants: Option<String>) -> Self {
+        self.tenants = tenants;
+        self
+    }
+
+    /// Use a product's system-prompt contributions instead of the SDK's default.
+    pub fn default_prompt(mut self, enabled: bool) -> Self {
+        self.no_default_prompt = !enabled;
+        self
+    }
+
     pub fn job_reports_start_turns(mut self, enabled: bool) -> Self {
         self.job_reports_start_turns = enabled;
         self
@@ -387,7 +426,15 @@ impl AgentBuilder {
         };
         let mut plugins: Vec<Arc<dyn base::Plugin>> = vec![
             Arc::new(CorePlugin {
-                settings: defaults,
+                configuration: match self.configuration {
+                    Some(mut files) => {
+                        let mut settings = files.defaults.take().unwrap_or(json!({}));
+                        base::merge(&mut settings, defaults);
+                        files.defaults = Some(settings);
+                        Arc::new(files.base())
+                    }
+                    None => Arc::new(crate::core::Defaults(defaults)),
+                },
                 history,
             }),
             match self.environment {
@@ -403,12 +450,17 @@ impl AgentBuilder {
         if self.approval.is_some() {
             plugins.push(Arc::new(feature_approval::ApprovalPlugin));
         }
+        if self.acp_conformance {
+            plugins.push(Arc::new(tools_builtin::BuiltinTools));
+            plugins.push(Arc::new(provider_fake::ConformancePlugin));
+        }
         plugins.extend(self.providers);
+        if !self.no_default_prompt {
+            plugins.push(Arc::new(feature_prompt::PromptPlugin));
+        }
         plugins.extend([
             Arc::new(feature_model::ModelPlugin) as Arc<dyn base::Plugin>,
-            Arc::new(feature_prompt::PromptPlugin),
             Arc::new(feature_context::ContextPlugin),
-            Arc::new(feature_commands::CommandsPlugin),
         ]);
         plugins.push(Arc::new(HubPlugin(hub.clone())));
         let mut own: Vec<(Arc<dyn base::Plugin>, Vec<String>)> =
@@ -421,7 +473,9 @@ impl AgentBuilder {
             own.push((Arc::new(InProcess::new(plugin)?), plugin.replaces.clone()));
         }
 
+        own.push((Arc::new(feature_commands::CommandsPlugin), vec![]));
         let harness = Harness::for_project(project.clone());
+        harness.configure_tenants(self.tenants.as_deref())?;
         for (plugin, replaces) in own {
             let name = plugin.name().to_string();
             let loaded = if replaces.is_empty() {

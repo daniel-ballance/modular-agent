@@ -9,6 +9,87 @@ use std::{
 };
 
 type Sink = Arc<dyn base::EventSink>;
+
+/// An application that builds a separate SDK Agent for each ACP project/session.
+#[async_trait::async_trait]
+pub trait AcpHost: Send + Sync + 'static {
+    async fn agent(&self, project: &Path) -> Result<Agent>;
+    fn history(&self) -> Result<crate::History>;
+    fn trust(&self, project: &Path) -> Result<()>;
+
+    fn initial_settings(&self) -> Value {
+        serde_json::json!({})
+    }
+
+    async fn attach_mcp(&self, _session: &str, _project: &Path, servers: Value) -> Result<()> {
+        if servers.as_array().is_some_and(Vec::is_empty) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                Code::NotSupported,
+                "this agent does not accept ACP MCP servers",
+            ))
+        }
+    }
+}
+
+/// Serve a project-aware host on stdio. Every composition must opt into process hosting.
+pub async fn serve_acp(host: impl AcpHost) -> Result<()> {
+    Ok(interface_acp::run(Arc::new(ProjectFactory(host))).await?)
+}
+
+struct ProjectFactory<H>(H);
+
+#[async_trait::async_trait]
+impl<H: AcpHost> interface_acp::Factory for ProjectFactory<H> {
+    async fn declaration(&self) -> base::Result<Value> {
+        let agent = self.0.agent(&std::env::current_dir()?).await?;
+        let declaration = agent.declaration_for(None, true);
+        agent.close().await?;
+        Ok(declaration?)
+    }
+
+    async fn build(&self, project: &Path, sink: Sink) -> base::Result<base::Api> {
+        let agent = self.0.agent(project).await?;
+        if !agent.inner.plugin_host {
+            agent.close().await?;
+            return Err(base::anyhow!("serve_acp requires a plugin host"));
+        }
+        let harness = agent.inner.harness.clone();
+        if let Err(error) = harness
+            .load(Arc::new(interface_acp::AcpPlugin { sink }))
+            .await
+        {
+            agent.close().await?;
+            return Err(error);
+        }
+        Ok(harness)
+    }
+
+    fn list(&self, project: Option<&Path>) -> base::Result<Vec<base::SessionData>> {
+        self.0.history()?.0.list(project)
+    }
+
+    fn trust(&self, project: &Path) -> base::Result<()> {
+        Ok(self.0.trust(project)?)
+    }
+
+    fn initial_settings(&self) -> Value {
+        base::portable::settings_from_wire(&self.0.initial_settings())
+    }
+
+    async fn attach(
+        &self,
+        _: base::Api,
+        session: &str,
+        project: &Path,
+        servers: Value,
+    ) -> base::Result<()> {
+        Ok(self.0.attach_mcp(session, project, servers).await?)
+    }
+    async fn detach(&self, _: base::Api, _: &str) {}
+}
+
 #[derive(Default)]
 pub(crate) struct Routes {
     pending: Mutex<Option<Sink>>,

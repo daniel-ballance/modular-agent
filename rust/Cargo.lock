@@ -749,14 +749,13 @@ dependencies = [
 name = "credentials-auth"
 version = "0.1.0"
 dependencies = [
- "agent-api",
- "agent-harness",
  "anyhow",
  "fs2",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2257,6 +2256,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.23.1",
+ "config-files",
  "environment-local",
  "feature-approval",
  "feature-commands",
@@ -2270,6 +2270,7 @@ dependencies = [
  "history-http",
  "interface-acp",
  "plugin-stdio",
+ "provider-fake",
  "provider-openai",
  "reqwest",
  "runtime-durable",
@@ -2280,6 +2281,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tools-builtin",
 ]
 
 [[package]]
@@ -2829,14 +2831,13 @@ dependencies = [
 name = "provider-responses"
 version = "0.1.0"
 dependencies = [
- "agent-api",
- "agent-harness",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "credentials-auth",
  "futures-util",
  "getrandom 0.3.4",
+ "modular-agent",
  "reqwest",
  "serde",
  "serde_json",
@@ -3899,36 +3900,19 @@ dependencies = [
 name = "standard"
 version = "0.1.0"
 dependencies = [
- "agent-api",
- "agent-harness",
  "anyhow",
- "async-trait",
- "config-files",
  "credentials-auth",
- "environment-local",
- "feature-commands",
- "feature-context",
- "feature-jobs",
- "feature-model",
- "feature-questions",
  "futures-util",
- "history-fs",
- "history-http",
- "interface-acp",
- "interface-terminal",
+ "jiff",
  "libc",
- "plugin-stdio",
- "provider-fake",
+ "modular-agent",
+ "modular-agent-files",
+ "modular-agent-mcp",
  "provider-responses",
- "runtime-durable",
- "runtime-transient",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tools-code",
- "tools-files",
- "tools-mcp",
 ]
 
 [[package]]
@@ -4230,11 +4214,11 @@ dependencies = [
 name = "tools-code"
 version = "0.1.0"
 dependencies = [
- "agent-api",
  "anyhow",
- "async-trait",
+ "modular-agent",
  "monty",
  "monty-types",
+ "serde",
  "serde_json",
  "tokio",
 ]
