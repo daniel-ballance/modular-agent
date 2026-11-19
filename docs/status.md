@@ -2,16 +2,16 @@
 
 ## Production edition 3: TypeScript
 
-Verified against specification `9fffc23` and kits `5f5bfc9`, on Linux with Node.js 26.13.1.
+Verified against specification `9fffc23` and kits `dde3458`, on Linux with Node.js 26.13.1. The earlier swap results below used kits `5f5bfc9`.
 
-The wire Runtime uses the committed result on a refusal. The host restores the last answered step and its `step.after` decision, and settles ineligible calls before handoff. The build also uses the configured ACP principal for portable retries, refuses startup on a failed configured plugin, and treats extra `provider.response` members as inert.
+The wire Runtime uses the committed tool result on a tool refusal. A failed turn still lists the calls it left pending, including when a host rejects `step.after`. The TypeScript host uses committed dispositions even if the Runtime reply is lost. It restores the last answered step and its `step.after` decision, and settles ineligible calls before handoff. The build also uses the configured ACP principal for portable retries, refuses startup on a failed configured plugin, and treats extra `provider.response` members as inert.
 
 | Self check | Result |
 |---|---|
-| Build and tests, local and with `MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local` | 96/96 each |
+| Build and tests, local and with `MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local` | 100/100 each |
 | History HTTP kit with decreased TTL on restart | 42/42 |
 | Served plugin kit | 139/139 |
-| ACP with crash, plugin, probe and job checks | 206/206 each for `provider,hooks`; plus `durable-runtime`; plus `tools,environment` |
+| ACP with crash, plugin, probe and job checks | 207/207 each for `provider,hooks`; plus `durable-runtime`; plus `tools,environment` |
 | Portable ACP with crash and job checks | 152/152 each for transient and durable |
 
 | Swap cell | Result |
@@ -23,7 +23,7 @@ The wire Runtime uses the committed result on a refusal. The host restores the l
 | E: TypeScript host with the Rust or Python durable Runtime | 189/189 each |
 | F4: TypeScript reopens Go sessions through the supplied history service | 152/152 |
 
-In the Python cell, the wire tap showed a `runToolCall` pending reply followed by rejection of `step.after` for unsettled calls. A committed pending call should satisfy that gate boundary. No peer code was changed. The gap log is `/tmp/ma-tools/r7/ts-gaps.md`.
+In the Python cell, the wire tap showed a `runToolCall` pending reply followed by rejection of `step.after` for unsettled calls. A committed pending call should satisfy that gate boundary. The focused TypeScript wire test reproduces the rejection and checks that both Runtime tiers still report the call. The earlier peer cells were not rerun. The gap log is `/tmp/ma-tools/r7/ts-gaps.md`.
 
 ## Production edition 2: TypeScript
 
