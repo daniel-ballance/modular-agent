@@ -49,8 +49,10 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		return modular.New(ctx, append(opts, modular.WithConformanceFixtures(), modular.WithTool(files.FixtureBash()), modular.WithTool(files.Tools("")[0]))...)
 	}
 	var agent *modular.Agent
-	opts = append(opts, mcp.WithServers(d.mcp(o.project, stderr), func(err error) { fmt.Fprintln(stderr, err) }),
-		modular.WithPlugin(files.Plugin(filepath.Join(d.state, "output"))), modular.WithTool(codemode.Tool(codemode.StandardLimits())),
+	if !o.acp {
+		opts = append(opts, mcp.WithServers(d.mcp(o.project, stderr), func(err error) { fmt.Fprintln(stderr, err) }))
+	}
+	opts = append(opts, modular.WithPlugin(files.Plugin(filepath.Join(d.state, "output"))), modular.WithTool(codemode.Tool(codemode.StandardLimits())),
 		modular.WithInputTransform(func(_ context.Context, c modular.Content) (modular.Content, error) {
 			if !strings.HasPrefix(c.Text(), "/skill:") {
 				return c, nil
@@ -124,7 +126,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 			opts = append(opts, modular.WithProvider(subscription.Provider(v, models, d.auth())))
 		}
 		script := d.claudeSidecar()
-		if containsClaude(settings) || (o.acp || o.command == "models") && script != "" {
+		if containsClaude(settings) || o.command == "models" && script != "" {
 			if script == "" {
 				return nil, errors.New("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR")
 			}

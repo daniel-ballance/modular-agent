@@ -42,6 +42,9 @@ func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionCon
 	}
 	v := p.ValueId
 	id := string(v.SessionId)
+	if host := s.sessionHost(id); host != s {
+		return host.SetSessionConfigOption(ctx, p)
+	}
 	st, err := s.attached(id)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
@@ -107,6 +110,9 @@ func promptContent(blocks []acp.ContentBlock) (api.Content, error) {
 }
 func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResponse, error) {
 	id := string(p.SessionId)
+	if host := s.sessionHost(id); host != s {
+		return host.Prompt(ctx, p)
+	}
 	st, err := s.attached(id)
 	if err != nil {
 		return acp.PromptResponse{}, err

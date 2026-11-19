@@ -472,6 +472,7 @@ func (a *Agent) OpenSession(ctx context.Context, id string) (*Session, error) {
 }
 func (a *Agent) Declaration() Declaration {
 	d := acpinterface.Declaration(a.a, a.project, "")
+	delete(d, "projectRoot")
 	d["portableSessions"] = a.persistent
 	inputs, reports := a.h.QueuedRecoveryPolicy()
 	d["queuedInputAfterRestart"] = inputs
@@ -514,16 +515,32 @@ func (a *Agent) Declaration() Declaration {
 	return d
 }
 
-func (a *Agent) ServeACP(ctx context.Context) error {
-	return a.ServeACPStreams(ctx, os.Stdin, os.Stdout)
+// ServeACPOptions customizes project composition and session resources.
+// A composed agent must use the connection's history store. The connection owns it.
+type ServeACPOptions struct {
+	Compose         func(context.Context, string) (*Agent, error)
+	ProjectSettings func(project string) (Settings, error)
+	ProjectMCP      func(project string) ([]MCPServer, error)
+	WarnMCP         func(error)
+	Input           io.ReadCloser
+	Output          io.Writer
 }
 
-// ServeACPStreams serves ACP on the supplied streams until the connection ends.
-func (a *Agent) ServeACPStreams(ctx context.Context, in io.ReadCloser, out io.Writer) error {
-	return a.serveACP(ctx, in, out)
-}
-
-func (a *Agent) serveACP(ctx context.Context, in io.ReadCloser, out io.Writer) error {
+// ServeACP serves one stdio connection, or the streams supplied in options.
+func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error {
+	if len(options) > 1 {
+		return &Error{Code: InvalidParams, Message: "at most one ServeACPOptions value"}
+	}
+	var opt ServeACPOptions
+	if len(options) == 1 {
+		opt = options[0]
+	}
+	if opt.Input == nil {
+		opt.Input = os.Stdin
+	}
+	if opt.Output == nil {
+		opt.Output = os.Stdout
+	}
 	if !a.pluginHost {
 		return &Error{Code: InvalidComposition, Message: "ACP requires WithPluginHost(true)"}
 	}
@@ -531,7 +548,53 @@ func (a *Agent) serveACP(ctx context.Context, in io.ReadCloser, out io.Writer) e
 	if err != nil {
 		return appError(err, NotSupported)
 	}
-	return appError(v.(*acpinterface.Interface).ServeWithDeclaration(ctx, in, out, func() map[string]any { return a.Declaration() }), Lost)
+	declared := func() map[string]any {
+		d := a.Declaration()
+		if opt.Compose == nil {
+			d["projectRoot"] = a.project
+		}
+		return d
+	}
+	projects := acpinterface.Projects{MCP: opt.ProjectMCP, WarnMCP: opt.WarnMCP}
+	if opt.Compose != nil {
+		projects.Compose = func(ctx context.Context, project, id string) (acpinterface.Project, error) {
+			child, err := opt.Compose(context.WithValue(ctx, reopeningSessionKey{}, id), project)
+			if err != nil {
+				return acpinterface.Project{}, err
+			}
+			if child == nil || child == a || child.project != project {
+				if child != nil && child != a {
+					_ = child.Close(context.Background())
+				}
+				return acpinterface.Project{}, &Error{Code: InvalidComposition, Message: "Compose must return a separate agent bound to the requested project"}
+			}
+			return acpinterface.Project{API: child.a, Declaration: func() map[string]any { return child.Declaration() }, Close: func() error { return child.Close(context.Background()) }}, nil
+		}
+	}
+	if opt.ProjectSettings != nil {
+		projects.Settings = func(project string, defaults api.Settings) (api.Settings, error) {
+			settings, err := opt.ProjectSettings(project)
+			if err != nil {
+				return defaults, err
+			}
+			for key, value := range settings {
+				if err := applySetting(&defaults, key, value); err != nil {
+					return defaults, err
+				}
+			}
+			return defaults, nil
+		}
+	}
+	return appError(v.(*acpinterface.Interface).ServeWithDeclaration(ctx, opt.Input, opt.Output, declared, projects), Lost)
+}
+
+type reopeningSessionKey struct{}
+
+// ACPReopeningSession returns the stored session ID when a factory is called for a reopen.
+// The call does not grant access to the session or start its recovery.
+func ACPReopeningSession(ctx context.Context) string {
+	id, _ := ctx.Value(reopeningSessionKey{}).(string)
+	return id
 }
 
 func decodeInto(v any, p any) error {

@@ -95,8 +95,8 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	if !info.IsDir() {
 		return "", errors.New("project is not a folder")
 	}
-	settings := api.Settings{}
-	if v, err := c.Get("configuration"); err == nil {
+	settings, provided := api.SessionSettings(ctx)
+	if v, err := c.Get("configuration"); !provided && err == nil {
 		settings, err = v.(api.Configuration).Settings(project)
 		if err != nil {
 			return "", err

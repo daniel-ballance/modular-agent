@@ -52,6 +52,8 @@ type attachment struct {
 }
 type server struct {
 	declared     func() map[string]any
+	projects     *projectHosts
+	resources    Projects
 	a            api.API
 	project      string
 	actor        string
@@ -75,7 +77,7 @@ func (i *Interface) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) 
 }
 
 // ServeWithDeclaration serves this composition's public capability declaration.
-func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any) error {
+func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any, configs ...Projects) error {
 	who := actor
 	if id, set := os.LookupEnv("MODULAR_AGENT_ACTOR"); set {
 		if id == "" || !utf8.ValidString(id) {
@@ -103,19 +105,17 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 		}
 	}
 	s := &server{declared: declared, a: i.a, project: project, actor: who, ctx: ctx, represents: represented, sessions: map[string]*attachment{}}
+	if len(configs) > 0 {
+		s.resources = configs[0]
+		if s.resources.Compose != nil {
+			s.projects = &projectHosts{compose: s.resources.Compose, hosts: map[string]*server{}}
+		}
+	}
 	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, in, acp.ConnectionOptions{MaxFrameSize: (64 << 20) + 2})
 	if err != nil {
 		return err
 	}
-	var unsubscribe func()
-	if a, ok := i.a.(interface {
-		SubscribeOutput(func(api.Event) string, func(api.Event)) func()
-	}); ok {
-		unsubscribe = a.SubscribeOutput(s.outputRecipient, s.event)
-	} else {
-		unsubscribe = i.a.Subscribe(s.event)
-	}
-	defer unsubscribe()
+	defer s.subscribe()()
 	select {
 	case <-ctx.Done():
 	case <-conn.Done():
@@ -123,6 +123,34 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 	stopped := ctx.Err() != nil
 	_ = conn.Close()
 	cancel()
+	if s.projects != nil {
+		h := s.projects
+		h.mu.Lock()
+		h.closed = true
+		h.mu.Unlock()
+		for _, clean := range h.cleanups {
+			clean()
+		}
+	}
+	s.stop()
+	_ = conn.Wait(context.Background())
+	err = conn.Err()
+	if errors.Is(err, acp.ErrPeerClosed) || stopped {
+		return nil
+	}
+	return err
+}
+
+func (s *server) subscribe() func() {
+	if a, ok := s.a.(interface {
+		SubscribeOutput(func(api.Event) string, func(api.Event)) func()
+	}); ok {
+		return a.SubscribeOutput(s.outputRecipient, s.event)
+	}
+	return s.a.Subscribe(s.event)
+}
+
+func (s *server) stop() {
 	s.lifecycle.Lock()
 	s.mu.Lock()
 	s.closed = true
@@ -135,16 +163,10 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 			disconnect()
 		}
 		st.cancel()
-		_ = i.a.StopSession(id)
+		_ = s.a.StopSession(id)
 	}
 	s.lifecycle.Unlock()
 	s.wg.Wait()
-	_ = conn.Wait(context.Background())
-	err = conn.Err()
-	if errors.Is(err, acp.ErrPeerClosed) || stopped {
-		return nil
-	}
-	return err
 }
 func (s *server) Initialize(ctx context.Context, p acp.InitializeRequest) (acp.InitializeResponse, error) {
 	s.mu.Lock()
@@ -275,6 +297,13 @@ func convertServers(in []acp.McpServer) ([]mcptools.Server, error) {
 	return out, nil
 }
 func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+	if s.projects != nil {
+		host, err := s.projectHost(p.Cwd, "", p.AdditionalDirectories, p.SystemPrompt)
+		if err != nil {
+			return acp.NewSessionResponse{}, err
+		}
+		return host.NewSession(ctx, p)
+	}
 	s.lifecycle.Lock()
 	defer s.lifecycle.Unlock()
 	if err := s.root(p.Cwd, p.AdditionalDirectories, p.SystemPrompt); err != nil {
@@ -297,6 +326,19 @@ func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.N
 			return acp.NewSessionResponse{}, acp.NewInvalidParams(nil)
 		}
 	}
+	if s.resources.Settings != nil {
+		var defaults api.Settings
+		if v, e := s.a.Get("configuration"); e == nil {
+			defaults, err = v.(api.Configuration).Settings(s.project)
+		}
+		if err == nil {
+			defaults, err = s.resources.Settings(s.project, defaults)
+		}
+		if err != nil {
+			return acp.NewSessionResponse{}, err
+		}
+		ctx = api.WithSessionSettings(ctx, defaults)
+	}
 	id, err := s.a.(actorSessions).NewForHost(api.AsActor(ctx, s.actor), p.Cwd, tenant, s.hostActor())
 	if errors.Is(err, api.ErrTenantForbidden) {
 		return acp.NewSessionResponse{}, acpError("forbidden")
@@ -306,6 +348,9 @@ func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.N
 	}
 	st := s.attach(id, false)
 	err = s.mcp().Add(ctx, id, specs)
+	if err == nil {
+		err = s.addProjectMCP(ctx, id)
+	}
 	if err != nil {
 		s.detach(id, st)
 		_ = s.a.CloseSession(id)
@@ -353,6 +398,10 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 		return result, err
 	}
 	if err = s.mcp().Add(ctx, id, specs); err != nil {
+		return result, err
+	}
+	if err = s.addProjectMCP(ctx, id); err != nil {
+		s.mcp().Remove(id)
 		return result, err
 	}
 	st := s.attach(id, true)
@@ -428,6 +477,13 @@ func (s *server) openReply(ctx context.Context, id, who string, replay bool) (ac
 	return reply, nil
 }
 func (s *server) LoadSession(ctx context.Context, p acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	if s.projects != nil {
+		host, err := s.projectHost(p.Cwd, string(p.SessionId), p.AdditionalDirectories, p.SystemPrompt)
+		if err != nil {
+			return acp.LoadSessionResponse{}, err
+		}
+		return host.LoadSession(ctx, p)
+	}
 	if !s.lifecycle.TryLock() {
 		return acp.LoadSessionResponse{}, acpError("busy")
 	}
@@ -436,6 +492,13 @@ func (s *server) LoadSession(ctx context.Context, p acp.LoadSessionRequest) (acp
 	return result, outputReplyError(err)
 }
 func (s *server) ResumeSession(ctx context.Context, p acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+	if s.projects != nil {
+		host, err := s.projectHost(p.Cwd, string(p.SessionId), p.AdditionalDirectories, p.SystemPrompt)
+		if err != nil {
+			return acp.ResumeSessionResponse{}, err
+		}
+		return host.ResumeSession(ctx, p)
+	}
 	if !s.lifecycle.TryLock() {
 		return acp.ResumeSessionResponse{}, acpError("busy")
 	}
@@ -444,6 +507,9 @@ func (s *server) ResumeSession(ctx context.Context, p acp.ResumeSessionRequest) 
 	return acp.ResumeSessionResponse{ConfigOptions: result.ConfigOptions, Meta: result.Meta}, outputReplyError(err)
 }
 func (s *server) CloseSession(ctx context.Context, p acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+	if host := s.sessionHost(string(p.SessionId)); host != s {
+		return host.CloseSession(ctx, p)
+	}
 	if err := s.ready(); err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
@@ -474,12 +540,25 @@ func (s *server) ListSessions(ctx context.Context, p acp.ListSessionsRequest) (a
 	if p.Cursor != nil {
 		return acp.ListSessionsResponse{}, acp.NewInvalidParams(map[string]any{"reason": "list is not paginated"})
 	}
-	if p.Cwd != nil {
+	project := s.project
+	if s.projects != nil {
+		project = ""
+		if p.Cwd != nil {
+			if !filepath.IsAbs(*p.Cwd) {
+				return acp.ListSessionsResponse{}, acp.NewInvalidParams(nil)
+			}
+			var err error
+			project, err = configuration.Canonical(*p.Cwd)
+			if err != nil {
+				return acp.ListSessionsResponse{}, acp.NewInvalidParams(nil)
+			}
+		}
+	} else if p.Cwd != nil {
 		if err := s.root(*p.Cwd, nil, nil); err != nil {
 			return acp.ListSessionsResponse{}, err
 		}
 	}
-	list, err := s.a.List(s.project)
+	list, err := s.a.List(project)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
@@ -498,6 +577,9 @@ func (s *server) ListSessions(ctx context.Context, p acp.ListSessionsRequest) (a
 	return out, nil
 }
 func (s *server) Cancel(ctx context.Context, p acp.CancelNotification) error {
+	if host := s.sessionHost(string(p.SessionId)); host != s {
+		return host.Cancel(ctx, p)
+	}
 	if _, err := s.attached(string(p.SessionId)); err != nil {
 		return err
 	}

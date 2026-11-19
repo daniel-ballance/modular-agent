@@ -23,6 +23,18 @@ type Actor struct {
 	Kind   string   `json:"kind"`
 	Rights []string `json:"rights"`
 }
+type sessionSettingsKey struct{}
+
+// WithSessionSettings sets trusted initial settings for a new session.
+func WithSessionSettings(ctx context.Context, settings Settings) context.Context {
+	return context.WithValue(ctx, sessionSettingsKey{}, settings)
+}
+
+func SessionSettings(ctx context.Context) (Settings, bool) {
+	settings, ok := ctx.Value(sessionSettingsKey{}).(Settings)
+	return settings, ok
+}
+
 type actorKey struct{}
 
 func AsActor(ctx context.Context, actor string) context.Context {

@@ -308,7 +308,45 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 	}
 	defer a.Close(context.Background())
 	if o.acp {
-		return a.ServeACPStreams(ctx, in, out)
+		return a.ServeACP(ctx, modular.ServeACPOptions{
+			Input: in, Output: out,
+			Compose: func(ctx context.Context, project string) (*modular.Agent, error) {
+				projectOptions := o
+				projectOptions.project = project
+				projectSettings, err := d.settings(project)
+				if err != nil {
+					return nil, err
+				}
+				if o.model != "" {
+					projectSettings["model"] = o.model
+				}
+				if o.thinking != "" {
+					projectSettings["reasoning"] = o.thinking
+				}
+				if id := modular.ACPReopeningSession(ctx); id != "" && !config {
+					rows, err := store.Sessions(ctx, project)
+					if err != nil {
+						return nil, err
+					}
+					for _, row := range rows {
+						if row.ID == id && strings.HasPrefix(row.Model, "claude/") {
+							projectSettings["model"] = row.Model
+						}
+					}
+				}
+				if o.model == "" && chosenModel(projectSettings) == "" && chosenModel(settings) != "" && !config {
+					projectSettings["model"] = chosenModel(settings)
+				}
+				return d.compose(ctx, projectOptions, projectSettings, store, stderr)
+			},
+			ProjectMCP: func(project string) ([]modular.MCPServer, error) {
+				if config {
+					return nil, nil
+				}
+				return d.mcp(project, stderr), nil
+			},
+			WarnMCP: func(err error) { fmt.Fprintln(stderr, err) },
+		})
 	}
 	if o.declaration {
 		return writeJSON(out, a.Declaration(), true)
