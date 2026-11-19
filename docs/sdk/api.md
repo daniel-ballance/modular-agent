@@ -45,10 +45,11 @@ Each option that names a part is shorthand for a plugin that provides it. `provi
 |---|---|
 | `session(options?)` | a new Session. Options: `settings`, `tenant`, `actors`. |
 | `openSession(id)` | an existing Session, reopened. It installs interrupted work for recovery, as the Runtime declares, before admitting fresh work. An embedded agent MAY wait for the recovered work before returning; `serveAcp` MUST NOT, as [ACP](../bindings/acp.md#sessions) requires. |
-| `sessions(filter?)` | stored sessions: id, project, title if any, last activity |
+| `sessions(filter?)` | stored sessions, without opening them or starting recovery: id, canonical project, selected model, title if any, last activity |
+| `sessionInfo(id)` | one stored session's project, settings, creation time and last activity, without opening it or starting recovery |
 | `declaration()` | what this agent supports, as a [Declaration](../contracts.md#declaration) |
 | `models()` | the models its Providers offer, as ModelInfo |
-| `serveAcp()` | serves the agent over [ACP](../bindings/acp.md) on stdio until the client disconnects |
+| `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md) on stdio until the client disconnects. Options: `compose(project)`, a factory that builds an Agent for each canonical project the client names, so one process can serve several projects with their own trust; without it, an agent bound to one project refuses other project paths. `projectSettings(project)` supplies new-session defaults for that project, and `projectMcp(project)` its configured MCP servers once its trust is checked. |
 | `close()` | closes open sessions, stops plugins in reverse load order and releases what it holds |
 
 An Agent is safe to use from several tasks at once. Sessions are independent of each other.
@@ -103,6 +104,7 @@ The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check th
 | `commands()` / `runCommand(line)` | the commands available / runs one |
 | `callTool(name, input)` | a ToolResult; a direct call by this actor, through every gate |
 | `events(fromEntry?)` | every event in the session this actor may see, from the start or a cursor, then live |
+| `waitIdle()` | waits until the running turn and every input already admitted have finished, without admitting input or closing the session |
 | `close()` | closes the session; cancels its work as [Jobs](../contracts.md#jobs) says |
 
 `input` is a string or Content. `options` carries `key`, for safe retries ([input admission](../contracts.md#input)), and `actor`, to act as an actor other than the local one.
@@ -243,7 +245,7 @@ A plugin reaches the agent only through the context passed to the call it is ser
 | `refuse(reason)`: ends the call as `refused` | tool | yes |
 | `ask(question, wait?)` | tool | yes |
 | `ask(question, wait?)` | command | in process only |
-| `environment`: the session's working environment | tool, command | yes |
+| `environment`: the session's working environment, scoped to this call: `read` and `write` of bytes, `list`, and `exec(command, { timeout })` returning exit code, output and whether it timed out, with output as progress. Relative paths resolve against the session's project; an operation the environment lacks raises `not_supported`. | tool, command | yes; an ignore-aware file walk, where offered, is in process only |
 | `tools.list()`, `tools.call(name, input)`: [nested calls](../contracts.md#nested-calls) | tool | yes |
 | `jobs.start(kind, detail, key?)` | tool, command | yes |
 | `jobs.unfinished()`, `jobs.resume(job)` | `session.start` hook of a job owner | yes |
@@ -295,6 +297,8 @@ A decline carries the reason, including a system closure such as `timeLimit` or 
 
 **Nested calls.** `tools.call(name, input)` asks the agent to run another tool as a nested call. It passes that tool's own gates and approval and returns its ToolResult. A nested call is never left open: if a gate would leave it pending, it is settled `refused`. Each SDK documents its nesting depth and refuses a call beyond it ([Nested calls](../contracts.md#nested-calls)).
 
+A tool's input may also be given as a JSON Schema object instead of a type, for example to wrap a tool defined elsewhere; the SDK keeps its names, descriptions and required-field order as given.
+
 A **tool source** is a set of tools whose list can change, such as an MCP server's. It provides `tools(sessionId?) -> Tool[]` and calls `changed()` when the list changes.
 
 ## Providers
@@ -313,6 +317,8 @@ A **Provider** has:
 `request` reports output as it arrives with `context.piece(type, delta, toolCallId?)`, then returns the complete AssistantMessage.
 
 A model failure after the request is admitted, including credentials the model service rejects, is an AssistantMessage with stop `failed` and a ModelError whose `kind` is `temporary`, `contextTooLarge`, `credentials`, `refused` or `other`. A Provider may raise the language's error carrying a ModelError instead; the SDK turns it into that AssistantMessage, in process and over the wire alike. The SDK refuses an unknown model before the request is admitted, with `invalid_request` at the embedded and plugin Provider boundaries; the ACP Interface refuses an unknown model setting with ACP's `invalid_params`. After admission, an error raised without a ModelError is recorded as a failed AssistantMessage with kind `other`; it never turns a settled model attempt into an input error.
+
+A Provider may return opaque `providerData` in a response. The SDK keeps it in the record, bound to that Provider's identity, and sends it only in a later request to the same Provider; it never appears in output or in a history projection for anyone else ([Content](../bindings/data.md#content)).
 
 The Provider gets its credential through `context.credential()`; it never receives one in configuration. In process, a Provider can also run tools itself, hold a live session or answer late. Those are in-process only ([Model request and response](../contracts.md#model-request-and-response)).
 
@@ -337,7 +343,7 @@ The Provider gets its credential through `context.credential()`; it never receiv
 | `provider.response` | observe | the complete response | none |
 | `output` | gate | events about to reach a recipient | `redact(events)`, or `block` |
 
-**In process only:** `session.join` and `session.leave`; `provider.piece`, for each piece of a Provider's response; `pending` as an answer to `tool.before`; `handle({ command })` on `input`; history and usage in the `step.before` payload; and every point a plugin defines with `defineHook`. The [plugin binding](../bindings/plugin.md#from-core-hooks-to-wire-hooks) carries none of these. A served handler that needs history reads it through its context.
+**In process only:** `session.prepare`, which runs when a session opens and before recovery, so a plugin can install per-session resources that `session.end` releases; the session's project and the callable tool definitions in the `turn.before` payload, for prompt building (a snapshot that grants no authority); `session.join` and `session.leave`; `provider.piece`, for each piece of a Provider's response; `pending` as an answer to `tool.before`; `handle({ command })` on `input`; history and usage in the `step.before` payload; and every point a plugin defines with `defineHook`. The [plugin binding](../bindings/plugin.md#from-core-hooks-to-wire-hooks) carries none of these. A served handler that needs history reads it through its context.
 
 `pending(question)` does not wait. It records the question and leaves the call pending under the [question rules](../contracts.md#questions); the call continues in a later turn once the question is answered.
 

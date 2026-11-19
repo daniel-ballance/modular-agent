@@ -28,4 +28,15 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `models` | `ma models` lists the scripted model |
 | `version` | `ma --version` names the implementation's language |
 
+## Results
+
+All four implementations, with `MODULAR_AGENT_REF_REQUIRE=all`:
+
+| Implementation | Reference checks | ACP kit with crash checks |
+|---|---|---|
+| Rust | 12/12 | 123/123 |
+| TypeScript | 12/12 | 123/123 |
+| Go | 12/12 | 94/94: it declares fewer features, a gap the description now closes |
+| Python | 12/12 | 123/123 |
+
 The ACP kit is the other half: each implementation must also pass `node conformance/acp/run.mjs -- ma --acp` with `MODULAR_AGENT_CONFORMANCE=1`.

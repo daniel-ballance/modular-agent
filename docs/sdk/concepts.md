@@ -73,12 +73,12 @@ Each SDK ships at least one implementation of every part the specification names
 | History store | memory; files; the history HTTP client; the history service |
 | Working environment | local |
 | Provider | OpenAI Responses API and Anthropic Messages API, by API key; a scripted Provider for tests |
-| Tool sources | the file and command tools (`read`, `write`, `edit`, `exec`, `find`, `list`); MCP servers |
+| Tool sources | the file and command tools (`read`, `write`, `edit`, `exec`, `find`, `list`); MCP servers from configuration, skipping one that cannot start with a warning rather than failing the rest, and MCP servers an ACP client attaches to its session |
 | Interfaces | ACP on stdio |
 | Plugin binding | loading a plugin from another process; serving a plugin as a program |
 | Credential store | environment variables; a file readable only by its owner |
 | Configuration | settings files and project trust |
-| Feature plugins | approval; questions; context compaction; model selection; subagents; guardrails |
+| Feature plugins | approval; questions; context compaction and its `/compact` command; model selection; subagents; guardrails |
 
 **Not in the SDK** are product features the specification does not describe: Agent Skills, a code tool, subscription sign-in for Providers, a line-based CLI or terminal UI, and prompts tuned for a particular use. They belong to a [reference implementation](../../GLOSSARY.md), built on the SDK's public API like any other developer's agent.
 
