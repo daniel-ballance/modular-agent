@@ -79,7 +79,7 @@ impl Conformance {
         if self.has("tools") {
             r["toolSources"] =
                 json!([{"id":"conformance-tools","tools":tools(),"perSession":false}]);
-            replaces.extend(["tool:bash", "tool:read"]);
+            replaces.extend(["tool:bash", "tool:read", "tool:nest"]);
         }
         if self.has("environment") {
             r["workingEnvironment"] =
@@ -103,7 +103,8 @@ pub fn echo_info() -> Value {
 fn tools() -> Value {
     json!([
         {"name":"bash","description":"Run bash in the host working environment.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false},"hints":{"readOnly":false,"safeToRepeat":false},"parallel":false,"callers":["model","ui","plugin"]},
-        {"name":"read","description":"Read a UTF-8 file from the host working environment.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false},"hints":{"readOnly":true,"safeToRepeat":true},"parallel":true,"callers":["model","ui","plugin"]}
+        {"name":"read","description":"Read a UTF-8 file from the host working environment.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false},"hints":{"readOnly":true,"safeToRepeat":true},"parallel":true,"callers":["model","ui","plugin"]},
+        {"name":"nest","description":"Start one nested call and return its result.","parameters":{"type":"object","properties":{"name":{"type":"string"},"input":{"type":"object"}},"required":["name","input"],"additionalProperties":false},"hints":{"readOnly":false,"safeToRepeat":false},"parallel":false}
     ])
 }
 fn text_of(content: &Value) -> String {
@@ -229,6 +230,23 @@ impl Endpoint for Conformance {
                 let work = Work::new(&api, &scope, "tools/call", cancel.clone());
                 let mut params =
                     json!({"parentRequestId":id,"cwd":p["project"],"sessionId":p["sessionId"]});
+                if name == "nest" {
+                    let asked = peer
+                        .call(
+                            "host/tools/call",
+                            json!({"parentRequestId":id,"name":call["input"]["name"],"input":call["input"]["input"]}),
+                            Some(work),
+                            cancel.clone(),
+                        )
+                        .await;
+                    if cancel.is_cancelled() {
+                        return Err(Fault::new("cancelled", "tool cancelled"));
+                    }
+                    return Ok(match asked {
+                        Ok(nested) => json!({"status":nested["status"],"content":nested["content"]}),
+                        Err(e) => json!({"status":"failed","content":[{"type":"text","text":e.code}]}),
+                    });
+                }
                 let method = match name {
                     "read" => {
                         params["path"] = call["input"]["path"].clone();
@@ -477,6 +495,17 @@ pub(crate) async fn environment(
             Ok(json!({}))
         }
         "env/exists" => Ok(json!({"exists":env.exists(&cwd,name).await?})),
+        "env/list" => match env.list_dir(&cwd, name).await {
+            Ok(names) => Ok(json!({"entries":wire::dir_entries(&names)})),
+            Err(error)
+                if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                    e.kind() == std::io::ErrorKind::NotADirectory
+                }) =>
+            {
+                Err(Fault::new("invalid_request", "not a directory"))
+            }
+            Err(error) => Err(error.into()),
+        },
         "env/save" => Ok(json!({"point":env.save_point(session,project).await?})),
         "env/checkPoint" => {
             let point = wire::string(p, "point").map_err(|e| Fault::new("invalid_request", e))?;

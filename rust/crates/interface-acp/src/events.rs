@@ -77,7 +77,13 @@ pub(crate) async fn pump(
                                 }
                                 if streamed.remove(&event.scope.turn) { Ok(()) } else { text(&cx,&session.id,"agent_message_chunk",c["text"].as_str().unwrap_or("")) }
                             },
-                            "tool.requested" => notify(&cx,&session.id,json!({"sessionUpdate":"tool_call","toolCallId":c["id"],"title":c["name"],"kind":"other","status":"pending","rawInput":c["input"]})),
+                            "tool.requested" => {
+                                let mut update = json!({"sessionUpdate":"tool_call","toolCallId":c["id"],"title":c["name"],"kind":"other","status":"pending","rawInput":c["input"]});
+                                if let Some(parent) = c["extra"]["parentCallId"].as_str() {
+                                    update["_meta"] = json!({"modular-agent":{"parentToolCallId":parent}});
+                                }
+                                notify(&cx,&session.id,update)
+                            }
                             "tool.started" => notify(&cx,&session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":event.scope.call,"status":"in_progress"})),
                             "tool.progress" => notify(&cx,&session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":event.scope.call,"content":[{"type":"content","content":{"type":"text","text":c.as_str().unwrap_or("")}}]})),
                             "tool.ended" => notify(&cx,&session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":c["call"],"status":if c["status"] == "completed" { "completed" } else { "failed" },"rawOutput":c,"content":[{"type":"content","content":{"type":"text","text":c["text"]}}]})),
@@ -271,11 +277,11 @@ pub(crate) async fn replay(api: Api, id: &str, cx: &ConnectionTo<acp::Client>) -
             }
             Some("toolStarted") => {
                 let call = &e["data"]["call"];
-                notify(
-                    cx,
-                    id,
-                    json!({"sessionUpdate":"tool_call","toolCallId":call["id"],"title":call["name"],"status":"pending","rawInput":call["input"]}),
-                )?;
+                let mut update = json!({"sessionUpdate":"tool_call","toolCallId":call["id"],"title":call["name"],"status":"pending","rawInput":call["input"]});
+                if let Some(parent) = call["parentCallId"].as_str() {
+                    update["_meta"] = json!({"modular-agent":{"parentToolCallId":parent}});
+                }
+                notify(cx, id, update)?;
             }
             Some("toolResult") => notify(
                 cx,

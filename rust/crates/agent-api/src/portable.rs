@@ -69,6 +69,7 @@ pub fn settings_to_wire(v: &Value) -> Value {
             ("thinking", "reasoning"),
             ("step_limit", "maxSteps"),
             ("output_limit", "maxOutput"),
+            ("model_tools", "modelTools"),
         ] {
             if let Some(value) = o.remove(local) {
                 o.insert(shared.into(), value);
@@ -101,6 +102,7 @@ pub fn settings_from_wire(v: &Value) -> Value {
             ("thinking", "reasoning"),
             ("step_limit", "maxSteps"),
             ("output_limit", "maxOutput"),
+            ("model_tools", "modelTools"),
         ] {
             if let Some(value) = o.remove(shared) {
                 o.insert(local.into(), value);

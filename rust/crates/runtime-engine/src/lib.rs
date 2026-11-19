@@ -1077,7 +1077,7 @@ impl Engine {
 #[async_trait]
 impl Runtime for Engine {
     fn declaration(&self) -> Value {
-        json!({"transient":!self.durable,"input_during_turn":true,"continues_after_restart":self.durable,"waits_through_restart":self.durable,"cancel_cancels_jobs":false,"parallel_tools":true})
+        json!({"transient":!self.durable,"input_during_turn":true,"continues_after_restart":self.durable,"waits_through_restart":self.durable,"cancel_cancels_jobs":false,"parallel_tools":true,"nested_tools":true})
     }
     async fn run(&self, api: Api, input: TurnInput) -> Result<TurnResult> {
         let run = async {
@@ -1162,6 +1162,24 @@ impl Runtime for Engine {
                 .any(|e| e.kind == "tool.call" && e.scope.call.as_deref() == Some(&call.id)),
             "duplicate tool call id"
         );
+        // Count the chain of parents above this call.
+        let mut depth = 1;
+        let mut above = Some(parent.clone());
+        while let Some(id) = above {
+            above = data
+                .entries
+                .iter()
+                .find(|e| e.kind == "tool.call" && e.scope.call.as_deref() == Some(&id))
+                .and_then(|e| e.content.as_ref()?["extra"]["parentCallId"].as_str())
+                .map(str::to_owned);
+            if above.is_some() {
+                depth += 1;
+            }
+        }
+        ensure!(
+            depth <= MAX_NESTING,
+            "nested calls may go {MAX_NESTING} deep at most"
+        );
         call.started_by = "tool".into();
         if !call.extra.is_object() {
             call.extra = json!({});
@@ -1172,15 +1190,7 @@ impl Runtime for Engine {
         // Followers hear of a nested call as they do of the model's own.
         api.emit(Event::new(&scope, "tool.requested", json!(call)))
             .await?;
-        let mut tools = vec![];
-        for name in api.capability_names("tools.") {
-            tools.extend(
-                capability::<dyn ToolSource>(api.as_ref(), &name)?
-                    .tools(&data)
-                    .into_iter()
-                    .filter(|tool| tool.allows("plugin")),
-            );
-        }
+        let tools = nested_tool_definitions(api.as_ref(), &data)?;
         let mut result = self
             .execute(
                 &api,
@@ -1195,6 +1205,19 @@ impl Runtime for Engine {
             .await?;
         if result.status == ToolStatus::Waiting {
             // A nested call has no continuation of its own to come back to.
+            for question in questions(&api.snapshot(&scope.session)?)?
+                .into_iter()
+                .filter(|q| q.answerable && q.scope.call == scope.call)
+            {
+                self.record(
+                    &api,
+                    &question.scope,
+                    "request.closed",
+                    false,
+                    json!({"request":question.id,"reason":"noLongerAnswerable"}),
+                    vec![],
+                )?;
+            }
             result = ToolResult::new(
                 &call,
                 ToolStatus::Refused,

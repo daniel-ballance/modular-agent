@@ -325,6 +325,32 @@ pub async fn refresh_tool_sources(api: &Api, scope: &Scope) -> Result<()> {
     }
     Ok(())
 }
+/// The registered tools a running call may start as nested calls.
+pub fn nested_tool_definitions(api: &dyn AgentApi, data: &SessionData) -> Result<Vec<ToolDefinition>> {
+    let mut tools = vec![];
+    for key in api.capability_names("tools.") {
+        tools.extend(
+            capability::<dyn ToolSource>(api, &key)?
+                .tools(data)
+                .into_iter()
+                .filter(|tool| tool.allows("plugin")),
+        );
+    }
+    Ok(tools)
+}
+/// The Runtime that runs this session's calls.
+pub fn session_runtime(api: &dyn AgentApi, data: &SessionData) -> Result<Arc<dyn Runtime>> {
+    capability(
+        api,
+        match data.settings["_runtime"].as_str() {
+            Some("durable") => "runtime.durable",
+            Some("transient") => "runtime.transient",
+            _ => "runtime",
+        },
+    )
+}
+/// How deep nested calls may go: a call, its nested call, and so on.
+pub const MAX_NESTING: usize = 4;
 #[async_trait]
 pub trait ToolSource: Send + Sync {
     async fn refresh_for_use(&self, _api: &Api, _scope: &Scope) {}

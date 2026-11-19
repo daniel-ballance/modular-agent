@@ -113,6 +113,33 @@ pub fn text(content: &Value) -> String {
         .filter_map(|p| p["text"].as_str())
         .collect()
 }
+/// Names from `WorkingEnvironment::list_dir` as shared DirEntry values. A
+/// directory's name ends in '/'.
+pub fn dir_entries(names: &[String]) -> Vec<Value> {
+    names
+        .iter()
+        .map(|name| match name.strip_suffix('/') {
+            Some(directory) => json!({"name":directory,"kind":"directory"}),
+            None => json!({"name":name,"kind":"file"}),
+        })
+        .collect()
+}
+/// The reverse, for an environment reached over the wire.
+pub fn dir_names(entries: &Value) -> Result<Vec<String>> {
+    entries
+        .as_array()
+        .ok_or_else(|| anyhow!("entries must be an array"))?
+        .iter()
+        .map(|entry| {
+            let name = string(entry, "name")?;
+            Ok(if entry["kind"] == "directory" {
+                format!("{name}/")
+            } else {
+                name.to_owned()
+            })
+        })
+        .collect()
+}
 pub fn definition(d: &ToolDefinition) -> Value {
     let mut v = d
         .hints

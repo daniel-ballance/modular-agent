@@ -189,7 +189,7 @@ fn supplied_plugin_kit_is_mandatory() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("139/139 checks passed"), "{stdout}");
+    assert!(stdout.contains("146/146 checks passed"), "{stdout}");
 }
 #[test]
 fn supplied_acp_kit_with_two_external_plugins_is_mandatory() {
@@ -215,7 +215,7 @@ fn supplied_acp_kit_with_two_external_plugins_is_mandatory() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("120/120 checks passed"), "{stdout}");
+    assert!(stdout.contains("132/132 checks passed"), "{stdout}");
 }
 #[test]
 fn supplied_acp_crash_kit_with_native_runtime() {
@@ -247,7 +247,7 @@ fn acp_crash_kit(part: Option<&str>) {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("111/111 checks passed"), "{stdout}");
+    assert!(stdout.contains("123/123 checks passed"), "{stdout}");
 }
 #[tokio::test]
 async fn replacements_leave_local_items_out_and_route_tools_to_a_third_process() {

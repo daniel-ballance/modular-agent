@@ -56,19 +56,17 @@ fn definition() -> ToolDefinition {
 /// Every tool another tool may call, except this one.
 pub fn functions(api: &Api, data: &SessionData) -> Result<Vec<Function>> {
     let mut functions: Vec<Function> = vec![];
-    for key in api.capability_names("tools.") {
-        for tool in capability::<dyn ToolSource>(api.as_ref(), &key)?.tools(data) {
-            if tool.name == TOOL || !tool.allows("plugin") {
-                continue;
-            }
-            let function = Function::new(tool);
-            ensure!(
-                !functions.iter().any(|f| f.name == function.name),
-                "two tools share the function name {}",
-                function.name
-            );
-            functions.push(function);
+    for tool in nested_tool_definitions(api.as_ref(), data)? {
+        if tool.name == TOOL {
+            continue;
         }
+        let function = Function::new(tool);
+        ensure!(
+            !functions.iter().any(|f| f.name == function.name),
+            "two tools share the function name {}",
+            function.name
+        );
+        functions.push(function);
     }
     Ok(functions)
 }
@@ -352,14 +350,7 @@ impl ToolSource for CodeTool {
         };
         let prepared = (|| -> Result<Run<'_>> {
             let data = api.snapshot(&scope.session)?;
-            let runtime = capability::<dyn Runtime>(
-                api.as_ref(),
-                match data.settings["_runtime"].as_str() {
-                    Some("durable") => "runtime.durable",
-                    Some("transient") => "runtime.transient",
-                    _ => "runtime",
-                },
-            )?;
+            let runtime = session_runtime(api.as_ref(), &data)?;
             Ok(Run {
                 tool: self,
                 functions: functions(&api, &data)?

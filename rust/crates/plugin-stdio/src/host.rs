@@ -1062,6 +1062,29 @@ impl WorkingEnvironment for Environment {
             .await?["exists"]
             == true)
     }
+    async fn list_dir(&self, project: &Path, path: &str) -> Result<Vec<String>> {
+        let (api, scope, cancel) = self.context(project)?;
+        let v = self
+            .request(
+                "env/list",
+                json!({"cwd":project,"path":path}),
+                api,
+                scope,
+                cancel,
+            )
+            .await
+            .map_err(|fault| {
+                if fault.code == "not_found" {
+                    anyhow::Error::from(std::io::Error::new(std::io::ErrorKind::NotFound, fault))
+                } else if matches!(fault.code.as_str(), "not_supported" | "method_not_found") {
+                    // An edition 3 environment: the caller falls back to a command.
+                    std::io::Error::new(std::io::ErrorKind::Unsupported, fault).into()
+                } else {
+                    fault.into()
+                }
+            })?;
+        wire::dir_names(&v["entries"])
+    }
     async fn edit(&self, project: &Path, path: &str, old: &str, new: &str) -> Result<()> {
         let text = self.read(project, path).await?;
         ensure!(
@@ -1418,6 +1441,9 @@ impl Callbacks {
                 | "host/env/write"
                 | "host/env/exists"
                 | "host/env/exec"
+                | "host/env/list"
+                | "host/tools/list"
+                | "host/tools/call"
                 | "host/jobs/start"
                 | "host/jobs/end"
                 | "host/jobs/unfinished"
@@ -1467,7 +1493,7 @@ impl Callbacks {
             let token=cancel.child_token();
             if parent_cancel.is_cancelled() && !matches!(method,
                 "host/history" | "host/session" | "host/declaration" | "host/env/read" | "host/env/exists"
-                | "host/runtime/record") && !(method == "host/runtime/hook" && p["hook"] == "turn.end") {
+                | "host/env/list" | "host/tools/list" | "host/runtime/record") && !(method == "host/runtime/hook" && p["hook"] == "turn.end") {
                 return Err(Fault::new("cancelled", "parent is cancelled").into());
             }
             let run=async {
@@ -1487,6 +1513,12 @@ impl Callbacks {
                             "env/read"=>Ok(json!({"data":BASE64_STANDARD.encode(env.read_bytes(cwd,wire::string(&p,"path")?).await?)})),
                             "env/write"=>{env.write_bytes(cwd,wire::string(&p,"path")?,&BASE64_STANDARD.decode(wire::string(&p,"data")?)?).await?;Ok(json!({}))}
                             "env/exists"=>Ok(json!({"exists":env.exists(cwd,wire::string(&p,"path")?).await?})),
+                            "env/list"=>match env.list_dir(cwd,wire::string(&p,"path")?).await {
+                                Ok(names)=>Ok(json!({"entries":wire::dir_entries(&names)})),
+                                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|e|e.kind()==std::io::ErrorKind::Unsupported)=>Err(Fault::new("not_supported","the environment does not list directories").into()),
+                                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|e|e.kind()==std::io::ErrorKind::NotADirectory)=>Err(Fault::new("invalid_request","not a directory").into()),
+                                Err(error)=>Err(error),
+                            },
                             "env/exec"=>{
                                 let relay:Api=Arc::new(crate::relay::Relay{inner:api.clone(),peer:peer.clone(),id,route:crate::relay::Route::Environment});
                                 // Zero is no limit, including when routing to a local environment.
@@ -1505,6 +1537,29 @@ impl Callbacks {
                             }
                             _=>bail!("unknown host environment method"),
                         }
+                    }
+                    "host/tools/list" | "host/tools/call"=>{
+                        // Nested calls: only under the tool source's own live, dispatched call.
+                        let work=work.ok_or_else(||Fault::new("invalid_request","nested calls require parentRequestId"))?;
+                        if work.method!="tools/call" || scope.call.is_none() {
+                            return Err(Fault::new("invalid_request","nested calls belong under a tools/call").into());
+                        }
+                        let data=api.snapshot(&scope.session)?;
+                        let runtime=session_runtime(api.as_ref(),&data)?;
+                        if runtime.declaration()["nested_tools"]!=true {
+                            return Err(Fault::new("not_supported","this host does not run nested calls").into());
+                        }
+                        if method=="host/tools/list" {
+                            let tools:Vec<Value>=nested_tool_definitions(api.as_ref(),&data)?.iter().map(wire::definition).collect();
+                            return Ok(json!({"tools":tools}));
+                        }
+                        let name=p["name"].as_str().filter(|n|!n.is_empty()).ok_or_else(||Fault::new("invalid_request","name must be a tool name"))?;
+                        if !p["input"].is_object() {
+                            return Err(Fault::new("invalid_request","input must be an object").into());
+                        }
+                        let nested=ToolCall::new(name,p["input"].clone());
+                        let result=runtime.nested_tool(api.clone(),scope.clone(),nested,token.clone()).await?;
+                        Ok(wire::result(&result))
                     }
                     "host/hook"=>{
                         let work=work.ok_or_else(||anyhow!("hook requires parent"))?;
@@ -1687,7 +1742,7 @@ impl Endpoint for Callbacks {
                 match method {
                     // Let cooperative work settle and committed records finish publishing,
                     // but leave room in the caller's five-second cancellation wait.
-                    "host/ask" | "host/env/exec" | "host/runtime/model"
+                    "host/ask" | "host/env/exec" | "host/tools/call" | "host/runtime/model"
                     | "host/runtime/runToolCall" | "host/runtime/record" => {
                         tokio::time::timeout(Duration::from_secs(4), &mut request)
                             .await

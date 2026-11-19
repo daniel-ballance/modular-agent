@@ -319,6 +319,45 @@ if (agent.state.hasApproval) await attempt("approval", async () => {
 	await setOption(agent, sessionId, "approval", "off");
 });
 
+// Edition 4 draft. Contracts: Nested calls. ACP: Updates and Conformance mode. Runs only for an agent that declares it.
+if (decl.nestedToolCalls === true) await attempt("nested calls", async () => {
+	writeFileSync(join(project, "nested.txt"), "nested-harbour\n");
+	const before = agent.updates.length;
+	const r = await within(15000, prompt(agent, sessionId, 'tool:nest {"name":"read","input":{"path":"nested.txt"}}'), "nested prompt");
+	check("nested: the turn ends", r.stopReason === "end_turn", r.stopReason);
+	const seen = agent.updates.slice(before).filter((u) => u.sessionId === sessionId);
+	const reply = seen.filter((u) => u.update.sessionUpdate === "agent_message_chunk").map((u) => u.update.content?.text ?? "").join("");
+	check("nested: the parent settles with the nested call's content", reply.startsWith("done: nested-harbour"), JSON.stringify(reply).slice(0, 160));
+	const announced = seen.filter((u) => u.update.sessionUpdate === "tool_call");
+	const parent = announced.find((u) => u.update.title === "nest");
+	const child = announced.find((u) => u.update.title === "read");
+	check("nested: both calls are announced with tool_call", !!parent && !!child, announced.map((u) => u.update.title).join(","));
+	check("nested: the nested call's first update names its parent", !!child && meta(child.update)?.parentToolCallId === parent?.update.toolCallId, JSON.stringify(meta(child?.update) ?? null));
+	check("nested: the parent's first update names no parent", !!parent && meta(parent.update)?.parentToolCallId === undefined);
+	const settled = seen.filter((u) => u.update.sessionUpdate === "tool_call_update" && u.update.toolCallId === child?.update.toolCallId && ["completed", "failed"].includes(u.update.status));
+	check("nested: the nested call settles exactly once, completed", settled.length === 1 && settled[0].update.status === "completed", settled.map((u) => u.update.status).join(","));
+	const { entries } = await history(agent, sessionId, { all: true });
+	const started = entries.filter((e) => e.kind === "toolStarted" && e.toolCallId === child?.update.toolCallId);
+	check("nested: one recorded start, by a tool, under its parent", started.length === 1 && started[0].data?.call?.startedBy === "tool" && started[0].data?.call?.parentCallId === parent?.update.toolCallId, JSON.stringify(started[0]?.data?.call ?? null).slice(0, 200));
+	const parentStart = entries.find((e) => e.kind === "toolStarted" && e.toolCallId === parent?.update.toolCallId);
+	check("nested: it shares its parent's turn and step", !!started[0] && started[0].turnId === parentStart?.turnId && started[0].stepId === parentStart?.stepId);
+	const results = entries.filter((e) => e.kind === "toolResult" && e.toolCallId === child?.update.toolCallId);
+	check("nested: one recorded result", results.length === 1 && results[0].data?.status === "completed", JSON.stringify(results.map((e) => e.data?.status)));
+	// The model saw its own call and that call's result, not the nested one.
+	const response = entries.filter((e) => e.kind === "response").at(-1);
+	const callsInResponses = entries.filter((e) => e.kind === "response").flatMap((e) => (e.message?.content ?? []).filter((c) => c.type === "toolCall").map((c) => c.id));
+	check("nested: no model response holds the nested call", !!response && !callsInResponses.includes(child?.update.toolCallId));
+
+	// A name with no registered tool is still a recorded call, settled as refused.
+	const b2 = agent.updates.length;
+	const r2 = await within(15000, prompt(agent, sessionId, 'tool:nest {"name":"kit-no-such-tool","input":{}}'), "nested unknown prompt");
+	check("nested: an unknown tool still ends the turn", r2.stopReason === "end_turn", r2.stopReason);
+	const ghost = agent.updates.slice(b2).find((u) => u.sessionId === sessionId && u.update.sessionUpdate === "tool_call" && u.update.title === "kit-no-such-tool");
+	const after = (await history(agent, sessionId, { all: true })).entries;
+	const ghostResult = after.filter((e) => e.kind === "toolResult" && e.toolCallId === ghost?.update.toolCallId);
+	check("nested: an unknown tool is recorded and refused, never started", !!ghost && ghostResult.length === 1 && ghostResult[0].data?.status === "refused" && !after.some((e) => e.kind === "toolStarted" && e.toolCallId === ghost.update.toolCallId), JSON.stringify(ghostResult.map((e) => e.data?.status)));
+});
+
 if (pluginChecks) {
 	await attempt("plugin hooks", async () => {
 		const r = await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo conformance-forbidden > forbidden.txt"}'), "forbidden prompt");

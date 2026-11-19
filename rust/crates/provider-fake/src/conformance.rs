@@ -9,7 +9,55 @@ impl Plugin for ConformancePlugin {
         "provider.conformance"
     }
     fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
+        r.provide::<dyn ToolSource>("tools.conformance", Arc::new(Nest))?;
         r.provide::<dyn Provider>("provider.conformance", Arc::new(Echo))
+    }
+}
+/// The fixture tool `nest`: starts one nested call and settles as it did.
+struct Nest;
+#[async_trait]
+impl ToolSource for Nest {
+    fn tools(&self, _: &SessionData) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "nest".into(),
+            description: "Start one nested call and return its result.".into(),
+            input: json!({"type":"object","properties":{"name":{"type":"string"},"input":{"type":"object"}},"required":["name","input"],"additionalProperties":false}),
+            read_only: false,
+            safe_to_repeat: false,
+            parallel: false,
+            hints: json!({}),
+        }]
+    }
+    async fn run(
+        &self,
+        api: Api,
+        scope: Scope,
+        call: ToolCall,
+        cancel: CancellationToken,
+    ) -> ToolResult {
+        let nested: Result<ToolResult> = async {
+            let name = call.input["name"]
+                .as_str()
+                .ok_or_else(|| anyhow!("name must be a string"))?;
+            ensure!(call.input["input"].is_object(), "input must be an object");
+            let data = api.snapshot(&scope.session)?;
+            session_runtime(api.as_ref(), &data)?
+                .nested_tool(
+                    api.clone(),
+                    scope.clone(),
+                    ToolCall::new(name, call.input["input"].clone()),
+                    cancel,
+                )
+                .await
+        }
+        .await;
+        match nested {
+            Ok(mut result) => {
+                result.call = call.id.clone();
+                result
+            }
+            Err(error) => ToolResult::new(&call, ToolStatus::Failed, error.to_string()),
+        }
     }
 }
 fn info() -> ModelInfo {

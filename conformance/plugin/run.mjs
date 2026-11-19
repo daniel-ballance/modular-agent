@@ -5,7 +5,7 @@
 // and checks every part of the conformance plugin. No network, no model. Exit code 0 means all passed.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
@@ -81,7 +81,7 @@ function start(extraEnv = {}) {
 		hostCalls.push(m);
 		const parent = pending.get(p.parentRequestId);
 		const sid = parent?.params?.sessionId ?? parent?.params?.turn?.sessionId;
-		const needsParent = m.method.startsWith("host/runtime/") || m.method.startsWith("host/env/") || ["host/hook", "host/ask"].includes(m.method);
+		const needsParent = m.method.startsWith("host/runtime/") || m.method.startsWith("host/env/") || m.method.startsWith("host/tools/") || ["host/hook", "host/ask"].includes(m.method);
 		if ((needsParent || p.parentRequestId !== undefined) && (!parent || (p.sessionId !== undefined && p.sessionId !== sid))) return fail(m.id, "invalid_request", "wrong parent or session");
 		if ((m.method.startsWith("host/runtime/") && !parent?.method.startsWith("runtime/")) || (m.method === "host/hook" && parent?.method !== "provider/request")) return fail(m.id, "invalid_request", "wrong role");
 		if (cancelledParents.has(p.parentRequestId) && !["host/env/read", "host/env/exists", "host/history", "host/session", "host/declaration", "host/runtime/record"].includes(m.method) && !(m.method === "host/runtime/hook" && p.hook === "turn.end")) return fail(m.id, "cancelled");
@@ -96,6 +96,15 @@ function start(extraEnv = {}) {
 				return reply(m.id, {});
 			case "host/env/exists":
 				return reply(m.id, { exists: existsSync(envPath(p.cwd, p.path)) });
+			// Edition 4 draft: nested calls. The kit plays a host that runs them.
+			case "host/tools/list":
+				if (parent?.method !== "tools/call") return fail(m.id, "invalid_request", "wrong role");
+				return reply(m.id, { tools: [] });
+			case "host/tools/call":
+				if (parent?.method !== "tools/call") return fail(m.id, "invalid_request", "wrong role");
+				if (typeof p.name !== "string" || p.input === null || typeof p.input !== "object" || Array.isArray(p.input)) return fail(m.id, "invalid_request", "name and input object required");
+				if (p.name === "kit-error") return fail(m.id, "not_supported", "this host does not run nested calls");
+				return reply(m.id, { callId: `kit-nested-${m.id}`, status: p.name === "kit-refused" ? "refused" : "completed", content: [{ type: "text", text: `kit ran ${p.name} ${JSON.stringify(p.input)}` }] });
 			case "host/env/exec": {
 				// This fixture accepts only its own commands, not arbitrary work from the peer.
 				if (!["echo kit-out; echo more", "sleep 30"].includes(p.command)) return fail(m.id, "invalid_request", "not a fixture command");
@@ -624,6 +633,23 @@ await attempt("tools cancel", async () => {
 	check("tools/call: early-arriving cancel gets a cancelled answer within 5 s", (code(earlyAnswer) === "cancelled" || earlyAnswer?.status === "cancelled") && Date.now() - t1 <= 5000);
 });
 
+// Edition 4 draft. Plugin binding: host/tools/call and the fixture tool nest. Runs only if the plugin registers nest.
+await attempt("nested calls", async () => {
+	const listed = (await p.request("tools/list", { toolSource: "conformance-tools", sessionId: "s1" })).tools ?? [];
+	if (!listed.some((t) => t.name === "nest")) return;
+	const nest = (id, name, input) => p.request("tools/call", { toolSource: "conformance-tools", sessionId: "s1", project: work, call: { id, name: "nest", input: { name, input }, startedBy: "model" } });
+	const before = p.hostCalls.length;
+	const r = nest("n1", "read", { path: "note.txt" });
+	const res = await r;
+	const asked = p.hostCalls.slice(before).filter((c) => c.method === "host/tools/call");
+	check("nest: one host/tools/call under its own tools/call, with the name and input", asked.length === 1 && asked[0].params?.parentRequestId === r.id && asked[0].params?.name === "read" && equal(asked[0].params?.input, { path: "note.txt" }), JSON.stringify(asked.map((c) => c.params)).slice(0, 200));
+	check("nest: settles with the nested result's status and content", res.status === "completed" && textOf(res.content) === 'kit ran read {"path":"note.txt"}', String(JSON.stringify(res)).slice(0, 200));
+	const refused = await nest("n2", "kit-refused", {});
+	check("nest: a refused nested call is passed on as refused", refused.status === "refused" && textOf(refused.content).startsWith("kit ran kit-refused"), String(JSON.stringify(refused)).slice(0, 200));
+	const unsupported = await nest("n3", "kit-error", {});
+	check("nest: a protocol error becomes a failed result naming the code", unsupported.status === "failed" && textOf(unsupported.content).includes("not_supported"), String(JSON.stringify(unsupported)).slice(0, 200));
+});
+
 await attempt("environment", async () => {
 	await p.request("env/write", { cwd: work, sessionId: "s1", path: "w.txt", data: Buffer.from("wrïtten").toString("base64") });
 	const ex = await p.request("env/exists", { cwd: work, sessionId: "s1", path: "w.txt" });
@@ -637,6 +663,27 @@ await attempt("environment", async () => {
 		missing = e;
 	}
 	check("env/read of a missing file is not_found", code(missing) === "not_found", JSON.stringify(missing));
+	// Edition 4 draft: env/list is optional. An environment without it answers not_supported or method_not_found.
+	mkdirSync(join(work, "listed-dir"), { recursive: true });
+	let listing, listError;
+	try {
+		listing = await p.request("env/list", { cwd: work, sessionId: "s1", path: "." });
+	} catch (e) {
+		listError = e;
+	}
+	if (listing) {
+		const kind = (name) => (listing.entries ?? []).find((e) => e.name === name)?.kind;
+		check("env/list: entries carry a name and a kind", Array.isArray(listing.entries) && kind("w.txt") === "file" && kind("listed-dir") === "directory" && listing.entries.every((e) => typeof e.name === "string" && !e.name.includes("/") && ![".", ".."].includes(e.name) && ["file", "directory", "other"].includes(e.kind)), String(JSON.stringify(listing)).slice(0, 200));
+		const failure = async (path) => {
+			try {
+				await p.request("env/list", { cwd: work, sessionId: "s1", path });
+			} catch (e) {
+				return code(e);
+			}
+		};
+		check("env/list of a missing directory is not_found", (await failure("no-such-dir")) === "not_found");
+		check("env/list of a file is invalid_request", (await failure("w.txt")) === "invalid_request");
+	} else check("env/list: an environment that does not list says so", ["not_supported", "method_not_found"].includes(code(listError)), JSON.stringify(listError));
 	const nb = p.notes.length;
 	const e = p.request("env/exec", { cwd: work, sessionId: "s1", command: "echo env-out" });
 	const er = await e;

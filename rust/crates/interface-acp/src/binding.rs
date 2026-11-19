@@ -57,6 +57,7 @@ pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
         "startsTurnsUnasked":if d["job_reports_start_turns"] == true {"jobReports"} else {"never"},
         "queuedInputAfterRestart":"handedBack", "queuedJobReportsAfterRestart":"run", "movingWithUnfinishedWork":"refused",
         "mixedActorInput":"shared", "settingsDuringTurn":"refused", "erasureDuringTurn":"refused",
+        "nestedToolCalls":d["runtime"]["nested_tools"] == true,
         "commandContainment":if d["environment"]["stops_commands_after_sigkill"] == true {"strong"} else if d["environment"]["containment"] == "processGroup" {"processGroup"} else {"none"}
     }))
 }
