@@ -51,7 +51,7 @@ func (r *remote) handler(reg HookRegistration) api.Handler {
 		if reg.Hook == "output" {
 			return r.outputHandler(ctx, reg.ID, v.(api.OutputBatch))
 		}
-		payload := r.hookPayload(ctx, reg.Hook, v)
+		payload := hookPayload(ctx, r.host.project, reg.Hook, v)
 		actor := api.Acting(ctx)
 		session := str(payload, "sessionId")
 		if reg.Hook == "input" {
@@ -75,97 +75,112 @@ func (r *remote) handler(reg HookRegistration) api.Handler {
 		if err != nil {
 			return api.Decision{}, err
 		}
-		if answer == nil {
-			return api.Decision{}, nil
-		}
-		result := asObject(answer)
-		switch reg.Hook {
-		case "plugin.load", "tool.before":
-			if has(result, "pending") {
-				return api.Decision{}, api.ErrQuestionOpen
-			}
-			if has(result, "refuse") {
-				return api.Decision{}, errors.New(str(result, "refuse"))
-			}
-			if has(result, "change") {
-				if reg.Hook == "plugin.load" {
-					return api.Decision{}, nil
-				}
-				check := v.(api.ToolCheck)
-				changed := callIn(asObject(asObject(result["change"])["call"]))
-				check.Call.Input = changed.Input
-				check.Call.Wire = changed.Wire
-				return api.Decision{Value: check}, nil
-			}
-		case "step.after":
-			if reason := str(result, "refuse"); reason != "" {
-				return api.Decision{}, errors.New(reason)
-			}
-			return api.Decision{}, errors.New("invalid step.after decision")
-		case "turn.result":
-			if has(result, "refuse") {
-				check := v.(api.ResultCheck)
-				check.Continue = str(result, "refuse")
-				return api.Decision{Value: check, Stop: true}, nil
-			}
-			if has(result, "change") {
-				check := v.(api.ResultCheck)
-				check.Result = api.Text(str(asObject(asObject(result["change"])["result"]), "text"))
-				return api.Decision{Value: check}, nil
-			}
-		case "turn.before":
-			return api.Decision{Value: answer}, nil
-		case "model.failed":
-			if boolean(result, "retry") {
-				f := v.(api.Failure)
-				f.Retry = true
-				if has(result, "request") {
-					f.Context.Request = requestIn(asObject(result["request"]))
-				}
-				return api.Decision{Answer: true, Value: f}, nil
-			}
-		case "input", "step.before", "tool.after", "provider.request":
-			if !has(result, "value") {
-				return api.Decision{}, nil
-			}
-			changed := asObject(result["value"])
-			var value any
-			switch reg.Hook {
-			case "input":
-				e := v.(api.InputEvent)
-				e.Input.Content = contentIn(changed["content"])
-				if when := str(changed, "when"); when != "" {
-					if when != "now" && when != "steer" && when != "after" {
-						return api.Decision{}, fault("invalid_request", "invalid transformed intake timing")
-					}
-					e.Input.When = when
-				}
-				if boolean(result, "stop") {
-					e.Handled = true
-				}
-				value = e
-			case "step.before":
-				e := v.(api.StepContext)
-				e.Request = requestIn(asObject(changed["request"]))
-				value = e
-			case "tool.after":
-				e := v.(api.AfterTool)
-				e.Result = resultIn(asObject(changed["result"]))
-				value = e
-			case "provider.request":
-				value = changed
-			}
-			return api.Decision{Value: value, Stop: boolean(result, "stop")}, nil
-		}
-		return api.Decision{}, nil
+		return hookAnswer(reg.Hook, v, answer)
 	}
 }
-func (r *remote) hookPayload(ctx context.Context, hook string, v any) object {
+
+// RegisterLocalHook uses the same payload and answer adapter as served hooks.
+func RegisterLocalHook(a api.API, point, order string, handle func(context.Context, Object) (any, error)) error {
+	return a.Handle(hookNames[point], order, func(ctx context.Context, v any) (api.Decision, error) {
+		answer, err := handle(ctx, hookPayload(ctx, "", point, v))
+		if err != nil {
+			return api.Decision{}, err
+		}
+		return hookAnswer(point, v, answer)
+	})
+}
+
+func hookAnswer(point string, v any, answer any) (api.Decision, error) {
+	if answer == nil {
+		return api.Decision{}, nil
+	}
+	result := asObject(answer)
+	switch point {
+	case "plugin.load", "tool.before":
+		if has(result, "pending") {
+			return api.Decision{}, api.ErrQuestionOpen
+		}
+		if has(result, "refuse") {
+			return api.Decision{}, errors.New(str(result, "refuse"))
+		}
+		if has(result, "change") {
+			if point == "plugin.load" {
+				return api.Decision{}, nil
+			}
+			check := v.(api.ToolCheck)
+			changed := callIn(asObject(asObject(result["change"])["call"]))
+			check.Call.Input = changed.Input
+			check.Call.Wire = changed.Wire
+			return api.Decision{Value: check}, nil
+		}
+	case "step.after":
+		if reason := str(result, "refuse"); reason != "" {
+			return api.Decision{}, errors.New(reason)
+		}
+		return api.Decision{}, errors.New("invalid step.after decision")
+	case "turn.result":
+		if has(result, "refuse") {
+			check := v.(api.ResultCheck)
+			check.Continue = str(result, "refuse")
+			return api.Decision{Value: check, Stop: true}, nil
+		}
+		if has(result, "change") {
+			check := v.(api.ResultCheck)
+			check.Result = api.Text(str(asObject(asObject(result["change"])["result"]), "text"))
+			return api.Decision{Value: check}, nil
+		}
+	case "turn.before":
+		return api.Decision{Value: answer}, nil
+	case "model.failed":
+		if boolean(result, "retry") {
+			f := v.(api.Failure)
+			f.Retry = true
+			if has(result, "request") {
+				f.Context.Request = requestIn(asObject(result["request"]))
+			}
+			return api.Decision{Answer: true, Value: f}, nil
+		}
+	case "input", "step.before", "tool.after", "provider.request":
+		if !has(result, "value") {
+			return api.Decision{}, nil
+		}
+		changed := asObject(result["value"])
+		var value any
+		switch point {
+		case "input":
+			e := v.(api.InputEvent)
+			e.Input.Content = contentIn(changed["content"])
+			if when := str(changed, "when"); when != "" {
+				if when != "now" && when != "steer" && when != "after" {
+					return api.Decision{}, fault("invalid_request", "invalid transformed intake timing")
+				}
+				e.Input.When = when
+			}
+			if boolean(result, "stop") {
+				e.Handled = true
+			}
+			value = e
+		case "step.before":
+			e := v.(api.StepContext)
+			e.Request = requestIn(asObject(changed["request"]))
+			value = e
+		case "tool.after":
+			e := v.(api.AfterTool)
+			e.Result = resultIn(asObject(changed["result"]))
+			value = e
+		case "provider.request":
+			value = changed
+		}
+		return api.Decision{Value: value, Stop: boolean(result, "stop")}, nil
+	}
+	return api.Decision{}, nil
+}
+func hookPayload(ctx context.Context, project, hook string, v any) object {
 	execution := api.Executing(ctx)
 	payload := object{"sessionId": execution.Session, "turnId": execution.Turn}
 	switch hook {
 	case "plugin.load":
-		return object{"name": v, "origin": "configuration", "project": r.host.project}
+		return object{"name": v, "origin": "configuration", "project": project}
 	case "session.start":
 		s := v.(api.Session)
 		return object{"sessionId": s.ID, "resumed": len(s.Entries) > 0}

@@ -27,6 +27,7 @@ type handler struct {
 	fn    api.Handler
 }
 type Harness struct {
+	localActor      string
 	tenants         map[string]tenantConfig
 	tenantConfigErr error
 	mu              sync.RWMutex
@@ -51,8 +52,12 @@ type client struct {
 	owner string
 }
 
-func New() *Harness {
+func New() *Harness { return NewWithLocalActor("local-user") }
+
+// NewWithLocalActor sets the principal for new embedded sessions.
+func NewWithLocalActor(actor string) *Harness {
 	h := &Harness{external: map[string]bool{}, externalPlugins: map[string]bool{}, plugins: map[string]api.Plugin{}, caps: map[string]registration{}, hooks: map[string]*hook{}, commands: map[string]registration{}, sessions: map[string]*session{}, listeners: map[int]outputListener{}, outputStreams: map[outputStream][]api.Event{}}
+	h.localActor = actor
 	h.tenants, h.tenantConfigErr = readTenants()
 	for name, rule := range map[string]api.Rule{"plugin.load": api.Gate, "process.stop": api.Observe, "session.start": api.Observe, "session.ready": api.Observe, "session.stop": api.Observe, "session.end": api.Observe, "session.fork": api.Transform, "input": api.Transform, "turn.prepare": api.Transform, "output": api.Transform, "output.batch": api.Gate} {
 		h.hooks[name] = &hook{owner: "harness", rule: rule}

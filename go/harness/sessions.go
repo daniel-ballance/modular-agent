@@ -106,7 +106,7 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	if settings.Approval == "" {
 		settings.Approval = "off"
 	}
-	s := &session{id: id, project: project, data: api.Session{Version: 1, ID: id, Project: project, Settings: settings, Actor: "local-user", Tenant: tenant, Limit: limit}}
+	s := &session{id: id, project: project, data: api.Session{Version: 1, ID: id, Project: project, Settings: settings, Actor: c.h.localActor, Tenant: tenant, Limit: limit}}
 	if host != nil {
 		s.data.Actor = host.ID
 	}

@@ -24,6 +24,7 @@ type Environment struct {
 	active    sync.WaitGroup
 	pointsMu  sync.Mutex
 	stateDirs []string
+	confined  bool
 }
 type guardian struct {
 	session string
@@ -44,7 +45,19 @@ func NewAt(root string, stateDirs ...string) *Environment {
 func (e *Environment) StopsOnCrash() bool { return e.initErr == nil }
 func Plugin() api.Plugin                  { return PluginAt(defaultRoot()) }
 func PluginAt(root string, stateDirs ...string) api.Plugin {
+	return environmentPlugin(NewAt(root, stateDirs...))
+}
+
+// ConfinedPluginAt keeps file operations within the session project.
+func ConfinedPluginAt(root string, stateDirs ...string) api.Plugin {
 	e := NewAt(root, stateDirs...)
+	e.confined = true
+	return environmentPlugin(e)
+}
+
+func (e *Environment) ConfinesFiles() bool { return e.confined }
+
+func environmentPlugin(e *Environment) api.Plugin {
 	return api.Plugin{Name: "local", Setup: func(a api.API) error {
 		if e.initErr != nil {
 			return e.initErr
@@ -72,7 +85,18 @@ func (e *Environment) Exists(ctx context.Context, project, name string) (bool, e
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	_, err := os.Stat(path(project, name))
+	var err error
+	if e.confined {
+		var root *os.Root
+		var rel string
+		root, rel, err = confinedPath(project, name)
+		if err == nil {
+			defer root.Close()
+			_, err = root.Stat(rel)
+		}
+	} else {
+		_, err = os.Stat(path(project, name))
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -82,17 +106,45 @@ func (e *Environment) Read(ctx context.Context, project, name string) ([]byte, e
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if e.confined {
+		root, rel, err := confinedPath(project, name)
+		if err != nil {
+			return nil, err
+		}
+		defer root.Close()
+		return root.ReadFile(rel)
+	}
 	return os.ReadFile(path(project, name))
 }
 func (e *Environment) Write(ctx context.Context, project, name string, data []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if e.confined {
+		root, rel, err := confinedPath(project, name)
+		if err != nil {
+			return err
+		}
+		defer root.Close()
+		if err = root.MkdirAll(filepath.Dir(rel), 0755); err != nil {
+			return err
+		}
+		return root.WriteFile(rel, data, 0644)
+	}
 	p := path(project, name)
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 		return err
 	}
 	return os.WriteFile(p, data, 0644)
+}
+
+func confinedPath(project, name string) (*os.Root, string, error) {
+	rel, err := filepath.Rel(project, path(project, name))
+	if err != nil || !filepath.IsLocal(rel) {
+		return nil, "", errors.New("path is outside the project")
+	}
+	root, err := os.OpenRoot(project)
+	return root, rel, err
 }
 
 type commandRequest struct{ Project, Command string }

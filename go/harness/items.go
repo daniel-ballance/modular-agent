@@ -13,6 +13,15 @@ import (
 // collision checks are tentative: on refusal the caller still owns the process
 // and can send it the refusal before shutting it down.
 func (h *Harness) LoadExternal(p api.Plugin, replaces []string) error {
+	return h.loadItems(p, replaces, true)
+}
+
+// LoadItems loads a local plugin with item-level replacement.
+func (h *Harness) LoadItems(p api.Plugin, replaces []string) error {
+	return h.loadItems(p, replaces, false)
+}
+
+func (h *Harness) loadItems(p api.Plugin, replaces []string, external bool) error {
 	if p.Name == "" || p.Name == "harness" || p.Setup == nil || p.Replaces != "" {
 		return errors.New("invalid external plugin")
 	}
@@ -124,26 +133,28 @@ func (h *Harness) LoadExternal(p api.Plugin, replaces []string) error {
 		h.mu.Unlock()
 		return err
 	}
-	for key, r := range h.caps {
-		if r.owner != p.Name {
-			continue
+	if external {
+		for key, r := range h.caps {
+			if r.owner != p.Name {
+				continue
+			}
+			switch {
+			case key == "working-environment" || key == "runtime":
+				h.external[key] = true
+			case strings.HasPrefix(key, "provider."):
+				h.external["provider:"+strings.TrimPrefix(key, "provider.")] = true
+			}
 		}
-		switch {
-		case key == "working-environment" || key == "runtime":
-			h.external[key] = true
-		case strings.HasPrefix(key, "provider."):
-			h.external["provider:"+strings.TrimPrefix(key, "provider.")] = true
+		for name, r := range h.commands {
+			if r.owner == p.Name {
+				h.external["command:"+name] = true
+			}
 		}
-	}
-	for name, r := range h.commands {
-		if r.owner == p.Name {
-			h.external["command:"+name] = true
+		for _, item := range externalTools {
+			h.external[item] = true
 		}
+		h.externalPlugins[p.Name] = true
 	}
-	for _, item := range externalTools {
-		h.external[item] = true
-	}
-	h.externalPlugins[p.Name] = true
 	h.mu.Unlock()
 	if oldEnv != nil {
 		if err := oldEnv.Close(); err != nil {

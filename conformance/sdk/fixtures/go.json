@@ -1,0 +1,5 @@
+{
+  "sdk": "go",
+  "build": "cd go && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures",
+  "command": ["{repo}/go/.bin/modular-agent-fixtures"]
+}

@@ -123,6 +123,16 @@ func (s *Server) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) err
 	return err
 }
 
+// Callback sends a scoped request on behalf of the current served handler.
+func (s *Server) Callback(ctx context.Context, method string, params Object, out any) error {
+	id := RequestID(ctx)
+	if len(id) == 0 || ctx.Err() != nil {
+		return fault("invalid_request", "no active request")
+	}
+	params["parentRequestId"] = id
+	return s.peer.Call(ctx, method, params, out)
+}
+
 func (s *Server) ownEnvironment(env api.WorkingEnvironment) {
 	s.envMu.Lock()
 	if !s.envClosed {

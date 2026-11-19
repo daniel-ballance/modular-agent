@@ -74,8 +74,32 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 	if err := json.Unmarshal([]byte(raw), &specs); err != nil {
 		return fmt.Errorf("MODULAR_AGENT_PLUGINS: %w", err)
 	}
+	return Load(context.Background(), h, project, home, specs)
+}
+
+// EnvironmentSpecs parses the operator's configured programs without starting them.
+func EnvironmentSpecs() ([]Spec, error) {
+	raw := os.Getenv("MODULAR_AGENT_PLUGINS")
+	if raw == "" {
+		return nil, nil
+	}
+	var specs []Spec
+	if err := json.Unmarshal([]byte(raw), &specs); err != nil || specs == nil {
+		return nil, fmt.Errorf("MODULAR_AGENT_PLUGINS must be an array of plugin specs: %v", err)
+	}
+	return specs, nil
+}
+
+// Load starts the given programs in order. The caller owns the Harness and
+// must close it if loading any program fails.
+func Load(ctx context.Context, h *harness.Harness, project, home string, specs []Spec) error {
 	if len(specs) == 0 {
 		return nil
+	}
+	for _, spec := range specs {
+		if len(spec.Command) == 0 || spec.Command[0] == "" {
+			return errors.New("plugin command is empty")
+		}
 	}
 	project, err := filepath.Abs(project)
 	if err != nil {
@@ -94,9 +118,6 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 		return err
 	}
 	for i, spec := range specs {
-		if len(spec.Command) == 0 || spec.Command[0] == "" {
-			return errors.New("plugin command is empty")
-		}
 		state := filepath.Join(home, "plugins", strconv.Itoa(i))
 		if err = os.MkdirAll(state, 0700); err != nil {
 			return err
@@ -114,6 +135,7 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 		for k, v := range spec.Env {
 			env[k] = v
 		}
+		r.cmd.Env = []string{}
 		for k, v := range env {
 			r.cmd.Env = append(r.cmd.Env, k+"="+v)
 		}
@@ -138,7 +160,10 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 		r.peer.OnClose = func() { r.active.Store(false); _ = r.Close() }
 		go func() { _ = r.peer.Run(); _ = r.cmd.Wait(); close(r.exited) }()
 		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": spec.Config}
-		if err = r.peer.Call(context.Background(), "plugin/initialize", init, &r.reg); err != nil {
+		if spec.Config == nil {
+			init["config"] = object{}
+		}
+		if err = r.peer.Call(ctx, "plugin/initialize", init, &r.reg); err != nil {
 			_ = r.Close()
 			return err
 		}
@@ -562,7 +587,7 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 		if q.Kind == "secret" {
 			return object{"requestId": answer.Request, "actorId": answer.Actor, "stored": answer.Value, "declined": answer.Declined}, nil
 		}
-		return object{"requestId": answer.Request, "actorId": answer.Actor, "value": answer.Value, "declined": answer.Declined}, nil
+		return object{"requestId": answer.Request, "actorId": answer.Actor, "value": answer.Value, "declined": answer.Declined, "reason": answer.Reason}, nil
 	}
 	if isEnvironmentMethod(method, "host/") {
 		if !hasSession || w.session == "" || !r.host.a.Authorize(session, w.actor, "tools") {

@@ -1,0 +1,410 @@
+package modular
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"iter"
+	"slices"
+	"time"
+
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
+)
+
+type Session struct {
+	agent *Agent
+	id    string
+}
+
+func (s *Session) ID() string                              { return s.id }
+func (s *Session) ctx(ctx context.Context) context.Context { return api.AsActor(ctx, localActor) }
+
+type Disposition string
+
+const (
+	Turn       Disposition = "turn"
+	Handled    Disposition = "handled"
+	HandedBack Disposition = "handedBack"
+)
+
+type Outcome struct {
+	Kind  string `json:"kind"`
+	Error string `json:"error,omitempty"`
+	Limit string `json:"limit,omitempty"`
+}
+type PromptResult struct {
+	InputID       string          `json:"inputId"`
+	Disposition   Disposition     `json:"disposition"`
+	Outcome       *Outcome        `json:"outcome,omitempty"`
+	Text          string          `json:"text,omitempty"`
+	Value         json.RawMessage `json:"value,omitempty"`
+	TurnID        string          `json:"turnId,omitempty"`
+	OpenToolCalls []string        `json:"openToolCalls,omitempty"`
+	Usage         *Usage          `json:"usage,omitempty"`
+	results       []ToolResult
+}
+
+func (r PromptResult) ToolResults() []ToolResult { return slices.Clone(r.results) }
+
+type PromptOption func(*promptOptions)
+type promptOptions struct{ key string }
+
+func WithInputKey(key string) PromptOption { return func(p *promptOptions) { p.key = key } }
+
+type Timing string
+
+const (
+	Now     Timing = "now"
+	Steer   Timing = "steer"
+	After   Timing = "after"
+	Propose Timing = "propose"
+)
+
+type InputReceipt struct {
+	InputID     string `json:"inputId"`
+	Disposition string `json:"disposition"`
+	Duplicate   bool   `json:"duplicate,omitempty"`
+	Erased      bool   `json:"erased,omitempty"`
+}
+
+func (s *Session) Send(ctx context.Context, input any, timing Timing, opts ...PromptOption) (InputReceipt, error) {
+	if err := ctx.Err(); err != nil {
+		return InputReceipt{}, appError(err, CancelledCode)
+	}
+	if timing != Now && timing != Steer && timing != After && timing != Propose {
+		return InputReceipt{}, &Error{Code: InvalidParams, Message: "invalid input timing"}
+	}
+	var content api.Content
+	switch v := input.(type) {
+	case string:
+		content = api.Text(v)
+	case Content:
+		content = portable.ReadContent(v)
+	default:
+		return InputReceipt{}, &Error{Code: InvalidParams, Message: "input must be text or Content"}
+	}
+	var p promptOptions
+	for _, opt := range opts {
+		opt(&p)
+	}
+	if _, err := s.agent.a.Snapshot(s.id); err != nil {
+		return InputReceipt{}, appError(err, NotOpen)
+	}
+	r, err := s.agent.a.Submit(s.ctx(ctx), s.id, api.Input{When: string(timing), Key: p.key, Content: content})
+	if errors.Is(err, api.ErrInputConflict) {
+		return InputReceipt{}, appError(err, Conflict)
+	}
+	return InputReceipt{InputID: r.ID, Disposition: r.When, Duplicate: r.Duplicate, Erased: r.Erased}, appError(err, Busy)
+}
+func (s *Session) Prompt(ctx context.Context, input any, opts ...PromptOption) (PromptResult, error) {
+	return s.prompt(ctx, input, nil, opts)
+}
+func (s *Session) PromptStream(ctx context.Context, input any, opts ...PromptOption) iter.Seq2[Event, error] {
+	return func(yield func(Event, error) bool) {
+		_, err := s.prompt(ctx, input, yield, opts)
+		if err != nil {
+			yield(nil, err)
+		}
+	}
+}
+func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error) bool, opts []PromptOption) (PromptResult, error) {
+	eventBuf := make(chan api.Event, 256)
+	overflow := make(chan struct{}, 1)
+	wake := make(chan struct{}, 1)
+	subscribe := s.agent.a.(interface {
+		SubscribeOutput(func(api.Event) string, func(api.Event)) func()
+	})
+	stop := subscribe.SubscribeOutput(func(api.Event) string { return localActor }, func(e api.Event) {
+		if e.Session != s.id {
+			return
+		}
+		if yield == nil {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+			return
+		}
+		select {
+		case eventBuf <- e:
+		default:
+			select {
+			case overflow <- struct{}{}:
+			default:
+			}
+		}
+	})
+	defer stop()
+	r, err := s.Send(ctx, input, Now, opts...)
+	if err != nil {
+		return PromptResult{}, err
+	}
+	if r.Disposition == "command" {
+		return PromptResult{InputID: r.InputID, Disposition: Handled}, nil
+	}
+	if r.Erased {
+		return PromptResult{InputID: r.InputID, Disposition: HandedBack}, nil
+	}
+	// Some admission/settlement records in the base do not yet have a live event.
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if yield == nil || r.Duplicate {
+			snap, err := s.view(ctx)
+			if err != nil {
+				return PromptResult{}, err
+			}
+			if result := resultFor(snap, r.InputID); result != nil {
+				if yield != nil && result.Outcome != nil {
+					yield(EndEvent{EventHeader: EventHeader{Type: "turnEnded", SessionID: s.id, TurnID: result.TurnID}, Outcome: *result.Outcome}, nil)
+				}
+				return *result, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return PromptResult{}, appError(ctx.Err(), CancelledCode)
+		case <-overflow:
+			return PromptResult{}, &Error{Code: Lost, Message: "prompt stream fell behind; read history to resume"}
+		case <-wake:
+		case <-tick.C:
+			if yield != nil {
+				snap, err := s.view(ctx)
+				if err != nil {
+					return PromptResult{}, err
+				}
+				if result := resultFor(snap, r.InputID); result != nil && result.Disposition != Turn {
+					return *result, nil
+				}
+			}
+		case raw := <-eventBuf:
+			if raw.Turn == "" {
+				continue
+			}
+			snap, err := s.view(ctx)
+			if err != nil {
+				return PromptResult{}, err
+			}
+			if turnFor(snap, r.InputID) != raw.Turn {
+				continue
+			}
+			e := sdkEvent(raw)
+			if e != nil && !yield(e, nil) {
+				return PromptResult{}, nil
+			}
+			if raw.Kind == "turn.end" {
+				if result := resultFor(snap, r.InputID); result != nil {
+					return *result, nil
+				}
+			}
+		}
+	}
+}
+func (s *Session) view(ctx context.Context) (api.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return api.Session{}, appError(err, CancelledCode)
+	}
+	if _, err := s.agent.a.Snapshot(s.id); err != nil {
+		return api.Session{}, appError(err, NotOpen)
+	}
+	v, err := s.agent.a.View(s.ctx(ctx), s.id)
+	if errors.Is(err, api.ErrOutputWithheld) {
+		return api.Session{}, appError(err, Withheld)
+	}
+	return v, appError(err, Forbidden)
+}
+func turnFor(s api.Session, input string) string {
+	for _, e := range s.Entries {
+		if e.Kind == "input" && e.InputID() == input {
+			return e.Turn
+		}
+		if e.Kind == "turn.start" && api.Decode[api.TurnStart](e.Data).Input == input {
+			return e.Turn
+		}
+	}
+	return ""
+}
+func resultFor(s api.Session, input string) *PromptResult {
+	turn := turnFor(s, input)
+	for _, e := range s.Entries {
+		if turn != "" && e.Kind == "turn.end" && e.Turn == turn {
+			return buildResult(s, e, input)
+		}
+		if turn == "" && (e.Kind == "input.returned" || e.Kind == "input.withdrawn") && slices.Contains(e.HandedBackIDs(), input) {
+			return &PromptResult{InputID: input, Disposition: HandedBack}
+		}
+	}
+	return nil
+}
+func buildResult(s api.Session, end api.Entry, input string) *PromptResult {
+	out := api.Decode[api.Outcome](end.Data)
+	r := &PromptResult{InputID: input, Disposition: Turn, TurnID: end.Turn, Text: out.Result.Text(), Value: out.Value, Outcome: &Outcome{Kind: out.Status, Error: out.Error}, Usage: &Usage{Input: out.Usage.Input, Output: out.Usage.Output, CacheRead: out.Usage.Cached, CacheWrite: out.Usage.CacheWrite, Cost: out.Usage.Cost}}
+	for _, c := range out.Open {
+		r.OpenToolCalls = append(r.OpenToolCalls, c.ID)
+	}
+	var order []string
+	names := map[string]string{}
+	results := map[string]ToolResult{}
+	for _, e := range s.Entries {
+		if e.Turn != end.Turn {
+			continue
+		}
+		switch e.Kind {
+		case "turn.start":
+			if r.InputID == "" {
+				r.InputID = api.Decode[api.TurnStart](e.Data).Input
+			}
+		case "tool.call":
+			if _, ok := names[e.Call]; !ok {
+				order = append(order, e.Call)
+			}
+			names[e.Call] = api.Decode[api.Call](e.Data).Name
+		case "tool.result":
+			result := api.Decode[api.ToolResult](e.Data)
+			result.Content = e.Content
+			var v ToolResult
+			_ = decodeInto(portable.Result(result), &v)
+			if v.CallID == "" {
+				v.CallID = e.Call
+			}
+			v.Name = result.Name
+			results[e.Call] = v
+		}
+	}
+	for _, id := range order {
+		if v, ok := results[id]; ok {
+			if v.Name == "" {
+				v.Name = names[id]
+			}
+			r.results = append(r.results, v)
+			delete(results, id)
+		}
+	}
+	// An imported history can omit the internal tool.call record.
+	for _, e := range s.Entries {
+		if e.Kind == "tool.result" && e.Turn == end.Turn {
+			if v, ok := results[e.Call]; ok {
+				r.results = append(r.results, v)
+				delete(results, e.Call)
+			}
+		}
+	}
+	return r
+}
+func (s *Session) LastTurn(ctx context.Context) (*PromptResult, error) {
+	snap, err := s.view(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range slices.Backward(snap.Entries) {
+		if e.Kind == "turn.end" {
+			return buildResult(snap, e, ""), nil
+		}
+	}
+	return nil, nil
+}
+func (s *Session) History(ctx context.Context) ([]HistoryEntry, error) {
+	snap, err := s.view(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]HistoryEntry, 0, len(snap.Entries))
+	for _, e := range snap.Entries {
+		out = append(out, portable.Entry(e))
+	}
+	return out, nil
+}
+func (s *Session) Cancel(ctx context.Context) ([]InputReceipt, error) {
+	ctx = s.ctx(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, appError(err, CancelledCode)
+	}
+	if _, err := s.agent.a.Snapshot(s.id); err != nil {
+		return nil, appError(err, NotOpen)
+	}
+	if err := s.agent.a.CancelAs(ctx, s.id); err != nil {
+		return nil, appError(err, Forbidden)
+	}
+	out, err := s.agent.a.Wait(ctx, s.id)
+	if err != nil {
+		return nil, appError(err, Lost)
+	}
+	var returned []InputReceipt
+	for _, in := range out.Returned {
+		returned = append(returned, InputReceipt{InputID: in.ID, Disposition: string(HandedBack)})
+	}
+	return returned, nil
+}
+func (s *Session) Settings(ctx context.Context) (Settings, error) {
+	snap, err := s.view(ctx)
+	if err != nil {
+		return nil, err
+	}
+	b := snap.Settings
+	out := Settings{"reasoning": b.Thinking, "approval": api.ApprovalWire(b.Approval), "maxSteps": b.MaxSteps, "maxOutput": b.MaxOutput}
+	for _, m := range s.agent.Models() {
+		if m.ModelRef.String() == b.Model {
+			out["model"] = m.ModelRef
+			break
+		}
+	}
+	return out, nil
+}
+func (s *Session) SetSetting(ctx context.Context, key string, value any) error {
+	ctx = s.ctx(ctx)
+	if err := ctx.Err(); err != nil {
+		return appError(err, CancelledCode)
+	}
+	snap, err := s.agent.a.Snapshot(s.id)
+	if err != nil {
+		return appError(err, NotOpen)
+	}
+	if err = applySetting(&snap.Settings, key, value); err != nil {
+		return err
+	}
+	if key == "model" && !slices.ContainsFunc(s.agent.Models(), func(m ModelInfo) bool { return m.ModelRef.String() == snap.Settings.Model }) {
+		return &Error{Code: NotFound, Message: "model is not offered"}
+	}
+	return appError(s.agent.a.SetSettings(ctx, s.id, snap.Settings), Busy)
+}
+func (s *Session) Fork(ctx context.Context, entryID ...string) (*Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, appError(err, CancelledCode)
+	}
+	if len(entryID) > 1 {
+		return nil, &Error{Code: InvalidParams, Message: "at most one entry id"}
+	}
+	target := ""
+	if len(entryID) == 1 {
+		target = entryID[0]
+	}
+	if _, err := s.agent.a.Snapshot(s.id); err != nil {
+		return nil, appError(err, NotOpen)
+	}
+	id, err := s.agent.a.Fork(s.ctx(ctx), s.id, target)
+	if err != nil {
+		return nil, appError(err, Busy)
+	}
+	return &Session{agent: s.agent, id: id}, nil
+}
+func (s *Session) OnQuestion(ctx context.Context, h QuestionHandler) error {
+	if err := ctx.Err(); err != nil {
+		return appError(err, CancelledCode)
+	}
+	if _, err := s.agent.a.Snapshot(s.id); err != nil {
+		return appError(err, NotOpen)
+	}
+	s.agent.q.attach(s.id, h)
+	return nil
+}
+func (s *Session) Close(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return appError(err, CancelledCode)
+	}
+	v, ok := s.agent.a.(interface{ CloseAs(string, string) error })
+	if ok {
+		return appError(v.CloseAs(s.id, localActor), NotOpen)
+	}
+	return appError(s.agent.a.CloseSession(s.id), NotOpen)
+}

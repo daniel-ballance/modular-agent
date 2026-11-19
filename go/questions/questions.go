@@ -372,6 +372,11 @@ func (m *Manager) RefuseUndeliverableApproval(q api.Question) {
 	}
 }
 
+// DeclineUnanswered settles a question an embedded host cannot deliver.
+func (m *Manager) DeclineUnanswered(q api.Question, reason string) {
+	_ = m.decline(q, reason)
+}
+
 func (m *Manager) decline(q api.Question, reason string) error {
 	m.mu.Lock()
 	s, err := m.a.Snapshot(q.Session)
