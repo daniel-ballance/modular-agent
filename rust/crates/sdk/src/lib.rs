@@ -42,8 +42,8 @@ pub use plugin::{Command, CommandContext, Plugin, Registrar};
 pub use provider::*;
 pub use serve::serve;
 pub use session::{
-    Disposition, EventStream, HandedBack, InputReceipt, Outcome, PromptResult, Session, Timing,
-    ToolResult,
+    Disposition, EventStream, HandedBack, InputReceipt, Outcome, PromptOptions, PromptResult,
+    Session, Timing, ToolResult,
 };
 pub use tool::{
     Answer, Ask, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext, ToolEnvironment,

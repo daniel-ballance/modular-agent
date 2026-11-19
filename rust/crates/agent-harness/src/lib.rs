@@ -541,7 +541,24 @@ impl Harness {
             actor: actor.into(),
             ..Scope::session(session)
         };
-        self.admit(&scope, text, timing, key, None).await
+        self.admit(&scope, text, timing, key, None, None).await
+    }
+    /// Admit a prompt with a schema attached to this admission, not to the session.
+    pub async fn submit_shaped(
+        &self,
+        session: &str,
+        actor: &str,
+        text: &str,
+        key: Option<String>,
+        shape: Value,
+    ) -> Result<Receipt> {
+        schema::compile(&shape)?;
+        let scope = Scope {
+            actor: actor.into(),
+            ..Scope::session(session)
+        };
+        self.admit(&scope, text, Timing::Now, key, None, Some(shape))
+            .await
     }
     async fn admit(
         &self,
@@ -550,6 +567,7 @@ impl Harness {
         timing: Timing,
         key: Option<String>,
         sponsor: Option<&str>,
+        result_shape: Option<Value>,
     ) -> Result<Receipt> {
         let session = scope.session.as_str();
         let actor = scope.actor.as_str();
@@ -714,7 +732,11 @@ impl Harness {
                        "authority":authority,"sponsor":sponsor,"submittedBy":submitter,"taken":input_taken(open.active, timing)}),
             ),
         );
-        entry.content.as_mut().unwrap()["inputId"] = json!(entry.id);
+        let content = entry.content.as_mut().unwrap();
+        content["inputId"] = json!(entry.id);
+        if let Some(shape) = result_shape {
+            content["resultShape"] = shape;
+        }
         next.position = Some(entry.id.clone());
         next.entries.push(entry.clone());
         self.save(&next)?;
@@ -1080,7 +1102,7 @@ impl Harness {
             )
             .await?
             .value;
-        let system = contributions
+        let mut system = contributions
             .as_array()
             .into_iter()
             .flatten()
@@ -1150,6 +1172,13 @@ impl Harness {
             settings["thinking"].as_str().unwrap_or("low"),
             &info.thinking
         ));
+        if let Some(shape) = source
+            .and_then(|e| e.content.as_ref())
+            .and_then(|v| v.get("resultShape"))
+        {
+            settings["result_shape"] = shape.clone();
+            system.push_str(&format!("\n\nFor the final answer, return only one JSON value matching this schema:\n{shape}"));
+        }
         let mut start = json!({"startedBy":started_by,"model":info,"system":system,"tools":tools,"settings":settings,"resume":resume,"context":context});
         if let Some(origin) = resume
             .first()
@@ -1415,7 +1444,8 @@ impl AgentApi for Harness {
         timing: Timing,
         key: Option<String>,
     ) -> Result<Receipt> {
-        self.admit(scope, text, timing, key, Some(sponsor)).await
+        self.admit(scope, text, timing, key, Some(sponsor), None)
+            .await
     }
     async fn release(
         &self,

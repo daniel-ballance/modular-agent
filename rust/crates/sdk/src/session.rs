@@ -109,6 +109,18 @@ impl ToolResult {
     }
 }
 
+/// Per-admission options for a prompt.
+#[derive(Clone, Debug, Default)]
+pub struct PromptOptions {
+    pub key: Option<String>,
+    pub result: Option<Value>,
+}
+impl From<Option<String>> for PromptOptions {
+    fn from(key: Option<String>) -> Self {
+        Self { key, result: None }
+    }
+}
+
 /// What `prompt` returns.
 #[derive(Clone, Debug)]
 pub struct PromptResult {
@@ -158,14 +170,17 @@ impl Session {
         self.prompt_with(input, None).await
     }
 
-    /// Prompt with an optional admission key. Retrying a key waits for its original turn.
+    /// Prompt with options. Retrying a key waits for its original turn.
     pub async fn prompt_with(
         &self,
         input: impl Into<String>,
-        key: Option<String>,
+        options: impl Into<PromptOptions>,
     ) -> Result<PromptResult> {
         let mut events = self.inner.hub.events.subscribe();
-        let receipt = self.admit(input.into(), Timing::Now, key).await?;
+        let options = options.into();
+        let receipt = self
+            .admit(input.into(), Timing::Now, options.key, options.result)
+            .await?;
         if receipt.taken == "handled" {
             return Ok(no_turn(receipt.input_id, Disposition::Handled));
         }
@@ -191,8 +206,19 @@ impl Session {
 
     /// The events of the turn this input starts, ending with its `TurnEnded`.
     pub async fn prompt_stream(&self, input: impl Into<String>) -> Result<EventStream> {
+        self.prompt_stream_with(input, PromptOptions::default())
+            .await
+    }
+
+    pub async fn prompt_stream_with(
+        &self,
+        input: impl Into<String>,
+        options: PromptOptions,
+    ) -> Result<EventStream> {
         let events = self.inner.hub.events.subscribe();
-        let receipt = self.admit(input.into(), Timing::Now, None).await?;
+        let receipt = self
+            .admit(input.into(), Timing::Now, options.key, options.result)
+            .await?;
         if receipt.taken == "handled" {
             return Ok(Box::pin(futures_util::stream::empty()));
         }
@@ -263,11 +289,16 @@ impl Session {
         text: String,
         timing: Timing,
         key: Option<String>,
+        shape: Option<Value>,
     ) -> Result<InputReceipt> {
         self.snapshot()?;
         let h = &self.inner.harness;
-        let receipt = h
-            .submit(
+        let receipt = if let Some(shape) = shape {
+            base::schema::compile(&shape)
+                .map_err(|e| Error::new(Code::InvalidParams, e.to_string()))?;
+            h.submit_shaped(&self.id, LOCAL, &text, key, shape).await?
+        } else {
+            h.submit(
                 &self.id,
                 LOCAL,
                 &text,
@@ -279,7 +310,8 @@ impl Session {
                 },
                 key,
             )
-            .await?;
+            .await?
+        };
         let taken = if receipt.erased {
             "handedBack".into()
         } else {
@@ -333,7 +365,7 @@ impl Session {
         timing: Timing,
         key: Option<String>,
     ) -> Result<InputReceipt> {
-        let receipt = self.admit(input.into(), timing, key).await?;
+        let receipt = self.admit(input.into(), timing, key, None).await?;
         if !receipt.duplicate && !matches!(receipt.taken.as_str(), "handled" | "proposed") {
             // Dropping the handle detaches the waiter, not the work.
             drop(self.drive());

@@ -1171,15 +1171,10 @@ impl TurnWork {
                 let mut payload = json!({"text":value["result"]["text"]});
                 if let Some(shape) = self.input.settings.get("result_shape") {
                     payload["shape"] = shape.clone();
-                    let reason = if value["result"].get("value").is_none() {
-                        Some("A shaped result requires a value.")
-                    } else if shape == &Value::Bool(false) {
-                        Some("The result shape does not accept this value.")
-                    } else {
-                        None
-                    };
-                    if let Some(reason) = reason {
-                        self.record_feedback(api, &scope, reason)?;
+                    if let Err(error) = schema::check(shape, value["result"].get("value")) {
+                        let reason =
+                            format!("The result shape does not accept this value: {error}");
+                        self.record_feedback(api, &scope, &reason)?;
                         return Ok(json!({"value":value,"refused":reason}));
                     }
                 }

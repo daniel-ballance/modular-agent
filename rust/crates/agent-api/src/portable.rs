@@ -227,7 +227,7 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
                     value[key] = item.clone();
                 }
             }
-            for key in ["authority", "sponsor", "taken"] {
+            for key in ["authority", "sponsor", "taken", "resultShape"] {
                 if let Some(item) = optional(c, key) {
                     value[format!("rust.{key}")] = item.clone();
                 }
@@ -392,6 +392,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             let mut start = json!({"startedBy":c.get("startedBy").cloned().unwrap_or_else(||json!({"kind":"actor","id":e.scope.actor})),"model":{"provider":model["provider"],"id":model["id"]},"system":c["system"].as_str().unwrap_or_default(),"tools":tools.iter().map(definition).collect::<Vec<_>>(),"settings":{}});
             if let Some(origin) = optional(c, "continuesTurnId") {
                 v["continuesTurnId"] = origin.clone();
+            }
+            if let Some(shape) = c["settings"].get("result_shape") {
+                start["resultShape"] = shape.clone();
             }
             for key in ["point", "context"] {
                 if let Some(value) = c.get(key) {
@@ -633,11 +636,12 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
         let (native, content) = match k {
             "inputAccepted" => {
                 let content = input_content(d);
-                (
-                    "input.accepted",
-                    json!({"inputId":d["inputId"],"text":text(&content),"content":content,"timing":d["when"],"key":d["key"],
-                    "releasedBy":d["releasedBy"],"submittedBy":d["submittedBy"],"authority":d["rust.authority"],"sponsor":d["rust.sponsor"],"taken":d.get("taken").unwrap_or(&d["rust.taken"]),"parked":d["parked"]}),
-                )
+                let mut accepted = json!({"inputId":d["inputId"],"text":text(&content),"content":content,"timing":d["when"],"key":d["key"],
+                    "releasedBy":d["releasedBy"],"submittedBy":d["submittedBy"],"authority":d["rust.authority"],"sponsor":d["rust.sponsor"],"taken":d.get("taken").unwrap_or(&d["rust.taken"]),"parked":d["parked"]});
+                if let Some(shape) = d.get("rust.resultShape") {
+                    accepted["resultShape"] = shape.clone();
+                }
+                ("input.accepted", accepted)
             }
             "inputHandedBack" => (
                 "input.returned",
@@ -733,6 +737,9 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     .collect::<Result<Vec<_>>>()?;
                 let mut settings = optional(d, "rust.settings").cloned().unwrap_or(json!({}));
                 merge(&mut settings, settings_from_wire(&d["settings"]));
+                if let Some(shape) = d.get("resultShape") {
+                    settings["result_shape"] = shape.clone();
+                }
                 (
                     "turn.start",
                     json!({"startedBy":d["startedBy"],"model":model,"system":d["system"],"tools":tools,"settings":settings,"resume":optional(d, "rust.resume").cloned().unwrap_or(json!([])),"point":d["point"],"context":d["context"]}),
