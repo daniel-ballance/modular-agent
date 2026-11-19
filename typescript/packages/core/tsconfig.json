@@ -1,0 +1,40 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  "include": [
+    "src",
+    "test"
+  ],
+  "references": [
+    {
+      "path": "../harness"
+    },
+    {
+      "path": "../history-jsonl"
+    },
+    {
+      "path": "../env-local"
+    },
+    {
+      "path": "../runtime-durable"
+    },
+    {
+      "path": "../runtime-transient"
+    },
+    {
+      "path": "../approval"
+    },
+    {
+      "path": "../plugin-wire"
+    },
+    {
+      "path": "../interface-acp"
+    },
+    {
+      "path": "../services"
+    }
+  ]
+}

@@ -82,12 +82,17 @@ export class HookRegistry {
 	}
 
 	/** A refusal wins and stops the rest. A handler that fails counts as a refusal. */
-	async gate<T>(name: string, payload: T): Promise<GateResult<T>> {
+	async gate<T>(name: string, payload: T, options?: {
+		invoke?(value: T, handler: () => unknown): unknown;
+		change?(before: T, after: T): T;
+	}): Promise<GateResult<T>> {
 		let value = payload;
 		for (const h of this.point(name, "gate").handlers) {
 			let answer: GateAnswer<T>;
 			try {
-				answer = (await h.handler(value)) as GateAnswer<T>;
+				const invoke = () => h.handler(value);
+				answer = (await (options?.invoke ? options.invoke(value, invoke) : invoke())) as GateAnswer<T>;
+				if (answer && "change" in answer) value = options?.change ? options.change(value, answer.change) : answer.change;
 			} catch (error) {
 				this.onFailure({ hook: name, plugin: h.plugin, error });
 				return { refused: `${h.plugin} failed while deciding`, value };
@@ -95,7 +100,6 @@ export class HookRegistry {
 			if (!answer) continue;
 			if ("refuse" in answer) return { refused: answer.refuse, value };
 			if ("pending" in answer) return { pending: answer.pending, value };
-			if ("change" in answer) value = answer.change;
 		}
 		return { value };
 	}

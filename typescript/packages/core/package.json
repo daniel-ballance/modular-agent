@@ -1,0 +1,25 @@
+{
+  "name": "@modular-agent/core",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/src/index.js",
+    "./testing": "./dist/src/testing.js"
+  },
+  "dependencies": {
+    "@modular-agent/harness": "*",
+    "@modular-agent/history-jsonl": "*",
+    "@modular-agent/env-local": "*",
+    "@modular-agent/runtime-durable": "*",
+    "@modular-agent/runtime-transient": "*",
+    "@modular-agent/approval": "*",
+    "@modular-agent/plugin-wire": "*",
+    "@modular-agent/interface-acp": "*",
+    "@modular-agent/services": "*",
+    "ajv": "^8.20.0",
+    "json-schema-to-ts": "^3.1.1"
+  },
+  "devDependencies": {
+    "zod": "^4.6.7"
+  }
+}

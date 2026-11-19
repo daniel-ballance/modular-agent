@@ -48,7 +48,9 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - The core package is `@modular-agent/core`, an ES module with its own type declarations. It runs on Node.js 22 or later.
 - A tool is `tool({ name, description, input, run })`. Hints are fields: `readOnly: true`.
 - A plugin is an object: `{ name, replaces?, setup(registrar), stop? }`, or `definePlugin({ name, tools, hooks, … })` for the common case.
-- `run` may return a value or a Promise. Streams are async iterables, used with `for await`.
+- `run` may return a value or a Promise. Streams are async iterables, used with `for await`. A tool refuses by calling `cx.refuse(reason)`, which throws and does not return.
+- Standard Schema validators must expose the Standard JSON Schema input export, for example Zod 4. For plain JSON Schema assigned to a variable, use `as const` so its keywords keep their literal types for inference.
+- `registrar.on("tool.before", handler)` infers the payload and answer from the point. A gate can return `"allow"` or `{ refuse: reason }`.
 - No default exports.
 
 ## Go

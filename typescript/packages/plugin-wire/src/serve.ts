@@ -29,6 +29,8 @@ import { notFoundAsEnoent, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js
 export interface ServeOptions {
 	/** The plugin's name in its registration. */
 	name: string;
+	/** Pass the whole initialize config to a single plugin. */
+	directConfig?: boolean;
 	/** Ordinary plugins of this build, to serve as one external plugin. */
 	plugins: Plugin[];
 	/** What the host leaves out of its own plugins in favour of these. */
@@ -73,7 +75,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	const toolSources: ToolSource[] = [];
 	let environment: WorkingEnvironment | undefined;
 	let runtime: Runtime | undefined;
-	const handlers = new Map<number, { hook: string; handler: (payload: any) => unknown; order: HandlerOrder }>();
+	const handlers = new Map<number, { hook: string; handler: (payload: any, work?: unknown) => unknown; order: HandlerOrder }>();
 	const commands = new Map<string, { description: string; run: (args: string, ctx: any) => unknown }>();
 	const stops: (() => unknown)[] = [];
 	let nextHandler = 1;
@@ -124,7 +126,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			name: plugin.name,
 			project: init.project,
 			home: init.home,
-			config: () => (init.config[plugin.name] as Record<string, unknown> | undefined) ?? init.config,
+			config: () => options.directConfig ? init.config : (init.config[plugin.name] as Record<string, unknown> | undefined) ?? init.config,
 			projectOf: () => init.project,
 			provide: (capability: string, impl: unknown) => {
 				if (capability === "provider") providers.push(impl as Provider);
@@ -140,7 +142,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			},
 			use: (capability: string) => (capability === "credential-store" ? credentialStore : undefined),
 			useAll: () => [],
-			on: (hook: string, handler: (payload: any) => unknown, order: HandlerOrder = "normal") => {
+			on: (hook: string, handler: (payload: any, work?: unknown) => unknown, order: HandlerOrder = "normal") => {
 				const id = nextHandler++;
 				handlers.set(id, { hook, handler, order });
 				return () => handlers.delete(id);
@@ -284,10 +286,15 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		return {};
 	});
 
+	const work = (ctx: { id: number | string; signal: AbortSignal }, sessionId: string) => ({
+		signal: ctx.signal,
+		history: (after?: string) => peer.request("host/history", { parentRequestId: ctx.id, sessionId, after, limit: 100, all: true }, ctx.signal),
+		emit: (type: string, data: unknown) => peer.notify("host/emit", { parentRequestId: ctx.id, sessionId, type, data }),
+	});
 	peer.handle("hook/handle", async (p, ctx) => {
 		const h = handlers.get(Number(p.handlerId));
 		if (!h || h.hook !== p.hook) throw new WireError("unknown_handler", `No handler ${p.handlerId}`);
-		const answer = await currentParent.run(ctx.id, () => h.handler(fromWire(p.payload)));
+		const answer = await currentParent.run(ctx.id, () => h.handler(fromWire(p.payload), work(ctx, p.payload?.sessionId)));
 		if (h.hook === "output") {
 			const gate = answer as import("@modular-agent/harness").OutputAnswer;
 			if (gate?.action === "pass") return gate.events ? { events: toWire(gate.events) } : null;
@@ -299,7 +306,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	peer.handle("command/run", async (p, ctx) => {
 		const c = commands.get(String(p.name));
 		if (!c) throw new WireError("invalid_request", `No command ${p.name}`);
-		const output = await currentParent.run(ctx.id, () => c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId }));
+		const output = await currentParent.run(ctx.id, () => c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId, ...work(ctx, p.sessionId) }));
 		return typeof output === "string" ? { output } : {};
 	});
 

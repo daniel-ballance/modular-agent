@@ -1,0 +1,5 @@
+{
+  "sdk": "typescript",
+  "build": "cd typescript && npm ci && npm run build",
+  "command": ["node", "{repo}/typescript/packages/fixtures/dist/src/bin.js"]
+}

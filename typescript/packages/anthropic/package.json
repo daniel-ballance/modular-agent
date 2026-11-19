@@ -1,0 +1,10 @@
+{
+  "name": "@modular-agent/anthropic",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./dist/src/index.js",
+  "dependencies": {
+    "@modular-agent/core": "*",
+    "@modular-agent/provider-pi-ai": "*"
+  }
+}

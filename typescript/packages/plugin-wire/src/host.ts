@@ -77,7 +77,7 @@ export function pluginSpecsFromEnv(env: NodeJS.ProcessEnv = process.env): Extern
  * host can leave out its own plugins that this one `replaces`.
  */
 export async function startExternalPlugin(spec: ExternalPluginSpec, info: { project: string; home: string }): Promise<ExternalPlugin> {
-	const child = spawn(spec.command[0], spec.command.slice(1), { stdio: ["pipe", "pipe", "inherit"], env: { PATH: process.env.PATH, LANG: process.env.LANG, ...(spec.env ?? {}) } });
+	const child = spawn(spec.command[0], spec.command.slice(1), { stdio: ["pipe", "pipe", "inherit"], env: { PATH: process.env.PATH, ...(spec.env ?? {}) } });
 	const peer = new WirePeer((line) => child.stdin.write(line), () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
 	child.stdout.on("data", (chunk: Buffer) => peer.feed(chunk));
 	child.stdout.on("end", () => peer.close("The plugin closed its output"));
@@ -94,13 +94,17 @@ export async function startExternalPlugin(spec: ExternalPluginSpec, info: { proj
 		await exited;
 		clearTimeout(timer);
 	};
+	return registerExternalPlugin(peer, info, spec.config ?? {}, stop);
+}
+
+export async function registerExternalPlugin(peer: WirePeer, info: { project: string; home: string }, config: Record<string, unknown>, stop: ExternalPlugin["stop"]): Promise<ExternalPlugin> {
 	const registration = await peer.request<Registration>("plugin/initialize", {
 		binding: PLUGIN_BINDING,
 		data: DATA_BINDING,
 		host: { name: "modular-agent (TypeScript)", version: "0.1.0" },
 		project: info.project,
 		home: info.home,
-		config: spec.config ?? {},
+		config,
 	}).catch(async (error) => { await stop("refused", "Initialization failed"); throw error; });
 	try {
 		const reg = registration;
