@@ -217,7 +217,7 @@ class External(Plugin):
         self.declarations = {}
         self.api = harness.api(self.name)
 
-    async def connect(self):
+    async def open_transport(self):
         decision = await self.h.fire(
             "@harness",
             "plugin.load",
@@ -244,6 +244,9 @@ class External(Plugin):
         self.peer = Peer(
             self.process.stdout, self.process.stdin, self.callback, self.notification, self.name
         )
+
+    async def connect(self):
+        await self.open_transport()
         self.home.mkdir(parents=True, exist_ok=True)
         self.registration = await asyncio.wait_for(
             self.peer.request(
@@ -275,6 +278,7 @@ class External(Plugin):
                 stops_commands_on_crash=environment["containment"] == "strong",
                 containment=environment["containment"],
                 rewind=bool(environment.get("points")),
+                confines_files=bool(environment.get("confinesFiles")),
                 platforms=environment.get("platforms", []),
             )
         providers = self.registration.get("providers", [])
@@ -1002,7 +1006,7 @@ class External(Plugin):
         self.stopping = True
         if self.runtime and hasattr(self.runtime, "api"):
             await self.runtime.stop()
-        if not self.process:
+        if not self.peer:
             return
         try:
             if self.peer and not self.peer.closed.is_set() and self.registration:
@@ -1019,14 +1023,15 @@ class External(Plugin):
         finally:
             if self.peer:
                 await self.peer.close()
-            if self.process.stdin:
-                self.process.stdin.close()
-            try:
-                async with asyncio.timeout(5):
+            if self.process:
+                if self.process.stdin:
+                    self.process.stdin.close()
+                try:
+                    async with asyncio.timeout(5):
+                        await self.process.wait()
+                except TimeoutError:
+                    self.process.kill()
                     await self.process.wait()
-            except TimeoutError:
-                self.process.kill()
-                await self.process.wait()
             if hasattr(self, "watcher"):
                 await self.watcher
 
@@ -1051,7 +1056,7 @@ class ToolSource:
         return result_in(result, d["call"]["id"])
 
 
-async def load_plugins(harness, specs, project, home):
+async def load_plugins(harness, specs, project, home, *, external_factory=External):
     """Initialize in order, preflight collisions, then retract local registrations."""
     harness.external_tool_names = {
         t["name"]: ("local", t.get("target", "files"))
@@ -1082,7 +1087,9 @@ async def load_plugins(harness, specs, project, home):
             or not all(isinstance(s, str) for s in spec["command"])
         ):
             raise WireError("Plugin command must be a nonempty string array", "invalid_request")
-        plugin = External(harness, spec, project, Path(home) / "external" / str(index), index)
+        plugin = external_factory(
+            harness, spec, project, Path(home) / "external" / str(index), index
+        )
         snapshot = {
             key: getattr(harness, key).copy()
             for key in ("capabilities", "hooks", "handlers", "commands", "external_tool_names")

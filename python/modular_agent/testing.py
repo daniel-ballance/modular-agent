@@ -9,7 +9,10 @@ from tempfile import TemporaryDirectory
 from typing import Unpack, TypedDict
 
 from ._agent import Agent, AgentStart, create_agent
+from ._environment import MemoryEnvironment, memory_environment as memory_environment
+from ._history import HistoryStore
 from ._plugin import Plugin, ProcessPlugin
+from ._serve import _OverWire
 from ._provider import ModelInfo, ProviderContext, ProviderSupports
 from ._tool import Tool
 from ._types import (
@@ -91,20 +94,42 @@ def scripted_provider(script: Sequence[JsonObject]) -> ScriptedProvider:
     return ScriptedProvider(script)
 
 
-def answers(values: Sequence[AnswerInput]) -> QuestionHandler:
-    pending = deque(values)
+class AnswerQueue:
+    def __init__(self, values: Sequence[AnswerInput]) -> None:
+        self._pending = deque(values)
+        self.unexpected: list[Question] = []
 
-    def answer(question: Question, context: QuestionContext) -> AnswerInput:
-        if not pending:
-            raise AssertionError(f"Unexpected question: {question.question}")
-        return pending.popleft()
+    def __call__(self, question: Question, context: QuestionContext) -> AnswerInput:
+        if not self._pending:
+            self.unexpected.append(question)
+            return "decline"
+        return self._pending.popleft()
 
-    return answer
+    def assert_done(self) -> None:
+        if self._pending or self.unexpected:
+            raise AssertionError(
+                f"{len(self._pending)} unused answers; unexpected questions: "
+                + ", ".join(q.question for q in self.unexpected)
+            )
+
+
+def answers(values: Sequence[AnswerInput]) -> AnswerQueue:
+    return AnswerQueue(values)
+
+
+def over_wire(plugin: Plugin) -> Plugin:
+    return _OverWire(plugin)
+
+
+async def restart(agent: Agent) -> Agent:
+    return await agent._interrupt_and_restart()
 
 
 class _Options(TypedDict, total=False):
     data_dir: str | PathLike[str] | None
     durability: Durability
+    environment: MemoryEnvironment
+    history: HistoryStore
     tools: Sequence[Tool]
     plugins: Sequence[Plugin]
     process_plugins: Sequence[ProcessPlugin | JsonObject] | None
@@ -122,6 +147,7 @@ def test_agent(
 ) -> AgentStart:
     async def build() -> Agent:
         scratch = TemporaryDirectory(prefix="modular-agent-test-") if project is None else None
+        options.setdefault("environment", memory_environment())
         try:
             agent = await create_agent(
                 project=scratch.name if scratch else project,

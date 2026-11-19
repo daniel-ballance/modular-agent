@@ -317,14 +317,18 @@ class Harness(Authority):
         scope = self.tool_dispatches.get(token)
         if scope is None or scope["closing"]:
             raise AgentError("Nested tools need a live dispatched parent", "invalid_request")
-        runtime = self.capabilities.get("runtime", (None, None))[1]
-        if not getattr(runtime, "declarations", {}).get("nested_tools"):
+        runtime = self.capabilities.get("runtime", (None, None))[0]
+        if runtime is None or not self.plugins[runtime].declarations.get("nested_tools"):
             raise AgentError("Nested calls are unavailable", "not_supported")
         parent = scope["data"]
         sid, turn, step = (parent.get(k) for k in ("session", "turn", "step"))
         source = parent["call"]
+
+        async def definitions():
+            return await self.call("@harness", "tools", "definitions", {"session": sid})
+
         if name is None:
-            return [t for t in await runtime._definitions(sid) if "plugin" in t.get("callers", [])]
+            return [t for t in await definitions() if "plugin" in t.get("callers", [])]
         if not isinstance(name, str) or not name or not isinstance(arguments, dict):
             raise AgentError("Nested tools need a name and object input", "invalid_request")
         depth = source.get("nesting_depth", 1) + 1
@@ -362,10 +366,19 @@ class Harness(Authority):
                         "content": content("Tool nesting depth exceeded"),
                     }
                 else:
-                    definition = next(
-                        (t for t in await runtime._definitions(sid) if t["name"] == name), None
+                    definition = next((t for t in await definitions() if t["name"] == name), None)
+                    answer = await self.call(
+                        "@harness",
+                        "runtime",
+                        "dispatch_nested",
+                        {
+                            "session": sid,
+                            "turn": turn,
+                            "step": step,
+                            "call": call,
+                            "definition": definition,
+                        },
                     )
-                    answer = await runtime._tool(sid, turn, step, call, definition)
                     if answer.get("open"):
                         await self._close_nested_questions(sid, call["id"])
                         answer = {
@@ -373,7 +386,7 @@ class Harness(Authority):
                             "content": content("Nested calls cannot be left open"),
                         }
             finally:
-                if sid not in runtime.suspending and sid in self.sessions:
+                if sid in self.sessions and not self.sessions[sid].get("suspending"):
                     await self._settle_nested(sid, only=call["id"], answer=answer, cancelled=True)
             return {**answer, "call": call["id"]}
 

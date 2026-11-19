@@ -10,7 +10,6 @@ from typing import Any, cast
 
 from ma_core import AgentError as _NativeError, Plugin as _NativePlugin
 from ma_core.wire import result_in, tool_in
-from ma_local import Local
 from ma_plugin import hooks
 from ma_plugin.rpc import WireError
 from ma_tools import Tools
@@ -64,17 +63,6 @@ class _SdkTools(Tools):  # type: ignore[misc]  # Untyped base adapter.
         if len({t["name"] for t in tools}) != len(tools):
             raise _NativeError("Duplicate tool name")
         return tools
-
-
-class _ConfinedLocal(Local):  # type: ignore[misc]  # Untyped base adapter.
-    async def _path(self, d: dict[str, Any]) -> Path:
-        session = await self.api.session("get", session=d["session"])
-        project = Path(session["project"]).resolve()
-        path = Path(d["path"])
-        target = (Path(d.get("cwd") or project) / path).resolve()
-        if not target.is_relative_to(project):
-            raise _NativeError("File resolves outside the project", "invalid_request")
-        return target
 
 
 class _MemoryHistory(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.

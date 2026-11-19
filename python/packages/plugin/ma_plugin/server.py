@@ -10,7 +10,7 @@ from pathlib import Path
 from .output import redact
 
 from ma_core import AgentError, content, identity, plain
-from ma_fake.conformance import NEST
+from ma_core.conformance import NEST
 from ma_durable import Durable
 from ma_runtime import Runtime
 from ma_local import Local

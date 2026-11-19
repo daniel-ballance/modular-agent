@@ -5,30 +5,16 @@ import json
 from ma_core import AgentError, Plugin, content, identity, plain
 
 
-NEST = {
-    "name": "nest",
-    "description": "Run a nested tool",
-    "schema": {
-        "type": "object",
-        "properties": {"name": {"type": "string"}, "input": {"type": "object"}},
-        "required": ["name", "input"],
-        "additionalProperties": False,
-    },
-    "parallel": False,
-    "callers": ["model", "plugin", "interface"],
-    "hints": {},
-}
+from ma_core.conformance import NEST
 
 
-class Echo(Plugin):
-    name = "conformance"
-    role = "provider"
-    declarations = {"stateful": False, "runs_tools": False, "live": False}
+class Nest(Plugin):
+    name = "conformance-nest"
+    role = "tool_source"
 
     async def start(self, api):
         await super().start(api)
         api.provide(self.name, self)
-        api.provide("conformance-nest", self)
         api.on("tools.list", self.tools)
 
     async def tools(self, d):
@@ -40,6 +26,16 @@ class Echo(Plugin):
             return await self.api.nested_tools(d["dispatch"], args["name"], args["input"])
         except AgentError as exc:
             return {"status": "failed", "content": content(exc.code)}
+
+
+class Echo(Plugin):
+    name = "conformance"
+    role = "provider"
+    declarations = {"stateful": False, "runs_tools": False, "live": False}
+
+    async def start(self, api):
+        await super().start(api)
+        api.provide(self.name, self)
 
     async def catalog(self, d, emit):
         return [

@@ -506,6 +506,7 @@ def turn_end_out(d):
     result = d.get("shared_result") or {
         "text": plain(d.get("content", [])),
         "openToolCalls": d.get("open_calls", []),
+        **({"value": d["value"]} if "value" in d else {}),
     }
     return {"outcome": outcome, "result": result}
 

@@ -7,7 +7,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ma_plugin.rpc import WireError
+from ma_plugin.host import External
+from ma_plugin.rpc import MAX_FRAME, Peer, WireError
 from ma_plugin.server import BINDING, PluginServer
 
 from ._native import _error, _read_answer
@@ -24,9 +25,13 @@ from ._tool import ToolContext
 from ._types import AgentError, Answer, Content, ErrorCode, Json, JsonObject, QuestionSpec
 
 
-async def _serve(plugin: Plugin) -> None:
+async def _serve(
+    plugin: Plugin,
+    streams: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None,
+) -> None:
     registrar: Registrar | None = None
     initialized = False
+    attempted = False
     stopped = False
     active: set[asyncio.Task[Any]] = set()
     registration: dict[str, Any] = {
@@ -177,16 +182,19 @@ async def _serve(plugin: Plugin) -> None:
 
     class Server(PluginServer):  # type: ignore[misc]  # Untyped base adapter.
         async def dispatch(self, method: str, params: dict[str, Any], key: str | int) -> Any:
-            nonlocal initialized
+            nonlocal initialized, attempted
             task = asyncio.current_task()
             if method == "plugin/initialize":
-                if initialized:
+                if attempted:
                     raise WireError("Already initialized", "invalid_request")
-                initialized = True
+                attempted = True
             if method != "plugin/shutdown" and task is not None:
                 active.add(task)
             try:
-                return await super().dispatch(method, params, key)
+                value = await super().dispatch(method, params, key)
+                if method == "plugin/initialize":
+                    initialized = True
+                return value
             except AgentError as exc:
                 raise WireError(exc.message, exc.code.value) from exc
             except (KeyError, TypeError) as exc:
@@ -202,9 +210,56 @@ async def _serve(plugin: Plugin) -> None:
         "command/run": run_command,
     }
     server = Server(registration, methods, initialize, stop)
-    await server.serve()
+    if streams is None:
+        await server.serve()
+    else:
+        server.peer = Peer(*streams, server.dispatch, None, "memory-host")
+        try:
+            await server.peer.closed.wait()
+        finally:
+            await server.peer.close()
+            await stop()
+
+
+class _OverWire(Plugin):
+    def __init__(self, plugin: Plugin) -> None:
+        super().__init__(plugin.name, config=plugin.config)
+        self.original = plugin
+
+
+class _MemoryExternal(External):  # type: ignore[misc]  # Untyped base adapter.
+    def __init__(
+        self, harness: Any, spec: dict[str, Any], project: Any, home: Any, index: int
+    ) -> None:
+        super().__init__(harness, spec, project, home, index)
+        self._task: asyncio.Task[None] | None = None
+
+    async def open_transport(self) -> None:
+        import socket
+
+        left, right = socket.socketpair()
+        try:
+            host = await asyncio.open_connection(sock=left, limit=MAX_FRAME + 2)
+            plugin = await asyncio.open_connection(sock=right, limit=MAX_FRAME + 2)
+        except BaseException:
+            left.close()
+            right.close()
+            raise
+        self.peer = Peer(*host, self.callback, self.notification, self.name)
+        self._task = asyncio.create_task(_serve(self.spec["_over_wire"], plugin))
+
+    async def stop(self) -> None:
+        try:
+            await super().stop()
+        finally:
+            if self._task is not None:
+                await self._task
 
 
 def serve(plugin: Plugin) -> None:
     """Speak the plugin binding on stdin/stdout until the host disconnects."""
+    items = [f"tool:{t.name}" for t in plugin._tools if t.in_process_only]
+    items += [point for point in plugin._hooks if point not in _SUPPORTED_HOOKS]
+    if items:
+        raise AgentError(ErrorCode.NOT_SUPPORTED, "Cannot serve " + ", ".join(items))
     asyncio.run(_serve(plugin))

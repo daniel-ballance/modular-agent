@@ -75,6 +75,7 @@ class HostedRuntime(Runtime):
             "steering": bool(self.supports.get("inputDuringTurn")),
             "durable": bool(self.supports.get("continuesAfterRestart")),
             "waiting_through_restart": bool(self.supports.get("waitingThroughRestart")),
+            "nested_tools": False,
         }
 
     async def _turn(self, sid, queued=None, turn=None):
@@ -219,6 +220,11 @@ class HostedRuntime(Runtime):
             await self.wake(d, emit)
             return {}
 
+        # Hand-backs are open metadata, not recovered execution.
+        if not self.declarations["durable"]:
+            for queued in await self._pending(sid):
+                await self._return(sid, queued)
+
         async def resume():
             try:
                 results = [await self._turn(sid, turn=turn) for turn in turns]
@@ -243,10 +249,7 @@ class HostedRuntime(Runtime):
             self.cancelled.discard(sid)
             await self.api.session("invalidate", session=sid, reason="recovery")
             await self.api.session("busy", session=sid, value=True)
-            task = self.tasks[sid] = asyncio.create_task(resume(), name="external-recover:" + sid)
-        if not self.declarations["durable"]:
-            # ACP includes the synchronous transient hand-back in load metadata.
-            await asyncio.shield(task)
+            self.tasks[sid] = asyncio.create_task(resume(), name="external-recover:" + sid)
         return {"resuming": turns}
 
 
