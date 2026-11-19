@@ -54,6 +54,12 @@ impl Served {
 
 fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
     let mut v = json!({"binding": BINDING, "name": name, "replaces": replaces});
+    if !r.providers.is_empty() {
+        v["providers"] = json!(r.providers.iter().map(|p| {
+            let support = p.supports();
+            json!({"id":p.id(),"models":p.models(),"supports":{"keepsState":support.keeps_state,"runsTools":false,"safeToRepeat":support.safe_to_repeat}})
+        }).collect::<Vec<_>>());
+    }
     if !r.tools.is_empty() {
         v["toolSources"] = json!([{"id": SOURCE, "tools": tools(r), "perSession": false}]);
     }
@@ -121,6 +127,70 @@ impl Endpoint for Served {
                 Ok(v)
             }
             "plugin/shutdown" => Ok(json!({})),
+            "provider/models" | "provider/available" | "provider/discard" | "provider/request" => {
+                let r = self.registered()?;
+                let provider = r
+                    .providers
+                    .iter()
+                    .find(|pv| p["provider"] == pv.id())
+                    .ok_or_else(|| Fault::new("invalid_request", "unknown Provider"))?;
+                match method {
+                    "provider/models" => Ok(json!({"models":provider.models()})),
+                    "provider/available" => Ok(json!({"available":provider.available()})),
+                    "provider/discard" => {
+                        let session = p["sessionId"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| Fault::new("invalid_request", "session required"))?;
+                        provider.discard_state(session).await.map_err(to_fault)?;
+                        Ok(json!({}))
+                    }
+                    _ => {
+                        let model: crate::ModelRef = serde_json::from_value(p["model"].clone())
+                            .map_err(|_| Fault::new("invalid_request", "invalid ModelRef"))?;
+                        if model.provider != provider.id()
+                            || !provider.models().iter().any(|info| info.model == model)
+                        {
+                            return Err(Fault::new("invalid_request", "unknown model"));
+                        }
+                        let session = p["sessionId"].as_str().filter(|s| !s.is_empty());
+                        if (!p["sessionId"].is_null() && session.is_none())
+                            || (provider.supports().keeps_state && session.is_none())
+                            || !p["request"].is_object()
+                        {
+                            return Err(Fault::new("invalid_request", "invalid Provider request"));
+                        }
+                        let payload = json!({"sessionId":session,"provider":provider.id(),"model":model,"request":p["request"]});
+                        let transformed = peer.call("host/hook", json!({"parentRequestId":id,"hook":"provider.request","payload":payload}),
+                            None, cancel.clone()).await?;
+                        let done = CancellationToken::new();
+                        let _guard = done.clone().drop_guard();
+                        let cx = crate::ProviderContext::remote(
+                            peer.clone(),
+                            id.clone(),
+                            session.unwrap_or_default().into(),
+                            provider.id().into(),
+                            cancel.clone(),
+                            done.clone(),
+                        );
+                        let message = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Err(Fault::new("cancelled", "Provider request cancelled")),
+                            message = provider.request(model.clone(), crate::ModelRequest(transformed["request"].clone()), cx) => {
+                                message.unwrap_or_else(|e| crate::ModelError::new(crate::ModelErrorKind::Other, e.message()).failed()).0
+                            }
+                        };
+                        done.cancel();
+                        if cancel.is_cancelled() {
+                            return Err(Fault::new("cancelled", "Provider request cancelled"));
+                        }
+                        peer.call("host/hook", json!({"parentRequestId":id,"hook":"provider.response",
+                            "payload":{"sessionId":session,"provider":provider.id(),"model":model,"message":message}}),
+                            None, cancel).await?;
+                        Ok(message)
+                    }
+                }
+            }
             "tools/list" => {
                 let r = self.registered()?;
                 if p["toolSource"] != SOURCE || r.tools.is_empty() {
