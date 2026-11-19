@@ -1,0 +1,19 @@
+{
+  "scenario": "read-only-approval",
+  "about": "Under the ask policy a tool whose trusted definition is read-only runs without asking, so it completes even with no question handler.",
+  "rules": ["contracts.md#approval-policy", "sdk/concepts.md#the-local-actor"],
+  "agent": { "durability": "ephemeral", "plugins": ["tide"], "approval": "ask" },
+  "model": [
+    { "toolCalls": [{ "name": "tide", "input": { "harbour": "Staithes" } }] },
+    { "text": "Done." }
+  ],
+  "steps": [
+    {
+      "prompt": "When is high tide at Staithes?",
+      "expect": {
+        "outcome": "completed",
+        "toolResults": [{ "name": "tide", "status": "completed", "text": "High tide at Staithes is 14:02." }]
+      }
+    }
+  ]
+}

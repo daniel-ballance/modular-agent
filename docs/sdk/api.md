@@ -37,14 +37,14 @@ Each SDK provides constructors for the parts it ships: `transientRuntime()`, `du
 
 Each option that names a part is shorthand for a plugin that provides it. `providers`, `tools`, `environment` and the rest are added before `plugins`, in the order of this table, so an explicit plugin can [replace](#replacing-a-part) one of them.
 
-`createAgent` raises `invalid_composition` for a combination the [durability](placement.md#durability) rules forbid, a missing `dataDir`, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. A plugin or process plugin that fails to start, including a program that cannot be run or exits before registering, fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
+`createAgent` raises `invalid_composition` for a combination the [durability](placement.md#durability) rules forbid, `kept` or `durable` with no persistent history store, a part that keeps local recovery bookkeeping (such as the local working environment) with no `dataDir`, `pluginHost: false` together with `processPlugins`, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. A plugin or process plugin that fails to start, including a program that cannot be run or exits before registering, fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
 
 ## The agent
 
 | Operation | Returns |
 |---|---|
 | `session(options?)` | a new Session. Options: `settings`, `tenant`, `actors`. |
-| `openSession(id)` | an existing Session, reopened. Recovers interrupted work as the Runtime declares. |
+| `openSession(id)` | an existing Session, reopened. It installs interrupted work for recovery, as the Runtime declares, before admitting fresh work. An embedded agent MAY wait for the recovered work before returning; `serveAcp` MUST NOT, as [ACP](../bindings/acp.md#sessions) requires. |
 | `sessions(filter?)` | stored sessions: id, project, title if any, last activity |
 | `declaration()` | what this agent supports, as a [Declaration](../contracts.md#declaration) |
 | `models()` | the models its Providers offer, as ModelInfo |
@@ -55,13 +55,14 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 
 ### The declaration
 
-`declaration()` returns every key of the [ACP declaration](../bindings/acp.md#the-declaration), computed from the parts the agent was built with. The SDK never guesses a key: each comes from a part's own declaration or from a choice in `createAgent`. Where support varies, the agent declares the more restrictive value. With the parts the SDK ships:
+`declaration()` returns every key of the [ACP declaration](../bindings/acp.md#the-declaration), computed from the parts the agent was built with. The SDK never guesses a key: each comes from a part's own declaration or from a choice in `createAgent`. Where support varies, the agent declares the more restrictive value. Most values are capabilities of the chosen parts, not constants:
 
 | Key | Value |
 |---|---|
 | `continuesAfterRestart` | true under `durable`; false otherwise ([Durability](placement.md#durability)) |
 | `waitingThroughRestart` | false |
-| `queuedInputAfterRestart` | `handedBack` |
+| `queuedInputAfterRestart` | from the Runtime's recovery policy; `handedBack` for both shipped Runtimes |
+| `queuedJobReportsAfterRestart` | from the Runtime's recovery policy; omitted when it equals `queuedInputAfterRestart` |
 | `portableSessions` | true under `kept` and `durable`, whose stores keep the shared format; false under `ephemeral` |
 | `inputDuringTurn` | true: both Runtimes take steering |
 | `forking` | true |
@@ -71,17 +72,17 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `holdsOutput`, `outputBypassesAgent` | false |
 | `cancellingTurnCancelsJobs` | false |
 | `pluginsDuringSession` | false |
-| `erasure` | true |
+| `erasure` | true only if the history store and the agent both implement erasure; false for the memory store until it does |
 | `inputKeys` | true |
 | `questionsOutlastTurns`, `lateAnswersStartTurns` | false unless the app enables both |
 | `startsTurnsUnasked` | `jobReports` if `jobReportsStartTurns`; otherwise `never` |
 | `movingWithUnfinishedWork` | `refused` |
 | `mixedActorInput` | `refused` |
-| `settingsDuringTurn` | `nextTurn` |
+| `settingsDuringTurn` | `nextTurn` if the host records a change during a turn and applies it from the next; otherwise `refused` |
 | `erasureDuringTurn` | `refused` |
-| `commandContainment` | from the working environment; `processGroup` for the local one |
+| `commandContainment` | the containment the working environment declares for the current platform. `strong` only where it confirms that every descendant of a command stops; `processGroup` where it contains only the command's process group. Never inferred from the environment's name. |
 | `confinesFiles` | from the working environment. False for the local one: it resolves paths against the project but does not refuse ones that lead outside it. True for the testing kit's memory environment, which has no other files. |
-| `nestedToolCalls` | true |
+| `nestedToolCalls` | true only if the host and the Runtime both run nested calls in the chosen placement |
 
 The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check these values.
 
@@ -120,11 +121,11 @@ A **PromptResult** has:
 | `openToolCalls` | calls left open past the turn, by id |
 | `usage` | Usage for the turn |
 | `turnId` | the turn's id |
-| `toolResults()` | the turn's recorded ToolResults, in call order, each with its tool `name` and a `text()` helper that joins its text content |
+| `toolResults()` | the recorded ToolResults of the calls the model made in this turn, in call order, each with its tool `name` and a `text()` helper that joins its text content. Nested calls are not listed; they are in the history. |
 
 An input that a hook handles, or that is handed back before a turn takes it, returns its disposition and no outcome. A failed turn is an outcome, not an error: `prompt` raises only when the input itself is refused.
 
-A structured result is requested with `options.result`, a schema; `value` then holds the checked result ([Turn result](../contracts.md#hook-execution)).
+A structured result is requested with `options.result`, a JSON Schema 2020-12 schema. A Runtime whose Provider returns only text parses the final answer as one JSON value, without removing surrounding markup. It submits the candidate to [`turn.result`](../contracts.md#hook-execution); a missing, malformed or schema-invalid value is refused with recorded feedback and retried under the usual rules. On completion `value` is the checked JSON value, including JSON null when the schema allows it.
 
 ## Events
 
@@ -147,7 +148,7 @@ The agent emits every standard event for the actions and states it supports ([Fo
 
 Every event passes the [output gate](../contracts.md#the-output-gate) for the receiving actor first. Live model output is never history; `entry` reports what was kept.
 
-A slow reader never blocks the agent. The SDK buffers each stream within a bound; a reader that falls behind it is told how far it got and resumes with `events(fromEntry)`, which replays kept entries but not live deltas ([Following a session](../contracts.md#following-a-session)).
+A slow reader never blocks the agent. The SDK bounds each stream. If a reader falls behind, its stream ends with an error of code `lost` whose `data.fromEntry` is the id of the last kept entry delivered to it, or null if none was. `events(fromEntry)` replays kept entries strictly after that id, or from the start for null, then follows live events. Live deltas and other live-only events are not replayed ([Following a session](../contracts.md#following-a-session)).
 
 ## Questions
 
@@ -164,7 +165,7 @@ onQuestion(question: Question, context) -> Answer
 | `call` | for an approval: the exact tool call, name and input |
 | `deadline` | when it closes, if timed |
 
-An Answer is `allow` (approval), a value (choice, text, link), a secret value (secret) or `decline` with an optional reason. A handler that raises or returns nothing declines. A secret value goes only to the credential store; nothing records or returns it ([Secrets](../contracts.md#secrets)).
+An Answer is `allow` (approval), a value (choice, text, link), a secret value (secret) or `decline` with an optional reason. A decline is a tagged answer, not a reserved string: a text answer of `declined` is a value. A handler that raises or returns nothing declines. A secret value goes only to the credential store; nothing records or returns it ([Secrets](../contracts.md#secrets)).
 
 The handler can be set on `createAgent` for every session or on one session with `session.onQuestion`, which takes precedence for that session. `session.questions()` lists open questions and `session.answer(questionId, answer)` answers one later, for apps that show questions in their own UI.
 
@@ -215,7 +216,7 @@ A **Plugin** has:
 
 A plugin is **servable** when everything it registers, and every context member its code uses, can cross the plugin binding. The SDK can then [serve it](placement.md#a-plugin-in-another-process). Otherwise it is **in-process only**.
 
-Registrations are visible to the SDK; calls a function makes at run time are not. So an item whose code uses an [in-process-only context member](#contexts), or a model-using command, MUST say so when it is registered, with its `inProcessOnly` flag. `serve` refuses a plugin with any in-process-only registration or flagged item. It fails with `not_supported`, names the item, and never serves the rest without it. A served plugin that calls an in-process-only member without the flag gets `not_supported` from that call. The testing kit's [`overWire`](testing.md#the-testing-kit) runs a plugin's tests over the wire too, so an unflagged call fails a test rather than a deployment.
+Registrations are visible to the SDK; calls a function makes at run time are not. So an item whose code uses an [in-process-only context member](#contexts), or a model-using command, MUST say so when it is registered, with its `inProcessOnly` flag. `serve` refuses a plugin with any in-process-only registration or flagged item. An item visible before the settings arrive is refused before stdio opens. One registered in `setup`, which needs the settings, is refused by answering `plugin/initialize` with `not_supported`, naming the item, and no registration; `setup` is never run twice to check in advance. It fails with `not_supported`, names the item, and never serves the rest without it. A served plugin that calls an in-process-only member without the flag gets `not_supported` from that call. The testing kit's [`overWire`](testing.md#the-testing-kit) runs a plugin's tests over the wire too, so an unflagged call fails a test rather than a deployment.
 
 A tool, a Provider or a working environment passed directly to `createAgent` is wrapped in a plugin named after it.
 
@@ -266,7 +267,7 @@ A **Tool** has a definition and a function:
 | `presentation` | none |
 | `inProcessOnly` | false; see [Plugins](#plugins) |
 
-`input` and `output` are the SDK's names for the definition's `parameters` and `returns`. On the wire, in history and in every ToolDefinition the SDK exposes, they are `parameters` and `returns`.
+`input` and `output` are the SDK's names for the definition's `parameters` and `returns`. On the wire, in history and in every ToolDefinition the SDK exposes, they are `parameters` and `returns`. In a serialized ToolDefinition the four hints are members of `hints`; `parallel` and `callers` are top-level fields. The SDK checks a call's input against `parameters` before the function runs, and a completed result's `value` against `returns`; invalid input ends the call `failed` with a readable reason.
 
 The function receives the input, already checked against the schema and converted to the language's type, and a [tool context](#contexts). What it returns becomes the ToolResult:
 
@@ -276,11 +277,11 @@ The function receives the input, already checked against the schema and converte
 | returns Content | `completed` | that content |
 | returns a value, with `output` set | `completed` | `value` is the value; content is its JSON text unless the tool gives content too |
 | returns a ToolOutput `{ status?, content, value? }` | as given: `completed`, `failed`, `refused` or `outcomeUnknown` | as given |
-| calls `refuse(reason)` | `refused` | the reason |
-| raises an error | `failed` | the error's message |
+| calls `refuse(reason)` | `refused` | the reason, which the SDK may wrap in a fixed wording |
+| raises an error | `failed` | the error's message, which the SDK may wrap in a fixed wording |
 | stops because `cancelled` fired | `cancelled` | that the call was cancelled |
 
-Every result that is not `completed` MUST say what failed or may have happened ([Tool result](../bindings/data.md#tools)); the SDK supplies the wording where the tool gives none. `notStarted` is the agent's to report, not a tool's.
+One SDK MUST word a given tool's result identically in process and served; different SDKs MAY word diagnostics differently, so programs branch on the status, not the text. Every result that is not `completed` MUST say what failed or may have happened ([Tool result](../bindings/data.md#tools)); the SDK supplies the wording where the tool gives none. `notStarted` is the agent's to report, not a tool's.
 
 **Questions from a tool.** `ask(question)` opens a question and waits for its answer. It returns:
 
@@ -311,7 +312,7 @@ A **Provider** has:
 
 `request` reports output as it arrives with `context.piece(type, delta, toolCallId?)`, then returns the complete AssistantMessage.
 
-A model failure after the request is admitted, including credentials the model service rejects, is an AssistantMessage with stop `failed` and a ModelError whose `kind` is `temporary`, `contextTooLarge`, `credentials`, `refused` or `other`. A Provider may raise the language's error carrying a ModelError instead; the SDK turns it into that AssistantMessage, in process and over the wire alike. An error raised without a ModelError means the request was not admitted, such as an unknown model, and is an `invalid_request`.
+A model failure after the request is admitted, including credentials the model service rejects, is an AssistantMessage with stop `failed` and a ModelError whose `kind` is `temporary`, `contextTooLarge`, `credentials`, `refused` or `other`. A Provider may raise the language's error carrying a ModelError instead; the SDK turns it into that AssistantMessage, in process and over the wire alike. The SDK refuses an unknown model before the request is admitted, with `invalid_request`. After admission, an error raised without a ModelError is recorded as a failed AssistantMessage with kind `other`; it never turns a settled model attempt into an input error.
 
 The Provider gets its credential through `context.credential()`; it never receives one in configuration. In process, a Provider can also run tools itself, hold a live session or answer late. Those are in-process only ([Model request and response](../contracts.md#model-request-and-response)).
 
@@ -327,9 +328,9 @@ The Provider gets its credential through `context.credential()`; it never receiv
 | `turn.before` | collect | the input starting the turn | `add({ system?, context? })` |
 | `turn.start` / `turn.end` | observe | the turn; at the end its outcome and result | none |
 | `step.before` | transform | the prepared ModelRequest and model limits; in process, also history and usage | `change(request)`: context, offered tools, settings; in process, also the Provider-tool allowance |
-| `step.after` | gate | the step's recorded response | `continue`, or `end(reason)` |
+| `step.after` | gate | the step's recorded response | `continue`, or `end(reason)`: a gate refusal, which ends the turn `failed` |
 | `tool.before` | gate | the call and its definition | `allow`, `refuse(reason)`, `change(input)`; in process only, `pending(question)` |
-| `tool.after` | transform | the call and its result | `change({ content?, value? })` |
+| `tool.after` | transform | the call and its result | `change({ content?, value? })`; on the wire, a full transform of the payload with every other field unchanged |
 | `model.failed` | first answer | the request and its ModelError | `retry(request?)`, or `stop` |
 | `turn.result` | gate | the result and the expected shape | `accept`, or `refuse(feedback)` |
 | `provider.request` | transform | the ModelRequest a Provider is about to send | `change(request)` |

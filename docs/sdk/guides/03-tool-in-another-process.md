@@ -73,7 +73,24 @@ agent, err := modular.New(ctx,
 	}))
 ```
 
+**Python**
+
+```python
+from modular_agent import ProcessPlugin, create_agent
+from modular_agent.openai import openai
+
+agent = await create_agent(
+    providers=[openai()],
+    model="openai/gpt-6-luna",
+    process_plugins=[ProcessPlugin(["/srv/tides/.venv/bin/python", "/srv/tides/tides.py"])],
+)
+```
+
 The model sees `tide` exactly as it would in process. The call passes the same gates, is recorded the same way and returns the same result.
+
+## Test it without a model
+
+A test loads a plugin program the same way, with the scripted Provider from the testing kit in place of a real one. Each SDK's own guide tests do this with its fixture program, which serves the same `tide` tool as above, so the test needs neither Python nor a key.
 
 ## Or keep it in process
 

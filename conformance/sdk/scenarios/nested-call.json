@@ -1,0 +1,21 @@
+{
+  "scenario": "nested-call",
+  "about": "A tool makes a nested call; both are recorded, the nested call is its own call, and only the model's call is listed as the turn's result.",
+  "rules": ["contracts.md#nested-calls", "bindings/data.md#tools"],
+  "agent": { "durability": "ephemeral", "plugins": ["tide", "pilot"] },
+  "model": [
+    { "toolCalls": [{ "name": "pilot", "input": { "harbour": "Whitby" } }] },
+    { "text": "The pilot has the tide." }
+  ],
+  "steps": [
+    {
+      "prompt": "Ask the pilot about Whitby.",
+      "expect": {
+        "outcome": "completed",
+        "text": "The pilot has the tide.",
+        "toolResults": [{ "name": "pilot", "status": "completed", "text": "Pilot: High tide at Whitby is 14:02." }],
+        "records": ["toolStarted", "toolStarted", "toolResult", "toolResult", "turnEnd"]
+      }
+    }
+  ]
+}

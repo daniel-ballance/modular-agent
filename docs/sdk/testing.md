@@ -11,9 +11,9 @@ Every SDK ships these in a `testing` module:
 | `scriptedProvider(script)` | A Provider with id `scripted` and one model, `scripted/script`, that answers from a [script](#the-model-script). |
 | `memoryEnvironment(files?)` | A working environment that keeps files in memory. `exec` runs commands registered with `onExec(name, handler)` and raises `not_supported` for others. It declares `containment: "none"`. |
 | `testAgent(options)` | `createAgent` with the scripted Provider and its model, a memory environment and `ephemeral` durability, unless the options say otherwise. |
-| `answers(list)` | A question handler that answers in order from a list, and raises if a question arrives that the list did not expect. Each item is `"allow"`, `"decline"` or `{ "value": answer }`. |
+| `answers(list)` | A question handler that answers in order from a list. Each item is `"allow"`, `"decline"` or `{ "value": answer }`. A question beyond the list is declined, because a handler's error is a decline, and is also recorded: the helper's check (`assertDone` or the language's equivalent) fails the test if any question went unexpected or any answer went unused. |
 | `overWire(plugin)` | The same plugin, served over the plugin binding through an in-memory pipe in the same process. A test can run any servable plugin both ways and compare. |
-| `restart(agent)` | Drops the agent without shutting it down, as a crash would, and builds a new one over the same store and plugins. In-process only; the shared scenarios kill a real process. |
+| `restart(agent)` | Interrupts the agent's work without writing a graceful outcome or calling plugins' stop, releases its writer leases, and builds a new agent over the same store and in-process plugins. Reopen the sessions on the new agent. It simulates an interruption in one process; it does not show that a real process or its descendants would stop. The shared crash scenarios kill a real process for that. |
 
 A developer tests a tool by building a `testAgent` with the tool and a script that calls it, sending a prompt and checking the PromptResult and the recorded ToolResult. The [guides](guides/README.md) show it.
 
@@ -29,7 +29,7 @@ A script is a list of responses. Each response is an object:
 | `error` | `{ kind, message }`: the attempt fails with this ModelError |
 | `usage` | Usage to report; zero if absent |
 
-For each request, the scripted Provider counts the assistant messages in `request.messages` and answers with the response at that index. The script is therefore stateless: a request repeated after a crash gets the same answer as the first time, and a turn that carries on after a restart picks up where it left off. A request past the end of the script fails with kind `other` and the message `script exhausted`.
+For each request, the scripted Provider counts the assistant messages in `request.messages`, the final request actually sent, so attempts left out of the context and responses removed by compaction do not count, and answers with the response at that index. The script is therefore stateless: a request repeated after a crash gets the same answer as the first time, and a turn that carries on after a restart picks up where it left off. A request past the end of the script fails with kind `other` and the message `script exhausted`.
 
 The same format is used by the shared scenarios, so a developer's script and a scenario's are interchangeable.
 
@@ -65,11 +65,11 @@ Each SDK lists its fixture program in `conformance/sdk/fixtures/<sdk>.json`:
 
 `command` is the argument vector that starts the program; the runner appends the fixture's name and passes the counter's `path` in the plugin's config. `{repo}` stands for the repository's absolute root. A program whose `{repo}` paths do not exist has not been built: the runner skips that placement and says how to build it, unless `MODULAR_AGENT_SDK_REQUIRE` names that SDK or is `all`, in which case it fails. The program starts with the plugin binding's minimal environment, so `command` uses an absolute path wherever `PATH` alone would not find the program or its dependencies. Each runner uses its own SDK's freshly built program for its own placement.
 
-Steps that crash the agent run it as a separate process, in its own process group. A crash sends `SIGKILL` to the whole group, so served fixture plugins die with the agent, and the runner waits until every process in the group has exited before it reopens. Recovery then has nothing left running that could race it ([Working environment](../contracts.md#the-working-environment)).
+Steps that crash the agent run it as a separate process, in its own process group. A crash sends `SIGKILL` to the whole group, so served fixture plugins die with the agent, and the runner reaps its direct child and waits until no member of the group can still run before it reopens. A zombie awaiting reaping counts as exited. Recovery then has nothing left running that could race it ([Working environment](../contracts.md#the-working-environment)).
 
 ### The fixture plugins
 
-Every SDK implements these identically and serves them from a fixture program, `fixtures`, that takes the plugin names to serve as arguments. They are servable.
+Every SDK implements these identically and serves them from a fixture program, `fixtures`, that takes exactly one fixture name as its first argument and serves that plugin. They are servable.
 
 | Plugin | Registers | Behavior |
 |---|---|---|
@@ -77,6 +77,8 @@ Every SDK implements these identically and serves them from a fixture program, `
 | `counter` | tool `bump`, input `{ hold?: boolean, note?: string }`, not safe to repeat | Adds one to a count kept in the file named by its config `path`, then returns the new count as text. With `hold: true` it then waits until cancelled, so a crash lands after its effect. |
 | `confirm` | tool `confirm`, input `{ question: string }` | Asks a `choice` question with options `yes` and `no` and returns the answer. |
 | `gate` | hook `tool.before` | Refuses any call whose input, as JSON text, contains `forbidden`, with the reason `the gate refused it`. |
+| `quay` | tool `moor`, input `{ harbour: string }` | Refuses with the reason `the quay is closed`, through the tool context's `refuse`. |
+| `pilot` | tool `pilot`, input `{ harbour: string }`; needs `tide` loaded too | Calls `tide` with the same harbour as a [nested call](../contracts.md#nested-calls), then returns `Pilot: ` followed by the nested result's text. |
 
 ### The format
 
@@ -123,7 +125,7 @@ and can have `expect`:
 |---|---|
 | `outcome` | the last turn's outcome kind matches |
 | `text` | the last turn's result text is exactly this |
-| `toolResults` | the last turn's tool results, in order, have these `name` and `status`, and `text` if given |
+| `toolResults` | the last turn's tool results, in order, have these `name` and `status`, `text` if given (exact), and `contains` if given (a substring, for diagnostics an SDK may word in its own way) |
 | `records` | these record kinds appear in the session's history in this order, not necessarily adjacent |
 | `count` | the `counter` fixture's count is this number |
 | `error` | the step itself raised this error code |

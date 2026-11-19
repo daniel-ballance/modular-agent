@@ -105,7 +105,7 @@ What happened:
 **Rust**
 
 ```rust
-use futures::StreamExt;
+use futures_util::StreamExt;
 use modular_agent::Event;
 
 let mut events = session.prompt_stream("Describe Whitby harbour in two sentences.").await?;

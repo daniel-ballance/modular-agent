@@ -40,6 +40,18 @@ A cross-model review of the first draft found that it relaxed several rules it w
 
 The declaration now has a table of its values, so no key is guessed.
 
+## The first build round
+
+All four SDKs were built from draft 0.1, each wrapping its language's base. Every runner then passed the first seven scenarios in process and served by every SDK: 140 runs. The builders recorded about 35 findings; these changed the draft:
+
+- **The declaration is computed from the chosen parts,** not a table of constants: erasure, command containment, settings during a turn and nested calls depend on the store, environment, host and Runtime. The draft had claimed the local environment confines files; it does not, and declares `confinesFiles: false`.
+- **`pluginHost: false` with `processPlugins` is `invalid_composition`.** One builder proposed loading the listed programs while skipping `MODULAR_AGENT_PLUGINS`. An agent that loads plugin programs is a plugin host, and the binding requires every host to read the variable, so the combination is refused rather than allowed to ignore that rule.
+- **Kept history needs a persistent store, not necessarily `dataDir`,** but a part with local recovery bookkeeping, such as the local environment, still needs `dataDir`.
+- **An embedded `openSession` may wait for recovered work; `serveAcp` must not,** as ACP requires.
+- **Diagnostics may differ between SDKs** but not between one SDK's placements; programs branch on the status.
+- **Event lag, structured results, the `restart` helper, `serveHistory` and Provider errors** each got a precise rule.
+- **Four scenarios** were added: a tool's own refusal, invalid input, a nested call, and read-only tools under `ask`.
+
 ## Consequences
 
 - **Rust starts.** The Rust workspace splits into the `modular-agent` core crate, official plugin crates, a testing module, a fixture program and a scenario runner. The standard configuration moves onto the public API.

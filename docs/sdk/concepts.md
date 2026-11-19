@@ -43,7 +43,7 @@ An agent built with nothing but a Provider behaves like this:
 |---|---|---|
 | Project | The process's current directory | Where a developer expects a tool to look |
 | Durability | `ephemeral`: history in memory, transient Runtime | A library should not keep anything unasked. Command bookkeeping that the local environment needs goes in a scratch folder removed with the agent. See [Durability](placement.md#durability). |
-| Working environment | Local, rooted at the project. Relative paths resolve against the project; it does not refuse paths that lead outside it, and declares `confinesFiles: false`. Commands get process-group containment. | Every tool context has one; the declaration is honest about what it does not confine |
+| Working environment | Local, rooted at the project. Relative paths resolve against the project; it does not refuse paths that lead outside it, and declares `confinesFiles: false`. Commands get the containment its command supervisor provides on this platform, which it declares. Local does not mean sandboxed. | Every tool context has one; the declaration is honest about what it does not confine |
 | Credential store | Environment variables, by the names each Provider documents | `OPENAI_API_KEY` works without setup |
 | Approval | No approval plugin | The app chose its tools. Naming a policy loads the plugin and records that policy ([Approval policy](../contracts.md#approval-policy)). |
 | Plugin host | No | An embedded agent does not start programs named in its environment unless the app gives it process plugins. See [Placement](placement.md#a-plugin-in-another-process). |

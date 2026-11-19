@@ -66,6 +66,8 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 ## Python
 
 - The distribution is `modular-agent`, imported as `modular_agent`. Official plugins are extras: `modular-agent[openai]`.
+- Attributes and keyword arguments are `snake_case`. A dictionary that is shared wire data, such as a raw history entry, a hook payload or a Provider request, keeps the shared field names; passing or returning it never renames its keys.
+- Durations are seconds, as `float`, the Python convention; the SDK converts them to the binding's integer milliseconds.
 - The API is `async`. `modular_agent.run(coro)` runs a coroutine for scripts that are not already async.
 - `create_agent(…)` can be awaited, or used with `async with`, which closes the agent at the end of the block. `serve(plugin)` is an ordinary function that runs until the agent closes the connection.
 - A tool is an `async` function with the `@tool` decorator. The docstring's summary is the description and its `Args:` entries describe the fields; type hints are the input schema; hints are decorator arguments: `@tool(read_only=True)`.

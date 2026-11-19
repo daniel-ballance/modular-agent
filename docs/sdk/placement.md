@@ -34,7 +34,7 @@ A plugin moves into its own process without changing its code:
 
 Giving `processPlugins` makes the agent a plugin host. The agent loads its own plugins first, then `processPlugins` in order, then the programs in `MODULAR_AGENT_PLUGINS`, and validates each registration before enabling it. If a program fails to start or its registration is refused, `createAgent` fails ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)). A child process starts with the minimal environment the binding requires, plus the `env` the developer approved; it does not inherit the agent's.
 
-A plugin host MUST read `MODULAR_AGENT_PLUGINS` at startup, as the binding requires. An embedded agent is not a plugin host by default: a library should not start programs named in its environment unless the app asks. An agent becomes one when the app gives `processPlugins` or sets `pluginHost: true`, and then reads the variable too. A program that claims the plugin-host role, such as an agent served over ACP, sets `pluginHost: true`.
+A plugin host MUST read `MODULAR_AGENT_PLUGINS` at startup, as the binding requires. An embedded agent is not a plugin host by default: a library should not start programs named in its environment unless the app asks. An agent becomes one when the app gives `processPlugins` or sets `pluginHost: true`, and then reads the variable too. An agent that loads plugin programs is a plugin host, so `pluginHost: false` together with `processPlugins` is contradictory and raises `invalid_composition`. A program that claims the plugin-host role, such as an agent served over ACP, sets `pluginHost: true`.
 
 If a plugin's process is lost while the agent runs, the agent treats the part as [lost](../contracts.md#parts-that-are-lost) and [settles](../contracts.md#settlement) its calls. A call that may have been dispatched is `outcomeUnknown`. A call abandoned before dispatch is `notStarted`. Neither is repeated except under the repeat rule below.
 
@@ -42,7 +42,7 @@ If a plugin's process is lost while the agent runs, the agent treats the part as
 
 The history store is the only part with a service binding today:
 
-- `serveHistory(store, { address, tokenFile })` serves any history store as the [history service](../bindings/history-http.md).
+- `serveHistory(store, { address, tokenFile })` serves a history store as the [history service](../bindings/history-http.md), if the store can keep the binding's promises: opaque JSON records committed durably, exact batch and tombstone behavior, and writer leases. It refuses any other store with `not_supported`, naming it, rather than substituting another backend. The memory store can be served only for tests, where losing everything on restart is acceptable; a build that does not offer that says so. Plain HTTP is served only on loopback.
 - `httpHistory(url, tokenFile)` is a history store that uses one.
 
 Agents in any language that share a history service and the same actor ids can reopen and continue each other's [portable sessions](../bindings/data.md#portable-sessions).
@@ -75,7 +75,8 @@ The scenarios check this with a real `kill -9`.
 `history` and `runtime` can still be given explicitly, for example a history service with `kept`. The agent checks the combination and raises `invalid_composition` for one that cannot keep its promise:
 
 - a durable Runtime with history in memory;
-- `kept` or `durable` with no `dataDir` and no other persistent store;
+- `kept` or `durable` with no persistent history store: files under `dataDir` by default, or an explicit one such as `httpHistory`;
+- a part that keeps local recovery bookkeeping, such as the local working environment's record of running commands, with no `dataDir` to keep it in;
 - a Runtime that does not declare `continuesAfterRestart` under `durable`.
 
 The agent's [declaration](../contracts.md#declaration) states what it chose, so a client knows whether to expect a turn to continue after a restart.

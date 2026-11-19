@@ -14,4 +14,4 @@ Each guide walks through one task in all four languages. The examples are the AP
 | Drive an agent over ACP | `serveAcp`, connecting an editor or T3 Code | planned |
 | Share sessions between agents | The history service, actor ids, portable sessions | planned |
 
-The examples use `openai/gpt-6-luna` as the model and `OPENAI_API_KEY` for its key. Any Provider and model work the same way. The Go module path `github.com/OWNER/modular-agent/go` stands in for the published one.
+The examples use `openai/gpt-6-luna` as the model and `OPENAI_API_KEY` for its key. The model stands for any model the Provider offers: use one from `provider.models()`, since an agent refuses a model no Provider offers. Any Provider and model work the same way. The Go module path `github.com/OWNER/modular-agent/go` stands in for the published one.

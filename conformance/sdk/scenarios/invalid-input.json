@@ -1,0 +1,21 @@
+{
+  "scenario": "invalid-input",
+  "about": "A call whose input does not match the tool's parameters schema ends failed and the tool never runs; the turn carries on.",
+  "rules": ["bindings/data.md#tools", "contracts.md#settlement"],
+  "agent": { "durability": "ephemeral", "plugins": ["counter"] },
+  "model": [
+    { "toolCalls": [{ "name": "bump", "input": { "hold": "yes" } }] },
+    { "text": "That failed." }
+  ],
+  "steps": [
+    {
+      "prompt": "Bump the counter.",
+      "expect": {
+        "outcome": "completed",
+        "text": "That failed.",
+        "toolResults": [{ "name": "bump", "status": "failed" }],
+        "count": 0
+      }
+    }
+  ]
+}

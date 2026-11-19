@@ -1,0 +1,20 @@
+{
+  "scenario": "tool-refusal",
+  "about": "A tool refuses its own call; the call settles refused with the reason, the same in every placement, and the turn carries on.",
+  "rules": ["contracts.md#settlement", "sdk/api.md#tools"],
+  "agent": { "durability": "ephemeral", "plugins": ["quay"] },
+  "model": [
+    { "toolCalls": [{ "name": "moor", "input": { "harbour": "Whitby" } }] },
+    { "text": "The quay is closed." }
+  ],
+  "steps": [
+    {
+      "prompt": "Moor at Whitby.",
+      "expect": {
+        "outcome": "completed",
+        "text": "The quay is closed.",
+        "toolResults": [{ "name": "moor", "status": "refused", "contains": "the quay is closed" }]
+      }
+    }
+  ]
+}
