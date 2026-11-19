@@ -202,11 +202,11 @@ export class Agent {
       if (options.compaction) await agent.#load(contextCompaction());
       if (options.conformance) {
         await agent.#load(conformanceProvider());
-        await agent.#load(conformanceTools(!!options.plugins?.length));
       }
       for (const p of options.providers ?? []) await agent.#plugin(definePlugin({ name: `provider.${p.id}`, setup: r => r.provider(p) }));
       for (const t of options.tools ?? []) await agent.#plugin(definePlugin({ name: `tool.${t.definition.name}`, tools: [t] }));
       for (const p of options.plugins ?? []) await agent.#plugin(p);
+      if (options.conformance) await agent.#load(conformanceTools(false, agent.#api.tools().map(t => t.name)));
       agent.#hostEnabled = options.pluginHost ?? options.processPlugins !== undefined;
       await agent.#loadProcesses([...options.processPlugins ?? [], ...(agent.#hostEnabled ? pluginSpecsFromEnv() : [])]);
       const effectiveRuntime = h.use<Runtime>("runtime");

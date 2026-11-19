@@ -84,7 +84,8 @@ async function main(argv: string[]) {
       console.log(`${name.padEnd(20)} ${"url" in config ? `http   ${config.url}` : `stdio  ${config.command} ${(config.args ?? []).join(" ")}`}`);
     return 0;
   }
-  const history = process.env.MODULAR_AGENT_HISTORY_URL ? httpHistory(process.env.MODULAR_AGENT_HISTORY_URL, process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "") : fileHistory(join(p.state, "sessions"));
+  const conformance = opts.acp && process.env.MODULAR_AGENT_CONFORMANCE === "1";
+  const history = process.env.MODULAR_AGENT_HISTORY_URL ? httpHistory(process.env.MODULAR_AGENT_HISTORY_URL, process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "") : conformance ? undefined : fileHistory(join(p.state, "sessions"));
   const base = { durability: opts.runtime === "durable" ? "durable" as const : "kept" as const, history, dataDir: p.state };
   const script = await loadScript(process.env.MODULAR_AGENT_SCRIPT, process.env.MODULAR_AGENT_SCRIPT_LOG);
   let savedModel: string | undefined;
@@ -108,7 +109,6 @@ async function main(argv: string[]) {
     } finally { await index.close(); }
   }
   const settings = { ...standardSettings(await settingsFor(p, project)), ...opts.settings };
-  const conformance = opts.acp && process.env.MODULAR_AGENT_CONFORMANCE === "1";
   const model = script ? "scripted/script" : conformance ? "conformance/echo" : modelRef(opts.settings.model) ?? savedModel ?? modelRef(settings.model);
   if (conformance) settings.modelTools = null;
   delete settings.model;
