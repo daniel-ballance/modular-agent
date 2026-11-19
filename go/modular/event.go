@@ -16,7 +16,7 @@ type EventHeader struct {
 	SessionID string    `json:"sessionId,omitempty"`
 	TurnID    string    `json:"turnId,omitempty"`
 	StepID    string    `json:"stepId,omitempty"`
-	CallID    string    `json:"callId,omitempty"`
+	CallID    string    `json:"toolCallId,omitempty"`
 	ActorID   string    `json:"actorId,omitempty"`
 }
 
@@ -26,10 +26,30 @@ type TextEvent struct {
 	EventHeader
 	Delta string `json:"delta"`
 }
+type TurnResult struct {
+	Text          string          `json:"text,omitempty"`
+	Value         json.RawMessage `json:"value,omitempty"`
+	OpenToolCalls []string        `json:"openToolCalls"`
+}
+
 type EndEvent struct {
 	EventHeader
-	Outcome Outcome `json:"outcome"`
+	Outcome Outcome
+	Result  TurnResult
 }
+
+func (e TextEvent) MarshalJSON() ([]byte, error) {
+	data := map[string]any{"delta": e.Delta}
+	if e.StepID != "" {
+		data["stepId"] = e.StepID
+	}
+	return json.Marshal(DataEvent{EventHeader: e.EventHeader, Data: api.JSON(data)})
+}
+func (e EndEvent) MarshalJSON() ([]byte, error) {
+	data := map[string]any{"turnId": e.TurnID, "outcome": e.Outcome, "result": e.Result}
+	return json.Marshal(DataEvent{EventHeader: e.EventHeader, Data: api.JSON(data)})
+}
+
 type DataEvent struct {
 	EventHeader
 	Data json.RawMessage `json:"data"`
@@ -52,22 +72,31 @@ func sdkEvent(e api.Event) Event {
 		if p.Type == "text" {
 			return TextEvent{EventHeader: h, Delta: p.Text}
 		}
-		data = api.JSON(map[string]any{"delta": p.Text})
+		piece := map[string]any{"delta": p.Text}
+		if e.Step != "" {
+			piece["stepId"] = e.Step
+		}
+		data = api.JSON(piece)
 	case "turn.end":
 		out := api.Decode[api.Outcome](e.Data)
-		return EndEvent{EventHeader: h, Outcome: *outcome(out)}
+		open := make([]string, 0, len(out.Open))
+		for _, c := range out.Open {
+			open = append(open, c.ID)
+		}
+		return EndEvent{EventHeader: h, Outcome: *outcome(out), Result: TurnResult{Text: out.Result.Text(), Value: out.Value, OpenToolCalls: open}}
 	case "history.added":
-		data = api.JSON(portable.Entry(api.Decode[api.Entry](e.Data)))
+		data = api.JSON(map[string]any{"entry": portable.Entry(api.Decode[api.Entry](e.Data))})
 	case "tool.requested":
-		data = api.JSON(portable.Call(api.Decode[api.Call](e.Data)))
+		data = api.JSON(map[string]any{"call": portable.Call(api.Decode[api.Call](e.Data))})
 	case "tool.end":
-		data = api.JSON(portable.Result(api.Decode[api.ToolResult](e.Data)))
+		result := api.Decode[api.ToolResult](e.Data)
+		data = api.JSON(map[string]any{"toolCallId": result.Call, "status": portable.StatusOut(result.Status), "content": portable.Content(result.Content)})
 	case "tool.progress":
 		var content api.Content
 		if json.Unmarshal(e.Data, &content) != nil {
 			content = api.Text(api.Decode[string](e.Data))
 		}
-		data = api.JSON(map[string]any{"content": portable.Content(content)})
+		data = api.JSON(map[string]any{"toolCallId": e.Call, "chunk": content.Text()})
 	}
 	if h.Type == "" {
 		if !strings.HasPrefix(e.Kind, "plugin.") {

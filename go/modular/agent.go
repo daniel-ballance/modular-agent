@@ -4,6 +4,7 @@ package modular
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,7 +69,18 @@ type Option func(*options) error
 
 func WithProject(p string) Option { return func(o *options) error { o.project = p; return nil } }
 func WithDataDir(p string) Option { return func(o *options) error { o.dataDir = p; return nil } }
-func WithModel(m string) Option   { return func(o *options) error { o.model = m; return nil } }
+
+// WithModel accepts a shared ModelRef or a "provider/id" string.
+func WithModel(model any) Option {
+	return func(o *options) error {
+		var ref api.Settings
+		if err := applySetting(&ref, "model", model); err != nil {
+			return err
+		}
+		o.model = ref.Model
+		return nil
+	}
+}
 func WithDurability(d Durability) Option {
 	return func(o *options) error { o.durability = d; return nil }
 }
@@ -115,6 +127,7 @@ type Agent struct {
 	persistent bool
 	closed     atomic.Bool
 	lifecycle  sync.Mutex
+	settingsMu sync.Mutex
 	pluginHost bool
 	q          *questionRouter
 	closeOnce  sync.Once
@@ -251,7 +264,11 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	own = append(own, o.plugins...)
 	for _, p := range own {
 		if err := loadPlugin(h, p); err != nil {
-			return nil, appError(err, InvalidComposition)
+			var e *Error
+			if errors.As(err, &e) && e.Code == NotSupported {
+				return nil, e
+			}
+			return nil, &Error{Code: InvalidComposition, Message: err.Error()}
 		}
 	}
 	if err := pluginrpc.Load(ctx, h, project, state, specs); err != nil {

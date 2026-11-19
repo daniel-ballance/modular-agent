@@ -36,6 +36,7 @@ Commands in the base suite use Linux with unprivileged user, PID and mount names
 
 ### What is checked
 
+- **Go suite:** 31 packages with tests, with 221 top-level `Test` functions (including the SDK and its two subprocess helpers). `go build ./...`, `go vet ./...` and the SDK race run pass.
 - **Shared scenarios:** 21 combinations in the Go runner: seven in process, seven served by Go, and seven served by Rust. The Rust runner also passes seven with the Go fixture program. Both crash cases kill the agent's process group, including the served fixtures. The Go runner watches count files or committed history, and waits for the group to exit before opening the session.
 - **Negative control:** changing the Go tide fixture's text to `High tide at Whitby is deliberately wrong.` failed `tool-call/process:go`, step 0, with the expected and actual result text. The fixture was restored and rebuilt.
 - **Guide examples:** three offline tests from guides 01 and 02: scripted hello, iterating a text stream through `turnEnded`, and typed tide lookup. The process fixture program and the served scenario checks exercise guide 03's `Serve` and process-plugin path. Examples using the default real Provider endpoint are not run.

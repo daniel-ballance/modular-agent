@@ -158,7 +158,7 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 			}
 			if result := resultFor(snap, r.InputID); result != nil {
 				if yield != nil && result.Outcome != nil {
-					yield(EndEvent{EventHeader: EventHeader{Type: "turnEnded", SessionID: s.id, TurnID: result.TurnID}, Outcome: *result.Outcome}, nil)
+					yield(EndEvent{EventHeader: EventHeader{Type: "turnEnded", SessionID: s.id, TurnID: result.TurnID}, Outcome: *result.Outcome, Result: TurnResult{Text: result.Text, Value: result.Value, OpenToolCalls: append([]string{}, result.OpenToolCalls...)}}, nil)
 				}
 				return *result, nil
 			}
@@ -239,9 +239,11 @@ func resultFor(s api.Session, input string) *PromptResult {
 	return nil
 }
 func outcome(out api.Outcome) *Outcome {
-	o := &Outcome{Kind: out.Status, Error: out.Error}
+	o := &Outcome{Kind: out.Status}
+	if out.Status == "failed" {
+		o.Error = out.Error
+	}
 	if out.Status == "limit" {
-		o.Error = ""
 		o.Limit = strings.TrimSuffix(out.Error, " limit")
 		if o.Limit == "step" {
 			o.Limit = "steps"
@@ -332,8 +334,12 @@ func (s *Session) Cancel(ctx context.Context) ([]InputReceipt, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, appError(err, CancelledCode)
 	}
-	if _, err := s.agent.a.Snapshot(s.id); err != nil {
+	busy, err := s.agent.h.Busy(s.id)
+	if err != nil {
 		return nil, appError(err, NotOpen)
+	}
+	if !busy {
+		return nil, nil
 	}
 	if err := s.agent.a.CancelAs(ctx, s.id); err != nil {
 		return nil, appError(err, Forbidden)
@@ -364,6 +370,8 @@ func (s *Session) Settings(ctx context.Context) (Settings, error) {
 	return out, nil
 }
 func (s *Session) SetSetting(ctx context.Context, key string, value any) error {
+	s.agent.settingsMu.Lock()
+	defer s.agent.settingsMu.Unlock()
 	ctx = s.ctx(ctx)
 	if err := ctx.Err(); err != nil {
 		return appError(err, CancelledCode)
