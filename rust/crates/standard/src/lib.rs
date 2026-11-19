@@ -36,6 +36,8 @@ pub struct Standard {
     pub claude: bool,
     /// A scripted Provider in place of the real ones, for tests.
     pub scripted: Option<Arc<dyn Plugin>>,
+    /// The code tool's limits.
+    pub code: tools_code::CodeTool,
 }
 
 impl Standard {
@@ -62,6 +64,7 @@ impl Standard {
             durable: true,
             claude: false,
             scripted: None,
+            code: tools_code::CodeTool::default(),
         })
     }
     pub fn settings_file(&self) -> PathBuf {
@@ -127,9 +130,8 @@ impl Standard {
             }))
             .find(|path| path.is_file())?;
         // A plugin starts with an empty environment. The sidecar needs these
-        // to find node and Claude Code's own sign-in. No secret is passed
-        // unless the person exported one for Claude Code themselves.
-        let env = ["HOME", "PATH", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "XDG_CONFIG_HOME"]
+        // to find node and Claude Code's own sign-in. No credential is passed.
+        let env = ["HOME", "PATH", "CLAUDE_CONFIG_DIR"]
             .into_iter()
             .filter_map(|name| Some((name.to_owned(), std::env::var(name).ok()?)))
             .collect();
@@ -185,7 +187,7 @@ pub async fn compose(
             global: standard.config.join("mcp.json"),
             project_trusted: trusted,
         }),
-        Arc::new(tools_code::CodeTool::default()),
+        Arc::new(standard.code.clone()),
         runtime,
         Arc::new(feature_jobs::JobsPlugin),
         Arc::new(feature_questions::QuestionsPlugin),

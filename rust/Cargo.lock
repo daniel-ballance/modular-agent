@@ -2556,6 +2556,7 @@ name = "provider-responses"
 version = "0.1.0"
 dependencies = [
  "agent-api",
+ "agent-harness",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -3600,6 +3601,7 @@ dependencies = [
  "history-http",
  "interface-acp",
  "interface-terminal",
+ "libc",
  "plugin-stdio",
  "provider-fake",
  "provider-responses",

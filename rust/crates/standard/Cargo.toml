@@ -41,3 +41,4 @@ provider-fake = { path = "../provider-fake" }
 
 [dev-dependencies]
 tempfile.workspace = true
+libc.workspace = true
