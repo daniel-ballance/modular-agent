@@ -60,6 +60,10 @@ class _SdkTools(Tools):  # type: ignore[misc]  # Untyped base adapter.
     async def definitions(self, d: JsonObject, emit: Any) -> list[JsonObject]:
         groups = await self.api.hook("tools.list", d)
         tools = [t for group in groups for t in group]
+        if getattr(self, "conformance", False):
+            from ma_tools import DEFINITIONS
+
+            tools.extend(t for t in DEFINITIONS if t["name"] == "bash")
         if len({t["name"] for t in tools}) != len(tools):
             raise _NativeError("Duplicate tool name")
         return tools
@@ -157,6 +161,16 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                 async def run(d: dict[str, Any]) -> Any:
                     try:
                         payload = await hooks.payload(self, item.point, d)
+                        if item.in_process_only and item.point in {"turn.before", "input"}:
+                            state = await self.api.session("get", session=d["session"])
+                            payload["project"] = state["project"]
+                            if item.point == "turn.before":
+                                from ma_core.wire import tool_out
+
+                                definitions = await self.api.call("tools", "definitions", d)
+                                payload["nestedTools"] = [
+                                    tool_out(t) for t in definitions if "plugin" in t["callers"]
+                                ]
                         return hooks.answer(item.point, d, await _handle_hook(item, payload))
                     except Exception as exc:
                         if item.point not in _OBSERVERS:

@@ -1,0 +1,5 @@
+{
+  "language": "python",
+  "build": "cd python && uv sync --all-packages --python 3.13",
+  "command": ["{repo}/python/.venv/bin/ma"]
+}

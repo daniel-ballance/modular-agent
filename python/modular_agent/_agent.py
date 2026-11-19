@@ -509,7 +509,9 @@ def create_agent(
                 except Exception:
                     local = ProcessGroupLocal(root)
             await h.load(environment or local)
-            await h.load(_SdkTools())
+            dispatcher = _SdkTools()
+            dispatcher.conformance = conformance
+            await h.load(dispatcher)
             agent._conformance = conformance
             await h.load(_SdkDurable() if durability == "durable" else _SdkRuntime())
             h.on("embedding", "result.ready", _structured_result, "last")
@@ -529,7 +531,7 @@ def create_agent(
                 await h.load(Commands())
             if mcp_servers or conformance:
                 await h.load(MCP(mcp_servers, standard_names=True))
-            if approval is not None:
+            if approval is not None or conformance:
                 await h.load(_Approval())
             registered_tools: dict[str, _LocalPlugin] = {}
             for plugin in [
