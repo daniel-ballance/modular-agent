@@ -46,6 +46,10 @@ Not requirements. They record how the specification was reached.
 
 ## Reference
 
+### The Rust build and the standard configuration
+
+[`rust/`](rust/README.md) holds a working agent: the clean-room Rust build as its base, and on it a **standard configuration** with Pi's feature set. It has one code tool backed by a Monty sandbox, Providers for ChatGPT, Grok and Claude subscriptions, Agent Skills, an MCP client and a CLI, `ma`. [ADR 0022](docs/adr/0022-standard-configuration.md) records the decisions. The Claude Provider is a plugin in its own process, in [`sidecars/claude`](sidecars/claude/README.md).
+
 ### The TypeScript build
 
 `packages/` holds the TypeScript build: a Harness, transient and durable Runtimes, the vanilla Pi plugin set, subagents, a terminal UI, an ACP Interface that T3 Code drives, plugins over the plugin binding, and parts as HTTP services. [Status](docs/status.md) shows what it exercises. It is a reference build, not a production build.

@@ -183,7 +183,7 @@ All four exited 101. The eight common failures are the old approval-lifetime ass
 
 ### Real run
 
-`python3 -u scripts/real-crash.py` passed with `gpt-6-luna` on 2026-11-18. The durable Runtime recorded a bash dispatch, and the script killed only the agent PID with `kill -9` after observing bash running. The managed bash stopped. Reopening without input committed `outcomeUnknown` for that call, did not repeat it, read `receipt.txt`, and completed the original turn with “The receipt contains `copper-river-83`; this turn recovered from interruption.” The retained evidence is [evidence/production-real-crash.json](evidence/production-real-crash.json). Earlier script attempts failed on obsolete history entry names and interactive EOF behavior; the successful run used the shared history shapes and noninteractive reopen.
+`python3 -u scripts/real-crash.py` passed with `gpt-6-luna` on 2026-11-18. The durable Runtime recorded a bash dispatch, and the script killed only the agent PID with `kill -9` after observing bash running. The managed bash stopped. Reopening without input committed `outcomeUnknown` for that call, did not repeat it, read `receipt.txt`, and completed the original turn with “The receipt contains `copper-river-83`; this turn recovered from interruption.” The retained evidence is [evidence/production-real-crash.json](../../evidence/production-real-crash.json). Earlier script attempts failed on obsolete history entry names and interactive EOF behavior; the successful run used the shared history shapes and noninteractive reopen.
 
 ## Round six follow-up: proposal content and refused calls
 
