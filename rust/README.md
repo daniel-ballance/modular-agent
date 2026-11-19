@@ -113,6 +113,7 @@ mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 - **Standard reference checks:** 12/12, including the durable and transient process crashes and the exact scripted request log.
 - **ACP against `ma`:** 116/116 by default and 123/123 with `--crash-checks`.
 - **Standard and its plugins:** 34 Rust tests. Of these, 16 cover the CLI composition, dependency boundary, prompt and skills, MCP, nested calls and crash recovery; 4 cover file handling; 2 cover auth bytes, permissions and refresh locking; and 12 cover subscription sign-in, refresh, request mapping, streaming, failures and cancellation.
+- **Workspace:** 302 passed, 0 failed, 0 ignored, including doctests and the base build's kit tests. Formatting and Clippy with `-D warnings` pass.
 - **Offline only:** browser sign-in uses a simulated browser on loopback; both device flows and refresh use loopback HTTP fixtures. No credentials, real sign-ins or model requests were used.
 
 To try the terminal without a login:
