@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 
 	"github.com/OWNER/modular-agent/go/api"
@@ -126,7 +127,16 @@ func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.
 		return api.Response{}, err
 	}
 	ref := ModelRef{Provider: m.model.Provider, ID: strings.TrimPrefix(m.model.ID, m.model.Provider+"/")}
-	pc := &ProviderContext{piece: func(p Part) {
+	pc := &ProviderContext{credential: func() (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", appError(err, CancelledCode)
+		}
+		name := strings.ToUpper(strings.ReplaceAll(ref.Provider, "-", "_")) + "_API_KEY"
+		if key := os.Getenv(name); key != "" {
+			return key, nil
+		}
+		return "", &Error{Code: NotFound, Message: "provider credential unavailable"}
+	}, piece: func(p Part) {
 		if ctx.Err() == nil {
 			if c := portable.ReadContent(Content{p}); len(c) > 0 {
 				emit(c[0])
@@ -141,10 +151,10 @@ func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.
 		}
 		response = AssistantMessage{Stop: "failed", Error: modelError}
 	}
-	if response.Stop == "failed" && response.Error != nil {
-		return api.Response{}, &api.ModelError{Kind: string(response.Error.Kind), Message: response.Error.Message}
-	}
 	response.Role = "assistant"
+	if response.Content == nil {
+		response.Content = Content{}
+	}
 	var o portable.Object
 	if err := decodeInto(response, &o); err != nil {
 		return api.Response{}, err

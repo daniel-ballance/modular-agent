@@ -233,6 +233,18 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	// Proposals are available through the record, not the running turn's
 	// queue; a cancel must not hand back an unreleased proposal.
 	s.queue = slices.DeleteFunc(s.queue, parked)
+	if c.h.handBackOnOpen && len(s.queue) > 0 {
+		ids := make([]string, 0, len(s.queue))
+		for _, in := range s.queue {
+			ids = append(ids, in.ID)
+		}
+		if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
+			s.mu.Unlock()
+			_ = c.StopSession(id)
+			return err
+		}
+		s.queue = nil
+	}
 	s.external = externalRecovery(s.data)
 	nextInput := runnableInput(s.queue)
 	if s.resume != nil || nextInput >= 0 || len(s.external) > 0 {

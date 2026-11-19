@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/OWNER/modular-agent/go/api"
 	"github.com/OWNER/modular-agent/go/pluginrpc"
@@ -75,8 +76,16 @@ func serve(ctx context.Context, plugin Plugin, in io.ReadCloser, out io.Writer) 
 			reg.Commands = append(reg.Commands, pluginrpc.CommandRegistration{Name: c.Name, Description: c.Description})
 			server.Commands[c.Name] = func(ctx context.Context, p pluginrpc.Object) (any, error) {
 				str := func(key string) string { v, _ := p[key].(string); return v }
-				text, err := c.Run(ctx, str("arguments"), &CommandContext{SessionID: str("sessionId"), ActorID: str("actorId")})
-				return pluginrpc.Object{"content": portable.Content(api.Text(text))}, serveFault(err)
+				args, ok := p["args"].(string)
+				if !ok {
+					var legacy []string
+					if err := decodeInto(p["args"], &legacy); err != nil {
+						return nil, serveFault(&Error{Code: InvalidRequest, Message: "command args must be text"})
+					}
+					args = strings.Join(legacy, " ")
+				}
+				text, err := c.Run(ctx, args, &CommandContext{SessionID: str("sessionId"), ActorID: str("actorId")})
+				return pluginrpc.Object{"output": text}, serveFault(err)
 			}
 		}
 		server.Registration = reg

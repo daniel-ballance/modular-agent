@@ -474,6 +474,13 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 		case len(calls) > 0 || steer:
 			more = true
 		case response.Stop == "failed" || response.Stop == "refused" || response.Stop == "aborted":
+			var wire struct {
+				Error *api.ModelError `json:"error"`
+			}
+			_ = json.Unmarshal(response.Wire, &wire)
+			if wire.Error != nil {
+				return fail(errors.New(wire.Error.Message))
+			}
 			return fail(errors.New("model " + response.Stop))
 		case response.Stop == "output_limit":
 			out.Status = "limit"

@@ -55,7 +55,7 @@ func sdkEvent(e api.Event) Event {
 		data = api.JSON(map[string]any{"delta": p.Text})
 	case "turn.end":
 		out := api.Decode[api.Outcome](e.Data)
-		return EndEvent{EventHeader: h, Outcome: Outcome{Kind: out.Status, Error: out.Error}}
+		return EndEvent{EventHeader: h, Outcome: *outcome(out)}
 	case "history.added":
 		data = api.JSON(portable.Entry(api.Decode[api.Entry](e.Data)))
 	case "tool.requested":

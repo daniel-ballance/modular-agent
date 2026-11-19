@@ -378,7 +378,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 	case "command/run":
 		fn, ok := s.Commands[str(v, "name")]
 		if !ok {
-			return nil, fault("unknown_handler", "unknown command")
+			return nil, fault("invalid_request", "unknown command")
 		}
 		return fn(ctx, v)
 	}

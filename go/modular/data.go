@@ -71,11 +71,11 @@ const (
 )
 
 type ToolCall struct {
-	ID      string          `json:"id"`
-	Name    string          `json:"name"`
-	Input   json.RawMessage `json:"input"`
-	Origin  string          `json:"origin,omitempty"`
-	ActorID string          `json:"actorId,omitempty"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	StartedBy string          `json:"startedBy,omitempty"`
+	ActorID   string          `json:"actorId,omitempty"`
 }
 type ToolResult struct {
 	CallID  string          `json:"callId"`

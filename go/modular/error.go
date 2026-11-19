@@ -6,6 +6,7 @@ import (
 	"io/fs"
 
 	"github.com/OWNER/modular-agent/go/pluginrpc"
+	"github.com/OWNER/modular-agent/go/servicehttp"
 )
 
 type Code string
@@ -45,6 +46,7 @@ func appError(err error, fallback Code) error {
 	}
 	var sdk *Error
 	var rpc *pluginrpc.RPCError
+	var remote *servicehttp.ResponseError
 	switch {
 	case errors.As(err, &sdk):
 		return sdk
@@ -52,6 +54,12 @@ func appError(err error, fallback Code) error {
 		fallback = CancelledCode
 	case errors.Is(err, fs.ErrNotExist):
 		fallback = NotFound
+	case errors.As(err, &remote) && remote.Code != "":
+		e := &Error{Code: Code(remote.Code), Message: remote.Error()}
+		if e.Code == Held {
+			e.Data = map[string]any{"retryAfterMs": remote.RetryAfterMS}
+		}
+		return e
 	case errors.As(err, &rpc):
 		return &Error{Code: Code(rpc.Data.Code), Message: rpc.Message}
 	}

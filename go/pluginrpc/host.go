@@ -25,12 +25,13 @@ type Spec struct {
 	Config  object            `json:"config"`
 }
 type host struct {
-	h           *harness.Harness
-	a           api.API
-	project     string
-	toolsMu     sync.Mutex
-	jobOwnersMu sync.RWMutex
-	jobOwners   map[string]*remote
+	h                 *harness.Harness
+	a                 api.API
+	project           string
+	toolsMu           sync.Mutex
+	jobOwnersMu       sync.RWMutex
+	jobOwners         map[string]*remote
+	legacyCommandArgs bool
 }
 type remote struct {
 	host      *host
@@ -74,7 +75,7 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 	if err := json.Unmarshal([]byte(raw), &specs); err != nil {
 		return fmt.Errorf("MODULAR_AGENT_PLUGINS: %w", err)
 	}
-	return Load(context.Background(), h, project, home, specs)
+	return load(context.Background(), h, project, home, specs, true)
 }
 
 // EnvironmentSpecs parses the operator's configured programs without starting them.
@@ -93,6 +94,10 @@ func EnvironmentSpecs() ([]Spec, error) {
 // Load starts the given programs in order. The caller owns the Harness and
 // must close it if loading any program fails.
 func Load(ctx context.Context, h *harness.Harness, project, home string, specs []Spec) error {
+	return load(ctx, h, project, home, specs, false)
+}
+
+func load(ctx context.Context, h *harness.Harness, project, home string, specs []Spec, legacyCommandArgs bool) error {
 	if len(specs) == 0 {
 		return nil
 	}
@@ -113,7 +118,7 @@ func Load(ctx context.Context, h *harness.Harness, project, home string, specs [
 	if err != nil {
 		return err
 	}
-	bridge := &host{h: h, project: project, jobOwners: map[string]*remote{}}
+	bridge := &host{h: h, project: project, jobOwners: map[string]*remote{}, legacyCommandArgs: legacyCommandArgs}
 	if err = h.Load(bridge.plugin()); err != nil {
 		return err
 	}
@@ -353,7 +358,11 @@ func (r *remote) plugin(index int) api.Plugin {
 				var result struct {
 					Output string `json:"output"`
 				}
-				err := r.call(withWork(ctx, work{session: id, actor: api.Acting(ctx)}), "command/run", object{"name": c.Name, "args": args, "sessionId": id, "actorId": api.Acting(ctx)}, &result)
+				var wireArgs any = strings.Join(args, " ")
+				if r.host.legacyCommandArgs {
+					wireArgs = args
+				}
+				err := r.call(withWork(ctx, work{session: id, actor: api.Acting(ctx)}), "command/run", object{"name": c.Name, "args": wireArgs, "sessionId": id, "actorId": api.Acting(ctx)}, &result)
 				return result.Output, err
 			}); err != nil {
 				return err

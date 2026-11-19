@@ -28,6 +28,7 @@ type handler struct {
 }
 type Harness struct {
 	localActor      string
+	handBackOnOpen  bool
 	tenants         map[string]tenantConfig
 	tenantConfigErr error
 	mu              sync.RWMutex
@@ -64,6 +65,10 @@ func NewWithLocalActor(actor string) *Harness {
 	}
 	return h
 }
+
+// HandBackQueuedOnOpen selects the embedded SDK's recovery policy before loading plugins.
+func (h *Harness) HandBackQueuedOnOpen() { h.handBackOnOpen = true }
+
 func (h *Harness) API() api.API     { return &client{h: h, owner: "harness"} }
 func (c *client) validLocked() bool { _, ok := c.h.plugins[c.owner]; return c.owner == "harness" || ok }
 func (h *Harness) Load(p api.Plugin) error {

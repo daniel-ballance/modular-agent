@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/OWNER/modular-agent/go/acpinterface"
 	"github.com/OWNER/modular-agent/go/api"
@@ -18,6 +20,7 @@ import (
 	"github.com/OWNER/modular-agent/go/durable"
 	"github.com/OWNER/modular-agent/go/harness"
 	"github.com/OWNER/modular-agent/go/local"
+	"github.com/OWNER/modular-agent/go/mcptools"
 	"github.com/OWNER/modular-agent/go/modelselect"
 	"github.com/OWNER/modular-agent/go/pluginrpc"
 	"github.com/OWNER/modular-agent/go/questions"
@@ -109,6 +112,9 @@ type Agent struct {
 	a          api.API
 	project    string
 	scratch    string
+	persistent bool
+	closed     atomic.Bool
+	lifecycle  sync.Mutex
 	pluginHost bool
 	q          *questionRouter
 	closeOnce  sync.Once
@@ -133,6 +139,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	if o.durability != Ephemeral && o.durability != Kept && o.durability != Durable {
 		return nil, &Error{Code: InvalidParams, Message: "unknown durability"}
+	}
+	if o.history.serviceDir != "" {
+		return nil, &Error{Code: InvalidComposition, Message: "use HTTPHistory to connect to a history service"}
 	}
 	if o.durability != Ephemeral && o.dataDir == "" && !o.history.persistent {
 		return nil, &Error{Code: InvalidComposition, Message: "kept and durable require a data directory or persistent history"}
@@ -178,7 +187,8 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		specs = append(specs, more...)
 	}
 	h := harness.NewWithLocalActor(localActor)
-	a := &Agent{h: h, a: h.API(), project: project, pluginHost: host}
+	h.HandBackQueuedOnOpen()
+	a := &Agent{h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral || o.history.persistent}
 	state := o.dataDir
 	if state == "" {
 		state, err = os.MkdirTemp("", "modular-go-")
@@ -212,10 +222,15 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err != nil {
 		return nil, appError(err, InvalidComposition)
 	}
-	core := []api.Plugin{{Name: "history", Setup: func(a api.API) error { return a.Provide("history", hs) }},
+	historyPlugin := api.Plugin{Name: "history", Setup: func(a api.API) error { return a.Provide("history", hs) }}
+	if closer, ok := hs.(io.Closer); ok {
+		historyPlugin.Close = closer.Close
+	}
+	core := []api.Plugin{historyPlugin,
 		{Name: "configuration", Setup: func(a api.API) error { return a.Provide("configuration", sessionDefaults{&defaults}) }},
+		{Name: "sdk-credentials", Setup: func(a api.API) error { return a.Provide("credentials", environmentCredentials{}) }},
 		configuration.BoundProject(project), local.ConfinedPluginAt(filepath.Join(state, "commands"), state), runtime,
-		modelselect.Plugin(), contextview.Plugin(), commands.Plugin(), questions.Plugin(), acpinterface.Plugin(project)}
+		modelselect.Plugin(), contextview.Plugin(), commands.Plugin(), questions.Plugin(), mcptools.Plugin(nil, project), acpinterface.Plugin(project)}
 	if o.approval != "" {
 		core = append(core, approval.Plugin())
 	}
@@ -240,7 +255,10 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		}
 	}
 	if err := pluginrpc.Load(ctx, h, project, state, specs); err != nil {
-		return nil, appError(err, InvalidComposition)
+		if ctx.Err() != nil {
+			return nil, appError(ctx.Err(), CancelledCode)
+		}
+		return nil, &Error{Code: InvalidComposition, Message: err.Error()}
 	}
 	models := a.Models()
 	if defaults.Model == "" && len(models) == 1 {
@@ -267,6 +285,9 @@ func (a *Agent) Close(ctx context.Context) error {
 		return appError(err, CancelledCode)
 	}
 	a.closeOnce.Do(func() {
+		a.lifecycle.Lock()
+		a.closed.Store(true)
+		a.lifecycle.Unlock()
 		a.closeErr = a.h.Close()
 		if a.scratch != "" {
 			if err := os.RemoveAll(a.scratch); a.closeErr == nil {
@@ -277,6 +298,11 @@ func (a *Agent) Close(ctx context.Context) error {
 	return appError(a.closeErr, Lost)
 }
 func (a *Agent) Session(ctx context.Context) (*Session, error) {
+	a.lifecycle.Lock()
+	defer a.lifecycle.Unlock()
+	if a.closed.Load() {
+		return nil, &Error{Code: NotOpen, Message: "agent is closed"}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, appError(err, CancelledCode)
 	}
@@ -287,17 +313,27 @@ func (a *Agent) Session(ctx context.Context) (*Session, error) {
 	return &Session{agent: a, id: id}, nil
 }
 func (a *Agent) OpenSession(ctx context.Context, id string) (*Session, error) {
+	a.lifecycle.Lock()
+	if a.closed.Load() {
+		a.lifecycle.Unlock()
+		return nil, &Error{Code: NotOpen, Message: "agent is closed"}
+	}
 	ctx = api.AsActor(ctx, localActor)
 	if err := ctx.Err(); err != nil {
+		a.lifecycle.Unlock()
 		return nil, appError(err, CancelledCode)
 	}
 	if id == "" {
+		a.lifecycle.Unlock()
 		return nil, &Error{Code: InvalidParams, Message: "session id is empty"}
 	}
 	if _, err := a.a.Snapshot(id); err == nil {
+		a.lifecycle.Unlock()
 		return nil, &Error{Code: Busy, Message: "session is already open"}
 	}
-	if err := a.a.Open(ctx, id); err != nil {
+	err := a.a.Open(ctx, id)
+	a.lifecycle.Unlock()
+	if err != nil {
 		return nil, appError(err, Busy)
 	}
 	if _, err := a.a.Wait(ctx, id); err != nil {
@@ -309,9 +345,34 @@ func (a *Agent) OpenSession(ctx context.Context, id string) (*Session, error) {
 func (a *Agent) Declaration() Declaration {
 	d := acpinterface.Declaration(a.a, a.project, "")
 	d["nestedToolCalls"] = false
+	d["portableSessions"] = a.persistent
+	d["queuedInputAfterRestart"] = "handedBack"
+	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = false, false
+	d["startsTurnsUnasked"] = "never"
+	d["severalActors"], d["sessionLimits"], d["tenants"] = false, false, false
+	d["erasure"] = a.persistent
+	d["confinesFiles"] = false
+	if v, err := a.a.Get("working-environment"); err == nil {
+		if e, ok := v.(interface{ ConfinesFiles() bool }); ok {
+			d["confinesFiles"] = e.ConfinesFiles()
+		}
+	}
+	for _, p := range a.a.All("provider.") {
+		for _, m := range p.(api.Provider).Catalog() {
+			if m.Stateful {
+				d["keepsStateAtProvider"] = true
+			}
+			if m.RunsTools {
+				d["runsToolsAtProvider"] = true
+			}
+		}
+	}
 	return d
 }
-func (a *Agent) ServeACP(ctx context.Context) error {
+
+func (a *Agent) ServeACP(ctx context.Context) error { return a.serveACP(ctx, os.Stdin, os.Stdout) }
+
+func (a *Agent) serveACP(ctx context.Context, in io.ReadCloser, out io.Writer) error {
 	if !a.pluginHost {
 		return &Error{Code: InvalidComposition, Message: "ACP requires WithPluginHost(true)"}
 	}
@@ -319,7 +380,7 @@ func (a *Agent) ServeACP(ctx context.Context) error {
 	if err != nil {
 		return appError(err, NotSupported)
 	}
-	return appError(v.(*acpinterface.Interface).Serve(ctx, os.Stdin, os.Stdout), Lost)
+	return appError(v.(*acpinterface.Interface).Serve(ctx, in, out), Lost)
 }
 
 func decodeInto(v any, p any) error {

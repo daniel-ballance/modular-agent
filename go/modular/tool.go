@@ -21,14 +21,18 @@ type ToolDefinition struct {
 	Description  string          `json:"description"`
 	Parameters   json.RawMessage `json:"parameters"`
 	Returns      json.RawMessage `json:"returns,omitempty"`
-	ReadOnly     bool            `json:"readOnly"`
-	Destructive  bool            `json:"destructive"`
-	OpenWorld    bool            `json:"openWorld"`
-	SafeToRepeat bool            `json:"safeToRepeat"`
+	Hints        ToolHints       `json:"hints"`
 	Parallel     bool            `json:"parallel"`
 	Callers      []string        `json:"callers"`
 	Presentation json.RawMessage `json:"presentation,omitempty"`
 }
+type ToolHints struct {
+	ReadOnly     bool `json:"readOnly"`
+	Destructive  bool `json:"destructive"`
+	OpenWorld    bool `json:"openWorld"`
+	SafeToRepeat bool `json:"safeToRepeat"`
+}
+
 type Tool struct {
 	definition ToolDefinition
 	run        func(context.Context, json.RawMessage, *ToolContext) (any, error)
@@ -48,10 +52,10 @@ func (t Tool) Definition() ToolDefinition {
 
 type ToolOption func(*Tool)
 
-func ReadOnly() ToolOption          { return func(t *Tool) { t.definition.ReadOnly = true } }
-func Destructive(v bool) ToolOption { return func(t *Tool) { t.definition.Destructive = v } }
-func OpenWorld(v bool) ToolOption   { return func(t *Tool) { t.definition.OpenWorld = v } }
-func SafeToRepeat() ToolOption      { return func(t *Tool) { t.definition.SafeToRepeat = true } }
+func ReadOnly() ToolOption          { return func(t *Tool) { t.definition.Hints.ReadOnly = true } }
+func Destructive(v bool) ToolOption { return func(t *Tool) { t.definition.Hints.Destructive = v } }
+func OpenWorld(v bool) ToolOption   { return func(t *Tool) { t.definition.Hints.OpenWorld = v } }
+func SafeToRepeat() ToolOption      { return func(t *Tool) { t.definition.Hints.SafeToRepeat = true } }
 func Parallel() ToolOption          { return func(t *Tool) { t.definition.Parallel = true } }
 func Callers(v ...string) ToolOption {
 	return func(t *Tool) { t.definition.Callers = append([]string{}, v...) }
@@ -81,7 +85,7 @@ func resolve(schema *jsonschema.Schema) (json.RawMessage, *jsonschema.Resolved, 
 	return b, r, err
 }
 func NewTool[In, Out any](name, description string, run func(context.Context, In, *ToolContext) (Out, error), opts ...ToolOption) Tool {
-	t := Tool{definition: ToolDefinition{Name: name, Description: description, Destructive: true, OpenWorld: true, Callers: []string{"model", "ui", "plugin"}}}
+	t := Tool{definition: ToolDefinition{Name: name, Description: description, Hints: ToolHints{Destructive: true, OpenWorld: true}, Callers: []string{"model", "ui", "plugin"}}}
 	for _, opt := range opts {
 		opt(&t)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"iter"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/OWNER/modular-agent/go/api"
@@ -237,9 +238,20 @@ func resultFor(s api.Session, input string) *PromptResult {
 	}
 	return nil
 }
+func outcome(out api.Outcome) *Outcome {
+	o := &Outcome{Kind: out.Status, Error: out.Error}
+	if out.Status == "limit" {
+		o.Error = ""
+		o.Limit = strings.TrimSuffix(out.Error, " limit")
+		if o.Limit == "step" {
+			o.Limit = "steps"
+		}
+	}
+	return o
+}
 func buildResult(s api.Session, end api.Entry, input string) *PromptResult {
 	out := api.Decode[api.Outcome](end.Data)
-	r := &PromptResult{InputID: input, Disposition: Turn, TurnID: end.Turn, Text: out.Result.Text(), Value: out.Value, Outcome: &Outcome{Kind: out.Status, Error: out.Error}, Usage: &Usage{Input: out.Usage.Input, Output: out.Usage.Output, CacheRead: out.Usage.Cached, CacheWrite: out.Usage.CacheWrite, Cost: out.Usage.Cost}}
+	r := &PromptResult{InputID: input, Disposition: Turn, TurnID: end.Turn, Text: out.Result.Text(), Value: out.Value, Outcome: outcome(out), Usage: &Usage{Input: out.Usage.Input, Output: out.Usage.Output, CacheRead: out.Usage.Cached, CacheWrite: out.Usage.CacheWrite, Cost: out.Usage.Cost}}
 	for _, c := range out.Open {
 		r.OpenToolCalls = append(r.OpenToolCalls, c.ID)
 	}
@@ -398,6 +410,31 @@ func (s *Session) OnQuestion(ctx context.Context, h QuestionHandler) error {
 	s.agent.q.attach(s.id, h)
 	return nil
 }
+func (s *Session) Commands(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, appError(err, CancelledCode)
+	}
+	if _, err := s.agent.a.Snapshot(s.id); err != nil {
+		return nil, appError(err, NotOpen)
+	}
+	return s.agent.a.Commands(), nil
+}
+func (s *Session) RunCommand(ctx context.Context, line string) (string, error) {
+	commands, err := s.Commands(ctx)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(strings.TrimPrefix(line, "/"))
+	if len(fields) == 0 {
+		return "", &Error{Code: InvalidParams, Message: "command is empty"}
+	}
+	if !slices.Contains(commands, fields[0]) {
+		return "", &Error{Code: NotFound, Message: "command is not registered"}
+	}
+	text, err := s.agent.a.Command(s.ctx(ctx), s.id, line)
+	return text, appError(err, Lost)
+}
+
 func (s *Session) Close(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return appError(err, CancelledCode)
