@@ -48,7 +48,8 @@ MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks -- "$PWD
 - **Reference checks: 12/12.** No changes to the runner.
 - **ACP:** 87/87 default, 94/94 with `--crash-checks`.
 - **New Go tests:** 14 top-level tests and 18 subtests pass, including under `-race`. Tests cover a Rust-format auth fixture, file modes and simultaneous refresh, loopback browser and device-code sign-in, loopback Responses requests and refresh for both vendors, Provider data isolation, Monty limits and exceptions, prompt order and wording against the Rust sources, skill discovery, project trust, file tools in process and over the plugin binding, Streamable HTTP MCP and the public SDK import boundary. The reference runner separately exercises stdio MCP and real process loss with a scripted Provider.
-- **Race run:** 10 test packages pass (96 top-level tests, 174 subtests); five packages have no tests. Build and vet pass, and `gofmt -l .` lists no files.
+- **Full Go SDK and base suite:** 36 test packages pass (248 top-level tests, 465 subtests); 15 packages have no tests. Build and vet pass, and `gofmt -l .` lists no files.
+- **Race run:** 10 test packages pass (96 top-level tests, 174 subtests); five packages have no tests.
 - **Claude:** a separate smoke test built the TypeScript sidecar in a temporary directory and loaded it from Go over stdio with the sidecar's scripted SDK. It completed one prompt. No real sign-ins or model requests were made for any Provider.
 
 ## Known gaps
