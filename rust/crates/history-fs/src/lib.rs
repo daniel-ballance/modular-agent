@@ -135,6 +135,9 @@ impl FileHistory {
     }
 }
 impl HistoryStore for FileHistory {
+    fn supports_service_snapshots(&self) -> bool {
+        true
+    }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
         self.path(session)?;
         let mut hash = std::collections::hash_map::DefaultHasher::new();

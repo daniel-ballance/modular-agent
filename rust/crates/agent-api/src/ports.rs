@@ -214,6 +214,12 @@ pub trait Lease: Send + Sync {
     }
 }
 pub trait HistoryStore: Send + Sync {
+    /// Opt in to storing opaque HTTP service snapshots. `save` must durably
+    /// replace a whole snapshot, and `acquire` must exclude another server,
+    /// even before the first `save`.
+    fn supports_service_snapshots(&self) -> bool {
+        false
+    }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>>;
     fn load(&self, session: &str) -> Result<SessionData>;
     fn save(&self, session: &SessionData) -> Result<()>;

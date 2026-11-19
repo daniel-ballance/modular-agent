@@ -47,12 +47,19 @@ impl ServeHistoryOptions {
     }
 }
 
-/// Serve a dedicated snapshot store until the future is dropped. Plaintext is only
-/// supported on loopback. A filesystem store is required for crash persistence.
+/// Serve a dedicated durable snapshot store until the future is dropped.
+/// Plaintext is only supported on loopback.
 pub async fn serve_history(
     store: Arc<dyn HistoryStore>,
     options: ServeHistoryOptions,
 ) -> agent_api::Result<()> {
+    if !store.supports_service_snapshots() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the history service requires durable opaque snapshots and exclusive writer leases",
+        )
+        .into());
+    }
     ensure!(
         options.address.ip().is_loopback(),
         "plaintext history service must listen on loopback"
@@ -444,10 +451,10 @@ fn tombstone(entry: &Value) -> Value {
         "requestId",
         "continuesTurnId",
     ] {
-        if let Some(value) = entry.get(key) {
-            if value.is_string() {
-                out[key] = value.clone();
-            }
+        if let Some(value) = entry.get(key)
+            && value.is_string()
+        {
+            out[key] = value.clone();
         }
     }
     let data = &entry["data"];
