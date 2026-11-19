@@ -259,7 +259,7 @@ async def test_responses_refresh_retry_and_stream(
                     ModelRef(vendor, vendors_model),
                     {
                         "systemPrompt": "instructions",
-                        "settings": {"reasoning": "high", "output_limit": 25},
+                        "settings": {"reasoning": "high", "maxOutput": 25},
                         "messages": [
                             {"role": "user", "content": [{"type": "text", "text": "greet"}]}
                         ],

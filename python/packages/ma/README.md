@@ -24,7 +24,8 @@ Claude uses the [TypeScript sidecar](../../../typescript/sidecars/claude/README.
 - **Reference:** 12/12 checks, including both crash cases, MCP over stdio, tool offers and session continuation.
 - **ACP:** 116/116 default checks; 123/123 with `--crash-checks`. The kit ran against `ma --acp` with `MODULAR_AGENT_CONFORMANCE=1`.
 - **Python ma:** 19/19 tests. They test both device flows and Codex browser PKCE against loopback servers, both Providers' Responses requests and concurrent 401 refresh, an `auth.json` fixture in Rust's serde format, Monty limits and errors, skill discovery and prompt wording, MCP configuration and project trust, and the public SDK boundary. No real sign-in, credentials or model calls were used.
-- **Python checks:** Ruff lint and format checks passed; strict mypy passed for the SDK and ma (27 source files). The existing base and SDK suite passed 336/336 in each local-binding run, transient and durable. See the run commands below.
+- **Claude sidecar:** One offline end-to-end request from `ma` through the TypeScript sidecar's own fake SDK. The fake confirmed the requested model, system prompt and input; it did not start Claude Code.
+- **Python checks:** Ruff lint and format checks passed; strict mypy passed for the SDK and ma (27 source files). The existing base and SDK suite passed 336/336 in each local-binding run, transient and durable. The durable process-binding run passed 355/355 with the 19 new tests included. See the run commands below.
 
 ```sh
 # From the repository root, after uv sync above:
@@ -48,7 +49,7 @@ Run the full Python suites one at a time and do not edit the base plugins during
 ## Known gaps
 
 - The Responses Providers replay text and tool calls, but do not replay encrypted vendor reasoning items. The SDK does not yet give an in-process Provider a store whose opaque data is guaranteed to come back only to that Provider. No real service verified the replay or current endpoint behavior.
-- The Claude launcher is wired through the SDK's process plugin API. This implementation did not run a Claude request through it. ACP starts the sidecar, when installed, at interface startup so it can advertise the catalog; line and print mode load it only when selected, or for `ma models`.
+- The Claude launcher uses the SDK's process plugin API and was tested with the sidecar's built-in fake only. ACP starts the sidecar, when installed, at interface startup so it can advertise the catalog; line and print mode load it only when selected, or for `ma models`.
 - `auth.json` preserves Rust's `answers` map but `ma` does not yet put new secret answers into it. Line mode declines secret questions rather than accepting secret text in the terminal. There is no general SDK credential-store override to connect the shared file to the question lifecycle.
 - File tools use the working environment. Their byte and directory callbacks are currently available only in-process. The SDK's MCP transport supports stdio and Streamable HTTP; the reference kit exercises stdio. MCP and file-tool error wording is not identical for every invalid input and filesystem failure. `find` uses Git enumeration (or `find` outside a repository) and Python glob matching; not every Rust glob extension is supported.
 - The CLI uses the SDK's event names and shared ids for JSON lines; it does not reproduce the Rust build's native event envelope. It does not interpret executable plugin entries in `.modular-agent.json`. Only trusted project MCP can start project-configured programs.

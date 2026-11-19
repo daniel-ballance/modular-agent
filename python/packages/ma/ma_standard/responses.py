@@ -148,7 +148,7 @@ def request_body(vendor: Vendor, model: Model, request: JsonObject, session: str
     else:
         if system:
             messages.insert(0, {"role": "system", "content": system})
-        limit = settings.get("output_limit", settings.get("outputLimit", model.maximum))
+        limit = settings.get("maxOutput", settings.get("max_output", model.maximum))
         if type(limit) is int and limit > 0:
             body["max_output_tokens"] = min(limit, model.maximum)
     body["input"] = list(messages)
