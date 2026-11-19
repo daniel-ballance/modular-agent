@@ -294,11 +294,17 @@ func buildResult(s api.Session, end api.Entry, input string) *PromptResult {
 			if r.InputID == "" {
 				r.InputID = api.Decode[api.TurnStart](e.Data).Input
 			}
-		case "tool.call":
-			if _, ok := names[e.Call]; !ok {
-				order = append(order, e.Call)
+		case "model":
+			// The recorded assistant response provides both attribution and
+			// call order, even when calls are dispatched in parallel.
+			for _, part := range e.Content {
+				if c := part.Call; c != nil && c.ParentCall == "" {
+					if _, ok := names[c.ID]; !ok {
+						order = append(order, c.ID)
+					}
+					names[c.ID] = c.Name
+				}
 			}
-			names[e.Call] = api.Decode[api.Call](e.Data).Name
 		case "tool.result":
 			result := api.Decode[api.ToolResult](e.Data)
 			result.Content = e.Content
@@ -317,16 +323,6 @@ func buildResult(s api.Session, end api.Entry, input string) *PromptResult {
 				v.Name = names[id]
 			}
 			r.results = append(r.results, v)
-			delete(results, id)
-		}
-	}
-	// An imported history can omit the internal tool.call record.
-	for _, e := range s.Entries {
-		if e.Kind == "tool.result" && e.Turn == end.Turn {
-			if v, ok := results[e.Call]; ok {
-				r.results = append(r.results, v)
-				delete(results, e.Call)
-			}
 		}
 	}
 	return r

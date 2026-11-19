@@ -52,9 +52,9 @@ type condition struct {
 type expectation struct {
 	Outcome, Text, Error *string
 	ToolResults          []struct {
-		Name   string
-		Status modular.ToolStatus
-		Text   *string
+		Name           string
+		Status         modular.ToolStatus
+		Text, Contains *string
 	}
 	Records []string
 	Count   *int
@@ -333,6 +333,9 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 				equal(field+".status", want.Status, g.Status)
 				if want.Text != nil {
 					equal(field+".text", *want.Text, g.Text())
+				}
+				if want.Contains != nil && !strings.Contains(g.Text(), *want.Contains) {
+					fail("%s.text: want substring %q, got %q", field, *want.Contains, g.Text())
 				}
 			}
 		}
