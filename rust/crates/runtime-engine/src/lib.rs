@@ -551,6 +551,19 @@ impl Engine {
                 )
             }
         }
+        if let Some((_, definition)) = registration
+            && let Err(error) = schema::tool_result(&definition, &result)
+        {
+            // Execution was confirmed. Settle once without exposing the invalid payload.
+            let safe = ToolResult::new(
+                call,
+                result.status,
+                "The call completed, but its result did not match its schema.",
+            );
+            self.publish_tool_result(api, scope, call_entry, safe)
+                .await?;
+            return Err(error);
+        }
         Ok(result)
     }
     async fn tools(

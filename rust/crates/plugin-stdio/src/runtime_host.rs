@@ -916,6 +916,27 @@ impl TurnWork {
         } else {
             result
         };
+        let mut result = result;
+        let mut invalid = None;
+        if result.status == ToolStatus::Completed {
+            let data = api.snapshot(&scope.session)?;
+            if let Some(start) = data
+                .entries
+                .iter()
+                .rev()
+                .find(|entry| entry.kind == "tool.started" && entry.scope.call == scope.call)
+                .and_then(|e| e.content.as_ref())
+                .and_then(|e| e.get("definition"))
+            {
+                let definition = wire::parse_definition(start)?;
+                if let Err(error) = schema::tool_result(&definition, &result) {
+                    result.text =
+                        "The call completed, but its result did not match its schema.".into();
+                    result.value = None;
+                    invalid = Some(error);
+                }
+            }
+        }
         api.append(
             scope,
             "external.runtime",
@@ -923,6 +944,9 @@ impl TurnWork {
         )?;
         api.emit(Event::new(scope, "tool.ended", json!(result)))
             .await?;
+        if let Some(error) = invalid {
+            return Err(error);
+        }
         Ok(result)
     }
     fn record_feedback(&self, api: &Api, scope: &Scope, reason: &str) -> Result<()> {

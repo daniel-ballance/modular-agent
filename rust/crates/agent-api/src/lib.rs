@@ -1,6 +1,7 @@
 //! Shared in-process plugin API. No concrete plugins live here.
 pub mod portable;
 pub mod recovery;
+pub mod schema;
 pub mod wire;
 mod work;
 pub use work::*;
