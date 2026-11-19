@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import type { AgentOptions, Answer, PromptResult, Session } from "@modular-agent/core";
 import { answers, testAgent, type ScriptStep } from "@modular-agent/core/testing";
 import { count, fixture } from "./index.js";
@@ -52,13 +53,14 @@ export const loadScenario = load<Scenario>;
 export const applies = (s: Scenario, p: Placement) => !s.placements || s.placements.includes(p.name) || !!p.command && s.placements.includes("process");
 const countFile = (dir: string) => join(dir, "count");
 
-export async function scenarioAgent(s: Scenario, dir: string, p: Placement) {
+export async function scenarioAgent(s: Scenario, dir: string, p: Placement,
+  handler = s.agent.answers && answers(s.agent.answers)) {
   const project = join(dir, "project");
   await mkdir(project, { recursive: true });
-  const { plugins = [], answers: list, ...options } = s.agent;
+  const { plugins = [], answers: _answers, ...options } = s.agent;
   const config = { path: countFile(dir) };
   return testAgent({ ...options, script: s.model, project, dataDir: join(dir, "data"),
-    onQuestion: list && answers(list),
+    onQuestion: handler,
     ...(p.command ? { processPlugins: plugins.map(name => ({ command: [...p.command!, name], config })) }
       : { plugins: plugins.map(name => fixture(name, config)) }),
   });
@@ -82,8 +84,11 @@ async function waitGroup(pid: number) {
         }
       });
     } else {
-      try { process.kill(-pid, 0); live = true; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; live = false; }
+      const { stdout } = await promisify(execFile)("ps", ["-ax", "-o", "pgid=,stat="], { timeout: 2_000 });
+      live = stdout.split("\n").some(line => {
+        const [group, state] = line.trim().split(/\s+/);
+        return Number(group) === pid && !!state && !/^[ZX]/.test(state);
+      });
     }
     if (!live) return;
     if (Date.now() > deadline) throw new Error(`Crash process group ${pid} is still running`);
@@ -130,6 +135,7 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
   const s = loadScenario(path);
   const dir = await mkdtemp(join(tmpdir(), "sdk-scenario-"));
   const failures: string[] = [];
+  const handler = s.agent.answers && answers(s.agent.answers);
   let id: string | undefined;
   let a: Awaited<ReturnType<typeof scenarioAgent>> | undefined;
   let session: Session | undefined;
@@ -149,11 +155,11 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
         } else if ("reopen" in step) {
           await a?.close(); a = undefined; session = undefined;
           if (!id) throw new Error("No session to reopen");
-          a = await scenarioAgent(s, dir, p);
+          a = await scenarioAgent(s, dir, p, handler);
           session = await a.openSession(id);
           result = await session.lastTurn();
         } else if ("prompt" in step) {
-          a ??= await scenarioAgent(s, dir, p);
+          a ??= await scenarioAgent(s, dir, p, handler);
           session ??= await a.session();
           id = session.id;
           result = await session.prompt(step.prompt);
@@ -187,6 +193,10 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
         }
       }
       compare("count", want.count, count(countFile(dir)));
+    }
+    if (failures.length === 0) {
+      try { handler?.assertDone(); }
+      catch (error) { failures.push(`${s.scenario} (${p.name}): ${String(error)}`); }
     }
   } finally {
     await a?.close();
