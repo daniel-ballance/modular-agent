@@ -181,7 +181,7 @@ async function main(argv: string[]) {
     mcpServers(p, cwd, cwd === project ? projectTrust : await trusted(p, cwd)) });
   const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p), mcp];
   const agent = await createAgent({ ...base, project, settings, model: opts.command === "models" ? undefined : model, providers, plugins,
-    compaction: !conformance, conformance, pluginHost: opts.acp || !!claude, ...(claude ? { processPlugins: [claude] } : {}) });
+    compaction: !conformance, conformance, questionsOutlastTurns: true, jobReportsStartTurns: true, settingsDuringTurn: "refused", pluginHost: opts.acp || !!claude, ...(claude ? { processPlugins: [claude] } : {}) });
   try { return await run(agent); } finally { await agent.close(); }
 
   async function run(agent: Agent) {
@@ -191,7 +191,7 @@ async function main(argv: string[]) {
     }
     if (opts.declaration) { console.log(JSON.stringify(agent.declaration(), null, 2)); return 0; }
     if (opts.acp) {
-      await agent.serveAcp({ showApproval: conformance, async sessionSettings(cwd) {
+      await agent.serveAcp({ sdkDeclaration: true, showApproval: conformance, async sessionSettings(cwd) {
         const project = await realpath(cwd);
         const initial: Settings = { ...standardSettings(await settingsFor(p, project)), ...opts.settings, cwd: project };
         if (script || conformance) {

@@ -39,6 +39,9 @@ export interface AgentOptions {
   approval?: Approval;
   /** Enable the official context compaction plugin and /compact command. */
   compaction?: boolean;
+  questionsOutlastTurns?: boolean;
+  jobReportsStartTurns?: boolean;
+  settingsDuringTurn?: "nextTurn" | "refused";
   /** Offline fixtures for the ACP conformance kit; not for production use. */
   conformance?: boolean;
   onQuestion?: QuestionHandler;
@@ -48,7 +51,7 @@ export interface AgentOptions {
   credentials?: CredentialStore;
 }
 export interface SessionOptions { settings?: Settings }
-export type ServeAcpOptions = Omit<AcpOptions, "declaration">;
+export type ServeAcpOptions = Omit<AcpOptions, "declaration"> & { /** Use the SDK declaration in conformance mode. */ sdkDeclaration?: boolean };
 export interface SessionInfo { id: string; project: string; created: number }
 export interface SavedSessionInfo extends SessionInfo { updated: number; settings: Settings }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
@@ -167,7 +170,8 @@ export class Agent {
       if (!(await stat(project)).isDirectory()) throw new Error("Project must be a directory");
       const home = options.dataDir ? resolve(options.dataDir) : scratch;
       await mkdir(home, { recursive: true });
-      const h = new Harness({ project, home, questionsOutlastTurns: false, settingsDuringTurn: "nextTurn", rejectUnknownModel: true });
+      const h = new Harness({ project, home, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
+        jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn", rejectUnknownModel: true });
       agent = new Agent(h, scratch, options.onQuestion);
       agent.#conformance = options.conformance ?? false;
       const settings = structuredClone(options.settings ?? {});
@@ -420,7 +424,7 @@ export class Agent {
       runsToolsAtProvider: providers.some(p => p.supports.runsTools === true),
       liveSessions: providers.some(p => p.supports.liveSessions === true),
       portableSessions: this.#portable && !providers.some(p => p.supports.runsTools === true || p.supports.keepsState === true),
-      nestedToolCalls: base.nestedToolCalls === true, questionsOutlastTurns: false, lateAnswersStartTurns: false, waitingThroughRestart: false,
+      nestedToolCalls: base.nestedToolCalls === true, lateAnswersStartTurns: base.questionsOutlastTurns === true,
       severalActors: false, tenants: false, sessionLimits: false, holdsOutput: false, mixedActorInput: "refused",
       startsTurnsUnasked: base.startsTurnsUnasked === "never" ? "never" : "jobReports",
     };
@@ -432,7 +436,7 @@ export class Agent {
     this.#acp = true;
     try {
       const binding = acpInterface(this.#conformance
-        ? { actorId: process.env.MODULAR_AGENT_ACTOR, ...options }
+        ? { actorId: process.env.MODULAR_AGENT_ACTOR, ...options, declaration: options.sdkDeclaration ? () => this.declaration() : undefined }
         : { ...options, declaration: () => this.declaration() });
       await this.#load(binding);
       await binding.acp.serveStdio();

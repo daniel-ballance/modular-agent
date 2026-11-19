@@ -191,7 +191,7 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn"; rejectUnknownModel?: boolean }
+export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
@@ -216,7 +216,8 @@ export class Harness {
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
 	private readonly questionsOutlastTurns: boolean;
-	private readonly settingsDuringTurn?: "nextTurn";
+	private readonly settingsDuringTurn?: "nextTurn" | "refused";
+	private readonly jobReportsStartTurns: boolean;
 	private readonly rejectUnknownModel: boolean;
 	private newId: () => string;
 	private jobCancels = new Map<string, (jobId: string) => Promise<void>>();
@@ -233,6 +234,7 @@ export class Harness {
 		this.newId = options.newId ?? randomUUID;
 		this.questionsOutlastTurns = options.questionsOutlastTurns ?? true;
 		this.settingsDuringTurn = options.settingsDuringTurn;
+		this.jobReportsStartTurns = options.jobReportsStartTurns ?? true;
 		this.rejectUnknownModel = options.rejectUnknownModel === true;
 		this.hooks = new HookRegistry(({ hook, plugin, error }) => this.problem(plugin, `hook ${hook}`, error));
 		const h = (name: string, rule: HookRule, owner: string) => this.hooks.define(name, rule, owner);
@@ -882,6 +884,7 @@ export class Harness {
 
 	private async setSetting(s: Session, key: string, value: unknown, writer: string, actorId?: string): Promise<void> {
 		if (actorId) this.requireAuthority(s, actorId, "settings");
+		if (this.settingsDuringTurn === "refused" && s.isBusy()) throw Object.assign(new Error("Cannot change settings during a turn"), { code: "busy" });
 		await this.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
 		this.emit(s.id, "setting.changed", { key, value, appliesFrom: this.settingsDuringTurn === "nextTurn" ? "next turn" : "next step" }, writer, { actorId });
 	}
@@ -2365,16 +2368,16 @@ export class Harness {
 						const drafts = [end];
 						if (report && !s.keys.has(`job:${job.id}`)) {
 							if (!this.workRights(s, [], [job.id]).includes("input")) throw new Error('Job report requires the "input" right');
-							queued = { id: this.newId(), actorId: job.actorId ?? "harness", when: "after", key: `job:${job.id}`, kind: "input",
+							queued = { id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key: `job:${job.id}`, kind: "input",
 								startedBy: { kind: "job", id: job.id }, sources: [end.id!], content: content ?? [] };
 							drafts.push({ kind: "inputAccepted", writer: "harness", modelVisible: false, inputId: queued.id, actorId: queued.actorId, jobId: job.id,
-								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: "after", taken: "after", parked: false } });
+								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: queued.when, taken: queued.when, parked: queued.when === "propose" } });
 						}
 						await this.commit(s, drafts);
 						job.state = state;
 						job.result = content;
 						this.emit(s.id, "job.ended", { state, result: content }, plugin, { jobId: job.id });
-						if (queued) { s.followUps.push(queued); this.startQueued(s); }
+						if (queued?.when === "after") { s.followUps.push(queued); this.startQueued(s); }
 					});
 				};
 				record.ending = work().catch((error) => { if (job.state === "running") record.ending = undefined; throw error; });
@@ -2393,7 +2396,7 @@ export class Harness {
 		await this.admit(s, async () => {
 			if (s.keys.has(key) || s.closed || s.closing || s.suspended) return;
 			await this.acceptInput(s, {
-				id: this.newId(), actorId: job.actorId ?? "harness", when: "after", key, kind: "input",
+				id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key, kind: "input",
 				startedBy: { kind: "job", id: job.id }, sources: [end.id],
 				content: data.result ?? [],
 			});
@@ -2448,7 +2451,7 @@ export class Harness {
 			tenants: true,
 			holdsOutput: true,
 			outputBypassesAgent: false,
-			startsTurnsUnasked: "when a job reports back",
+			startsTurnsUnasked: this.jobReportsStartTurns ? "when a job reports back" : "never",
 			cancellingTurnCancelsJobs: false,
 			pluginsDuringSession: false,
 			erasure: s?.ephemeral ? true : !!store?.erase,
