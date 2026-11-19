@@ -1,0 +1,186 @@
+"""Serve SDK registrations with the base's plugin-binding transport."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from ma_plugin.rpc import WireError
+from ma_plugin.server import BINDING, PluginServer
+
+from ._native import _error, _read_answer
+from ._plugin import (
+    CommandContext,
+    Plugin,
+    Registrar,
+    _OBSERVERS,
+    _SUPPORTED_HOOKS,
+    _handle_command,
+    _handle_hook,
+)
+from ._tool import ToolContext
+from ._types import AgentError, Answer, Content, ErrorCode, JsonObject, QuestionSpec
+
+
+async def _serve(plugin: Plugin) -> None:
+    registrar: Registrar | None = None
+    stopped = False
+    active: set[asyncio.Task[Any]] = set()
+    registration: dict[str, Any] = {
+        "binding": BINDING,
+        "name": plugin.name,
+        "replaces": list(plugin.replaces),
+    }
+
+    async def initialize(p: dict[str, Any]) -> None:
+        nonlocal registrar
+        config = p.get("config", {})
+        if not isinstance(config, dict):
+            raise WireError("Plugin config must be an object", "invalid_request")
+        registrar = await plugin._register(config)
+        items = [f"tool:{t.name}" for t in registrar._tools.values() if t.in_process_only]
+        items += [
+            h.point
+            for h in registrar._hooks
+            if h.in_process_only or h.point not in _SUPPORTED_HOOKS
+        ]
+        items += [f"command:{c.name}" for c in registrar._commands.values() if c.in_process_only]
+        if items:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Cannot serve " + ", ".join(items))
+        registration["toolSources"] = (
+            [
+                {
+                    "id": plugin.name,
+                    "tools": [t.definition for t in registrar._tools.values()],
+                    "perSession": False,
+                }
+            ]
+            if registrar._tools
+            else []
+        )
+        registration["hooks"] = [
+            {"hook": h.point, "handlerId": n, "order": h.order}
+            for n, h in enumerate(registrar._hooks, 1)
+        ]
+        registration["commands"] = [
+            {"name": c.name, "description": c.description} for c in registrar._commands.values()
+        ]
+
+    async def stop() -> None:
+        nonlocal stopped
+        if stopped:
+            return
+        stopped = True
+        tasks = active - {asyncio.current_task()}
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if registrar is not None:
+            await plugin._close()
+
+    def registered() -> Registrar:
+        if registrar is None or stopped:
+            raise WireError("Plugin is not accepting work", "invalid_request")
+        return registrar
+
+    async def list_tools(p: dict[str, Any], key: str | int) -> JsonObject:
+        if p.get("toolSource") != plugin.name or p.get("sessionId") is not None:
+            raise WireError("Unknown or session-scoped tool source", "invalid_request")
+        return {"tools": [t.definition for t in registered()._tools.values()]}
+
+    async def call_tool(p: dict[str, Any], key: str | int) -> JsonObject:
+        call = p["call"]
+        t = registered()._tools.get(call["name"])
+        if (
+            t is None
+            or p.get("toolSource") != plugin.name
+            or not isinstance(p.get("sessionId"), str)
+        ):
+            raise WireError("Unknown tool or invalid scope", "invalid_request")
+
+        async def ask(q: QuestionSpec, index: int, wait: float | None) -> Answer:
+            request: dict[str, Any] = dict(q)
+            if wait is not None:
+                request["timeLimitMs"] = round(wait * 1000)
+                request["whenTimeLimit"] = "close"
+            try:
+                reply = await server.peer.request(
+                    "host/ask", {"parentRequestId": key, "request": request}
+                )
+            except WireError as exc:
+                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+            if reply.get("allow") is True:
+                return Answer("allow")
+            return _read_answer(reply)
+
+        async def progress(parts: Content) -> None:
+            await server.peer.notify("tools/progress", {"parentRequestId": key, "content": parts})
+
+        context = ToolContext(p["sessionId"], call["actorId"], call["id"], ask, progress)
+        try:
+            return await t._run(
+                call["arguments"] if "arguments" in call else call["input"], context
+            )
+        except asyncio.CancelledError:
+            return {
+                "status": "cancelled",
+                "content": [{"type": "text", "text": "Tool call cancelled"}],
+            }
+
+    async def handle_hook(p: dict[str, Any], key: str | int) -> JsonObject | None:
+        registrations = registered()._hooks
+        n = p.get("handlerId")
+        if (
+            type(n) is not int
+            or not 1 <= n <= len(registrations)
+            or registrations[n - 1].point != p.get("hook")
+        ):
+            raise WireError("Unknown hook handler", "unknown_handler")
+        hook = registrations[n - 1]
+        try:
+            return await _handle_hook(hook, p["payload"])
+        except Exception as exc:
+            if hook.point not in _OBSERVERS:
+                raise
+            logging.getLogger(__name__).warning("%s hook failed: %s", hook.point, exc)
+            return None
+
+    async def run_command(p: dict[str, Any], key: str | int) -> JsonObject:
+        command = registered()._commands.get(p["name"])
+        if command is None:
+            raise WireError("Unknown command", "invalid_request")
+        output = await _handle_command(
+            command, p["args"], CommandContext(p["sessionId"], p["actorId"])
+        )
+        return {"output": output} if output is not None else {}
+
+    class Server(PluginServer):  # type: ignore[misc]  # Untyped base adapter.
+        async def dispatch(self, method: str, params: dict[str, Any], key: str | int) -> Any:
+            task = asyncio.current_task()
+            if method not in {"plugin/initialize", "plugin/shutdown"} and task is not None:
+                active.add(task)
+            try:
+                return await super().dispatch(method, params, key)
+            except AgentError as exc:
+                raise WireError(exc.message, exc.code.value) from exc
+            except (KeyError, TypeError) as exc:
+                raise WireError("Malformed plugin request", "invalid_request", -32602) from exc
+            finally:
+                if task is not None:
+                    active.discard(task)
+
+    methods: dict[str, Callable[..., Awaitable[Any]]] = {
+        "tools/list": list_tools,
+        "tools/call": call_tool,
+        "hook/handle": handle_hook,
+        "command/run": run_command,
+    }
+    server = Server(registration, methods, initialize, stop)
+    await server.serve()
+
+
+def serve(plugin: Plugin) -> None:
+    """Speak the plugin binding on stdin/stdout until the host disconnects."""
+    asyncio.run(_serve(plugin))
