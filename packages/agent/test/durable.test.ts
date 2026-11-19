@@ -26,6 +26,7 @@ async function crashedSession() {
 	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t1", actorId: "user", data: { startedBy: { kind: "actor", id: "user" }, model: { provider: "faux", id: "faux-1" }, system: "", tools: api.tools(s), settings: {} } });
 	await api.append(s, { kind: "input", writer: "test", modelVisible: true, turnId: "t1", actorId: "user", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, data: { inputId: "foreign-input" } });
 	const calls = [fauxToolCall("read", { path: "notes.txt" }), fauxToolCall("bash", { command: "echo charged >> payments.log" }), fauxToolCall("write", { path: "done.txt", content: "ok" })];
+	await api.append(s, { kind: "modelRequest", writer: "test", modelVisible: false, turnId: "t1", stepId: "step1", data: { model: { provider: "faux", id: "faux-1" }, tools: calls.map((call) => call.name), tracksStepAfter: true } });
 	await api.append(s, { kind: "response", writer: "test", modelVisible: true, turnId: "t1", stepId: "step1", message: { role: "assistant", content: calls as never, stop: "toolUse" } });
 	for (const c of calls.slice(0, 2)) {
 		await api.append(s, { kind: "toolStarted", writer: "test", modelVisible: false, turnId: "t1", toolCallId: c.id, stepId: "step1", data: { call: { id: c.id, name: c.name, input: c.arguments, startedBy: "model", stepId: "step1" }, safeToRepeat: c.name === "read" && process.platform === "linux" } });
@@ -61,12 +62,12 @@ test("swap test: the same crashed session, reopened with a transient and then a 
 	await api.openSession(s);
 	await api.waitForIdle(s);
 	assert.equal(outcome(d, s), "completed");
-	// read is safe to repeat, so it ran again; bash is not, so its outcome is unknown; write never started, so it ran.
-	assert.deepEqual(statuses(d, s), { read: process.platform === "linux" ? "completed" : "outcomeUnknown", bash: "outcomeUnknown", write: "completed" });
+	// Neither legacy start proves registration or cleanup. The unstarted write can run.
+	assert.deepEqual(statuses(d, s), { read: "outcomeUnknown", bash: "outcomeUnknown", write: "completed" });
 	assert.equal(readFileSync(join(dirs.project, "done.txt"), "utf8"), "ok");
 	assert.equal(existsSync(join(dirs.project, "payments.log")), false, "an unsafe call must not run twice");
 	const read = api.history(s).find((e) => e.kind === "toolResult" && e.message?.role === "toolResult" && e.message.toolName === "read")!;
-	assert.match(textOf(read.message!.content), process.platform === "linux" ? /milk/ : /unknown/);
+	assert.match(textOf(read.message!.content), /unknown/);
 	assert.equal(d.declaration(d.session(s)).continuesAfterRestart, true);
 	await d.stop();
 });

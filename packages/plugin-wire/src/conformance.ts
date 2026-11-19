@@ -19,7 +19,7 @@ export class ConformanceProvider implements Provider {
 		const scope = { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: model.id } };
 		const prepared = options.requestPrepared ? undefined : await this.api?.runHook<{ request: ModelRequest }>("provider.request", { ...scope, request });
 		const message = this.echo(prepared?.request ?? request, options);
-		if (!options.requestPrepared) await this.api?.runHook("provider.response", { ...scope, message });
+		if (!options.requestPrepared) await this.api?.runHook("provider.response", { sessionId: scope.sessionId, provider: scope.provider, model: scope.model, message });
 		return message;
 	}
 	private echo(request: ModelRequest, options: RequestOptions): AssistantMessage {

@@ -1,4 +1,24 @@
-import { type ContentPart, type HistoryEntry, type InterruptedTurn, type ModelMessage, type ToolCall, isToolCall, text } from "./types.js";
+import { type ContentPart, type HistoryEntry, type InterruptedTurn, type ModelMessage, type ResumedStep, type ToolCall, isToolCall, text } from "./types.js";
+
+/** Restore the last real answer and prove whether its gate committed. */
+export function restoreAnsweredStep(branch: HistoryEntry[], turnId: string, kept = branch): { lastStep: ResumedStep; response: HistoryEntry } | undefined {
+	const attempts = new Map(branch.filter((e) => e.kind === "modelRequest" && e.turnId === turnId).map((e) => [e.stepId, e]));
+	const response = branch.findLast((e) => e.kind === "response" && e.turnId === turnId &&
+		!(attempts.get(e.stepId)?.data as { auxiliary?: boolean } | undefined)?.auxiliary && !(e.data as { recovery?: boolean } | undefined)?.recovery);
+	if (!response) return undefined;
+	const stepId = response.stepId;
+	const intent = attempts.get(stepId);
+	if (!stepId || response.erased || response.message?.role !== "assistant" || !intent || intent.erased) throw new Error("Cannot restore the last answered step");
+	const records = kept.filter((e) => e.kind === "modular-agent.stepAfter" && e.turnId === turnId && e.stepId === stepId);
+	if (!records.length && (intent.data as { tracksStepAfter?: boolean } | undefined)?.tracksStepAfter === true) return { lastStep: { stepId }, response };
+	const record = records[0];
+	const decision = (record?.data as { decision?: unknown } | undefined)?.decision;
+	if (records.length !== 1 || record.erased || !branch.some((e) => e.id === record.id) ||
+		!(decision === null || (typeof decision === "object" && decision && "refuse" in decision && typeof decision.refuse === "string" && Object.keys(decision).length === 1))) {
+		throw new Error("Cannot establish the last step's gate decision");
+	}
+	return { lastStep: { stepId, decision: decision as ResumedStep["decision"] }, response };
+}
 
 /** Rebuild pending calls from the standard entry kinds on the current branch. */
 export function interruptedCalls(history: HistoryEntry[], turnId: string): InterruptedTurn["calls"] {
@@ -7,7 +27,7 @@ export function interruptedCalls(history: HistoryEntry[], turnId: string): Inter
 	const started = new Map(inTurn.filter((e) => e.kind === "toolStarted").map((e) => [e.toolCallId, e]));
 	const calls = new Map<string, InterruptedTurn["calls"][number]>();
 	for (const e of inTurn) {
-		if (e.kind !== "response" || e.message?.role !== "assistant") continue;
+		if (e.kind !== "response" || e.message?.role !== "assistant" || !["toolUse", "finished"].includes(e.message.stop)) continue;
 		for (const c of e.message.content.filter(isToolCall)) {
 			if (!answered.has(c.id)) calls.set(c.id, { id: c.id, name: c.name, input: c.arguments ?? {}, stepId: e.stepId, started: false, safeToRepeat: false });
 		}

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { relative, isAbsolute, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { addUsage, interruptedNote, isToolCall, text, zeroUsage, type Harness, type HistoryEntry, type Usage } from "@modular-agent/harness";
+import { addUsage, interruptedNote, isToolCall, restoreAnsweredStep, text, zeroUsage, type Harness, type HistoryEntry, type Usage } from "@modular-agent/harness";
 import type {
 	Answer,
 	AssistantMessage,
@@ -119,6 +119,7 @@ export async function startExternalPlugin(spec: ExternalPluginSpec, info: { proj
 				if (harness.plugins().includes(reg.name)) return `Plugin ${reg.name} is already loaded`;
 				if (reg.hooks?.some((h) => h.order != null && !["first", "normal", "last"].includes(h.order))) return "Unknown hook order";
 				if (new Set(items).size !== items.length) return "Registration repeats an item";
+				if (reg.replaces && new Set(reg.replaces).size !== reg.replaces.length) return "Registration repeats a replacement";
 				const missing = replacements.find((item) => !items.includes(item));
 				if (missing) return `Replacement ${missing} is not registered`;
 				const external = items.find((item) => externalItems.has(item));
@@ -252,7 +253,8 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				if (p.hook === "provider.response") {
 					if (!attempt.committed || attempt.response || p.payload.message?.role !== "assistant") throw invalidState("Invalid Provider response phase");
 					attempt.response = p.payload.message;
-					await api.runHook(p.hook, fromWire(p.payload));
+					const { sessionId, provider, model, message } = p.payload;
+					await api.runHook(p.hook, fromWire({ sessionId: sessionId ?? null, provider, model, message }));
 					return null;
 				}
 				if (parent.signal?.aborted) throw new WireError("cancelled", "Parent was cancelled");
@@ -439,6 +441,7 @@ interface Turn {
 	entries: Set<string>;
 	ended?: boolean;
 	limit?: string;
+	refusal?: string;
 	replacement?: ModelRequest;
 	replay?: HistoryEntry;
 }
@@ -457,7 +460,10 @@ class WireRuntime implements Runtime {
 			if (!t || t.ended || !peer.isWaiting(p.parentRequestId) || (p.sessionId !== undefined && p.sessionId !== t.input.sessionId)) throw invalidState("No live turn for this session");
 			return t;
 		};
-		const effect = (t: Turn) => { if (t.signal.aborted) throw new WireError("cancelled", "Turn was cancelled"); };
+		const effect = (t: Turn) => {
+			if (t.signal.aborted) throw new WireError("cancelled", "Turn was cancelled");
+			if (t.refusal !== undefined) throw invalidState("The step gate refused further work");
+		};
 		const atBoundary = (t: Turn) => !t.current || t.attempts.get(t.current)?.after;
 		const withLimit = async <T>(t: Turn, work: () => Promise<T>): Promise<T> => {
 			try { return await work(); }
@@ -522,17 +528,20 @@ class WireRuntime implements Runtime {
 					!(t.host.registration?.(call.original.name)?.definition.parallel && other.registration?.definition.parallel))) throw invalidState("A serial tool is still dispatched");
 				call.phase = "checking";
 				const registration = t.host.registration?.(call.original.name);
-				const hookPayload = { ...payload, call: call.original, definition: registration?.definition };
+				const hookPayload = { call: call.original, definition: registration?.definition };
 				const gate: { value: { call: ToolCall }; refused?: string; pending?: string } = !call.offered || !registration ? { value: hookPayload, refused: "not offered" } :
 					await t.host.hook<{ value: { call: ToolCall }; refused?: string; pending?: string }>("tool.before", hookPayload);
-				if (gate.refused) await this.settle(t, call, { callId: call.original.id, status: "refused", content: [text(gate.refused)] });
+				if (gate.refused !== undefined) {
+					const result = await this.settle(t, call, { callId: call.original.id, status: "refused", content: [text(gate.refused)] });
+					return toWire({ value: hookPayload, refused: gate.refused, result });
+				}
 				else if (gate.pending) call.phase = "pending";
 				else {
 					const allowed = gate.value.call;
 					if (!allowed || allowed.id !== call.original.id || allowed.name !== call.original.name ||
 						allowed.startedBy !== call.original.startedBy || allowed.actorId !== call.original.actorId || allowed.stepId !== call.original.stepId) {
-						await this.settle(t, call, { callId: call.original.id, status: "refused", content: [text("Gate changed call identity")] });
-						return toWire({ value: hookPayload, refused: "Gate changed call identity" });
+						const result = await this.settle(t, call, { callId: call.original.id, status: "refused", content: [text("Gate changed call identity")] });
+						return toWire({ value: hookPayload, refused: "Gate changed call identity", result });
 					}
 					call.allowed = allowed;
 					call.registration = registration;
@@ -542,21 +551,31 @@ class WireRuntime implements Runtime {
 			}
 			if (p.hook === "tool.after") {
 				const call = t.calls.get(payload.call?.id);
-				if (!call?.result || !sameCall(payload.call, call.allowed ?? call.original)) throw invalidState("Call has no settled result");
+				if (!call?.result || !sameCall(payload.call, call.allowed ?? call.original) || !wireEqual(payload.result, call.result)) throw invalidState("Tool result differs from committed result");
 				return toWire({ ...payload, result: call.result });
 			}
 			if (p.hook === "step.after" || p.hook === "model.failed") {
-				const step = t.attempts.get(payload.stepId);
-				if (!step?.record || payload.stepId !== t.current) throw invalidState("No answered step for hook");
+				const stepId = p.hook === "step.after" ? payload.stepId : t.current;
+				const step = t.attempts.get(stepId);
+				if (!step?.record || stepId !== t.current) throw invalidState("No answered step for hook");
 				if (p.hook === "step.after") {
-					if (step.after || !wireEqual(payload.response, step.answer) || [...t.calls.values()].some((call) => call.original.stepId === payload.stepId && call.phase !== "pending" && call.phase !== "settled")) throw invalidState("Step has an unfinished call round");
+					if (!wireEqual(payload.response, step.answer) || [...t.calls.values()].some((call) => call.phase !== "pending" && call.phase !== "settled")) throw invalidState("Step has an unfinished call round");
+					const answer = await t.host.hook<{ refused?: string }>("step.after", { stepId, response: step.answer });
+					if (!step.after) t.host.report("step.ended", { usage: step.answer?.usage }, { stepId });
 					step.after = true;
-					t.host.report("step.ended", { usage: step.answer?.usage }, { stepId: payload.stepId });
-				} else if (step.answer?.stop !== "failed") throw invalidState("Step did not fail");
+					t.refusal = answer.refused;
+					return toWire(answer);
+				} else {
+					if (step.answer?.stop !== "failed") throw invalidState("Step did not fail");
+					payload.stepId = stepId;
+					payload.request = step.request ?? payload.request;
+					payload.error = step.answer.error ?? { kind: "other", message: "unknown" };
+				}
 			}
 			if (p.hook === "turn.end") {
 				if (!t.signal.aborted && !t.limit && !atBoundary(t)) throw invalidState("Turn ended inside a step");
 				if (t.signal.aborted || t.limit) payload.outcome = t.signal.aborted ? { kind: "cancelled" } : { kind: "limit", limit: t.limit };
+				else if (t.refusal !== undefined) payload.outcome = { kind: "failed", error: t.refusal };
 				await this.closeReplay(t);
 				t.ended = true;
 			}
@@ -603,7 +622,7 @@ class WireRuntime implements Runtime {
 						step.record = await t.host.record({ kind: "response", writer: this.id, stepId: entry.stepId, message: step.answer, modelVisible: true });
 						t.usage = addUsage(t.usage, step.answer.usage);
 						if (step.answer.stop === "toolUse" || step.answer.stop === "finished") for (const part of step.answer.content.filter(isToolCall)) {
-							t.calls.set(part.id, { original: { id: part.id, name: part.name, input: part.arguments, startedBy: "model", stepId: entry.stepId },
+							t.calls.set(part.id, { original: { id: part.id, name: part.name, input: part.arguments, startedBy: "model", actorId: t.host.callActor?.(), stepId: entry.stepId },
 								offered: step.request!.tools.some((d) => d.name === part.name), phase: "unstarted" });
 						}
 					} finally { step.writing = false; }
@@ -665,7 +684,17 @@ class WireRuntime implements Runtime {
 		const t: Turn = { input, host, signal, attempts: new Map(), calls: new Map(), usage: zeroUsage(), entries: new Set() };
 		const interrupted = extra.interrupted as InterruptedTurn | undefined;
 		if (interrupted) {
-			const history = (await host.history()).filter((e) => e.turnId === input.turnId);
+			const branch = await host.history();
+			const restored = restoreAnsweredStep(branch, input.turnId, await host.history({ all: true }));
+			if (restored) {
+				const { lastStep, response } = restored;
+				t.current = lastStep.stepId;
+				const intent = branch.find((e) => e.kind === "modelRequest" && e.stepId === lastStep.stepId);
+				t.attempts.set(t.current, { answer: response.message as AssistantMessage, record: response, sent: true,
+					request: (intent?.data as { request?: ModelRequest } | undefined)?.request, after: lastStep.decision !== undefined });
+				t.refusal = lastStep.decision?.refuse;
+			}
+			const history = branch.filter((e) => e.turnId === input.turnId);
 			const responses = new Map(history.filter((e) => e.kind === "response").map((e) => [e.stepId, e]));
 			const unmatched = history.filter((e) => e.kind === "modelRequest" && !responses.has(e.stepId));
 			const last = unmatched.at(-1);
@@ -682,19 +711,11 @@ class WireRuntime implements Runtime {
 				t.usage = addUsage(t.usage, row?.message?.role === "assistant" ? row.message.usage : row?.usage);
 			}
 		}
-		const remaining: InterruptedTurn["calls"] = [];
 		for (const call of interrupted?.calls ?? (extra.calls as InterruptedTurn["calls"] | undefined) ?? []) {
-			const original: ToolCall = { id: call.id, name: call.name, input: call.input, startedBy: "model", stepId: call.stepId };
-			if (interrupted && (!this.supports.continuesAfterRestart || call.started && !call.safeToRepeat)) {
-				await host.record({ kind: "toolResult", writer: "harness", modelVisible: true, stepId: call.stepId, toolCallId: call.id,
-					message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: [text(interruptedNote(call.started))], isError: true },
-					data: { status: call.started ? "outcomeUnknown" : "notStarted" } });
-			} else {
-				t.calls.set(call.id, { original, offered: true, phase: "unstarted" });
-				remaining.push(call);
-			}
+			const original: ToolCall = { id: call.id, name: call.name, input: call.input, startedBy: "model", actorId: host.callActor?.(), stepId: call.stepId };
+			t.calls.set(call.id, { original, offered: true, phase: "unstarted" });
 		}
-		const req = this.peer.request<TurnOutcome>(method, { turn, ...toWire(interrupted ? { interrupted: { ...interrupted, calls: remaining } } : extra) }, signal);
+		const req = this.peer.request<TurnOutcome>(method, { turn, ...toWire(extra) }, signal);
 		this.turns.set(req.id, t);
 		try {
 			const reply = fromWire(await this.track(req, { runtime: true, sessionId: input.sessionId, signal })) as TurnOutcome;
@@ -703,9 +724,17 @@ class WireRuntime implements Runtime {
 			if (t.limit && (reply.outcome.kind !== "limit" || reply.outcome.limit !== t.limit)) throw invalidState("Runtime did not report the signalled limit");
 			if (method === "runtime/runTurn" && (!wireEqual(reply.usage, t.usage) || !wireEqual(reply.entries, [...t.entries]))) throw invalidState("Runtime outcome does not match its committed work");
 			if (!wireEqual(reply.result.openToolCalls, [...t.calls.values()].filter((c) => c.phase === "pending").map((c) => c.original.id))) throw invalidState("Runtime outcome has invalid open calls");
+			if (t.refusal !== undefined && !t.limit) return { ...reply, outcome: { kind: "failed", error: t.refusal } };
 			return reply;
 		} finally {
 			this.turns.delete(req.id);
+			for (const call of t.calls.values()) {
+				if (!["unstarted", "allowed", "checking"].includes(call.phase)) continue;
+				const original = call.original;
+				await host.record({ kind: "toolResult", writer: "harness", modelVisible: true, stepId: original.stepId, toolCallId: original.id,
+					message: { role: "toolResult", toolCallId: original.id, toolName: original.name, content: [text(interruptedNote(false))], isError: true },
+					data: { status: "notStarted" } });
+			}
 		}
 	}
 	runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome> {

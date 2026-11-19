@@ -418,6 +418,10 @@ export interface StepPreparation { stepId: string; usage: Usage }
  * is asynchronous, so a Runtime can run in another process.
  */
 export interface RuntimeHost {
+	/** The plugin wire host commits terminal tool results before replying. */
+	readonly hostSettlesTools?: boolean;
+	/** Authenticated attribution for model work, not supplied by a Runtime. */
+	callActor?(): string | undefined;
 	newId(): Promise<string>;
 	/** Ask plugins to decide the model request for this step ("before each step"). */
 	prepareStep(info: StepPreparation): Promise<ModelRequest>;
@@ -428,7 +432,7 @@ export interface RuntimeHost {
 	definition(toolName: string): Promise<ToolDefinition | undefined>;
 	/** Record entries in the session's history. */
 	record(entry: EntryDraft): Promise<HistoryEntry>;
-	history(): Promise<HistoryEntry[]>;
+	history(options?: { all?: boolean }): Promise<HistoryEntry[]>;
 	/** Take input given for the running turn, and record it. */
 	takeSteering(final?: boolean): Promise<HistoryEntry[]>;
 	registration?(name: string): { source: { plugin: string; toolSource: string }; definition: ToolDefinition } | undefined;
@@ -436,10 +440,14 @@ export interface RuntimeHost {
 	report(type: string, data?: any, ids?: { stepId?: string; toolCallId?: string }): void;
 }
 
+export type StepAfterDecision = null | { refuse: string };
+export interface ResumedStep { stepId: string; decision?: StepAfterDecision }
+
 /** A turn whose process stopped, as the history records it. */
 export interface InterruptedTurn {
 	turnId: string;
-	/** Tool calls the model asked for that have no result. */
+	lastStep?: ResumedStep;
+	/** Unresolved calls eligible for dispatch after recovery. */
 	calls: { id: string; name: string; input: Record<string, unknown>; stepId?: string; started: boolean; safeToRepeat: boolean }[];
 }
 

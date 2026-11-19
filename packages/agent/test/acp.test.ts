@@ -6,21 +6,21 @@ import { test } from "node:test";
 import { client, methods, type SessionNotification } from "@agentclientprotocol/sdk";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { approval } from "@modular-agent/approval";
-import type { Harness } from "@modular-agent/harness";
+import type { Harness, HistoryEntry, Plugin } from "@modular-agent/harness";
 import { acpInterface } from "@modular-agent/interface-acp";
 import { createAgent } from "../src/index.js";
 
 const dirs = () => ({ project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) });
 
 /** Our agent, with an ACP Interface, and an ACP client from the official SDK connected to it in process. */
-async function setup(responses: FauxResponseStep[], options: { permission?: "allow" | "refuse" | "never"; d?: { project: string; home: string }; waitMs?: number } = {}) {
+async function setup(responses: FauxResponseStep[], options: { permission?: "allow" | "refuse" | "never"; d?: { project: string; home: string }; waitMs?: number; plugins?: Plugin[] } = {}) {
 	const d = options.d ?? dirs();
 	const faux = fauxProvider();
 	const models = createModels();
 	models.setProvider(faux.provider);
 	faux.setResponses(responses);
 	const acp = acpInterface();
-	const harness: Harness = await createAgent({ ...d, models, model: "faux/faux-1", plugins: [approval({ policy: "ask", waitMs: options.waitMs }), acp] });
+	const harness: Harness = await createAgent({ ...d, models, model: "faux/faux-1", plugins: [approval({ policy: "ask", waitMs: options.waitMs }), ...(options.plugins ?? []), acp] });
 	const updates: SessionNotification[] = [];
 	const permissions: unknown[] = [];
 	let answerLater: ((optionId: string) => void) | undefined;
@@ -38,6 +38,31 @@ async function setup(responses: FauxResponseStep[], options: { permission?: "all
 }
 
 const kinds = (updates: SessionNotification[]) => updates.map((u) => u.update.sessionUpdate);
+
+test("ACP: withheld history entries are omitted before the page reply gate", async (t) => {
+	const seen: string[][] = [];
+	const gate: Plugin = { name: "hide-entries", setup(api) {
+		api.on("output", (event: { type: string; data: any }) => {
+			if (event.type === "entry" && event.data.kind === "hidden.entry") return { action: "block" };
+			if (event.type === "reply" && event.data.method === "_modular-agent/history") {
+				seen.push(event.data.result.entries.map((entry: HistoryEntry) => entry.kind));
+			}
+		});
+	} };
+	const { d, harness, ctx, connection } = await setup([], { plugins: [gate] });
+	t.after(async () => { connection.close(); await harness.stop(); });
+	await ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+	const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: d.project, mcpServers: [] });
+	const api = harness.api("test");
+	const after = api.history(sessionId).at(-1)!.id;
+	await api.append(sessionId, { kind: "hidden.entry", modelVisible: false, writer: "test" });
+	const visible = await api.append(sessionId, { kind: "visible.entry", modelVisible: false, writer: "test" });
+	const hiddenPage = await ctx.request("_modular-agent/history", { sessionId, after, limit: 1 });
+	assert.deepEqual(hiddenPage, { entries: [] });
+	const mixed = await ctx.request("_modular-agent/history", { sessionId, after, limit: 2 });
+	assert.deepEqual(mixed, { entries: [JSON.parse(JSON.stringify(visible))] });
+	assert.deepEqual(seen, [[], ["visible.entry"]]);
+});
 
 test("ACP: initialize declares what the agent supports; a prompt runs a turn with a tool call", async () => {
 	const { d, harness, ctx, updates, permissions, connection } = await setup([

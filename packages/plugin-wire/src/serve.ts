@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { isDeepStrictEqual } from "node:util";
+import { interruptedCalls, restoreAnsweredStep } from "@modular-agent/harness";
 import type {
 	Answer,
 	AssistantMessage,
@@ -36,6 +38,25 @@ export interface ServeOptions {
 	/** Where messages come from and go to. Defaults to this process's stdin and stdout. */
 	input?: NodeJS.ReadableStream;
 	output?: (line: string) => void;
+}
+
+async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: InterruptedTurn, runtime: Runtime) {
+	const invalid = () => new WireError("invalid_request", "Interrupted turn does not match its checkpoint");
+	if (interrupted?.turnId !== input.turnId || !Array.isArray(interrupted.calls)) throw invalid();
+	const branch = await host.history();
+	const kept = await host.history({ all: true });
+	let lastStep;
+	try { lastStep = restoreAnsweredStep(branch, input.turnId, kept)?.lastStep; }
+	catch { throw invalid(); }
+	if (!isDeepStrictEqual(lastStep, interrupted.lastStep)) throw invalid();
+	const settled = new Set(kept.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
+	const pending = new Set(branch.filter((e) => e.kind === "toolPending" && e.turnId === input.turnId).map((e) => e.toolCallId));
+	const expected = interruptedCalls(branch, input.turnId).filter((c) => !settled.has(c.id) && !pending.has(c.id));
+	if (expected.length !== interrupted.calls.length || expected.some((c, i) => {
+		const sent = interrupted.calls[i];
+		return !sent || !runtime.supports.continuesAfterRestart || c.started && (!c.safeToRepeat || sent.safeToRepeat !== true) ||
+			c.started !== sent.started || c.id !== sent.id || c.name !== sent.name || c.stepId !== sent.stepId || !isDeepStrictEqual(c.input, sent.input);
+	})) throw invalid();
 }
 
 /**
@@ -313,6 +334,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			},
 		};
 		const host: RuntimeHost = {
+			hostSettlesTools: true,
 			newId: async () => (await call<{ id: string }>("host/runtime/newId")).id,
 			prepareStep: async (info) => {
 				currentStep = info.stepId;
@@ -325,11 +347,11 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 				const { turnId: _t, ...rest } = entry as Record<string, unknown>;
 				return fromWire(await call("host/runtime/record", { entry: toWire(rest) })) as HistoryEntry;
 			},
-			history: async () => {
+			history: async (options) => {
 				const entries: HistoryEntry[] = [];
 				let after: string | undefined;
 				do {
-					const page: { entries: HistoryEntry[]; next?: string } = await call("host/history", { sessionId: input.sessionId, after });
+					const page: { entries: HistoryEntry[]; next?: string } = await call("host/history", { sessionId: input.sessionId, after, all: options?.all });
 					entries.push(...fromWire(page.entries));
 					after = page.next ?? undefined;
 				} while (after);
@@ -354,7 +376,9 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	});
 	peer.handle("runtime/resumeTurn", async (p, ctx) => {
 		const { input, host } = turnFor(p, ctx);
-		return outcome(await needRuntime().resumeTurn(input, host, ctx.signal, fromWire(p.interrupted) as InterruptedTurn));
+		const interrupted = fromWire(p.interrupted) as InterruptedTurn;
+		await validateResume(input, host, interrupted, needRuntime());
+		return outcome(await needRuntime().resumeTurn(input, host, ctx.signal, interrupted));
 	});
 	peer.handle("runtime/continueOpenCalls", async (p, ctx) => {
 		const { input, host } = turnFor(p, ctx);

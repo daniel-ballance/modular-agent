@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { interruptedCalls } from "./view.js";
+import { interruptedCalls, restoreAnsweredStep } from "./view.js";
 import { HookRegistry } from "./hooks.js";
-import { type InputReceipt, type InputTiming, type QueuedInput, Session } from "./session.js";
+import { inputIdOf, inputKeyScope, type InputReceipt, type InputTiming, type QueuedInput, Session } from "./session.js";
 import {
 	interruptedNote,
 	type Actor,
@@ -194,7 +194,7 @@ export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer"
 
 interface Tenant { rights: Authority[]; tokens?: number }
 interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens: { budget: number; used: number } | null }
-interface TurnState extends TurnSnapshot { endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean }
+interface TurnState extends TurnSnapshot { endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; stepAfterRunning?: boolean }
 
 /**
  * The Harness: hosts plugins, offers the plugin API, keeps sessions.
@@ -727,14 +727,12 @@ export class Harness {
 		const lastStart = branch.findLast((e) => e.kind === "turnStart" && !e.erased && !s.copied.has(e.id));
 		if (!lastStart?.turnId) return;
 		if (s.order.some((id) => { const e = s.entries.get(id)!; return e.kind === "turnEnd" && e.turnId === lastStart.turnId; })) return;
-		const env = await this.environmentFor(s);
 		const startedBy = (lastStart.data as { startedBy?: QueuedInput["startedBy"] } | undefined)?.startedBy ?? { kind: "actor", id: lastStart.actorId ?? "user" };
 		const pending = new Map((startedBy.kind === "answer" ? this.openCalls(s) : []).map((c) => [c.id, c]));
 		for (const c of interruptedCalls(branch, lastStart.turnId)) pending.set(c.id, c);
-		const calls = [...pending.values()].map((c) => ({
-			...c,
-			safeToRepeat: c.safeToRepeat && env?.containment === "strong" && this.findTool(s, c.name)?.definition.hints?.safeToRepeat === true,
-		}));
+		// This host has no restart-time cleanup confirmation from its environments.
+		const settled = new Set(s.order.map((id) => s.entries.get(id)!).filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
+		const calls = [...pending.values()].filter((c) => !settled.has(c.id)).map((c) => ({ ...c, safeToRepeat: false }));
 		const interrupted: InterruptedTurn = { turnId: lastStart.turnId, calls };
 		this.emit(s.id, "turn.interrupted", { pending: interrupted.calls.length }, "harness", { turnId: interrupted.turnId });
 		// Not awaited: the resumed turn may wait for an answer that only an Interface opened after this can give.
@@ -744,7 +742,7 @@ export class Harness {
 	/** Used when no Runtime is loaded: the turn ends as failed, and each pending call gets one result. */
 	private async endInterruptedTurn(s: Session, interrupted: InterruptedTurn): Promise<void> {
 		const drafts: EntryDraft[] = interrupted.calls.map((c) => ({
-			kind: "toolResult", writer: "harness", modelVisible: true, turnId: interrupted.turnId, toolCallId: c.id,
+			kind: "toolResult", writer: "harness", modelVisible: true, turnId: interrupted.turnId, stepId: c.stepId, toolCallId: c.id,
 			message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [text(interruptedNote(c.started))], isError: true },
 			data: { status: c.started ? "outcomeUnknown" : "notStarted" },
 		}));
@@ -919,7 +917,13 @@ export class Harness {
 	private async completeRewind(s: Session, to: string | null, previous: string | null, restore: { point: string; undo: string }, undoing: boolean): Promise<void> {
 		const move = (target: string | null, intent?: typeof restore) => this.commit(s, [{ kind: "position", writer: "harness", modelVisible: false, data: { to: target, ...(intent ? { restore: intent } : {}) } }]);
 		const env = await this.environmentFor(s);
-		if (!env?.restore) { s.suspended = true; throw new Error("Rewind environment unavailable"); }
+		if (!env?.restore || !env.hasPoint) { s.suspended = true; throw new Error("Rewind environment unavailable"); }
+		const verify = async (point: string) => {
+			try {
+				if (!await env.hasPoint!(point)) throw new Error("Cannot verify ownership of rewind point");
+			} catch (error) { s.suspended = true; throw error; }
+		};
+		await verify(restore.point);
 		const check = () => this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
 		try {
 			check();
@@ -928,6 +932,7 @@ export class Harness {
 			if (undoing) { s.suspended = true; throw error; }
 			try {
 				check();
+				await verify(restore.undo);
 				await move(previous, { point: restore.undo, undo: restore.point });
 				check();
 				await env.restore(restore.undo);
@@ -987,9 +992,9 @@ export class Harness {
 				try {
 					const inputKeys = entryIds.flatMap((id) => {
 						const e = session.entries.get(id);
-						const d = e?.data as { inputId?: string; key?: string; submittedBy?: string } | undefined;
-						const inputId = e?.inputId ?? d?.inputId;
-						return e?.kind === "inputAccepted" && inputId && d?.key ? [{ inputId, key: d.key, actorId: e.actorId, submittedBy: d.submittedBy }] : [];
+						const d = e?.data as { key?: string; submittedBy?: string; delegatedBy?: string } | undefined;
+						const inputId = e && inputIdOf(e);
+						return e?.kind === "inputAccepted" && inputId && d?.key ? [{ inputId, key: d.key, actorId: e.actorId, submittedBy: d.submittedBy ?? d.delegatedBy ?? e.actorId }] : [];
 					});
 					const reservations = [...new Map(inputKeys.map((k) => [k.inputId, k])).values()];
 					await this.commit(session, [{ kind: "erasure", writer, actorId, modelVisible: false, data: { entryIds, ...(reservations.length ? { inputKeys: reservations } : {}) } }]);
@@ -1136,9 +1141,10 @@ export class Harness {
 			this.requireAuthority(s, options.actorId, right);
 			if (options.delegatedBy) this.requireAuthority(s, options.delegatedBy, right);
 		}
-		if (options.key) {
-			if (s.erasedKeys.has(options.key)) return { duplicate: true, erased: true } as InputReceipt;
-			const earlier = s.keys.get(options.key);
+		const scoped = options.key && inputKeyScope(options.key, options.actorId, options.delegatedBy);
+		if (scoped) {
+			if (s.erasedKeys.has(scoped)) return { duplicate: true, erased: true } as InputReceipt;
+			const earlier = s.keys.get(scoped);
 			if (earlier) return { ...earlier, duplicate: true };
 		}
 		let content = typeof options.content === "string" ? [text(options.content)] : options.content;
@@ -1146,14 +1152,14 @@ export class Harness {
 		if (options.when !== "propose" && !options.delegatedBy && options.startedBy?.kind !== "job" && typed.startsWith("/") && this.commandTable.has(/^\/(\S+)/.exec(typed)?.[1] ?? "")) {
 			const output = await this.runCommand(sessionId, typed, options.actorId);
 			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true, output: output ?? undefined };
-			if (options.key) s.keys.set(options.key, receipt);
+			if (scoped) s.keys.set(scoped, receipt);
 			return receipt;
 		}
 		const transformed = await this.hooks.transform("input", { sessionId, content, actorId: options.actorId, when: options.when ?? "now" });
 		if (s.erasing) throw new Error("Erasure is in progress");
 		if (transformed.stopped) {
 			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true };
-			if (options.key) s.keys.set(options.key, receipt);
+			if (scoped) s.keys.set(scoped, receipt);
 			return receipt;
 		}
 		content = transformed.value.content;
@@ -1166,8 +1172,8 @@ export class Harness {
 				this.requireAuthority(s, queued.actorId, right);
 				if (queued.delegatedBy) this.requireAuthority(s, queued.delegatedBy, right);
 			}
-			if (queued.key && s.erasedKeys.has(queued.key)) return { duplicate: true, erased: true } as InputReceipt;
-			const earlier = queued.key && s.keys.get(queued.key);
+			if (scoped && s.erasedKeys.has(scoped)) return { duplicate: true, erased: true } as InputReceipt;
+			const earlier = scoped && s.keys.get(scoped);
 			if (earlier) return { ...earlier, duplicate: true };
 			return this.acceptInput(s, queued);
 		});
@@ -1187,10 +1193,9 @@ export class Harness {
 		await this.commit(s, [{
 			kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: q.actorId, inputId: q.id, sources: q.sources,
 			jobId: q.startedBy.kind === "job" ? q.startedBy.id : undefined,
-			data: { inputId: q.id, key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, delegatedBy: q.delegatedBy, taken },
+			data: { inputId: q.id, key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, submittedBy: q.delegatedBy, taken },
 		}]);
 		const receipt: InputReceipt = { inputId: q.id, taken };
-		if (q.key && !s.keys.has(q.key)) s.keys.set(q.key, receipt);
 		if (q.when !== "propose") {
 			if (taken === "now") this.startTurn(s, q);
 			else (taken === "inTurn" ? s.steering : s.followUps).push(q);
@@ -1402,16 +1407,36 @@ export class Harness {
 			sources: new Map(), actors: new Set(this.recordedTurnActors(branch, turnId)),
 			jobs: new Set(this.recordedTurnJobs(branch, turnId)),
 		};
+		const kept = s.order.map((id) => s.entries.get(id)!);
+		const pending = new Set(branch.filter((e) => e.kind === "toolPending" && e.turnId === turnId).map((e) => e.toolCallId));
+		const calls = interrupted.calls.filter((c) => !pending.has(c.id));
 		let outcome: TurnOutcome;
 		try {
+			const restored = restoreAnsweredStep(branch, turnId, kept);
+			const eligible = calls.filter((c) => {
+				const offer = branch.find((e) => e.kind === "modelRequest" && e.stepId === c.stepId && !e.erased);
+				return runtime.supports.continuesAfterRestart && !restored?.lastStep.decision && !c.started && this.findTool(s, c.name) &&
+					(offer?.data as { tools?: string[] } | undefined)?.tools?.includes(c.name) && this.workRights(s, [...state.actors], state.jobs).includes("tools");
+			});
+			await this.endInterruptedTurn(s, { turnId, calls: calls.filter((c) => !eligible.includes(c)) });
 			outcome = await runtime.resumeTurn(
 				{ sessionId: s.id, turnId, startedBy, model: this.turnModel(s, turnId, state, model), settings: state.settings, resultShape: snapshot?.resultShape },
 				this.runtimeHost(s, turnId, state),
 				signal,
-				interrupted,
+				{ turnId, calls: eligible, ...(restored ? { lastStep: restored.lastStep } : {}) },
 			);
 		} catch (error) {
 			outcome = this.failedOutcome(error instanceof Error ? error.message : String(error));
+		}
+		if (!s.suspended) {
+			const keptNow = s.order.map((id) => s.entries.get(id)!);
+			const terminal = new Set(keptNow.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
+			if (!signal.aborted) for (const e of keptNow) if (e.kind === "toolPending" && e.turnId === turnId && e.toolCallId && !e.erased && !terminal.has(e.toolCallId)) pending.add(e.toolCallId);
+			const open = signal.aborted ? [] : [...new Set([
+				...interrupted.calls.filter((c) => pending.has(c.id)).map((c) => c.id), ...outcome.result.openToolCalls,
+			])].filter((id) => !terminal.has(id));
+			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !terminal.has(c.id) && !open.includes(c.id)) });
+			outcome = { ...outcome, result: { ...outcome.result, openToolCalls: open } };
 		}
 		await this.finishTurn(s, turnId, outcome, state, signal);
 	}
@@ -1459,6 +1484,7 @@ export class Harness {
 		const withAuthority = <T>(fn: () => T): T => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs }, fn);
 		return {
 			newId: async () => this.newId(),
+			callActor: () => state.actors.values().next().value ?? this.actorForJob(s, state.jobs),
 			prepareStep: async ({ stepId, usage }) => {
 				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 				const attempts = s.order.map((id) => s.entries.get(id)!).filter((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary).length;
@@ -1485,7 +1511,24 @@ export class Harness {
 					state.endedHook = true;
 					if ((state.tenantLimit || await this.tenantBudgetReached(s)) && payload.outcome?.kind !== "cancelled") payload = { ...payload, outcome: { kind: "limit", limit: "tenantTokens" } };
 				}
-				if (name === "step.after" && await this.tenantBudgetReached(s)) state.tenantLimit = true;
+				if (name === "step.after") {
+					if (state.stepAfterRunning) throw new Error("Step gate is in progress");
+					state.stepAfterRunning = true;
+					try {
+						const restored = restoreAnsweredStep(s.branch(), turnId, s.order.map((id) => s.entries.get(id)!));
+						if (!restored || restored.lastStep.stepId !== payload.stepId || !isDeepStrictEqual(restored.response.message, payload.response)) throw new Error("No matching answered step");
+						if (await this.tenantBudgetReached(s)) state.tenantLimit = true;
+						const value = { sessionId: s.id, turnId, stepId: payload.stepId, response: restored.response.message };
+						let decision = restored.lastStep.decision;
+						if (decision === undefined) {
+							const gate = await withAuthority(() => this.hooks.gate("step.after", value));
+							decision = gate.refused !== undefined ? { refuse: gate.refused } : gate.pending !== undefined ? { refuse: "Invalid pending step decision" } : null;
+							await this.commit(s, [{ kind: "modular-agent.stepAfter", writer: "harness", turnId, stepId: payload.stepId,
+								modelVisible: false, data: { decision }, sources: [restored.response.id] }]);
+						}
+						return { value, ...(decision === null ? {} : { refused: decision.refuse }) } as never;
+					} finally { state.stepAfterRunning = false; }
+				}
 				const run = () => withAuthority(() => this.hooks.run(name, { ...payload, sessionId: s.id, turnId }));
 				const result = name === "tool.before" && payload.call ? await this.toolWork.run(payload.call, run) : await run();
 				if (name === "turn.result" && typeof result?.refused === "string") {
@@ -1503,7 +1546,7 @@ export class Harness {
 				const found = this.findTool(s, name);
 				return found && { source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition };
 			},
-			history: async () => s.branch(),
+			history: async (options) => options?.all ? s.order.map((id) => s.entries.get(id)!) : s.branch(),
 			record: async (draft) => {
 				if (draft.kind === "turnStart" || draft.kind === "turnEnd") {
 					return s.branch().find((e) => e.turnId === turnId && e.kind === draft.kind)
@@ -1559,7 +1602,7 @@ export class Harness {
 					await check();
 					const [intent] = await this.commit(s, [{
 						kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
-						data: { model: scope.model, safeToRepeat, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat ? { request: prepared.request } : {}) },
+						data: { model: scope.model, safeToRepeat, tracksStepAfter: true, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat ? { request: prepared.request } : {}) },
 						sources: state.sources.get(stepId),
 					}]);
 					try { await check(); }
@@ -2228,7 +2271,7 @@ export function parseModel(value: unknown): { provider: string; id: string } | u
 	return undefined;
 }
 
-const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting inputAccepted inputHandedBack input turnStart modelRequest response toolStarted toolPending toolResult inputRequest secretAnswerAccepted inputAnswer resultFeedback turnEnd summary position erasure jobStarted jobCleanupUnconfirmed jobEnded plugins".split(" "));
+const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting inputAccepted inputHandedBack input turnStart modelRequest response toolStarted toolPending toolResult inputRequest secretAnswerAccepted inputAnswer resultFeedback modular-agent.stepAfter turnEnd summary position erasure jobStarted jobCleanupUnconfirmed jobEnded plugins".split(" "));
 
 function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () => string): HistoryEntry[] {
 	const kept = branch.filter((e) => !e.erased && e.kind !== "position");

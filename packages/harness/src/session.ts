@@ -3,6 +3,22 @@ import { modelView } from "./view.js";
 import { erasedEntry } from "./types.js";
 import type { Actor, AgentEvent, Answer, ContentPart, HistoryEntry, InputRequest, Job, ModelMessage, StoredSession } from "./types.js";
 
+export function inputIdOf(entry: HistoryEntry): string | undefined {
+	return entry.inputId ?? (entry.data as { inputId?: string } | undefined)?.inputId;
+}
+
+export function inputHandedBackIds(entry: HistoryEntry): string[] {
+	if (entry.inputId) return [entry.inputId];
+	if (entry.inputIds) return entry.inputIds;
+	const id = inputIdOf(entry);
+	return id ? [id] : (entry.data as { inputIds?: string[] } | undefined)?.inputIds ?? [];
+}
+
+export function inputKeyScope(key: string, actorId?: string, submittedBy = actorId): string {
+	// Reserved job keys belong to a host-assigned job, not to an input principal.
+	return key.startsWith("job:") ? key : JSON.stringify([submittedBy, actorId, key]);
+}
+
 export type InputTiming = "now" | "steer" | "after" | "propose";
 export interface QueuedInput {
 	id: string;
@@ -110,28 +126,30 @@ export class Session {
 		}
 		switch (entry.kind) {
 			case "inputAccepted": {
-				const { inputId: legacyId, key, content, when, releasedBy, delegatedBy, taken, parked } = entry.data as {
-					inputId: string; key?: string; content: ContentPart[]; when: InputTiming; releasedBy?: string; delegatedBy?: string; taken?: InputReceipt["taken"]; parked?: boolean;
+				const { key, content, when, releasedBy, submittedBy, delegatedBy = submittedBy, taken, parked } = entry.data as {
+					key?: string; content: ContentPart[]; when: InputTiming; releasedBy?: string; submittedBy?: string; delegatedBy?: string; taken?: InputReceipt["taken"]; parked?: boolean;
 				};
-				const inputId = entry.inputId ?? legacyId;
+				const inputId = inputIdOf(entry)!;
 				const actorId = entry.actorId!;
 				const startedBy = entry.jobId ? { kind: "job" as const, id: entry.jobId } : { kind: "actor" as const, id: actorId };
 				const queued = { id: inputId, actorId, key, content, when, releasedBy, delegatedBy, time: entry.time, kind: "input", startedBy };
 				this.admissions.set(inputId, queued);
 				if (when === "propose" || parked === true && !releasedBy) this.proposals.set(inputId, queued);
 				else this.proposals.delete(inputId);
-				if (key && !this.keys.has(key)) this.keys.set(key, { inputId, taken: taken ?? (when === "propose" ? "proposed" : when === "steer" ? "inTurn" : when) });
+				const scoped = key && inputKeyScope(key, actorId, submittedBy ?? delegatedBy);
+				if (scoped && !this.keys.has(scoped) && !this.erasedKeys.has(scoped)) this.keys.set(scoped, { inputId, taken: taken ?? (when === "propose" ? "proposed" : when === "steer" ? "inTurn" : when) });
 				break;
 			}
 			case "inputHandedBack":
 				for (const id of entry.inputId ? [entry.inputId] : (entry.data as { inputIds?: string[]; inputId?: string })?.inputIds ?? ((entry.data as { inputId?: string })?.inputId ? [(entry.data as { inputId: string }).inputId] : [])) { this.admissions.delete(id); this.proposals.delete(id); }
 				break;
 			case "input": {
-				const { inputId: legacyId, key } = (entry.data ?? {}) as { inputId?: string; key?: string };
-				const inputId = entry.inputId ?? legacyId;
+				const { key, delegatedBy } = (entry.data ?? {}) as { key?: string; delegatedBy?: string };
+				const inputId = inputIdOf(entry);
 				if (inputId) {
 					this.admissions.delete(inputId);
-					if (key && !this.keys.has(key)) this.keys.set(key, { inputId, taken: "now" });
+					const scoped = key && inputKeyScope(key, entry.actorId, delegatedBy);
+					if (scoped && !this.keys.has(scoped) && !this.erasedKeys.has(scoped)) this.keys.set(scoped, { inputId, taken: "now" });
 				}
 				break;
 			}
@@ -159,19 +177,21 @@ export class Session {
 				this.actors.delete((entry.data as { actorId: string }).actorId);
 				break;
 			case "erasure": {
-				for (const { key, inputId } of (entry.data as { inputKeys?: { key: string; inputId: string }[] }).inputKeys ?? []) {
-					this.erasedKeys.add(key);
-					this.keys.delete(key);
+				for (const { key, inputId, actorId, submittedBy } of (entry.data as { inputKeys?: { key: string; inputId: string; actorId?: string; submittedBy?: string }[] }).inputKeys ?? []) {
+					const scoped = inputKeyScope(key, actorId, submittedBy);
+					this.erasedKeys.add(scoped);
+					this.keys.delete(scoped);
 					this.admissions.delete(inputId);
 					this.proposals.delete(inputId);
 				}
 				for (const id of (entry.data as { entryIds: string[] }).entryIds) {
 					const target = this.entries.get(id);
-					// Erasing an input also forgets its key.
-					const erasedKey = (target?.data as { key?: string } | undefined)?.key;
-					if (erasedKey) this.keys.delete(erasedKey);
-					const inputId = (target?.data as { inputId?: string } | undefined)?.inputId;
-					if (inputId) { this.admissions.delete(inputId); this.proposals.delete(inputId); }
+					const inputId = target && inputIdOf(target);
+					if (inputId) {
+						for (const [key, receipt] of this.keys) if (receipt.inputId === inputId) this.keys.delete(key);
+						this.admissions.delete(inputId);
+						this.proposals.delete(inputId);
+					}
 					if (target && !target.erased) this.entries.set(id, erasedEntry(target));
 				}
 				break;

@@ -1,5 +1,4 @@
 import {
-	interruptedNote,
 	type AssistantMessage,
 	type GateResult,
 	type HistoryEntry,
@@ -22,7 +21,7 @@ import {
 	zeroUsage,
 } from "@modular-agent/harness";
 
-interface Prepared { call: ToolCall; refused?: string; pending?: string }
+interface Prepared { call: ToolCall; refused?: string; pending?: string; result?: ToolResult }
 
 export interface TransientRuntimeOptions {
 	/** Default step limit when the session sets none. */
@@ -62,18 +61,25 @@ export class TransientRuntime implements Runtime {
 		return outcome;
 	}
 
-	/** A transient Runtime ends a turn whose process stopped. Each pending call gets one result. */
+	/** A transient Runtime ends a turn whose process stopped. The host settles abandoned calls. */
 	resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
 		return this.withHooks(input, host, () => this.recover(input, host, signal, interrupted), false, signal);
 	}
 
 	protected async recover(_input: TurnInput, host: RuntimeHost, _signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
-		const entries: string[] = [];
-		const settled = new Set((await host.history()).filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
-		for (const c of interrupted.calls) if (!settled.has(c.id)) {
-			entries.push((await this.settle(host, c, c.started ? "outcomeUnknown" : "notStarted")).id);
-		}
-		return { outcome: { kind: "failed", error: "The process stopped during the turn" }, result: { openToolCalls: [] }, entries, usage: zeroUsage() };
+		if (interrupted.calls.length) throw new Error("The host did not settle interrupted calls");
+		const after = await this.resumedGate(host, interrupted, await host.history());
+		return { outcome: { kind: "failed", error: after?.refuse ?? "The process stopped during the turn" }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
+	}
+
+	protected async resumedGate(host: RuntimeHost, interrupted: InterruptedTurn, history: HistoryEntry[]) {
+		const last = interrupted.lastStep;
+		if (!last) return;
+		if (last.decision !== undefined) return last.decision;
+		const response = history.find((e) => e.kind === "response" && e.turnId === interrupted.turnId && e.stepId === last.stepId)?.message;
+		if (response?.role !== "assistant") throw new Error("Missing committed response for resumed step");
+		const gate = await host.hook<GateResult<unknown>>("step.after", { stepId: last.stepId, response });
+		return gate?.refused === undefined ? null : { refuse: gate.refused };
 	}
 
 	/** Run calls left open past an earlier turn, which now have their answers, then carry on. */
@@ -92,44 +98,15 @@ export class TransientRuntime implements Runtime {
 	protected async runPending(host: RuntimeHost, calls: InterruptedTurn["calls"], signal: AbortSignal, entries: string[], mayRun: (c: InterruptedTurn["calls"][number]) => boolean | Promise<boolean>): Promise<string[]> {
 		const open: string[] = [];
 		for (const c of calls) {
-			if (!(await mayRun(c))) {
-				if (!(await host.history()).some((e) => e.kind === "toolResult" && e.toolCallId === c.id)) entries.push((await this.settle(host, c, "outcomeUnknown")).id);
-				continue;
-			}
-			if (signal.aborted) {
-				entries.push((await this.settle(host, c, c.started ? "outcomeUnknown" : "notStarted")).id);
-				continue;
-			}
+			if (!(await mayRun(c))) throw new Error("The host passed an ineligible interrupted call");
+			if (signal.aborted) break;
 			const stepId = c.stepId ?? await host.newId();
 			const part = { type: "toolCall" as const, id: c.id, name: c.name, arguments: c.input };
-			let recorded: HistoryEntry | undefined;
-			if (c.started) {
-				const starts = async () => (await host.history()).filter((e) => e.kind === "toolStarted" && e.toolCallId === c.id).length;
-				const before = await starts();
-				let ran: Awaited<ReturnType<RuntimeHost["runToolCall"]>> | undefined;
-				let prepared: Prepared | undefined;
-				try {
-					prepared = await this.preflight(host, part, stepId);
-					if (!prepared.refused && !prepared.pending) ran = await host.runToolCall(prepared.call, signal);
-				} catch {
-					// A failed check tells us nothing about the first attempt.
-				}
-				const didStart = ran && !isPending(ran) && ["refused", "failed", "notStarted"].includes(ran.status) ? await starts() > before : !!ran;
-				recorded = didStart && prepared ? await this.complete(host, prepared, stepId, ran) : await this.settle(host, c, "outcomeUnknown");
-			} else recorded = await this.runCall(host, part, stepId, signal);
+			const recorded = await this.runCall(host, part, stepId, signal);
 			if (recorded) entries.push(recorded.id);
 			else open.push(c.id);
 		}
 		return open;
-	}
-
-	protected settle(host: RuntimeHost, c: InterruptedTurn["calls"][number], status: "outcomeUnknown" | "notStarted") {
-		const note = interruptedNote(status === "outcomeUnknown");
-		return host.record({
-			kind: "toolResult", writer: "runtime", modelVisible: true, stepId: c.stepId, toolCallId: c.id,
-			message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [text(note)], isError: true },
-			data: { status },
-		});
 	}
 
 	/** The step loop. It rebuilds the model context from the history on every step, so it can start mid-turn. */
@@ -182,11 +159,11 @@ export class TransientRuntime implements Runtime {
 			}
 			if (message.stop === "failed") {
 				const decision = !compacted && retries < maxRetries ? await host.hook<{ retry: boolean; request?: ModelRequest } | undefined>("model.failed", {
-					stepId, error: message.error ?? ({ kind: "other", message: "unknown" } as ModelError), attempt: retries, request,
+					error: message.error ?? ({ kind: "other", message: "unknown" } as ModelError), attempt: retries, request,
 				}) : undefined;
 				const after = await host.hook<GateResult<unknown>>("step.after", { stepId, response: message });
 				if (signal.aborted) return done({ kind: "cancelled" }, message);
-				if (after?.refused) return done({ kind: "failed", error: after.refused }, message);
+				if (after?.refused !== undefined) return done({ kind: "failed", error: after.refused }, message);
 				if (decision?.retry) {
 					retries++;
 					if (message.error?.kind === "contextTooLarge") compacted = true;
@@ -206,7 +183,7 @@ export class TransientRuntime implements Runtime {
 				const prepared: Prepared[] = [];
 				for (const part of calls) prepared.push(await this.preflight(host, part, stepId));
 				await Promise.all(prepared.map(async (p) => {
-					const ran = p.refused || p.pending ? undefined : await host.runToolCall(p.call, signal);
+					const ran = p.refused !== undefined || p.pending ? undefined : await host.runToolCall(p.call, signal);
 					const recorded = await this.complete(host, p, stepId, ran);
 					if (recorded) entries.push(recorded.id);
 					else open.push(p.call.id);
@@ -227,7 +204,7 @@ export class TransientRuntime implements Runtime {
 			host.report("step.ended", { usage: message.usage }, { stepId });
 			// "After each step": a plugin may end the turn.
 			const after = await host.hook<GateResult<unknown>>("step.after", { stepId, response: message });
-			if (after?.refused) return done({ kind: "failed", error: after.refused }, message);
+			if (after?.refused !== undefined) return done({ kind: "failed", error: after.refused }, message);
 			if (signal.aborted) return done({ kind: "cancelled" }, message);
 			if (open.length) {
 				if (this.supports.inputDuringTurn) for (const e of await host.takeSteering(true)) entries.push(e.id);
@@ -251,7 +228,7 @@ export class TransientRuntime implements Runtime {
 
 	protected async runCall(host: RuntimeHost, part: ToolCallPart, stepId: string, signal: AbortSignal): Promise<HistoryEntry | undefined> {
 		const prepared = await this.preflight(host, part, stepId);
-		const ran = prepared.refused || prepared.pending ? undefined : await host.runToolCall(prepared.call, signal);
+		const ran = prepared.refused !== undefined || prepared.pending ? undefined : await host.runToolCall(prepared.call, signal);
 		return this.complete(host, prepared, stepId, ran);
 	}
 
@@ -260,7 +237,11 @@ export class TransientRuntime implements Runtime {
 		const call: ToolCall = { id: part.id, name: part.name, input: part.arguments ?? {}, startedBy: "model", stepId };
 		const gate = await host.hook<GateResult<{ call: ToolCall }>>("tool.before", { call, definition: await host.definition(call.name) });
 		if (gate.pending) return { call, pending: gate.pending };
-		if (gate.refused) return { call, refused: gate.refused };
+		if (gate.refused !== undefined) {
+			const result = (gate as typeof gate & { result?: ToolResult }).result;
+			if (host.hostSettlesTools && (!result || result.callId !== call.id)) throw new Error("Missing committed result for refused call");
+			return { call, refused: gate.refused, result };
+		}
 		return { call: gate.value.call };
 	}
 
@@ -269,7 +250,10 @@ export class TransientRuntime implements Runtime {
 		const call = prepared.call;
 		if (prepared.pending) return this.leaveOpen(host, call, prepared.pending);
 		if (ran && isPending(ran)) return this.leaveOpen(host, call, ran.pending);
-		let result: ToolResult = prepared.refused || !ran ? { callId: call.id, status: "refused", content: [text(`Refused: ${prepared.refused}`)] } : (ran as ToolResult);
+		const committed = prepared.result ?? ran as ToolResult | undefined;
+		if (host.hostSettlesTools && !committed) throw new Error("Missing committed tool result");
+		let result: ToolResult = committed ?? { callId: call.id, status: "refused", content: [text(`Refused: ${prepared.refused}`)] };
+		if (host.hostSettlesTools && result.status === "notStarted") throw new Error("The host abandoned the tool call");
 		try {
 			const after = await host.hook<{ result: ToolResult }>("tool.after", { call, result });
 			result = after?.result ?? result;
@@ -293,6 +277,7 @@ export class TransientRuntime implements Runtime {
 
 	/** Every tool call ends with exactly one result. */
 	private async settleUnanswered(host: RuntimeHost, message: AssistantMessage, stepId: string, status: "cancelled", entries: string[], from = 0) {
+		if (host.hostSettlesTools) return;
 		const calls = message.content.filter(isToolCall).slice(from);
 		for (const part of calls) {
 			const e = await host.record({

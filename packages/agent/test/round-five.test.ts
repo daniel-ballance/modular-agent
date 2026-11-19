@@ -60,6 +60,46 @@ test("portable receipts survive reopening even when input is handed back, and an
 	assert.equal((api.history(sid).find((e) => e.kind === "inputAnswer")?.data as { reason: string }).reason, "refused");
 });
 
+test("portable input reservations keep submitter and attributed actor distinct", async (t) => {
+	const { api, store, dirs } = await open(t);
+	const sid = await seed(store, dirs.project, [
+		joined(),
+		draft("actorJoined", { data: { actor: { id: "delegate", kind: "program", rights: ALL_AUTHORITY } } }),
+		draft("inputAccepted", { actorId: "user", inputId: "erased", data: { key: "same", when: "propose", content: [text("old")], submittedBy: "delegate" } }),
+		draft("erasure", { data: { entryIds: ["e2"], inputKeys: [{ inputId: "erased", key: "same", actorId: "user", submittedBy: "delegate" }] } }),
+	]);
+	await api.openSession(sid);
+	const admission = { key: "same", when: "propose" as const, content: "new" };
+	assert.deepEqual(await api.input(sid, { ...admission, actorId: "user", delegatedBy: "delegate" }), { duplicate: true, erased: true });
+	const first = await api.input(sid, { ...admission, actorId: "user" });
+	const second = await api.input(sid, { ...admission, actorId: "delegate" });
+	assert.notEqual(first.inputId, second.inputId);
+	assert.deepEqual(await api.input(sid, { ...admission, actorId: "user" }), { ...first, duplicate: true });
+});
+
+for (const scenario of ["due", "allow", "refuse", "unknown"] as const) {
+	test(`durable reopen: step.after ${scenario} at the checkpoint`, async (t) => {
+		let gates = 0;
+		const hook: Plugin = { name: "count-step-gates", setup(api) { api.on("step.after", () => { gates++; }); } };
+		const { api, store, dirs } = await open(t, folders(t), [durableRuntime(), hook]);
+		const ids = { turnId: "turn", stepId: "step" };
+		const sid = await seed(store, dirs.project, [joined(), setting("model", model),
+			draft("turnStart", { turnId: ids.turnId, actorId: "user", data: { model, startedBy: { kind: "actor", id: "user" }, tools: [], settings: {}, system: "" } }),
+			draft("modelRequest", { ...ids, data: { model, safeToRepeat: false, tools: [], ...(scenario === "unknown" ? {} : { tracksStepAfter: true }) } }),
+			draft("response", { ...ids, modelVisible: true, message: { role: "assistant", stop: "finished", content: [text("answer")] } }),
+			...(scenario === "allow" || scenario === "refuse" ? [draft("modular-agent.stepAfter", { ...ids, data: { decision: scenario === "allow" ? null : { refuse: "committed denial" } } })] : []),
+		]);
+		await api.openSession(sid);
+		await api.waitForIdle(sid);
+		const history = api.history(sid);
+		assert.equal(gates, Number(scenario === "due"));
+		assert.equal(history.filter((e) => e.kind === "modular-agent.stepAfter").length, Number(scenario !== "unknown"));
+		const end = history.findLast((e) => e.kind === "turnEnd");
+		assert.deepEqual((end?.data as { outcome: unknown })?.outcome, scenario === "due" || scenario === "allow" ? { kind: "completed" } :
+			{ kind: "failed", error: scenario === "refuse" ? "committed denial" : "Cannot establish the last step's gate decision" });
+	});
+}
+
 test("rewind restores files before an out-of-turn call and refuses points from a stopped environment", async (t) => {
 	const first = await open(t);
 	const { api, dirs } = first;
@@ -136,7 +176,7 @@ test("durable reopen sends committed result feedback in its next request", async
 		draft("inputAccepted", { inputId: "admission", actorId: "user", data: { when: "now", taken: "now", content: [text("Question")] } }),
 		draft("turnStart", { turnId, actorId: "user", data: { model, tools: [], system: "", settings: {}, startedBy: { kind: "actor", id: "user" } } }),
 		draft("input", { turnId, inputId: "admission", actorId: "user", modelVisible: true, message: { role: "user", content: [text("Question")] } }),
-		draft("modelRequest", { turnId, stepId: "first", data: { model, tools: [], safeToRepeat: false } }),
+		draft("modelRequest", { turnId, stepId: "first", data: { model, tools: [], safeToRepeat: false, tracksStepAfter: true } }),
 		draft("response", { turnId, stepId: "first", modelVisible: true, message: { role: "assistant", content: [text("An answer")], stop: "finished" } }),
 		draft("resultFeedback", { turnId, modelVisible: true, data: { reason } }),
 	]);

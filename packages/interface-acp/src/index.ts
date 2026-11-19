@@ -14,6 +14,8 @@ import {
 	type Plugin,
 	type PluginApi,
 	type Provider,
+	inputHandedBackIds,
+	inputIdOf,
 	isToolCall,
 	lowerReasoning,
 	parseModel,
@@ -105,7 +107,7 @@ export class AcpInterface implements InterfaceCapability {
 	private client?: AgentContext;
 	private binding = BINDING;
 	private initialized = false;
-	private exactApprovals = new Set<string>();
+	private deliveredPollApprovals = new Set<string>();
 	private clientCaps: acp.ClientCapabilities = {};
 	private sessions = new Map<string, SessionState>();
 	private pending = new Map<string, AbortController>();
@@ -320,16 +322,13 @@ export class AcpInterface implements InterfaceCapability {
 			const changed = new Set<string>();
 			const max = 4 * 1024 * 1024;
 			let bytes = Buffer.byteLength('{"entries":[]}');
-			for (let i = at + 1; i < raw.length && entries.length < limit; i++) {
+			for (let i = at + 1; i < Math.min(raw.length, at + 1 + limit); i++) {
 				const entry = raw[i];
 				const request = entry.kind === "inputRequest" ? (entry.data as { request?: InputRequest } | undefined)?.request : undefined;
 				const view = request && this.requestView(request);
 				const projected = view ? { ...entry, data: { request: view } } : entry;
 				const allowed = await this.api.gateOutput(sessionId, this.actorId, "entry", projected);
-				if (!allowed) {
-					if (view) this.exactApprovals.delete(view.id);
-					throw new RequestError(-32000, "History entry was blocked", { code: "withheld" });
-				}
+				if (!allowed) continue;
 				const nextBytes = i + 1 < raw.length ? Buffer.byteLength(`,"nextEntryId":${JSON.stringify(entry.id)}`) : 0;
 				const estimate = view ? { ...allowed, data: { request: { ...(allowed.data as { request: typeof view }).request, answerable: false } } } : allowed;
 				const size = Buffer.byteLength(JSON.stringify(estimate)) + Number(entries.length > 0);
@@ -344,8 +343,9 @@ export class AcpInterface implements InterfaceCapability {
 				bytes += size;
 				entries.push(allowed);
 			}
+			const last = entries.at(-1);
 			const page = await this.gateReply(sessionId, "_modular-agent/history", {
-				entries, ...(at + 1 + entries.length < raw.length ? { nextEntryId: entries.at(-1)!.id } : {}),
+				entries, ...(last && last.id !== raw.at(-1)?.id ? { nextEntryId: last.id } : {}),
 			});
 			page.entries = page.entries.map((entry) => {
 				const original = before.get(entry.id);
@@ -353,7 +353,6 @@ export class AcpInterface implements InterfaceCapability {
 				const { request } = entry.data as { request: typeof original };
 				const exact = !changed.has(entry.id) && isDeepStrictEqual(request, original);
 				const answerable = this.canAnswer(sessionId, request.id) && (request.kind !== "approval" || exact);
-				if (request.kind === "approval" && !exact) this.exactApprovals.delete(request.id);
 				return { ...entry, data: { request: { ...request, answerable } } };
 			});
 			if (Buffer.byteLength(JSON.stringify(page)) > max) throw new RequestError(-32000, "Gated history page does not fit", { code: "result_too_large" });
@@ -378,11 +377,11 @@ export class AcpInterface implements InterfaceCapability {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
 			const view = this.requestViews(sessionId);
-			for (const q of view.requests) if (q.kind === "approval") this.exactApprovals.delete(q.id);
+			for (const q of view.requests) if (q.kind === "approval") this.deliveredPollApprovals.delete(q.id);
 			const gated = await this.gateReply(sessionId, "_modular-agent/requests", view);
 			return { requests: gated.requests.map((q) => {
 				const answerable = this.canAnswer(sessionId, q.id) && (q.kind !== "approval" || isDeepStrictEqual(q, view.requests.find((r) => r.id === q.id)));
-				if (q.kind === "approval" && answerable) this.exactApprovals.add(q.id);
+				if (q.kind === "approval" && answerable) this.deliveredPollApprovals.add(q.id);
 				return { ...q, answerable };
 			}) };
 		});
@@ -395,7 +394,7 @@ export class AcpInterface implements InterfaceCapability {
 			const request = this.api.openRequests(sessionId).find((r) => r.id === params.requestId);
 			if (!request || (request.answerers.length && !request.answerers.includes(actorId))) return notOpen();
 			const right = request.kind === "approval" ? "approve" : "answer";
-			if (!this.hasRight(sessionId, actorId, right) || request.kind === "approval" && !this.exactApprovals.has(request.id)) return notOpen();
+			if (!this.hasRight(sessionId, actorId, right) || request.kind === "approval" && (!this.deliveredPollApprovals.has(request.id) || !this.hasRight(sessionId, actorId, "watch") || !this.canAnswer(sessionId, request.id))) return notOpen();
 			const declined = params.declined === true || params.value === undefined || request.kind === "approval" && params.value === "refuse";
 			if ((request.kind === "secret" && params.value !== undefined) || !declined && (typeof params.value !== "string" || (request.kind === "choice" && !request.options?.includes(params.value)) ||
 				(request.kind === "approval" && params.value !== "allow"))) throw bindingError("invalid_params", "Invalid answer value");
@@ -591,11 +590,11 @@ export class AcpInterface implements InterfaceCapability {
 			return this.gateReply(sessionId, "session/prompt", promptResponse(receipt.inputId, { kind: "completed" }, receipt.duplicate ? { duplicate: true } : {}));
 		}
 		const all = this.api.history(sessionId, { all: true });
-		const taken = all.find((e) => e.kind === "input" && (e.data as { inputId?: string } | undefined)?.inputId === receipt.inputId);
-		const end = taken && all.find((e) => e.kind === "turnEnd" && e.turnId === taken.turnId);
-		const latest = all.findLast((e) => e.kind === "inputAccepted" && (e.data as { inputId?: string } | undefined)?.inputId === receipt.inputId);
+		const taken = all.find((e) => e.kind === "input" && inputIdOf(e) === receipt.inputId);
+		const end = taken?.turnId ? all.find((e) => e.kind === "turnEnd" && e.turnId === taken.turnId) : undefined;
+		const latest = all.findLast((e) => e.kind === "inputAccepted" && inputIdOf(e) === receipt.inputId);
 		if (receipt.duplicate && !taken && ((latest?.data as { when?: string } | undefined)?.when === "propose" ||
-			all.some((e) => e.kind === "inputHandedBack" && (e.data as { inputIds?: string[] } | undefined)?.inputIds?.includes(receipt.inputId)))) {
+			all.some((e) => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(receipt.inputId)))) {
 			throw RequestError.invalidParams(undefined, "The input was not taken by a turn");
 		}
 		if (end) {
@@ -628,7 +627,7 @@ export class AcpInterface implements InterfaceCapability {
 			(state.handedBack ??= []).push({ inputId: e.data.inputId, content: e.data.content });
 		}
 		if (e.type === "entry.added" && (e.data as HistoryEntry).kind === "input") {
-			const inputId = (e.data as HistoryEntry).data && ((e.data as HistoryEntry).data as { inputId?: string }).inputId;
+			const inputId = inputIdOf(e.data as HistoryEntry);
 			if (inputId) for (const w of state.waiters) if (w.inputId === inputId) w.turnId = (e.data as HistoryEntry).turnId;
 			return;
 		}
@@ -702,7 +701,7 @@ export class AcpInterface implements InterfaceCapability {
 					state.toolOutput.delete(entry.toolCallId);
 					await this.toolResult(sessionId, entry);
 				} else if (entry.kind === "input" && entry.message) {
-					const inputId = (entry.data as { inputId?: string } | undefined)?.inputId;
+					const inputId = inputIdOf(entry);
 					if (inputId && state.ownInputs.has(inputId)) return;
 					for (const part of entry.message.content) if (part.type === "text") await this.update(sessionId, { sessionUpdate: "user_message_chunk", content: { type: "text", text: (part as { text: string }).text } });
 				}
@@ -791,7 +790,7 @@ export class AcpInterface implements InterfaceCapability {
 
 	onInputRequestClosed(requestId: string): void {
 		// Answered elsewhere, or no longer answerable: withdraw the question from the client.
-		this.exactApprovals.delete(requestId);
+		this.deliveredPollApprovals.delete(requestId);
 		this.pending.get(requestId)?.abort();
 	}
 
@@ -814,11 +813,12 @@ export class AcpInterface implements InterfaceCapability {
 			if (!gated || !isDeepStrictEqual(gated, payload) || Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, ...gated })) > MAX_LINE_BYTES) {
 				const views = this.requestViews(request.sessionId);
 				const poll = await this.gateReply(request.sessionId, "_modular-agent/requests", views).catch(() => undefined);
-				if (!poll || !isDeepStrictEqual(views.requests.find((q) => q.id === request.id), poll.requests.find((q) => q.id === request.id))) return { declined: true, reason: "refused" };
+				const exact = poll?.requests.find((q) => q.id === request.id);
+				if (!this.canAnswer(request.sessionId, request.id) || !this.hasRight(request.sessionId, this.actorId, "watch") ||
+					!exact || !isDeepStrictEqual(views.requests.find((q) => q.id === request.id), exact)) return { declined: true, reason: "refused" };
 				return;
 			}
-			if (signal.aborted || !this.hasRight(request.sessionId, this.actorId, "approve")) return;
-			this.exactApprovals.add(request.id);
+			if (signal.aborted || !this.canAnswer(request.sessionId, request.id)) return;
 			const response = await client.request(methods.client.session.requestPermission, gated.params, { cancellationSignal: signal }) as acp.RequestPermissionResponse;
 			// The permission reply refers to the exact view already delivered on this route.
 			if (signal.aborted || !this.canAnswer(request.sessionId, request.id)) return;

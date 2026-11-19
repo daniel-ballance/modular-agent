@@ -70,7 +70,9 @@ async function main() {
 	if (args.acp) {
 		// stdout carries the protocol, so nothing else may write to it.
 		console.log = (...m: unknown[]) => process.stderr.write(m.join(" ") + "\n");
-		const acp = acpInterface();
+		const actorId = process.env.MODULAR_AGENT_ACTOR;
+		if (actorId === "") throw new Error("MODULAR_AGENT_ACTOR must be a nonempty id");
+		const acp = acpInterface({ actorId });
 		// Over ACP, approval is a session setting (the "approval" option), so the plugin is always loaded; it starts off.
 		const withApproval = args.approval ? [] : [approval({ policy: "off", waitMs: args.approvalWait })];
 		const conformance = process.env.MODULAR_AGENT_CONFORMANCE === "1" ? [conformanceProvider()] : [];
