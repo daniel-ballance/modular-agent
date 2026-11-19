@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
         builder.provider(scripted_provider(json!([{"text":"Hello over ACP."}])))
     };
     let agent = builder.build().await?;
-    agent.serve_acp().await?;
+    agent.serve_acp(Default::default()).await?;
     agent.close().await
 }
 

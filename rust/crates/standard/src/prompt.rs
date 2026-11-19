@@ -1,7 +1,7 @@
 //! System prompt for the standard configuration.
 use crate::skills::{self, SkillsPlugin};
 use anyhow::{Context, Result};
-use modular_agent::{Order, Plugin};
+use modular_agent::{Code, Error, Order, Plugin, TurnAddition};
 use std::path::{Path, PathBuf};
 
 const PREAMBLE: &str = "You are a coding assistant running inside Modular Agent, a coding agent harness. Help users inspect files, run commands, and modify code.";
@@ -63,9 +63,21 @@ fn render(files: &[(String, String)]) -> String {
 
 impl PromptPlugin {
     pub fn plugin(self, skills: SkillsPlugin) -> Plugin {
-        Plugin::new("standard.prompt").on_turn_system(Order::Last, move |cx| {
+        Plugin::new("standard.prompt").on_turn_before_with(Order::Last, move |cx| {
             let (global, skills) = (self.global.clone(), skills.clone());
             async move {
+                let project = cx.project.ok_or_else(|| {
+                    Error::new(
+                        Code::NotSupported,
+                        "the prompt needs the in-process project",
+                    )
+                })?;
+                let tools = cx.tools.ok_or_else(|| {
+                    Error::new(
+                        Code::NotSupported,
+                        "the prompt needs the in-process tool catalog",
+                    )
+                })?;
                 let mut sections = vec![format!("{PREAMBLE}\n\n{RULES}")];
                 let mut files = vec![];
                 if let Ok(text) = std::fs::read_to_string(&global)
@@ -73,23 +85,25 @@ impl PromptPlugin {
                 {
                     files.push((global.to_string_lossy().into_owned(), text));
                 }
-                files.extend(project_files(&cx.project)?);
+                files.extend(project_files(&project)?);
                 if !files.is_empty() {
                     sections.push(render(&files));
                 }
-                let listing = skills::prompt(&skills.for_project(&cx.project));
+                let listing = skills::prompt(&skills.for_project(&project));
                 if !listing.is_empty() {
                     sections.push(format!("<skills>\n{listing}\n</skills>"));
                 }
-                sections.push(tools_code::catalog::prompt(&tools_code::functions(
-                    cx.tools,
-                )?));
+                sections.push(tools_code::catalog::prompt(&tools_code::functions(tools)?));
                 sections.push(format!(
                     "<cwd>\n{}\n</cwd>\n\n<date>\n{}\n</date>",
-                    cx.project.display(),
+                    project.display(),
                     jiff::Zoned::now().date()
                 ));
-                Ok(sections.join("\n\n"))
+                Ok(TurnAddition {
+                    system: Some(sections.join("\n\n")),
+                    context: None,
+                    sources: Some(vec![]),
+                })
             }
         })
     }

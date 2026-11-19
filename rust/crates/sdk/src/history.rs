@@ -47,6 +47,7 @@ pub struct SessionInfo {
     pub id: String,
     pub project: std::path::PathBuf,
     pub settings: Value,
+    pub created_at: u64,
     pub last_active: u64,
 }
 
@@ -55,7 +56,8 @@ impl From<base::SessionData> for SessionInfo {
         Self {
             id: data.id,
             project: data.project,
-            settings: data.settings,
+            settings: base::portable::settings_to_wire(&data.settings),
+            created_at: data.entries.first().map_or(0, |e| e.at),
             last_active: data.entries.last().map_or(0, |e| e.at),
         }
     }
@@ -71,7 +73,7 @@ impl History {
             .collect())
     }
 
-    pub fn session(&self, id: &str) -> Result<SessionInfo> {
+    pub fn session_info(&self, id: &str) -> Result<SessionInfo> {
         Ok(self.0.load(id)?.into())
     }
 }

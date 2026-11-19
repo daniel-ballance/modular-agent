@@ -92,7 +92,7 @@ async fn agent(
         .plugin(Plugin::new("system").on_turn_before(|_| async {
             Ok(modular_agent::TurnAddition {
                 system: Some("Be brief.".into()),
-                context: None,
+                ..Default::default()
             })
         }));
     for plugin in plugins {

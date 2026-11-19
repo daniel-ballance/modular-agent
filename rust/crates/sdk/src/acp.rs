@@ -10,18 +10,19 @@ use std::{
 
 type Sink = Arc<dyn base::EventSink>;
 
-/// An application that builds a separate SDK Agent for each ACP project/session.
+/// A project-aware ACP composition. The saved session ID lets a host
+/// select parts using recorded settings before recovery starts.
 #[async_trait::async_trait]
-pub trait AcpHost: Send + Sync + 'static {
-    async fn agent(&self, project: &Path, reopening: Option<&str>) -> Result<Agent>;
+pub trait AcpComposition: Send + Sync + 'static {
+    async fn compose(&self, project: &Path, reopening: Option<&str>) -> Result<Agent>;
     fn history(&self) -> Result<crate::History>;
     fn trust(&self, project: &Path) -> Result<()>;
 
-    fn initial_settings(&self) -> Value {
-        serde_json::json!({})
+    fn project_settings(&self, _project: &Path) -> Result<Value> {
+        Ok(serde_json::json!({}))
     }
 
-    async fn attach_mcp(&self, _session: &str, _project: &Path, servers: Value) -> Result<()> {
+    async fn project_mcp(&self, _session: &str, _project: &Path, servers: Value) -> Result<()> {
         if servers.as_array().is_some_and(Vec::is_empty) {
             Ok(())
         } else {
@@ -33,20 +34,21 @@ pub trait AcpHost: Send + Sync + 'static {
     }
 }
 
-/// Serve a project-aware host on stdio. Every composition must opt into process hosting.
-pub async fn serve_acp(host: impl AcpHost) -> Result<()> {
-    Ok(interface_acp::run(Arc::new(ProjectFactory(host))).await?)
+/// Serve the built agent's project by default, or compose per project.
+#[derive(Default)]
+pub struct AcpOptions {
+    pub compose: Option<Arc<dyn AcpComposition>>,
 }
 
-struct ProjectFactory<H>(H);
+struct ProjectFactory(Arc<dyn AcpComposition>, Agent);
 
 #[async_trait::async_trait]
-impl<H: AcpHost> interface_acp::Factory for ProjectFactory<H> {
+impl interface_acp::Factory for ProjectFactory {
     async fn declaration(&self) -> base::Result<Value> {
-        let agent = self.0.agent(&std::env::current_dir()?, None).await?;
-        let declaration = agent.declaration_for(None, true);
-        agent.close().await?;
-        Ok(declaration?)
+        Ok(self.1.declaration_for(None, true)?)
+    }
+    fn session_declaration(&self, api: &dyn base::AgentApi, session: &str) -> base::Result<Value> {
+        Ok(self.1.project_declaration(api, Some(session), true)?)
     }
 
     async fn build(&self, project: &Path, sink: Sink) -> base::Result<base::Api> {
@@ -59,7 +61,7 @@ impl<H: AcpHost> interface_acp::Factory for ProjectFactory<H> {
         reopening: Option<&str>,
         sink: Sink,
     ) -> base::Result<base::Api> {
-        let agent = self.0.agent(project, reopening).await?;
+        let agent = self.0.compose(project, reopening).await?;
         if !agent.inner.plugin_host {
             agent.close().await?;
             return Err(base::anyhow!("serve_acp requires a plugin host"));
@@ -89,8 +91,10 @@ impl<H: AcpHost> interface_acp::Factory for ProjectFactory<H> {
         Ok(self.0.trust(project)?)
     }
 
-    fn initial_settings(&self) -> Value {
-        base::portable::settings_from_wire(&self.0.initial_settings())
+    fn project_settings(&self, project: &Path) -> base::Result<Value> {
+        Ok(base::portable::settings_from_wire(
+            &self.0.project_settings(project)?,
+        ))
     }
 
     async fn attach(
@@ -100,7 +104,7 @@ impl<H: AcpHost> interface_acp::Factory for ProjectFactory<H> {
         project: &Path,
         servers: Value,
     ) -> base::Result<()> {
-        Ok(self.0.attach_mcp(session, project, servers).await?)
+        Ok(self.0.project_mcp(session, project, servers).await?)
     }
     async fn detach(&self, _: base::Api, _: &str) {}
 }
@@ -128,12 +132,15 @@ impl base::EventSink for Routes {
 impl Agent {
     /// Serve this agent's project on stdio. Build with `plugin_host(true)` before serving.
     /// Start the Interface before opening embedded sessions; stdout belongs to ACP.
-    pub async fn serve_acp(&self) -> Result<()> {
+    pub async fn serve_acp(&self, options: AcpOptions) -> Result<()> {
         if !self.inner.plugin_host {
             return Err(Error::new(
                 Code::InvalidComposition,
                 "serve_acp requires a plugin host",
             ));
+        }
+        if let Some(compose) = options.compose {
+            return Ok(interface_acp::run(Arc::new(ProjectFactory(compose, self.clone()))).await?);
         }
         let routes = self
             .inner
@@ -196,8 +203,8 @@ impl interface_acp::Factory for Factory {
     fn trust(&self, _project: &Path) -> base::Result<()> {
         base::bail!("ACP cannot change project trust")
     }
-    fn initial_settings(&self) -> Value {
-        self.0.inner.session_settings.clone()
+    fn project_settings(&self, _: &Path) -> base::Result<Value> {
+        Ok(self.0.inner.session_settings.clone())
     }
     async fn attach(
         &self,

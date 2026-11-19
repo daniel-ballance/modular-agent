@@ -159,9 +159,14 @@ async fn interactive(session: &Session, questions: Questions) -> Result<()> {
                 let Some(line) = line.transpose()? else {
                     // A closed pipe cannot answer questions. Decline both those
                     // already shown and any opened while the last input drains.
-                    while session.pending_work()? {
+                    let idle = session.wait_idle();
+                    tokio::pin!(idle);
+                    loop {
                         questions.decline_all();
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        tokio::select! {
+                            result = &mut idle => { result?; break; }
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => (),
+                        }
                     }
                     break;
                 };

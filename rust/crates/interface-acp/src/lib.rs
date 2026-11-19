@@ -58,8 +58,8 @@ pub trait Factory: Send + Sync {
     fn session_declaration(&self, api: &dyn AgentApi, session: &str) -> Result<Value> {
         binding::declaration(api, Some(session))
     }
-    fn initial_settings(&self) -> Value {
-        json!({})
+    fn project_settings(&self, _project: &Path) -> Result<Value> {
+        Ok(json!({}))
     }
     async fn attach(&self, api: Api, session: &str, project: &Path, servers: Value) -> Result<()>;
     async fn detach(&self, api: Api, session: &str);

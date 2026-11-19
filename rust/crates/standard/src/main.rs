@@ -284,16 +284,27 @@ async fn start() -> Result<()> {
     }
     if acp {
         ensure!(
-            terminal.prompt.is_none() && terminal.session.is_none() && !trust && !resume,
-            "with --acp the client creates sessions and grants trust"
+            terminal.prompt.is_none() && terminal.session.is_none() && !resume,
+            "with --acp the client creates or reopens sessions"
         );
-        sdk::serve_acp(standard::acp::Factory {
-            standard,
-            settings: terminal.settings,
-            mcp: Mcp::default(),
-        })
-        .await?;
-        return Ok(());
+        if trust {
+            standard.configuration().trust(&project)?;
+        }
+        let mcp = Mcp::default();
+        // The bootstrap agent supplies the declaration. Only the actual
+        // project/session composition can choose to start Claude.
+        let agent = builder(&standard, &project, &mcp, vec![])?.build().await?;
+        let served = agent
+            .serve_acp(sdk::AcpOptions {
+                compose: Some(std::sync::Arc::new(standard::acp::Factory {
+                    standard,
+                    settings: terminal.settings,
+                    mcp,
+                })),
+            })
+            .await;
+        let closed = agent.close().await;
+        return Ok(served.and(closed)?);
     }
     if terminal.list {
         let project = project.canonicalize()?;
@@ -320,7 +331,7 @@ async fn start() -> Result<()> {
     }
     let recorded = match &terminal.session {
         Some(session) => {
-            let data = standard.history()?.session(session)?;
+            let data = standard.history()?.session_info(session)?;
             project = data.project;
             data.settings["model"].as_str().map(str::to_owned)
         }

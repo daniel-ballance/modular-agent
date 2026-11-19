@@ -64,7 +64,7 @@ fn hooks() -> Plugin {
             assert_eq!(before.input[0]["text"], "go");
             Ok(TurnAddition {
                 system: Some("A test contribution.".into()),
-                context: None,
+                ..Default::default()
             })
         })
         .on_tool_after(|after| async move {

@@ -97,6 +97,10 @@ pub struct TurnBefore {
     pub session_id: String,
     pub turn_id: String,
     pub input: Value,
+    /// In-process snapshot of the session's project.
+    pub project: Option<std::path::PathBuf>,
+    /// Tool definitions callable by plugins; absent over the binding.
+    pub tools: Option<Vec<Value>>,
 }
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct TurnAddition {
@@ -104,6 +108,10 @@ pub struct TurnAddition {
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
+    /// History entries used by this contribution. An empty list asserts that
+    /// it does not depend on any session history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<String>>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

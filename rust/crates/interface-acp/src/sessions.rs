@@ -497,7 +497,7 @@ impl State {
                 .map(|v| v.as_str().ok_or_else(|| anyhow!("tenant must be a string")))
                 .transpose()?;
             match api
-                .create_in_tenant(&project, self.factory.initial_settings(), tenant)
+                .create_in_tenant(&project, self.factory.project_settings(&project)?, tenant)
                 .await
             {
                 Ok(id) => id,

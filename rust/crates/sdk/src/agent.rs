@@ -12,7 +12,11 @@ use crate::{
 use agent_api as base;
 use agent_harness::Harness;
 use serde_json::{Value, json};
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 /// What survives the agent's process (docs/sdk/placement.md#durability).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,7 +94,9 @@ pub(crate) struct Inner {
     pub hub: Arc<Hub>,
     pub project: PathBuf,
     pub persistent: bool,
+    pub history: History,
     pub plugin_host: bool,
+    pub acp_conformance: bool,
     pub acp: std::sync::OnceLock<Arc<crate::acp::Routes>>,
     pub session_settings: Value,
     pub drivers: std::sync::Mutex<
@@ -191,16 +197,34 @@ impl Agent {
         })
     }
 
+    /// List stored sessions without opening them or starting recovery.
+    pub fn sessions(&self, project: Option<&Path>) -> Result<Vec<crate::SessionInfo>> {
+        self.inner.history.sessions(project)
+    }
+
+    /// Read stored session metadata without acquiring a writer lease.
+    pub fn session_info(&self, id: &str) -> Result<crate::SessionInfo> {
+        self.inner.history.session_info(id)
+    }
+
     /// What this agent supports, as the ACP declaration.
     pub fn declaration(&self) -> Result<Value> {
         self.declaration_for(None, false)
     }
 
     pub(crate) fn declaration_for(&self, session: Option<&str>, acp: bool) -> Result<Value> {
-        let api = self.inner.harness.as_ref();
+        self.project_declaration(self.inner.harness.as_ref(), session, acp)
+    }
+
+    pub(crate) fn project_declaration(
+        &self,
+        api: &dyn base::AgentApi,
+        session: Option<&str>,
+        acp: bool,
+    ) -> Result<Value> {
         let mut declaration = interface_acp::declaration(api, session)?;
         declaration["portableSessions"] = json!(self.inner.persistent);
-        if !acp {
+        if !acp || !self.inner.acp_conformance {
             declaration["severalActors"] = json!(false);
             declaration["sessionLimits"] = json!(false);
             declaration["tenants"] = json!(false);
@@ -416,6 +440,7 @@ impl AgentBuilder {
             None if self.durability == Durability::Ephemeral => memory_history(),
             None => file_history(state.join("sessions"))?,
         };
+        let saved_history = History(history.clone(), persistent, store_name);
         if let Some(recipe) = &mut restart {
             recipe.project = Some(project.clone());
             recipe.history = Some(History(history.clone(), persistent, store_name));
@@ -602,7 +627,9 @@ impl AgentBuilder {
                 hub,
                 project,
                 persistent,
+                history: saved_history,
                 plugin_host,
+                acp_conformance: self.acp_conformance,
                 acp: Default::default(),
                 session_settings,
                 drivers: Default::default(),
