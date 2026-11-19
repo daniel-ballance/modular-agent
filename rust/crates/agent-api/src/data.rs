@@ -371,6 +371,17 @@ impl ToolDefinition {
     pub fn open_world(&self) -> bool {
         self.hints["openWorld"] == true || self.hints["_wire"]["hints"]["openWorld"] == true
     }
+    /// Limit who may start this tool: any of `model`, `ui` and `plugin`.
+    /// A call made by another tool counts as `plugin`.
+    pub fn for_callers(mut self, callers: &[&str]) -> Self {
+        let mut wire = crate::wire::definition(&self);
+        wire["callers"] = json!(callers);
+        if !self.hints.is_object() {
+            self.hints = json!({});
+        }
+        self.hints["_wire"] = wire;
+        self
+    }
     pub fn allows(&self, caller: &str) -> bool {
         self.hints["_wire"]["callers"]
             .as_array()

@@ -40,9 +40,7 @@ impl interface_acp::Factory for Factory {
         }
     }
     fn trust(&self, project: &Path) -> Result<()> {
-        config_files::FilesConfiguration {
-            global: self.options.global_config.clone(),
-        }
+        config_files::FilesConfiguration::new(self.options.global_config.clone())
         .trust(project)
     }
     fn initial_settings(&self) -> Value {

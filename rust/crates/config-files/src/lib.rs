@@ -7,6 +7,17 @@ use std::{
 #[derive(Clone)]
 pub struct FilesConfiguration {
     pub global: PathBuf,
+    /// Session defaults beneath both settings files. `None` keeps the
+    /// experiment's defaults.
+    pub defaults: Option<Value>,
+}
+impl FilesConfiguration {
+    pub fn new(global: PathBuf) -> Self {
+        Self {
+            global,
+            defaults: None,
+        }
+    }
 }
 fn read(path: &Path) -> Result<Value> {
     match std::fs::read(path) {
@@ -97,7 +108,7 @@ impl Plugin for FilesConfiguration {
 }
 impl Configuration for FilesConfiguration {
     fn settings(&self, project: &Path) -> Result<Value> {
-        let mut settings = json!({"model":"gpt-6-luna","thinking":"low","step_limit":12,"output_limit":2048,"context_tokens":24000});
+        let mut settings = self.defaults.clone().unwrap_or_else(|| json!({"model":"gpt-6-luna","thinking":"low","step_limit":12,"output_limit":2048,"context_tokens":24000}));
         for path in [&self.global, &project.join(".modular-agent.json")] {
             let mut layer = read(path)?;
             // Executable plugin configuration is not a session default or history content.
@@ -121,9 +132,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let project = root.path().join("project");
         std::fs::create_dir(&project)?;
-        let c = FilesConfiguration {
-            global: root.path().join("settings.json"),
-        };
+        let c = FilesConfiguration::new(root.path().join("settings.json"));
         std::fs::write(
             &c.global,
             r#"{"plugins":[{"name":"guardrail.literal","options":{"secrets":["global"]}}]}"#,

@@ -1094,6 +1094,14 @@ impl Harness {
                 if !tool.allows("model") {
                     continue;
                 }
+                // `model_tools` names the only tools the model is offered.
+                // The rest stay registered, for other tools and the UI to call.
+                if data.settings["model_tools"]
+                    .as_array()
+                    .is_some_and(|names| !names.iter().any(|name| name == &tool.name))
+                {
+                    continue;
+                }
                 ensure!(
                     !tools.iter().any(|t: &ToolDefinition| t.name == tool.name),
                     "duplicate tool {}",

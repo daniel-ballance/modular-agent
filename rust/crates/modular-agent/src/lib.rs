@@ -48,9 +48,7 @@ async fn compose_with(
         }),
     };
     let plugins: Vec<Arc<dyn Plugin>> = vec![
-        Arc::new(config_files::FilesConfiguration {
-            global: options.global_config,
-        }),
+        Arc::new(config_files::FilesConfiguration::new(options.global_config)),
         history,
         Arc::new(credentials_file::FileCredentials {
             openai_key: options.key_file,
@@ -95,9 +93,7 @@ pub async fn compose_project(
     project: &std::path::Path,
 ) -> Result<Arc<Harness>> {
     let project = project.canonicalize()?;
-    let plan = config_files::FilesConfiguration {
-        global: options.global_config.clone(),
-    }
+    let plan = config_files::FilesConfiguration::new(options.global_config.clone())
     .plugin_plan(&project)?;
     let plugin_home = options.history.with_file_name("plugins");
     let h = compose_with(

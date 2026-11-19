@@ -154,9 +154,7 @@ async fn start() -> Result<()> {
         .project;
     }
     if trust_project {
-        config_files::FilesConfiguration {
-            global: options.global_config.clone(),
-        }
+        config_files::FilesConfiguration::new(options.global_config.clone())
         .trust(&terminal.project)?;
     }
     let api = compose_project(options, provider, interface, runtime, &terminal.project).await?;

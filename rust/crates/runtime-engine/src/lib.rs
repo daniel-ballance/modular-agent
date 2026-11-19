@@ -1008,7 +1008,7 @@ impl Engine {
                 api,
                 &entry.scope,
                 "tool.result",
-                true,
+                call.started_by != "tool",
                 json!(result),
                 vec![entry.id.clone()],
             )?;
@@ -1134,6 +1134,80 @@ impl Runtime for Engine {
             api.emit(Event::new(&scope, "tool.ended", json!(result)))
                 .await?;
         }
+        Ok(result)
+    }
+    async fn nested_tool(
+        &self,
+        api: Api,
+        mut scope: Scope,
+        mut call: ToolCall,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult> {
+        let parent = scope
+            .call
+            .clone()
+            .ok_or_else(|| anyhow!("a nested call needs a parent call"))?;
+        let data = api.snapshot(&scope.session)?;
+        ensure!(
+            data.entries.iter().any(|e| e.kind == "tool.started"
+                && e.scope.call.as_deref() == Some(&parent))
+                && !data.entries.iter().any(|e| e.kind == "tool.result"
+                    && e.scope.call.as_deref() == Some(&parent)),
+            "the parent call is not running"
+        );
+        ensure!(
+            !data
+                .entries
+                .iter()
+                .any(|e| e.kind == "tool.call" && e.scope.call.as_deref() == Some(&call.id)),
+            "duplicate tool call id"
+        );
+        call.started_by = "tool".into();
+        if !call.extra.is_object() {
+            call.extra = json!({});
+        }
+        call.extra["parentCallId"] = json!(parent);
+        scope.call = Some(call.id.clone());
+        let entry = self.record(&api, &scope, "tool.call", false, json!(call), vec![])?;
+        let mut tools = vec![];
+        for name in api.capability_names("tools.") {
+            tools.extend(
+                capability::<dyn ToolSource>(api.as_ref(), &name)?
+                    .tools(&data)
+                    .into_iter()
+                    .filter(|tool| tool.allows("plugin")),
+            );
+        }
+        let mut result = self
+            .execute(
+                &api,
+                &Execution {
+                    tools: &tools,
+                    cancel: &cancel,
+                },
+                &scope,
+                &call,
+                &entry,
+            )
+            .await?;
+        if result.status == ToolStatus::Waiting {
+            // A nested call has no continuation of its own to come back to.
+            result = ToolResult::new(
+                &call,
+                ToolStatus::Refused,
+                "it needs an answer that cannot outlast the calling tool",
+            );
+        }
+        self.record(
+            &api,
+            &scope,
+            "tool.result",
+            false,
+            json!(result),
+            vec![entry.id],
+        )?;
+        api.emit(Event::new(&scope, "tool.ended", json!(result)))
+            .await?;
         Ok(result)
     }
     async fn interrupted(&self, api: Api, scope: Scope) -> Result<()> {

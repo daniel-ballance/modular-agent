@@ -304,6 +304,18 @@ pub trait Runtime: Send + Sync {
     async fn run(&self, api: Api, input: TurnInput) -> Result<TurnResult>;
     async fn interrupted(&self, api: Api, scope: Scope) -> Result<()>;
     async fn tool(&self, api: Api, scope: Scope, call: ToolCall) -> Result<ToolResult>;
+    /// Run a call made by a running tool call. `scope.call` is the live parent.
+    /// The nested call passes its own gates and is recorded with its parent,
+    /// outside the model's view.
+    async fn nested_tool(
+        &self,
+        _api: Api,
+        _scope: Scope,
+        _call: ToolCall,
+        _cancel: CancellationToken,
+    ) -> Result<ToolResult> {
+        bail!("this Runtime does not run nested tool calls")
+    }
 }
 pub async fn refresh_tool_sources(api: &Api, scope: &Scope) -> Result<()> {
     for key in api.capability_names("tools.") {
@@ -372,6 +384,16 @@ pub trait WorkingEnvironment: Send + Sync {
         }
     }
     async fn write(&self, project: &Path, path: &str, text: &str) -> Result<()>;
+    /// Names in a directory, in no fixed order. A directory's name ends in '/'.
+    /// `Unsupported` lets the caller fall back to a command.
+    async fn list_dir(&self, _project: &Path, _path: &str) -> Result<Vec<String>> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into())
+    }
+    /// Files under `path` that the project's ignore rules keep, relative to
+    /// `path`, with '/' separators. `Unsupported` lets the caller fall back.
+    async fn walk_files(&self, _project: &Path, _path: &str) -> Result<Vec<String>> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into())
+    }
     async fn edit(&self, project: &Path, path: &str, old: &str, new: &str) -> Result<()>;
     async fn bash(
         &self,

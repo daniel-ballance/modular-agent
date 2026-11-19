@@ -142,6 +142,46 @@ impl WorkingEnvironment for LocalEnvironment {
     async fn exists(&self, project: &Path, name: &str) -> Result<bool> {
         Ok(tokio::fs::try_exists(path(project, name)).await?)
     }
+    async fn list_dir(&self, project: &Path, name: &str) -> Result<Vec<String>> {
+        let mut names = vec![];
+        let mut entries = tokio::fs::read_dir(path(project, name)).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let mut name = entry.file_name().to_string_lossy().into_owned();
+            // Follow links, as a listing for a person does.
+            if tokio::fs::metadata(entry.path())
+                .await
+                .is_ok_and(|m| m.is_dir())
+            {
+                name.push('/');
+            }
+            names.push(name);
+        }
+        Ok(names)
+    }
+    async fn walk_files(&self, project: &Path, name: &str) -> Result<Vec<String>> {
+        let root = path(project, name);
+        ensure!(
+            tokio::fs::metadata(&root).await?.is_dir(),
+            "not a directory: {name}"
+        );
+        tokio::task::spawn_blocking(move || {
+            let mut files = vec![];
+            let walk = ignore::WalkBuilder::new(&root)
+                .hidden(false)
+                .require_git(false)
+                .filter_entry(|e| e.file_name() != ".git")
+                .build();
+            for entry in walk.flatten() {
+                if entry.file_type().is_some_and(|t| !t.is_dir())
+                    && let Ok(relative) = entry.path().strip_prefix(&root)
+                {
+                    files.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+            Ok(files)
+        })
+        .await?
+    }
     async fn read(&self, project: &Path, name: &str) -> Result<String> {
         Ok(tokio::fs::read_to_string(path(project, name)).await?)
     }

@@ -71,6 +71,8 @@ struct Connection {
 #[derive(Default)]
 pub struct Mcp {
     connections: Mutex<BTreeMap<String, Vec<Connection>>>,
+    /// Who may start these tools. `None` leaves every caller allowed.
+    pub callers: Option<Vec<String>>,
 }
 #[derive(Default)]
 pub struct McpPlugin {
@@ -165,6 +167,12 @@ fn definition(server: &str, tool: &Tool) -> Result<ToolDefinition> {
     })
 }
 impl Mcp {
+    pub fn for_callers(callers: &[&str]) -> Self {
+        Self {
+            callers: Some(callers.iter().map(|c| c.to_string()).collect()),
+            ..Self::default()
+        }
+    }
     pub async fn attach(&self, session: &str, project: &Path, servers: Vec<Server>) -> Result<()> {
         let mut opened = Vec::new();
         let result: Result<()> = async {
@@ -316,6 +324,12 @@ impl ToolSource for Mcp {
                     .iter()
                     .filter_map(|t| definition(&c.name, t).ok())
                     .collect::<Vec<_>>()
+            })
+            .map(|tool| match &self.callers {
+                Some(callers) => {
+                    tool.for_callers(&callers.iter().map(String::as_str).collect::<Vec<_>>())
+                }
+                None => tool,
             })
             .collect()
     }
