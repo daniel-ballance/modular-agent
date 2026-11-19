@@ -653,7 +653,7 @@ export class AcpInterface implements InterfaceCapability {
 		return this.client.notify(methods.client.session.update, { sessionId, update }).catch(() => undefined);
 	}
 
-	private toolCall(sessionId: string, part: { id: string; name: string; arguments?: Record<string, unknown> }, status: acp.ToolCallStatus): Promise<void> {
+	private toolCall(sessionId: string, part: { id: string; name: string; arguments?: Record<string, unknown>; parentCallId?: string }, status: acp.ToolCallStatus): Promise<void> {
 		return this.update(sessionId, {
 			sessionUpdate: "tool_call",
 			toolCallId: part.id,
@@ -662,6 +662,7 @@ export class AcpInterface implements InterfaceCapability {
 			kind: kindOf(part.name),
 			status,
 			rawInput: part.arguments ?? {},
+			...(part.parentCallId ? { _meta: { "modular-agent": { parentToolCallId: part.parentCallId } } } : {}),
 		});
 	}
 
@@ -697,7 +698,10 @@ export class AcpInterface implements InterfaceCapability {
 			}
 			case "entry.added": {
 				const entry = e.data as HistoryEntry;
-				if (entry.kind === "response" && entry.message?.role === "assistant") {
+				if (entry.kind === "modular-agent.nestedCall") {
+					const call = (entry.data as { call?: import("@modular-agent/harness").ToolCall } | undefined)?.call;
+					if (call) await this.toolCall(sessionId, { ...call, arguments: call.input }, "pending");
+				} else if (entry.kind === "response" && entry.message?.role === "assistant") {
 					for (const part of entry.message.content.filter(isToolCall)) await this.toolCall(sessionId, part, "pending");
 				} else if (entry.kind === "toolResult" && entry.toolCallId) {
 					state.toolOutput.delete(entry.toolCallId);
@@ -715,10 +719,15 @@ export class AcpInterface implements InterfaceCapability {
 	/** Send a reopened session's history, as session/load requires. */
 	private async replay(sessionId: string): Promise<void> {
 		for (const raw of this.api.history(sessionId)) {
-			if (!raw.message) continue;
+			if (!raw.message && raw.kind !== "modular-agent.nestedCall") continue;
 			const entry = await this.api.gateOutput(sessionId, this.actorId, "entry", raw);
 			const m = entry?.message;
-			if (!entry || !m) continue;
+			if (!entry) continue;
+			if (entry.kind === "modular-agent.nestedCall") {
+				const call = (entry.data as { call?: import("@modular-agent/harness").ToolCall } | undefined)?.call;
+				if (call) await this.toolCall(sessionId, { ...call, arguments: call.input }, "pending");
+			}
+			if (!m) continue;
 			if (m.role === "user" && entry.modelVisible) {
 				const t = textOf(m.content);
 				if (t) await this.update(sessionId, { sessionUpdate: "user_message_chunk", content: { type: "text", text: t } });

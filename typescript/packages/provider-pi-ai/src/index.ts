@@ -9,6 +9,7 @@ import {
 	isRetryableAssistantError,
 } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import { lowerReasoning } from "@modular-agent/harness";
 import type {
 	AssistantMessage,
 	ContentPart,
@@ -53,13 +54,14 @@ export class PiAiProvider implements Provider {
 			messages: req.messages.map((m) => toPi(m, model)),
 			tools: req.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
 		};
+		const reasoning = lowerReasoning(req.settings.reasoning, toInfo(model));
 		let final: PiAssistantMessage;
 		try {
 			const stream = this.collection.streamSimple(model, context, {
 				signal: options.signal,
 				apiKey: options.apiKey,
 				sessionId: options.sessionId,
-				reasoning: req.settings.reasoning === "off" ? undefined : (req.settings.reasoning as never) || undefined,
+				reasoning: reasoning === "off" ? undefined : reasoning as never,
 				maxTokens: req.settings.maxOutput,
 			});
 			for await (const event of stream) {
@@ -72,7 +74,7 @@ export class PiAiProvider implements Provider {
 			return failed(error instanceof Error ? error.message : String(error), "other");
 		}
 		const message = fromPi(final, model);
-		if (!options.requestPrepared && this.api) await this.api.runHook("provider.response", { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: ref.id }, message });
+		if (!options.signal.aborted && !options.requestPrepared && this.api) await this.api.runHook("provider.response", { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: ref.id }, message });
 		return message;
 	}
 }

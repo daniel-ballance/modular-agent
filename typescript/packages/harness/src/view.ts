@@ -35,6 +35,7 @@ export function interruptedCalls(history: HistoryEntry[], turnId: string): Inter
 	for (const [id, entry] of started) {
 		if (!id || answered.has(id)) continue;
 		const data = entry.data as { call?: ToolCall; safeToRepeat?: boolean } | undefined;
+		if (data?.call?.startedBy === "tool") continue;
 		const call = data?.call ?? calls.get(id);
 		if (call) calls.set(id, { id, name: call.name, input: call.input, stepId: entry.stepId, started: true, safeToRepeat: data?.safeToRepeat === true });
 	}

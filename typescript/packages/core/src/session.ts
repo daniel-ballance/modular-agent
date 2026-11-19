@@ -2,6 +2,7 @@ import { inputHandedBackIds, inputIdOf, isToolCall, textOf, type AgentEvent, typ
 import { setTimeout as delay } from "node:timers/promises";
 import type { Content, HistoryEntry, InputTiming, InputReceipt, Input, Outcome, QuestionHandler, Settings, ToolStatus, TurnResult, Usage } from "./data.js";
 import { AgentError, checked, sdkError } from "./errors.js";
+import { schema } from "./schema.js";
 
 export interface ToolResult {
   callId: string;
@@ -100,14 +101,15 @@ export class Session {
   }
   async send(input: Input, timing: InputTiming, options: PromptOptions = {}): Promise<InputReceipt> {
     this.#check();
-    if (options.result !== undefined) throw new AgentError("not_supported", "Structured prompt results are not supported");
+    if (options.result !== undefined && timing !== "now") throw new AgentError("invalid_params", "Only a prompt can request a structured turn result");
     if (options.actor !== undefined && options.actor !== local) throw new AgentError("forbidden", "Only the local actor is supported");
     if (!["now", "steer", "after", "propose"].includes(timing) || options.key !== undefined && typeof options.key !== "string" ||
       typeof input !== "string" && (!Array.isArray(input) || input.some(p => typeof p?.type !== "string"))) {
       throw new AgentError("invalid_params", "Invalid input, timing or key");
     }
     if (options.key === "") throw new AgentError("invalid_params", "Input key must not be empty");
-    return checked(() => this.#api.input(this.id, { content: structuredClone(input), when: timing, key: options.key, actorId: local }));
+    const resultShape = options.result === undefined ? undefined : await checked(() => schema(options.result!).parameters, "invalid_params");
+    return checked(() => this.#api.input(this.id, { content: structuredClone(input), when: timing, key: options.key, actorId: local, resultShape }));
   }
 
   async #run(input: Input, options: PromptOptions, stream?: { event(e: AgentEvent): void; admitted(id: string): void }): Promise<PromptResult> {

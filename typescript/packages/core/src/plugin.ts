@@ -24,7 +24,7 @@ type Hooks = {
   "tool.before": [Before, "allow" | { refuse: string } | { change: ToolCall["input"] }];
   "tool.after": [After, { change: Partial<ResultFields> }];
   "model.failed": [Observe & { error: ModelError; request: ModelRequest }, "stop" | { retry: true | ModelRequest }];
-  "turn.result": [Observe & { result: TurnResult }, "accept" | { refuse: string }];
+  "turn.result": [Observe & { result: Pick<TurnResult, "text" | "value">; shape?: Record<string, unknown> }, "accept" | { refuse: string }];
   "turn.end": [Observe & { outcome: Outcome; result: TurnResult }, void];
   "provider.request": [{ sessionId: string | null; provider: string; model: ModelRef; request: ModelRequest }, { change: ModelRequest }];
   "provider.response": [{ sessionId: string | null; provider: string; model: ModelRef; message: AssistantMessage }, void];

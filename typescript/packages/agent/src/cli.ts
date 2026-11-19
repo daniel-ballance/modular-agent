@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { questionTool } from "@modular-agent/tools-question";
 import { conformanceProvider, createAgent } from "./index.js";
+import { conformanceTools } from "@modular-agent/plugin-wire";
 
 function parse(argv: string[]) {
 	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; approvalWait?: number; questionWait?: number; acp: boolean; plain: boolean; serve?: number; help: boolean } = {
@@ -75,7 +76,7 @@ async function main() {
 		const acp = acpInterface({ actorId });
 		// Over ACP, approval is a session setting (the "approval" option), so the plugin is always loaded; it starts off.
 		const withApproval = args.approval ? [] : [approval({ policy: "off", waitMs: args.approvalWait })];
-		const conformance = process.env.MODULAR_AGENT_CONFORMANCE === "1" ? [conformanceProvider()] : [];
+		const conformance = process.env.MODULAR_AGENT_CONFORMANCE === "1" ? [conformanceProvider(), conformanceTools(true)] : [];
 		const harness = await createAgent({ model: args.model, usePiAuth: args.piAuth, ephemeral: args.ephemeral, plugins: [...common, ...withApproval, ...conformance, acp] });
 		try {
 			await acp.acp.serveStdio();

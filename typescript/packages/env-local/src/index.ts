@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { access, lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { join } from "node:path";
-import type { ExecResult, Plugin, WorkingEnvironment } from "@modular-agent/harness";
+import type { DirEntry, ExecResult, Plugin, WorkingEnvironment } from "@modular-agent/harness";
 import { randomUUID } from "node:crypto";
 import { SavedPoints } from "./points.js";
 import { COMMAND_MARKER, markedProcesses, ProcessTracker } from "./processes.js";
@@ -69,6 +69,12 @@ export class LocalEnvironment implements WorkingEnvironment {
 		const full = await this.confined(path);
 		await mkdir(dirname(full), { recursive: true });
 		await writeFile(full, data);
+	}
+	async list(path: string): Promise<DirEntry[]> {
+		if (typeof path !== "string" || !path || path.includes("\0")) throw Object.assign(new Error("Invalid directory path"), { code: "invalid_request" });
+		return (await readdir(await this.confined(path), { withFileTypes: true })).map(entry => ({
+			name: entry.name, kind: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other",
+		}));
 	}
 	async exists(path: string): Promise<boolean> {
 		try {

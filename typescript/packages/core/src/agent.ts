@@ -325,7 +325,7 @@ export class Agent {
       runsToolsAtProvider: providers.some(p => p.supports.runsTools === true),
       liveSessions: providers.some(p => p.supports.liveSessions === true),
       portableSessions: this.#portable && !providers.some(p => p.supports.runsTools === true || p.supports.keepsState === true),
-      nestedToolCalls: false, questionsOutlastTurns: false, lateAnswersStartTurns: false, waitingThroughRestart: false,
+      nestedToolCalls: base.nestedToolCalls === true, questionsOutlastTurns: false, lateAnswersStartTurns: false, waitingThroughRestart: false,
       severalActors: false, tenants: false, sessionLimits: false, holdsOutput: false, mixedActorInput: "refused",
       startsTurnsUnasked: "never", settingsDuringTurn: "nextTurn", confinesFiles: this.#confinesFiles,
     };

@@ -23,6 +23,7 @@ export type InputTiming = "now" | "steer" | "after" | "propose";
 export interface QueuedInput {
 	id: string;
 	content: ContentPart[];
+	resultShape?: Record<string, unknown>;
 	actorId: string;
 	when: InputTiming;
 	key?: string;
