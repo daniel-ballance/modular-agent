@@ -77,7 +77,7 @@ impl HistoryStore for MemoryHistory {
         let mut m = self.0.lock().unwrap();
         ensure!(
             m.held.insert(session.into()),
-            "session {session} is held by another writer"
+            OperationError::Busy(format!("session {session} is held by another writer"))
         );
         Ok(Box::new(MemoryLease(self.0.clone(), session.into())))
     }

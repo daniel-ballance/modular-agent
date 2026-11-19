@@ -1,5 +1,25 @@
 use crate::*;
 
+/// Common agent failures distinguishable without interpreting diagnostics.
+#[derive(Debug)]
+pub enum OperationError {
+    NotFound(String),
+    Busy(String),
+    Forbidden(String),
+}
+
+impl std::fmt::Display for OperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::Busy(message) | Self::Forbidden(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for OperationError {}
+
 /// A portable session is held longer than this open can wait.
 #[derive(Debug)]
 pub struct HistoryHeld {

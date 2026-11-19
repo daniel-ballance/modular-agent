@@ -125,6 +125,15 @@ impl From<anyhow::Error> for Error {
             return Error::new(Code::Held, held.to_string())
                 .with_data(serde_json::json!({"retryAfterMs":held.retry_after_ms}));
         }
+        if let Some(cause) = error.downcast_ref::<agent_api::OperationError>() {
+            use agent_api::OperationError::*;
+            let code = match cause {
+                NotFound(_) => Code::NotFound,
+                Busy(_) => Code::Busy,
+                Forbidden(_) => Code::Forbidden,
+            };
+            return Error::new(code, format!("{error:#}"));
+        }
         let code = if error
             .downcast_ref::<std::io::Error>()
             .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported)

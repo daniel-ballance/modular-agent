@@ -138,14 +138,7 @@ impl Agent {
     /// Reopen a kept session. Interrupted work is recovered, as the Runtime declares,
     /// before this returns.
     pub async fn open_session(&self, id: &str) -> Result<Session> {
-        self.inner.harness.open(id).await.map_err(|e| {
-            let e = Error::from(e);
-            if matches!(e.code(), Code::NotFound | Code::Held | Code::Lost) {
-                e
-            } else {
-                Error::new(Code::Busy, e.message())
-            }
-        })?;
+        self.inner.harness.open(id).await?;
         self.attach(id)?;
         Ok(Session::new(self.inner.clone(), id.to_string()))
     }

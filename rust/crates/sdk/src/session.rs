@@ -397,8 +397,7 @@ impl Session {
         let id = self
             .inner
             .harness
-            .fork(&base::Scope::session(&self.id), entry_id.map(str::to_owned))
-            .map_err(|e| Error::new(Code::Busy, format!("{e:#}")))?;
+            .fork(&base::Scope::session(&self.id), entry_id.map(str::to_owned))?;
         let agent = crate::Agent {
             inner: self.inner.clone(),
         };

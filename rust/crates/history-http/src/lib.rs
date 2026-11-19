@@ -259,6 +259,9 @@ fn escape(value: &str) -> String {
     out
 }
 fn checked((status, value): (StatusCode, Value)) -> Result<Value> {
+    if status == StatusCode::NOT_FOUND && value["code"] == "unknown_session" {
+        return Err(OperationError::NotFound("unknown session".into()).into());
+    }
     ensure!(
         status.is_success(),
         "history service {} ({})",

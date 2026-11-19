@@ -156,7 +156,10 @@ impl HistoryStore for FileHistory {
                     std::thread::sleep(std::time::Duration::from_millis(3))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                    bail!("session {session} is already held by another writer")
+                    return Err(OperationError::Busy(format!(
+                        "session {session} is already held by another writer"
+                    ))
+                    .into());
                 }
                 Err(e) => return Err(e.into()),
             }
