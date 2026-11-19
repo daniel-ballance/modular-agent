@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"modular/acpinterface"
-	"modular/api"
-	"modular/harness"
+	"github.com/OWNER/modular-agent/go/acpinterface"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/harness"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,12 +25,13 @@ type Spec struct {
 	Config  object            `json:"config"`
 }
 type host struct {
-	h           *harness.Harness
-	a           api.API
-	project     string
-	toolsMu     sync.Mutex
-	jobOwnersMu sync.RWMutex
-	jobOwners   map[string]*remote
+	h                 *harness.Harness
+	a                 api.API
+	project           string
+	toolsMu           sync.Mutex
+	jobOwnersMu       sync.RWMutex
+	jobOwners         map[string]*remote
+	legacyCommandArgs bool
 }
 type remote struct {
 	host      *host
@@ -74,8 +75,36 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 	if err := json.Unmarshal([]byte(raw), &specs); err != nil {
 		return fmt.Errorf("MODULAR_AGENT_PLUGINS: %w", err)
 	}
+	return load(context.Background(), h, project, home, specs, true)
+}
+
+// EnvironmentSpecs parses the operator's configured programs without starting them.
+func EnvironmentSpecs() ([]Spec, error) {
+	raw := os.Getenv("MODULAR_AGENT_PLUGINS")
+	if raw == "" {
+		return nil, nil
+	}
+	var specs []Spec
+	if err := json.Unmarshal([]byte(raw), &specs); err != nil || specs == nil {
+		return nil, fmt.Errorf("MODULAR_AGENT_PLUGINS must be an array of plugin specs: %v", err)
+	}
+	return specs, nil
+}
+
+// Load starts the given programs in order. The caller owns the Harness and
+// must close it if loading any program fails.
+func Load(ctx context.Context, h *harness.Harness, project, home string, specs []Spec) error {
+	return load(ctx, h, project, home, specs, false)
+}
+
+func load(ctx context.Context, h *harness.Harness, project, home string, specs []Spec, legacyCommandArgs bool) error {
 	if len(specs) == 0 {
 		return nil
+	}
+	for _, spec := range specs {
+		if len(spec.Command) == 0 || spec.Command[0] == "" {
+			return errors.New("plugin command is empty")
+		}
 	}
 	project, err := filepath.Abs(project)
 	if err != nil {
@@ -89,14 +118,11 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 	if err != nil {
 		return err
 	}
-	bridge := &host{h: h, project: project, jobOwners: map[string]*remote{}}
+	bridge := &host{h: h, project: project, jobOwners: map[string]*remote{}, legacyCommandArgs: legacyCommandArgs}
 	if err = h.Load(bridge.plugin()); err != nil {
 		return err
 	}
 	for i, spec := range specs {
-		if len(spec.Command) == 0 || spec.Command[0] == "" {
-			return errors.New("plugin command is empty")
-		}
 		state := filepath.Join(home, "plugins", strconv.Itoa(i))
 		if err = os.MkdirAll(state, 0700); err != nil {
 			return err
@@ -106,7 +132,11 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 		r.cmd.Dir = project
 		r.cmd.Stderr = os.Stderr
 		env := map[string]string{}
-		for _, key := range []string{"PATH", "LANG", "LC_ALL", "TZ", "TMPDIR"} {
+		minimal := []string{"PATH"}
+		if legacyCommandArgs {
+			minimal = append(minimal, "LANG", "LC_ALL", "TZ", "TMPDIR")
+		}
+		for _, key := range minimal {
 			if value, ok := os.LookupEnv(key); ok {
 				env[key] = value
 			}
@@ -114,6 +144,7 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 		for k, v := range spec.Env {
 			env[k] = v
 		}
+		r.cmd.Env = []string{}
 		for k, v := range env {
 			r.cmd.Env = append(r.cmd.Env, k+"="+v)
 		}
@@ -138,7 +169,10 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 		r.peer.OnClose = func() { r.active.Store(false); _ = r.Close() }
 		go func() { _ = r.peer.Run(); _ = r.cmd.Wait(); close(r.exited) }()
 		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": spec.Config}
-		if err = r.peer.Call(context.Background(), "plugin/initialize", init, &r.reg); err != nil {
+		if spec.Config == nil {
+			init["config"] = object{}
+		}
+		if err = r.peer.Call(ctx, "plugin/initialize", init, &r.reg); err != nil {
 			_ = r.Close()
 			return err
 		}
@@ -328,7 +362,11 @@ func (r *remote) plugin(index int) api.Plugin {
 				var result struct {
 					Output string `json:"output"`
 				}
-				err := r.call(withWork(ctx, work{session: id, actor: api.Acting(ctx)}), "command/run", object{"name": c.Name, "args": args, "sessionId": id, "actorId": api.Acting(ctx)}, &result)
+				var wireArgs any = strings.Join(args, " ")
+				if r.host.legacyCommandArgs {
+					wireArgs = args
+				}
+				err := r.call(withWork(ctx, work{session: id, actor: api.Acting(ctx)}), "command/run", object{"name": c.Name, "args": wireArgs, "sessionId": id, "actorId": api.Acting(ctx)}, &result)
 				return result.Output, err
 			}); err != nil {
 				return err
@@ -373,8 +411,9 @@ func (r *remote) notification(ctx context.Context, method string, raw json.RawMe
 			w.runtime.report(ctx, v)
 		}
 	case "tools/progress":
-		if w.progress != nil {
-			w.progress(contentIn(v["content"]).Text())
+		content := contentIn(v["content"])
+		if !api.ToolProgress(ctx, content) && w.progress != nil {
+			w.progress(content.Text())
 		}
 	case "env/output":
 		if fn, _ := ctx.Value(progressKey{}).(func(string)); fn != nil {
@@ -562,7 +601,7 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 		if q.Kind == "secret" {
 			return object{"requestId": answer.Request, "actorId": answer.Actor, "stored": answer.Value, "declined": answer.Declined}, nil
 		}
-		return object{"requestId": answer.Request, "actorId": answer.Actor, "value": answer.Value, "declined": answer.Declined}, nil
+		return object{"requestId": answer.Request, "actorId": answer.Actor, "value": answer.Value, "declined": answer.Declined, "reason": answer.Reason}, nil
 	}
 	if isEnvironmentMethod(method, "host/") {
 		if !hasSession || w.session == "" || !r.host.a.Authorize(session, w.actor, "tools") {

@@ -2,9 +2,9 @@ package transient_test
 
 import (
 	"context"
-	"modular/api"
-	"modular/fake"
-	"modular/internal/runtimetest"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/fake"
+	"github.com/OWNER/modular-agent/go/internal/runtimetest"
 	"os"
 	"path/filepath"
 	"strings"

@@ -2,11 +2,11 @@ package resultcheck_test
 
 import (
 	"context"
-	"modular/api"
-	"modular/fake"
-	"modular/internal/runtimetest"
-	"modular/resultcheck"
-	"modular/vanilla"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/fake"
+	"github.com/OWNER/modular-agent/go/internal/runtimetest"
+	"github.com/OWNER/modular-agent/go/resultcheck"
+	"github.com/OWNER/modular-agent/go/vanilla"
 	"strings"
 	"testing"
 )

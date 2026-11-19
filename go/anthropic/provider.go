@@ -14,8 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/OWNER/modular-agent/go/api"
 	"io"
-	"modular/api"
 	"net/http"
 	"sort"
 	"strings"
@@ -26,18 +26,30 @@ const ModelID = "claude-haiku-5-5"
 const Endpoint = "https://api.anthropic.com/v1/messages"
 
 type Provider struct {
-	a        api.API
-	endpoint string
-	http     *http.Client
+	a          api.API
+	credential func(context.Context) (string, error)
+	endpoint   string
+	http       *http.Client
 }
 
-func Plugin(endpoint string, client *http.Client) api.Plugin {
+func newProvider(endpoint string, client *http.Client) *Provider {
 	if endpoint == "" {
 		endpoint = Endpoint
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("Provider redirects refused") }}
 	}
+	return &Provider{endpoint: endpoint, http: client}
+}
+
+// NewAccess reuses the Messages API transport in an embedded Provider.
+func NewAccess(endpoint string, client *http.Client, getCredential func(context.Context) (string, error)) api.ModelAccess {
+	p := newProvider(endpoint, client)
+	p.credential = getCredential
+	return &access{p}
+}
+
+func Plugin(endpoint string, client *http.Client) api.Plugin {
 	return api.Plugin{Name: "anthropic", Setup: func(a api.API) error {
 		if err := a.Define("anthropic.request", api.Transform); err != nil {
 			return err
@@ -45,7 +57,9 @@ func Plugin(endpoint string, client *http.Client) api.Plugin {
 		if err := a.Define("anthropic.piece", api.Observe); err != nil {
 			return err
 		}
-		return a.Provide("provider.anthropic", &Provider{a, endpoint, client})
+		p := newProvider(endpoint, client)
+		p.a = a
+		return a.Provide("provider.anthropic", p)
 	}}
 }
 func (p *Provider) Catalog() []api.Model {
@@ -63,11 +77,13 @@ type access struct{ p *Provider }
 func (a *access) Model() api.Model { return a.p.Catalog()[0] }
 func (a *access) Generate(ctx context.Context, r api.Request, emit func(api.Part)) (api.Response, error) {
 	p := a.p
-	prepared, err := p.a.Invoke(ctx, "anthropic.request", r)
-	if err != nil {
-		return api.Response{}, err
+	if p.a != nil {
+		prepared, err := p.a.Invoke(ctx, "anthropic.request", r)
+		if err != nil {
+			return api.Response{}, err
+		}
+		r = prepared.(api.Request)
 	}
-	r = prepared.(api.Request)
 	if r.MaxOutput <= 0 || r.MaxOutput > a.Model().Output {
 		return api.Response{}, errors.New("invalid output limit")
 	}
@@ -96,12 +112,18 @@ func (a *access) Generate(ctx context.Context, r api.Request, emit func(api.Part
 		}
 		body["tools"] = tools
 	}
-	store, err := p.a.Get("credentials")
-	if err != nil {
-		return api.Response{}, &api.ModelError{Kind: "credentials", Message: "credential store unavailable"}
+	credential := p.credential
+	if p.a != nil {
+		credential = func(ctx context.Context) (string, error) {
+			store, err := p.a.Get("credentials")
+			if err != nil {
+				return "", err
+			}
+			return store.(api.Credentials).Get(ctx, "anthropic")
+		}
 	}
-	key, err := store.(api.Credentials).Get(ctx, "anthropic")
-	if err != nil {
+	key, err := credential(ctx)
+	if err != nil || key == "" {
 		return api.Response{}, &api.ModelError{Kind: "credentials", Message: "Anthropic credential unavailable"}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(api.JSON(body)))
@@ -124,7 +146,12 @@ func (a *access) Generate(ctx context.Context, r api.Request, emit func(api.Part
 		b, _ := io.ReadAll(io.LimitReader(response.Body, 1024*1024))
 		return api.Response{}, classify(response.StatusCode, b)
 	}
-	return parse(response.Body, func(part api.Part) { _, _ = p.a.Invoke(ctx, "anthropic.piece", part); emit(part) })
+	return parse(response.Body, func(part api.Part) {
+		if p.a != nil {
+			_, _ = p.a.Invoke(ctx, "anthropic.piece", part)
+		}
+		emit(part)
+	})
 }
 func encodeMessages(messages []api.Message) ([]map[string]any, error) {
 	var out []map[string]any

@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +27,8 @@ type handler struct {
 	fn    api.Handler
 }
 type Harness struct {
+	localActor      string
+	handBackOnOpen  bool
 	tenants         map[string]tenantConfig
 	tenantConfigErr error
 	mu              sync.RWMutex
@@ -51,14 +53,22 @@ type client struct {
 	owner string
 }
 
-func New() *Harness {
+func New() *Harness { return NewWithLocalActor("local-user") }
+
+// NewWithLocalActor sets the principal for new embedded sessions.
+func NewWithLocalActor(actor string) *Harness {
 	h := &Harness{external: map[string]bool{}, externalPlugins: map[string]bool{}, plugins: map[string]api.Plugin{}, caps: map[string]registration{}, hooks: map[string]*hook{}, commands: map[string]registration{}, sessions: map[string]*session{}, listeners: map[int]outputListener{}, outputStreams: map[outputStream][]api.Event{}}
+	h.localActor = actor
 	h.tenants, h.tenantConfigErr = readTenants()
 	for name, rule := range map[string]api.Rule{"plugin.load": api.Gate, "process.stop": api.Observe, "session.start": api.Observe, "session.ready": api.Observe, "session.stop": api.Observe, "session.end": api.Observe, "session.fork": api.Transform, "input": api.Transform, "turn.prepare": api.Transform, "output": api.Transform, "output.batch": api.Gate} {
 		h.hooks[name] = &hook{owner: "harness", rule: rule}
 	}
 	return h
 }
+
+// HandBackQueuedOnOpen selects the embedded SDK's recovery policy before loading plugins.
+func (h *Harness) HandBackQueuedOnOpen() { h.handBackOnOpen = true }
+
 func (h *Harness) API() api.API     { return &client{h: h, owner: "harness"} }
 func (c *client) validLocked() bool { _, ok := c.h.plugins[c.owner]; return c.owner == "harness" || ok }
 func (h *Harness) Load(p api.Plugin) error {

@@ -3,7 +3,7 @@ package turnrun
 import (
 	"context"
 	"errors"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 )
 
 func remaining(t api.Turn, calls []api.Call) []api.Call {

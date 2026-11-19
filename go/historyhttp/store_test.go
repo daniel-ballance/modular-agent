@@ -2,9 +2,9 @@ package historyhttp_test
 
 import (
 	"errors"
-	"modular/api"
-	"modular/historyhttp"
-	"modular/servicehttp"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/historyhttp"
+	"github.com/OWNER/modular-agent/go/servicehttp"
 	"net/http/httptest"
 	"os"
 	"testing"

@@ -1,6 +1,6 @@
 package harness
 
-import "modular/api"
+import "github.com/OWNER/modular-agent/go/api"
 
 func unfinished(s api.Session) bool {
 	if len(api.OpenCalls(s)) > 0 {

@@ -3,7 +3,7 @@ package harness
 import (
 	"context"
 	"errors"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"reflect"
 	"testing"
 )

@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"slices"
 	"sort"
 	"strings"
@@ -370,6 +370,11 @@ func (m *Manager) RefuseUndeliverableApproval(q api.Question) {
 	if q.Kind == "approval" {
 		_ = m.decline(q, "refused")
 	}
+}
+
+// DeclineUnanswered settles a question an embedded host cannot deliver.
+func (m *Manager) DeclineUnanswered(q api.Question, reason string) {
+	_ = m.decline(q, reason)
 }
 
 func (m *Manager) decline(q api.Question, reason string) error {

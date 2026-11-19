@@ -1,6 +1,6 @@
 package turnrun
 
-import "modular/api"
+import "github.com/OWNER/modular-agent/go/api"
 
 // ModelRequest marks the boundary after step preparation and before invoking
 // the Provider. Preparation alone is not evidence of an external request.

@@ -2,9 +2,9 @@ package acpinterface_test
 
 import (
 	"encoding/json"
-	"modular/api"
-	"modular/fake"
-	"modular/internal/runtimetest"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/fake"
+	"github.com/OWNER/modular-agent/go/internal/runtimetest"
 	"strings"
 	"testing"
 

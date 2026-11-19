@@ -2,14 +2,14 @@ package contextview_test
 
 import (
 	"context"
-	"modular/api"
-	"modular/configuration"
-	"modular/contextview"
-	"modular/fake"
-	"modular/harness"
-	"modular/history"
-	"modular/internal/runtimetest"
-	"modular/modelselect"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/configuration"
+	"github.com/OWNER/modular-agent/go/contextview"
+	"github.com/OWNER/modular-agent/go/fake"
+	"github.com/OWNER/modular-agent/go/harness"
+	"github.com/OWNER/modular-agent/go/history"
+	"github.com/OWNER/modular-agent/go/internal/runtimetest"
+	"github.com/OWNER/modular-agent/go/modelselect"
 	"strings"
 	"testing"
 )

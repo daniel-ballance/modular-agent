@@ -2,12 +2,12 @@ package turnrun_test
 
 import (
 	"context"
-	"modular/api"
-	"modular/fake"
-	"modular/history"
-	"modular/internal/runtimetest"
-	"modular/local"
-	"modular/vanilla"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/fake"
+	"github.com/OWNER/modular-agent/go/history"
+	"github.com/OWNER/modular-agent/go/internal/runtimetest"
+	"github.com/OWNER/modular-agent/go/local"
+	"github.com/OWNER/modular-agent/go/vanilla"
 	"os"
 	"path/filepath"
 	"strings"

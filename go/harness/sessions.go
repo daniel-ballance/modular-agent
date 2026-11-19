@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"os"
 	"path/filepath"
 	"slices"
@@ -106,7 +106,7 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	if settings.Approval == "" {
 		settings.Approval = "off"
 	}
-	s := &session{id: id, project: project, data: api.Session{Version: 1, ID: id, Project: project, Settings: settings, Actor: "local-user", Tenant: tenant, Limit: limit}}
+	s := &session{id: id, project: project, data: api.Session{Version: 1, ID: id, Project: project, Settings: settings, Actor: c.h.localActor, Tenant: tenant, Limit: limit}}
 	if host != nil {
 		s.data.Actor = host.ID
 	}
@@ -120,6 +120,12 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	}
 	if host != nil {
 		if err := s.joinHostLocked(*host); err != nil {
+			return "", err
+		}
+	} else if !forking && c.h.localActor != "local-user" {
+		// The portable store reconstructs the actor from records, not the snapshot.
+		local := api.Actor{ID: s.data.Actor, Kind: "user", Rights: slices.Clone(api.Rights)}
+		if err := s.joinHostLocked(local); err != nil {
 			return "", err
 		}
 	}
@@ -233,6 +239,18 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	// Proposals are available through the record, not the running turn's
 	// queue; a cancel must not hand back an unreleased proposal.
 	s.queue = slices.DeleteFunc(s.queue, parked)
+	if c.h.handBackOnOpen && len(s.queue) > 0 {
+		ids := make([]string, 0, len(s.queue))
+		for _, in := range s.queue {
+			ids = append(ids, in.ID)
+		}
+		if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
+			s.mu.Unlock()
+			_ = c.StopSession(id)
+			return err
+		}
+		s.queue = nil
+	}
 	s.external = externalRecovery(s.data)
 	nextInput := runnableInput(s.queue)
 	if s.resume != nil || nextInput >= 0 || len(s.external) > 0 {
@@ -1099,7 +1117,8 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	}
 	ctx = api.WithExecution(api.AsActor(ctx, in.Actor), api.Execution{Session: snap.ID, Turn: turnID})
 	ctx = api.WithJobContributors(ctx, in.Actor, in.ViaActor, in.ReleasedBy)
-	prepared, err := h.API().Invoke(ctx, "turn.prepare", api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content})
+	before := api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content}
+	prepared, err := h.API().Invoke(ctx, "turn.prepare", before)
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 			if in.ID != "" && resume == nil {
@@ -1109,6 +1128,13 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 				}
 			}
 			return api.Outcome{Status: "cancelled", Error: ctx.Err().Error()}
+		}
+		if h.handBackOnOpen {
+			h.mu.RLock()
+			owner := h.caps["runtime"].owner
+			h.mu.RUnlock()
+			ports := &turnPorts{c: &client{h: h, owner: owner}, s: s, id: turnID, actor: in.Actor, input: in}
+			return unavailableTurn(ctx, ports, selectionView.Settings, before, nil, resume, err)
 		}
 		return api.Outcome{Status: "failed", Error: err.Error()}
 	}
@@ -1611,6 +1637,13 @@ func (p *turnPorts) RunTool(ctx context.Context, call api.Call) (result api.Tool
 				if err := p.CheckWriter(); err != nil {
 					return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
 				}
+				ctx = api.WithToolProgress(ctx, func(content api.Content) {
+					data := api.JSON(content)
+					if len(content) == 1 && content[0].Type == "text" {
+						data = api.JSON(content[0].Text)
+					}
+					p.Emit(ctx, api.Event{Kind: "tool.progress", Call: call.ID, Step: call.Step, Data: data})
+				})
 				return source.Run(ctx, snap, call, func(text string) { p.Emit(ctx, api.Event{Kind: "tool.progress", Call: call.ID, Data: api.JSON(text)}) })
 			}
 		}

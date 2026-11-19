@@ -2,8 +2,8 @@
 package durable
 
 import (
-	"modular/api"
-	"modular/turnrun"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/turnrun"
 )
 
 type Runtime = turnrun.Runner

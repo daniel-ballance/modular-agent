@@ -3,7 +3,7 @@ package acpinterface
 import (
 	"context"
 	"encoding/json"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 
 	acp "github.com/caelis-labs/acp-go-sdk"
 )

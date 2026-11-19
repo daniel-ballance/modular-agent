@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"modular/api"
-	"modular/servicehttp"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/servicehttp"
 	"net/http"
 	"sync"
 )

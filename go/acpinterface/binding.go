@@ -2,8 +2,8 @@ package acpinterface
 
 import (
 	"encoding/json"
-	"modular/api"
-	"modular/portable"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
 	"strings"
 
 	acp "github.com/caelis-labs/acp-go-sdk"

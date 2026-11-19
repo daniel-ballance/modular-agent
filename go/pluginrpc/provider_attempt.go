@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 )
 
 // Each provider/request has its own grant and raw response. Neither the

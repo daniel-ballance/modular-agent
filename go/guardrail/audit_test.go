@@ -2,9 +2,9 @@ package guardrail_test
 
 import (
 	"context"
-	"modular/api"
-	"modular/guardrail"
-	"modular/harness"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/guardrail"
+	"github.com/OWNER/modular-agent/go/harness"
 	"strings"
 	"testing"
 )

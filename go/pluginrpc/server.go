@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/conformancemodel"
+	"github.com/OWNER/modular-agent/go/local"
+	"github.com/OWNER/modular-agent/go/tools"
+	"github.com/OWNER/modular-agent/go/turnrun"
 	"io"
 	"io/fs"
-	"modular/api"
-	"modular/conformancemodel"
-	"modular/local"
-	"modular/tools"
-	"modular/turnrun"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -123,6 +123,16 @@ func (s *Server) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) err
 	return err
 }
 
+// Callback sends a scoped request on behalf of the current served handler.
+func (s *Server) Callback(ctx context.Context, method string, params Object, out any) error {
+	id := RequestID(ctx)
+	if len(id) == 0 || ctx.Err() != nil {
+		return fault("invalid_request", "no active request")
+	}
+	params["parentRequestId"] = id
+	return s.peer.Call(ctx, method, params, out)
+}
+
 func (s *Server) ownEnvironment(env api.WorkingEnvironment) {
 	s.envMu.Lock()
 	if !s.envClosed {
@@ -227,8 +237,12 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 			return nil, fault("invalid_request", "sessionId is required")
 		}
 		ctx = api.WithExecution(ctx, api.Execution{Session: str(v, "sessionId"), Call: call})
+		progress := func(content api.Content) {
+			_ = s.peer.Send("tools/progress", object{"parentRequestId": id, "content": contentOut(content)})
+		}
+		ctx = api.WithToolProgress(ctx, progress)
 		r := source.Run(ctx, api.Session{ID: str(v, "sessionId"), Project: str(v, "project")}, call, func(chunk string) {
-			_ = s.peer.Send("tools/progress", object{"parentRequestId": id, "content": contentOut(api.Text(chunk))})
+			progress(api.Text(chunk))
 		})
 		if r.Status == "open" {
 			return object{"pending": "waiting for an answer"}, nil
@@ -368,7 +382,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 	case "command/run":
 		fn, ok := s.Commands[str(v, "name")]
 		if !ok {
-			return nil, fault("unknown_handler", "unknown command")
+			return nil, fault("invalid_request", "unknown command")
 		}
 		return fn(ctx, v)
 	}

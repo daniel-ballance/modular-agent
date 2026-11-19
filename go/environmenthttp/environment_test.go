@@ -2,8 +2,8 @@ package environmenthttp_test
 
 import (
 	"context"
-	"modular/environmenthttp"
-	"modular/servicehttp"
+	"github.com/OWNER/modular-agent/go/environmenthttp"
+	"github.com/OWNER/modular-agent/go/servicehttp"
 	"net/http/httptest"
 	"os"
 	"path/filepath"

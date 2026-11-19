@@ -1,9 +1,9 @@
 package turnrun_test
 
 import (
-	"modular/api"
-	"modular/fake"
-	"modular/vanilla"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/fake"
+	"github.com/OWNER/modular-agent/go/vanilla"
 	"slices"
 	"testing"
 )

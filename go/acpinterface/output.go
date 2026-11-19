@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/servicehttp"
 	"math"
-	"modular/api"
-	"modular/servicehttp"
 	"net/http"
 	"slices"
 

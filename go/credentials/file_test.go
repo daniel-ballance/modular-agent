@@ -2,7 +2,7 @@ package credentials_test
 
 import (
 	"context"
-	"modular/credentials"
+	"github.com/OWNER/modular-agent/go/credentials"
 	"os"
 	"path/filepath"
 	"testing"

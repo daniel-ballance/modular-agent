@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"sort"
 	"strings"
 	"sync"

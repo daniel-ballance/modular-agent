@@ -3,9 +3,9 @@ package local_test
 import (
 	"context"
 	"errors"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/local"
 	"io/fs"
-	"modular/api"
-	"modular/local"
 	"os"
 	"path/filepath"
 	"testing"

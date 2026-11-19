@@ -5,7 +5,7 @@ package portable
 import (
 	"encoding/json"
 	"fmt"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"strings"
 	"time"
 )

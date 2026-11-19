@@ -2,7 +2,7 @@ package harness
 
 import (
 	"fmt"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"slices"
 	"strings"
 )

@@ -3,8 +3,8 @@ package pluginrpc
 import (
 	"context"
 
-	"modular/api"
-	"modular/portable"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
 )
 
 func (w *runtimeWork) hook(ctx context.Context, hook string, p object) (any, error) {

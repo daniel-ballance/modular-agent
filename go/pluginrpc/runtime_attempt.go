@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"modular/api"
-	"modular/portable"
-	"modular/turnrun"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
+	"github.com/OWNER/modular-agent/go/turnrun"
 )
 
 type runtimeAttempt struct {

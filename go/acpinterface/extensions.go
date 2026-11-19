@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"os"
 	"slices"
 	"strings"

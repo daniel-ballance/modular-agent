@@ -2,7 +2,7 @@ package main_test
 
 import (
 	"context"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"os"
 	"os/exec"
 	"path/filepath"

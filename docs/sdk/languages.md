@@ -55,7 +55,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 
 ## Go
 
-- The module is the repository's `go/` directory; the core package is `modular`, so an agent is `modular.New(ctx, …)`.
+- The module is `github.com/OWNER/modular-agent/go` until the repository is published; import `github.com/OWNER/modular-agent/go/modular` and construct an agent with `modular.New(ctx, …)`.
 - Every operation that can wait takes a `context.Context` first. Cancellation is the context's.
 - A tool is `modular.NewTool(name, description, func(ctx context.Context, in T, tc *modular.ToolContext) (Out, error), opts…)`, with type parameters for input and output.
 - A plugin is a `modular.Plugin` value with `Name`, `Replaces` and `Setup func(*modular.Registrar) error`.

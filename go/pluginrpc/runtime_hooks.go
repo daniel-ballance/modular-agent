@@ -3,7 +3,7 @@ package pluginrpc
 import (
 	"context"
 	"errors"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 )
 
 func (p *runtimeClient) Hook(ctx context.Context, name string, raw any) (any, error) {

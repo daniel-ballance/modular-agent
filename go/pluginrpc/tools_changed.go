@@ -3,7 +3,7 @@ package pluginrpc
 import (
 	"context"
 	"fmt"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"slices"
 	"sync"
 )
