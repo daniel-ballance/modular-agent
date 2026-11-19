@@ -81,13 +81,13 @@ class ToolEnvironment:
             raise AgentError(ErrorCode.NOT_SUPPORTED, "Environment access is unavailable")
         return await self._call(operation, data)
 
-    async def read_bytes(self, path: str) -> bytes:
+    async def read(self, path: str) -> bytes:
         import base64
 
         result = await self._run("read_bytes", {"path": path})
         return base64.b64decode(cast(str, cast(JsonObject, result)["data"]), validate=True)
 
-    async def write_bytes(self, path: str, data: bytes) -> None:
+    async def write(self, path: str, data: bytes) -> None:
         import base64
 
         await self._run("write_bytes", {"path": path, "data": base64.b64encode(data).decode()})
@@ -109,13 +109,21 @@ class ToolEnvironment:
         )
 
 
+class LeftOpen(Exception):
+    """A timed question left this tool call open for a later turn."""
+
+    def __init__(self, question_id: str) -> None:
+        super().__init__("Tool is waiting for an answer")
+        self.question_id = question_id
+
+
 class ToolContext:
     def __init__(
         self,
         session_id: str,
         actor_id: str,
         call_id: str,
-        ask: Callable[[QuestionSpec, int, float | None], Awaitable[Answer]],
+        ask: Callable[[QuestionSpec, int, float | None, bool], Awaitable[Answer]],
         progress: Callable[[Content], Awaitable[None]],
         nested: Callable[[str, JsonObject], Awaitable[Json]],
         environment: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
@@ -148,14 +156,17 @@ class ToolContext:
         then: Literal["leaveOpen"] | None = None,
     ) -> Answer:
         self._check()
-        if then is not None:
-            raise AgentError(ErrorCode.NOT_SUPPORTED, "Leaving tool calls open is not supported")
+        if then is not None and (wait is None or question["kind"] == "approval"):
+            raise AgentError(
+                ErrorCode.INVALID_REQUEST,
+                "Leaving a question open requires a timed non-approval question",
+            )
         if wait is not None and (not math.isfinite(wait) or wait < 0):
             raise AgentError(
                 ErrorCode.INVALID_REQUEST, "Question wait must be finite, nonnegative seconds"
             )
         self._question_index += 1
-        return await self._ask(question, self._question_index, wait)
+        return await self._ask(question, self._question_index, wait, then == "leaveOpen")
 
     async def progress(self, content: Input) -> None:
         self._check()
@@ -284,6 +295,8 @@ class Tool:
                     }[str(result["status"])]
                 )
             return result
+        except LeftOpen:
+            raise
         except _Refusal as exc:
             return {"status": "refused", "content": _content(str(exc) or "Tool refused")}
         except asyncio.CancelledError:

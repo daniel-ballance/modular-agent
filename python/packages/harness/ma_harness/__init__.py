@@ -37,6 +37,7 @@ class Harness(Authority):
         self.output_streams = {}
         self.trace = []
         self.define_hook("@harness", "plugin.load", "gate")
+        self.define_hook("@harness", "session.prepare", "observe")
         self.define_hook("@harness", "session.start", "observe")
         self.define_hook("@harness", "session.end", "observe")
         self.define_hook("@harness", "session.suspend", "observe")
@@ -159,15 +160,14 @@ class Harness(Authority):
                             "data": {"active": self.active_plugins()},
                         }
                     )
-            await self.fire(
-                "@harness",
-                "session.start",
-                {
-                    "session": sid,
-                    "child": bool((s.get("origin") or {}).get("parent")),
-                    **(attachments or {}),
-                },
-            )
+            opening = {
+                "session": sid,
+                "project": s["project"],
+                "child": bool((s.get("origin") or {}).get("parent")),
+                **(attachments or {}),
+            }
+            await self.fire("@harness", "session.prepare", opening)
+            await self.fire("@harness", "session.start", opening)
         except BaseException:
             try:
                 await self.fire("@harness", "session.suspend", {"session": s["id"]})

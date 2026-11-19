@@ -12,6 +12,7 @@ from ma_core import Plugin as _BasePlugin
 from ma_core import lower_reasoning
 from ma_core.wire import model_in, request_for_provider, request_out, response_in
 
+from ._credentials import CredentialStore
 from ._types import AgentError, ErrorCode, Json, JsonObject, ModelRef
 
 
@@ -81,8 +82,9 @@ class Provider(Protocol):
 class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapter.
     role = "provider"
 
-    def __init__(self, provider: Provider) -> None:
+    def __init__(self, provider: Provider, credentials: CredentialStore | None = None) -> None:
         self.provider = provider
+        self.credentials = credentials
         self.name = provider.id
         self.declarations = {
             "stateful": provider.supports.keeps_state,
@@ -125,7 +127,11 @@ class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapt
             d.get("session"),
             d.get("actor"),
             emit,
-            lambda: os.getenv(self.name.upper().replace("-", "_") + "_API_KEY"),
+            lambda: (
+                self.credentials.read(self.name)
+                if self.credentials is not None
+                else os.getenv(self.name.upper().replace("-", "_") + "_API_KEY")
+            ),
         )
         try:
             request = request_for_provider(d.get("_shared_request") or request_out(d), self.name)

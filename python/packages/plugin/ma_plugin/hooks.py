@@ -50,8 +50,10 @@ async def payload(plugin, hook, d):
             p[new] = d[old]
     if hook == "plugin.load":
         p.update(name=d["plugin"], origin="configured", project=str(plugin.project))
-    elif hook == "session.start":
+    elif hook in {"session.start", "session.prepare"}:
         p["resumed"] = bool(d.get("resumed"))
+        if hook == "session.start":
+            p.pop("project", None)
     elif hook == "input":
         p["when"] = "inTurn" if d.get("when") == "steer" else d.get("when", "now")
     elif hook == "turn.before":

@@ -76,7 +76,9 @@ class Registrar:
     ) -> None:
         if order not in {"first", "normal", "last"}:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid hook order: {order}")
-        self._hooks.append(_Hook(point, handler, order, in_process_only))
+        self._hooks.append(
+            _Hook(point, handler, order, in_process_only or point == "session.prepare")
+        )
 
     def command(
         self,
@@ -200,6 +202,7 @@ async def _handle_command(command: _Command, args: str, context: CommandContext)
 
 _SUPPORTED_HOOKS = {
     "input",
+    "session.prepare",
     "session.start",
     "session.end",
     "turn.start",
@@ -209,4 +212,4 @@ _SUPPORTED_HOOKS = {
     "tool.before",
     "tool.after",
 }
-_OBSERVERS = {"session.start", "session.end", "turn.start", "turn.end"}
+_OBSERVERS = {"session.prepare", "session.start", "session.end", "turn.start", "turn.end"}

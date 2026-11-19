@@ -19,7 +19,6 @@ from ma_acp import ACP, OUTPUT_SESSION
 from ma_core import Plugin as _NativePlugin
 from ma_acp.binding import declaration as _declaration
 from ma_approval import Approval as _Approval
-from ma_context import Context
 from ma_core import plain
 from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
@@ -37,6 +36,9 @@ from ma_questions import Questions
 from ma_runtime import Runtime
 from ma_selection import Selection
 
+from .compaction import _CompactionPlugin
+from .mcp import _McpPlugin
+from ._credentials import CredentialStore, _CredentialAdapter
 from ._environment import MemoryEnvironment
 from ._history import HistoryStore
 from ._native import (
@@ -272,6 +274,7 @@ class Agent:
         self._plugin_host = False
         self._conformance = False
         self._late_answers = False
+        self._credentials: CredentialStore | None = None
         self._restart: Callable[[], Awaitable[Agent]] | None = None
         self._memory_store: _MemoryHistory | None = None
 
@@ -322,6 +325,21 @@ class Agent:
             if answer.kind == "value"
             else "declined"
         )
+        if answer.kind == "value" and self._credentials is not None:
+            question = await self._call(
+                "questions", "validate", session=sid, actor="user", request=question_id
+            )
+            if question["kind"] == "secret":
+                try:
+                    await self._h.call(
+                        "embedding",
+                        "credentials",
+                        "answer",
+                        {"session": sid, "actor": "user", "request": question_id, "value": value},
+                    )
+                except Exception as exc:
+                    raise _error(exc) from None
+                return
         await self._call(
             "questions",
             "answer",
@@ -393,8 +411,10 @@ class Agent:
             await self._call("runtime", "wait", session=id)
             return self._attach(id)
 
-    async def sessions(self) -> list[JsonObject]:
-        return cast(list[JsonObject], await self._session("list"))
+    async def sessions(self, *, project: Path | None = None) -> list[JsonObject]:
+        return cast(
+            list[JsonObject], await self._session("list", project=str(project) if project else None)
+        )
 
     async def session_info(self, id: str) -> JsonObject:
         """Read saved local session settings without starting recovery or taking its lease."""
@@ -407,6 +427,10 @@ class Agent:
             "id": id,
             "project": state["project"],
             "settings": settings_out(state["settings"]),
+            "created": state["created"],
+            "lastActivity": max(
+                (entry["time"] for entry in state["entries"]), default=state["created"]
+            ),
         }
 
     async def models(self) -> list[ModelInfo]:
@@ -481,7 +505,9 @@ class Agent:
         if "mcp" in self._h.plugins:
             self._h.plugins["mcp"].project_servers = resolver
         else:
-            await self._h.load(MCP(standard_names=True, project_servers=resolver))
+            await self._h.load(
+                MCP(standard_names=True, project_servers=resolver, prepare_hook="session.prepare")
+            )
 
     async def serve_acp(
         self,
@@ -601,6 +627,7 @@ def create_agent(
     durability: Durability = "ephemeral",
     history: HistoryStore | None = None,
     environment: MemoryEnvironment | None = None,
+    credentials: CredentialStore | None = None,
     providers: Sequence[Provider] = (),
     tools: Sequence[Tool] = (),
     plugins: Sequence[Plugin] = (),
@@ -611,8 +638,6 @@ def create_agent(
     approval: Approval | None = None,
     on_question: QuestionHandler | None = None,
     local_process_groups: bool = False,
-    mcp_servers: Sequence[JsonObject] = (),
-    project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
     commands: bool = False,
     conformance: bool = False,
     job_reports_start_turns: bool = False,
@@ -695,24 +720,39 @@ def create_agent(
                 await h.load(Echo())
                 await h.load(Nest())
             await h.load(Questions() if conformance else _Questions())
+            if credentials is not None:
+                agent._credentials = credentials
+                await h.load(_CredentialAdapter(credentials))
             h.on("embedding", "session.start", agent._present, "first")
             h.follow("embedding", "user", agent._event)
             for provider in providers:
-                await h.load(_ProviderAdapter(provider))
+                await h.load(_ProviderAdapter(provider, credentials))
             await h.load(
                 Selection([p.id for p in providers] + (["conformance"] if conformance else []))
             )
-            await h.load(Context())
+            compaction_parts = [p for p in plugins if isinstance(p, _CompactionPlugin)]
+            mcp_parts = [p for p in plugins if isinstance(p, _McpPlugin)]
+            if len(compaction_parts) > 1 or len(mcp_parts) > 1:
+                raise ValueError("Duplicate official plugin")
+            await h.load(
+                (compaction_parts[0] if compaction_parts else _CompactionPlugin())._native()
+            )
             if commands:
                 await h.load(Commands())
-            if mcp_servers or project_mcp is not None or conformance:
-                await h.load(MCP(mcp_servers, standard_names=True, project_servers=project_mcp))
+            if mcp_parts:
+                await h.load(mcp_parts[0]._native())
+            elif conformance:
+                await h.load(MCP(standard_names=True))
             if approval is not None or conformance:
                 await h.load(_Approval())
             registered_tools: dict[str, _LocalPlugin] = {}
             for plugin in [
                 *(Plugin(t.name, tools=[t]) for t in tools),
-                *(p for p in plugins if not isinstance(p, _OverWire)),
+                *(
+                    p
+                    for p in plugins
+                    if not isinstance(p, (_OverWire, _CompactionPlugin, _McpPlugin))
+                ),
             ]:
                 if plugin.name in h.plugins:
                     raise AgentError(
@@ -738,7 +778,9 @@ def create_agent(
                 except BaseException:
                     await plugin._close()
                     raise
-                adapter = _LocalPlugin(plugin, registrar, folder)
+                adapter = _LocalPlugin(
+                    plugin, registrar, folder, late_answers=late_answers_start_turns
+                )
                 await h.load(adapter)
                 registered_tools.update((name, adapter) for name in registrar._tools)
             specs: list[dict[str, Any]] = [

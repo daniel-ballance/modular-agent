@@ -97,6 +97,15 @@ class AuthFile:
     def login(self, provider: str) -> Login | None:
         return self._read()[0].get(provider)
 
+    def answer(self, name: str) -> str | None:
+        return self._read()[1].get(name)
+
+    async def set_answer(self, name: str, value: str) -> None:
+        async with self._locked():
+            logins, answers = self._read()
+            answers[name] = value
+            self._write(logins, answers)
+
     @asynccontextmanager
     async def _locked(self) -> AsyncIterator[None]:
         self.path.parent.mkdir(parents=True, exist_ok=True)

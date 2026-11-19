@@ -2,18 +2,21 @@
 
 import argparse
 import asyncio
+import getpass
 import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import warnings
 from typing import cast
 
 from modular_agent import (
     Agent,
     AgentError,
     Answer,
+    CredentialStore,
     Durability,
     Event,
     JsonObject,
@@ -28,7 +31,9 @@ from modular_agent import (
     file_history,
     http_history,
 )
+from modular_agent.compaction import compaction
 from modular_agent.files import file_tools
+from modular_agent.mcp import mcp
 from modular_agent.testing import ScriptedProvider
 
 from .auth import AuthFile
@@ -174,16 +179,21 @@ async def _print_turn(session: Session, args: argparse.Namespace) -> int:
 async def _line(session: Session, args: argparse.Namespace) -> int:
     loop = asyncio.get_running_loop()
     active = False
-    pending: dict[str, asyncio.Future[Answer]] = {}
+    pending: dict[str, tuple[Question, asyncio.Future[Answer]]] = {}
     eof = False
 
     async def question(q: Question, context: QuestionContext) -> Answer:
-        if eof or q.kind == "secret":
+        if eof or (q.kind == "secret" and not sys.stdin.isatty()):
             return Answer("decline")
         reply: asyncio.Future[Answer] = loop.create_future()
-        pending[q.id] = reply
+        pending[q.id] = (q, reply)
+        usage = (
+            "/answer REQUEST_ID (hidden input)"
+            if q.kind == "secret"
+            else "/answer REQUEST_ID VALUE"
+        )
         print(
-            f"Question {q.id}: {q.question} {q.options}\nUse /answer REQUEST_ID VALUE",
+            f"Question {q.id}: {q.question} {q.options}\nUse {usage}",
             file=sys.stderr,
             flush=True,
         )
@@ -215,7 +225,7 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
             line = await asyncio.to_thread(sys.stdin.readline)
             if not line:
                 eof = True
-                for outstanding in pending.values():
+                for _, outstanding in pending.values():
                     if not outstanding.done():
                         outstanding.set_result(Answer("decline"))
                 await session.wait_idle()
@@ -230,13 +240,30 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
                 await cancel()
             elif line.startswith("/answer "):
                 id, _, value = line.removeprefix("/answer ").partition(" ")
-                reply = pending.get(id)
-                if reply is None or reply.done() or not value:
+                item = pending.get(id)
+                if item is None or item[1].done():
                     print("Use /answer REQUEST_ID VALUE for an open question", file=sys.stderr)
-                else:
-                    reply.set_result(
-                        Answer("decline") if value == "decline" else Answer("value", value)
-                    )
+                    continue
+                q, reply = item
+                if value == "decline":
+                    reply.set_result(Answer("decline"))
+                elif q.kind == "secret":
+                    if value:
+                        print(
+                            "Do not put the secret on the command line; use /answer REQUEST_ID",
+                            file=sys.stderr,
+                        )
+                        continue
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("error", getpass.GetPassWarning)
+                            secret = getpass.getpass("Secret: ")
+                    except (EOFError, OSError, KeyboardInterrupt, getpass.GetPassWarning):
+                        reply.set_result(Answer("decline"))
+                    else:
+                        reply.set_result(Answer("value", secret))
+                elif value:
+                    reply.set_result(Answer("value", value))
             elif line.startswith("/after "):
                 await session.send(line.removeprefix("/after "), "after")
             elif line.startswith("/") and not line.startswith("/skill:"):
@@ -315,6 +342,7 @@ async def _agent(
     script = os.environ.get("MODULAR_AGENT_SCRIPT")
     testing = args.acp and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1"
     settings = paths.settings(project)
+    auth = AuthFile(paths.config / "auth.json")
     providers: list[Provider] = []
     processes = None
     configured_model = settings.pop("model", None)
@@ -340,7 +368,6 @@ async def _agent(
     else:
         from .responses import Responses
 
-        auth = AuthFile(paths.config / "auth.json")
         providers.extend(
             [
                 Responses(vendor, auth, paths.config / "models.json")
@@ -397,8 +424,14 @@ async def _agent(
         durability=durability,
         local_process_groups=True,
         providers=providers,
+        credentials=CredentialStore(auth.answer, auth.set_answer),
         tools=[code_tool()],
-        plugins=[file_tools(paths.state / "output"), prompt_plugin(paths.config, project)],
+        plugins=[
+            file_tools(paths.state / "output"),
+            prompt_plugin(paths.config, project),
+            compaction(),
+            *([] if inspecting else [mcp(project_servers=paths.mcp)]),
+        ],
         model=model,
         settings=settings,
         process_plugins=processes,
@@ -407,7 +440,6 @@ async def _agent(
         job_reports_start_turns=True,
         late_answers_start_turns=True,
         conformance=testing,
-        project_mcp=None if inspecting else paths.mcp,
     )
 
 

@@ -146,8 +146,9 @@ class Event:
 
 
 class QuestionSpec(TypedDict):
-    kind: Literal["approval", "choice", "text"]
+    kind: Literal["approval", "choice", "text", "link", "secret"]
     question: str
+    credential: NotRequired[str]
     options: NotRequired[list[str]]
     details: NotRequired[Json]
 

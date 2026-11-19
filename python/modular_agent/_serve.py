@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 from ma_plugin.host import External
 from ma_plugin.rpc import MAX_FRAME, Peer, WireError
@@ -21,7 +21,7 @@ from ._plugin import (
     _handle_command,
     _handle_hook,
 )
-from ._tool import ToolContext
+from ._tool import LeftOpen, ToolContext
 from ._types import AgentError, Answer, Content, ErrorCode, Json, JsonObject, QuestionSpec
 
 
@@ -115,17 +115,21 @@ async def _serve(
         ):
             raise WireError("Unknown tool or invalid scope", "invalid_request")
 
-        async def ask(q: QuestionSpec, index: int, wait: float | None) -> Answer:
+        async def ask(q: QuestionSpec, index: int, wait: float | None, leave_open: bool) -> Answer:
             request: dict[str, Any] = dict(q)
             if wait is not None:
                 request["timeLimitMs"] = round(wait * 1000)
-                request["whenTimeLimit"] = "decline"
+                request["whenTimeLimit"] = "leaveOpen" if leave_open else "decline"
             try:
                 reply = await server.peer.request(
                     "host/ask", {"parentRequestId": key, "request": request}
                 )
             except WireError as exc:
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+            if reply.get("pending"):
+                raise LeftOpen(reply["requestId"])
+            if q["kind"] == "secret" and isinstance(reply.get("stored"), str):
+                return Answer("value", reply["stored"])
             if reply.get("allow") is True:
                 return Answer("allow")
             return _read_answer(reply, q["kind"])
@@ -142,11 +146,50 @@ async def _serve(
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
             return reply["tools"] if operation == "list" and isinstance(reply, dict) else reply
 
+        async def environment(operation: str, params: JsonObject) -> Json:
+            methods = {
+                "read_bytes": "read",
+                "write_bytes": "write",
+                "list_directory": "list",
+                "bash": "exec",
+            }
+            arguments = dict(params)
+            timeout = arguments.pop("timeout", None)
+            if isinstance(timeout, (int, float)):
+                arguments["timeoutMs"] = round(timeout * 1000)
+            try:
+                reply = await server.peer.request(
+                    "host/env/" + methods[operation],
+                    {
+                        **arguments,
+                        "parentRequestId": key,
+                        "sessionId": p["sessionId"],
+                        "cwd": p["project"],
+                    },
+                )
+            except WireError as exc:
+                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+            if operation == "bash":
+                return {
+                    "exit_code": reply["exitCode"],
+                    "text": reply["output"],
+                    "timed_out": reply["timedOut"],
+                }
+            return cast(Json, reply)
+
         context = ToolContext(
-            p["sessionId"], call.get("actorId", "user"), call["id"], ask, progress, nested
+            p["sessionId"],
+            call.get("actorId", "user"),
+            call["id"],
+            ask,
+            progress,
+            nested,
+            environment,
         )
         try:
             return await t._run(call["input"], context)
+        except LeftOpen as exc:
+            return {"pending": str(exc)}
         except asyncio.CancelledError:
             return {
                 "status": "cancelled",

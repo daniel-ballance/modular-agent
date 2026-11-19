@@ -15,9 +15,9 @@ from urllib.parse import parse_qs, urlsplit
 from httpx2 import AsyncClient
 import pytest
 
-from modular_agent import ModelRef, ProviderContext
+from modular_agent import Answer, CredentialStore, ModelRef, ProviderContext, Tool, create_agent
 from modular_agent.files import file_tools
-from modular_agent.testing import memory_environment, test_agent as offline_agent
+from modular_agent.testing import memory_environment, scripted_provider, test_agent as offline_agent
 from ma_standard import oauth, prompt, responses
 from ma_standard.auth import ApiKey, AuthFile, OAuth
 from ma_standard.code import code_tool
@@ -28,7 +28,13 @@ PACKAGE = ROOT / "python/packages/ma/ma_standard"
 
 
 def test_public_sdk_only() -> None:
-    public = {"modular_agent", "modular_agent.files", "modular_agent.testing"}
+    public = {
+        "modular_agent",
+        "modular_agent.compaction",
+        "modular_agent.files",
+        "modular_agent.mcp",
+        "modular_agent.testing",
+    }
     for file in PACKAGE.glob("*.py"):
         for node in ast.walk(ast.parse(file.read_text())):
             names = (
@@ -206,6 +212,37 @@ async def test_browser_sign_in(wrong_state: bool, monkeypatch: pytest.MonkeyPatc
     digest = hashlib.sha256(fields["code_verifier"][0].encode()).digest()
     assert shown["code_challenge"] == [base64.urlsafe_b64encode(digest).decode().rstrip("=")]
     assert fields["code"] == ["local-code"]
+
+
+async def test_secret_answer_is_written_to_shared_auth_not_history(tmp_path: Path) -> None:
+    auth = AuthFile(tmp_path / "auth.json")
+    await auth.set_login("xai", ApiKey("test-key"))
+
+    async def ask(arguments, context):
+        reply = await context.ask(
+            {"kind": "secret", "question": "Signing key?", "credential": "signing-key"}
+        )
+        return str(reply.value)
+
+    tool = Tool.from_schema("ask_secret", "Ask a secret", {"type": "object"}, ask)
+    provider = scripted_provider([{"toolCalls": [{"name": "ask_secret"}]}, {"text": "done"}])
+    async with create_agent(
+        project=tmp_path,
+        tools=[tool],
+        providers=[provider],
+        on_question=lambda question, _: Answer("value", "test-secret"),
+        credentials=CredentialStore(auth.answer, auth.set_answer),
+    ) as agent:
+        session = await agent.session()
+        result = await asyncio.wait_for(session.prompt("ask"), 5)
+        assert result.text == "done"
+        assert result.tool_results()[0].text() == "signing-key"
+        assert "test-secret" not in json.dumps(await session.history())
+    assert json.loads(auth.path.read_text()) == {
+        "logins": {"xai": {"type": "api_key", "key": "test-key"}},
+        "answers": {"signing-key": "test-secret"},
+    }
+    assert stat.S_IMODE(auth.path.stat().st_mode) == 0o600
 
 
 @pytest.mark.loopback
