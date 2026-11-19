@@ -5,7 +5,7 @@ use agent_api::*;
 /// The vendor's own output items are kept on the assistant message so its
 /// reasoning can be sent back as it was. They are only ever returned to the
 /// vendor that wrote them.
-fn replayable<'a>(message: &'a Message, vendor: Vendor) -> Option<&'a Vec<Value>> {
+fn replayable(message: &Message, vendor: Vendor) -> Option<&Vec<Value>> {
     (message.opaque["provider"] == vendor.id())
         .then(|| message.opaque["output"].as_array())
         .flatten()
@@ -130,8 +130,9 @@ pub fn response(vendor: Vendor, response: &Value) -> Result<ModelResponse> {
                 let input: Value = if arguments.trim().is_empty() {
                     json!({})
                 } else {
-                    serde_json::from_str(arguments)
-                        .map_err(|e| anyhow!("the model sent tool arguments that are not JSON: {e}"))?
+                    serde_json::from_str(arguments).map_err(|e| {
+                        anyhow!("the model sent tool arguments that are not JSON: {e}")
+                    })?
                 };
                 parts.push(Part::ToolCall {
                     call: ToolCall {
@@ -241,7 +242,10 @@ mod tests {
         )
         .unwrap();
         assert!(xai.get("instructions").is_none());
-        assert_eq!(xai["input"][0], json!({"role":"system","content":"Be brief."}));
+        assert_eq!(
+            xai["input"][0],
+            json!({"role":"system","content":"Be brief."})
+        );
         assert_eq!(xai["max_output_tokens"], 4096);
         assert_eq!(xai["tools"][0]["name"], "codemode");
     }
@@ -276,6 +280,10 @@ mod tests {
         assert_eq!(other.len(), 2);
         assert_eq!(other[0]["type"], "function_call");
         assert_eq!(other[0]["call_id"], "agent-id");
-        assert!(other.iter().all(|item| item.get("encrypted_content").is_none()));
+        assert!(
+            other
+                .iter()
+                .all(|item| item.get("encrypted_content").is_none())
+        );
     }
 }

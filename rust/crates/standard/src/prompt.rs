@@ -103,7 +103,11 @@ impl Plugin for PromptPlugin {
                     let session = api.snapshot(&scope.session)?;
                     let env: Arc<dyn WorkingEnvironment> = capability(api.as_ref(), "environment")?;
                     let env = env
-                        .scoped(api.clone(), scope.clone(), api.cancellation(&scope.session)?)
+                        .scoped(
+                            api.clone(),
+                            scope.clone(),
+                            api.cancellation(&scope.session)?,
+                        )
                         .unwrap_or(env);
                     let mut files = vec![];
                     // The person's own file is configuration, read from this machine.

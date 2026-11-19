@@ -1169,6 +1169,9 @@ impl Runtime for Engine {
         call.extra["parentCallId"] = json!(parent);
         scope.call = Some(call.id.clone());
         let entry = self.record(&api, &scope, "tool.call", false, json!(call), vec![])?;
+        // Followers hear of a nested call as they do of the model's own.
+        api.emit(Event::new(&scope, "tool.requested", json!(call)))
+            .await?;
         let mut tools = vec![];
         for name in api.capability_names("tools.") {
             tools.extend(

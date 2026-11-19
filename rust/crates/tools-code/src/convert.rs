@@ -29,7 +29,8 @@ pub fn to_json(value: ObjectRef<'_>) -> Value {
         return json!(i);
     }
     if let Some(f) = value.as_float() {
-        return serde_json::Number::from_f64(f).map_or_else(|| json!(value.py_repr()), Value::Number);
+        return serde_json::Number::from_f64(f)
+            .map_or_else(|| json!(value.py_repr()), Value::Number);
     }
     if let Some(s) = value.as_str() {
         return json!(s);

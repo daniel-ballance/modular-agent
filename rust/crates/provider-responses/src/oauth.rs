@@ -33,7 +33,10 @@ pub enum Step<'a> {
     /// Open this address in a browser.
     Open(&'a str),
     /// Open the address and enter the code.
-    Code { address: &'a str, code: &'a str },
+    Code {
+        address: &'a str,
+        code: &'a str,
+    },
     Note(&'a str),
 }
 
@@ -61,7 +64,10 @@ fn decode(text: &str) -> String {
     let mut at = 0;
     while at < bytes.len() {
         match bytes[at] {
-            b'%' => match text.get(at + 1..at + 3).and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+            b'%' => match text
+                .get(at + 1..at + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            {
                 Some(byte) => {
                     out.push(byte);
                     at += 3;
@@ -106,7 +112,11 @@ pub fn chatgpt_account(access: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("the ChatGPT token names no account; sign in again"))
 }
 
-async fn form(client: &reqwest::Client, url: &str, fields: &[(&str, &str)]) -> Result<(u16, Value)> {
+async fn form(
+    client: &reqwest::Client,
+    url: &str,
+    fields: &[(&str, &str)],
+) -> Result<(u16, Value)> {
     let body = fields
         .iter()
         .map(|(k, v)| format!("{}={}", encode(k), encode(v)))
@@ -121,7 +131,10 @@ async fn form(client: &reqwest::Client, url: &str, fields: &[(&str, &str)]) -> R
         .await?;
     let status = response.status().as_u16();
     let text = response.text().await?;
-    Ok((status, serde_json::from_str(&text).unwrap_or(json!({"error": text}))))
+    Ok((
+        status,
+        serde_json::from_str(&text).unwrap_or(json!({"error": text})),
+    ))
 }
 fn oauth_error(action: &str, status: u16, body: &Value) -> anyhow::Error {
     let detail = [&body["error"], &body["error_description"]]
@@ -129,7 +142,10 @@ fn oauth_error(action: &str, status: u16, body: &Value) -> anyhow::Error {
         .filter_map(|v| v.as_str())
         .collect::<Vec<_>>()
         .join(": ");
-    anyhow!("{action} failed (HTTP {status}){}{detail}", if detail.is_empty() { "" } else { ": " })
+    anyhow!(
+        "{action} failed (HTTP {status}){}{detail}",
+        if detail.is_empty() { "" } else { ": " }
+    )
 }
 /// A token set from a token endpoint's answer. A vendor that does not rotate
 /// the refresh token may leave it out; the old one stays.
@@ -173,7 +189,12 @@ pub async fn refresh(client: &reqwest::Client, vendor: Vendor, old: Login) -> Re
         ],
     )
     .await
-    .map_err(|e| anyhow!("could not reach {} to refresh the sign-in: {e}", vendor.label()))?;
+    .map_err(|e| {
+        anyhow!(
+            "could not reach {} to refresh the sign-in: {e}",
+            vendor.label()
+        )
+    })?;
     if !(200..300).contains(&status) {
         return Err(oauth_error(
             &format!(
@@ -217,7 +238,11 @@ async fn xai_device(client: &reqwest::Client, show: &(dyn Fn(Step<'_>) + Sync)) 
     let (status, device) = form(
         client,
         XAI_DEVICE_CODE,
-        &[("client_id", XAI_CLIENT), ("scope", XAI_SCOPE), ("referrer", "pi")],
+        &[
+            ("client_id", XAI_CLIENT),
+            ("scope", XAI_SCOPE),
+            ("referrer", "pi"),
+        ],
     )
     .await?;
     if !(200..300).contains(&status) {
@@ -314,7 +339,11 @@ async fn codex_device(client: &reqwest::Client, show: &(dyn Fn(Step<'_>) + Sync)
         .to_owned();
     let interval = body["interval"]
         .as_u64()
-        .or_else(|| body["interval"].as_str().and_then(|s| s.trim().parse().ok()))
+        .or_else(|| {
+            body["interval"]
+                .as_str()
+                .and_then(|s| s.trim().parse().ok())
+        })
         .unwrap_or(5)
         .max(1);
     show(Step::Code {
@@ -330,8 +359,13 @@ async fn codex_device(client: &reqwest::Client, show: &(dyn Fn(Step<'_>) + Sync)
         let status = response.status().as_u16();
         let body: Value = response.json().await.unwrap_or(Value::Null);
         if (200..300).contains(&status) {
-            return match (body["authorization_code"].as_str(), body["code_verifier"].as_str()) {
-                (Some(code), Some(verifier)) => Ok(Poll::Done((code.to_owned(), verifier.to_owned()))),
+            return match (
+                body["authorization_code"].as_str(),
+                body["code_verifier"].as_str(),
+            ) {
+                (Some(code), Some(verifier)) => {
+                    Ok(Poll::Done((code.to_owned(), verifier.to_owned())))
+                }
                 _ => bail!("the ChatGPT sign-in answer is incomplete"),
             };
         }
@@ -370,8 +404,14 @@ async fn callback(listener: tokio::net::TcpListener, state: &str) -> Result<Stri
             )))
         };
         let (status, text) = match &outcome {
-            Some(Ok(_)) => ("200 OK", "Signed in. You can close this tab and return to the terminal."),
-            Some(Err(_)) => ("400 Bad Request", "The sign-in did not complete. Return to the terminal."),
+            Some(Ok(_)) => (
+                "200 OK",
+                "Signed in. You can close this tab and return to the terminal.",
+            ),
+            Some(Err(_)) => (
+                "400 Bad Request",
+                "The sign-in did not complete. Return to the terminal.",
+            ),
             None => ("404 Not Found", "Not found."),
         };
         let _ = stream
@@ -412,7 +452,11 @@ async fn codex_browser(
 
 /// Sign in to a subscription. `device` asks for a code typed on another
 /// machine instead of a browser on this one.
-pub async fn login(vendor: Vendor, device: bool, show: &(dyn Fn(Step<'_>) + Sync)) -> Result<Login> {
+pub async fn login(
+    vendor: Vendor,
+    device: bool,
+    show: &(dyn Fn(Step<'_>) + Sync),
+) -> Result<Login> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
@@ -438,11 +482,17 @@ mod tests {
 
     #[test]
     fn query_values_are_decoded() {
-        assert_eq!(query("code=a%2Fb+c&state=xyz", "code").as_deref(), Some("a/b c"));
+        assert_eq!(
+            query("code=a%2Fb+c&state=xyz", "code").as_deref(),
+            Some("a/b c")
+        );
         assert_eq!(query("code=a&state=xyz", "state").as_deref(), Some("xyz"));
         assert_eq!(query("code=100%", "code").as_deref(), Some("100%"));
         assert_eq!(query("state=xyz", "code"), None);
-        assert_eq!(encode("http://localhost:1455/a b"), "http%3A%2F%2Flocalhost%3A1455%2Fa%20b");
+        assert_eq!(
+            encode("http://localhost:1455/a b"),
+            "http%3A%2F%2Flocalhost%3A1455%2Fa%20b"
+        );
     }
 
     #[test]
@@ -451,12 +501,19 @@ mod tests {
         assert_eq!(chatgpt_account(&format!("h.{claims}.s")).unwrap(), "acct-7");
         assert!(chatgpt_account("not-a-token").is_err());
         let body = json!({"access_token": format!("h.{claims}.s"), "expires_in": 3600});
-        let Login::Oauth { refresh, account, expires, .. } =
-            tokens(Vendor::Codex, &body, Some("kept")).unwrap()
+        let Login::Oauth {
+            refresh,
+            account,
+            expires,
+            ..
+        } = tokens(Vendor::Codex, &body, Some("kept")).unwrap()
         else {
             unreachable!()
         };
-        assert_eq!((refresh.as_str(), account.as_deref()), ("kept", Some("acct-7")));
+        assert_eq!(
+            (refresh.as_str(), account.as_deref()),
+            ("kept", Some("acct-7"))
+        );
         assert!(expires > now_ms() && expires < now_ms() + 3_600_000);
         assert!(tokens(Vendor::Xai, &json!({"access_token":"a"}), None).is_err());
     }
@@ -464,7 +521,9 @@ mod tests {
     #[tokio::test]
     async fn the_callback_takes_only_the_matching_state() {
         async fn visit(port: u16, target: &str) -> String {
-            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
             stream
                 .write_all(format!("GET {target} HTTP/1.1\r\nhost: localhost\r\n\r\n").as_bytes())
                 .await
@@ -473,16 +532,32 @@ mod tests {
             stream.read_to_string(&mut text).await.unwrap();
             text
         }
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         let waiting = tokio::spawn(async move { callback(listener, "good").await });
-        assert!(visit(port, "/favicon.ico").await.starts_with("HTTP/1.1 404"));
-        assert!(visit(port, "/auth/callback?code=c1&state=good").await.starts_with("HTTP/1.1 200"));
+        assert!(
+            visit(port, "/favicon.ico")
+                .await
+                .starts_with("HTTP/1.1 404")
+        );
+        assert!(
+            visit(port, "/auth/callback?code=c1&state=good")
+                .await
+                .starts_with("HTTP/1.1 200")
+        );
         assert_eq!(waiting.await.unwrap().unwrap(), "c1");
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         let waiting = tokio::spawn(async move { callback(listener, "good").await });
-        assert!(visit(port, "/auth/callback?code=c1&state=bad").await.starts_with("HTTP/1.1 400"));
+        assert!(
+            visit(port, "/auth/callback?code=c1&state=bad")
+                .await
+                .starts_with("HTTP/1.1 400")
+        );
         assert!(waiting.await.unwrap().is_err());
     }
 }

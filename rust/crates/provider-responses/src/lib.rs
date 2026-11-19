@@ -204,9 +204,8 @@ fn api_failure(status: Option<u16>, error: &Value) -> ModelFailure {
         ("usage_limit_reached" | "usage_not_included" | "insufficient_quota", _) => {
             FailureKind::Other
         }
-        ("invalid_api_key" | "authentication_error" | "token_expired", _) | (_, Some(401 | 403)) => {
-            FailureKind::Credentials
-        }
+        ("invalid_api_key" | "authentication_error" | "token_expired", _)
+        | (_, Some(401 | 403)) => FailureKind::Credentials,
         ("rate_limit_exceeded" | "server_error" | "overloaded", _) | (_, Some(429 | 500..=599)) => {
             FailureKind::Temporary
         }
@@ -237,12 +236,7 @@ impl Bound {
         .await
         .map_err(|e| failed(FailureKind::Credentials, format!("{e:#}")).into())
     }
-    async fn send(
-        &self,
-        login: &Login,
-        session: &str,
-        body: &Value,
-    ) -> Result<reqwest::Response> {
+    async fn send(&self, login: &Login, session: &str, body: &Value) -> Result<reqwest::Response> {
         let mut request = self
             .provider
             .client
@@ -375,15 +369,17 @@ impl Bound {
             }
             // A token the service no longer honours, though not yet past its
             // stated expiry: refresh once and try again.
-            if status.as_u16() == 401 && !retried && !self.provider.test {
-                if let Login::Oauth { expires, .. } = &mut login {
-                    *expires = 0;
-                    let auth: Arc<AuthFile> = capability(api.as_ref(), "credentials.auth")?;
-                    auth.set_login(vendor.id(), Some(login.clone()))?;
-                    login = self.login(api).await?;
-                    retried = true;
-                    continue;
-                }
+            if status.as_u16() == 401
+                && !retried
+                && !self.provider.test
+                && let Login::Oauth { expires, .. } = &mut login
+            {
+                *expires = 0;
+                let auth: Arc<AuthFile> = capability(api.as_ref(), "credentials.auth")?;
+                auth.set_login(vendor.id(), Some(login.clone()))?;
+                login = self.login(api).await?;
+                retried = true;
+                continue;
             }
             let text = response.text().await.unwrap_or_default();
             let value: Value = serde_json::from_str(&text).unwrap_or(json!(text));
@@ -426,10 +422,12 @@ impl ModelAccess for Bound {
         end.stream = Some(stream_id);
         end.end = true;
         let emitted = api.emit(end).await;
-        result.and_then(|response| emitted.map(|()| response)).map_err(|e| {
-            e.downcast_ref::<ModelFailure>()
-                .cloned()
-                .unwrap_or_else(|| failed(FailureKind::Other, format!("{e:#}")))
-        })
+        result
+            .and_then(|response| emitted.map(|()| response))
+            .map_err(|e| {
+                e.downcast_ref::<ModelFailure>()
+                    .cloned()
+                    .unwrap_or_else(|| failed(FailureKind::Other, format!("{e:#}")))
+            })
     }
 }

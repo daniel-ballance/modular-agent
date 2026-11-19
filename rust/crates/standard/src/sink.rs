@@ -72,12 +72,16 @@ impl EventSink for Sink {
             return;
         }
         match event.kind.as_str() {
-            "session.open" => eprintln!("{}", self.dim(&format!("Session {}", event.scope.session))),
+            "session.open" => {
+                eprintln!("{}", self.dim(&format!("Session {}", event.scope.session)))
+            }
             "tool.started" => {
                 let name = event.content["name"].as_str().unwrap_or("");
                 let input = &event.content["input"];
                 if event.content["started_by"] == "tool" {
-                    state.nested.insert(event.content["id"].as_str().unwrap_or("").into());
+                    state
+                        .nested
+                        .insert(event.content["id"].as_str().unwrap_or("").into());
                     if self.verbose {
                         self.note(&mut state, &format!("  -> {name}({})", one_line(input)));
                     }

@@ -231,7 +231,9 @@ mod tests {
         let mode = std::fs::metadata(&auth.path)?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         let fresh = |login: Login| async move {
-            let Login::Oauth { refresh, .. } = login else { unreachable!() };
+            let Login::Oauth { refresh, .. } = login else {
+                unreachable!()
+            };
             assert_eq!(refresh, "r1");
             Ok(Login::Oauth {
                 access: "new".into(),

@@ -58,7 +58,9 @@ fn show(step: oauth::Step<'_>) {
             eprintln!("Waiting for the sign-in to finish...");
         }
         oauth::Step::Code { address, code } => {
-            eprintln!("Open this address in a browser:\n\n  {address}\n\nand enter the code: {code}\n");
+            eprintln!(
+                "Open this address in a browser:\n\n  {address}\n\nand enter the code: {code}\n"
+            );
             open_browser(address);
             eprintln!("Waiting for the sign-in to finish...");
         }
@@ -93,7 +95,11 @@ async fn login(standard: &Standard, mut args: impl Iterator<Item = String>) -> R
         let status = std::process::Command::new("claude")
             .args(["auth", "login"])
             .status()
-            .map_err(|e| anyhow!("could not run claude: {e}. Install Claude Code, then run `claude auth login`."))?;
+            .map_err(|e| {
+                anyhow!(
+                    "could not run claude: {e}. Install Claude Code, then run `claude auth login`."
+                )
+            })?;
         ensure!(status.success(), "claude auth login did not complete");
         return Ok(());
     }
@@ -127,7 +133,12 @@ fn auth_status(standard: &Standard) -> Result<()> {
         };
         println!("{:<13} {:<22} {state}", vendor.id(), vendor.label());
     }
-    println!("{:<13} {:<22} {}", "claude", "Claude subscription", claude_status());
+    println!(
+        "{:<13} {:<22} {}",
+        "claude",
+        "Claude subscription",
+        claude_status()
+    );
     if standard.claude_launch().is_none() {
         println!("              the Claude sidecar is not installed (build sidecars/claude)");
     }
@@ -150,7 +161,8 @@ async fn start() -> Result<()> {
             if provider == "claude" {
                 bail!("Claude Code holds that sign-in; run `claude auth logout`");
             }
-            let vendor = Vendor::parse(&provider).ok_or_else(|| anyhow!("unknown provider {provider}"))?;
+            let vendor =
+                Vendor::parse(&provider).ok_or_else(|| anyhow!("unknown provider {provider}"))?;
             standard.auth().set_login(vendor.id(), None)?;
             eprintln!("Signed out of {}.", vendor.label());
             return Ok(());
@@ -158,7 +170,14 @@ async fn start() -> Result<()> {
         Some("auth") => return auth_status(&standard),
         Some("models") => {
             standard.claude = standard.claude_launch().is_some();
-            let api = compose(&standard, Arc::new(TerminalPlugin { sink: Arc::new(Quiet) }), &project).await?;
+            let api = compose(
+                &standard,
+                Arc::new(TerminalPlugin {
+                    sink: Arc::new(Quiet),
+                }),
+                &project,
+            )
+            .await?;
             for model in standard::models(api.as_ref())? {
                 println!(
                     "{:<34} context {:>7}  thinking {}",
@@ -173,7 +192,13 @@ async fn start() -> Result<()> {
             let plugin = standard.skills();
             let (skills, problems) = standard::skills::discover(&plugin.folders(&project));
             for skill in skills {
-                println!("{:<28} {}\n{:<28} {}", skill.name, skill.description, "", skill.file.display());
+                println!(
+                    "{:<28} {}\n{:<28} {}",
+                    skill.name,
+                    skill.description,
+                    "",
+                    skill.file.display()
+                );
             }
             for problem in problems {
                 eprintln!("skipped {problem}");
@@ -189,10 +214,17 @@ async fn start() -> Result<()> {
             let (servers, problems) = config.servers(&project);
             for server in servers {
                 match server {
-                    tools_mcp::Server::Stdio { name, command, args, .. } => {
+                    tools_mcp::Server::Stdio {
+                        name,
+                        command,
+                        args,
+                        ..
+                    } => {
                         println!("{name:<20} stdio  {command} {}", args.join(" "))
                     }
-                    tools_mcp::Server::Http { name, url, .. } => println!("{name:<20} http   {url}"),
+                    tools_mcp::Server::Http { name, url, .. } => {
+                        println!("{name:<20} http   {url}")
+                    }
                 }
             }
             for problem in problems {
@@ -288,7 +320,10 @@ async fn start() -> Result<()> {
             .into_iter()
             .max_by_key(|s| s.entries.last().map_or(0, |e| e.at))
             .map(|s| s.id);
-        ensure!(terminal.session.is_some(), "this folder has no saved session to continue");
+        ensure!(
+            terminal.session.is_some(),
+            "this folder has no saved session to continue"
+        );
     }
     let recorded = match &terminal.session {
         Some(session) => {
@@ -305,7 +340,9 @@ async fn start() -> Result<()> {
     // Which model this run will use decides whether the Claude sidecar starts.
     let configured = {
         use agent_api::Configuration;
-        standard.configuration().settings(&project.canonicalize()?)?["model"]
+        standard
+            .configuration()
+            .settings(&project.canonicalize()?)?["model"]
             .as_str()
             .map(str::to_owned)
     };

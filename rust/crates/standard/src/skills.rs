@@ -26,7 +26,9 @@ pub struct Skill {
 /// and `>` or `|` blocks.
 pub fn frontmatter(text: &str) -> Option<(BTreeMap<String, String>, &str)> {
     let rest = text.strip_prefix("---")?.trim_start_matches([' ', '\t']);
-    let rest = rest.strip_prefix('\n').or_else(|| rest.strip_prefix("\r\n"))?;
+    let rest = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))?;
     let end = rest
         .match_indices("\n---")
         .find(|(at, _)| {
@@ -54,13 +56,18 @@ pub fn frontmatter(text: &str) -> Option<(BTreeMap<String, String>, &str)> {
                 }
                 block.push(lines.next().unwrap().trim());
             }
-            block.join(if folded { " " } else { "\n" }).trim().to_owned()
+            block
+                .join(if folded { " " } else { "\n" })
+                .trim()
+                .to_owned()
         } else {
             let quoted = value.len() >= 2
                 && ((value.starts_with('"') && value.ends_with('"'))
                     || (value.starts_with('\'') && value.ends_with('\'')));
             if quoted {
-                value[1..value.len() - 1].replace("\\\"", "\"").replace("''", "'")
+                value[1..value.len() - 1]
+                    .replace("\\\"", "\"")
+                    .replace("''", "'")
             } else {
                 value.to_owned()
             }
@@ -97,7 +104,9 @@ fn load(file: &Path) -> Result<Skill> {
         name,
         description,
         file: file.to_owned(),
-        manual_only: fields.get("disable-model-invocation").is_some_and(|v| v == "true"),
+        manual_only: fields
+            .get("disable-model-invocation")
+            .is_some_and(|v| v == "true"),
     })
 }
 
@@ -264,7 +273,9 @@ impl Plugin for SkillsPlugin {
                     Ok(answer(json!(
                         this.for_project(&project)
                             .iter()
-                            .map(|s| json!({"name":s.name,"description":s.description,"file":s.file}))
+                            .map(
+                                |s| json!({"name":s.name,"description":s.description,"file":s.file})
+                            )
                             .collect::<Vec<_>>()
                     )))
                 })
@@ -302,12 +313,28 @@ mod tests {
     fn discovery_lists_valid_skills_and_explains_the_rest() {
         let root = tempfile::tempdir().unwrap();
         let (a, b) = (root.path().join("a"), root.path().join("b"));
-        skill(&a, "deploy", "---\nname: deploy\ndescription: Ship it <fast>\n---\nRun it.");
-        skill(&a, "group/notes", "---\ndescription: Take notes\n---\nWrite.");
-        skill(&a, "hidden", "---\nname: hidden\ndescription: By hand\ndisable-model-invocation: true\n---\nx");
+        skill(
+            &a,
+            "deploy",
+            "---\nname: deploy\ndescription: Ship it <fast>\n---\nRun it.",
+        );
+        skill(
+            &a,
+            "group/notes",
+            "---\ndescription: Take notes\n---\nWrite.",
+        );
+        skill(
+            &a,
+            "hidden",
+            "---\nname: hidden\ndescription: By hand\ndisable-model-invocation: true\n---\nx",
+        );
         skill(&a, "Bad_Name", "---\ndescription: nope\n---\nx");
         skill(&a, "empty", "---\nname: empty\n---\nx");
-        skill(&b, "deploy", "---\nname: deploy\ndescription: Shadowed\n---\nx");
+        skill(
+            &b,
+            "deploy",
+            "---\nname: deploy\ndescription: Shadowed\n---\nx",
+        );
         let (skills, problems) = discover(&[a.clone(), b, root.path().join("missing")]);
         let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["deploy", "notes", "hidden"]);
@@ -316,7 +343,9 @@ mod tests {
         let listing = prompt(&skills);
         assert!(listing.contains("<description>Ship it &lt;fast&gt;</description>"));
         assert!(listing.contains("<name>notes</name>") && !listing.contains("hidden"));
-        let text = expand(&skills, "/skill:deploy to staging").unwrap().unwrap();
+        let text = expand(&skills, "/skill:deploy to staging")
+            .unwrap()
+            .unwrap();
         assert!(text.starts_with("<skill name=\"deploy\""));
         assert!(text.contains("\n\nRun it.\n</skill>\n\nto staging"));
         assert!(expand(&skills, "/skill:nope").is_err());

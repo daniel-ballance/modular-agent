@@ -5,8 +5,8 @@
 use agent_api::*;
 use monty::{MontyRun, RunProgress};
 use monty_types::{
-    CallArgs, CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject,
-    MontyUuid, NameLookupResult, OsFunctionCall, PrintWriter, ResourceLimits, ResourceTracker,
+    CallArgs, CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, MontyUuid,
+    NameLookupResult, OsFunctionCall, PrintWriter, ResourceLimits, ResourceTracker,
 };
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -98,7 +98,7 @@ impl Plugin for CodeTool {
 }
 
 enum Next {
-    Progress(RunProgress),
+    Progress(Box<RunProgress>),
     Raised(MontyException),
 }
 /// Monty runs on a blocking thread: a step is plain computation until the
@@ -110,7 +110,7 @@ where
     Ok(tokio::task::spawn_blocking(move || {
         let mut printed = printed;
         let next = match run(PrintWriter::CollectString(&mut printed, Some(cap))) {
-            Ok(progress) => Next::Progress(progress),
+            Ok(progress) => Next::Progress(Box::new(progress)),
             Err(error) => Next::Raised(error),
         };
         (next, printed)
@@ -150,19 +150,33 @@ impl Run<'_> {
         )
     }
     /// One function call from the sandbox, as a value or a Python exception.
-    async fn call(&mut self, name: &str, args: &CallArgs) -> std::result::Result<Value, MontyException> {
+    async fn call(
+        &mut self,
+        name: &str,
+        args: &CallArgs,
+    ) -> std::result::Result<Value, MontyException> {
         match name {
             "describe_tool" | "search_tools" => {
                 let text = args
                     .arg(0)
-                    .or_else(|| args.kwarg(if name == "describe_tool" { "name" } else { "query" }))
+                    .or_else(|| {
+                        args.kwarg(if name == "describe_tool" {
+                            "name"
+                        } else {
+                            "query"
+                        })
+                    })
                     .and_then(|v| v.as_str().map(str::to_owned))
-                    .ok_or_else(|| raise(ExcType::TypeError, format!("{name}() takes one string")))?;
+                    .ok_or_else(|| {
+                        raise(ExcType::TypeError, format!("{name}() takes one string"))
+                    })?;
                 return if name == "describe_tool" {
                     self.functions
                         .get(&text)
                         .map(Function::describe)
-                        .ok_or_else(|| raise(ExcType::KeyError, format!("no function named {text}")))
+                        .ok_or_else(|| {
+                            raise(ExcType::KeyError, format!("no function named {text}"))
+                        })
                 } else {
                     Ok(catalog::search(self.functions.values(), &text))
                 };
@@ -193,7 +207,12 @@ impl Run<'_> {
                 self.cancel.child_token(),
             )
             .await
-            .map_err(|e| raise(ExcType::RuntimeError, format!("{name}() could not run: {e:#}")))?;
+            .map_err(|e| {
+                raise(
+                    ExcType::RuntimeError,
+                    format!("{name}() could not run: {e:#}"),
+                )
+            })?;
         match (result.status, result.value) {
             (ToolStatus::Completed, Some(value)) => Ok(value),
             (ToolStatus::Completed, None) => Ok(json!(result.text)),
@@ -201,11 +220,18 @@ impl Run<'_> {
             (ToolStatus::Failed, Some(value)) if value.is_object() => Ok(value),
             (status, _) => Err(raise(
                 ExcType::RuntimeError,
-                format!("{name}() {}: {}", convert::status_word(&status), result.text),
+                format!(
+                    "{name}() {}: {}",
+                    convert::status_word(&status),
+                    result.text
+                ),
             )),
         }
     }
-    async fn drive(&mut self, code: String) -> Result<(std::result::Result<MontyObject, MontyException>, String)> {
+    async fn drive(
+        &mut self,
+        code: String,
+    ) -> Result<(std::result::Result<MontyObject, MontyException>, String)> {
         let limits = ResourceLimits::default()
             .max_turn_duration(self.tool.compute)
             .max_recursion_depth(self.tool.recursion);
@@ -221,7 +247,7 @@ impl Run<'_> {
         loop {
             let progress = match next {
                 Next::Raised(error) => return Ok((Err(error), printed)),
-                Next::Progress(progress) => progress,
+                Next::Progress(progress) => *progress,
             };
             if self.cancel.is_cancelled() {
                 bail!("cancelled");
@@ -276,7 +302,10 @@ impl Run<'_> {
                 }
                 RunProgress::ResolveFutures(waiting) => {
                     // Functions answer at the call, so nothing here can be pending.
-                    let error = raise(ExcType::RuntimeError, "awaited something that never resolves");
+                    let error = raise(
+                        ExcType::RuntimeError,
+                        "awaited something that never resolves",
+                    );
                     step(printed, cap, move |print| waiting.abort(error, print)).await?
                 }
             };

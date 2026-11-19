@@ -47,11 +47,13 @@ fn server(name: &str, spec: &Value) -> Result<Option<Server>> {
     if spec["disabled"] == true || spec["enabled"] == false {
         return Ok(None);
     }
-    let kind = spec["type"].as_str().unwrap_or(if spec.get("url").is_some() {
-        "http"
-    } else {
-        "stdio"
-    });
+    let kind = spec["type"]
+        .as_str()
+        .unwrap_or(if spec.get("url").is_some() {
+            "http"
+        } else {
+            "stdio"
+        });
     Ok(Some(match kind {
         "stdio" => Server::Stdio {
             name: name.into(),
@@ -73,7 +75,11 @@ fn server(name: &str, spec: &Value) -> Result<Option<Server>> {
         },
         "http" | "streamable-http" | "streamableHttp" => Server::Http {
             name: name.into(),
-            url: expand(spec["url"].as_str().ok_or_else(|| anyhow!("url is missing"))?)?,
+            url: expand(
+                spec["url"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("url is missing"))?,
+            )?,
             headers: strings(&spec["headers"], "headers")?,
         },
         other => bail!("transport {other} is not supported; use stdio or http"),
@@ -209,17 +215,29 @@ mod tests {
 
         let project = dir.path().join("project");
         std::fs::create_dir(&project).unwrap();
-        std::fs::write(project.join(".mcp.json"), r#"{"mcpServers":{"files":{"command":"other"}}}"#).unwrap();
+        std::fs::write(
+            project.join(".mcp.json"),
+            r#"{"mcpServers":{"files":{"command":"other"}}}"#,
+        )
+        .unwrap();
         let config = |trusted| McpConfig {
             service: Arc::default(),
             global: file.clone(),
             project_trusted: trusted,
         };
         let (servers, problems) = config(false).servers(&project);
-        assert!(servers.iter().any(|s| matches!(s, Server::Stdio { command, .. } if command == "npx")));
+        assert!(
+            servers
+                .iter()
+                .any(|s| matches!(s, Server::Stdio { command, .. } if command == "npx"))
+        );
         assert!(problems.iter().any(|p| p.contains("not trusted")));
         let (servers, _) = config(true).servers(&project);
         assert_eq!(servers.len(), 2);
-        assert!(servers.iter().any(|s| matches!(s, Server::Stdio { command, .. } if command == "other")));
+        assert!(
+            servers
+                .iter()
+                .any(|s| matches!(s, Server::Stdio { command, .. } if command == "other"))
+        );
     }
 }

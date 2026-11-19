@@ -169,10 +169,10 @@ fn optional_number(input: &Value, key: &str) -> Result<Option<f64>> {
 /// Pi accepts a leading '@' (as pasted from a mention) and '~'.
 fn clean_path(path: &str) -> String {
     let path = path.strip_prefix('@').unwrap_or(path);
-    if path == "~" || path.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return format!("{}{}", home.to_string_lossy(), &path[1..]);
-        }
+    if (path == "~" || path.starts_with("~/"))
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return format!("{}{}", home.to_string_lossy(), &path[1..]);
     }
     path.into()
 }
@@ -190,7 +190,21 @@ fn image_type(bytes: &[u8]) -> Option<&'static str> {
         [0xff, 0xd8, 0xff, ..] => Some("image/jpeg"),
         [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
         [b'B', b'M', ..] if bytes.len() > 26 => Some("image/bmp"),
-        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => Some("image/webp"),
         _ => None,
     }
 }
@@ -260,8 +274,7 @@ impl Work {
             .map(|edit| Ok((string(edit, "oldText")?, string(edit, "newText")?)))
             .collect::<Result<Vec<_>>>()?;
         let bytes = self.env.read_bytes(&self.project, &path).await?;
-        let original =
-            String::from_utf8(bytes).map_err(|_| anyhow!("{path} is not UTF-8 text"))?;
+        let original = String::from_utf8(bytes).map_err(|_| anyhow!("{path} is not UTF-8 text"))?;
         let changed = apply_edits(&original, &edits, &path)?;
         self.env
             .write_bytes(&self.project, &path, changed.as_bytes())
@@ -361,10 +374,7 @@ impl Work {
                 }
             }
         };
-        let exit_code = result
-            .value
-            .as_ref()
-            .and_then(|v| v["exit_code"].as_i64());
+        let exit_code = result.value.as_ref().and_then(|v| v["exit_code"].as_i64());
         let cut = truncate_tail(&result.text, MAX_LINES, MAX_BYTES);
         let mut text = cut.content.clone();
         let mut value = json!({

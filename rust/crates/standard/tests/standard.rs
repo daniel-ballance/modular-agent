@@ -134,7 +134,11 @@ async fn the_model_is_offered_one_tool_and_its_calls_are_nested_and_private() {
 
     // The model was offered the code tool and nothing else.
     let requests = rig.requests();
-    assert!(requests.iter().all(|r| r.tools.len() == 1 && r.tools[0].name == "codemode"));
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.tools.len() == 1 && r.tools[0].name == "codemode")
+    );
     assert!(requests[0].system.contains("## tools.read(path: str"));
     assert!(requests[0].system.contains("tools.exec(command: str"));
 
@@ -175,11 +179,21 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
     assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
     let first = rig.result("c1");
     assert_eq!(first.status, ToolStatus::Completed);
-    assert!(first.text.starts_with("caught read() failed: File not found: nope.txt\n"));
+    assert!(
+        first
+            .text
+            .starts_with("caught read() failed: File not found: nope.txt\n")
+    );
     assert!(first.text.contains("\"hi\\n\""));
     let second = rig.result("c2");
     assert_eq!(second.status, ToolStatus::Failed);
-    assert!(second.text.contains("TypeError: read(): unexpected argument bogus"), "{}", second.text);
+    assert!(
+        second
+            .text
+            .contains("TypeError: read(): unexpected argument bogus"),
+        "{}",
+        second.text
+    );
     assert!(second.text.contains("line 1"));
     assert_eq!(rig.result("c3").status, ToolStatus::Failed);
     let fourth = rig.result("c4");
@@ -190,7 +204,10 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
 #[tokio::test]
 async fn the_sandbox_reaches_nothing_itself_and_is_bounded() {
     let rig = Rig::new(vec![
-        code("fs", "from pathlib import Path\nPath('/etc/hostname').read_text()"),
+        code(
+            "fs",
+            "from pathlib import Path\nPath('/etc/hostname').read_text()",
+        ),
         code("spin", "while True:\n    pass"),
         code("many", "for i in range(9):\n    tools.list()"),
         code("deep", "def f(n):\n    return f(n + 1)\nf(0)"),
@@ -203,10 +220,18 @@ async fn the_sandbox_reaches_nothing_itself_and_is_bounded() {
     assert!(fs.text.contains("no direct access"), "{}", fs.text);
     let spin = rig.result("spin");
     assert_eq!(spin.status, ToolStatus::Failed);
-    assert!(spin.text.to_lowercase().contains("time limit"), "{}", spin.text);
+    assert!(
+        spin.text.to_lowercase().contains("time limit"),
+        "{}",
+        spin.text
+    );
     let many = rig.result("many");
     assert_eq!(many.status, ToolStatus::Failed);
-    assert!(many.text.contains("more than 5 function calls"), "{}", many.text);
+    assert!(
+        many.text.contains("more than 5 function calls"),
+        "{}",
+        many.text
+    );
     let deep = rig.result("deep");
     assert_eq!(deep.status, ToolStatus::Failed);
     assert!(deep.text.contains("RecursionError"), "{}", deep.text);
@@ -275,16 +300,26 @@ async fn without_the_setting_the_tools_are_offered_directly_too() {
     let mut call = ToolCall::new("read", json!({"path":"a.txt"}));
     call.id = "direct".into();
     let rig = Rig::with(
-        vec![Script::response(ModelResponse::calls(vec![call])), text("done")],
+        vec![
+            Script::response(ModelResponse::calls(vec![call])),
+            text("done"),
+        ],
         vec![],
         json!({"model_tools": null}),
         |project| std::fs::write(project.join("a.txt"), "direct read").unwrap(),
     )
     .await;
     assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
-    let offered: Vec<String> = rig.requests()[0].tools.iter().map(|t| t.name.clone()).collect();
+    let offered: Vec<String> = rig.requests()[0]
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
     for name in ["codemode", "read", "exec", "edit", "write", "find", "list"] {
-        assert!(offered.iter().any(|n| n == name), "{name} missing from {offered:?}");
+        assert!(
+            offered.iter().any(|n| n == name),
+            "{name} missing from {offered:?}"
+        );
     }
     assert_eq!(rig.result("direct").text, "direct read");
 }
@@ -322,7 +357,11 @@ async fn instructions_and_skills_reach_the_prompt_and_a_skill_can_be_loaded_by_h
     )
     .await;
     std::fs::create_dir_all(rig.root.path().join("config")).unwrap();
-    std::fs::write(rig.root.path().join("config/AGENTS.md"), "My own standing rule.").unwrap();
+    std::fs::write(
+        rig.root.path().join("config/AGENTS.md"),
+        "My own standing rule.",
+    )
+    .unwrap();
     rig.run("hello").await;
     rig.run("/skill:release for 2.0").await;
     let requests = rig.requests();
@@ -332,8 +371,18 @@ async fn instructions_and_skills_reach_the_prompt_and_a_skill_can_be_loaded_by_h
     assert!(system.contains("My own standing rule."));
     assert!(system.contains("<name>release</name>"));
     assert!(system.contains("<description>Cut a release.</description>"));
-    let order = ["<rules>", "# Functions in codemode", "<project_context>", "<skills>", "<cwd>"]
-        .map(|part| system.find(part).unwrap_or_else(|| panic!("{part} missing")));
+    let order = [
+        "<rules>",
+        "# Functions in codemode",
+        "<project_context>",
+        "<skills>",
+        "<cwd>",
+    ]
+    .map(|part| {
+        system
+            .find(part)
+            .unwrap_or_else(|| panic!("{part} missing"))
+    });
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
     let loaded = requests[1].messages.last().unwrap().text_content();
     assert!(loaded.starts_with("<skill name=\"release\""), "{loaded}");
@@ -342,7 +391,10 @@ async fn instructions_and_skills_reach_the_prompt_and_a_skill_can_be_loaded_by_h
 
 #[tokio::test]
 async fn mcp_servers_from_configuration_are_functions_and_a_dead_one_is_skipped() {
-    let fixture = format!("{}/../../scripts/mcp-fixture.py", env!("CARGO_MANIFEST_DIR"));
+    let fixture = format!(
+        "{}/../../scripts/mcp-fixture.py",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let root = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     std::fs::create_dir_all(root.path().join("config")).unwrap();
@@ -381,12 +433,24 @@ async fn mcp_servers_from_configuration_are_functions_and_a_dead_one_is_skipped(
     .await
     .unwrap();
     // The broken server does not stop the session from opening.
-    let id = h.create(project.path(), json!({"model":"fake"})).await.unwrap();
-    h.submit(&id, "user", "go", Timing::Now, None).await.unwrap();
-    assert_eq!(h.run_next(&id).await.unwrap().unwrap().outcome, Outcome::Completed);
+    let id = h
+        .create(project.path(), json!({"model":"fake"}))
+        .await
+        .unwrap();
+    h.submit(&id, "user", "go", Timing::Now, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        h.run_next(&id).await.unwrap().unwrap().outcome,
+        Outcome::Completed
+    );
     let requests = probe.requests.lock().unwrap().clone();
     assert!(requests[0].tools.iter().all(|t| t.name == "codemode"));
-    assert!(requests[0].system.contains("tools.mcp_notes__echo(text: str = None)"));
+    assert!(
+        requests[0]
+            .system
+            .contains("tools.mcp_notes__echo(text: str = None)")
+    );
     let result = requests[1].messages.last().unwrap().text_content();
     assert!(result.contains("mcp_notes__echo"), "{result}");
     assert!(result.contains("noted:hello"), "{result}");

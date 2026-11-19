@@ -42,7 +42,8 @@ pub struct Standard {
 
 impl Standard {
     pub fn from_env() -> Result<Self> {
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?);
+        let home =
+            PathBuf::from(std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?);
         let dir = |variable: &str, fallback: &str, under: &str| {
             std::env::var_os(variable)
                 .map(PathBuf::from)
@@ -90,8 +91,9 @@ impl Standard {
     pub fn model_overrides(&self) -> Result<Value> {
         let path = self.config.join("models.json");
         match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| anyhow!("{}: {e}", path.display())),
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|e| anyhow!("{}: {e}", path.display()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
             Err(e) => Err(e.into()),
         }
@@ -123,7 +125,13 @@ impl Standard {
             .into_iter()
             .chain(std::env::current_exe().ok().and_then(|exe| {
                 // A development build: rust/target/<profile>/ma beside sidecars/.
-                Some(exe.parent()?.parent()?.parent()?.parent()?.join("sidecars/claude/dist/main.js"))
+                Some(
+                    exe.parent()?
+                        .parent()?
+                        .parent()?
+                        .parent()?
+                        .join("sidecars/claude/dist/main.js"),
+                )
             }))
             .chain(std::env::var_os("HOME").map(|home| {
                 PathBuf::from(home).join(".local/share/modular-agent/sidecars/claude/dist/main.js")

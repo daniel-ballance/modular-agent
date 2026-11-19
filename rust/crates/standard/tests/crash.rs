@@ -13,7 +13,12 @@ fn ma(data: &Path, project: &Path, script: &Path) -> Command {
     command
         .env("MODULAR_AGENT_DATA_DIR", data)
         .env_remove("MODULAR_AGENT_HISTORY_URL")
-        .args(["--project", project.to_str().unwrap(), "--fake-script", script.to_str().unwrap()]);
+        .args([
+            "--project",
+            project.to_str().unwrap(),
+            "--fake-script",
+            script.to_str().unwrap(),
+        ]);
     command
 }
 fn call(code: &str) -> serde_json::Value {
@@ -60,7 +65,11 @@ fn a_killed_code_run_is_settled_as_unknown_and_never_repeated() {
     child.wait().unwrap();
 
     let second = root.path().join("second.json");
-    std::fs::write(&second, serde_json::json!(["It was interrupted."]).to_string()).unwrap();
+    std::fs::write(
+        &second,
+        serde_json::json!(["It was interrupted."]).to_string(),
+    )
+    .unwrap();
     let reopened = ma(&data, &project, &second)
         .args(["--session", &session, "--json"])
         .stdin(Stdio::null())
@@ -76,11 +85,17 @@ fn a_killed_code_run_is_settled_as_unknown_and_never_repeated() {
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
-    let turn = events.iter().find(|e| e["kind"] == "turn.result").expect("no turn result");
+    let turn = events
+        .iter()
+        .find(|e| e["kind"] == "turn.result")
+        .expect("no turn result");
     assert_eq!(turn["content"]["text"], "It was interrupted.");
 
     // One run of the command, and nothing after the kill point was done.
-    assert_eq!(std::fs::read_to_string(project.join("runs.txt")).unwrap(), "run\n");
+    assert_eq!(
+        std::fs::read_to_string(project.join("runs.txt")).unwrap(),
+        "run\n"
+    );
     assert!(project.join("before.txt").exists());
     assert!(!project.join("after.txt").exists());
 
@@ -91,5 +106,8 @@ fn a_killed_code_run_is_settled_as_unknown_and_never_repeated() {
         .unwrap();
     let text = String::from_utf8_lossy(&history.stdout);
     let unknown = text.matches("outcomeUnknown").count() + text.matches("\"unknown\"").count();
-    assert!(unknown >= 2, "the code run and its command should both be unknown:\n{text}");
+    assert!(
+        unknown >= 2,
+        "the code run and its command should both be unknown:\n{text}"
+    );
 }

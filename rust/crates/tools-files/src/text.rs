@@ -224,7 +224,10 @@ fn edit_label(index: usize, total: usize) -> String {
 /// Apply every edit against the original text. Matching ignores the file's
 /// line-ending style and a byte order mark, and both are kept.
 pub fn apply_edits(original: &str, edits: &[(&str, &str)], path: &str) -> Result<String> {
-    ensure!(!edits.is_empty(), "edits must contain at least one replacement");
+    ensure!(
+        !edits.is_empty(),
+        "edits must contain at least one replacement"
+    );
     let (bom, body) = match original.strip_prefix('\u{feff}') {
         Some(rest) => ("\u{feff}", rest),
         None => ("", original),
@@ -315,7 +318,10 @@ mod tests {
 
     #[test]
     fn tail_keeps_the_end_and_whole_lines() {
-        let text = (1..=10).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let text = (1..=10)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let cut = truncate_tail(&text, 3, 1000);
         assert_eq!(cut.content, "8\n9\n10");
         assert!(cut.truncated && !cut.by_bytes);
@@ -329,14 +335,17 @@ mod tests {
 
     #[test]
     fn edits_match_the_original_and_keep_its_line_endings() {
-        let out = apply_edits("one\r\ntwo\r\nthree\r\n", &[("two\n", "2\n"), ("one", "1")], "f")
-            .unwrap();
+        let out = apply_edits(
+            "one\r\ntwo\r\nthree\r\n",
+            &[("two\n", "2\n"), ("one", "1")],
+            "f",
+        )
+        .unwrap();
         assert_eq!(out, "1\r\n2\r\nthree\r\n");
         let out = apply_edits("\u{feff}a b", &[("a", "c")], "f").unwrap();
         assert_eq!(out, "\u{feff}c b");
-        let error = |edits: &[(&str, &str)]| {
-            apply_edits("x y x z", edits, "f").unwrap_err().to_string()
-        };
+        let error =
+            |edits: &[(&str, &str)]| apply_edits("x y x z", edits, "f").unwrap_err().to_string();
         assert!(error(&[("x", "q")]).contains("Found 2 occurrences of oldText"));
         assert!(error(&[("w", "q")]).contains("Could not find oldText"));
         assert!(error(&[("y x", "q"), ("x z", "r")]).contains("overlap"));

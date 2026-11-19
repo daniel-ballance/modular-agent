@@ -21,7 +21,13 @@ pub struct Function {
 fn identifier(name: &str) -> String {
     let mut out: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if out.chars().next().is_none_or(|c| c.is_ascii_digit()) {
         out.insert(0, '_');
@@ -120,10 +126,16 @@ impl Function {
             && let Some(properties) = self.tool.input["properties"].as_object()
             && let Some(unknown) = input.keys().find(|k| !properties.contains_key(*k))
         {
-            bail!("unexpected argument {unknown}; the signature is {}", self.signature());
+            bail!(
+                "unexpected argument {unknown}; the signature is {}",
+                self.signature()
+            );
         }
         if let Some(missing) = self.required.iter().find(|name| !input.contains_key(*name)) {
-            bail!("missing argument {missing}; the signature is {}", self.signature());
+            bail!(
+                "missing argument {missing}; the signature is {}",
+                self.signature()
+            );
         }
         Ok(Value::Object(input))
     }

@@ -12,8 +12,13 @@ struct Fixture {
 }
 /// Answers each POST with the next scripted reply: a status and a body.
 async fn fixture(replies: Vec<(u16, String)>) -> Fixture {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let endpoint = format!("http://127.0.0.1:{}/responses", listener.local_addr().unwrap().port());
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let endpoint = format!(
+        "http://127.0.0.1:{}/responses",
+        listener.local_addr().unwrap().port()
+    );
     let requests = Arc::new(Mutex::new(vec![]));
     let seen = requests.clone();
     tokio::spawn(async move {
@@ -40,7 +45,11 @@ async fn fixture(replies: Vec<(u16, String)>) -> Fixture {
             };
             let sent: Value = serde_json::from_slice(&buffer[length..]).unwrap();
             seen.lock().unwrap().push((head, sent));
-            let kind = if status == 200 { "text/event-stream" } else { "application/json" };
+            let kind = if status == 200 {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
             let reply = format!(
                 "HTTP/1.1 {status} X\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
@@ -104,7 +113,10 @@ async fn a_streamed_answer_becomes_text_calls_and_usage() {
     assert_eq!(answer.text_content(), "Hello");
     assert_eq!(answer.stop, "tools");
     assert_eq!(answer.tool_calls()[0].input, json!({"code":"1+1"}));
-    assert_eq!((answer.usage.input_tokens, answer.usage.output_tokens), (12, 5));
+    assert_eq!(
+        (answer.usage.input_tokens, answer.usage.output_tokens),
+        (12, 5)
+    );
     assert_eq!(answer.opaque["provider"], "openai-codex");
     assert_eq!(answer.opaque["output"].as_array().unwrap().len(), 3);
 
@@ -140,7 +152,12 @@ async fn service_errors_are_told_apart() {
     let mut kinds = vec![];
     for _ in 0..5 {
         let failure = model
-            .generate(api.clone(), Scope::session("s1"), ask(), CancellationToken::new())
+            .generate(
+                api.clone(),
+                Scope::session("s1"),
+                ask(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap_err();
         kinds.push((format!("{:?}", failure.kind), failure.message));
@@ -162,8 +179,13 @@ async fn service_errors_are_told_apart() {
 
 #[tokio::test]
 async fn cancelling_stops_waiting_on_the_stream() {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let endpoint = format!("http://127.0.0.1:{}/responses", listener.local_addr().unwrap().port());
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let endpoint = format!(
+        "http://127.0.0.1:{}/responses",
+        listener.local_addr().unwrap().port()
+    );
     // Accepts and then says nothing.
     let held = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
