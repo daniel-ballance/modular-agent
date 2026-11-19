@@ -176,8 +176,8 @@ func Prompt(defs []modular.ToolDefinition) (string, error) {
 	}
 	var out strings.Builder
 	out.WriteString("# Functions in codemode\n\nYou have one tool, `codemode`, which runs Python. These functions exist inside it, on the `tools` object, and nowhere else. Call them as written; no import and no `await` is needed. Arguments go by keyword or in the order shown. A function returns a string unless its entry says otherwise, and raises `RuntimeError` when the call fails, is refused or is cancelled. Do several steps in one run when the later steps do not depend on your judgement of the earlier ones.\n")
-	for i, f := range fs {
-		if i < 12 {
+	for _, f := range fs {
+		if len(fs) <= 12 {
 			fmt.Fprintf(&out, "\n## %s\n%s\n", f.signature(), f.tool.Description)
 		} else {
 			fmt.Fprintf(&out, "\n- `%s`: %s", f.signature(), firstLine(f.tool.Description))

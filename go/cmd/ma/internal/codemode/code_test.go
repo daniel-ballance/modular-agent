@@ -2,12 +2,28 @@ package codemode
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/OWNER/modular-agent/go/modular"
 	"github.com/OWNER/modular-agent/go/modular/files"
 )
+
+func TestPromptCatalogThreshold(t *testing.T) {
+	defs := make([]modular.ToolDefinition, 13)
+	for i := range defs {
+		defs[i] = modular.ToolDefinition{Name: fmt.Sprintf("fixture_%d", i), Description: strings.Repeat("a", 170) + "\nSecond line", Parameters: []byte(`{"type":"object"}`)}
+	}
+	full, err := Prompt(defs[:12])
+	if err != nil || strings.Count(full, "Second line") != 12 {
+		t.Fatalf("full prompt: %v\n%s", err, full)
+	}
+	short, err := Prompt(defs)
+	if err != nil || strings.Count(short, "- `tools.fixture_") != 13 || strings.Contains(short, "Second line") || strings.Contains(short, strings.Repeat("a", 161)) {
+		t.Fatalf("abbreviated prompt: %v\n%s", err, short)
+	}
+}
 
 func TestMontyCallsAndLimits(t *testing.T) {
 	var defs []modular.ToolDefinition
