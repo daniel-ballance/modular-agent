@@ -37,7 +37,7 @@ Commands in the base suite use Linux with unprivileged user, PID and mount names
 
 ### What is checked
 
-- **Go suite:** 31 packages pass; 15 have no tests. Build and vet pass, and `gofmt -l .` emits no paths. The SDK race run passes 23 top-level tests and 52 subtests in two packages.
+- **Go suite:** 31 packages pass (225 top-level tests and 437 subtests in the full run); 15 have no tests. Build and vet pass, and `gofmt -l .` emits no paths. The final SDK run, including the additional cancellation/recovery and lag tests, passes 23 top-level tests and 52 subtests in two packages, with and without `-race`.
 - **Binding kits:** ACP 123/123 each for transient, durable and external durable (plus 121/121 each with split stdio plugins, for transient and durable); plugin 144/144. The SDK history kit passes 39/39 each over memory, files and an HTTP relay (normal runs, without restart mode). The SDK ACP test compares the published declaration to `Agent.Declaration()`.
 - **Shared scenarios:** 84/84 across the Go, Rust and TypeScript runners (28 each): seven in-process combinations and seven against each of the three served fixture programs, per runner. Python is not required. Both crash cases kill the agent's entire process group and wait for it to exit before reopening.
 - **Negative control:** changing the Go tide fixture's text to `High tide at Whitby is deliberately wrong.` failed `tool-call/process:go`, step 0, with the expected and actual result text. The fixture was restored and rebuilt.
