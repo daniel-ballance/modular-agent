@@ -1,6 +1,37 @@
 # Status: the description against the code
 
+## Production edition 3
+
+The final round-seven run finished on 2026-11-19 at 02:02. All five builds passed their suites and applicable kits. The last specification change was `cf663a5`; the final kit check was `dde3458`. See [ADR 0021](adr/0021-production-edition.md) for what these results establish.
+
+| Build | Suite | Plugin kit | ACP local | ACP portable (durable / transient) |
+|---|---|---|---|---|
+| TypeScript | 100/100 in both runs | 139 | 207 in three layouts | 152 / 152 |
+| Rust | 233 to 234 in four runs | 139 | 207 | 152 / 152 |
+| Python | 298 in four runs | 139 | 207 in three layouts | 153 / 152 |
+| Go | 29/29 packages, also with `-race` | 139 | 207 | 153 / 153 |
+| Elixir | 50/50 in both runs | 138 | 201 in two layouts | 152 / 152 |
+
+Kit counts are checks passed, not a common count for each build. The TypeScript and Go history services each passed 42/42, including restart with a shorter TTL.
+
+Each matrix ran every ordered pair of the five builds, including self-swaps. The plugin and Runtime matrices pair a host with a plugin set; the portable matrices pair a session writer with a reopener.
+
+| Matrix | First pass | Second pass | Final rerun |
+|---|---:|---:|---:|
+| Provider, hooks, tools and working environment | 23/25 | 25/25 | 25/25 |
+| Durable Runtime through `kill -9` | 15/25 | 23/25 | 25/25 |
+| Transient Runtime through `kill -9` | 20/25 | 23/25 | 25/25 |
+| Portable sessions with jobs, durable layout | 13/25 | 25/25 | 25/25 |
+| Portable sessions with jobs, transient layout | 13/25 | 25/25 | 25/25 |
+| **Total** | | | **125/125** |
+
+The portable crash checks use the reopener's declaration. The Elixir launcher used for the portable matrices did not declare continuation in either layout. Its durable Runtime did carry on in the Runtime matrix and in the separate real-model check.
+
+**Real model:** Rust to Elixir and Elixir to Rust both passed after Rust fixed its translation of shared reasoning `off` to the OpenAI API's `none`. With `gpt-6-luna`, a shared history service and the same configured actor, both reruns completed the interrupted turn, recorded the command as `outcomeUnknown` with one start, and answered a follow-up from history.
+
 ## Production edition 3: TypeScript
+
+This is the TypeScript checkpoint before the final run above.
 
 Verified against specification `9fffc23` and kits `dde3458`, on Linux with Node.js 26.13.1. The earlier swap results below used kits `5f5bfc9`.
 
@@ -23,7 +54,7 @@ The wire Runtime uses the committed tool result on a tool refusal. A failed turn
 | E: TypeScript host with the Rust or Python durable Runtime | 189/189 each |
 | F4: TypeScript reopens Go sessions through the supplied history service | 152/152 |
 
-In the Python cell, the wire tap showed a `runToolCall` pending reply followed by rejection of `step.after` for unsettled calls. A committed pending call should satisfy that gate boundary. The focused TypeScript wire test reproduces the rejection and checks that both Runtime tiers still report the call. The earlier peer cells were not rerun. The gap log is `/tmp/ma-tools/r7/ts-gaps.md`.
+In the Python cell, the wire tap showed a `runToolCall` pending reply followed by rejection of `step.after` for unsettled calls. A committed pending call should satisfy that gate boundary. The focused TypeScript wire test reproduces the rejection and checks that both Runtime tiers still report the call. The other peer cells had not yet been rerun at this checkpoint. The gap log is `/tmp/ma-tools/r7/ts-gaps.md`.
 
 ## Production edition 2: TypeScript
 

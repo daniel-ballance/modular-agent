@@ -1,12 +1,12 @@
 # Implementer's guide
 
-Start here if you are building an agent from the specification. The example traces a single approved file read from the ACP client to the working environment and back. It shows where to look up each decision. It does not set requirements.
+Start here if you are building an agent from [production edition 3](adr/0021-production-edition.md). The example traces a single approved file read from the ACP client to the working environment and back. It shows where to look up each decision. It does not set requirements.
 
 ## How to read the specification
 
 [Conformance](conformance.md#the-documents) tells you which documents set requirements. [Contracts](contracts.md#rules-every-implementation-follows) owns core behavior, including when work can start and what survives interruption. [Security](security.md#trust-boundaries) owns the trust boundaries. Each [binding](bindings/README.md) owns its wire: [ACP](bindings/acp.md) for the client and agent, [Plugin](bindings/plugin.md) for the Harness and child plugins, [History HTTP](bindings/history-http.md) for the history client and service, and [Shared data](bindings/data.md) for common JSON and portable sessions.
 
-The capitalized [keywords](conformance.md#keywords) distinguish absolute requirements, recommendations that need a documented reason for departing from them, and options with fallbacks. This guide, [Architecture](architecture.md), [Scenarios](scenarios.md), past decisions and kit results help you read the rules. They do not override them. If two applicable rules disagree, [report a defect](conformance.md#reporting-a-defect) rather than choosing the behavior that happens to pass a test.
+The capitalized [keywords](conformance.md#keywords) distinguish absolute requirements, recommendations that need a documented reason for departing from them, and options with fallbacks. This guide, [Architecture](architecture.md), [Scenarios](scenarios.md), [past decisions](adr/README.md) and kit results help you read the rules. They do not override them. If two applicable rules disagree, [report a defect](conformance.md#reporting-a-defect) rather than choosing the behavior that happens to pass a test.
 
 A core agent can have local history and no wire profiles. The optional claims add the ACP agent or client role, the plugin host or served plugin role, and the history HTTP client or service role. Start with the [role and kit table](conformance.md#what-conforms). Record the [specification revision and binding versions](conformance.md#versioning) you accept. ACP agents speak both binding versions over ACP v1. [Portable sessions](bindings/data.md#portable-sessions) are a separate claim about the records, not a consequence of using HTTP history. Read the [session declaration](bindings/acp.md#the-declaration) for options such as continuation after restart, late answers to questions and rewind. Those answers are not late model responses; [Provider coverage](bindings/plugin.md#the-host-asks-a-provider) describes the request and response profile. A production deployment chooses its own [operator policy](security.md#what-an-operator-configures). No combination of binding claims supplies that policy.
 
@@ -91,7 +91,7 @@ Only the Runtime moves to another process in this example. The ACP Interface, st
 
 ## Where builds have gone wrong before
 
-The [swap matrices](build-notes.md#round-four-portable-sessions-and-a-fifth-build) ran across TypeScript, Rust, Python, Go and Elixir. The [round-five](build-notes.md#round-five-the-open-items) and [round-six](build-notes.md#round-six-the-last-open-items) runs show why successful same-build tests were not enough. The binding Changes sections are the history of these fixes. The links below go to the current rules instead.
+The [swap matrices](build-notes.md#round-four-portable-sessions-and-a-fifth-build) ran across TypeScript, Rust, Python, Go and Elixir. The [round-five](build-notes.md#round-five-the-open-items), [round-six](build-notes.md#round-six-the-last-open-items) and [round-seven](build-notes.md#round-seven) runs show why successful same-build tests were not enough. The binding Changes sections are the history of these fixes. The links below go to the current rules instead.
 
 | What broke in a swap | Where the rule lives now |
 |---|---|

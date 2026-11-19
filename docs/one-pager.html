@@ -6,15 +6,19 @@
 <title>Modular Agent: one page</title>
 <style>
   :root {
-    --fg: var(--foreground, #1a1a1a);
-    --mute: var(--muted-foreground, #666);
-    --line: var(--border, #ddd);
-    --box: var(--card, #f7f7f7);
-    --hi: var(--primary, #3b5bdb);
-    --ok: var(--success, #2f9e44);
-    --warn: var(--warning, #e8590c);
+    color-scheme: light dark;
+    --bg: var(--background, light-dark(#fff, #17191c));
+    --fg: var(--foreground, light-dark(#1a1a1a, #f1f3f5));
+    --mute: var(--muted-foreground, light-dark(#666, #b3bbc5));
+    --line: var(--border, light-dark(#ddd, #434951));
+    --box: var(--card, light-dark(#f7f7f7, #22262b));
+    --hi: var(--primary, light-dark(#3b5bdb, #bac8ff));
+    --ok: var(--success, light-dark(#237a34, #8ce99a));
+    --warn: var(--warning, light-dark(#b94809, #ffc078));
     --r: var(--radius, 8px);
   }
+  body { background: var(--bg); }
+  a { color: var(--hi); }
   .page { max-width: 1000px; margin: 0 auto; color: var(--fg); font-family: var(--font-sans, system-ui, sans-serif); line-height: 1.45; font-size: 14px; }
   h1 { font-size: 26px; margin: 4px 0 2px; letter-spacing: -0.01em; }
   .lede { color: var(--mute); font-size: 15px; margin: 0 0 18px; }
@@ -22,7 +26,7 @@
   p { margin: 0 0 8px; }
   ul { margin: 0; padding-left: 18px; }
   li { margin: 3px 0; }
-  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 12px; }
   .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
   .card { background: var(--box); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; }
   .card h3 { margin: 0 0 6px; font-size: 14px; }
@@ -64,7 +68,7 @@
 <div class="page">
 
 <h1>Modular Agent</h1>
-<p class="lede">An AI agent made of a small Harness and swappable plugins, written down as contracts, and proven by five independent builds in five languages that run each other's parts.</p>
+<p class="lede">An AI agent made of a small Harness and swappable plugins. Five independent builds test the contracts by running each other's parts.</p>
 
 <h2>Why</h2>
 <div class="grid2">
@@ -79,7 +83,7 @@
   <div class="card">
     <h3>The question</h3>
     <p>Can an agent be described precisely enough, as <em>what</em> each part does rather than <em>how</em>, that independent teams in different languages build parts which plug into each other and keep their promises, even through a crash?</p>
-    <p class="muted">It is a research project: understanding how an agent fits together. Production performance is not a goal.</p>
+    <p class="muted">The specification is for building an agent. Performance targets are each deployment's own.</p>
   </div>
 </div>
 
@@ -89,10 +93,10 @@
     <span class="pill">users</span><span class="pill">editors</span><span class="pill">hosts such as T3 Code</span><span class="pill">other agents</span><span class="pill">schedules</span>
   </div>
   <div class="arrow">Interface plugins (ACP, terminal, HTTP)</div>
-  <div class="harness"><b>Harness</b>: hosts plugins, keeps sessions, enforces authority. It runs no turns, calls no model and runs no tool itself.</div>
+  <div class="harness"><b>Harness</b>: hosts plugins, keeps sessions, enforces authority. It delegates the turn loop, inference and tool execution.</div>
   <div class="row">
     <div class="cap"><b>Runtime</b>the agent loop, transient or durable</div>
-    <div class="cap"><b>Providers</b>model access, never seen by the Runtime</div>
+    <div class="cap"><b>Providers</b>model inference behind shared model access</div>
     <div class="cap"><b>Tool sources</b>local, MCP, any language</div>
     <div class="cap"><b>Working environment</b>where commands and files live</div>
     <div class="cap"><b>History store</b>a tree of entries, local or a service</div>
@@ -109,8 +113,8 @@
   <div class="step"><b>Describe</b>Parts, contracts and guarantees: what passes between parts, never the wiring (ADR 0010).</div>
   <div class="step"><b>Build clean-room</b>Independent builders get only the documents, and log every gap they had to decide.</div>
   <div class="step"><b>Bind the wire</b>Small versioned bindings: ACP for hosts, plugins in any language, shared data, history over HTTP.</div>
-  <div class="step"><b>Check</b>A conformance kit per binding: plugin kit (111 checks), ACP kit (130), portable sessions (102).</div>
-  <div class="step"><b>Swap</b>Every build's agent with every build's parts, through a real <code>kill -9</code>. Each failure becomes a rule and a kit check.</div>
+  <div class="step"><b>Check</b>Run the plugin, ACP and history service kits. Include the ACP portable-session checks.</div>
+  <div class="step"><b>Swap</b>Pair every host with every build's parts, and every writer with every reopener. Test recovery through a real <code>kill -9</code>.</div>
 </div>
 
 <h2>Evidence</h2>
@@ -118,35 +122,35 @@
   <div class="stat"><div class="n">5</div><div class="l">independent builds, four made clean-room from the docs alone</div></div>
   <div class="stat"><div class="n">25/25</div><div class="l">hosts running every build's model, hooks, tools and environment</div></div>
   <div class="stat"><div class="n">50/50</div><div class="l">hosts running every build's Runtime through <code>kill -9</code>, durable and transient</div></div>
-  <div class="stat"><div class="n">50/50</div><div class="l">sessions written by one language, reopened and recovered by another, jobs included</div></div>
+  <div class="stat"><div class="n">50/50</div><div class="l">writer and reopener pairings, with jobs and restart checks in both layouts</div></div>
 </div>
-<div class="langs"><span class="pill">TypeScript</span><span class="pill">Rust</span><span class="pill">Python</span><span class="pill">Go</span><span class="pill">Elixir (fifth build, near-perfect first time)</span></div>
-<p style="margin-top:8px">In every crash cell, the interrupted command got exactly one result, "outcome unknown", and never ran twice. Real-model runs on <code>gpt-6-luna</code> and Claude Haiku showed a turn started in one language finished in another, and a job started by one agent taken up by another after a crash.</p>
+<div class="langs"><span class="pill">TypeScript</span><span class="pill">Rust</span><span class="pill">Python</span><span class="pill">Go</span><span class="pill">Elixir</span></div>
+<p style="margin-top:8px">The TypeScript and Go history services each passed 42/42 checks. In the real-model check with <code>gpt-6-luna</code>, Rust and Elixir each finished a turn the other had started, without repeating the interrupted command. Both answered a follow-up from history.</p>
 
 <h2>Value and differentiation</h2>
 <table>
   <tr><th style="width:30%">Property</th><th>What it means here</th><th style="width:30%">Usual alternative</th></tr>
   <tr><td><b>Even the loop is a plugin</b></td><td>Swap a transient Runtime for a durable one, or for one in another language, with no other plugin changed.</td><td>The loop is the framework.</td></tr>
-  <tr><td><b>Plugins in any language</b></td><td>One wire binding of the contracts. A Rust host runs a Python Runtime with Go tools in an Elixir environment.</td><td>Port one plugin API to each language and keep the ports in step.</td></tr>
-  <tr><td><b>Crash safety as a contract</b></td><td>"Safe to repeat" is a promise from the tool and the environment. Starts are recorded before work runs; nothing finished runs twice.</td><td>Best-effort retries, or a durable engine baked in.</td></tr>
+  <tr><td><b>Plugins in any language</b></td><td>One plugin binding lets a host use a Runtime, tools and environment from other builds.</td><td>Port one plugin API to each language and keep the ports in step.</td></tr>
+  <tr><td><b>Crash safety as a contract</b></td><td>The record distinguishes finished work from interrupted work. <a href="contracts.md#recovery-and-repeating-work">Recovery rules</a> say what can run again.</td><td>Best-effort retries, or a durable engine baked in.</td></tr>
   <tr><td><b>Portable sessions</b></td><td>History in shared shapes, so any build reopens, continues and recovers another's session.</td><td>Sessions locked to one implementation.</td></tr>
   <tr><td><b>Host-drivable</b></td><td>Speaks ACP with a declared feature set, so a host like T3 Code drives it as it drives other agents.</td><td>A bespoke API per agent.</td></tr>
-  <tr><td><b>Safety in the Harness</b></td><td>Authority only narrows, under session limits and tenants; approvals fail closed; secrets go straight to the credential store; every output passes a gate; erasure follows copies.</td><td>Left to each feature.</td></tr>
+  <tr><td><b>Safety in the Harness</b></td><td>The Harness checks authority and manages approvals, secrets, gated views and erasure. <a href="security.md">Security</a> describes the trust boundaries.</td><td>Left to each feature.</td></tr>
 </table>
 
 <h2>What we learned</h2>
 <div class="grid2">
-  <div class="card quote">Each build passed every kit on its own, yet every round of swaps found holes the kits missed: 25 across rounds two to six. Nearly all were the same kind: a receiver relying on a value the binding never defined, such as a timeout of 0, an event name, the names of rights, a folder replaced on restore, or <code>0.0</code> written as <code>0</code>.</div>
+  <div class="card quote">Each build passed the kits on its own, yet the swaps found failures. TypeScript could read its own input records because it wrote a redundant field. A different writer exposed its reader bug. Another swap found a host running a built-in gate in place of a configured plugin that failed to start.</div>
   <div class="card quote">The descriptions of the parts held throughout. What kept needing work was the exact values one side relies on from the other. So the recipe is: describe the parts, bind each wire narrowly, write a kit per binding, and run every pairing.</div>
 </div>
 
 <h2>Status</h2>
 <div class="card warnbox">
-  <p><b>Done:</b> 20 decision records; five builds passing every kit and every 5×5 swap matrix; ACP <code>/2</code>, several actors and proposals, jobs, rewinding, remote output gates with shared event shapes, and tenants and session limits on authority.</p>
-  <p style="margin:0"><b>Known limits:</b> a tenant's token budget isn't reserved ahead, so turns already running can cross it together; production performance is not a goal.</p>
+  <p><b><a href="adr/0021-production-edition.md">Production edition 3:</a></b> all five builds passed their suites and applicable kits. All five matrices passed, <a href="status.md#production-edition-3">125/125 pairings</a>.</p>
+  <p style="margin:0"><b>Known limits:</b> passing the kits does not make a build production-ready. See the <a href="adr/0021-production-edition.md#consequences">standing gaps</a> before planning a deployment.</p>
 </div>
 
-<footer>Repository: <code>~/Code/modular-agent</code>. Start with <code>docs/architecture.md</code>, <code>docs/contracts.md</code> and <code>docs/bindings/</code>; the decisions are in <code>docs/adr/</code>.</footer>
+<footer>Start with the <a href="implementers-guide.md">Implementer's guide</a> and <a href="conformance.md">Conformance</a>. The decisions are in the <a href="adr/README.md">ADR index</a>.</footer>
 </div>
 </body>
 </html>

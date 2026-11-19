@@ -4,6 +4,8 @@ A specification for an AI agent made of a small **Harness** and replaceable **pl
 
 The specification says **what** each part does, what passes between the parts, and what must always hold. It doesn't prescribe how a part works inside. The core prescribes no transport. Optional **bindings** fix the wire where two builds need to work together: ACP for hosts, a plugin protocol, and an HTTP history service. The bindings share JSON shapes.
 
+The current handoff is [production edition 3](docs/adr/0021-production-edition.md).
+
 ## Why it holds up
 
 Five builds were made from these documents: one in TypeScript, and four clean-room builds in Rust, Python, Go and Elixir whose builders saw only the documents. In the final swap round, each build passed the kits and ran with every other build's parts:
@@ -11,7 +13,7 @@ Five builds were made from these documents: one in TypeScript, and four clean-ro
 - every host with every build's Runtime, through a real `kill -9` mid-tool-call;
 - every agent reopening, continuing and recovering every other agent's sessions, including their unfinished jobs.
 
-The swaps found gaps that led to rules and kit checks. [Build notes](docs/build-notes.md) tell that story.
+All 125 pairings passed across the five final matrices. [Status](docs/status.md#production-edition-3) records the results. [Build notes](docs/build-notes.md#round-seven) explains what the swaps found and how to repeat them.
 
 ## Reading order
 
@@ -35,8 +37,8 @@ Not requirements. They record how the specification was reached.
 
 | File | What it holds |
 |---|---|
-| [docs/build-notes.md](docs/build-notes.md) | What building it, six rounds of cross-language swaps, and real-model runs found |
-| [docs/status.md](docs/status.md) | Which rules the TypeScript build in `packages/` exercises |
+| [docs/build-notes.md](docs/build-notes.md) | What the independent builds, cross-language swaps and real-model runs found |
+| [docs/status.md](docs/status.md) | Edition 3 results for all five builds and earlier TypeScript evidence |
 | [docs/examples/](docs/examples/) | Existing agents described in these terms: [vanilla Pi](docs/examples/vanilla-pi.md), and [two durable agents](docs/examples/durable-agents.md) |
 | [docs/research/](docs/research/) | Notes on prior art and protocols, and a map of how each fills these parts |
 | [docs/pressure-test/](docs/pressure-test/) | The early tests of the design against Pi, agent frameworks, T3 Code and an everything-at-once system |
