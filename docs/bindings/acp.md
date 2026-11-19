@@ -49,6 +49,7 @@ Peers MUST use the following fields under `_meta["modular-agent"]` on the indica
 | `handedBack` | Cancelled prompt result; recovery result for `session/load` or `session/resume` when nonempty | Array of `{ inputId, content }`, with content in [shared Content](data.md#content) projected as in [Entry](#entry); `[]` if a cancelled prompt has nothing to report |
 | `requestId`, `actorId` | `session/request_permission` and `elicitation/create` requests | Shared question id and the addressed actor id, both strings |
 | `status` | Terminal `tool_call_update` | Shared [ToolResult status](data.md#tools): `completed`, `failed`, `refused`, `cancelled`, `notStarted` or `outcomeUnknown` |
+| `parentToolCallId` | `tool_call` for a [nested call](#updates) | Call id (string) of the call that asked for it |
 
 ## The declaration
 
@@ -86,6 +87,7 @@ An agent MUST send every non-optional key and use only the values below. The ses
 | `tenants` (optional) | boolean | Implies `tenant` is offered. Default `false`. |
 | `projectRoot` (optional) | string | Canonical absolute path of the sole served project. Omitted for no binding-level single-root restriction. |
 | `confinesFiles` (optional) | boolean | File operations refuse paths resolving outside the project after symlinks. Default `false`. |
+| `nestedToolCalls` (optional) | boolean | A running tool call can start [nested calls](../contracts.md#nested-calls). Default `false`. |
 
 The table is the ACP projection of the core declaration; binding claims and extra hook names are published separately. In both versions a host MUST reject missing required keys, invalid values and the following inconsistent combinations:
 
@@ -227,6 +229,8 @@ The agent MUST refuse mixed-actor steering under `mixedActorInput: "refused"` wi
 ## Updates
 
 The agent MUST use `session/update` for live updates and replay. It MUST send `agent_message_chunk` for model text and `agent_thought_chunk` for readable reasoning only. The first update for a displayed call MUST be `tool_call` with the session's stable call id as `toolCallId`, the name as `title`, and the tool input as `rawInput` after gating. Calls MUST start with ACP `pending`, or `in_progress` if dispatch already started. Progress MUST use `tool_call_update` with `in_progress`. A call left open MUST have status `pending` until it settles, including if it settles in a continuation. A blocked initial call MUST NOT be followed by orphan updates on that connection.
+
+A [nested call](../contracts.md#nested-calls) is displayed like any other call: its first update MUST be `tool_call`, and that update MUST carry `parentToolCallId`, the session's id of the call that asked for it, under `_meta["modular-agent"]`. A client that does not know the field shows the call as an ordinary one.
 
 The agent MUST send a terminal `tool_call_update` after the final result is recorded, with status `completed` for a completed result and `failed` for each other terminal result. It MUST include the shared status in metadata and use ACP tool content blocks for renderable result content. Each result MUST settle its call exactly once; replay uses the same id. Final live updates for a turn MUST precede its prompt reply on that connection.
 
@@ -399,9 +403,13 @@ The fixture MUST select the last user message and concatenate its text parts wit
 | Valid `tool:<name> <json>` with a tool result after the latest user message | The model MUST return `stop: "finished"` and `done: ` followed by the first 200 Unicode code points of the first such result's text parts, concatenated without separators. |
 | Other text | The model MUST return `stop: "finished"` and one text part `echo: <text>`. |
 
+An agent that declares `nestedToolCalls` MUST also offer the fixture tool `nest` (`{ name: string, input: object }`). `nest` MUST start one nested call with that name and input and settle with the nested result's status and content unchanged.
+
 The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 
 ## Changes
+
+- **Edition 4 draft** ([ADR 0023](../adr/0023-edition-4-draft.md)). Both versions keep their numbers. The optional declaration key `nestedToolCalls`, the fixture tool `nest` for agents that declare it, and `parentToolCallId` on a nested call's first update.
 
 - **Production edition 3.** Approval authority is per recipient and route (TypeScript, Python G100). Gate limits and the history page limit are separate (TypeScript). The operator can set a shared connection actor id (portable F2, TypeScript to Python and Rust: the kit used different principals and the builds misread key scope; F4, Go to TypeScript: the reopener retrieved another actor's receipt).
 

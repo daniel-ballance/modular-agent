@@ -62,7 +62,7 @@ A reasoning part MUST have at least one of `text` and `providerData`. A receiver
 | TurnSettings | ModelSettings plus `maxSteps?: Count` (positive step cap; no cap in this snapshot if absent) |
 | Stream event | `type: "text" \| "reasoning" \| "toolInput"`; `delta: string`; `toolCallId?: Id` (only on `toolInput`) |
 
-Reasoning levels in ascending order are `off`, `minimal`, `low`, `medium`, `high` and `xhigh`. A request's explicit output cap MUST NOT exceed the model's advertised maximum. The standard model input modalities are `text` and `image`. A receiver MUST NOT infer support from an unknown modality. Unrecognized ModelSettings fields are inert unless both sides implement the extension.
+Reasoning levels in ascending order are `off`, `minimal`, `low`, `medium`, `high` and `xhigh`. A host MUST choose a level for a request by the [selection rule](#context-and-interrupted-work). A Provider that still receives a level its model does not list MUST apply the same rule itself: the nearest listed level no higher, or no reasoning setting if none qualifies. It MUST NOT fail the request for that reason, and it MUST NOT raise the level. A request's explicit output cap MUST NOT exceed the model's advertised maximum. The standard model input modalities are `text` and `image`. A receiver MUST NOT infer support from an unknown modality. Unrecognized ModelSettings fields are inert unless both sides implement the extension.
 
 A stream MUST end with the answer to its enclosing request. There is no end event. A sender MUST include `toolCallId` when a tool-input delta can be attributed to a specific call. Within that stream the ID MUST match the reference in the sender's final message, before the host maps it to the canonical call ID. An unkeyed tool-input delta is progress only, not a call. A receiver MUST NOT dispatch from any delta.
 
@@ -78,6 +78,8 @@ The [Provider binding](plugin.md#the-host-asks-a-provider) carries request/respo
 | ToolResult | `callId: Id`; `status: ToolStatus`; `content: Content`; `value?: JSON` (no structured result) |
 
 Caller is `model`, `ui` or `plugin`. For the caller check, the host MUST treat `provider` as `model` and `tool` as `plugin`. Callers are a set. Repeat safety and dispatch authority follow [Contracts](../contracts.md#recovery-and-repeating-work) and [Authority](../contracts.md#authority), not model assertions. A host MUST refuse an effect without authenticated attribution. A ToolCall inside recorded `toolStarted` MUST include `actorId`.
+
+A [nested call](../contracts.md#nested-calls) MUST have `startedBy: "tool"` and a `parentCallId` naming the call that asked for it. Its `actorId` and, where its parent has them, `turnId` and `stepId` MUST be the parent's. Every record of a nested call MUST have `modelVisible: false`. A reader MUST NOT project a nested call or its result into model context, and MUST NOT treat one as a call from the step's response.
 
 Schema is JSON Schema Draft 2020-12, including boolean schemas. Senders MUST use only its standard vocabulary and within-document references. Receivers MUST NOT fetch external references. The effective `parameters` schema also requires an object; a non-object Provider argument MUST fail the attempt before recording a call part. After `tool.after`, the Harness MUST require `value` on a completed result when `returns` is set and validate it against that schema. Non-completed results have no `returns` constraint. Invalid completed values follow [settlement](../contracts.md#settlement), preserving fact of execution.
 
@@ -130,6 +132,8 @@ A supplied key MUST NOT start with `call:`. For an unkeyed tool question the hos
 ## Working environment
 
 ExecResult is `{ exitCode: integer | null, output: string, timedOut: boolean, truncated?: true }`. Exit codes use signed safe integers; null means no code for an interrupted command. `timedOut` indicates an execution deadline. `truncated` indicates sender-side output loss. See [Command lifetime](plugin.md#command-lifetime).
+
+DirEntry is `{ name: string, kind: "file" | "directory" | "other" }`. `name` is one path segment, never `.` or `..`. A symlink MUST be reported with the kind of what it resolves to, or `other` if it resolves to nothing or to a special file. Entries are in no fixed order.
 
 ## Actors
 
@@ -296,6 +300,7 @@ On reopen the Harness MUST repair a legacy reported end without a matching admis
 | `maxSteps` | positive Count | Agent's configured default, otherwise no cap |
 | `maxOutput` | positive Count | Agent's configured default, otherwise Provider default |
 | `approval` | `off`, `ask`, `all` or `never` | [Core default](../contracts.md#tool-dispatch) |
+| `modelTools` | Array of tool names, or `null` | Same as `null`: every registered tool that allows the model as a caller. See [Settings](../contracts.md#settings). |
 | `settings` | Object of changes by key; no nested `settings` | No change |
 
 The reader MUST keep unknown setting keys inert. It MUST preserve an unrecognized recorded string for `approval` and apply the [core fallback](../contracts.md#tool-dispatch). The Harness MUST reject new writes of unrecognized approval values. A non-string approval is malformed.
@@ -397,6 +402,8 @@ The Harness MUST use this journal when restoring a point:
 While an intent is unresolved, the Harness MUST block project work and keep other entries from interleaving with the journal. It MUST resume project work only once the target or undo restore has established the files at the head and the matching completion is committed. A missing point or a partial restore is not evidence of completion. A legacy `data.failed: true` record MUST NOT clear that block.
 
 ## Changes
+
+- **Edition 4 draft** ([ADR 0023](../adr/0023-edition-4-draft.md)). From the first working build on edition 3. Nested calls have a defined shape and stay out of model context. `modelTools` is a standard setting. A Provider handed a reasoning level its model does not list lowers it, as the host does. DirEntry is added for directory listing.
 
 - **Production edition 3.** A turn whose remaining calls are left open ends `completed`, never as a limit, and a host refuses rather than rewrites a Runtime's outcome (Python G107: a Runtime reported `limit: questions`). Session ownership of saved points (Go P11), independent gate and wire size limits (TypeScript), and I-JSON numbers (Elixir PE2-3, TypeScript). The `step.after` checkpoint distinguishes a due gate from a committed decision (Runtime E, Go with Rust, Python and Elixir, and TypeScript with Rust and Python: the host did not restore the answered step's gate state).
 

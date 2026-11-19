@@ -235,6 +235,13 @@ Using model access supplied by the Harness, the Runtime requests inference and c
 | list tools | session *(if scoped)* | definitions; change notice when the list changes |
 | run a call | authorized call and cancellation signal | progress then result, or a typed pending reply tied to a question |
 
+A running call can ask the Harness for the tools another call may start, and ask it to run one as a [nested call](#nested-calls):
+
+| Asks | Carrying | Answers |
+|---|---|---|
+| list callable tools | the asking call | definitions a call may start |
+| run a nested call | the asking call, tool name and input | the nested call's terminal result, or refusal of the request |
+
 Loss before dispatch is distinct from loss after a call may have started.
 
 ### Harness and working environment
@@ -242,6 +249,7 @@ Loss before dispatch is distinct from loss after a call may have started.
 | Asks | Carrying | Answers |
 |---|---|---|
 | run a command; read or write a file | session project, command and working directory or file path and data, cancellation signal | result, failure, or environment lost |
+| list a directory *(optional)* | session project, working directory and path | entries with their kinds, failure, or not supported |
 | save, check or restore a point | project and environment identity; saved point for check or restore | saved, exists, restored or refused |
 | end a session | session | cleanup outcome within the declared containment scope |
 
@@ -342,6 +350,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 - The Harness MUST apply settings to the whole session, across branches. Fork inheritance is in [Moving and rewinding](#moving-and-rewinding).
 - The Harness MUST apply changes from the next turn or refuse changes during a turn, as `settingsDuringTurn` declares. Rights, ceilings, answer eligibility and deployment policy remain current at each action; they are not pinned settings.
 - The Harness MUST select and record the turn's model, settings, offered tools, prompt additions and context additions and supply them on recovery. The Runtime MUST NOT choose a different model. Step preparation still applies.
+- The Harness MUST offer the model only registered tools whose callers include the model. When the [`modelTools`](bindings/data.md#setting-keys) setting is recorded, the Harness MUST also leave out every tool the setting does not name. A name with no registered tool is inert. The setting narrows the model's offer only. It does not limit what the UI, a plugin or a nested call can start, and it grants nothing.
 
 ### Commands
 
@@ -375,6 +384,17 @@ The operation owner defines its hook points, including points owned by plugins. 
 - Every agent-executed call MUST go through the Harness, whether it comes from a model, Interface, plugin or another call.
 - Immediately before handoff to the tool, Provider or environment executor, after every wait and history write, the Harness MUST check current rights for every actor behind the work, policy, availability, cancellation and writer access. A change to any checked fact before handoff MUST trigger another check.
 - At ToolCall handoff the Harness MUST also check registration, input validity and an unused allowance for that exact call. An environment callback under a tool invocation MUST use its own live, authorized, dispatched parent and stay within that parent's scope. The environment callback needs no second allowance. A nested ToolCall MUST pass its own gates and get its own allowance. For direct commands see [Commands](#commands).
+
+#### Nested calls
+
+- A tool invocation MAY ask the Harness to run another call, only under its own live, dispatched invocation. A build that does not run nested calls MUST refuse the request and MUST NOT declare `nestedToolCalls`.
+- The Harness MUST make the request a new ToolCall with a fresh id, a tool as its caller, the asking call as its parent, and the parent's actor, turn and step. The asking tool MUST NOT choose any of these.
+- The Harness MUST check a nested call as it checks any call, separately from its parent: the registration's callers MUST include a plugin, and rights, gates, approval and the final dispatch check all apply. The [recorded offer](#recovery-and-repeating-work) governs the calls a model starts. A nested call needs no place in it.
+- The Harness MUST commit the nested call's start and its terminal result as for any call, keep both out of the model's view, and return the committed terminal result to the asking invocation. Only the parent's own result reaches the model.
+- A nested call MUST NOT be left open. If a gate answers pending for it, the Harness MUST close that call's open questions as `noLongerAnswerable` and settle the call as `refused`.
+- The Harness MUST enforce a finite nesting depth, which the build documents, and refuse a request beyond it.
+- Cancelling a call MUST cancel its unsettled nested calls. The Harness MUST settle every nested call no later than its parent, with the [settlement](#settlement) statuses.
+- On recovery the Harness MUST settle an unsettled nested call itself. It MUST NOT hand one to the Runtime or repeat one on its own. A nested call runs again only when its parent is repeated and asks again, and then it is a new call.
 
 #### Gates and registration
 
@@ -421,7 +441,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 - The history store MUST apply erasure to the exact ids sent by the Harness and leave tombstones without erased content. The Harness MUST preserve authority, accounting and the control facts needed to prevent replay of erased work, following the [shared erasure fold](bindings/data.md#session-state).
 - Before deletion, the Harness MUST durably mark the known copy set pending. It MUST honor `erasureDuringTurn` and prevent affected work and output from recreating or exposing pending content. It MUST refuse a fork that would copy pending content or a replay that would disclose it.
 - The Harness MUST follow the [cross-session erasure limit](security.md#deliberate-limits). It MUST retry pending erasures across restart. It MUST report erased, pending and out-of-reach copies separately. A deployment unable to enforce pending marks across readers cannot promise complete shared erasure.
-- The Harness MUST request Provider state discard and deletion of known remote copies. Unconfirmed deletion is not success.
+- The Harness MUST request Provider state discard and deletion of known remote copies. Unconfirmed deletion is not success. A description of an out-of-reach copy is text for a person. A receiver MUST NOT branch on its wording.
 - The record MUST preserve permitted content losslessly, including unknown types, except for retention or erasure. Secret values and protected launch material are excluded at write time. The core does not promise deletion of copies it cannot identify or control.
 
 ### Recovery and repeating work
