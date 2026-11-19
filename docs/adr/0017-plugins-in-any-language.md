@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-17
 ---
 
-**Current rule:** The evidence below is from round three; [ADR 0019](0019-acp-2-and-several-actors.md) added jobs and stream-at-a-time output gating to `/1`, and [ADR 0020](0020-tenants-limits-and-output-events.md) added shared output events and unique plugin names. See the current [Runtime record rules](../bindings/plugin.md#runtime-records-and-effects) and [held output rules](../bindings/plugin.md#held-output); `/1` alone does not identify an earlier snapshot.
+**Current rule:** The evidence below is from round three; [ADR 0019](0019-acp-2-and-several-actors.md) added jobs and stream-at-a-time output gating to `/1`, and [ADR 0020](0020-tenants-limits-and-output-events.md) added shared output events and unique plugin names. See the current [Runtime record rules](../bindings/plugin.md#runtime-records-and-effects) and [held output rules](../bindings/plugin.md#held-output); `/1` alone does not identify an earlier snapshot. [ADR 0024](0024-five-layers.md) supersedes the rejection of one plugin API in every language: the four SDKs share one.
 
 # A plugin in any language, through one binding of the contracts
 

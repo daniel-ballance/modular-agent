@@ -15,6 +15,18 @@ Five builds were made from these documents: one in TypeScript, and four clean-ro
 
 All 125 pairings passed across the five final matrices. [Status](docs/status.md#production-edition-3) records the results. [Build notes](docs/build-notes.md#round-seven) explains what the swaps found and how to repeat them.
 
+## Layers
+
+The project has five layers. Each is made only from the layers below it, and a gap found in one is fixed in the layer below first. [ADR 0024](docs/adr/0024-five-layers.md) records the decision.
+
+| Layer | What it is | Where it is |
+|---|---|---|
+| 1. Specification | What every agent and part must do, and the wire | [`docs/`](docs/conformance.md#the-documents), [kits](conformance/) |
+| 2. SDK specification | What a developer sees, in each language | Not yet written |
+| 3. SDKs | One SDK in TypeScript, Python, Rust and Go | Not yet; the [builds](#builds) are the starting points |
+| 4. Reference implementations | Batteries-included agents, each in one language | The [standard configuration](#the-rust-build-and-the-standard-configuration) |
+| 5. Demonstrative implementations | Agents that show the ecosystem, across languages and placements | [`sidecars/claude`](sidecars/claude/README.md) |
+
 ## Reading order
 
 | Read | To learn | Status |
@@ -44,7 +56,7 @@ Not requirements. They record how the specification was reached.
 | [docs/pressure-test/](docs/pressure-test/) | The early tests of the design against Pi, agent frameworks, T3 Code and an everything-at-once system |
 | [docs/one-pager.html](docs/one-pager.html) | A one-page overview |
 
-## Reference
+## Builds
 
 ### The Rust build and the standard configuration
 
@@ -52,7 +64,7 @@ Not requirements. They record how the specification was reached.
 
 ### The TypeScript build
 
-`packages/` holds the TypeScript build: a Harness, transient and durable Runtimes, the vanilla Pi plugin set, subagents, a terminal UI, an ACP Interface that T3 Code drives, plugins over the plugin binding, and parts as HTTP services. [Status](docs/status.md) shows what it exercises. It is a reference build, not a production build.
+`packages/` holds the TypeScript build: a Harness, transient and durable Runtimes, the vanilla Pi plugin set, subagents, a terminal UI, an ACP Interface that T3 Code drives, plugins over the plugin binding, and parts as HTTP services. [Status](docs/status.md) shows what it exercises. It is a build for testing the specification, not a production build.
 
 ## Acceptance test
 

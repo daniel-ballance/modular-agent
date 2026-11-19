@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-14
 ---
 
-**Current rule:** Pi is a reference implementation, not a wire or conformance dependency. The original message-restatement claim was superseded by [ADR 0010](0010-describe-parts-not-wiring.md); see the current [interactions](../contracts.md#interactions).
+**Current rule:** Pi is a reference implementation, not a wire or conformance dependency. The original message-restatement claim was superseded by [ADR 0010](0010-describe-parts-not-wiring.md); see the current [interactions](../contracts.md#interactions). [ADR 0024](0024-five-layers.md) now uses *reference implementation* for the batteries-included agents built on the SDKs; Pi stays the reference for features.
 
 > **Amended** on 2026-11-16 by [ADR 0010](0010-describe-parts-not-wiring.md): we describe Pi's essentials as parts and how they fit together, not as messages. The rest of this decision stands.
 

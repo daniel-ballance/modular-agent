@@ -318,3 +318,33 @@ _Avoid_: Child agent, delegate, worker
 **Peer**:
 Another agent this one can message, with no parent relationship.
 _Avoid_: Teammate, sibling
+
+## The project's layers
+
+**Specification**:
+The normative documents: what every agent and part must do, the trust boundaries, and the wire between parts. See [Conformance](docs/conformance.md#the-documents).
+_Avoid_: Spec docs, the description
+
+**SDK specification**:
+The documents that set what a developer using an SDK sees: its concepts, names and API shape, and how each language expresses them. It binds the SDKs, not conformance.
+_Avoid_: API docs, SDK guide
+
+**SDK**:
+A published library, in one of Rust, TypeScript, Go or Python, for building agents and plugins from the specification and the SDK specification. The four are one SDK in four languages.
+_Avoid_: Base, framework, build
+
+**Placement**:
+Where a part runs: in the agent's process, in a child process over the plugin binding, or as a service. Chosen when an agent is put together, not in the part's code.
+_Avoid_: Topology, deployment mode
+
+**Build**:
+An implementation of the specification made to test it, such as the five clean-room builds.
+_Avoid_: Reference build
+
+**Reference implementation**:
+A batteries-included agent for everyday use, written in one language on that language's SDK. Each of the four languages has one; the standard configuration is Rust's.
+_Avoid_: Reference build, batteries-included version, standard version
+
+**Demonstrative implementation**:
+An opinionated agent that shows the ecosystem, such as one with parts in several languages or placements, built only on the SDKs and the bindings.
+_Avoid_: Demo, showcase, example
