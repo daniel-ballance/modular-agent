@@ -93,8 +93,8 @@ Which placement to use is a deployment choice. In process is faster. In its own 
 
 ## When serving is refused
 
-`serve` refuses a plugin that uses something the binding cannot carry, such as a `tool.before` handler that answers by asking a question, or a hook point the plugin defines itself. It fails at startup with `not_supported` and names what it could not serve. It does not serve the rest and drop the feature. See [Plugins](../api.md#plugins) for what is servable.
+`serve` refuses a plugin that uses something the binding cannot carry, such as a hook point the plugin defines itself, a model-using command, or a tool flagged `inProcessOnly` because it reads a named credential. It fails at startup with `not_supported` and names what it could not serve. It does not serve the rest and drop the feature. See [Plugins](../api.md#plugins) for what is servable.
 
 ## If the program dies
 
-If the plugin's process exits while the agent runs, the agent treats the part as [lost](../../contracts.md#parts-that-are-lost). A call that was running is settled `outcomeUnknown`, because it may have had its effect, and is not repeated. If the program fails to start, `createAgent` fails: an agent never runs without a part it was configured to have.
+If the plugin's process exits while the agent runs, the agent treats the part as [lost](../../contracts.md#parts-that-are-lost). A call that may have been dispatched is settled `outcomeUnknown`, because it may have had its effect, and is not repeated. A call that had not been dispatched is settled `notStarted`. If the program fails to start, `createAgent` fails: an agent never runs without a part it was configured to have.

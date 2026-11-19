@@ -43,9 +43,10 @@ An agent built with nothing but a Provider behaves like this:
 |---|---|---|
 | Project | The process's current directory | Where a developer expects a tool to look |
 | Durability | `ephemeral`: history in memory, transient Runtime | A library should not write to disk unasked. See [Durability](placement.md#durability). |
-| Working environment | Local, rooted at the project, declaring process-group containment | Every tool context has one; the declaration is honest about what it does not confine |
+| Working environment | Local, rooted at the project. It refuses file paths that resolve outside the project and declares process-group containment for commands. | Every tool context has one; the declaration is honest about what it does not confine |
 | Credential store | Environment variables, by the names each Provider documents | `OPENAI_API_KEY` works without setup |
-| Approval | No approval plugin | The app chose its tools. Adding approval is one call; with it, the [core default](../contracts.md#approval-policy) `all` applies. |
+| Approval | No approval plugin | The app chose its tools. Naming a policy loads the plugin and records that policy ([Approval policy](../contracts.md#approval-policy)). |
+| Plugin host | No | An embedded agent does not start programs named in its environment unless the app gives it process plugins. See [Placement](placement.md#a-plugin-in-another-process). |
 | Actors | One local actor, described below | |
 | Questions | Answered by the app's handler if it registered one | See below |
 | Model | None. The developer names one, or the agent uses the only model its Providers offer. | Picking a model silently would pick a cost |

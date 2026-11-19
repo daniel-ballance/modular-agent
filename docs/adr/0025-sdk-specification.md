@@ -10,10 +10,11 @@ date: 2026-11-19
 ## Decision
 
 - **The developer's object is the Agent.** The Harness stays inside it. `createAgent` checks the whole composition and fails before anything runs.
-- **What a plugin registers is what the plugin binding can carry.** A plugin built only from those items is *servable*: `serve(plugin)` runs it in its own process unchanged, under an agent in any language. The few features the wire cannot carry are marked in-process only. `serve` refuses a plugin that uses one; it does not serve the rest and drop the feature.
+- **What a plugin registers is what the plugin binding can carry.** A plugin built only from those items is *servable*: `serve(plugin)` runs it in its own process unchanged, under an agent in any language. The few features the wire cannot carry are marked in-process only, including context members such as a named credential. An item whose code uses one says so with an `inProcessOnly` flag, because `serve` can see registrations but not what a function will call. `serve` refuses a plugin with such an item; it does not serve the rest and drop the feature.
 - **Authority travels with the work.** A plugin reaches the agent only through the context of the call it is serving, as served plugins do through host callbacks. Only Interfaces get the whole Agent.
 - **Durability is one option:** `ephemeral`, `kept` or `durable`. It sets the history store and the Runtime together and rejects combinations that cannot keep its promise. The default is `ephemeral`.
-- **Safe, quiet defaults.** One `local` actor, present only while the app has a question handler, so an approval no one can answer is refused, never left waiting. No approval plugin unless asked for. Credentials from environment variables.
+- **Safe, quiet defaults.** One `local` actor, present only while the app has a question handler, so an approval no one can answer is refused, never left waiting. No approval plugin unless asked for. Credentials from environment variables. An embedded agent is not a plugin host, so it starts no program named in `MODULAR_AGENT_PLUGINS`, unless the app gives it process plugins.
+- **Errors use the codes of the binding each surface mirrors.** What an app calls uses the ACP codes, so `serveAcp` passes them through. What a plugin's context calls uses the plugin binding codes, so a plugin sees the same code in process and served.
 - **The SDK covers what the specification names.** Each SDK ships an implementation of every part and every binding, plus API-key Providers for the OpenAI Responses and Anthropic Messages APIs. Features the specification does not describe, such as skills, a code tool, subscription sign-in and a CLI, belong to reference implementations.
 - **One version for all four SDKs,** the revision of the SDK specification.
 - **The swap matrix becomes part of each SDK's tests.** Every SDK runs every shared scenario with the fixture plugins in process and served by each of the four SDKs, and runs every guide example as a test.
@@ -26,6 +27,18 @@ date: 2026-11-19
 - **`kept` or `durable` as the default.** It suits a product, and the reference implementations will choose it. A library that writes to disk unasked surprises the developer.
 - **One shape in every language,** such as a builder everywhere. It is easier to check, but it reads as foreign code in three of the four languages. The names stay the same; the construction does not.
 - **Wait for a machine-readable schema before writing the SDK specification.** The schema matters but does not block the API. Types are hand-written to the shared data names until it exists.
+
+## Review
+
+A cross-model review of the first draft found that it relaxed several rules it was meant only to hide, and this draft corrects them:
+
+- it repeated a crashed call on the tool's promise alone;
+- it refused a `replaces` entry that collided with nothing;
+- it offered served plugins context members the binding does not allow;
+- it named the tool schema fields `input` and `output` on the wire;
+- it invented a `refused` error code where ACP uses `forbidden`.
+
+The declaration now has a table of its values, so no key is guessed.
 
 ## Consequences
 

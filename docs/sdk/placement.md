@@ -32,11 +32,11 @@ A plugin moves into its own process without changing its code:
 1. **Serve it.** A plugin program's entry point calls `serve(plugin)`. That one call speaks the binding on stdio: it answers the handshake with the plugin's registration, routes requests to its tools, Provider, hooks and the rest, and passes each request's context through as host callbacks. `serve` refuses an [in-process-only plugin](api.md#plugins) with `not_supported`.
 2. **Load it.** The agent names the program in `processPlugins`: `{ command: ["python", "tides.py"], env?, config? }`. The command is an argument vector, never a shell line. The program can be written with any SDK, or without one.
 
-The agent loads process plugins after its own, in order, and validates each registration before enabling it. If a program fails to start or its registration is refused, `createAgent` fails ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)). A child process starts with the minimal environment the binding requires, plus the `env` the developer approved; it does not inherit the agent's.
+Giving `processPlugins` makes the agent a plugin host. The agent loads its own plugins first, then `processPlugins` in order, then the programs in `MODULAR_AGENT_PLUGINS`, and validates each registration before enabling it. If a program fails to start or its registration is refused, `createAgent` fails ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)). A child process starts with the minimal environment the binding requires, plus the `env` the developer approved; it does not inherit the agent's.
 
-An agent created by the SDK is a plugin host, so it also reads `MODULAR_AGENT_PLUGINS` at startup, as the binding requires. An app that must not load plugins from its environment sets `pluginHost: false`. The agent then makes no plugin-host claim, and both `processPlugins` and the variable are refused.
+A plugin host MUST read `MODULAR_AGENT_PLUGINS` at startup, as the binding requires. An embedded agent is not a plugin host by default: a library should not start programs named in its environment unless the app asks. An agent becomes one when the app gives `processPlugins` or sets `pluginHost: true`, and then reads the variable too. A program that claims the plugin-host role, such as an agent served over ACP, sets `pluginHost: true`.
 
-If a plugin's process is lost while the agent runs, the agent treats the part as [lost](../contracts.md#parts-that-are-lost). Work that may have started is settled `outcomeUnknown`, never repeated, unless the tool promised it was safe to repeat.
+If a plugin's process is lost while the agent runs, the agent treats the part as [lost](../contracts.md#parts-that-are-lost) and [settles](../contracts.md#settlement) its calls. A call that may have been dispatched is `outcomeUnknown`. A call abandoned before dispatch is `notStarted`. Neither is repeated except under the repeat rule below.
 
 ## Services
 
@@ -64,7 +64,13 @@ One option, `durability`, sets what survives the agent's process ending:
 | `kept` | files under `dataDir`, or a history service | transient | Sessions reopen with their history. An interrupted turn ends `failed`. |
 | `durable` | files under `dataDir`, or a history service | durable | An interrupted turn carries on when the session reopens. |
 
-In both `kept` and `durable`, reopening follows the [recovery rules](../contracts.md#recovery-and-repeating-work). A tool call that may have run is settled `outcomeUnknown` and never repeated unless the tool declared `safeToRepeat`. A model request is repeated only where it was recorded as safe to repeat. The scenarios check this with a real `kill -9`.
+In both `kept` and `durable`, reopening follows the [recovery rules](../contracts.md#recovery-and-repeating-work):
+
+- **A tool call that started and has no result** is repeated only when all of these hold: its registration is identical to the recorded one; the tool and the working environment both promised it is safe to repeat, then and now; and cleanup of the first attempt is confirmed. Read-only and containment alone are not enough. Otherwise it is settled `outcomeUnknown`.
+- **A call that never started** is settled `notStarted`, or dispatched afresh if it is still eligible.
+- **A model request** is repeated only as the same final request, from a Provider that declared it safe to repeat then and now.
+
+The scenarios check this with a real `kill -9`.
 
 `history` and `runtime` can still be given explicitly, for example a history service with `kept`. The agent checks the combination and raises `invalid_composition` for one that cannot keep its promise:
 

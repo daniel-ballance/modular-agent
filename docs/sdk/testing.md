@@ -9,13 +9,13 @@ Every SDK ships these in a `testing` module:
 | Item | What it does |
 |---|---|
 | `scriptedProvider(script)` | A Provider with id `scripted` and one model, `scripted/script`, that answers from a [script](#the-model-script). |
-| `memoryEnvironment(files?)` | A working environment that keeps files in memory. `exec` runs commands registered with `onExec(name, handler)` and raises `not_supported` for others. It declares no containment. |
+| `memoryEnvironment(files?)` | A working environment that keeps files in memory. `exec` runs commands registered with `onExec(name, handler)` and raises `not_supported` for others. It declares `containment: "none"`. |
 | `testAgent(options)` | `createAgent` with the scripted Provider and its model, a memory environment and `ephemeral` durability, unless the options say otherwise. |
 | `answers(list)` | A question handler that answers in order from a list, and raises if a question arrives that the list did not expect. Each item is `"allow"`, `"decline"` or `{ "value": answer }`. |
 | `overWire(plugin)` | The same plugin, served over the plugin binding through an in-memory pipe in the same process. A test can run any servable plugin both ways and compare. |
 | `restart(agent)` | Drops the agent without shutting it down, as a crash would, and builds a new one over the same store and plugins. In-process only; the shared scenarios kill a real process. |
 
-A developer tests a tool by building a `testAgent` with the tool and a script that calls it, sending a prompt and checking the TurnOutcome and the recorded ToolResult. The [guides](guides/README.md) show it.
+A developer tests a tool by building a `testAgent` with the tool and a script that calls it, sending a prompt and checking the PromptResult and the recorded ToolResult. The [guides](guides/README.md) show it.
 
 ### The model script
 
@@ -46,7 +46,12 @@ The runner runs each scenario in every applicable placement of the fixture plugi
 
 So a Rust agent runs every scenario with fixtures in process, then served from Rust, TypeScript, Go and Python. Every result MUST be the same. A scenario that uses an in-process-only feature lists `"placements": ["inProcess"]`.
 
-Steps that crash the agent run it as a separate process and kill it with `SIGKILL`.
+For each run of a scenario in each placement, the runner creates a fresh, empty directory outside the agent's reach and supplies two things from it:
+
+- the agent's `dataDir`, which survives a crash and is reused on reopen;
+- the `counter` fixture's config `path`, an absolute path to its count file. A missing file counts as zero.
+
+Steps that crash the agent run it as a separate process, in its own process group. A crash sends `SIGKILL` to the whole group, so served fixture plugins die with the agent, and the runner waits until every process in the group has exited before it reopens. Recovery then has nothing left running that could race it ([Working environment](../contracts.md#the-working-environment)).
 
 ### The fixture plugins
 
