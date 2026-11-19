@@ -12,9 +12,12 @@ async fn main() {
         placement: Placement::from_args(&args[4..]),
     };
     let step = &scenario["steps"][args[3].parse::<usize>().unwrap()];
-    let agent = agent(&scenario, &run).await.expect("agent");
+    let (agent, queue) = agent(&scenario, &run).await.expect("agent");
     let session = agent.session().await.expect("session");
     println!("SESSION {}", session.id());
     std::io::stdout().flush().unwrap();
     let _ = session.prompt(step["prompt"].as_str().unwrap()).await;
+    if let Some(queue) = queue {
+        queue.assert_done().expect("scripted answers");
+    }
 }

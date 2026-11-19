@@ -616,7 +616,8 @@ fn from_turn(
         .entries
         .iter()
         .filter(|e| e.kind == "tool.call" && e.scope.turn == turn)
-        .filter_map(|e| serde_json::from_value(e.content.clone()?).ok())
+        .filter_map(|e| serde_json::from_value::<base::ToolCall>(e.content.clone()?).ok())
+        .filter(|call| call.started_by == "model")
         .collect();
     let tool_results = data
         .entries

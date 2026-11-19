@@ -4,7 +4,11 @@ use modular_agent::{serve, testing::fixtures::fixture};
 
 #[tokio::main]
 async fn main() {
-    let name = std::env::args().nth(1).unwrap_or_default();
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let [name] = args.as_slice() else {
+        eprintln!("usage: modular-agent-fixtures FIXTURE");
+        std::process::exit(2);
+    };
     let plugin = if name == "provider-script" {
         Some(modular_agent::Plugin::new("fixture.provider").setup(|r| {
             let script = r.config()["script"].clone();
@@ -12,7 +16,7 @@ async fn main() {
             Ok(())
         }))
     } else {
-        fixture(&name)
+        fixture(name)
     };
     let Some(plugin) = plugin else {
         eprintln!("no fixture named {name:?}");
