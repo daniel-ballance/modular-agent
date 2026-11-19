@@ -66,6 +66,49 @@ class _NestedTools:
         )
 
 
+class ToolEnvironment:
+    """Access to this call's working environment, not the agent's own process."""
+
+    def __init__(
+        self, context: ToolContext, call: Callable[[str, JsonObject], Awaitable[Json]] | None
+    ) -> None:
+        self._context = context
+        self._call = call
+
+    async def _run(self, operation: str, data: JsonObject) -> Json:
+        self._context._check()
+        if self._call is None:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Environment access is unavailable")
+        return await self._call(operation, data)
+
+    async def read_bytes(self, path: str) -> bytes:
+        import base64
+
+        result = await self._run("read_bytes", {"path": path})
+        return base64.b64decode(cast(str, cast(JsonObject, result)["data"]), validate=True)
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        import base64
+
+        await self._run("write_bytes", {"path": path, "data": base64.b64encode(data).decode()})
+
+    async def list(self, path: str) -> list[JsonObject]:
+        result = await self._run("list_directory", {"path": path})
+        return cast(list[JsonObject], cast(JsonObject, result)["entries"])
+
+    async def exec(self, command: str, timeout: float | None = None) -> JsonObject:
+        return cast(
+            JsonObject,
+            await self._run(
+                "bash",
+                {
+                    "command": command,
+                    **({"timeout": timeout} if timeout is not None else {}),
+                },
+            ),
+        )
+
+
 class ToolContext:
     def __init__(
         self,
@@ -75,6 +118,7 @@ class ToolContext:
         ask: Callable[[QuestionSpec, int, float | None], Awaitable[Answer]],
         progress: Callable[[Content], Awaitable[None]],
         nested: Callable[[str, JsonObject], Awaitable[Json]],
+        environment: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
     ) -> None:
         self.session_id = session_id
         self.actor_id = actor_id
@@ -83,6 +127,7 @@ class ToolContext:
         self._ask = ask
         self._progress = progress
         self._nested = nested
+        self.environment = ToolEnvironment(self, environment)
         self.tools = _NestedTools(self)
         self._question_index = 0
         self._active = True
@@ -138,6 +183,38 @@ class Tool:
     callers: Sequence[Literal["model", "ui", "plugin"]] = ("model", "ui", "plugin")
     presentation: JsonObject | None = None
     in_process_only: bool = False
+
+    @classmethod
+    def from_schema(
+        cls,
+        name: str,
+        description: str,
+        parameters: JsonObject,
+        handler: Callable[[JsonObject, ToolContext], Awaitable[str | Content | ToolOutput]],
+        *,
+        read_only: bool = False,
+        destructive: bool = True,
+        open_world: bool = True,
+        safe_to_repeat: bool = False,
+        parallel: bool = False,
+        in_process_only: bool = False,
+    ) -> Tool:
+        """Register an existing JSON Schema without regenerating it from Python types."""
+        Draft202012Validator.check_schema(parameters)
+        return cls(
+            name,
+            description,
+            parameters,
+            lambda arguments: {"arguments": arguments},
+            handler,
+            "context",
+            read_only=read_only,
+            destructive=destructive,
+            open_world=open_world,
+            safe_to_repeat=safe_to_repeat,
+            parallel=parallel,
+            in_process_only=in_process_only,
+        )
 
     @property
     def definition(self) -> JsonObject:

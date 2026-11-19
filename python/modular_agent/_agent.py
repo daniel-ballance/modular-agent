@@ -19,12 +19,16 @@ from ma_acp.binding import declaration as _declaration
 from ma_approval import Approval as _Approval
 from ma_context import Context
 from ma_core import plain
-from ma_core.wire import model_out, settings_in
+from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
 from ma_history import History
 from ma_history.http import HTTPHistory
-from ma_local import Local
+from ma_local import Local, ProcessGroupLocal
+from ma_local.containment import delegated_root
+from ma_fake.conformance import Echo, Nest
+from ma_commands import Commands
+from ma_mcp import MCP
 from ma_plugin.host import External, load_plugins
 from ma_questions import Questions
 from ma_runtime import Runtime
@@ -112,10 +116,20 @@ class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
 
 class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
     def __init__(self, agent: Agent) -> None:
-        super().__init__(agent._project, agent._settings, actor="user")
+        super().__init__(
+            agent._project, agent._settings, actor=os.environ.get("MODULAR_AGENT_ACTOR", "user")
+        )
         self._agent = agent
 
+    def new_session_settings(self, project: str) -> JsonObject:
+        resolver = self._agent._project_settings
+        if resolver is not None:
+            return cast(JsonObject, settings_in(resolver(Path(project))))
+        return self._agent._settings
+
     async def declaration(self, sid: str | None = None) -> JsonObject:
+        if self._agent._conformance:
+            return cast(JsonObject, await super().declaration(sid))
         return {**self._agent.declaration(), "plugins": self._agent._h.declarations()}
 
 
@@ -141,6 +155,8 @@ class Agent:
         self._lock = asyncio.Lock()
         self._closed = False
         self._plugin_host = False
+        self._conformance = False
+        self._project_settings: Callable[[Path], JsonObject] | None = None
         self._restart: Callable[[], Awaitable[Agent]] | None = None
         self._memory_store: _MemoryHistory | None = None
 
@@ -264,6 +280,19 @@ class Agent:
 
     async def sessions(self) -> list[JsonObject]:
         return cast(list[JsonObject], await self._session("list"))
+
+    async def session_info(self, id: str) -> JsonObject:
+        """Read saved local session settings without starting recovery or taking its lease."""
+        if not id or not id.isalnum():
+            raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid session id")
+        state = await self._call("history", "read", session=id)
+        if state is None:
+            raise AgentError(ErrorCode.NOT_FOUND, "Unknown session")
+        return {
+            "id": id,
+            "project": state["project"],
+            "settings": settings_out(state["settings"]),
+        }
 
     async def models(self) -> list[ModelInfo]:
         catalog = await self._call("selection", "catalog")
@@ -437,6 +466,12 @@ def create_agent(
     settings: JsonObject | None = None,
     approval: Approval | None = None,
     on_question: QuestionHandler | None = None,
+    local_process_groups: bool = False,
+    mcp_servers: Sequence[JsonObject] = (),
+    project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
+    project_settings: Callable[[Path], JsonObject] | None = None,
+    commands: bool = False,
+    conformance: bool = False,
 ) -> AgentStart:
     async def build() -> Agent:
         return await build_with_store()
@@ -489,18 +524,37 @@ def create_agent(
                 store_root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 store = History(store_root)
             await h.load(store)
-            await h.load(environment or Local(root))
-            await h.load(_SdkTools())
+            local = Local(root)
+            if environment is None and local_process_groups:
+                try:
+                    delegated_root()
+                except Exception:
+                    local = ProcessGroupLocal(root)
+            await h.load(environment or local)
+            dispatcher = _SdkTools()
+            dispatcher.conformance = conformance
+            await h.load(dispatcher)
+            agent._conformance = conformance
+            agent._project_settings = project_settings
             await h.load(_SdkDurable() if durability == "durable" else _SdkRuntime())
             h.on("embedding", "result.ready", _structured_result, "last")
-            await h.load(_Questions())
+            if conformance:
+                await h.load(Echo())
+                await h.load(Nest())
+            await h.load(Questions() if conformance else _Questions())
             h.on("embedding", "session.start", agent._present, "first")
             h.follow("embedding", "user", agent._event)
             for provider in providers:
                 await h.load(_ProviderAdapter(provider))
-            await h.load(Selection([p.id for p in providers]))
+            await h.load(
+                Selection([p.id for p in providers] + (["conformance"] if conformance else []))
+            )
             await h.load(Context())
-            if approval is not None:
+            if commands:
+                await h.load(Commands())
+            if mcp_servers or project_mcp is not None or conformance:
+                await h.load(MCP(mcp_servers, standard_names=True, project_servers=project_mcp))
+            if approval is not None or conformance:
                 await h.load(_Approval())
             registered_tools: dict[str, _LocalPlugin] = {}
             for plugin in [

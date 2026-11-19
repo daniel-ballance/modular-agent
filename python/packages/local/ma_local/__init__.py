@@ -235,3 +235,65 @@ class Local(Plugin):
     async def stop(self):
         for sid in set(self.commands) | {item[0] for item in self.points.saved.values()}:
             await self._close({"session": sid})
+
+
+class ProcessGroupLocal(Local):
+    """Local files with process-group containment when cgroup delegation is absent."""
+
+    declarations = {
+        **Local.declarations,
+        "containment": "processGroup",
+        "platform": "POSIX process group with lifetime supervisor",
+        "stops_commands_on_crash": False,
+    }
+
+    async def start(self, api):
+        await Plugin.start(self, api)
+        api.provide("environment", self)
+        api.on("session.end", self._close)
+        api.on("session.suspend", self._close)
+
+    async def bash(self, d, emit):
+        s = await self.api.session("get", session=d["session"])
+        read_fd, lifetime = os.pipe()
+        with tempfile.TemporaryFile() as output:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "ma_local.group_worker",
+                    str(read_fd),
+                    d.get("cwd") or s["project"],
+                    d["command"],
+                    pass_fds=(read_fd,),
+                    stdout=output,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.DEVNULL,
+                )
+            except BaseException:
+                os.close(lifetime)
+                raise
+            finally:
+                os.close(read_fd)
+            offset = 0
+            timed_out = False
+            try:
+                async with asyncio.timeout(d.get("timeout")):
+                    while process.returncode is None:
+                        if data := os.pread(output.fileno(), 65536, offset):
+                            offset += len(data)
+                            await emit({"text": data.decode(errors="replace")})
+                        else:
+                            await asyncio.sleep(0.02)
+            except TimeoutError:
+                timed_out = True
+            finally:
+                os.close(lifetime)
+                _, status = await process.communicate()
+            output.seek(0)
+            text = output.read().decode(errors="replace")
+            if pending := text.encode()[offset:]:
+                await emit({"text": pending.decode(errors="replace")})
+            if process.returncode or not status.strip():
+                raise AgentError("Command supervisor died; environment lost", "environment_lost")
+            return {"text": text, "exit_code": int(status), "timed_out": timed_out}

@@ -2,6 +2,8 @@
 
 import asyncio
 import hashlib
+import logging
+from pathlib import Path
 import re
 from contextlib import AsyncExitStack
 
@@ -146,6 +148,9 @@ class Connection:
 class MCP(Plugin):
     name = "mcp"
     role = "tool_source"
+    # A private process placement can restore an older serialized instance.
+    standard_names = False
+    project_servers = None
     declarations = {
         "transports": ["stdio", "http"],
         "session_tools": True,
@@ -156,7 +161,9 @@ class MCP(Plugin):
         "stdio_crash_cleanup": False,
     }
 
-    def __init__(self, servers=(), http_factory=None):
+    def __init__(self, servers=(), http_factory=None, standard_names=False, project_servers=None):
+        self.standard_names = standard_names
+        self.project_servers = project_servers
         self.servers = list(servers)
         validate_servers(self.servers)
         self.http_factory = http_factory
@@ -173,9 +180,14 @@ class MCP(Plugin):
         api.on("session.suspend", self.detach, "last")
         try:
             for spec in self.servers:
-                self.global_connections[spec["name"]] = await Connection(
-                    spec, http_factory=self.http_factory
-                ).start()
+                try:
+                    self.global_connections[spec["name"]] = await Connection(
+                        spec, spec.get("cwd"), http_factory=self.http_factory
+                    ).start()
+                except Exception as exc:
+                    if not self.standard_names:
+                        raise
+                    logging.getLogger(__name__).warning("%s: %s", spec["name"], exc)
         except BaseException:
             await self.stop()
             raise
@@ -185,10 +197,27 @@ class MCP(Plugin):
         validate_servers(specs)
         if any(s["name"] in self.global_connections for s in specs):
             raise AgentError("Session MCP server shadows a configured server")
+        if self.standard_names and any(
+            spec.get("type", "stdio") == "stdio" and not Path(spec["command"]).is_absolute()
+            for spec in specs
+        ):
+            raise AgentError("ACP MCP executable paths must be absolute", "invalid_request")
         sid = d["session"]
         project = (await self.api.session("get", session=sid))["project"]
         connections = {}
         try:
+            explicit = {spec["name"] for spec in specs}
+            if self.project_servers is not None:
+                for spec in self.project_servers(Path(project)):
+                    if spec["name"] in explicit or spec["name"] in self.global_connections:
+                        continue
+                    try:
+                        validate_servers([spec])
+                        connections[spec["name"]] = await Connection(
+                            spec, project, self.http_factory
+                        ).start()
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("%s: %s", spec["name"], exc)
             for spec in specs:
                 connections[spec["name"]] = await Connection(
                     spec, project, self.http_factory
@@ -221,6 +250,15 @@ class MCP(Plugin):
                     "mcp_unavailable", session=sid, server=server, error=type(exc).__name__
                 )
                 continue
+            if self.standard_names and any(
+                not re.fullmatch(r"[A-Za-z0-9_-]+", tool.name)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", f"mcp_{server}__{tool.name}")
+                for tool in tools
+            ):
+                logging.getLogger(__name__).warning(
+                    "MCP server %s has an invalid tool name", server
+                )
+                continue
             snapshot = [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in tools]
             if connection.previous != snapshot:
                 connection.previous = snapshot
@@ -228,7 +266,11 @@ class MCP(Plugin):
             for tool in tools:
                 a = tool.annotations or types.ToolAnnotations()
                 read_only = a.read_only_hint is True
-                name = tool_name(server, tool.name)
+                name = (
+                    f"mcp_{server}__{tool.name}"
+                    if self.standard_names
+                    else tool_name(server, tool.name)
+                )
                 if name in routes:
                     raise AgentError("MCP tool name collision")
                 routes[name] = (connection, tool.name)

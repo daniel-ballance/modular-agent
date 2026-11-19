@@ -416,6 +416,9 @@ class ACP(Plugin):
             ),
         ]
 
+    def new_session_settings(self, project):
+        return self.settings
+
     @rpc
     async def new_session(self, cwd, mcp_servers=None, additional_directories=None, **kwargs):
         self.cwd(cwd, additional_directories, **kwargs)
@@ -427,7 +430,7 @@ class ACP(Plugin):
                     project=self.project,
                     actor=self.actor,
                     actor_kind="host",
-                    settings=self.settings,
+                    settings=self.new_session_settings(self.project),
                     tenant=(kwargs.get(NAMESPACE) or {}).get("tenant"),
                     mcp_servers=[
                         x.model_dump(mode="json", by_alias=True, exclude_none=True)
