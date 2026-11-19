@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { type Harness, type InputRequest, type Plugin, type PluginApi, textOf, WAITING_NOTE } from "@modular-agent/harness";
+import { type Harness, type InputRequest, type Plugin, type PluginApi, type RuntimeHost, type TurnInput, type TurnOutcome, textOf, WAITING_NOTE } from "@modular-agent/harness";
+import { TransientRuntime } from "@modular-agent/runtime-transient";
 import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "../src/index.js";
 
@@ -23,12 +24,12 @@ function fakeUi() {
 	};
 }
 const dirs = () => ({ project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) });
-async function agent(d: { project: string; home: string }, responses: FauxResponseStep[], ui: Plugin): Promise<Harness> {
+async function agent(d: { project: string; home: string }, responses: FauxResponseStep[], ui: Plugin, ...plugins: Plugin[]): Promise<Harness> {
 	const faux = fauxProvider();
 	const models = createModels();
 	models.setProvider(faux.provider);
 	faux.setResponses(responses);
-	return createAgent({ ...d, models, model: "faux/faux-1", plugins: [questionTool({ waitMs: 30 }), ui] });
+	return createAgent({ ...d, models, model: "faux/faux-1", plugins: [questionTool({ waitMs: 30 }), ui, ...plugins] });
 }
 const pay = () => fauxToolCall("ask_user", { question: "Confirm payment?" });
 const kinds = (h: Harness, s: string, k: string) => h.api("t").history(s).filter((e) => e.kind === k);
@@ -76,6 +77,34 @@ test("a question outlasts its turn; a late allow runs the call and the agent car
 	assert.equal(results[0].stepId, checkpoint.stepId);
 	assert.equal(kinds(h, s, "inputAnswer")[0].stepId, checkpoint.stepId);
 	await h.stop();
+});
+
+test("the Harness preserves a committed pending call when the Runtime reply is lost", async (t) => {
+	class LostReplyRuntime extends TransientRuntime {
+		override async runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome> {
+			await super.runTurn(input, { ...host, hook: (name, payload) => name === "turn.end" ? Promise.resolve(null as never) : host.hook(name, payload) }, signal);
+			throw new Error("Runtime reply lost");
+		}
+	}
+	const runtime: Plugin = { name: "lost-reply-runtime", replaces: "runtime-transient", setup(api) { api.provide("runtime", new LostReplyRuntime()); } };
+	const ui = fakeUi();
+	const call = pay();
+	const h = await agent(dirs(), [fauxAssistantMessage([call], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Continued.")])], ui.plugin, runtime);
+	t.after(() => h.stop());
+	const api = h.api("t");
+	const s = await api.startSession();
+	await api.input(s, { content: "pay", actorId: "user" });
+	const asked = await ui.next();
+	await api.waitForIdle(s);
+	const [end] = turnData(h, s);
+	assert.deepEqual(end.outcome, { kind: "failed", error: "Runtime reply lost" });
+	assert.deepEqual(end.result.openToolCalls, [call.id]);
+	assert.equal(kinds(h, s, "toolResult").length, 0);
+	assert.deepEqual(ui.answer(asked, "allow"), { accepted: true });
+	await api.waitForIdle(s);
+	assert.deepEqual(kinds(h, s, "toolResult").map((e) => e.toolCallId), [call.id]);
+	const [first, continuation] = kinds(h, s, "turnStart");
+	assert.equal(continuation.continuesTurnId, first.turnId);
 });
 
 test("new input while a call is open sees a stand-in result; the real one later replaces the stand-in at the original call", async () => {

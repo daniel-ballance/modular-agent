@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { relative, isAbsolute, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { addUsage, interruptedNote, isToolCall, restoreAnsweredStep, text, zeroUsage, type Harness, type HistoryEntry, type Usage } from "@modular-agent/harness";
+import { addUsage, interruptedNote, isToolCall, pendingToolCalls, restoreAnsweredStep, text, zeroUsage, type Harness, type HistoryEntry, type Usage } from "@modular-agent/harness";
 import type {
 	Answer,
 	AssistantMessage,
@@ -573,7 +573,7 @@ class WireRuntime implements Runtime {
 				}
 			}
 			if (p.hook === "turn.end") {
-				if (!t.signal.aborted && !t.limit && !atBoundary(t)) throw invalidState("Turn ended inside a step");
+				if (!t.signal.aborted && !t.limit && payload.outcome?.kind !== "failed" && !atBoundary(t)) throw invalidState("Turn ended inside a step");
 				if (t.signal.aborted || t.limit) payload.outcome = t.signal.aborted ? { kind: "cancelled" } : { kind: "limit", limit: t.limit };
 				else if (t.refusal !== undefined) payload.outcome = { kind: "failed", error: t.refusal };
 				await this.closeReplay(t);
@@ -723,7 +723,9 @@ class WireRuntime implements Runtime {
 			if (signal.aborted) return { outcome: { kind: "cancelled" }, result: { openToolCalls: [] }, entries: [...t.entries], usage: t.usage };
 			if (t.limit && (reply.outcome.kind !== "limit" || reply.outcome.limit !== t.limit)) throw invalidState("Runtime did not report the signalled limit");
 			if (method === "runtime/runTurn" && (!wireEqual(reply.usage, t.usage) || !wireEqual(reply.entries, [...t.entries]))) throw invalidState("Runtime outcome does not match its committed work");
-			if (!wireEqual(reply.result.openToolCalls, [...t.calls.values()].filter((c) => c.phase === "pending").map((c) => c.original.id))) throw invalidState("Runtime outcome has invalid open calls");
+			const pending = reply.outcome.kind === "cancelled" ? [] :
+				pendingToolCalls(await host.history(), input.turnId, await host.history({ all: true }));
+			if (!wireEqual(reply.result.openToolCalls, pending)) throw invalidState("Runtime outcome has invalid open calls");
 			if (t.refusal !== undefined && !t.limit) return { ...reply, outcome: { kind: "failed", error: t.refusal } };
 			return reply;
 		} finally {

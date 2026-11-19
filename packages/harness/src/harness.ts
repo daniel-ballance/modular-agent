@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { interruptedCalls, restoreAnsweredStep } from "./view.js";
+import { interruptedCalls, pendingToolCalls, restoreAnsweredStep } from "./view.js";
 import { HookRegistry } from "./hooks.js";
 import { inputIdOf, inputKeyScope, type InputReceipt, type InputTiming, type QueuedInput, Session } from "./session.js";
 import {
@@ -1379,7 +1379,23 @@ export class Harness {
 		else if (outcome.outcome.kind !== "cancelled" && (state?.tenantLimit || (responses.length > 0 && await this.tenantBudgetReached(s)))) {
 			outcome = { ...outcome, outcome: { kind: "limit", limit: "tenantTokens" } };
 		}
-		const open = new Set(outcome.result.openToolCalls);
+		// Committed dispositions survive a lost or invalid Runtime outcome.
+		const branch = s.branch();
+		const pending = pendingToolCalls(branch, turnId, s.order.map((id) => s.entries.get(id)!));
+		const cancelled = outcome.outcome.kind === "cancelled";
+		const open = new Set(cancelled ? [] : pending);
+		outcome = { ...outcome, result: { ...outcome.result, openToolCalls: [...open] } };
+		if (cancelled && pending.length) {
+			const drafts = pending.map((id): EntryDraft => {
+				const disposition = branch.findLast((e) => e.kind === "toolPending" && e.turnId === turnId && e.toolCallId === id);
+				const offer = branch.find((e) => e.kind === "response" && e.message?.role === "assistant" && e.message.content.some((p) => isToolCall(p) && p.id === id));
+				const call = offer?.message?.content.filter(isToolCall).find((p) => p.id === id);
+				return { kind: "toolResult", writer: "harness", modelVisible: true, turnId, stepId: disposition?.stepId, toolCallId: id,
+					message: { role: "toolResult", toolCallId: id, toolName: call?.name ?? "", content: [text("Cancelled while waiting for an answer")], isError: true },
+					data: { status: "cancelled" } };
+			});
+			await this.commit(s, drafts);
+		}
 		for (const request of this.recordedOpenRequests(s).filter((r) => r.turnId === turnId && !s.requests.has(r.id) && !open.has(r.toolCallId ?? ""))) {
 			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId, toolCallId: request.toolCallId, data: { requestId: request.id, actorId: "harness", declined: true, reason: outcome.outcome.kind === "cancelled" ? "cancelled" : "noLongerAnswerable" } }]);
 			this.emit(s.id, "input.request.closed", { requestId: request.id, declined: true, lost: true }, "harness", { turnId, toolCallId: request.toolCallId });
@@ -1396,8 +1412,9 @@ export class Harness {
 		const runtime = this.runtime();
 		const model = this.modelAccess(s, snapshot?.model);
 		if (!runtime || !model) {
-			await this.endInterruptedTurn(s, interrupted);
-			await this.finishTurn(s, turnId, this.failedOutcome("The process stopped during the turn"));
+			const pending = new Set(pendingToolCalls(s.branch(), turnId, s.order.map((id) => s.entries.get(id)!)));
+			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !pending.has(c.id)) });
+			await this.finishTurn(s, turnId, this.failedOutcome("The process stopped during the turn"), undefined, signal);
 			return;
 		}
 		const branch = s.branch();
@@ -1408,7 +1425,7 @@ export class Harness {
 			jobs: new Set(this.recordedTurnJobs(branch, turnId)),
 		};
 		const kept = s.order.map((id) => s.entries.get(id)!);
-		const pending = new Set(branch.filter((e) => e.kind === "toolPending" && e.turnId === turnId).map((e) => e.toolCallId));
+		const pending = new Set(pendingToolCalls(branch, turnId, kept));
 		const calls = interrupted.calls.filter((c) => !pending.has(c.id));
 		let outcome: TurnOutcome;
 		try {
@@ -1431,12 +1448,8 @@ export class Harness {
 		if (!s.suspended) {
 			const keptNow = s.order.map((id) => s.entries.get(id)!);
 			const terminal = new Set(keptNow.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
-			if (!signal.aborted) for (const e of keptNow) if (e.kind === "toolPending" && e.turnId === turnId && e.toolCallId && !e.erased && !terminal.has(e.toolCallId)) pending.add(e.toolCallId);
-			const open = signal.aborted ? [] : [...new Set([
-				...interrupted.calls.filter((c) => pending.has(c.id)).map((c) => c.id), ...outcome.result.openToolCalls,
-			])].filter((id) => !terminal.has(id));
-			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !terminal.has(c.id) && !open.includes(c.id)) });
-			outcome = { ...outcome, result: { ...outcome.result, openToolCalls: open } };
+			const open = new Set(pendingToolCalls(s.branch(), turnId, keptNow));
+			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !terminal.has(c.id) && !open.has(c.id)) });
 		}
 		await this.finishTurn(s, turnId, outcome, state, signal);
 	}
@@ -1510,6 +1523,9 @@ export class Harness {
 					if (state.endedHook || s.suspended) return null as never;
 					state.endedHook = true;
 					if ((state.tenantLimit || await this.tenantBudgetReached(s)) && payload.outcome?.kind !== "cancelled") payload = { ...payload, outcome: { kind: "limit", limit: "tenantTokens" } };
+					const openToolCalls = payload.outcome?.kind === "cancelled" ? [] :
+						pendingToolCalls(s.branch(), turnId, s.order.map((id) => s.entries.get(id)!));
+					payload = { ...payload, result: { ...payload.result, openToolCalls } };
 				}
 				if (name === "step.after") {
 					if (state.stepAfterRunning) throw new Error("Step gate is in progress");
@@ -1960,8 +1976,9 @@ export class Harness {
 	/** Tool calls on the current branch that have no result and are not part of a running turn. */
 	private openCalls(s: Session): InterruptedTurn["calls"] {
 		const branch = s.branch();
-		const results = new Set(branch.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
-		const continued = new Set(s.order.map((id) => s.entries.get(id)!).filter((e) => e.kind === "turnStart").map((e) => e.continuesTurnId ?? (e.data as { continuesTurnId?: string } | undefined)?.continuesTurnId));
+		const kept = s.order.map((id) => s.entries.get(id)!);
+		const results = new Set(kept.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
+		const continued = new Set(kept.filter((e) => e.kind === "turnStart").map((e) => e.continuesTurnId ?? (e.data as { continuesTurnId?: string } | undefined)?.continuesTurnId));
 		const open = new Set(branch.flatMap((e) => e.kind === "turnEnd" && !e.erased && !continued.has(e.turnId) ? (e.data as { result?: TurnOutcome["result"] }).result?.openToolCalls ?? [] : []));
 		const calls: InterruptedTurn["calls"] = [];
 		for (const e of branch) {
