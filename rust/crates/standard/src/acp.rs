@@ -49,9 +49,9 @@ impl AcpComposition for Factory {
         } else {
             None
         };
-        let chosen = recorded
-            .as_ref()
-            .and_then(|session| session.settings["model"].as_str())
+        let saved_model = recorded.and_then(|session| session.model.map(|model| model.to_string()));
+        let chosen = saved_model
+            .as_deref()
             .or(self.settings["model"].as_str())
             .or(configured["model"].as_str())
             .or(fallback);

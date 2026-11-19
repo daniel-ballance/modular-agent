@@ -47,8 +47,8 @@ fn a_killed_code_run_is_settled_as_unknown_and_never_repeated() {
     let session = loop {
         let line = lines.next().expect("agent exited early").unwrap();
         let event: serde_json::Value = serde_json::from_str(&line).unwrap();
-        if event["kind"] == "session.open" {
-            break event["scope"]["session"].as_str().unwrap().to_owned();
+        if event["type"] == "sessionStarted" {
+            break event["sessionId"].as_str().unwrap().to_owned();
         }
     };
     let deadline = Instant::now() + Duration::from_secs(20);

@@ -6,7 +6,7 @@ pub fn messages(entries: &[Entry]) -> Result<Vec<Message>> {
 
 /// The feedback belongs only to a new step of this turn, not the general view.
 pub fn model_messages(entries: &[Entry], turn: Option<&str>) -> Result<Vec<Message>> {
-    let mut result = history_messages(entries)?;
+    let mut result = messages_with_origins(entries, entries)?;
     for feedback in pending_result_feedback(entries, turn) {
         let reason = feedback.content.as_ref().and_then(|v| v["reason"].as_str());
         if let Some(reason) = reason {
@@ -39,7 +39,9 @@ pub fn pending_result_feedback<'a>(
         })
 }
 
-fn history_messages(entries: &[Entry]) -> Result<Vec<Message>> {
+/// Project a filtered conversation using the unfiltered branch for Provider
+/// provenance. Recording intents need not be in the filtered conversation.
+pub fn messages_with_origins(entries: &[Entry], branch: &[Entry]) -> Result<Vec<Message>> {
     let mut result = vec![];
     let mut emitted = std::collections::BTreeSet::new();
     let summarized: std::collections::BTreeSet<_> = entries
@@ -90,6 +92,32 @@ fn history_messages(entries: &[Entry]) -> Result<Vec<Message>> {
                         .retain(|p| !matches!(p, Part::ToolCall { .. }));
                 }
                 let calls = response.tool_calls();
+                // The committed model intent pins the producing Provider. A
+                // response's own model field is not proof of its identity.
+                let provider = branch
+                    .iter()
+                    .rev()
+                    .find(|intent| {
+                        intent.kind == "model.request"
+                            && intent.scope.step.is_some()
+                            && intent.scope.step == e.scope.step
+                            && intent.scope.turn == e.scope.turn
+                            && e.copies.contains(&intent.id)
+                    })
+                    .and_then(|intent| {
+                        intent
+                            .content
+                            .as_ref()?
+                            .get("model")?
+                            .get("provider")?
+                            .as_str()
+                    });
+                if let Some(provider) = provider {
+                    if !response.opaque.is_object() {
+                        response.opaque = json!({});
+                    }
+                    response.opaque["_providerOwner"] = json!(provider);
+                }
                 result.push(Message {
                     role: "assistant".into(),
                     parts: response.parts,

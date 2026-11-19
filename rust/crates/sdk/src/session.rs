@@ -233,7 +233,13 @@ impl Session {
         let rows = data.entries[at..]
             .iter()
             .filter(|e| e.writer != "rust.derived")
-            .map(|e| Ok((e.scope.clone(), e.at, base::portable::entry(e, &data)?)))
+            .map(|e| {
+                Ok((
+                    e.scope.clone(),
+                    e.at,
+                    base::portable::public_entry(e, &data)?,
+                ))
+            })
             .collect::<base::Result<Vec<_>>>()?;
         let me = self.clone();
         Ok(Box::pin(async_stream::try_stream! {
@@ -647,7 +653,7 @@ impl Session {
         data.entries
             .iter()
             .filter(|e| e.writer != "rust.derived")
-            .map(|e| base::portable::entry(e, &data).map_err(Error::from))
+            .map(|e| base::portable::public_entry(e, &data).map_err(Error::from))
             .collect()
     }
 

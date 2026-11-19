@@ -312,7 +312,7 @@ async fn start() -> Result<()> {
             .history()?
             .sessions((!terminal.all_projects).then_some(project.as_path()))?;
         println!("{}", serde_json::to_string_pretty(&sessions.into_iter().map(|s| {
-            json!({"id":s.id,"project":s.project,"lastActive":s.last_active,"model":s.settings["model"]})
+            json!({"id":s.id,"project":s.project,"lastActive":s.last_active,"model":s.model.map(|model| model.to_string())})
         }).collect::<Vec<_>>())?);
         return Ok(());
     }
@@ -333,7 +333,7 @@ async fn start() -> Result<()> {
         Some(session) => {
             let data = standard.history()?.session_info(session)?;
             project = data.project;
-            data.settings["model"].as_str().map(str::to_owned)
+            data.model.map(|model| model.to_string())
         }
         None => None,
     };

@@ -257,7 +257,7 @@ pub(crate) async fn replay(api: Api, id: &str, cx: &ConnectionTo<acp::Client>) -
     let data = api.snapshot(id)?;
     for original in data.branch().into_iter().filter(|e| e.content.is_some()) {
         let Some(e) =
-            crate::binding::gate_entry(api.as_ref(), &scope, wire::entry(&original, &data)?)
+            crate::binding::gate_entry(api.as_ref(), &scope, wire::public_entry(&original, &data)?)
                 .await?
         else {
             continue;

@@ -127,7 +127,7 @@ fn blocks(parts: &[Part]) -> Vec<Value> {
                 // Shared content uses arguments; input remains a legacy alias.
                 json!({"type":"toolCall","id":call.id,"name":call.name,"arguments":call.input,"input":call.input})
             }
-            Part::Reasoning { data } => json!({"type":"reasoning","data":data}),
+            Part::Reasoning { .. } => wire::content(std::slice::from_ref(p)).remove(0),
             Part::Other { name, data } => json!({"type":name,"data":data}),
         })
         .collect()
@@ -159,6 +159,8 @@ fn entry(e: Entry) -> Result<Value> {
         "model.response" => {
             let response: ModelResponse = serde_json::from_value(c)?;
             v["message"] = json!({"role":"assistant","content":blocks(&response.parts)});
+            wire::omit_provider_data(&mut v["message"]);
+            v["data"] = Value::Null;
         }
         "tool.result" => {
             v["data"]["status"] = match c["status"].as_str() {
@@ -216,7 +218,7 @@ pub(crate) async fn history(session: &Session, p: &Value) -> Result<Value> {
         .skip(start)
         .filter(|e| e.writer != "rust.derived")
     {
-        let mut shared = portable::entry(&e, &data)?;
+        let mut shared = portable::public_entry(&e, &data)?;
         if e.kind == "erasure"
             && let Some(payload) = shared["data"].as_object_mut()
         {
@@ -569,7 +571,7 @@ pub(crate) async fn extension(session: Arc<Session>, method: &str, p: &Value) ->
                 {
                     continue;
                 }
-                let shared = portable::entry(entry, &data)?;
+                let shared = portable::public_entry(entry, &data)?;
                 proposals.push(json!({"inputId":id,"actorId":shared["actorId"],
                     "content":shared["data"]["content"],"time":entry.at}));
             }

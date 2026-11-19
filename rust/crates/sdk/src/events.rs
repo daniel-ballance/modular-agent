@@ -183,7 +183,7 @@ impl base::EventSink for Hub {
             let Ok(data) = h.snapshot(&event.scope.session) else {
                 return;
             };
-            let Ok(view) = base::portable::entry(&entry, &data) else {
+            let Ok(view) = base::portable::public_entry(&entry, &data) else {
                 return;
             };
             let kind = match entry.kind.as_str() {

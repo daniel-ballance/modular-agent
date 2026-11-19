@@ -158,7 +158,7 @@ pub fn encode(event: &Event, api: &dyn AgentApi) -> Result<Value> {
         }
         "history.entry" => (
             "entry",
-            json!({"entry":wire::entry(&serde_json::from_value(c.clone())?, &api.snapshot(&s.session)?)?}),
+            json!({"entry":wire::public_entry(&serde_json::from_value(c.clone())?, &api.snapshot(&s.session)?)?}),
         ),
         k => {
             return Ok(

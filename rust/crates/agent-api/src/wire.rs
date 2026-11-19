@@ -354,6 +354,16 @@ pub fn parse_response(v: Value) -> Result<ModelResponse> {
     })
 }
 pub fn request(r: &ModelRequest, data: Option<&SessionData>) -> Value {
+    request_for_provider(r, data, None)
+}
+
+/// Project a request for the specified Provider, retaining opaque state
+/// only when its recorded owner matches.
+pub fn request_for_provider(
+    r: &ModelRequest,
+    data: Option<&SessionData>,
+    provider: Option<&str>,
+) -> Value {
     let mut calls = std::collections::BTreeMap::new();
     let messages: Vec<_> = r
         .messages
@@ -371,6 +381,20 @@ pub fn request(r: &ModelRequest, data: Option<&SessionData>) -> Value {
                 &m.role
             });
             v["content"] = merge_content(&v["content"], content(&m.parts));
+            // Native Providers store opaque state separately from their wire
+            // template. Preserve it for the matching Provider only.
+            if m.role == "assistant"
+                && provider.is_some()
+                && m.opaque["_providerOwner"].as_str() == provider
+                && v.get("providerData").is_none()
+                && let Some(mut opaque) = m.opaque.as_object().cloned()
+            {
+                opaque.remove("_providerOwner");
+                opaque.remove("_pluginWire");
+                if !opaque.is_empty() {
+                    v["providerData"] = Value::Object(opaque);
+                }
+            }
             if m.role == "assistant" && v["stop"].is_null() {
                 v["stop"] = json!(
                     if m.parts.iter().any(|p| matches!(p, Part::ToolCall { .. })) {
@@ -379,6 +403,11 @@ pub fn request(r: &ModelRequest, data: Option<&SessionData>) -> Value {
                         "finished"
                     }
                 );
+            }
+            if m.role == "assistant"
+                && (provider.is_none() || m.opaque["_providerOwner"].as_str() != provider)
+            {
+                omit_provider_data(&mut v);
             }
             if m.role == "tool" {
                 v["toolCallId"] = json!(m.call);
@@ -527,4 +556,22 @@ pub fn model_request_record(info: &ModelInfo) -> Value {
         .unwrap_or((crate::portable::native_provider(&info.name), &info.name));
     json!({"model":{"provider":provider,"id":id},"safeToRepeat":!info.keeps_state && !info.runs_tools,"keeps_state":info.keeps_state,"runs_tools":info.runs_tools})
 }
-pub use crate::portable::entry;
+/// Remove only reserved Provider data, not arbitrary tool inputs or values.
+pub fn omit_provider_data(message: &mut Value) {
+    if let Some(fields) = message.as_object_mut() {
+        fields.remove("providerData");
+    }
+    if let Some(content) = message["content"].as_array_mut() {
+        content.retain_mut(|part| {
+            if part["type"] != "reasoning" {
+                return true;
+            }
+            if let Some(fields) = part.as_object_mut() {
+                fields.remove("providerData");
+            }
+            part["text"].is_string()
+        });
+    }
+}
+
+pub use crate::portable::{entry, public_entry};

@@ -119,6 +119,7 @@ pub struct AgentBuilder {
     tenants: Option<String>,
     pub(crate) acp_conformance: bool,
     no_default_prompt: bool,
+    no_compaction: bool,
     job_reports_start_turns: bool,
     providers: Vec<Arc<dyn base::Plugin>>,
     tools: Vec<Tool>,
@@ -294,6 +295,13 @@ impl AgentBuilder {
         self.history = Some(history);
         self
     }
+    /// Install the official context compaction part and its `/compact`
+    /// command (enabled by default).
+    pub fn compaction(mut self, enabled: bool) -> Self {
+        self.no_compaction = !enabled;
+        self
+    }
+
     /// Use a settings file and an external project trust ledger.
     pub fn configuration(mut self, configuration: crate::FilesConfiguration) -> Self {
         self.configuration = Some(configuration);
@@ -491,10 +499,10 @@ impl AgentBuilder {
         if !self.no_default_prompt {
             plugins.push(Arc::new(feature_prompt::PromptPlugin));
         }
-        plugins.extend([
-            Arc::new(feature_model::ModelPlugin) as Arc<dyn base::Plugin>,
-            Arc::new(feature_context::ContextPlugin),
-        ]);
+        plugins.push(Arc::new(feature_model::ModelPlugin));
+        if !self.no_compaction {
+            plugins.push(Arc::new(feature_context::ContextPlugin));
+        }
         plugins.push(Arc::new(HubPlugin(hub.clone())));
         let mut own: Vec<(Arc<dyn base::Plugin>, Vec<String>)> =
             plugins.into_iter().map(|p| (p, vec![])).collect();
@@ -611,7 +619,9 @@ impl AgentBuilder {
             session_settings["model"] = json!(model);
         }
         let continues = harness.declaration()?["runtime"]["continues_after_restart"] == true;
-        if continues != (self.durability == Durability::Durable) {
+        // The offline ACP kit also installs a Runtime fixture to exercise the
+        // bridge. It may select transient recovery with persistent history.
+        if !self.acp_conformance && continues != (self.durability == Durability::Durable) {
             let _ = base::AgentApi::shutdown(harness.as_ref()).await;
             return Err(Error::new(
                 Code::InvalidComposition,

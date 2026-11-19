@@ -3,7 +3,102 @@ use modular_agent::{
     memory_history, serve_history,
     testing::{answers, fixtures, scripted_provider, test_agent},
 };
-use serde_json::json;
+use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
+
+struct OpaqueProvider(&'static str, Arc<Mutex<Vec<Value>>>);
+
+#[modular_agent::async_trait]
+impl modular_agent::Provider for OpaqueProvider {
+    fn id(&self) -> &str {
+        self.0
+    }
+
+    fn models(&self) -> Vec<modular_agent::ModelInfo> {
+        vec![modular_agent::ModelInfo {
+            model: modular_agent::ModelRef {
+                provider: self.0.into(),
+                id: "test".into(),
+            },
+            context_window: 65_536,
+            max_output: 1024,
+            thinking: vec![],
+            extra: Default::default(),
+        }]
+    }
+
+    async fn request(
+        &self,
+        _: modular_agent::ModelRef,
+        request: modular_agent::ModelRequest,
+        _: modular_agent::ProviderContext,
+    ) -> Result<modular_agent::AssistantMessage> {
+        self.1.lock().unwrap().push(request.0);
+        Ok(modular_agent::AssistantMessage(json!({
+            "role":"assistant", "stop":"finished", "providerData":["private", self.0],
+            "content":[{"type":"reasoning","text":"visible","providerData":"sealed"},{"type":"text","text":"hello"}]
+        })))
+    }
+}
+
+#[tokio::test]
+async fn stored_sessions_and_provider_data_survive_reopen_but_stay_scoped() -> Result<()> {
+    let data = tempfile::tempdir()?;
+    let a = Arc::new(Mutex::new(vec![]));
+    let b = Arc::new(Mutex::new(vec![]));
+    let build = || {
+        Agent::builder()
+            .data_dir(data.path())
+            .durability(Durability::Durable)
+            .provider(OpaqueProvider("first", a.clone()))
+            .provider(OpaqueProvider("second", b.clone()))
+            .model("first/test")
+            .build()
+    };
+    let agent = build().await?;
+    let session = agent.session().await?;
+    let id = session.id().to_owned();
+    session.send("once", modular_agent::Timing::Now).await?;
+    session.wait_idle().await?;
+    assert_eq!(a.lock().unwrap().len(), 1);
+    session.close().await?;
+    agent.close().await?;
+
+    let agent = build().await?;
+    assert_eq!(agent.sessions(None)?.len(), 1);
+    let saved = agent.session_info(&id)?;
+    assert_eq!(
+        saved.settings["model"],
+        json!({"provider":"first","id":"test"})
+    );
+    assert!(saved.created_at > 0 && saved.last_active >= saved.created_at);
+    assert_eq!(a.lock().unwrap().len(), 1); // Listing did not run the Provider.
+    let session = agent.open_session(&id).await?;
+    session.prompt("again").await?;
+    assert!(
+        a.lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("sealed")
+    );
+    assert!(
+        a.lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("private")
+    );
+    session.set_setting("model", json!("second/test"))?;
+    session.prompt("different Provider").await?;
+    let requests = b.lock().unwrap()[0].to_string();
+    assert!(requests.contains("visible"));
+    assert!(!requests.contains("providerData"));
+    assert!(!serde_json::to_string(&session.history()?)?.contains("providerData"));
+    agent.close().await
+}
 
 #[tokio::test]
 async fn persistent_history_and_local_recovery_need_different_storage() -> Result<()> {

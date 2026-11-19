@@ -12,6 +12,12 @@ pub struct ModelRef {
     pub id: String,
 }
 
+impl std::fmt::Display for ModelRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.provider, self.id)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
@@ -339,7 +345,11 @@ impl base::ModelAccess for Bound {
             .provider
             .request(
                 self.model.model.clone(),
-                ModelRequest(base::wire::request(&request, None)),
+                ModelRequest(base::wire::request_for_provider(
+                    &request,
+                    None,
+                    Some(self.adapter.provider.id()),
+                )),
                 cx,
             )
             .await;
