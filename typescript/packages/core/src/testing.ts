@@ -1,4 +1,5 @@
 export { overWire } from "./serve.js";
+export { restart } from "./agent.js";
 import { memoryEnvironment } from "./environment.js";
 export { memoryEnvironment, MemoryEnvironment } from "./environment.js";
 import { createAgent, type AgentOptions } from "./agent.js";

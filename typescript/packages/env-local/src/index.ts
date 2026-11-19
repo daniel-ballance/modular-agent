@@ -15,6 +15,7 @@ export class LocalEnvironment implements WorkingEnvironment {
 	readonly containment = process.platform === "linux" ? "strong" : "processGroup";
 	readonly safeToRepeat = this.containment === "strong";
 	readonly points = true;
+	get confinesFiles(): boolean { return this.root !== undefined; }
 	constructor(readonly cwd: string, private processes = new ProcessTracker(), private sessionId?: string, private snapshots = new SavedPoints(), private root?: string) {
 		this.id = `local:${cwd}`;
 	}

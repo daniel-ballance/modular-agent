@@ -281,6 +281,7 @@ export interface WorkingEnvironment {
 	/** Nothing from an interrupted attempt is still running when recovery begins. */
 	safeToRepeat?: boolean;
 	containment?: string;
+	confinesFiles?: boolean;
 	points?: boolean;
 	save?(): Promise<string>;
 	/** Check a point without touching project files, if the environment can. */

@@ -85,7 +85,7 @@ const noTurn = (inputId: string, disposition: "handled" | "handedBack"): PromptR
   ({ inputId, disposition, text: "", openToolCalls: [], toolResults: () => [] });
 
 export interface PromptOptions { key?: string; actor?: string; result?: import("./schema.js").Schema }
-type Owner = { fork(entry?: string): Promise<Session>; close(): Promise<void>; handler(handler?: QuestionHandler): void };
+type Owner = { interruption: AbortSignal; fork(entry?: string): Promise<Session>; close(): Promise<void>; handler(handler?: QuestionHandler): void };
 const local = "user";
 export let makeSession: (id: string, api: PluginApi, owner: Owner) => Session;
 
@@ -97,7 +97,7 @@ export class Session {
   private constructor(readonly id: string, api: PluginApi, owner: Owner) { this.#api = api; this.#owner = owner; }
 
   #check() {
-    if (!this.#open) throw new AgentError("not_open", `Session ${this.id} is closed`);
+    if (!this.#open || this.#owner.interruption.aborted) throw new AgentError("not_open", `Session ${this.id} is closed`);
   }
   async send(input: Input, timing: InputTiming, options: PromptOptions = {}): Promise<InputReceipt> {
     this.#check();
@@ -123,6 +123,7 @@ export class Session {
       if (receipt.handled) return noTurn(id, "handled");
       if (receipt.erased) throw new AgentError("not_found", "Input key refers to erased input");
       for (;;) {
+        if (this.#owner.interruption.aborted) throw new AgentError("lost", "Agent was interrupted");
         const changed = new Promise<void>(r => { wake = r; });
         const entries = await this.history();
         const turn = entries.find(e => e.kind === "input" && inputIdOf(e) === id)?.turnId;
@@ -191,23 +192,48 @@ export class Session {
     const queue: AgentEvent[] = [];
     let dropped = false;
     let cursor = fromEntry;
-    const off = this.#api.follow(this.id, { recipient: local, fromEntry: index + 1 }, e => {
-      if (queue.length >= 1024) dropped = true;
-      else queue.push(e);
+    const lag = () => { dropped = true; wake(); };
+    // Snapshot the committed watermark and subscribe synchronously. Gate replay
+    // on demand so a long history alone cannot make a new subscriber lag.
+    const off = this.#api.follow(this.id, { recipient: local, onLag: lag }, e => {
+      if (queue.length >= 1024) {
+        if (e.type === "model.output" || e.type === "tool.progress") return;
+        lag();
+        off();
+      } else queue.push(e);
       wake();
     });
+    const interruption = () => wake();
+    this.#owner.interruption.addEventListener("abort", interruption, { once: true });
+    const check = () => {
+      if (dropped || this.#owner.interruption.aborted) throw new AgentError("lost", "Session event stream disconnected", { fromEntry: cursor });
+    };
     try {
+      if (index >= 0 && (entries[index].erased || !await this.#api.gateOutput(this.id, local, "entry", entries[index]))) {
+        throw new AgentError("not_found", "Unknown entry cursor");
+      }
+      for (const entry of entries.slice(index + 1)) {
+        check();
+        const view = await this.#api.gateOutput(this.id, local, "entry", entry);
+        check();
+        if (!view) continue;
+        cursor = view.id;
+        yield { type: "entry", time: view.time, sessionId: this.id, data: structuredClone(view) };
+      }
       for (;;) {
-        if (dropped) throw new AgentError("lost", "Session event reader fell behind", { fromEntry: cursor });
+        check();
         const next = queue.shift();
         if (!next) { await new Promise<void>(r => { wake = r; }); continue; }
         const event = eventOf(next);
         if (!event) continue;
         if (event.type === "entry") cursor = event.data.id;
-        yield event;
+        yield structuredClone(event);
         if (event.type === "sessionEnded") return;
       }
-    } finally { off(); }
+    } finally {
+      this.#owner.interruption.removeEventListener("abort", interruption);
+      off();
+    }
   }
 
   commands(): { name: string; description: string }[] {

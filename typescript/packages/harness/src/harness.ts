@@ -100,7 +100,7 @@ export interface Transaction {
 	setSetting(key: string, value: unknown, actorId?: string): void;
 	input(options: InputOptions): void;
 }
-export interface FollowOptions { recipient: string; fromEntry?: number; raw?: boolean }
+export interface FollowOptions { recipient: string; fromEntry?: number; raw?: boolean; onLag?: () => void }
 
 /** Everything a plugin can do. A plugin can do nothing else. */
 export interface PluginApi {
@@ -288,6 +288,10 @@ export class Harness {
 	 * close: running turns and jobs are abandoned without being recorded as ended,
 	 * so reopening a session lets its Runtime and job plugins decide what happens.
 	 */
+	async interrupt(): Promise<void> {
+		for (const id of [...this.sessions.keys()]) await this.suspendSession(id);
+	}
+
 	async stop(): Promise<void> {
 		for (const id of [...this.sessions.keys()]) await this.suspendSession(id).catch(() => undefined);
 		for (const { plugin } of [...this.loaded].reverse()) {
@@ -520,12 +524,13 @@ export class Harness {
 	private pluginFollowers: Follower[] = [];
 
 	private follow(s: Session, options: FollowOptions, listener: (event: AgentEvent) => unknown): (() => void) & { idle(): Promise<void> } {
-		const follower = new Follower(this.hooks, options.recipient, options.raw ?? false, listener, (e) => this.problem("harness", "follow", e));
+		const follower = new Follower(this.hooks, options.recipient, options.raw ?? false, listener, (e) => this.problem("harness", "follow", e),
+			options.onLag && (() => { s.followers.delete(follower); options.onLag!(); }));
 		// History first, from the requested point, then live events.
 		const from = options.fromEntry ?? s.order.length;
 		for (const id of s.order.slice(from)) follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: s.entries.get(id) });
 		s.followers.add(follower);
-		return Object.assign(() => { s.followers.delete(follower); }, { idle: () => follower.idle() });
+		return Object.assign(() => { s.followers.delete(follower); follower.disconnect(); }, { idle: () => follower.idle() });
 	}
 
 	// ---------- commands ----------
@@ -2392,6 +2397,8 @@ export class Harness {
 
 /** One recipient following a session, through the output gate. */
 class Follower {
+	private pending = 0;
+	private disconnected = false;
 	private held: AgentEvent[] = [];
 	private streams = new Map<string, AgentEvent[]>();
 	private chain: Promise<void> = Promise.resolve();
@@ -2401,10 +2408,25 @@ class Follower {
 		private raw: boolean,
 		private listener: (event: AgentEvent) => unknown,
 		private onError: (e: unknown) => void,
+		private onLag?: () => void,
 	) {}
 
+	disconnect(): void {
+		this.disconnected = true;
+		this.held = [];
+		this.streams.clear();
+	}
+
 	push(event: AgentEvent): void {
-		this.chain = this.chain.then(() => this.deliver(event)).catch(this.onError);
+		if (this.disconnected) return;
+		if (this.onLag && this.pending >= 1024) {
+			if (event.type === "model.output" || event.type === "tool.progress") return;
+			this.disconnect();
+			this.onLag();
+			return;
+		}
+		this.pending++;
+		this.chain = this.chain.then(() => this.disconnected ? undefined : this.deliver(event)).catch(this.onError).finally(() => { this.pending--; });
 	}
 
 	/** Resolves once everything pushed so far has been delivered or blocked. */
@@ -2460,7 +2482,7 @@ class Follower {
 			if (answer.events) events = answer.events;
 		}
 		this.held = [];
-		for (const e of events) await this.listener(e);
+		for (const e of events) if (!this.disconnected) await this.listener(e);
 	}
 }
 
