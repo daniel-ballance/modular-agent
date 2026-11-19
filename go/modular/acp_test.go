@@ -6,7 +6,9 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	acp "github.com/caelis-labs/acp-go-sdk"
 )
@@ -25,6 +27,77 @@ func (c *testACPClient) SessionUpdate(_ context.Context, p acp.SessionNotificati
 func (c *testACPClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{Outcome: "cancelled"}}}, nil
 }
+func TestServeACPResumeDoesNotWaitForRecovery(t *testing.T) {
+	t.Setenv("MODULAR_AGENT_PLUGINS", "")
+	t.Setenv("MODULAR_AGENT_ACTOR", localActor)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	project := t.TempDir()
+	started, recovering, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var attempts atomic.Int32
+	p := Provider{ID: "offline", Models: func() []ModelInfo {
+		return []ModelInfo{{ModelRef: ModelRef{ID: "script"}, ContextWindow: 4000, MaxOutput: 2000}}
+	}, Supports: ProviderSupport{SafeToRepeat: true}, Request: func(ctx context.Context, _ ModelRef, _ ModelRequest, _ *ProviderContext) (AssistantMessage, error) {
+		if attempts.Add(1) == 1 {
+			close(started)
+			<-ctx.Done()
+			return AssistantMessage{}, ctx.Err()
+		}
+		close(recovering)
+		select {
+		case <-ctx.Done():
+			return AssistantMessage{}, ctx.Err()
+		case <-release:
+			return AssistantMessage{Stop: "finished", Content: Text("recovered")}, nil
+		}
+	}}
+	a, err := New(ctx, WithProject(project), WithDataDir(t.TempDir()), WithDurability(Durable), WithPluginHost(true), WithProvider(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(context.Background())
+	session, err := a.Session(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Send(ctx, "recover me", Now); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	fresh, err := a.RestartForTest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close(context.Background())
+	agentSide, clientSide := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- fresh.serveACP(ctx, agentSide, agentSide) }()
+	conn := acp.NewClientSideConnection(&testACPClient{}, clientSide, clientSide)
+	defer func() {
+		conn.Close()
+		if err := <-done; err != nil && ctx.Err() == nil {
+			t.Error(err)
+		}
+	}()
+	defer close(release)
+	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ResumeSession(ctx, acp.ResumeSessionRequest{Cwd: project, SessionId: acp.SessionId(session.ID())}); err != nil {
+		t.Fatalf("resume did not reply while recovery blocked: %v", err)
+	}
+	select {
+	case <-recovering:
+	case <-ctx.Done():
+		t.Fatal("interrupted request did not enter recovery")
+	}
+}
+
 func TestServeACP(t *testing.T) {
 	t.Setenv("MODULAR_AGENT_PLUGINS", "")
 	project := t.TempDir()

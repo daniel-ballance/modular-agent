@@ -32,6 +32,24 @@ func ValidateJSON(schema *jsonschema.Resolved, raw json.RawMessage) error {
 	return schema.Validate(value)
 }
 
+// ValidateToolResult checks the final, transformed value against the dispatched tool's schema.
+func ValidateToolResult(result ToolResult) error {
+	if result.Status != "completed" || len(result.Returns) == 0 {
+		return nil
+	}
+	if len(result.Structured) == 0 {
+		return errors.New("completed tool result is missing a value")
+	}
+	schema, err := ResolveSchema(result.Returns)
+	if err == nil {
+		err = ValidateJSON(schema, result.Structured)
+	}
+	if err != nil {
+		return fmt.Errorf("tool output: %w", err)
+	}
+	return nil
+}
+
 func ValidateResult(raw json.RawMessage, check *ResultCheck) error {
 	schema, err := ResolveSchema(raw)
 	if err != nil {

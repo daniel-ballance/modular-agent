@@ -37,7 +37,7 @@ func TestHTTPHistoryReopens(t *testing.T) {
 	}, Request: func(context.Context, ModelRef, ModelRequest, *ProviderContext) (AssistantMessage, error) {
 		return AssistantMessage{Content: Text("kept over HTTP"), Stop: "finished"}, nil
 	}}
-	opts := []Option{WithProject(project), WithDurability(Kept), WithProvider(p), WithHistory(HTTPHistory("http://"+listener.Addr().String(), tokenFile))}
+	opts := []Option{WithProject(project), WithDataDir(t.TempDir()), WithDurability(Kept), WithProvider(p), WithHistory(HTTPHistory("http://"+listener.Addr().String(), tokenFile))}
 	a, err := New(ctx, opts...)
 	if err != nil {
 		t.Fatal(err)

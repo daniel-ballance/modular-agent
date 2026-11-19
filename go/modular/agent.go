@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -135,6 +136,7 @@ type Agent struct {
 	project    string
 	scratch    string
 	persistent bool
+	erasure    bool
 	closed     atomic.Bool
 	restarting atomic.Bool
 	lifecycle  sync.Mutex
@@ -165,6 +167,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if o.durability != Ephemeral && o.durability != Kept && o.durability != Durable {
 		return nil, &Error{Code: InvalidParams, Message: "unknown durability"}
 	}
+	if o.host != nil && !*o.host && len(o.process) > 0 {
+		return nil, &Error{Code: InvalidComposition, Message: "process plugins require a plugin host"}
+	}
 	if o.history.serviceDir != "" {
 		return nil, &Error{Code: InvalidComposition, Message: "use HTTPHistory to connect to a history service"}
 	}
@@ -173,6 +178,14 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	if o.durability != Ephemeral && o.history.make != nil && !o.history.persistent {
 		return nil, &Error{Code: InvalidComposition, Message: "kept and durable require persistent history"}
+	}
+	// The default ephemeral environment can discard its scratch bookkeeping.
+	// Nothing that promises recovery may keep that bookkeeping in scratch.
+	if o.dataDir == "" {
+		bookkeeping, _ := o.environment.(interface{ NeedsDataDir() bool })
+		if (o.environment == nil && o.durability != Ephemeral) || (bookkeeping != nil && bookkeeping.NeedsDataDir()) {
+			return nil, &Error{Code: InvalidComposition, Message: "working environment recovery bookkeeping requires dataDir"}
+		}
 	}
 	project, err := configuration.Canonical(o.project)
 	if err != nil {
@@ -216,7 +229,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	h := harness.NewWithLocalActor(localActor)
 	h.HandBackQueuedOnOpen()
-	a := &Agent{h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral || o.history.persistent}
+	a := &Agent{h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
 	state := o.dataDir
 	if state == "" {
 		state, err = os.MkdirTemp("", "modular-go-")
@@ -254,15 +267,30 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if closer, ok := hs.(io.Closer); ok {
 		historyPlugin.Close = closer.Close
 	}
-	environment := local.ConfinedPluginAt(filepath.Join(state, "commands"), state)
-	if o.environment != nil {
+	var environment api.Plugin
+	if o.environment == nil {
+		environment = local.PluginAt(filepath.Join(state, "commands"), state)
+	} else {
 		environment = api.Plugin{Name: "environment", Setup: func(a api.API) error { return a.Provide("working-environment", o.environment) }, Close: o.environment.Close}
 	}
 	core := []api.Plugin{historyPlugin,
 		{Name: "configuration", Setup: func(a api.API) error { return a.Provide("configuration", sessionDefaults{&defaults}) }},
 		{Name: "sdk-credentials", Setup: func(a api.API) error { return a.Provide("credentials", environmentCredentials{}) }},
 		configuration.BoundProject(project), environment, runtime,
-		modelselect.Plugin(), contextview.Plugin(), commands.Plugin(), questions.Plugin(), mcptools.Plugin(nil, project), acpinterface.Plugin(project)}
+		modelselect.Plugin(), contextview.Plugin(), commands.Plugin(), questions.Plugin(), mcptools.Plugin(nil, project), acpinterface.Plugin(project),
+		{Name: "sdk-model-admission", Setup: func(host api.API) error {
+			return host.Handle("input", "last", func(_ context.Context, payload any) (api.Decision, error) {
+				input := payload.(api.InputEvent)
+				snap, err := host.Snapshot(input.Session)
+				if err != nil {
+					return api.Decision{}, err
+				}
+				if model := snap.Settings.Model; model != "" && !a.offersModel(model) {
+					return api.Decision{}, fmt.Errorf("%w: %q", api.ErrUnknownModel, model)
+				}
+				return api.Decision{}, nil
+			})
+		}}}
 	if o.approval != "" {
 		core = append(core, approval.Plugin())
 	}
@@ -308,27 +336,22 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if defaults.Model == "" && len(models) == 1 {
 		defaults.Model = models[0].ModelRef.String()
 	}
-	if defaults.Model != "" {
-		valid := false
-		for _, m := range models {
-			if m.ModelRef.String() == defaults.Model {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			return nil, &Error{Code: InvalidComposition, Message: fmt.Sprintf("model %q is not offered", defaults.Model)}
-		}
+	if defaults.Model != "" && !a.offersModel(defaults.Model) {
+		return nil, &Error{Code: InvalidRequest, Message: fmt.Sprintf("model %q is not offered", defaults.Model)}
 	}
 	if len(specs) == 0 {
 		options := append([]Option{}, opts...)
-		if _, ok := hs.(*memoryStore); ok {
-			options = append(options, WithHistory(HistoryStore{make: func() (api.Store, error) { return hs, nil }}))
+		if memory, ok := hs.(*memoryStore); ok {
+			options = append(options, WithHistory(memoryHistory(memory)))
 		}
 		a.restart = func(ctx context.Context) (*Agent, error) { return New(ctx, options...) }
 	}
 	success = true
 	return a, nil
+}
+
+func (a *Agent) offersModel(ref string) bool {
+	return slices.ContainsFunc(a.Models(), func(m ModelInfo) bool { return m.ModelRef.String() == ref })
 }
 
 func (a *Agent) Close(ctx context.Context) error {
@@ -396,13 +419,27 @@ func (a *Agent) OpenSession(ctx context.Context, id string) (*Session, error) {
 func (a *Agent) Declaration() Declaration {
 	d := acpinterface.Declaration(a.a, a.project, "")
 	d["portableSessions"] = a.persistent
-	d["queuedInputAfterRestart"] = "handedBack"
+	inputs, reports := a.h.QueuedRecoveryPolicy()
+	d["queuedInputAfterRestart"] = inputs
+	if reports != inputs {
+		d["queuedJobReportsAfterRestart"] = reports
+	}
+	if settings, ok := a.a.(interface{ SettingsDuringTurn() string }); ok {
+		d["settingsDuringTurn"] = settings.SettingsDuringTurn()
+	} else {
+		d["settingsDuringTurn"] = "refused"
+	}
+	runtime, err := a.a.Get("runtime")
+	d["nestedToolCalls"] = err == nil && runtime.(api.Runtime).Declaration().NestedToolCalls
 	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = false, false
 	d["startsTurnsUnasked"] = "never"
 	d["severalActors"], d["sessionLimits"], d["tenants"] = false, false, false
-	d["erasure"] = a.persistent
-	d["confinesFiles"] = false
+	d["erasure"] = a.erasure
+	d["confinesFiles"], d["commandContainment"] = false, "none"
 	if v, err := a.a.Get("working-environment"); err == nil {
+		if e, ok := v.(interface{ Containment() string }); ok {
+			d["commandContainment"] = e.Containment()
+		}
 		if e, ok := v.(interface{ ConfinesFiles() bool }); ok {
 			d["confinesFiles"] = e.ConfinesFiles()
 		}

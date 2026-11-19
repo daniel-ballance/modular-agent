@@ -154,7 +154,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			p.settled = true
 			t.IO.Emit(context.Background(), api.Event{Kind: "tool.end", Step: p.call.Step, Call: p.call.ID, Data: api.JSON(result)})
 		}
-		return errors.Join(saveErr, e)
+		return errors.Join(saveErr, result.ProcessingError, e)
 	}
 	defer func() {
 		if v := recover(); v != nil {

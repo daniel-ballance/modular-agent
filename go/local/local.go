@@ -43,7 +43,14 @@ func NewAt(root string, stateDirs ...string) *Environment {
 	return e
 }
 func (e *Environment) StopsOnCrash() bool { return e.initErr == nil }
-func Plugin() api.Plugin                  { return PluginAt(defaultRoot()) }
+
+func (e *Environment) Containment() string {
+	if e.StopsOnCrash() {
+		return "strong"
+	}
+	return "none"
+}
+func Plugin() api.Plugin { return PluginAt(defaultRoot()) }
 func PluginAt(root string, stateDirs ...string) api.Plugin {
 	return environmentPlugin(NewAt(root, stateDirs...))
 }
@@ -56,6 +63,9 @@ func ConfinedPluginAt(root string, stateDirs ...string) api.Plugin {
 }
 
 func (e *Environment) ConfinesFiles() bool { return e.confined }
+
+// NeedsDataDir reports that the environment keeps command recovery bookkeeping.
+func (e *Environment) NeedsDataDir() bool { return true }
 
 func environmentPlugin(e *Environment) api.Plugin {
 	return api.Plugin{Name: "local", Setup: func(a api.API) error {

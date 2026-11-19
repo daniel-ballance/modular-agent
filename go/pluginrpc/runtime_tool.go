@@ -259,7 +259,7 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 		return object{"callId": c.ID, "pending": "waiting for an answer"}, nil
 	}
 	out, err := w.settleTool(ctx, c, result)
-	return resultOut(out), errors.Join(err, result.ProcessingError)
+	return resultOut(out), err
 }
 
 // settleTool is the sole terminal transition. Hook outputs may refine the
@@ -275,7 +275,7 @@ func (w *runtimeWork) settleTool(ctx context.Context, c api.Call, r api.ToolResu
 	value, err := w.turn.IO.Hook(api.WithExecution(ctx, api.Execution{Session: w.turn.Session, Turn: w.turn.ID, Call: c}), "runtime.tool.after", api.AfterTool{Call: c, Result: r})
 	if err == nil {
 		if checked, ok := value.(api.AfterTool); ok {
-			r.Content, r.Structured = checked.Result.Content, checked.Result.Structured
+			r = checked.Result
 		}
 	} else {
 		w.turn.IO.Emit(ctx, api.Event{Kind: "plugin.problem", Call: c.ID, Data: api.JSON(err.Error())})
@@ -294,7 +294,7 @@ func (w *runtimeWork) settleTool(ctx context.Context, c api.Call, r api.ToolResu
 	w.results[c.ID], w.terminals[c.ID] = r, e
 	delete(w.approved, c.ID)
 	delete(w.pending, c.ID)
-	return r, nil
+	return r, r.ProcessingError
 }
 
 func (w *runtimeWork) recordResult(id, step string, v object) (any, error) {

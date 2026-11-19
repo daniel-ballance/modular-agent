@@ -63,6 +63,7 @@ type Call struct {
 }
 type ToolResult struct {
 	ProcessingError error           `json:"-"`
+	Returns         json.RawMessage `json:"-"` // schema of the registration actually dispatched
 	NotDispatched   bool            `json:"-"` // result reports a local preflight failure, not execution
 	Wire            json.RawMessage `json:"wire,omitempty"`
 	Name            string          `json:"name,omitempty"`
@@ -387,6 +388,7 @@ type Selection interface {
 type RuntimeDeclaration struct {
 	Durable, Steering, Parallel bool
 	WaitingThroughRestart       bool
+	NestedToolCalls             bool
 }
 type Runtime interface {
 	Declaration() RuntimeDeclaration

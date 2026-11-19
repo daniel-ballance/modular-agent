@@ -32,6 +32,22 @@ func Plugin(name string) (modular.Plugin, error) {
 				return fmt.Sprintf("High tide at %s is 14:02.", in.Harbour), nil
 			}, modular.ReadOnly()))
 		}
+	case "quay":
+		p.Setup = func(r *modular.Registrar) error {
+			return r.Tool(modular.NewTool("moor", "Moor at a harbour.", func(_ context.Context, _ tideInput, tc *modular.ToolContext) (string, error) {
+				return "", tc.Refuse("the quay is closed")
+			}))
+		}
+	case "pilot":
+		p.Setup = func(r *modular.Registrar) error {
+			return r.Tool(modular.NewTool("pilot", "Ask the tide tool about a harbour.", func(ctx context.Context, in tideInput, tc *modular.ToolContext) (string, error) {
+				result, err := tc.Tools.Call(ctx, "tide", in)
+				if err != nil {
+					return "", err
+				}
+				return "Pilot: " + result.Text(), nil
+			}))
+		}
 	case "confirm":
 		p.Setup = func(r *modular.Registrar) error {
 			return r.Tool(modular.NewTool("confirm", "Ask whether to go ahead.", func(ctx context.Context, in confirmInput, tc *modular.ToolContext) (string, error) {

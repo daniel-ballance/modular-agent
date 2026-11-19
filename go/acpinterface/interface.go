@@ -428,13 +428,17 @@ func (s *server) openReply(ctx context.Context, id, who string, replay bool) (ac
 	return reply, nil
 }
 func (s *server) LoadSession(ctx context.Context, p acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
-	s.lifecycle.Lock()
+	if !s.lifecycle.TryLock() {
+		return acp.LoadSessionResponse{}, acpError("busy")
+	}
 	defer s.lifecycle.Unlock()
 	result, err := s.reopen(ctx, string(p.SessionId), p.Cwd, p.McpServers, p.AdditionalDirectories, p.SystemPrompt, true)
 	return result, outputReplyError(err)
 }
 func (s *server) ResumeSession(ctx context.Context, p acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
-	s.lifecycle.Lock()
+	if !s.lifecycle.TryLock() {
+		return acp.ResumeSessionResponse{}, acpError("busy")
+	}
 	defer s.lifecycle.Unlock()
 	result, err := s.reopen(ctx, string(p.SessionId), p.Cwd, p.McpServers, p.AdditionalDirectories, p.SystemPrompt, false)
 	return acp.ResumeSessionResponse{ConfigOptions: result.ConfigOptions, Meta: result.Meta}, outputReplyError(err)

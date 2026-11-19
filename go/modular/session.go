@@ -114,6 +114,9 @@ func (s *Session) Send(ctx context.Context, input any, timing Timing, opts ...Pr
 		}
 	}
 	r, err := s.agent.a.Submit(s.ctx(ctx), s.id, api.Input{When: string(timing), Key: p.key, Content: content, ResultSchema: p.schema})
+	if errors.Is(err, api.ErrUnknownModel) {
+		return InputReceipt{}, appError(err, InvalidRequest)
+	}
 	if errors.Is(err, api.ErrInputConflict) {
 		return InputReceipt{}, appError(err, Conflict)
 	}
@@ -171,8 +174,16 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 	// Some admission/settlement records in the base do not yet have a live event.
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
-	cursor := ""
+	lastDelivered := ""
+	lost := func() (PromptResult, error) {
+		return PromptResult{}, streamLost("prompt stream fell behind", lastDelivered)
+	}
 	for {
+		select {
+		case <-overflow:
+			return lost()
+		default:
+		}
 		if yield == nil || r.Duplicate {
 			snap, err := s.view(ctx)
 			if err != nil {
@@ -189,7 +200,7 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 		case <-ctx.Done():
 			return PromptResult{}, appError(ctx.Err(), CancelledCode)
 		case <-overflow:
-			return PromptResult{}, &Error{Code: Lost, Message: "prompt stream fell behind", Data: map[string]any{"fromEntry": cursor}}
+			return lost()
 		case <-wake:
 		case <-tick.C:
 			if yield != nil {
@@ -213,11 +224,15 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 				continue
 			}
 			e := sdkEvent(raw)
-			if raw.Kind == "history.added" {
-				cursor = api.Decode[api.Entry](raw.Data).ID
-			}
-			if e != nil && !yield(e, nil) {
-				return PromptResult{}, nil
+			if e != nil {
+				if !yield(e, nil) {
+					return PromptResult{}, nil
+				}
+				if raw.Kind == "history.added" {
+					if id := api.Decode[api.Entry](raw.Data).ID; id != "" {
+						lastDelivered = id
+					}
+				}
 			}
 			if raw.Kind == "turn.end" {
 				if result := resultFor(snap, r.InputID); result != nil {
@@ -294,11 +309,17 @@ func buildResult(s api.Session, end api.Entry, input string) *PromptResult {
 			if r.InputID == "" {
 				r.InputID = api.Decode[api.TurnStart](e.Data).Input
 			}
-		case "tool.call":
-			if _, ok := names[e.Call]; !ok {
-				order = append(order, e.Call)
+		case "model":
+			// The recorded assistant response provides both attribution and
+			// call order, even when calls are dispatched in parallel.
+			for _, part := range e.Content {
+				if c := part.Call; c != nil && c.ParentCall == "" {
+					if _, ok := names[c.ID]; !ok {
+						order = append(order, c.ID)
+					}
+					names[c.ID] = c.Name
+				}
 			}
-			names[e.Call] = api.Decode[api.Call](e.Data).Name
 		case "tool.result":
 			result := api.Decode[api.ToolResult](e.Data)
 			result.Content = e.Content
@@ -317,16 +338,6 @@ func buildResult(s api.Session, end api.Entry, input string) *PromptResult {
 				v.Name = names[id]
 			}
 			r.results = append(r.results, v)
-			delete(results, id)
-		}
-	}
-	// An imported history can omit the internal tool.call record.
-	for _, e := range s.Entries {
-		if e.Kind == "tool.result" && e.Turn == end.Turn {
-			if v, ok := results[e.Call]; ok {
-				r.results = append(r.results, v)
-				delete(results, e.Call)
-			}
 		}
 	}
 	return r
@@ -413,8 +424,8 @@ func (s *Session) SetSetting(ctx context.Context, key string, value any) error {
 	if err = applySetting(&snap.Settings, key, value); err != nil {
 		return err
 	}
-	if key == "model" && !slices.ContainsFunc(s.agent.Models(), func(m ModelInfo) bool { return m.ModelRef.String() == snap.Settings.Model }) {
-		return &Error{Code: NotFound, Message: "model is not offered"}
+	if key == "model" && !s.agent.offersModel(snap.Settings.Model) {
+		return &Error{Code: InvalidRequest, Message: "model is not offered"}
 	}
 	return appError(s.agent.a.SetSettings(ctx, s.id, snap.Settings), Busy)
 }

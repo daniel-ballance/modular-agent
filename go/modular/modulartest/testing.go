@@ -79,7 +79,7 @@ func Script(text string) modular.Option {
 
 func Agent(t testing.TB, opts ...modular.Option) *modular.Agent {
 	t.Helper()
-	opts = append([]modular.Option{modular.WithProject(t.TempDir())}, opts...)
+	opts = append([]modular.Option{modular.WithProject(t.TempDir()), modular.WithEnvironment(MemoryEnvironment())}, opts...)
 	a, err := modular.New(t.Context(), opts...)
 	if err != nil {
 		t.Fatal(err)
@@ -110,17 +110,37 @@ func Restart(t testing.TB, agent *modular.Agent) *modular.Agent {
 	return fresh
 }
 
-func Answers(list ...modular.Answer) modular.QuestionHandler {
-	var mu sync.Mutex
-	i := 0
-	return func(_ context.Context, _ modular.Question) (modular.Answer, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if i >= len(list) {
-			return modular.Answer{}, fmt.Errorf("the test expected no more questions")
-		}
-		a := list[i]
-		i++
-		return a, nil
+// AnswerScript is an ordered test question handler with an explicit completion check.
+type AnswerScript struct {
+	mu         sync.Mutex
+	remaining  []modular.Answer
+	unexpected []modular.Question
+}
+
+func Answers(list ...modular.Answer) *AnswerScript {
+	return &AnswerScript{remaining: append([]modular.Answer(nil), list...)}
+}
+
+func (s *AnswerScript) Handle(_ context.Context, q modular.Question) (modular.Answer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.remaining) == 0 {
+		s.unexpected = append(s.unexpected, q)
+		return modular.Decline("unexpected test question"), nil
+	}
+	a := s.remaining[0]
+	s.remaining = s.remaining[1:]
+	return a, nil
+}
+
+func (s *AnswerScript) AssertDone(t testing.TB) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n := len(s.remaining); n != 0 {
+		t.Errorf("%d scripted answers went unused", n)
+	}
+	for _, q := range s.unexpected {
+		t.Errorf("unexpected %s question: %q", q.Kind, q.Question)
 	}
 }

@@ -23,6 +23,9 @@ func heldError(err error) error {
 }
 
 func outputReplyError(err error) error {
+	if errors.Is(err, api.ErrUnknownModel) {
+		return acp.NewInvalidParams(map[string]any{"reason": err.Error()})
+	}
 	if errors.Is(err, api.ErrOutputWithheld) {
 		// The original response and the handler's error both stay private.
 		return &acp.RequestError{Code: -32000, Message: api.ErrOutputWithheld.Error(), Data: map[string]string{"code": "withheld"}}

@@ -75,6 +75,9 @@ func TestNestedToolsInBothPlacements(t *testing.T) {
 			if err != nil || r.Text != "done" {
 				t.Fatalf("%+v %v %v", r, err, r.ToolResults())
 			}
+			if results := r.ToolResults(); len(results) != 1 || results[0].Name != "parent" || results[0].Text() != "parent only" {
+				t.Fatalf("want only the model's call, got %+v", results)
+			}
 			calls := <-saved
 			if _, err = calls.List(ctx); err == nil {
 				t.Fatal("settled tool context still active")

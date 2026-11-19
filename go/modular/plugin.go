@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -200,7 +201,9 @@ func (r *Registrar) OnToolAfter(fn func(context.Context, ToolAfter) (ToolChange,
 		if c.Value != nil {
 			result["value"] = c.Value
 		}
-		return pluginrpc.Object{"value": pluginrpc.Object{"result": result}}, nil
+		changed := maps.Clone(p)
+		changed["result"] = result
+		return pluginrpc.Object{"value": changed}, nil
 	}}, opts)
 }
 

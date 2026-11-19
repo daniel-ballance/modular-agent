@@ -123,7 +123,7 @@ func (m modelAccess) Model() api.Model { return m.model }
 func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.Part)) (api.Response, error) {
 	var request ModelRequest
 	if err := decodeInto(portable.Request(r), &request); err != nil {
-		return api.Response{}, err
+		return failedModelResponse(err), nil
 	}
 	ref := ModelRef{Provider: m.model.Provider, ID: strings.TrimPrefix(m.model.ID, m.model.Provider+"/")}
 	pc := &ProviderContext{credential: func() (string, error) {
@@ -146,12 +146,11 @@ func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.
 		}
 	}}
 	response, err := m.p.Request(ctx, ref, request, pc)
+	if ctx.Err() != nil {
+		return api.Response{}, ctx.Err()
+	}
 	if err != nil {
-		var modelError *ModelError
-		if !errors.As(err, &modelError) {
-			return api.Response{}, err
-		}
-		response = AssistantMessage{Stop: "failed", Error: modelError}
+		return failedModelResponse(err), nil
 	}
 	response.Role = "assistant"
 	if response.Content == nil {
@@ -159,9 +158,17 @@ func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.
 	}
 	var o portable.Object
 	if err := decodeInto(response, &o); err != nil {
-		return api.Response{}, err
+		return failedModelResponse(err), nil
 	}
 	return portable.ReadResponse(o), nil
+}
+
+func failedModelResponse(err error) api.Response {
+	var failure *ModelError
+	if !errors.As(err, &failure) || failure == nil {
+		failure = &ModelError{Kind: Other, Message: err.Error()}
+	}
+	return portable.ReadResponse(portable.Object{"role": "assistant", "content": []any{}, "stop": "failed", "error": failure})
 }
 func (a *Agent) Models() []ModelInfo {
 	var result []ModelInfo

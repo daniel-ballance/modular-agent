@@ -2,6 +2,7 @@ package modular
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -10,6 +11,30 @@ import (
 	"testing"
 	"time"
 )
+
+func TestServeHistoryEligibility(t *testing.T) {
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte("offline-history-conformance"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, address string
+		store         HistoryStore
+		code          Code
+	}{
+		{"volatile", "127.0.0.1:0", MemoryHistory(), NotSupported},
+		{"missing", "127.0.0.1:0", HistoryStore{}, NotSupported},
+		{"plaintext wildcard", "0.0.0.0:0", FileHistory(t.TempDir()), InvalidParams},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ServeHistory(t.Context(), tc.store, HistoryOptions{Address: tc.address, TokenFile: token})
+			var e *Error
+			if !errors.As(err, &e) || e.Code != tc.code {
+				t.Fatalf("want %s, got %v", tc.code, err)
+			}
+		})
+	}
+}
 
 func TestServeHistoryKit(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -34,7 +59,10 @@ func TestServeHistoryKit(t *testing.T) {
 				}
 				done := make(chan error, 1)
 				child, stop := context.WithCancel(ctx)
-				go func() { done <- serveHistory(child, store, HistoryOptions{TokenFile: token}, l); _ = l.Close() }()
+				go func() {
+					done <- serveHistory(child, store, HistoryOptions{TokenFile: token, AllowVolatileForTests: placement != "files"}, l)
+					_ = l.Close()
+				}()
 				t.Cleanup(func() {
 					stop()
 					if err := <-done; err != nil {

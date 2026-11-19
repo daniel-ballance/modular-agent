@@ -52,9 +52,9 @@ type condition struct {
 type expectation struct {
 	Outcome, Text, Error *string
 	ToolResults          []struct {
-		Name   string
-		Status modular.ToolStatus
-		Text   *string
+		Name           string
+		Status         modular.ToolStatus
+		Text, Contains *string
 	}
 	Records []string
 	Count   *int
@@ -91,7 +91,7 @@ func load[T any](path string) (T, error) {
 	err = json.Unmarshal(b, &v)
 	return v, err
 }
-func (r run) agent(ctx context.Context, s scenario) (*modular.Agent, error) {
+func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modulartest.AnswerScript)) (*modular.Agent, error) {
 	project := filepath.Join(r.dir, "project")
 	if err := os.MkdirAll(project, 0700); err != nil {
 		return nil, err
@@ -133,7 +133,11 @@ func (r run) agent(ctx context.Context, s scenario) (*modular.Agent, error) {
 				answers = append(answers, a)
 			}
 		}
-		opts = append(opts, modular.WithOnQuestion(modulartest.Answers(answers...)))
+		script := modulartest.Answers(answers...)
+		if checkAnswers != nil {
+			checkAnswers(script)
+		}
+		opts = append(opts, modular.WithOnQuestion(script.Handle))
 	}
 	return modular.New(ctx, opts...)
 }
@@ -228,6 +232,13 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 	var a *modular.Agent
 	var s *modular.Session
 	var id string
+	var answers *modulartest.AnswerScript
+	remember := func(script *modulartest.AnswerScript) { answers = script }
+	defer func() {
+		if answers != nil {
+			answers.AssertDone(t)
+		}
+	}()
 	closeAgent := func() {
 		if a != nil {
 			if err := a.Close(context.Background()); err != nil {
@@ -248,7 +259,7 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 			id, err = r.crash(ctx, path, i, id, *step.CrashWhen)
 		case step.Prompt != nil:
 			if a == nil {
-				a, err = r.agent(ctx, sc)
+				a, err = r.agent(ctx, sc, remember)
 				if err == nil {
 					s, err = a.Session(ctx)
 					if err == nil {
@@ -267,7 +278,7 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 				err = errors.New("no session to reopen")
 				break
 			}
-			a, err = r.agent(ctx, sc)
+			a, err = r.agent(ctx, sc, remember)
 			if err == nil {
 				s, err = a.OpenSession(ctx, id)
 				if err == nil {
@@ -334,6 +345,9 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 				if want.Text != nil {
 					equal(field+".text", *want.Text, g.Text())
 				}
+				if want.Contains != nil && !strings.Contains(g.Text(), *want.Contains) {
+					fail("%s.text: want substring %q, got %q", field, *want.Contains, g.Text())
+				}
 			}
 		}
 		if w.Records != nil {
@@ -379,7 +393,7 @@ func TestCrashChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := run{dir: args[1], placement: placement{SDK: args[4], Command: args[5:]}}
-	a, err := r.agent(t.Context(), sc)
+	a, err := r.agent(t.Context(), sc, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
