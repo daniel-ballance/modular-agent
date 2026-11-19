@@ -1,0 +1,20 @@
+[project]
+name = "ma-plugin"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = ["ma-core", "ma-local", "ma-tools", "ma-acp", "ma-runtime", "ma-durable"]
+
+[project.scripts]
+modular-agent-plugin = "ma_plugin.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+ma-core = { workspace = true }
+ma-local = { workspace = true }
+ma-tools = { workspace = true }
+ma-acp = { workspace = true }
+ma-runtime = { workspace = true }
+ma-durable = { workspace = true }

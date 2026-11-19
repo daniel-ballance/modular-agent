@@ -1,0 +1,1177 @@
+"""Plugin host and owner of open sessions. No turn, model or tool implementation."""
+
+import asyncio
+from pathlib import Path
+
+from ma_core import API, AgentError, Stop, clone, identity, now, silent
+
+from .authority import Authority, PERMISSIONS, read_tenants
+from .output import gate
+
+
+class Harness(Authority):
+    def __init__(self, admin=None, tenant=None, process_plugins=None):
+        import os
+
+        placement = (
+            process_plugins if process_plugins is not None else os.getenv("MA_PLUGIN_PROCESSES", "")
+        )
+        self.process_plugins = (
+            set(placement.split(",")) if isinstance(placement, str) else set(placement)
+        )
+        self.admin = set(PERMISSIONS if admin is None else admin)
+        self.tenant = set(PERMISSIONS if tenant is None else tenant)
+        self.tenants = read_tenants(os.getenv("MODULAR_AGENT_TENANTS", "{}"))
+        self.plugins = {}
+        self.capabilities = {}
+        self.hooks = {}
+        self.handlers = []
+        self.commands = {}
+        self.sessions = {}
+        self.append_locks = {}
+        self.followers = []
+        self.output_streams = {}
+        self.trace = []
+        self.define_hook("@harness", "plugin.load", "gate")
+        self.define_hook("@harness", "session.start", "observe")
+        self.define_hook("@harness", "session.end", "observe")
+        self.define_hook("@harness", "session.suspend", "observe")
+        self.define_hook("@harness", "session.ready", "observe")
+        self.define_hook("@harness", "session.attach", "observe")
+        self.define_hook("@harness", "session.moving", "observe")
+        self.define_hook("@harness", "session.invalidate", "observe")
+        self.define_hook("@harness", "input.arrives", "transform")
+        self.define_hook("@harness", "turn.prepare", "collect")
+        self.define_hook("@harness", "output", "transform")
+        self.define_hook("@harness", "binding.output", "gate")
+
+    def api(self, owner="embedding", role="feature"):
+        return API(self, owner, role)
+
+    async def load(self, plugin, replaces=None, process=None):
+        if self.sessions:
+            raise AgentError("Plugins are fixed while sessions are open")
+        if replaces:
+            if replaces not in self.plugins:
+                raise AgentError("Replacement target does not exist")
+            await self.unload(replaces)
+        if plugin.name in self.plugins:
+            raise AgentError("Duplicate plugin: " + plugin.name)
+        decision = await self.fire("@harness", "plugin.load", {"plugin": plugin.name})
+        if decision.get("refused"):
+            raise AgentError(decision["reason"], "refused")
+        if process is None:
+            process = bool(self.process_plugins & {"all", plugin.name, plugin.role})
+        if process:
+            from ma_process import ProcessPlugin
+
+            plugin = ProcessPlugin(plugin)
+        self.plugins[plugin.name] = plugin
+        try:
+            await plugin.start(API(self, plugin.name, plugin.role))
+        except BaseException:
+            await self.unload(plugin.name)
+            raise
+
+    async def load_named(self, spec):
+        """Check before importing executable plugin code from an approved settings plan."""
+        if self.sessions:
+            raise AgentError("Plugins are fixed while sessions are open")
+        decision = await self.fire(
+            "@harness", "plugin.load", {"plugin": spec["factory"], "project": spec.get("project")}
+        )
+        if decision.get("refused"):
+            raise AgentError(decision["reason"], "refused")
+        import importlib
+
+        module, separator, factory = spec["factory"].partition(":")
+        if not separator or not module or not factory or "." in factory:
+            raise AgentError("Plugin factory must be module:attribute")
+        plugin = getattr(importlib.import_module(module), factory)(**spec.get("options", {}))
+        await self.load(plugin, replaces=spec.get("replaces"), process=spec.get("process"))
+
+    async def _start_session(self, s, attachments=None, actor=None, connection_host=False):
+        sid = s["id"]
+        self.sessions[sid] = s
+        try:
+            self.tenant_config(s.get("tenant"))
+            if s.get("tenant") is not None and not s["entries"]:
+                await self._append(
+                    {
+                        "session": sid,
+                        "writer": "@harness",
+                        "kind": "plugins",
+                        "data": {"active": self.active_plugins()},
+                    }
+                )
+            if connection_host:
+                # This stdio launcher is a single-user deployment. It can join
+                # a new principal, but can never reissue or widen a recorded grant.
+                if actor in s.get("departed", []):
+                    raise AgentError("Session inaccessible", "forbidden")
+                if actor not in s["actors"]:
+                    rights = self.session_ceiling(s)
+                    if "watch" not in rights:
+                        raise AgentError("Session inaccessible", "forbidden")
+                    self.sessions[sid]["actors"][actor] = {
+                        "kind": "host",
+                        "authority": sorted(rights),
+                    }
+                    await self._append(
+                        {
+                            "session": sid,
+                            "writer": "@harness",
+                            "kind": "actor_joined",
+                            "data": {
+                                "actor": {"id": actor, "kind": "host", "rights": sorted(rights)},
+                                "operatorAdmission": True,
+                            },
+                        }
+                    )
+                self.require(self.sessions[sid], actor, "watch")
+                # The history store has no portable default actor. Use the
+                # admitted connection for local defaults, not a synthetic user.
+                self.sessions[sid]["actor"] = actor
+            self._session({"session": sid, "actor": actor or s["actor"]})
+            await self._resume_rewind(sid)
+            if s["entries"] and not any(
+                e["kind"] == "plugins" and e["data"]["active"] == self.active_plugins()
+                for e in self.sessions[sid]["entries"][-1:]
+            ):
+                prior = next(
+                    (
+                        e["data"]["active"]
+                        for e in reversed(self.sessions[sid]["entries"])
+                        if e["kind"] == "plugins"
+                    ),
+                    None,
+                )
+                if prior != self.active_plugins():
+                    await self._append(
+                        {
+                            "session": sid,
+                            "kind": "plugins",
+                            "writer": "@harness",
+                            "data": {"active": self.active_plugins()},
+                        }
+                    )
+            await self.fire(
+                "@harness",
+                "session.start",
+                {
+                    "session": sid,
+                    "child": bool((s.get("origin") or {}).get("parent")),
+                    **(attachments or {}),
+                },
+            )
+        except BaseException:
+            try:
+                await self.fire("@harness", "session.suspend", {"session": s["id"]})
+            finally:
+                if "history" in self.capabilities:
+                    await self.call("@harness", "history", "close", {"session": s["id"]})
+                self.sessions.pop(s["id"], None)
+            raise
+
+    async def unload(self, name):
+        plugin = self.plugins.pop(name)
+        try:
+            await plugin.stop()
+        finally:
+            self.capabilities = {k: v for k, v in self.capabilities.items() if v[0] != name}
+            self.hooks = {k: v for k, v in self.hooks.items() if v[0] != name}
+            self.handlers = [h for h in self.handlers if h[0] != name]
+            self.commands = {k: v for k, v in self.commands.items() if v[0] != name}
+            self.followers = [f for f in self.followers if f[0] != name]
+
+    async def stop(self):
+        for s in self.sessions.values():
+            s["suspending"] = True
+        for sid in list(self.sessions):
+            if sid in self.sessions:
+                await self.fire("@harness", "session.suspend", {"session": sid})
+        for sid in list(self.sessions):
+            if "history" in self.capabilities:
+                await self.call("@harness", "history", "close", {"session": sid})
+            del self.sessions[sid]
+        for name in list(self.plugins)[::-1]:
+            await self.unload(name)
+
+    def provide(self, owner, name, service):
+        if name in self.capabilities:
+            raise AgentError("Duplicate capability: " + name)
+        self.capabilities[name] = (owner, service)
+
+    def define_hook(self, owner, name, rule):
+        if rule not in {"observe", "gate", "transform", "first", "collect"}:
+            raise AgentError("Unknown combination rule")
+        if name in self.hooks:
+            raise AgentError("Hook already defined: " + name)
+        self.hooks[name] = (owner, rule)
+
+    def on(self, owner, name, handler, order):
+        if order not in {"first", "normal", "last"}:
+            raise AgentError("Invalid handler order")
+        self.handlers.append((owner, name, handler, order))
+
+    def command(self, owner, name, description, handler):
+        if name in self.commands:
+            raise AgentError("Duplicate command: " + name)
+        self.commands[name] = (owner, description, handler)
+
+    def follow(self, owner, recipient, handler):
+        self.followers.append((owner, recipient, handler))
+
+    async def fire(self, owner, name, data):
+        if name not in self.hooks or self.hooks[name][0] != owner:
+            raise AgentError("Only the hook's owner may fire " + name, "forbidden")
+        rule = self.hooks[name][1]
+        value, answers = clone(data), []
+        handlers = [h for h in self.handlers if h[1] == name]
+        handlers.sort(key=lambda h: {"first": 0, "normal": 1, "last": 2}[h[3]])
+        for _, _, handler, _ in handlers:
+            try:
+                answer = await handler(clone(value))
+            except Exception as exc:
+                if (
+                    rule in {"observe", "collect"}
+                    and isinstance(exc, AgentError)
+                    and exc.code == "process_lost"
+                ):
+                    continue  # Reported lost sources no longer contribute tools or observations.
+                if rule == "gate":
+                    return {**value, "refused": True, "reason": str(exc)}
+                raise
+            if rule == "observe":
+                continue
+            if rule == "collect":
+                if answer is not None:
+                    answers.append(answer)
+            elif rule == "first":
+                if answer is not None:
+                    return answer
+            elif isinstance(answer, Stop):
+                return answer.value
+            elif answer is not None:
+                value = answer
+            if rule == "gate" and value.get("refused"):
+                break
+        return answers if rule == "collect" else (None if rule == "first" else value)
+
+    async def call(self, caller, target, operation, data, emit=silent):
+        self.trace.append((caller, target, operation))  # Metadata only, never content or secrets.
+        data = clone(data)
+        if target in {"jobs", "questions", "credentials"}:
+            plugin = self.plugins.get(caller)
+            data["_caller"] = (
+                getattr(plugin, "registration", {}).get("name", caller)
+                if target == "jobs"
+                else caller
+            )
+            data["_caller_role"] = self.plugins[caller].role if caller in self.plugins else None
+        if target == "@harness":
+            return clone(await self.handle(operation, data, emit))
+        if target not in self.capabilities:
+            raise AgentError("Unavailable capability: " + target, "unavailable")
+        _, service = self.capabilities[target]
+        method = getattr(service, operation, None)
+        if method is None or operation.startswith("_"):
+            raise AgentError("Unknown operation: " + operation)
+        sid = data.get("session")
+        if (
+            isinstance(sid, str)
+            and sid in self.sessions
+            and (
+                operation in {"run", "bash", "write", "restore", "save", "generate"}
+                or (target == "environment" and operation == "read")
+            )
+            and (target != "runtime" and target != "history")
+        ):
+            await self._assert_writable(sid)
+        return clone(await method(data, emit))
+
+    async def _assert_writable(self, sid):
+        if self.sessions[sid].get("writer_lost"):
+            raise AgentError("Session writer was lost; reopen before continuing", "lost")
+        history = self.capabilities.get("history")
+        if history and self.plugins[history[0]].declarations.get("remote_lease"):
+            await self.call("@harness", "history", "writable", {"session": sid})
+
+    def _session(self, data, *, check_actor=True):
+        sid = data["session"]
+        if sid not in self.sessions:
+            raise AgentError("Session is not open")
+        s = self.sessions[sid]
+        actor = data.get("actor", s["actor"])
+        if check_actor and "actor" in data and actor not in s.get("actors", {s["actor"]: {}}):
+            raise AgentError("Actor is not enrolled in the session", "forbidden")
+        return s
+
+    async def _keep(self, session, entries):
+        cancellation = None
+        if "history" in self.capabilities:
+            sid = session["id"]
+            if sid in self.sessions:
+                await self._assert_writable(sid)
+            commit = asyncio.create_task(
+                self.call("@harness", "history", "keep", {"session": session, "entries": entries})
+            )
+            try:
+                while True:
+                    try:
+                        await asyncio.shield(commit)
+                        break
+                    except asyncio.CancelledError as exc:
+                        if commit.cancelled():
+                            raise
+                        cancellation = exc
+            except (Exception, asyncio.CancelledError):
+                if sid in self.sessions:
+                    self.sessions[sid]["writer_lost"] = True
+                raise
+        # Calls to an out-of-process store yield. Preserve flags changed by a
+        # concurrent cancellation/close while that durable write was in flight.
+        current = self.sessions.get(session["id"], {})
+        for key in ("busy", "moving", "closing", "suspending", "writer_lost"):
+            if key in current:
+                session[key] = current[key]
+        self.sessions[session["id"]] = session
+        # A cancelled caller cannot dispatch from this append. The next
+        # writer still needs the confirmed parent and call associations.
+        if cancellation is not None:
+            raise cancellation
+
+    def active_plugins(self):
+        return [
+            {"name": name}
+            for name in dict.fromkeys(
+                getattr(plugin, "registration", {}).get("name", key)
+                for key, plugin in self.plugins.items()
+            )
+        ]
+
+    async def _position(self, sid, target, actor, restore=None):
+        current = self.sessions[sid]
+        updated = clone(current)
+        entry = {
+            "id": identity(),
+            "parent": current["position"],
+            "session": sid,
+            "writer": "@harness",
+            "actor": actor,
+            "time": now(),
+            "kind": "position_move",
+            "visible": False,
+            "content": [],
+            "copies": [],
+            "data": {"to": target, **({"restore": restore} if restore else {})},
+        }
+        updated["position"] = target
+        updated["entries"].append(entry)
+        await self._keep(updated, [entry])
+        return entry
+
+    async def _resume_rewind(self, sid):
+        entries = self.sessions[sid]["entries"]
+        if not entries:
+            return
+        intent = entries[-1]
+        restore = intent["data"].get("restore") if intent["kind"] == "position_move" else None
+        if not restore:
+            return
+        previous = entries[-2] if len(entries) > 1 else {}
+        compensating = (
+            previous.get("kind") == "position_move"
+            and bool(previous["data"].get("restore"))
+            and intent["data"]["to"] == previous["parent"]
+            and restore
+            == {
+                "point": previous["data"]["restore"]["undo"],
+                "undo": previous["data"]["restore"]["point"],
+            }
+        )
+        await self._finish_restore(sid, intent, compensating=compensating, reopening=True)
+
+    async def _finish_restore(self, sid, intent, *, compensating=False, reopening=False):
+        restore = intent["data"]["restore"]
+        try:
+            await self.call(
+                "@harness", "environment", "restore", {"session": sid, "point": restore["point"]}
+            )
+        except (AgentError, OSError) as exc:
+            if (
+                compensating
+                or self.sessions[sid].get("writer_lost")
+                or getattr(exc, "code", None) == "lost"
+            ):
+                self.sessions[sid]["writer_lost"] = True
+                raise AgentError("Cannot confirm project restoration", "lost") from exc
+            rollback = await self._position(
+                sid,
+                intent["parent"],
+                intent["actor"],
+                {"point": restore["undo"], "undo": restore["point"]},
+            )
+            result = await self._finish_restore(sid, rollback, compensating=True)
+            if reopening:
+                return result
+            raise AgentError(
+                "Project restore failed; restored previous position", "conflict"
+            ) from exc
+        return await self._position(sid, intent["data"]["to"], intent["actor"])
+
+    async def _append(self, d):
+        # An entry may attribute an effect to a historical actor who has left.
+        s = self._session(d, check_actor=False)
+        sid = s["id"]
+        if d["kind"] in {"question_answer", "question_closed"} and any(
+            entry["kind"] in {"question_answer", "question_closed"}
+            and entry["data"]["request"] == d["data"]["request"]
+            for entry in s["entries"]
+        ):
+            raise AgentError("Question is closed or no longer answerable", "refused")
+        setup = []
+        if not s["entries"] and s.get("tenant") is not None:
+            setup.append(
+                {
+                    "id": identity(),
+                    "parent": None,
+                    "session": sid,
+                    "writer": "@harness",
+                    "time": now(),
+                    "kind": "tenant",
+                    "content": [],
+                    "visible": False,
+                    "copies": [],
+                    "data": {"tenant": s["tenant"]},
+                }
+            )
+        if (s.get("setup_pending") or setup) and not s["entries"]:
+            setup.append(
+                {
+                    "id": identity(),
+                    "parent": setup[-1]["id"] if setup else None,
+                    "session": sid,
+                    "writer": "@harness",
+                    "actor": s["actor"],
+                    "time": now(),
+                    "kind": "setting",
+                    "content": [],
+                    "visible": False,
+                    "copies": [],
+                    "data": s["settings"],
+                }
+            )
+            for aid, actor in s["actors"].items():
+                setup.append(
+                    {
+                        **{k: v for k, v in setup[-1].items() if k != "actor"},
+                        "id": identity(),
+                        "parent": setup[-1]["id"],
+                        "kind": "actor_joined",
+                        "data": {
+                            "actor": {
+                                "id": aid,
+                                "kind": actor["kind"],
+                                "rights": actor["authority"],
+                            },
+                            "operatorAdmission": True,
+                        },
+                    }
+                )
+        prior_plugins = next(
+            (e["data"]["active"] for e in reversed(s["entries"]) if e["kind"] == "plugins"), None
+        )
+        active = self.active_plugins()
+        if d["kind"] != "plugins" and prior_plugins != active:
+            setup.append(
+                {
+                    "id": identity(),
+                    "parent": setup[-1]["id"] if setup else s["position"],
+                    "session": sid,
+                    "kind": "plugins",
+                    "time": now(),
+                    "writer": "@harness",
+                    "visible": False,
+                    "content": [],
+                    "copies": [],
+                    "data": {"active": active},
+                }
+            )
+        e = {
+            "id": d.get("id", identity()),
+            "parent": setup[-1]["id"] if setup else s["position"],
+            "session": sid,
+            "writer": d.get("writer", "plugin"),
+            **(
+                {}
+                if d["kind"] == "actor_joined" and d.get("data", {}).get("operatorAdmission")
+                else {"actor": d.get("actor", s["actor"])}
+            ),
+            "time": now(),
+            "kind": d["kind"],
+            "content": d.get("content", []),
+            "visible": d.get("visible", False),
+            "copies": d.get("copies", []),
+            **{k: d[k] for k in ("turn", "step", "call", "job", "data") if k in d},
+        }
+        if prior := d.get("close_attempt"):
+            aborted = {
+                **e,
+                "id": identity(),
+                "kind": "response",
+                "step": prior["step"],
+                "content": [],
+                "visible": False,
+                "copies": [prior["id"]],
+                "data": {"stop": "aborted", "recovery": True},
+            }
+            setup.append(aborted)
+            e["parent"] = aborted["id"]
+        batch = [*setup, e]
+        paired = {"turn_start": ("first_input", "input"), "job_end": ("job_report", "input_queued")}
+        field, kind = paired.get(e["kind"], (None, None))
+        if field in d:
+            batch.append(
+                {
+                    **d[field],
+                    "id": identity(),
+                    "parent": e["id"],
+                    "session": sid,
+                    "writer": e["writer"],
+                    "time": now(),
+                    "kind": kind,
+                    **(
+                        {"turn": e["turn"]}
+                        if kind == "input"
+                        else {"job": e["job"], "copies": [e["id"]]}
+                    ),
+                }
+            )
+        updated = clone(s)
+        updated["entries"].extend(batch)
+        updated["position"] = batch[-1]["id"]
+        if e["kind"] == "limit":
+            actor = e["actor"]
+            self.require(s, actor, "administer")
+            rights = e["data"]["rights"]
+            if rights is not None:
+                if not isinstance(rights, list) or not all(isinstance(r, str) for r in rights):
+                    raise AgentError("Expected an array of rights or null", "invalid_request")
+                if not set(rights) <= self.permissions(s, actor):
+                    raise AgentError("Cannot set a limit above the actor's authority", "forbidden")
+            updated["limit"] = rights
+        if e["kind"] == "actor_left":
+            left = e["data"]["actorId"]
+            updated["actors"].pop(left, None)
+            updated["departed"] = sorted(set(updated.get("departed", [])) | {left})
+        if e["kind"] in {"actor_joined", "authority"}:
+            joined = e["data"].get("actor", {}).get("id") or e["data"].get("subject")
+            updated["departed"] = [aid for aid in updated.get("departed", []) if aid != joined]
+        if e["kind"] == "setting":
+            if s.get("busy"):
+                raise AgentError("Settings may change only between turns")
+            updated["settings"].update(e["data"])
+        updated.pop("setup_pending", None)
+        await self._keep(updated, batch)
+        return batch[len(setup) :]
+
+    def holds_output(self):
+        return any(h[1] == "binding.output" for h in self.handlers)
+
+    async def output(self, sid, recipient, events):
+        return await gate(self, sid, recipient, events)
+
+    async def _emit(self, event):
+        sid = event.get("session")
+        for owner, recipient, handler in list(self.followers):
+            try:
+                kind = event["kind"]
+                events = [{"type": kind, "data": event}]
+                if self.holds_output() and kind in {"model_output", "tool_progress"}:
+                    key = (owner, recipient, sid, kind, event.get("step"), event.get("call"))
+                    self.output_streams.setdefault(key, []).extend(events)
+                    if not event.get("final"):
+                        continue
+                    events = self.output_streams.pop(key)
+                for item in await self.output(sid, recipient, events):
+                    view = await self.fire(
+                        "@harness", "output", {"recipient": recipient, "value": item["data"]}
+                    )
+                    if view is not None and view.get("value") is not None:
+                        await handler(clone(view["value"]))
+            except Exception:
+                # A failed output gate or recipient can never expose ungated output.
+                continue
+
+    def declarations(self):
+        active = {
+            self.capabilities[k][0] for k in ("runtime", "environment") if k in self.capabilities
+        }
+        return {
+            name: p.declarations
+            for name, p in sorted(self.plugins.items(), key=lambda pair: pair[0] not in active)
+            if name in active
+            or p.role not in {"runtime", "environment"}
+            or not (
+                "parallel_tools" in p.declarations or "stops_commands_on_crash" in p.declarations
+            )
+        }
+
+    async def handle(self, op, d, emit):
+        if op == "writer_lost":
+            sid = d["session"]
+            if sid in self.sessions:
+                self.sessions[sid]["writer_lost"] = True
+                await self.fire("@harness", "session.suspend", {"session": sid})
+            return {}
+        if op == "assert_writable":
+            await self._assert_writable(d["session"])
+            return {}
+        if op == "create":
+            parent = self.sessions.get((d.get("origin") or {}).get("parent"))
+            tenant = parent.get("tenant") if parent else d.get("tenant")
+            self.tenant_config(tenant)
+            project = str(Path(d["project"]).resolve())
+            settings = {}
+            if "config" in self.capabilities:
+                settings = await self.call("@harness", "config", "load", {"project": project})
+            s = {
+                "id": d.get("id", identity()),
+                "project": project,
+                "created": __import__("time").time_ns() // 1_000_000,
+                **({"setup_pending": True} if getattr(self, "lazy_setup", False) else {}),
+                "settings": {"approval": "off", **settings, **d.get("settings", {})},
+                "actor": d.get("actor", "user"),
+                "entries": [],
+                "position": None,
+                "plugins": list(self.plugins),
+                "origin": d.get("origin"),
+                "tenant": tenant,
+            }
+            allowed = set(d.get("authority", PERMISSIONS)) & self.admin & self.tenant & PERMISSIONS
+            s["authority"] = sorted(allowed)
+            s["actors"] = {
+                s["actor"]: {"kind": d.get("actor_kind", "user"), "authority": sorted(allowed)}
+            }
+            if d.get("draft"):
+                return s
+            await self._start_session(s, {"mcp_servers": d.get("mcp_servers", [])})
+            return self.sessions[s["id"]]
+        if op == "open":
+            if d["session"] in self.sessions:
+                s = self._session(d)
+                if "mcp_servers" in d:
+                    self.require(s, d.get("actor", s["actor"]), "settings")
+                    if s.get("busy"):
+                        raise AgentError("Cannot replace session attachments during a turn")
+                    await self.fire(
+                        "@harness",
+                        "session.attach",
+                        {"session": s["id"], "mcp_servers": d["mcp_servers"]},
+                    )
+                return s
+            s = await self.call("@harness", "history", "open", d)
+            if s is None:
+                raise AgentError("Unknown session", "unknown_session")
+            s["plugins"] = list(self.plugins)
+            s.setdefault("authority", sorted(self.admin & self.tenant))
+            s.setdefault("actors", {s["actor"]: {"kind": "user", "authority": s["authority"]}})
+            await self._start_session(
+                s,
+                {"mcp_servers": d.get("mcp_servers", []), "resumed": True},
+                d.get("actor"),
+                connection_host=bool(d.get("connection_host") and d.get("actor")),
+            )
+            if d.get("recover", True):
+                if "runtime" in self.capabilities:
+                    await self.call("@harness", "runtime", "recover", {"session": s["id"]})
+                await self.fire("@harness", "session.ready", {"session": s["id"]})
+            return self.sessions[s["id"]]
+        if op == "list":
+            return await self.call("@harness", "history", "list", d)
+        if op == "declaration" and "session" not in d:
+            return self.declarations()
+        if op == "commands":
+            return {k: v[1] for k, v in self.commands.items()}
+        if op == "command":
+            command_session = self._session(d)
+            self.require(command_session, d.get("actor", command_session["actor"]), "input")
+            name, _, args = d["text"].removeprefix("/").partition(" ")
+            if name not in self.commands:
+                raise AgentError("Unknown command: /" + name)
+            return await self.commands[name][2](
+                {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()}
+            )
+        if op == "event":
+            if d.get("kind") == "plugin_failed" and "session" not in d and self.sessions:
+                for sid in list(self.sessions):
+                    await self._emit({"time": now(), **d, "session": sid})
+            else:
+                await self._emit({"time": now(), **d})
+            return {}
+        if op == "view":
+            result = await self.fire(
+                "@harness", "output", {"recipient": d.get("recipient", "user"), "value": d["value"]}
+            )
+            if not result or result.get("value") is None or d.get("alreadyGated"):
+                return result.get("value") if result else None
+            events = await self.output(
+                d.get("session"),
+                d.get("recipient", "user"),
+                [
+                    {
+                        "type": "history_view"
+                        if d.get("type") == "entry"
+                        else "entry"
+                        if d.get("type") == "projected_entry"
+                        else d.get("type", "python.view"),
+                        "data": (
+                            {"method": d["method"], "result": result["value"]}
+                            if "method" in d
+                            else {"entry": result["value"]}
+                            if d.get("type") in {"entry", "projected_entry"}
+                            else result["value"]
+                        ),
+                    }
+                ],
+            )
+            if not events:
+                return None
+            value = events[0]["data"]
+            return (
+                value["result"]
+                if "method" in d
+                else value["entry"]
+                if d.get("type") in {"entry", "projected_entry"}
+                else value
+            )
+        s = self._session(d, check_actor=op not in {"append", "authority"})
+        sid = s["id"]
+        permission = {
+            "settings": "settings",
+            "move": "settings",
+            "fork": "input",
+            "erase": "erase",
+        }.get(op)
+        if permission and "actor" in d:
+            self.require(s, d["actor"], permission)
+        if op == "get":
+            return s
+        if op == "children":
+            return [
+                child["id"]
+                for child in self.sessions.values()
+                if (child.get("origin") or {}).get("parent") == sid
+            ]
+        if op == "config_view":
+            return {
+                "settings": s["settings"],
+                "catalog": await self.call("@harness", "selection", "catalog", {}),
+            }
+        if op == "authority":
+            return sorted(self.permissions(s, d.get("actor", s["actor"]), d.get("ceiling")))
+        if op == "tenant":
+            return await self.tenant_info(s)
+        if op == "tenant_exhausted":
+            tokens = (await self.tenant_info(s))["tokens"]
+            return tokens is not None and tokens["used"] >= tokens["budget"]
+        if op == "limit":
+            return await self.handle(
+                "append",
+                {
+                    **d,
+                    "writer": "@harness",
+                    "kind": "limit",
+                    "data": {"rights": d["rights"]},
+                },
+                emit,
+            )
+        if op == "grant":
+            return await self.grant(d)
+        if op == "leave":
+            return await self.leave(d)
+        if op == "input":
+            return await self.fire("@harness", "input.arrives", d)
+        if op == "prepare":
+            return await self.fire("@harness", "turn.prepare", d)
+        if op == "invalidate":
+            await self.fire("@harness", "session.invalidate", d)
+            return {}
+        if op == "branch":
+            by_id = {e["id"]: e for e in s["entries"]}
+            branch, pos = [], s["position"]
+            while pos:
+                entry = by_id[pos]
+                branch.append(entry)
+                pos = entry["parent"]
+            return branch[::-1]
+        if op == "append":
+            async with self.append_locks.setdefault(sid, asyncio.Lock()):
+                entries = await self._append(d)
+            for entry in entries:
+                await self._emit({"kind": "history_entry", "session": sid, "entry": entry})
+            return entries[0]
+        if op == "settings":
+            if s.get("busy"):
+                raise AgentError("Settings may change only between turns")
+            e = await self.handle("append", {**d, "kind": "setting", "data": d["changes"]}, emit)
+            await self.fire(
+                "@harness", "session.invalidate", {"session": sid, "reason": "settings"}
+            )
+            return e
+        if op == "busy":
+            s["busy"] = d["value"]
+            return {}
+        if op == "move":
+            if s.get("busy"):
+                raise AgentError("Cannot move during a turn", "busy")
+            if d.get("rewind"):
+                if not any(p.get("rewind") for p in self.declarations().values()):
+                    raise AgentError("Working environment does not support rewind", "not_supported")
+                if any(
+                    x["id"] != sid and x["project"] == s["project"] for x in self.sessions.values()
+                ):
+                    raise AgentError("Another open session uses this project", "busy")
+            ids = {e["id"] for e in s["entries"] if e["kind"] != "position_move"}
+            if d["point"] is not None and d["point"] not in ids:
+                code = (
+                    "conflict" if any(e["id"] == d["point"] for e in s["entries"]) else "not_found"
+                )
+                raise AgentError("Unknown or ineligible history point", code)
+            branch = await self.handle("branch", d, emit)
+            if d["point"] is not None:
+                target = next((e for e in branch if e["id"] == d["point"]), None)
+                if target is None or (target.get("turn") and target["kind"] != "turn_end"):
+                    raise AgentError(
+                        "Move needs a quiescent point on the current branch", "conflict"
+                    )
+            if s.get("moving"):
+                raise AgentError("Session is already moving")
+            self.sessions[sid]["moving"] = True
+            out_of_reach, point = [], None
+            try:
+                if d.get("rewind"):
+                    branch = await self.handle("branch", d, emit)
+                    ids = [e["id"] for e in branch]
+                    if d["point"] is not None and d["point"] not in ids:
+                        raise AgentError("Rewind target must be on the current branch")
+                    later = branch[ids.index(d["point"]) + 1 :] if d["point"] else branch
+                    if any(
+                        e["kind"] in {"job_start", "job_end"}
+                        or e.get("data", {}).get("originalKind")
+                        in {"jobStarted", "jobEnded", "turnStart", "toolStarted"}
+                        or e.get("data", {}).get("pointUnavailable")
+                        for e in later
+                    ):
+                        raise AgentError("Cannot rewind work without a restorable point")
+                    points = [
+                        e["data"].get("point")
+                        for e in later
+                        if e["kind"] == "turn_start"
+                        or (e["kind"] == "tool_started" and not e.get("turn"))
+                    ]
+                    for candidate in points:
+                        if (
+                            not candidate
+                            or not (
+                                await self.call(
+                                    "@harness",
+                                    "environment",
+                                    "check_point",
+                                    {"session": sid, "point": candidate},
+                                )
+                            )["exists"]
+                        ):
+                            raise AgentError("Missing working environment point", "conflict")
+                    point = points[0] if points else None
+                    out_of_reach = [
+                        e["call"]
+                        for e in later
+                        if e["kind"] == "tool_started" and e["data"].get("openWorld", True)
+                    ]
+                await self.fire("@harness", "session.moving", {"session": sid})
+                async with self.append_locks.setdefault(sid, asyncio.Lock()):
+                    actor = d.get("actor", s["actor"])
+                    if point is None:
+                        e = await self._position(sid, d["point"], actor)
+                    else:
+                        saved = await self.call("@harness", "environment", "save", {"session": sid})
+                        journal = await self._position(
+                            sid, d["point"], actor, {"point": point, "undo": saved["point"]}
+                        )
+                        try:
+                            e = await self._finish_restore(sid, journal)
+                        except asyncio.CancelledError:
+                            self.sessions[sid]["writer_lost"] = True
+                            raise
+            finally:
+                self.sessions[sid]["moving"] = False
+            await self.fire("@harness", "session.invalidate", {"session": sid, "reason": "move"})
+            return {**e, "outOfReach": list(dict.fromkeys(out_of_reach))}
+        if op == "fork":
+            if s.get("busy"):
+                raise AgentError("Cannot fork during a turn")
+            branch = await self.handle("branch", d, emit)
+            ended_jobs = {e["job"] for e in branch if e["kind"] == "job_end"}
+            ended_calls = {e["call"] for e in branch if e["kind"] == "tool_result"}
+            closed_questions = {
+                e["data"]["request"]
+                for e in branch
+                if e["kind"] in {"question_answer", "question_closed"}
+            }
+            if any(
+                (e["kind"] == "job_start" and e["job"] not in ended_jobs)
+                or (e["kind"] == "tool_deferred" and e["call"] not in ended_calls)
+                or (e["kind"] == "question_open" and e["data"]["id"] not in closed_questions)
+                for e in branch
+            ):
+                raise AgentError("Cannot fork pending work; finish or cancel it first")
+            if "point" in d:
+                if d["point"] not in {e["id"] for e in branch}:
+                    raise AgentError("Fork point must be on current branch")
+                branch = branch[
+                    : next(i for i, e in enumerate(branch) if e["id"] == d["point"]) + 1
+                ]
+            child = await self.handle(
+                "create",
+                {
+                    "project": d.get("project", s["project"]),
+                    "settings": s["settings"],
+                    "actor": d.get("actor", s["actor"]),
+                    "actor_kind": s["actors"][d.get("actor", s["actor"])]["kind"],
+                    "authority": sorted(self.permissions(s, d.get("actor", s["actor"]))),
+                    "origin": {"session": sid, "point": branch[-1]["id"] if branch else None},
+                    "tenant": s.get("tenant"),
+                    "draft": True,
+                },
+                emit,
+            )
+            mapping = {e["id"]: identity() for e in branch}
+            entries = list(child["entries"])
+            for e in branch:
+                copied = clone(e)
+                copied.update(
+                    id=mapping[e["id"]],
+                    session=child["id"],
+                    parent=entries[-1]["id"] if entries else None,
+                    fork_source=e["id"],
+                    copies=[e["id"]],
+                )
+                if "input" in copied.get("data", {}):
+                    copied["data"]["input"] = mapping.get(
+                        copied["data"]["input"], copied["data"]["input"]
+                    )
+                if copied["kind"] == "summary" and "covers" in copied.get("data", {}):
+                    copied["data"]["covers"] = [mapping.get(x, x) for x in copied["data"]["covers"]]
+                entries.append(copied)
+            child["actors"] = clone(s["actors"])
+            child["departed"] = list(s.get("departed", []))
+            child["limit"] = clone(s.get("limit"))
+            setup = []
+            if child.get("tenant") is not None:
+                setup.append(("tenant", {"tenant": child["tenant"]}))
+            setup.append(("setting", child["settings"]))
+            setup.extend(
+                (
+                    "actor_joined",
+                    {
+                        "actor": {"id": aid, "kind": actor["kind"], "rights": actor["authority"]},
+                        "operatorAdmission": True,
+                    },
+                )
+                for aid, actor in child["actors"].items()
+            )
+            setup.extend(("actor_left", {"actorId": aid}) for aid in child["departed"])
+            if child["limit"] is not None:
+                setup.append(("limit", {"rights": child["limit"]}))
+            setup.append(("plugins", {"active": self.active_plugins()}))
+            for kind, data in setup:
+                entries.append(
+                    {
+                        "id": identity(),
+                        "session": child["id"],
+                        "time": now(),
+                        "parent": entries[-1]["id"] if entries else None,
+                        "kind": kind,
+                        "data": data,
+                        "content": [],
+                        "copies": [],
+                        "visible": False,
+                        "writer": "@harness",
+                    }
+                )
+            child.update(entries=entries, position=entries[-1]["id"])
+            child.pop("setup_pending", None)
+            try:
+                await self._keep(child, entries)
+            except BaseException:
+                if "history" in self.capabilities:
+                    await self.call("@harness", "history", "close", {"session": child["id"]})
+                raise
+            await self._start_session(child)
+            await self.fire(
+                "@harness", "session.invalidate", {"session": child["id"], "reason": "fork"}
+            )
+            return child
+        if op == "erase":
+            ids = d.get("entries")
+            if (
+                not isinstance(ids, list)
+                or not ids
+                or any(not isinstance(i, str) or not i for i in ids)
+            ):
+                raise AgentError("Erasure requires entry IDs", "invalid_request")
+            kept = {e["id"]: e for e in s["entries"]}
+            if not set(ids) <= kept.keys():
+                raise AgentError("Unknown erasure entry", "not_found")
+            protected = {
+                "tenant",
+                "limit",
+                "authority",
+                "actor_joined",
+                "actor_left",
+                "position_move",
+                "erase",
+                "job_cleanup_unconfirmed",
+            }
+            if any(e["kind"] in protected and e["id"] in d["entries"] for e in s["entries"]):
+                raise AgentError("Cannot erase records of authority", "forbidden")
+            for opened in self.sessions.values():
+                started = {e["job"] for e in opened["entries"] if e["kind"] == "job_start"}
+                ended = {e["job"] for e in opened["entries"] if e["kind"] == "job_end"}
+                if started - ended:
+                    raise AgentError("Erasure requires all jobs to be idle")
+            if any(x.get("busy") for x in self.sessions.values()):
+                raise AgentError("Erasure requires all turns to be idle", "busy")
+            # Reserve the source's erased input keys before the store destroys its payload.
+            targets = set(ids)
+            while True:
+                more = targets | {
+                    e["id"] for e in s["entries"] if targets.intersection(e.get("copies", []))
+                }
+                for eid in targets:
+                    row = kept[eid]
+                    receipt = row.get("data", {}).get("input")
+                    if row["kind"] == "input" and receipt in kept:
+                        more.add(receipt)
+                if more == targets:
+                    break
+                targets = more
+            if any(kept[eid]["kind"] in protected for eid in targets):
+                raise AgentError("Cannot erase records of authority or topology", "forbidden")
+            reservations = [
+                {
+                    "inputId": row["data"].get("input", row["id"]),
+                    "key": row["data"]["key"],
+                    "actorId": row["actor"],
+                    "submittedBy": row["data"].get("submittedBy", row["actor"]),
+                }
+                for row in s["entries"]
+                if row["id"] in targets and row["kind"] == "input_queued" and row["data"].get("key")
+            ]
+            await self.handle(
+                "append",
+                {
+                    "session": sid,
+                    "writer": "@harness",
+                    "kind": "erase",
+                    "data": {
+                        "entryIds": [e["id"] for e in s["entries"] if e["id"] in targets],
+                        "inputKeys": reservations,
+                    },
+                },
+                emit,
+            )
+            by_session = {
+                opened["id"]: {e["id"]: e for e in opened["entries"]}
+                for opened in self.sessions.values()
+            }
+            result = await self.call("@harness", "history", "erase", d)
+            for open_id in list(self.sessions):
+                loaded = await self.call("@harness", "history", "read", {"session": open_id})
+                if loaded:
+                    self.sessions[open_id] = loaded
+                    previous = by_session[open_id]
+                    ids = [eid for eid in result["erased"] if eid in previous]
+                    if ids:
+                        tags = {
+                            "turn": "turnId",
+                            "step": "stepId",
+                            "call": "toolCallId",
+                            "job": "jobId",
+                        }
+                        identities = {
+                            eid: {
+                                wire: previous[eid][native]
+                                for native, wire in tags.items()
+                                if previous[eid].get(native) is not None
+                            }
+                            for eid in ids
+                        }
+                        await self.handle(
+                            "append",
+                            {
+                                "session": open_id,
+                                "kind": "erase",
+                                "writer": "@harness",
+                                "data": {"entryIds": ids, "identities": identities},
+                            },
+                            emit,
+                        )
+                        for e in self.sessions[open_id]["entries"]:
+                            for native, wire in tags.items():
+                                if wire in identities.get(e["id"], {}):
+                                    e[native] = identities[e["id"]][wire]
+                await self.fire(
+                    "@harness", "session.invalidate", {"session": open_id, "reason": "erasure"}
+                )
+            result.setdefault("pending", [])
+            origin = {eid: open_id for open_id, rows in by_session.items() for eid in rows}
+            origin.update(
+                {pair["id"]: pair["sessionId"] for pair in result.get("affectedPairs", [])}
+            )
+            for category in ("erased", "pending"):
+                result[category + "Pairs"] = [
+                    {"sessionId": origin[eid], "id": eid}
+                    for eid in dict.fromkeys(result[category])
+                    if eid in origin
+                    and origin[eid] in self.sessions
+                    and "watch"
+                    in self.permissions(self.sessions[origin[eid]], d.get("actor", s["actor"]))
+                ]
+            result["out_of_reach"] = ["Output already delivered to recipients"]
+            for plugin in self.plugins.values():
+                erase_provider = getattr(plugin, "erase_provider", None)
+                if erase_provider:
+                    for erased_sid in result.get("sessions", [sid]):
+                        ids = [
+                            eid for eid in result["erased"] if eid in by_session.get(erased_sid, {})
+                        ]
+                        if not ids and erased_sid == sid:
+                            ids = d["entries"]
+                        report = await erase_provider(erased_sid, ids)
+                        result["pending"].extend(report["pending"])
+                        result["out_of_reach"].extend(report["outOfReach"])
+            result["pending"] = list(dict.fromkeys(result["pending"]))
+            return result
+        if op == "close":
+            # Closing an idle attachment is not cancellation. A close that
+            # would stop work still needs cancel, just like an explicit cancel.
+            started = {e["job"] for e in s["entries"] if e["kind"] == "job_start"}
+            ended = {e["job"] for e in s["entries"] if e["kind"] == "job_end"}
+            if "actor" in d and (s.get("busy") or started - ended):
+                self.require(s, d["actor"], "cancel")
+            self.sessions[sid]["closing"] = True
+            await self.fire(
+                "@harness",
+                "session.suspend" if s.get("writer_lost") else "session.end",
+                {"session": sid},
+            )
+            if "history" in self.capabilities:
+                await self.call("@harness", "history", "close", {"session": sid})
+            del self.sessions[sid]
+            return {}
+        if op == "declaration":
+            return self.declarations()
+        raise AgentError("Unknown session operation: " + op)
