@@ -397,8 +397,21 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 					changedBy.set(p.parentRequestId, Promise.all([previous, refresh]));
 				}
 			});
-			if (reg.workingEnvironment) api.provide("working-environment", new WireEnvironment(peer, api.project, reg.workingEnvironment.containment, reg.workingEnvironment.points === true, undefined, reg.workingEnvironment.confinesFiles === true));
-			if (reg.runtime) api.provide("runtime", new WireRuntime(peer, reg.runtime.id, reg.runtime.supports, track));
+			if (reg.workingEnvironment) {
+				const { containment, platforms, points, confinesFiles } = reg.workingEnvironment;
+				const matches = ["linux", "darwin", "win32", "freebsd", "openbsd"].includes(process.platform) && platforms?.includes(process.platform);
+				api.provide("working-environment", new WireEnvironment(peer, api.project, matches ? containment : "none", points === true, undefined, confinesFiles === true));
+			}
+			if (reg.runtime) {
+				const { inputDuringTurn, waitingThroughRestart, continuesAfterRestart } = reg.runtime.supports;
+				api.provide("runtime", new WireRuntime(peer, reg.runtime.id, {
+					inputDuringTurn: inputDuringTurn === true,
+					waitingThroughRestart: waitingThroughRestart === true,
+					continuesAfterRestart: continuesAfterRestart === true,
+					// The host bridge settles the model's calls before returning to any /1 Runtime.
+					nestedToolCalls: true,
+				}, track));
+			}
 			else for (const method of ["newId", "prepareStep", "model", "hook", "definition", "runToolCall", "record", "takeSteering", "hasSteering"]) {
 				peer.handle(`host/runtime/${method}`, () => { throw new WireError("invalid_request", "This connection has no Runtime parent"); });
 			}

@@ -176,13 +176,14 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			await plugin.setup(apiFor(plugin, init));
 			if (plugin.stop) stops.push(() => plugin.stop!());
 		}
+		const { inputDuringTurn, waitingThroughRestart, continuesAfterRestart } = runtime?.supports ?? {};
 		return {
 			binding: PLUGIN_BINDING,
 			name: options.name,
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
-			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [{ darwin: "macos", win32: "windows" }[process.platform as "darwin" | "win32"] ?? process.platform], ...(environment.points && environment.save && environment.hasPoint && environment.restore ? { points: true } : {}), ...(environment.confinesFiles === true ? { confinesFiles: true } : {}) } } : {}),
-			...(runtime ? { runtime: { id: runtime.id, supports: Object.fromEntries(Object.entries(runtime.supports).filter(([key]) => key !== "rewinding")) } } : {}),
+			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [process.platform], ...(environment.points && environment.save && environment.hasPoint && environment.restore ? { points: true } : {}), ...(environment.confinesFiles === true ? { confinesFiles: true } : {}) } } : {}),
+			...(runtime ? { runtime: { id: runtime.id, supports: { inputDuringTurn, waitingThroughRestart, continuesAfterRestart } } } : {}),
 			...(handlers.size ? { hooks: [...handlers].map(([handlerId, h]) => ({ hook: h.hook, handlerId, order: h.order })) } : {}),
 			...(commands.size ? { commands: [...commands].map(([name, c]) => ({ name, description: c.description })) } : {}),
 			...(options.replaces?.length ? { replaces: options.replaces } : {}),
