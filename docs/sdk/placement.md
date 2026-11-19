@@ -42,7 +42,7 @@ If a plugin's process is lost while the agent runs, the agent treats the part as
 
 The history store is the only part with a service binding today:
 
-- `serveHistory(store, { address, tokenFile })` serves a history store as the [history service](../bindings/history-http.md), if the store can keep the binding's promises: opaque JSON records committed durably, exact batch and tombstone behavior, and writer leases. It refuses any other store with `not_supported`, naming it, rather than substituting another backend. The memory store can be served only for tests, where losing everything on restart is acceptable; a build that does not offer that says so. Plain HTTP is served only on loopback.
+- `serveHistory(store, { address, tokenFile })` serves a history store as the [history service](../bindings/history-http.md), if the store can keep the binding's promises: opaque JSON records committed durably, exact batch and tombstone behavior, and writer leases. It refuses any other store with `not_supported`, naming it, rather than substituting another backend. A volatile memory store cannot be served as a conforming history service, since the binding requires entries to survive a restart; a build may offer a test-only in-memory service that is labelled as not conforming. A file store may serve from a separate namespace of opaque records rather than its native sessions; the SDK documents which, and whether existing native sessions can be opened through the service. Plain HTTP is served only on loopback.
 - `httpHistory(url, tokenFile)` is a history store that uses one.
 
 Agents in any language that share a history service and the same actor ids can reopen and continue each other's [portable sessions](../bindings/data.md#portable-sessions).
@@ -76,7 +76,7 @@ The scenarios check this with a real `kill -9`.
 
 - a durable Runtime with history in memory;
 - `kept` or `durable` with no persistent history store: files under `dataDir` by default, or an explicit one such as `httpHistory`;
-- a part that keeps local recovery bookkeeping, such as the local working environment's record of running commands, with no `dataDir` to keep it in;
+- under `kept` or `durable`, a part whose local recovery bookkeeping must survive a restart, such as the local working environment's record of running commands, with no `dataDir` to keep it in;
 - a Runtime that does not declare `continuesAfterRestart` under `durable`.
 
 The agent's [declaration](../contracts.md#declaration) states what it chose, so a client knows whether to expect a turn to continue after a restart.

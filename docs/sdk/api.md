@@ -16,7 +16,7 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | Option | Type | Default |
 |---|---|---|
 | `project` | path | the current directory |
-| `dataDir` | path | none; required when the durability or a plugin keeps anything on disk |
+| `dataDir` | path | none. Required when a part's local bookkeeping must survive a restart, or when `kept` or `durable` uses the default file history. Under `ephemeral` the SDK puts such bookkeeping in a scratch folder it removes with the agent. |
 | `durability` | `ephemeral`, `kept` or `durable` | `ephemeral`; see [Durability](placement.md#durability) |
 | `history` | a history store | chosen by `durability`: memory, or files under `dataDir` |
 | `runtime` | a Runtime | chosen by `durability` |
@@ -37,7 +37,7 @@ Each SDK provides constructors for the parts it ships: `transientRuntime()`, `du
 
 Each option that names a part is shorthand for a plugin that provides it. `providers`, `tools`, `environment` and the rest are added before `plugins`, in the order of this table, so an explicit plugin can [replace](#replacing-a-part) one of them.
 
-`createAgent` raises `invalid_composition` for a combination the [durability](placement.md#durability) rules forbid, `kept` or `durable` with no persistent history store, a part that keeps local recovery bookkeeping (such as the local working environment) with no `dataDir`, `pluginHost: false` together with `processPlugins`, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. A plugin or process plugin that fails to start, including a program that cannot be run or exits before registering, fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
+`createAgent` raises `invalid_composition` for a combination the [durability](placement.md#durability) rules forbid, `kept` or `durable` with no persistent history store, a part that needs local recovery bookkeeping to survive a restart (such as the local working environment under `kept` or `durable`) with no `dataDir`, `pluginHost: false` together with `processPlugins`, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. A plugin or process plugin that fails to start, including a program that cannot be run or exits before registering, fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
 
 ## The agent
 
@@ -60,9 +60,9 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | Key | Value |
 |---|---|
 | `continuesAfterRestart` | true under `durable`; false otherwise ([Durability](placement.md#durability)) |
-| `waitingThroughRestart` | false |
-| `queuedInputAfterRestart` | from the Runtime's recovery policy; `handedBack` for both shipped Runtimes |
-| `queuedJobReportsAfterRestart` | from the Runtime's recovery policy; omitted when it equals `queuedInputAfterRestart` |
+| `waitingThroughRestart` | true only when the chosen durable Runtime and the host re-ask an interrupted in-turn question on recovery ([ACP](../bindings/acp.md#questions)); otherwise false |
+| `queuedInputAfterRestart` | the policy the agent implements for queued input on reopen; `handedBack` with the shipped parts |
+| `queuedJobReportsAfterRestart` | the policy the agent implements for queued job reports on reopen; omitted when it equals `queuedInputAfterRestart` |
 | `portableSessions` | true under `kept` and `durable`, whose stores keep the shared format; false under `ephemeral` |
 | `inputDuringTurn` | true: both Runtimes take steering |
 | `forking` | true |
@@ -82,7 +82,7 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `erasureDuringTurn` | `refused` |
 | `commandContainment` | the containment the working environment declares for the current platform. `strong` only where it confirms that every descendant of a command stops; `processGroup` where it contains only the command's process group. Never inferred from the environment's name. |
 | `confinesFiles` | from the working environment. False for the local one: it resolves paths against the project but does not refuse ones that lead outside it. True for the testing kit's memory environment, which has no other files. |
-| `nestedToolCalls` | true only if the host and the Runtime both run nested calls in the chosen placement |
+| `nestedToolCalls` | true only if the host and the Runtime path both run nested calls in the chosen placement. For a served Runtime the host decides from its own Runtime bridge, which settles nested calls; the plugin binding's `RuntimeSupports` has no flag for it, and no private wire field may stand in for one. |
 
 The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check these values.
 
@@ -267,7 +267,7 @@ A **Tool** has a definition and a function:
 | `presentation` | none |
 | `inProcessOnly` | false; see [Plugins](#plugins) |
 
-`input` and `output` are the SDK's names for the definition's `parameters` and `returns`. On the wire, in history and in every ToolDefinition the SDK exposes, they are `parameters` and `returns`. In a serialized ToolDefinition the four hints are members of `hints`; `parallel` and `callers` are top-level fields. The SDK checks a call's input against `parameters` before the function runs, and a completed result's `value` against `returns`; invalid input ends the call `failed` with a readable reason.
+`input` and `output` are the SDK's names for the definition's `parameters` and `returns`. On the wire, in history and in every ToolDefinition the SDK exposes, they are `parameters` and `returns`. In a serialized ToolDefinition the four hints are members of `hints`; `parallel` and `callers` are top-level fields. The SDK checks a call's input against `parameters` before the function runs, and, after `tool.after`, a completed result's `value` against `returns`. Invalid input ends the call `failed` with a readable reason. If result processing fails, for example because `tool.after` produced an invalid value, the invalid value is never exposed: the call keeps a minimal safe result with its confirmed status, and the enclosing operation fails ([Settlement](../contracts.md#settlement)).
 
 The function receives the input, already checked against the schema and converted to the language's type, and a [tool context](#contexts). What it returns becomes the ToolResult:
 
@@ -312,7 +312,7 @@ A **Provider** has:
 
 `request` reports output as it arrives with `context.piece(type, delta, toolCallId?)`, then returns the complete AssistantMessage.
 
-A model failure after the request is admitted, including credentials the model service rejects, is an AssistantMessage with stop `failed` and a ModelError whose `kind` is `temporary`, `contextTooLarge`, `credentials`, `refused` or `other`. A Provider may raise the language's error carrying a ModelError instead; the SDK turns it into that AssistantMessage, in process and over the wire alike. The SDK refuses an unknown model before the request is admitted, with `invalid_request`. After admission, an error raised without a ModelError is recorded as a failed AssistantMessage with kind `other`; it never turns a settled model attempt into an input error.
+A model failure after the request is admitted, including credentials the model service rejects, is an AssistantMessage with stop `failed` and a ModelError whose `kind` is `temporary`, `contextTooLarge`, `credentials`, `refused` or `other`. A Provider may raise the language's error carrying a ModelError instead; the SDK turns it into that AssistantMessage, in process and over the wire alike. The SDK refuses an unknown model before the request is admitted, with `invalid_request` at the embedded and plugin Provider boundaries; the ACP Interface refuses an unknown model setting with ACP's `invalid_params`. After admission, an error raised without a ModelError is recorded as a failed AssistantMessage with kind `other`; it never turns a settled model attempt into an input error.
 
 The Provider gets its credential through `context.credential()`; it never receives one in configuration. In process, a Provider can also run tools itself, hold a live session or answer late. Those are in-process only ([Model request and response](../contracts.md#model-request-and-response)).
 

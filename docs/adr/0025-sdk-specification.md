@@ -52,6 +52,10 @@ All four SDKs were built from draft 0.1, each wrapping its language's base. Ever
 - **Event lag, structured results, the `restart` helper, `serveHistory` and Provider errors** each got a precise rule.
 - **Four scenarios** were added: a tool's own refusal, invalid input, a nested call, and read-only tools under `ask`.
 
+## The second build round
+
+Each SDK was brought to the revised draft and the eleven scenarios; Python and TypeScript and Go brought their bases to the [edition 4 draft](0023-edition-4-draft.md) for nested calls. The full matrix then passed 220 runs, and every SDK's own suite and kit runs passed. Three builders independently found that the revised `dataDir` rule rejected the default ephemeral agent, whose command bookkeeping lives in scratch; the rule now applies only where bookkeeping must survive a restart. The other changes: an unknown model is `invalid_params` over ACP; a `tool.after` that produces an invalid value settles safely without exposing it; a served Runtime's nested-call support and queued-input policy are decided by the host, since the plugin binding's `RuntimeSupports` carries no flag for them; and a volatile memory store cannot be served as a conforming history service.
+
 ## Consequences
 
 - **Rust starts.** The Rust workspace splits into the `modular-agent` core crate, official plugin crates, a testing module, a fixture program and a scenario runner. The standard configuration moves onto the public API.
