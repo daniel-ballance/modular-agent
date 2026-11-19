@@ -9,13 +9,13 @@ export const definitions = {
           "type": "string",
           "description": "Path to the file to read (relative or absolute)"
         },
-        "offset": {
-          "type": "number",
-          "description": "Line number to start reading from (1-indexed)"
-        },
         "limit": {
           "type": "number",
           "description": "Maximum number of lines to read"
+        },
+        "offset": {
+          "type": "number",
+          "description": "Line number to start reading from (1-indexed)"
         }
       },
       "required": [

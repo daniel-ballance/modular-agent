@@ -1698,12 +1698,13 @@ export class Harness {
 					// unambiguously matched messages belonging to the selected Provider.
 					const originals = options.exactReplay ? [] : modelView(s.branch(), turnId, scope.provider)
 						.map(message => ({ message, readable: withoutProviderData(message) }));
+					const readable = options.exactReplay ? [] : prepared.request.messages.map(withoutProviderData);
+					const unchanged = readable.length === originals.length && readable.every((message, i) => isDeepStrictEqual(message, originals[i].readable));
 					const dispatched = options.exactReplay ? prepared.request : { ...prepared.request,
-						messages: prepared.request.messages.map(message => {
-							const readable = withoutProviderData(message);
-							if (message.role !== "assistant") return readable;
-							const matches = originals.filter(candidate => isDeepStrictEqual(candidate.readable, readable));
-							return matches.length === 1 ? matches[0].message : readable;
+						messages: unchanged ? originals.map(({ message }) => message) : readable.map(message => {
+							if (message.role !== "assistant") return message;
+							const matches = originals.filter(candidate => isDeepStrictEqual(candidate.readable, message));
+							return matches.length === 1 ? matches[0].message : message;
 						}),
 					};
 					const [intent] = await this.commit(s, [{
@@ -2400,7 +2401,7 @@ export class Harness {
 							queued = { id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key: `job:${job.id}`, kind: "input",
 								startedBy: { kind: "job", id: job.id }, sources: [end.id!], content: content ?? [] };
 							drafts.push({ kind: "inputAccepted", writer: "harness", modelVisible: false, inputId: queued.id, actorId: queued.actorId, jobId: job.id,
-								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: queued.when, taken: queued.when, parked: queued.when === "propose" } });
+								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose" } });
 						}
 						await this.commit(s, drafts);
 						job.state = state;
@@ -2545,7 +2546,7 @@ class Follower {
 			const data = entry.data as { request?: ModelRequest } | undefined;
 			event = { ...event, data: { ...entry,
 				...(entry.message ? { message: withoutProviderData(entry.message) } : {}),
-				...(entry.kind === "modelRequest" && data?.request ? { data: { ...data, request: {
+				...(entry.kind === "modelRequest" && data?.request && Array.isArray(data.request.messages) ? { data: { ...data, request: {
 					...data.request, messages: data.request.messages.map(withoutProviderData),
 				} } } : {}),
 			} };

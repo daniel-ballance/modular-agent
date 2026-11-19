@@ -8,7 +8,7 @@ export type McpServerConfig =
   | { command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
   | { url: string; headers?: Record<string, string> };
 
-interface Connection { client: McpClient; tools: Tool[] }
+interface Connection { client: McpClient; tools: Tool[]; unsubscribe?: () => void }
 interface Options {
   /** Resolve the servers independently for each session's actual project. */
   servers(project: string): Promise<Record<string, McpServerConfig>>;
@@ -26,35 +26,55 @@ export function standardMcpTools(options: Options) {
     connections.delete(id);
     if (list) {
       changed();
-      await Promise.allSettled(list.map(c => c.client.close()));
+      await Promise.allSettled(list.map(c => { c.unsubscribe?.(); return c.client.close(); }));
     }
   };
   async function attach(id: string, project: string, servers: Record<string, McpServerConfig>) {
     let current = connections.get(id);
     if (!current) connections.set(id, current = []);
-    const names = new Set(current.flatMap(c => c.tools.map(t => t.definition.name)));
     for (const [server, config] of Object.entries(servers)) {
       const client = new McpClient({ name: "modular-agent", version: "0.1.0", roots: [{ uri: pathToFileURL(project).href, name: "project" }] });
       try {
         await client.connect("url" in config ? new StreamableHttpTransport({ url: config.url, headers: config.headers })
           : new StdioTransport({ command: config.command, args: config.args, env: config.env, cwd: config.cwd ?? project, stderr: "pipe" }));
-        const pending = new Map<string, Tool>();
-        for (const entry of await client.listTools()) {
-          const name = `mcp_${server}__${entry.name}`;
-          if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name) || !entry.name || names.has(name) || pending.has(name)) throw new Error(`invalid MCP tool name ${name}`);
-          const a = entry.annotations;
-          pending.set(name, tool({ name, description: entry.description ?? entry.name,
-            input: normalizeMcpInputSchema(entry.inputSchema) as Exclude<JSONSchema, boolean>, readOnly: a?.readOnlyHint, destructive: a?.destructiveHint,
-            openWorld: a?.openWorldHint, inProcessOnly: true,
-            async run(input, ctx) {
-              const res = await client.callTool(entry.name, input as Record<string, unknown>, { signal: ctx.cancelled });
-              const limited = await limitMcpContent(toLlmContent(res));
-              return { status: res.isError ? "failed" : "completed", content: limited.content as Content, value: res.structuredContent };
-            } }));
-        }
+        const connection: Connection = { client, tools: [] };
+        const refresh = async () => {
+          const entries = await client.listTools();
+          if (connections.get(id) !== current) return;
+          const names = new Set(current!.filter(c => c !== connection).flatMap(c => c.tools.map(t => t.definition.name)));
+          const pending = new Map<string, Tool>();
+          for (const entry of entries) {
+            const name = `mcp_${server}__${entry.name}`;
+            if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name) || !entry.name || names.has(name) || pending.has(name)) throw new Error(`invalid MCP tool name ${name}`);
+            const a = entry.annotations;
+            pending.set(name, tool({ name, description: entry.description ?? entry.name,
+              input: normalizeMcpInputSchema(entry.inputSchema) as Exclude<JSONSchema, boolean>, readOnly: a?.readOnlyHint, destructive: a?.destructiveHint,
+              openWorld: a?.openWorldHint, inProcessOnly: true,
+              async run(input, ctx) {
+                const res = await client.callTool(entry.name, input as Record<string, unknown>, { signal: ctx.cancelled });
+                const limited = await limitMcpContent(toLlmContent(res));
+                return { status: res.isError ? "failed" : "completed", content: limited.content as Content, value: res.structuredContent };
+              } }));
+          }
+          connection.tools = [...pending.values()];
+        };
+        await refresh();
         if (connections.get(id) !== current) { await client.close(); return; }
-        for (const name of pending.keys()) names.add(name);
-        current.push({ client, tools: [...pending.values()] });
+        current.push(connection);
+        let refreshes = Promise.resolve();
+        connection.unsubscribe = client.onNotification("notifications/tools/list_changed", () => {
+          refreshes = refreshes.then(async () => {
+            if (connections.get(id) !== current || !current!.includes(connection)) return;
+            try { await refresh(); }
+            catch (error) {
+              warn(`MCP server ${server}: ${error instanceof Error ? error.message : String(error)}`);
+              current!.splice(current!.indexOf(connection), 1);
+              connection.unsubscribe?.();
+              await client.close().catch(() => {});
+            }
+            changed();
+          });
+        });
         changed();
       } catch (error) {
         warn(`MCP server ${server}: ${error instanceof Error ? error.message : String(error)}`);

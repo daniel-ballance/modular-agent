@@ -82,9 +82,15 @@ recurse()`);
 });
 
 test("codemode dispatches no more than 500 nested calls", async t => {
-  const { result } = await sandbox(t, "for _ in range(501):\n    tools.fixture()");
+  const { result } = await sandbox(t, `for _ in range(500):
+    describe_tool('fixture')
+    search_tools('fixture')
+    tools.fixture()
+print('reached exactly 500')
+tools.fixture()`);
   const r = await result();
   assert.equal(r.status, "failed");
+  assert.match(r.text(), /reached exactly 500\n/);
   assert.match(r.text(), /more than 500 function calls/);
 });
 
@@ -209,8 +215,14 @@ test("Streamable HTTP MCP expands config values and skips a whole invalid catalo
 });
 
 test("ACP attaches a client MCP server to its own project and honors project settings", { timeout: 10_000 }, async t => {
-  const p = await project(t), work = join(p.work, "nested");
-  await p.put(join(work, ".modular-agent.json"), '{"model_tools":null}');
+  const p = await project(t), work = join(p.dir, "other-project"), untrusted = join(p.dir, "untrusted");
+  await p.put(join(work, ".modular-agent.json"), '{"model_tools":null,"plugins":[{"command":"must-not-run"}]}');
+  const fixturePath = join(root, "conformance/reference/mcp-fixture.mjs");
+  const config = JSON.stringify({ mcpServers: { project: { command: process.execPath, args: [fixturePath] } } });
+  await p.put(join(work, ".mcp.json"), config);
+  await p.put(join(untrusted, ".mcp.json"), config);
+  await p.put(join(untrusted, ".modular-agent.json"), '{"model_tools":null}');
+  await p.run("--project", work, "--trust-project", "mcp");
   await p.put(p.script, JSON.stringify([{ toolCalls: [{ name: "mcp_host__echo", input: { text: "tides" } }] }, { text: "ok" }]));
   const child = spawn(process.execPath, [cli, "--acp"], { cwd: p.work, env: p.env, stdio: ["pipe", "pipe", "pipe"] });
   t.after(() => { child.stdin.end(); child.kill(); });
@@ -231,13 +243,19 @@ test("ACP attaches a client MCP server to its own project and honors project set
   }
   await request("initialize", { protocolVersion: 1 });
   const opened = await request("session/new", { cwd: work, mcpServers: [{ name: "host", command: process.execPath,
-    args: [join(root, "conformance/reference/mcp-fixture.mjs")], env: [] }] }) as { sessionId: string };
+    args: [fixturePath], env: [] }] }) as { sessionId: string };
+  const other = await request("session/new", { cwd: untrusted, mcpServers: [] }) as { sessionId: string };
   await request("session/prompt", { sessionId: opened.sessionId, prompt: [{ type: "text", text: "Echo" }] });
   await request("session/close", { sessionId: opened.sessionId });
+  await request("session/prompt", { sessionId: other.sessionId, prompt: [{ type: "text", text: "Echo" }] });
+  await request("session/close", { sessionId: other.sessionId });
   const requests = (await readFile(p.log, "utf8")).trim().split("\n").map(l => JSON.parse(l));
   assert.ok(requests[0].tools.includes("mcp_host__echo"));
   assert.ok(requests[0].system.includes(`<cwd>\n${work}\n</cwd>`));
   assert.equal(requests[1].messages.at(-1).text, "echo: tides");
+  assert.ok(requests[0].tools.includes("mcp_project__echo"));
+  assert.ok(requests[2].system.includes(`<cwd>\n${untrusted}\n</cwd>`));
+  assert.ok(!requests[2].tools.includes("mcp_project__echo") && !requests[2].tools.includes("mcp_host__echo"));
 });
 
 test("ma composes only the public SDK and official SDK plugin entry points", async () => {

@@ -150,9 +150,8 @@ async function main(argv: string[]) {
         return 0;
       }
       if (opts.resume && !opts.session) {
-        const candidates = await Promise.all(sessions.map(s => index.sessionInfo(s.id)));
-        candidates.sort((a, b) => b.updated - a.updated);
-        opts.session = candidates[0]?.id;
+        sessions.sort((a, b) => b.updated - a.updated);
+        opts.session = sessions[0]?.id;
         if (!opts.session) throw new Error("this folder has no saved session to continue");
       }
       const saved = await index.sessionInfo(opts.session!);

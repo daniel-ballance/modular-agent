@@ -41,48 +41,40 @@ npm ci --prefix conformance/acp
 node conformance/reference/run.mjs --agent typescript
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
+MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
 ```
 
-- Reference checks: **12/12**, including durable and transient crash recovery.
-- ACP against `ma`: **116/116** default; **123/123** with crash checks.
-- TypeScript workspace: **185/185** tests in each of the normal and `MA_REMOTE` placements, including **19/19** `ma` tests. The `ma` tests cover the Rust credential-file format, lock exclusion during refresh, browser and device sign-in, Responses requests, codemode calls and limits, file tools, prompt wording and ordering, skills, stdio and HTTP MCP, ACP session MCP, terminal queueing and SDK-only imports.
-- Claude sidecar: **44/44**; one further `ma` smoke run with the sidecar's fake SDK completed. Sign-in and Responses request tests used numeric loopback endpoints only. No real sign-ins, credentials or models were used.
-- `tsc -b` and `git diff --check` pass. There is no separate TypeScript lint or formatting command in this workspace.
+- Reference checks: **15/15**, including declaration, JSON events, prompt tail and both crash-recovery modes.
+- ACP against `ma`: **87/87** default, **94/94** with crash checks, and **184/184** with crash, probe and job checks together. The last run includes late answers and job take-up after a crash. The default run exercises fewer checks than the previous SDK declaration, which advertised several actors, tenants and output holding.
+- TypeScript workspace: **186/186** in both the normal and `MA_REMOTE` placements, including **19/19** `ma` tests. Each workspace run includes **22/22** shared SDK scenarios across embedded and TypeScript process fixtures (the built fixture in this checkout). The `ma` tests cover Rust-format credentials, lock exclusion during refresh, loopback sign-in and Responses requests, codemode limits, file tools, prompt order, skills, stdio and HTTP MCP, per-project ACP settings and trust, terminal queueing and SDK-only imports.
+- Claude sidecar: **44/44**. No real sign-ins, credentials or models were used.
+- `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
 ## Known gaps
 
-- Tested on Linux. On platforms without a compatible `flock`, Claude and scripted runs still work, but subscription credential changes and refreshes fail rather than using a different, incompatible locking scheme.
-- The SDK installs process Providers when it creates an agent. A terminal run started without the Claude sidecar cannot switch into Claude with `/model`; restart with `--model claude/ID`. `ma models` and normal ACP load the sidecar when it is installed so the catalog is available. See the [sidecar's own gaps](../../sidecars/claude/README.md#known-gaps-and-open-problems).
-- On ACP load or resume, project-configured MCP servers connect before turn recovery, but servers supplied on the ACP request attach only after recovery is installed. A turn already resuming may not be able to call those client-supplied servers.
-- `find` honors `.gitignore` files at or below the search root. It does not read parent or global Git ignore rules, `.ignore`, or `.git/info/exclude`, and its glob parser is not Rust's `globset`. Platform filesystem errors and Monty's traceback display can also differ from Rust.
-- Standard MCP tool lists are discovered when the server connects. Changes announced after connect do not refresh the catalog until the session reopens.
+- Tested on Linux. Subscription credential changes and refreshes need a compatible `flock`; without one they fail rather than using an incompatible lock.
+- The terminal cannot switch to Claude unless it started the sidecar. In ACP, a project composition that did not start the sidecar does not offer Claude. Reopen with saved Claude settings or launch with `--model claude/ID`. See the [sidecar's own gaps](../../sidecars/claude/README.md#known-gaps-and-open-problems).
+- `find` honors `.gitignore` files at or below its search root, but not parent or global Git rules, `.ignore` or `.git/info/exclude`. Its glob parser, filesystem diagnostics and Monty's tracebacks can differ from Rust.
 
 ## Findings for docs/reference and docs/sdk
 
-Proposed replacements; the shared documents are unchanged in this branch.
+Proposed replacement text; the shared documents are unchanged in this branch.
 
-**Reference — `--trust-project`.** Rust standard reads project defaults independently of trust and does not install the general base plugin plan. Replace the option's Meaning cell with:
+**Reference — Checks.** Replace the ACP-kit bullet with:
 
-> Use this project's `.mcp.json` and remember the decision in `trusted-projects.json` in the configuration folder. `.modular-agent.json` supplies session defaults; it does not start plugins in the standard configuration.
+> the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp`, with the default options and with `--crash-checks --probe-checks --job-checks` to exercise recovered turns, late answers and job take-up;
 
-**Reference — tools and limits.** Rust `find` and `list` accept a `limit`. Replace their Input cells with `pattern`, `path?`, `limit?` and `path?`, `limit?`, respectively. Replace “The prompt describes up to twelve functions in full and lists the rest by name” with:
+**SDK — ACP factory.** Replace the `compose(project)` option sentence with:
 
-> The prompt describes every function in full when there are at most twelve. Above twelve, it lists every signature with the first line of its description, cut to 160 characters.
+> `compose(project, saved?)` builds an Agent for a canonical project the client names. For a load or resume, the host can pass the saved session metadata to select parts before recovery. The serving agent's history indexes the sessions that its project compositions open. Without `compose`, the agent refuses other project paths.
 
-**Reference — date.** The Rust prompt supplied for this work ends at `<cwd>` and has no date tag. To keep the documented date and make it testable, replace the end of the prompt-order bullet with:
+**SDK — Declaration choices.** Add these rows to the `createAgent` option table:
 
-> … the `codemode` functions, a `<cwd>` section containing the absolute project path, and a `<date>` section containing the current date in UTC (`YYYY-MM-DD`).
+| Option | Type | Default |
+|---|---|---|
+| `questionsOutlastTurns` | boolean | false. Enables both `questionsOutlastTurns` and `lateAnswersStartTurns`. |
+| `settingsDuringTurn` | `nextTurn` or `refused` | `nextTurn`. With `refused`, changing settings during a running turn raises `busy`. |
 
-**SDK — call contexts.** Append to the call context table in the API specification:
+**SDK — Command time units.** In the scoped environment row, replace `exec(command, { timeout })` with:
 
-> In-process hook and command handlers may declare `inProcessOnly` and read the current session's canonical project and tool definitions through their call context. This is a snapshot, does not grant dispatch authority, and is unavailable without a live session or over the plugin binding.
-
-**SDK — Sessions and turns.** Append to the session methods:
-
-> `waitForIdle()` waits for the running turn and admitted follow-up inputs. `agent.savedSession(id)` reads a kept session's project, settings, creation and most recent record times without opening the session or starting recovery.
-
-**SDK — ACP and official plugins.** Append to the Interfaces and SDK-includes descriptions:
-
-> An ACP host can supply initial session settings scoped to the client's project and attach MCP servers scoped to a session. The binding checks tool rights before attaching client-supplied servers. Do not keep their headers or environment values in session history. A composition without approval does not advertise an approval option.
-
-> Export the file and command tools, a session-scoped MCP client, and context compaction (including its command) as official SDK parts. An app can compose these without importing a base-build API.
+> `exec(command, { timeout })`, with `timeout` in milliseconds,

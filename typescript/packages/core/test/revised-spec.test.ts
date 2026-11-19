@@ -3,7 +3,44 @@ import { test } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgent, definePlugin, fileHistory, memoryHistory, ModelFailure, tool, transientRuntime } from "../src/index.js";
+import { createAgent, definePlugin, fileHistory, memoryHistory, ModelFailure, tool, transientRuntime, type Provider } from "../src/index.js";
+
+test("opaque response data reaches only its Provider, even after reopening", async t => {
+  const project = await mkdtemp(join(tmpdir(), "ma-opaque-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const opaque = "private-response-marker";
+  const seen: [string, string][] = [];
+  const provider = (id: string): Provider => ({ id, supports: { keepsState: false, safeToRepeat: true },
+    models: () => [{ provider: id, id: "test", contextWindow: 4000, maxOutput: 512, reasoning: true, input: ["text"] }],
+    request(_model, request) {
+      seen.push([id, JSON.stringify(request)]);
+      return { role: "assistant", stop: "finished", content: [{ type: "text", text: `${id} ${seen.length}` },
+        { type: "reasoning", text: "readable", providerData: opaque }], providerData: opaque };
+    },
+  });
+  let prepared = 0;
+  const plugin = definePlugin({ name: "test.prepare", setup(r) {
+    r.on("session.prepare", ({ project: actual }) => { assert.equal(actual, project); prepared++; });
+  } });
+  const options = { project, dataDir: project, durability: "kept" as const, model: "a/test", plugins: [plugin], providers: [provider("a"), provider("b")] };
+  const first = await createAgent(options);
+  const session = await first.session();
+  await session.prompt("First");
+  await first.close();
+  const second = await createAgent(options);
+  t.after(() => second.close());
+  assert.equal((await second.sessionInfo(session.id)).settings.model && (await second.sessions())[0].model?.provider, "a");
+  assert.equal(prepared, 1);
+  const reopened = await second.openSession(session.id);
+  await reopened.prompt("Same Provider");
+  await reopened.setSetting("model", "b/test");
+  await reopened.prompt("Different Provider");
+  await reopened.waitIdle();
+  assert.equal(prepared, 2);
+  assert.match(seen[1][1], /private-response-marker/);
+  assert.doesNotMatch(seen[2][1], /private-response-marker/);
+  assert.doesNotMatch(JSON.stringify(await reopened.history()), /private-response-marker/);
+});
 import { answers, memoryEnvironment, overWire, scriptedProvider, testAgent } from "../src/testing.js";
 
 const input = { type: "object", properties: { amount: { type: "number" } }, required: ["amount"] } as const;

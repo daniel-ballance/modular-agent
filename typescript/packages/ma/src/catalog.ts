@@ -26,7 +26,7 @@ export function catalog(tools: ToolDefinition[]) {
     const name = t.name.replace(/[^a-zA-Z0-9_]/gu, "_").replace(/^(?=\d)/, "_") || "_";
     const required = (t.parameters.required ?? []) as string[];
     const properties = (t.parameters.properties ?? {}) as Record<string, Schema>;
-    const params = [...required, ...Object.keys(properties).sort().filter(k => !required.includes(k))];
+    const params = [...required, ...Object.keys(properties).filter(k => !required.includes(k))];
     const signature = `tools.${name}(${params.map(k => `${k}: ${pythonType(properties[k])}${required.includes(k) ? "" : " = None"}`).join(", ")})`;
     const description = t.description;
     const doc = { name, signature, description };
