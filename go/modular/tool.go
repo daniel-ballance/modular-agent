@@ -243,8 +243,10 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 	tc.Environment = ToolEnvironment{tc: tc, project: session.Project}
 	if s.server != nil {
 		tc.Environment.port = s.server.HostEnvironment()
-	} else if v, err := s.a.Get("working-environment"); err == nil {
-		tc.Environment.port, _ = v.(api.WorkingEnvironment)
+	} else if s.a != nil {
+		if v, err := s.a.Get("working-environment"); err == nil {
+			tc.Environment.port, _ = v.(api.WorkingEnvironment)
+		}
 	}
 	defer tc.settled.Store(true)
 	tc.ask = func(ctx context.Context, q Question, wait time.Duration) (Answer, error) {

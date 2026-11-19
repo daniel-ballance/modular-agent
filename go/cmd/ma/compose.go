@@ -16,6 +16,7 @@ import (
 	"github.com/OWNER/modular-agent/go/cmd/ma/internal/subscription"
 	"github.com/OWNER/modular-agent/go/modular"
 	"github.com/OWNER/modular-agent/go/modular/files"
+	"github.com/OWNER/modular-agent/go/modular/mcp"
 	"github.com/OWNER/modular-agent/go/modular/modulartest"
 )
 
@@ -48,7 +49,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		return modular.New(ctx, append(opts, modular.WithConformanceFixtures(), modular.WithTool(files.FixtureBash()), modular.WithTool(files.Tools("")[0]))...)
 	}
 	var agent *modular.Agent
-	opts = append(opts, modular.WithMCP(d.mcp(o.project, stderr), func(err error) { fmt.Fprintln(stderr, err) }),
+	opts = append(opts, mcp.WithServers(d.mcp(o.project, stderr), func(err error) { fmt.Fprintln(stderr, err) }),
 		modular.WithPlugin(files.Plugin(filepath.Join(d.state, "output"))), modular.WithTool(codemode.Tool(codemode.StandardLimits())),
 		modular.WithInputTransform(func(_ context.Context, c modular.Content) (modular.Content, error) {
 			if !strings.HasPrefix(c.Text(), "/skill:") {

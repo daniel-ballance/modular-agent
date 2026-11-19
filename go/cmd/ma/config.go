@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,19 +63,36 @@ func (d layout) settings(project string) (modular.Settings, error) {
 	}
 	return settings, nil
 }
-func (d layout) trustFile(project string) string {
-	return filepath.Join(d.config, "trusted", fmt.Sprintf("%x", sha256.Sum256([]byte(project))))
-}
+func (d layout) trustLedger() string { return filepath.Join(d.config, "trusted-projects.json") }
 func (d layout) trust(project string) error {
-	p := d.trustFile(project)
-	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+	ledger := map[string]bool{}
+	if err := readJSON(d.trustLedger(), &ledger); err != nil {
 		return err
 	}
-	return os.WriteFile(p, []byte(project), 0600)
+	if ledger == nil {
+		ledger = map[string]bool{}
+	}
+	ledger[project] = true
+	if err := os.MkdirAll(d.config, 0700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(d.config, ".trusted-projects-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if err = writeJSON(f, ledger, true); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), d.trustLedger())
 }
 func (d layout) trusted(project string) bool {
-	b, err := os.ReadFile(d.trustFile(project))
-	return err == nil && string(b) == project
+	var ledger map[string]bool
+	return readJSON(d.trustLedger(), &ledger) == nil && ledger[project]
 }
 
 var envVar = regexp.MustCompile(`\$\{([^}]+)\}`)
