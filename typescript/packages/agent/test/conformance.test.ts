@@ -11,8 +11,9 @@ const repo = fileURLToPath(new URL("../../../../", import.meta.url));
 const kit = `${repo}conformance/acp/run.mjs`;
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
-test("this agent passes the ACP binding's conformance kit", () => {
+test("this agent passes the ACP binding's conformance kit", t => {
 	const run = spawnSync(process.execPath, [kit, "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 120_000 });
+	t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
 	const failures = run.stdout.split("\n").filter((l) => l.startsWith("FAIL"));
 	assert.equal(run.status, 0, `${failures.join("\n")}\n${run.stdout.split("\n").at(-2)}\n${run.stderr.slice(-500)}`);
 });
@@ -28,20 +29,22 @@ async function startHistoryService(): Promise<{ url: string; tokenFile: string; 
 	return { url, tokenFile, stop: () => child.kill("SIGTERM") };
 }
 
-test("this build's history service passes the history binding's conformance kit", async () => {
+test("this build's history service passes the history binding's conformance kit", async t => {
 	const svc = await startHistoryService();
 	try {
 		const run = spawnSync(process.execPath, [`${repo}conformance/history/run.mjs`, svc.url, svc.tokenFile], { encoding: "utf8", timeout: 60_000 });
+		t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
 		assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
 	} finally {
 		svc.stop();
 	}
 });
 
-test("this agent passes the ACP kit with its history in a history service", async () => {
+test("this agent passes the ACP kit with its history in a history service", async t => {
 	const svc = await startHistoryService();
 	try {
 		const run = spawnSync(process.execPath, [kit, "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 120_000, env: { ...process.env, MODULAR_AGENT_HISTORY_URL: svc.url, MODULAR_AGENT_HISTORY_TOKEN_FILE: svc.tokenFile } });
+		t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
 		assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
 	} finally {
 		svc.stop();
@@ -50,23 +53,26 @@ test("this agent passes the ACP kit with its history in a history service", asyn
 
 const servePlugin = fileURLToPath(import.meta.resolve("@modular-agent/plugin-wire").replace(/index\.js$/, "serve-cli.js"));
 
-test("this build's conformance plugin passes the plugin binding's kit", () => {
+test("this build's conformance plugin passes the plugin binding's kit", t => {
 	const run = spawnSync(process.execPath, [`${repo}conformance/plugin/run.mjs`, "--", process.execPath, servePlugin], { encoding: "utf8", timeout: 120_000 });
+	t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
 	assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
 });
 
-test("this agent passes the ACP kit hosting its Provider, tools, environment and hooks as two external plugins", () => {
+test("this agent passes the ACP kit hosting its Provider, tools, environment and hooks as two external plugins", t => {
 	const plugins = [
 		{ command: [process.execPath, servePlugin], env: { MODULAR_AGENT_PLUGIN_PARTS: "provider,hooks" } },
 		{ command: [process.execPath, servePlugin], env: { MODULAR_AGENT_PLUGIN_PARTS: "tools,environment" } },
 	];
 	const run = spawnSync(process.execPath, [kit, "--plugin-checks", "--probe-checks", "--job-checks", "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 180_000, env: { ...process.env, MODULAR_AGENT_PLUGINS: JSON.stringify(plugins) } });
+	t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
 	assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
 });
 
-test("this agent survives kill -9 mid-turn with a durable Runtime served from another process", () => {
+test("this agent survives kill -9 mid-turn with a durable Runtime served from another process", t => {
 	const plugins = [{ command: [process.execPath, servePlugin], env: { MODULAR_AGENT_PLUGIN_PARTS: "durable-runtime" } }];
 	const run = spawnSync(process.execPath, [kit, "--crash-checks", "--job-checks", "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 240_000, env: { ...process.env, MODULAR_AGENT_PLUGINS: JSON.stringify(plugins) } });
+	t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
 	assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
 	assert.match(run.stdout, /PASS {2}crash: with continuesAfterRestart, the turn carried on and completed/);
 });

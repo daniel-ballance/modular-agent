@@ -9,13 +9,13 @@ import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, pluginSpecsFromEnv } from "@modular-agent/plugin-wire";
 import { acpInterface } from "@modular-agent/interface-acp";
-import { historyService, HttpHistoryStore } from "@modular-agent/services";
+import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
 import { type Provider } from "./provider.js";
 import type { Tool } from "./tool.js";
 import { asWorkingEnvironment, MemoryEnvironment } from "./environment.js";
-import { MemoryHistory, memoryStore } from "./history.js";
+import { MemoryHistory, memoryArchive, memoryStore } from "./history.js";
 import { wirePlugin } from "./serve.js";
 import { environmentCredentials } from "./parts.js";
 import { makeSession, type Session } from "./session.js";
@@ -46,22 +46,26 @@ export interface SessionOptions { settings?: Settings }
 export interface SessionInfo { id: string; project: string; created: number }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
 
-let fileDir: (store: FileHistory) => string;
+let fileArchive: (store: FileHistory) => HistoryArchive;
 let openHttpHistory: (store: HttpHistory) => Promise<HistoryStore>;
+let httpUpstream: (store: HttpHistory) => Promise<{ url: string; token: string }>;
 export class FileHistory {
-  #dir: string;
-  constructor(dir: string) { this.#dir = resolve(dir); }
-  static { fileDir = store => store.#dir; }
+  #archive: HistoryArchive;
+  constructor(dir: string) { this.#archive = new HistoryArchive(resolve(dir)); }
+  static { fileArchive = store => store.#archive; }
 }
 export class HttpHistory {
   #url: string;
   #tokenFile: string;
   constructor(url: string, tokenFile: string) { this.#url = url; this.#tokenFile = tokenFile; }
-  static { openHttpHistory = async store => {
-    const client = new HttpHistoryStore({ url: store.#url, token: await tokenFrom(store.#tokenFile) });
-    await client.initialize();
-    return client;
-  }; }
+  static {
+    httpUpstream = async store => historyClientOptions(store.#url, await tokenFrom(store.#tokenFile)) as { url: string; token: string };
+    openHttpHistory = async store => {
+      const client = new HttpHistoryStore(await httpUpstream(store));
+      await client.initialize();
+      return client;
+    };
+  }
 }
 async function tokenFrom(file: string): Promise<string> {
   const info = await stat(file);
@@ -69,12 +73,14 @@ async function tokenFrom(file: string): Promise<string> {
   return (await readFile(file, "utf8")).trim();
 }
 export const httpHistory = (url: string, tokenFile: string): HttpHistory => new HttpHistory(url, tokenFile);
-export async function serveHistory(store: FileHistory, options: { address: string; tokenFile: string }) {
+export async function serveHistory(store: FileHistory | MemoryHistory | HttpHistory, options: { address: string; tokenFile: string }) {
   return checked(async () => {
-    if (!(store instanceof FileHistory)) throw new AgentError("not_supported", "The base history service needs file history");
     const match = /^127\.0\.0\.1:(\d+)$/.exec(options.address);
     if (!match || Number(match[1]) > 65535) throw new AgentError("invalid_params", "Use a numeric loopback address: 127.0.0.1:port");
-    const service = await historyService({ dir: fileDir(store), port: Number(match[1]), token: await tokenFrom(options.tokenFile) });
+    const binding = { port: Number(match[1]), token: await tokenFrom(options.tokenFile) };
+    const service = store instanceof HttpHistory
+      ? await historyRelay({ ...binding, upstream: await httpUpstream(store) })
+      : await historyService({ ...binding, archive: store instanceof FileHistory ? fileArchive(store) : memoryArchive(store) });
     return { url: service.url, close: () => new Promise<void>((resolve, reject) =>
       service.server.close(error => error ? reject(error) : resolve())) };
   });
@@ -154,10 +160,11 @@ export class Agent {
       agent = new Agent(h, scratch, options.onQuestion);
       const settings = structuredClone(options.settings ?? {});
       if (options.approval !== undefined) settings.approval = options.approval;
-      const history = options.history ?? (durability === "ephemeral" ? memoryHistory() : fileHistory(join(home, "history")));
+      const history = options.history ?? (durability === "ephemeral" ? memoryHistory() : undefined);
       agent.#rebuild = () => Agent.#create({ ...options, history });
-      const store = history instanceof FileHistory ? new JsonlHistoryStore(fileDir(history))
-        : history instanceof HttpHistory ? await openHttpHistory(history) : memoryStore(history);
+      const store = history instanceof FileHistory ? fileArchive(history).store()
+        : history instanceof HttpHistory ? await openHttpHistory(history)
+        : history ? memoryStore(history) : new JsonlHistoryStore(join(home, "history"));
       await store.list();
       agent.#portable = !(history instanceof MemoryHistory);
       const core: BasePlugin = { name: "sdk.core", setup(api) {

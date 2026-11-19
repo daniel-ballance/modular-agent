@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { HistoryEntry, HistoryStore, StoredSession } from "@modular-agent/harness";
 import { count, encodeJson, equalJson, nonnegativeNumber, object, parseJson, type Json, type JsonObject } from "./history-json.js";
 
 export const HISTORY_BINDING = "modular-agent-history/1";
@@ -82,12 +83,15 @@ function page(prefix: string, rows: Iterable<Row>, limit: number): string {
 class Records {
 	private db: DatabaseSync;
 	private failed = false;
-	readonly holdUntil: number;
+	holdUntil = 0;
+	ttlEpoch = 0;
 
-	constructor(dir: string, ttl: number, readonly retention: number | null, private quota: number) {
-		mkdirSync(dir, { recursive: true, mode: 0o700 });
-		if (readdirSync(dir).some((name) => name.endsWith(".jsonl"))) throw new Error("Legacy history directory has no verifiable lease bound; use a fresh directory");
-		this.db = new DatabaseSync(join(dir, "history.sqlite"));
+	constructor(dir: string | undefined, ttl: number, readonly retention: number | null, private quota: number) {
+		if (dir !== undefined) {
+			mkdirSync(dir, { recursive: true, mode: 0o700 });
+			if (readdirSync(dir).some((name) => name.endsWith(".jsonl"))) throw new Error("Legacy history directory has no verifiable lease bound; use a fresh directory");
+		}
+		this.db = new DatabaseSync(dir === undefined ? ":memory:" : join(dir, "history.sqlite"));
 		try {
 			// The retained exclusive lock prevents two service processes from
 			// managing independent lease maps over the same store. FULL sync
@@ -101,14 +105,26 @@ class Records {
 				CREATE INDEX IF NOT EXISTS entry_order ON entries (session,seq);`);
 			const prior = this.db.prepare("SELECT value FROM settings WHERE key='ttl-bound'").get()?.value;
 			if (prior === undefined && this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get()) throw new Error("Stored TTL bound is missing");
-			if (prior !== undefined && (typeof prior !== "number" || !Number.isSafeInteger(prior) || prior <= 0)) throw new Error("Stored TTL bound is invalid");
+			if (prior !== undefined && (typeof prior !== "number" || !Number.isSafeInteger(prior) || prior < 0)) throw new Error("Stored TTL bound is invalid");
 			const bound = Math.max(prior ?? 0, ttl);
 			this.db.prepare("INSERT OR REPLACE INTO settings VALUES ('ttl-bound',?)").run(bound);
+			if (ttl > 0) this.bumpTtlEpoch();
+			else this.ttlEpoch = Number(this.db.prepare("SELECT value FROM settings WHERE key='ttl-epoch'").get()?.value ?? 0);
 			this.db.exec("COMMIT");
 			this.holdUntil = prior === undefined ? 0 : performance.now() + bound;
 		} catch (error) { this.db.close(); throw error; }
 	}
 	close() { this.db.close(); }
+	private bumpTtlEpoch() {
+		this.db.exec("INSERT INTO settings VALUES ('ttl-epoch',1) ON CONFLICT(key) DO UPDATE SET value=value+1");
+		this.ttlEpoch = Number(this.db.prepare("SELECT value FROM settings WHERE key='ttl-epoch'").get()!.value);
+	}
+	bindTtl(ttl: number) {
+		this.commit(() => {
+			this.db.prepare("UPDATE settings SET value=MAX(value,?) WHERE key='ttl-bound'").run(ttl);
+			this.bumpTtlEpoch();
+		});
+	}
 	check() { if (this.failed) throw unavailable(); }
 	private commit<T>(operation: () => T): T {
 		this.db.exec("BEGIN IMMEDIATE");
@@ -258,8 +274,110 @@ function bodyObject(raw: Buffer, expected: boolean): JsonObject {
 	return b;
 }
 
+/** One archive used directly by SDK agents or exposed through the history binding.
+ * Direct writers and the HTTP service exclude one another, even in memory. */
+export class HistoryArchive {
+	private records?: Records;
+	private exclusion?: { epoch: number; until: number };
+	private local = new Map<string, symbol>();
+	private remote?: { leased(id: string): boolean; ttl: number };
+	constructor(private dir?: string) {}
+
+	private db() {
+		if (!this.records) {
+			this.records = new Records(this.dir, 0, null, 100_000);
+			if (this.exclusion?.epoch === this.records.ttlEpoch) this.records.holdUntil = this.exclusion.until;
+			else this.exclusion = { epoch: this.records.ttlEpoch, until: this.records.holdUntil };
+		}
+		return this.records;
+	}
+	private idle() {
+		if (this.dir !== undefined && !this.remote && !this.local.size) { this.records?.close(); this.records = undefined; }
+	}
+	attach(leased: (id: string) => boolean, ttl: number) {
+		if (this.remote) throw new Error("This archive is already being served");
+		const records = this.db();
+		records.bindTtl(ttl);
+		this.remote = { leased, ttl };
+		return {
+			records,
+			localHeld: (id: string) => this.local.has(id),
+			detach: () => {
+				this.remote = undefined;
+				records.holdUntil = Math.max(records.holdUntil, performance.now() + ttl);
+				this.exclusion = { epoch: records.ttlEpoch, until: records.holdUntil };
+				this.idle();
+			},
+		};
+	}
+	store(): HistoryStore {
+		const owner = Symbol();
+		const expires = () => false;
+		const read = <T>(operation: (db: Records) => T): T => {
+			const db = this.db();
+			try { db.check(); return operation(db); }
+			finally { this.idle(); }
+		};
+		const known = (db: Records, id: string) => db.session(id, expires) ?? (() => { throw new BindingError(404, "not_found", "Unknown session"); })();
+		const ensureWriter = (id: string) => {
+			if (this.local.get(id) !== owner) throw new BindingError(409, "lost", "No history writer");
+		};
+		return {
+			supports: { portableSessions: this.dir !== undefined, erasure: true },
+			create: async ({ id, ...meta }) => read(db => db.put(id, parseJson(JSON.stringify(meta)) as JsonObject, expires)),
+			openForWriting: async id => read(db => {
+				known(db, id);
+				if (db.holdUntil > performance.now()) throw held(db.holdUntil);
+				if (this.remote?.leased(id) || (this.local.has(id) && this.local.get(id) !== owner)) {
+					throw held(performance.now() + (this.remote?.ttl ?? 100));
+				}
+				this.local.set(id, owner);
+			}),
+			checkWriter: ensureWriter,
+			close: async id => {
+				if (this.local.get(id) === owner) this.local.delete(id);
+				this.idle();
+			},
+			append: async (id, batch) => read(db => {
+				ensureWriter(id);
+				db.keep(known(db, id), parseJson(JSON.stringify(batch)) as JsonObject[], () => ensureWriter(id));
+			}),
+			load: async id => read(db => {
+				const row = known(db, id);
+				const entries: HistoryEntry[] = [];
+				let next: string | undefined;
+				do {
+					const page = JSON.parse(db.read(row, next, 500)) as { entries: HistoryEntry[]; next?: string };
+					entries.push(...page.entries);
+					next = page.next;
+				} while (next !== undefined);
+				return { meta: JSON.parse(row.json) as StoredSession, entries };
+			}),
+			list: async filter => read(db => {
+				const sessions: StoredSession[] = [];
+				let next: string | undefined;
+				do {
+					const page = JSON.parse(db.list(filter?.project, next, 500, expires)) as { sessions: StoredSession[]; next?: string };
+					sessions.push(...page.sessions);
+					next = page.next;
+				} while (next !== undefined);
+				return sessions;
+			}),
+			erase: async (id, targets) => read(db => {
+				const authorize = () => {
+					if (this.local.get(id) !== owner && (this.local.has(id) || this.remote?.leased(id) || db.holdUntil > performance.now())) {
+						throw held(Math.max(db.holdUntil, performance.now() + 100));
+					}
+				};
+				authorize();
+				db.erase(known(db, id), targets, authorize);
+			}),
+		};
+	}
+}
+
 export interface HistoryServiceOptions {
-	dir: string; token: string; port?: number; leaseMs?: number; retention?: number | null;
+	dir?: string; archive?: HistoryArchive; token: string; port?: number; leaseMs?: number; retention?: number | null;
 	/** Permanent ID reservations count toward this operator-supplied limit. */
 	maxSessions?: number;
 	/** Fault injection for the history client tests. */
@@ -273,7 +391,6 @@ export async function historyService(options: HistoryServiceOptions) {
 	for (const n of [ttlMs, quota, ...(retention === null ? [] : [retention])]) if (!Number.isSafeInteger(n) || n < 1) throw new Error("Invalid history service limit");
 	if (!/^[A-Za-z0-9._~+/\-]+=*$/.test(options.token)) throw new Error("Invalid history bearer token configuration");
 	const token = digest(`Bearer ${options.token}`);
-	const records = new Records(options.dir, ttlMs, retention, quota);
 	const leases = new Map<string, { owner: string; lease: string; expires: number }>();
 	let drop = options.dropAppendResponses ?? 0;
 	let pendingBodies = 0;
@@ -287,6 +404,10 @@ export async function historyService(options: HistoryServiceOptions) {
 		if (!l || l.lease !== lease) throw new BindingError(409, "lost", "Lease is not current");
 		return l;
 	}
+	if (options.archive && retention !== null) throw new Error("An attached SDK archive does not support service retention");
+	const attached = options.archive?.attach(sid => current(sid) !== undefined, ttlMs);
+	const records = attached?.records ?? new Records(options.dir, ttlMs, retention, quota);
+	const closeRecords = () => attached ? attached.detach() : records.close();
 	const expired = (s: Session) => retention !== null && !current(s.id) && Date.now() - s.changed >= retention;
 	const known = (sid: string) => records.session(sid, expired) ?? (() => { throw unknownSession(); })();
 	function send(res: ServerResponse, status: number, json: string) {
@@ -337,6 +458,7 @@ export async function historyService(options: HistoryServiceOptions) {
 					known(sid);
 					if (records.holdUntil > performance.now()) throw held(records.holdUntil);
 					const l = current(sid);
+					if (attached?.localHeld(sid)) throw held(performance.now() + ttlMs);
 					if (l && l.owner !== b.owner) throw held(l.expires);
 					const lease = l?.lease ?? randomBytes(16).toString("hex");
 					if (!l) leases.set(sid, { lease, owner: b.owner, expires: performance.now() + ttlMs });
@@ -366,6 +488,7 @@ export async function historyService(options: HistoryServiceOptions) {
 					const authorize = () => {
 						if (b.lease !== undefined) { requireLease(sid, b.lease); return; }
 						if (records.holdUntil > performance.now()) throw held(records.holdUntil);
+						if (attached?.localHeld(sid)) throw held(performance.now() + ttlMs);
 						const l = current(sid);
 						if (l) throw held(l.expires);
 					};
@@ -388,8 +511,8 @@ export async function historyService(options: HistoryServiceOptions) {
 			server.once("error", reject);
 			server.listen(options.port ?? 0, "127.0.0.1", () => { server.off("error", reject); resolve(); });
 		});
-	} catch (error) { records.close(); throw error; }
-	server.once("close", () => records.close());
+	} catch (error) { closeRecords(); throw error; }
+	server.once("close", closeRecords);
 	const port = (server.address() as AddressInfo).port;
 	return { server, port, url: `http://127.0.0.1:${port}` };
 }

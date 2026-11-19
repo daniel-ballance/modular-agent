@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
+import { promisify } from "node:util";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,7 +11,7 @@ import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { client, methods, ndJsonStream, PROTOCOL_VERSION, type SessionNotification } from "@agentclientprotocol/sdk";
-import { createAgent, fileHistory, httpHistory, serveHistory } from "@modular-agent/core";
+import { createAgent, fileHistory, httpHistory, memoryHistory, serveHistory } from "@modular-agent/core";
 import { testAgent } from "@modular-agent/core/testing";
 import { openai } from "@modular-agent/openai";
 import { anthropic } from "@modular-agent/anthropic";
@@ -135,4 +137,47 @@ test("a kept session reopens over the history HTTP binding", { timeout: 10_000 }
   const reopened = await b.openSession(s.id);
   assert.equal((await reopened.lastTurn())?.text, "First.");
   assert.equal((await reopened.prompt("Second")).text, "Still here.");
+});
+
+for (const placement of ["file", "memory", "relay"] as const) {
+  test(`SDK ${placement} history passes the history binding kit`, { timeout: 60_000 }, async t => {
+    const dir = await mkdtemp(join(tmpdir(), "ma-sdk-history-"));
+    const tokenFile = join(dir, "token");
+    await writeFile(tokenFile, randomBytes(32).toString("hex") + "\n", { mode: 0o600 });
+    const options = { address: "127.0.0.1:0", tokenFile };
+    const store = placement === "file" ? fileHistory(join(dir, "archive")) : memoryHistory();
+    const direct = await serveHistory(store, options);
+    let relay: Awaited<ReturnType<typeof serveHistory>> | undefined;
+    t.after(async () => { await relay?.close(); await direct.close(); await rm(dir, { recursive: true, force: true }); });
+    if (placement === "relay") relay = await serveHistory(httpHistory(direct.url, tokenFile), options);
+    const kit = fileURLToPath(new URL("../../../../../conformance/history/run.mjs", import.meta.url));
+    const { stdout } = await promisify(execFile)(process.execPath, [kit, (relay ?? direct).url, tokenFile], { timeout: 52_000 });
+    t.diagnostic(stdout.trim().split("\n").at(-1)!);
+    assert.match(stdout, /\d+\/\d+ checks passed/);
+  });
+}
+
+test("serving a memory history handle exposes its existing records, without bypassing its local writer", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "ma-sdk-history-"));
+  const tokenFile = join(dir, "token");
+  const token = randomBytes(32).toString("hex");
+  await writeFile(tokenFile, token, { mode: 0o600 });
+  const history = memoryHistory();
+  const a = await testAgent({ history, script: [{ text: "From local history" }] });
+  const local = await a.session();
+  await local.prompt("First");
+  const service = await serveHistory(history, { address: "127.0.0.1:0", tokenFile });
+  t.after(async () => { await a.close(); await service.close(); await rm(dir, { recursive: true, force: true }); });
+  const reader = await testAgent({ history: httpHistory(service.url, tokenFile), script: [] });
+  t.after(() => reader.close());
+  assert.ok((await reader.sessions()).some(s => s.id === local.id));
+  const acquire = await fetch(new URL(`/v1/sessions/${local.id}/lease`, service.url), {
+    method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ owner: "another writer" }),
+  });
+  assert.equal(acquire.status, 409);
+  assert.equal((await acquire.json()).code, "held");
+  await a.close();
+  const fromWire = await reader.openSession(local.id);
+  assert.equal((await fromWire.lastTurn())?.text, "From local history");
 });
