@@ -18,7 +18,12 @@ The agent MUST use stdin and stdout for newline-delimited UTF-8 JSON-RPC, with o
 
 See [Stdio authentication](../security.md#authentication-on-each-wire) for the peer and [Authority](../contracts.md#authority) for the connection actor. The operator MUST configure the connection's allowed project scope outside client and project control, alongside its actor and allowed tenants (including whether no tenant is permitted). The operator MUST NOT expose the private pipe as an unauthenticated proxy. This binding defines no network ACP transport; network Interfaces follow [Security](../security.md#authentication-on-each-wire).
 
-When the operator sets `MODULAR_AGENT_DATA_DIR`, the agent MUST keep its agent-managed state under that directory instead of any default or path flag. This includes local history, settings, trust, and local credentials. Explicitly configured external stores and credentials supplied by the operator are not relocated. Without the variable the agent MUST use its configured paths or its normal defaults. The agent MUST reject client or project attempts to override its trusted state location or substitute the directory. The chosen directory MUST be writable only by the operator, the agent and other processes the operator trusts with its state.
+| Operator variable | Effect |
+|---|---|
+| `MODULAR_AGENT_DATA_DIR` | If set, the agent MUST keep agent-managed state under this directory instead of any default or path flag. If unset, the agent MUST use its configured paths or its normal defaults. |
+| `MODULAR_AGENT_ACTOR` | If set to an [Id](data.md#general-rules), the agent MUST use it instead of its default connection actor id. The agent MUST use kind `host` for that actor unless the operator configures another kind. If the variable is set to a value that is not an Id, the agent MUST fail startup. See [Authority](../contracts.md#authority) for stable ids across builds and how rights are assigned. |
+
+Agent-managed state includes local history, settings, trust and local credentials. Explicitly configured external stores and credentials supplied by the operator are not relocated. The agent MUST reject client or project attempts to set either variable, override its trusted state location or substitute the directory. The chosen directory MUST be writable only by the operator, the agent and other processes the operator trusts with its state.
 
 ## `initialize`
 
@@ -398,7 +403,7 @@ The [conformance kit](../../conformance/acp/README.md) exercises this mode. See 
 
 ## Changes
 
-- **Production edition 3.** Approval authority is per recipient and route (TypeScript, Python G100). Gate limits and the history page limit are separate (TypeScript).
+- **Production edition 3.** Approval authority is per recipient and route (TypeScript, Python G100). Gate limits and the history page limit are separate (TypeScript). The operator can set a shared connection actor id (portable F2, TypeScript to Python and Rust: the kit used different principals and the builds misread key scope; F4, Go to TypeScript: the reopener retrieved another actor's receipt).
 
 - **Production edition 2.** Idle close needs membership, not `cancel` (Elixir PE-1, Python G98). Approval projections compute `answerable` after gating (Elixir PE-8, Python G94). Reopen can return retryable `held` (Go P4, TypeScript). Limits count actual bytes (Go P5), and JSON depth errors and the `resultFeedback` entry projection are specified (TypeScript).
 
