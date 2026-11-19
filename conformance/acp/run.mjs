@@ -10,6 +10,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
+import { createInterface } from "node:readline";
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { historyService } from "./history.mjs";
 import { portableProblems } from "./portable.mjs";
@@ -57,6 +58,9 @@ const ENUM_KEYS = {
 	commandContainment: ["strong", "processGroup", "none"],
 };
 
+const portablePair = portableChecks || then >= 0;
+const portableActor = "kit-portable-writer";
+const otherActor = "kit-portable-reopener";
 const home = mkdtempSync(join(tmpdir(), "ma-conf-home-"));
 const env = Object.fromEntries(["PATH", "MODULAR_AGENT_HISTORY_URL", "MODULAR_AGENT_HISTORY_TOKEN_FILE"].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 let store, observer;
@@ -74,13 +78,14 @@ const dataDir = mkdtempSync(join(tmpdir(), "ma-conf-data-"));
 const dataDir2 = second === command ? dataDir : mkdtempSync(join(tmpdir(), "ma-conf-data-"));
 const probeDir = mkdtempSync(join(tmpdir(), "ma-conf-probe-"));
 const probeOut = (role) => join(probeDir, `${role}.json`);
+const probePlugin = (role, config = {}) => ({ command: [process.execPath, new URL("../plugin/probe.mjs", import.meta.url).pathname], config: { role, out: probeOut(role), ...config } });
 const pluginEnv = {};
 {
 	const extra = [];
-	if (probeChecks) {
-		const probe = new URL("../plugin/probe.mjs", import.meta.url).pathname;
-		for (const role of ["probe", "refuse-hook", "refuse-replace", "refuse-duplicate", "output-observer"]) extra.push({ command: [process.execPath, probe], config: { role, out: probeOut(role), ...(role === "probe" ? { release: probeOut("release-refresh"), traceOut: probeOut("probe-events") } : {}), ...(role === "output-observer" ? { withholdLoad: probeOut("withhold-load") } : {}) } });
-	}
+	if (probeChecks) extra.push(
+		probePlugin("probe", { release: probeOut("release-refresh"), traceOut: probeOut("probe-events") }),
+		probePlugin("output-observer", { withholdLoad: probeOut("withhold-load") }),
+	);
 	if (jobChecks) extra.push({ command: [process.execPath, new URL("../plugin/jobs.mjs", import.meta.url).pathname], config: { out: probeOut("jobs") } });
 	const given = process.env.MODULAR_AGENT_PLUGINS ? JSON.parse(process.env.MODULAR_AGENT_PLUGINS) : [];
 	if (extra.length || given.length) pluginEnv.MODULAR_AGENT_PLUGINS = JSON.stringify([...given, ...extra]);
@@ -111,14 +116,19 @@ async function attempt(name, fn) {
 	}
 }
 
-/** Start the agent and connect the official client. */
-function connect(which = command, extraEnv = {}) {
+function spawnAgent(which, extraEnv) {
 	const child = spawn(which[0], which.slice(1), {
 		cwd: project,
 		stdio: ["pipe", "pipe", verbose ? "inherit" : "ignore"],
-		env: { ...env, ...(observer ? { MODULAR_AGENT_HISTORY_URL: observer.url } : {}), HOME: home, XDG_CONFIG_HOME: home, XDG_DATA_HOME: home, LANG: "C.UTF-8", ...pluginEnv, ...extraEnv, MODULAR_AGENT_TENANTS: TENANTS, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: which === command ? dataDir : dataDir2 },
+		env: { ...env, ...(observer ? { MODULAR_AGENT_HISTORY_URL: observer.url } : {}), HOME: home, XDG_CONFIG_HOME: home, XDG_DATA_HOME: home, LANG: "C.UTF-8", ...pluginEnv, ...(portablePair ? { MODULAR_AGENT_ACTOR: portableActor } : {}), MODULAR_AGENT_TENANTS: TENANTS, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: which === command ? dataDir : dataDir2, ...extraEnv },
 	});
 	children.push(child);
+	return child;
+}
+
+/** Start the agent and connect the official client. */
+function connect(which = command, extraEnv = {}) {
+	const child = spawnAgent(which, extraEnv);
 	const updates = [];
 	const permissions = [];
 	const state = { permissionAnswer: "allow" };
@@ -186,7 +196,7 @@ function checkDeniedTool(name, reply, entries, marker) {
 		JSON.stringify({ stopReason: reply.stopReason, outcome, turnId, started, ran, results: results.map((e) => e.data?.status) }));
 }
 
-let sessionId, mainSession;
+let sessionId, mainSession, writerActor;
 let erasedForPortable;
 let portableDeclarations = [];
 const hasExit = (c) => c.exitCode !== null || c.signalCode !== null;
@@ -204,6 +214,7 @@ await attempt("initialize", async () => {
 	const init = await within(15000, agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize");
 	check("initialize: protocol version 1", init.protocolVersion === 1, `got ${init.protocolVersion}`);
 	const m = meta(init);
+	writerActor = m?.actor?.id;
 	check("initialize: _meta binding is modular-agent-acp/1", m?.binding === "modular-agent-acp/1", JSON.stringify(m?.binding));
 	const d = m?.declaration ?? {};
 	decl = d;
@@ -620,6 +631,35 @@ await attempt("unused session", async () => {
 	check("session/list: the used session is listed", ids.includes(sessionId), ids.join(", "));
 });
 
+// Plugin binding: Choosing plugins at start. Keep these entries out of positive runs.
+if (probeChecks) for (const [name, plugins] of [
+	["plugin exits before registration", [{ command: [process.execPath, "-e", "process.exit(0)"] }]],
+	["unknown hook", [probePlugin("refuse-hook")]],
+	["replacement without a registration", [probePlugin("refuse-replace")]],
+	["duplicate replacement", [probePlugin("refuse-duplicate-replacement")]],
+	["duplicate plugin name", [probePlugin("probe"), probePlugin("refuse-duplicate")]],
+	["unlisted tool collision", [probePlugin("probe"), probePlugin("refuse-collision")]],
+]) await attempt(`Choosing plugins at start (${name})`, async () => {
+	const child = spawnAgent(command, { MODULAR_AGENT_PLUGINS: JSON.stringify(plugins), MODULAR_AGENT_DATA_DIR: mkdtempSync(join(probeDir, "startup-")) });
+	const lines = createInterface({ input: child.stdout });
+	try {
+		// Observe the wire and the natural exit. Do not close stdin or signal the host to make it exit.
+		const result = new Promise((resolve, reject) => {
+			child.once("error", reject);
+			child.once("close", (code, signal) => resolve({ code, signal }));
+			lines.on("line", (line) => {
+				let m;
+				try { m = JSON.parse(line); } catch { return; }
+				if (m?.jsonrpc === "2.0" && m.id === 1 && Object.hasOwn(m, "result") && !Object.hasOwn(m, "error")) resolve({ initialized: true });
+			});
+		});
+		child.stdin.on("error", () => {}); // The host can exit before reading initialize.
+		child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1, clientCapabilities: {} } }) + "\n");
+		const seen = await within(15000, result, "startup failure or successful initialize");
+		check(`Choosing plugins at start (${name}): exits nonzero without a successful initialize`, Number.isInteger(seen.code) && seen.code !== 0, JSON.stringify(seen));
+	} finally { lines.close(); await stop({ child }); }
+});
+
 if (probeChecks) {
 	await attempt("probe", async () => {
 		await within(15000, prompt(agent, sessionId, "probe seed"), "pre-seed probe history");
@@ -628,13 +668,6 @@ if (probeChecks) {
 		const checks = existsSync(probeOut("probe")) ? JSON.parse(readFileSync(probeOut("probe"), "utf8")) : [];
 		check("probe: the probe ran", checks.length > 0, "no results; was the tool called?");
 		for (const c of checks) check(`probe: ${c.name}`, c.ok, c.detail);
-		for (const role of ["refuse-hook", "refuse-replace", "refuse-duplicate"]) {
-			const lines = existsSync(probeOut(role)) ? readFileSync(probeOut(role), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-			const why = { "refuse-hook": "a handler for a hook point the host doesn't offer", "refuse-replace": "naming a replacement it doesn't register", "refuse-duplicate": "a second plugin with a name already loaded" }[role];
-			check(`probe: ${why} gets plugin/shutdown, reason refused`, lines.some((l) => l.params?.reason === "refused"), JSON.stringify(lines));
-		}
-		const tools = agent.updates.filter((u) => u.sessionId === sessionId && u.update.sessionUpdate === "tool_call").map((u) => u.update.title);
-		check("probe: the refused plugins left nothing behind, and the host carried on", r.stopReason === "end_turn" && tools.includes("probe"), tools.join(","));
 		// What the output gate was given, in the shared shapes (docs/bindings/data.md#output-events).
 		const seen = existsSync(probeOut("output-observer")) ? readFileSync(probeOut("output-observer"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
 		const events = seen.flatMap((x) => x?.events ?? []);
@@ -892,6 +925,11 @@ if (probeChecks) {
 					check("Authority: a dispatched tool can call host/env/exec without a second allowance", log.filter((x) => x.effect).slice(before).some((x) => x.env === true));
 				}
 			}
+			const refusal = await within(15000, prompt(remote, s.sessionId, 'tool:probe-effect {"value":"refusal"}'), "refused call settlement");
+			const refused = trace("runtime").find((x) => x.test === "refusal")?.checks;
+			const refusedRows = (await history(remote, s.sessionId, { all: true })).entries.filter((e) => e.toolCallId === refused?.refusedCall);
+			check("Runtime records and effects / From core hooks to wire hooks: tool.before returns the one committed refused result", refused?.refusedSettlement &&
+				meta(refusal)?.outcome?.kind === "completed" && refusedRows.filter((e) => e.kind === "toolResult").length === 1 && !refusedRows.some((e) => e.kind === "toolStarted"));
 			const openProbe = async (tenant) => {
 				const session = await remote.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [], ...(tenant ? { _meta: { [NS]: { tenant } } } : {}) });
 				await setOption(remote, session.sessionId, "model", "kit-probe/scripted");
@@ -905,6 +943,13 @@ if (probeChecks) {
 			check("Runtime callbacks: a registered but unoffered tool is refused without the gate or dispatch", missing?.unoffered && missing.modelIntent && equal(missing.offered, finalOffer) &&
 				!log.some((x) => x.gate === missing.unofferedCall || x.effect?.value === "unoffered"));
 			await closeSession(remote, unoffered);
+			const extra = await openProbe();
+			const projected = await within(15000, prompt(remote, extra, "fixture extra-response-member"), "Provider response with extra member");
+			const accepted = trace("runtime").find((x) => x.extraResponseAccepted === extra);
+			const responses = (await history(remote, extra, { all: true })).entries.filter((e) => e.kind === "response");
+			check("The host asks a Provider / General rules: provider.response accepts an extra member without changing the answer", !!accepted && meta(projected)?.outcome?.kind === "completed" &&
+				responses.some((e) => equal(e.message, accepted.message)));
+			await closeSession(remote, extra);
 			if (meta(s)?.declaration?.tenants) {
 				const sid = await openProbe("kit-latch");
 				const p = await within(15000, prompt(remote, sid, "fixture latched"), "latched limit");
@@ -1040,8 +1085,15 @@ await attempt("load in a new process", async () => {
 	check("load: replays the session before answering", replayed.length > 0 && JSON.stringify(replayed).includes("echo: hello"), `${replayed.length} updates`);
 	const { entries } = await history(agent, sessionId);
 	check("load: history survives a restart", entries.some((e) => e.kind === "turnEnd"));
-	const r = await within(15000, prompt(agent, sessionId, "hello", "key-1"), "resent prompt after restart");
-	check("load: a key survives a restart", meta(r)?.duplicate === true, JSON.stringify(meta(r)));
+	// ACP: Starting and Input admission. Both principals in the tuple default to the connection actor.
+	const readerActor = meta(init)?.actor?.id;
+	const sameScope = !portablePair || (writerActor === portableActor && readerActor === portableActor);
+	if (sameScope) {
+		const r = await within(15000, prompt(agent, sessionId, "hello", "key-1"), "resent prompt after restart");
+		check("Input admission: the same principal gets the original receipt after reopen", meta(r)?.duplicate === true && meta(r)?.inputId === firstInputId, JSON.stringify(meta(r)));
+	} else {
+		check("Starting: portable writer and reopener honor MODULAR_AGENT_ACTOR for a same-scope retry", false, JSON.stringify({ configured: portableActor, writerActor, readerActor }));
+	}
 	const approval = (loaded.configOptions ?? []).find((o) => o.id === "approval");
 	if (approval) {
 		check("load: the approval setting survives", approval.currentValue === "never");
@@ -1058,6 +1110,20 @@ await attempt("load in a new process", async () => {
 		}
 	}
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
+});
+
+if (portablePair) await attempt("Input admission: key retry by a different principal", async () => {
+	const peer = connect(second, { MODULAR_AGENT_ACTOR: otherActor });
+	try {
+		const init = await within(15000, peer.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize different principal");
+		const readerActor = meta(init)?.actor?.id;
+		if (!check("Starting: a different MODULAR_AGENT_ACTOR changes the reopener's principal", writerActor === portableActor && readerActor === otherActor, JSON.stringify({ configuredWriter: portableActor, configuredReader: otherActor, writerActor, readerActor }))) return;
+		await within(await reopenWatchdog(), peer.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "reopen as different principal");
+		const r = await within(15000, prompt(peer, sessionId, "retry with a different principal", "key-1"), "key in new scope").catch((e) => e);
+		const m = meta(r);
+		check("Input admission: a different principal gets a new admission, not the old receipt", !!firstInputId && m?.duplicate !== true && typeof m?.inputId === "string" && m.inputId !== firstInputId && m?.outcome?.kind === "completed", JSON.stringify(m ?? { code: r?.code, data: r?.data, message: r?.message }));
+		await closeSession(peer, sessionId);
+	} finally { await stop(peer); }
 });
 
 // ACP: Input admission and Extension methods (Erase). Resend through both admission routes.
@@ -1268,7 +1334,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 		const seed = async (mode) => {
 			const sessionId = `kit-portable-${randomUUID()}`;
 			const rows = [
-				{ kind: "actorJoined", data: { actor: { id: "kit-granter", kind: "user", rights: [...actor.rights, "grant"] } } },
+				{ kind: "actorJoined", data: { actor: { id: "kit-granter", kind: "user", rights: [...actor.rights, "grant"] }, operatorAdmission: true } },
 				{ kind: "actorJoined", actorId: "kit-granter", data: { actor } },
 				{ kind: "setting", data: { key: "model", value: { provider: "conformance", id: "echo" } } },
 				{ kind: "inputAccepted", inputId: "initial-input", actorId: actor.id, data: { when: "after", key: "fixture-old", content: [{ type: "text", text: "old input" }], authorizers: [{ sessionId, actorId: actor.id }], rights: actor.rights } },
@@ -1383,7 +1449,58 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 });
 
 // Plugin binding: Model attempt sequences (crash recovery). Seed interrupted attempts in shared data.
+// Plugin binding: The host asks the Runtime. Contracts: Recovery and repeating work and Hook execution.
+if (probeChecks && crashChecks) for (const boundary of ["before", "after"]) {
+	const label = `The host asks the Runtime (crash ${boundary} step.after)`;
+	await attempt(label, async () => {
+		const role = `gate-recovery-${boundary}`;
+		const plugin = { command: [process.execPath, new URL("../plugin/gate-recovery.mjs", import.meta.url).pathname], config: { boundary, out: probeOut(role) } };
+		const start = () => connect(command, { MODULAR_AGENT_PLUGINS: JSON.stringify([plugin]) });
+		const init = (a) => within(15000, a.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize gate recovery fixture");
+		let remote = start();
+		try {
+			await init(remote);
+			const session = await remote.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+			const sid = session.sessionId;
+			await setOption(remote, sid, "model", "kit-gate-recovery/echo");
+			if (session.configOptions?.some((o) => o.id === "approval")) await setOption(remote, sid, "approval", "off");
+			const pending = prompt(remote, sid, "fixture gate recovery").then(() => true, () => true);
+			let latch;
+			for (const t0 = Date.now(); !latch && Date.now() - t0 < 10000;) {
+				latch = trace(role).find((x) => x.latch === boundary);
+				if (!latch && await Promise.race([pending, sleep(50).then(() => false)])) break;
+			}
+			if (!latch) throw Error(`fixture did not reach the ${boundary} crash boundary`);
+			const exited = new Promise((resolve) => remote.child.once("exit", resolve));
+			if (!remote.child.kill("SIGKILL")) throw Error("could not interrupt the fixture host");
+			await within(5000, exited, "interrupted host exit");
+			remote = start();
+			await init(remote);
+			await within(await reopenWatchdog(), remote.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "load step.after crash fixture");
+			const kept = await waitFor(remote, sid, (es) => es.some((e) => e.kind === "turnEnd"), 8000);
+			const log = trace(role), resumed = log.find((x) => x.resumed);
+			const { lastStep, calls } = resumed?.interrupted ?? {};
+			const step = kept.find((e) => e.kind === "response" && e.turnId === resumed?.resumed);
+			const end = kept.find((e) => e.kind === "turnEnd" && e.turnId === resumed?.resumed);
+			const gates = log.filter((x) => x.gate !== undefined).map((x) => x.gate);
+			const replies = log.filter((x) => x.gateReply !== undefined);
+			const detail = JSON.stringify({ ...resumed, gates, replies, outcome: end?.data?.outcome });
+			if (boundary === "before") {
+				check(`${label}: the unsafe call is settled before handoff and not passed or repeated`, equal(calls, []) &&
+					equal(resumed?.terminalCalls, [{ id: latch.callId, status: "outcomeUnknown" }]) && log.filter((x) => x.latch === "before").length === 1, detail);
+				check(`${label}: the resumed step runs its due gate once and completes`, !!lastStep && !!step && lastStep.stepId === step.stepId && !Object.hasOwn(lastStep, "decision") &&
+					equal(gates, [step.stepId]) && equal(replies, [{ gateReply: step.stepId, accepted: true }]) && end?.data?.outcome?.kind === "completed", detail);
+			} else {
+				check(`${label}: resume supplies the committed allow decision without a second gate`, !!lastStep && lastStep.stepId === latch.stepId && lastStep.decision === null &&
+					equal(gates, [latch.stepId]) && replies.length === 0 && end?.data?.outcome?.kind === "completed", detail);
+			}
+			await closeSession(remote, sid);
+		} finally { await stop(remote); }
+	});
+}
+
 if (probeChecks && portableChecks) for (const [mode, safe] of [
+
 	["transient", false], ["fresh", false], ["fresh", true], ["repeat", true],
 	["no-request-hook", false], ["early-response-hook", false],
 ]) await attempt(`remote recovery: ${mode} with ${safe ? "repeatable" : "unsafe"} attempt`, async () => {
@@ -1413,16 +1530,18 @@ if (probeChecks && portableChecks) for (const [mode, safe] of [
 			{ kind: "inputAccepted", inputId, actorId: actor.id, data: { when: "now", taken: "now", content, authorizers, rights } },
 			{ kind: "turnStart", turnId, data: { startedBy: { kind: "actor", id: actor.id }, model, system, tools: [], settings: {}, authorizers, rights } },
 			{ kind: "input", turnId, inputId, actorId: actor.id, message, modelVisible: true },
-			{ kind: "modelRequest", turnId, stepId: "old-step", data: { model, safeToRepeat: safe, tools: [], ...(safe ? { request } : {}) }, sources: [entryId(4)] },
+			{ kind: "modelRequest", turnId, stepId: "old-step", data: { model, safeToRepeat: safe, tools: [], tracksStepAfter: true, ...(safe ? { request } : {}) }, sources: [entryId(4)] },
 		];
 		if (mode === "fresh" && !safe) {
 			const empty = { role: "assistant", stop: "failed", content: [], error: { kind: "other", message: "Fixture failure" }, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } };
 			rows.splice(5, 0,
-				{ kind: "modelRequest", turnId, stepId: "failed-step", data: { model, safeToRepeat: false, tools: [] }, sources: [entryId(4)] },
+				{ kind: "modelRequest", turnId, stepId: "failed-step", data: { model, safeToRepeat: false, tools: [], tracksStepAfter: true }, sources: [entryId(4)] },
 				{ kind: "response", turnId, stepId: "failed-step", message: empty, modelVisible: true, sources: [entryId(5)] },
-				{ kind: "modelRequest", turnId, stepId: "settled-step", data: { model, safeToRepeat: false, tools: [] }, sources: [entryId(4)] },
-				{ kind: "response", turnId, stepId: "settled-step", modelVisible: true, sources: [entryId(7)], message: { role: "assistant", stop: "toolUse", usage: empty.usage, content: [{ type: "toolCall", id: "settled-call", name: "not-offered", arguments: {} }] } },
-				{ kind: "toolResult", turnId, stepId: "settled-step", toolCallId: "settled-call", modelVisible: true, data: { status: "refused" }, message: { role: "toolResult", toolCallId: "settled-call", toolName: "not-offered", isError: true, content: [{ type: "text", text: "not offered" }] } });
+				{ kind: "modular-agent.stepAfter", turnId, stepId: "failed-step", data: { decision: null } },
+				{ kind: "modelRequest", turnId, stepId: "settled-step", data: { model, safeToRepeat: false, tools: [], tracksStepAfter: true }, sources: [entryId(4)] },
+				{ kind: "response", turnId, stepId: "settled-step", modelVisible: true, sources: [entryId(8)], message: { role: "assistant", stop: "toolUse", usage: empty.usage, content: [{ type: "toolCall", id: "settled-call", name: "not-offered", arguments: {} }] } },
+				{ kind: "toolResult", turnId, stepId: "settled-step", toolCallId: "settled-call", modelVisible: true, data: { status: "refused" }, message: { role: "toolResult", toolCallId: "settled-call", toolName: "not-offered", isError: true, content: [{ type: "text", text: "not offered" }] } },
+				{ kind: "modular-agent.stepAfter", turnId, stepId: "settled-step", data: { decision: null } });
 		}
 		const time = Date.now();
 		const entries = rows.map((row, i) => ({ sessionId: sid, time, writer: "kit-history-fixture", modelVisible: false,

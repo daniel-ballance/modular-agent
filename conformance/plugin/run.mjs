@@ -267,7 +267,7 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 	if (!before.length) {
 		const content = [{ type: "text", text: "fixture input" }];
 		before = [
-			{ kind: "actorJoined", data: { actor: { id: "kit", kind: "host", rights } } },
+			{ kind: "actorJoined", data: { actor: { id: "kit", kind: "host", rights }, operatorAdmission: true } },
 			{ kind: "inputAccepted", actorId: "kit", inputId: "kit-input", data: { content, when: "now", authorizers, rights } },
 			{ kind: "turnStart", turnId: "kit-turn", data: { model: modelRef, startedBy: { kind: "actor", id: "kit" }, system: "kit", settings: { maxSteps: 8 }, tools: Object.values(tools), authorizers, rights } },
 			{ kind: "input", turnId: "kit-turn", actorId: "kit", modelVisible: true, message: { role: "user", content }, inputId: "kit-input" },
@@ -343,7 +343,7 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 				if (!attempt || attempt.sent || !equal(attempt.request, p.request)) invalid("not the prepared attempt");
 				refuseLimit("model", p.stepId);
 				attempt.sent = true;
-				attempt.intent = put({ kind: "modelRequest", stepId: p.stepId, modelVisible: false, data: { model: modelRef, safeToRepeat: false, tools: p.request.tools.map((t) => t.name) }, sources: attempt.sources });
+				attempt.intent = put({ kind: "modelRequest", stepId: p.stepId, modelVisible: false, data: { model: modelRef, safeToRepeat: false, tracksStepAfter: true, tools: p.request.tools.map((t) => t.name) }, sources: attempt.sources });
 				if (refuseAt === "postIntent" && rt.modelCalls === 1) {
 					// Runtime records and effects: only the host settles a committed, undispatched attempt.
 					put({ kind: "response", stepId: p.stepId, modelVisible: false, data: { recovery: true }, message: { role: "assistant", stop: "aborted", content: [] } });
@@ -362,15 +362,24 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 					if (!original || !match(call, original)) invalid("unknown or mismatched call");
 					const g = gate(call);
 					if (g) {
-						finish(original, { status: "refused", content: [{ type: "text", text: g }] });
-						return { value: p.payload, refused: g };
+						// Runtime records and effects: return the committed settlement, not just the reason.
+						const result = resultOf(finish(original, { status: "refused", content: [{ type: "text", text: g }] }));
+						return { value: p.payload, refused: g, result };
 					}
 					allowed.set(call.id, structuredClone(call));
 					return { value: p.payload };
 				}
-				if (p.hook === "step.after") rt.afterSteps.push(p.payload?.stepId);
+				if (p.hook === "step.after") {
+					// Shared data: Recording order and ownership. This fixture gate always allows.
+					const stepId = p.payload?.stepId;
+					if (!rt.history().some((e) => e.kind === "modular-agent.stepAfter" && e.stepId === stepId)) {
+						put({ kind: "modular-agent.stepAfter", stepId, modelVisible: false, data: { decision: null } });
+					}
+					rt.afterSteps.push(stepId);
+					return { value: p.payload };
+				}
 				if (p.hook === "turn.end") rt.endOutcome = p.payload?.outcome;
-				if (p.hook === "step.after" || p.hook === "turn.result") return { value: p.payload };
+				if (p.hook === "turn.result") return { value: p.payload };
 				if (p.hook === "tool.after") {
 					const result = resultFor(rt, p.payload?.call?.id)[0];
 					if (!result) invalid("no cached tool result");
@@ -538,7 +547,8 @@ await attempt("provider", async () => {
 	check("provider/request: streamed provider/event before the result", events.some((e) => e.params.event?.type === "text"), `${events.length} events`);
 	const responseHooks = p.hostCalls.filter((c) => c.method === "host/hook" && c.params?.hook === "provider.response" && c.params?.parentRequestId === req.id);
 	check("provider/request: \"as the response arrives\" runs once, through host/hook", responseHooks.length === 1, `${responseHooks.length} calls`);
-	check("provider/request: it has the complete message, after the last provider/event", responseHooks.length === 1 && textOf(responseHooks[0].params?.payload?.message?.content) === "echo: hello" && events.every((e) => e.seq < responseHooks[0].seq), String(JSON.stringify(responseHooks[0]?.params?.payload ?? null)).slice(0, 200));
+	const projection = { sessionId: "s1", provider: "conformance", model: { provider: "conformance", id: "echo" }, message: msg };
+	check("The host asks a Provider: provider.response sends the four-field projection after the last provider/event", responseHooks.length === 1 && equal(responseHooks[0].params?.payload, projection) && events.every((e) => e.seq < responseHooks[0].seq), String(JSON.stringify(responseHooks[0]?.params?.payload ?? null)).slice(0, 200));
 	let unknownProvider;
 	try {
 		await p.request("provider/request", { provider: "no-such-provider", model: { provider: "no-such-provider", id: "x" }, request: { systemPrompt: "", messages: [], tools: [], settings: {} } });
@@ -892,11 +902,11 @@ async function runtimeChecks(part) {
 			{ name: "bash", description: "fixture shell", parameters: true },
 		];
 		const before = [
-			entry("actorJoined", { turnId: undefined, data: { actor: { id: "kit", kind: "host", rights } } }),
+			entry("actorJoined", { turnId: undefined, data: { actor: { id: "kit", kind: "host", rights }, operatorAdmission: true } }),
 			entry("inputAccepted", { turnId: undefined, actorId: "kit", inputId: "kit-input", data: { content: source, when: "now", rights, authorizers } }),
 			entry("turnStart", { data: { startedBy: { kind: "actor", id: "kit" }, model: { provider: "kit", id: "scripted" }, system: "kit", tools: ["read", "bash"].map((name) => ({ name, description: name, parameters: true })), settings: { maxSteps: 8 }, rights, authorizers } }),
 			entry("input", { modelVisible: true, actorId: "kit", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, inputId: "kit-input" }),
-			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, tools: recoveryTools.map((t) => t.name) } }),
+			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, tracksStepAfter: true, tools: recoveryTools.map((t) => t.name) } }),
 			entry("response", { modelVisible: true, stepId: "kit-step-1", message: { role: "assistant", content: [notStarted, startedCall, safeCall].map(toolCall), stop: "toolUse", usage: usage0 } }),
 			entry("toolStarted", { toolCallId: "c-started", stepId: "kit-step-1", actorId: "kit", data: { call: { id: startedCall.id, name: startedCall.name, input: startedCall.input, actorId: "kit", startedBy: "model" }, source: fixtureSource, definition: recoveryTools[1], openWorld: true, safeToRepeat: false, rights, authorizers } }),
 			entry("toolStarted", { toolCallId: "c-safe", stepId: "kit-step-1", actorId: "kit", data: { call: { id: safeCall.id, name: safeCall.name, input: safeCall.input, actorId: "kit", startedBy: "model" }, source: fixtureSource, definition: recoveryTools[0], openWorld: false, safeToRepeat: true, rights, authorizers } }),
@@ -908,7 +918,7 @@ async function runtimeChecks(part) {
 		try {
 			await fresh.request("plugin/initialize", initParams);
 			rt = fresh.state.rt = runScenario({ model: () => say("carried on"), definitions: Object.fromEntries(recoveryTools.map((d) => [d.name, d])), before, abandoned: durable ? [startedCall] : [notStarted, startedCall, safeCall] });
-			o = await fresh.request("runtime/resumeTurn", { turn: turn(), interrupted: { turnId: "kit-turn", calls: durable ? [notStarted, safeCall] : [] } });
+			o = await fresh.request("runtime/resumeTurn", { turn: turn(), interrupted: { turnId: "kit-turn", calls: durable ? [notStarted, safeCall] : [], lastStep: { stepId: "kit-step-1" } } });
 		} finally {
 			fresh.state.rt = undefined;
 			await fresh.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);

@@ -26,10 +26,12 @@ let pointProject, pointDir;
 function registration() {
 	const base = { binding: BINDING, name: `probe-${config.role ?? "probe"}` };
 	switch (config.role) {
-		// Starting: the handshake. Deliberately invalid registrations for rollback tests.
+		// Starting: the handshake. These negative fixtures run only in separate startups.
 		case "refuse-hook": return { ...base, hooks: [{ hook: "probe.no-such-point", handlerId: 1 }] };
 		case "refuse-replace": return { ...base, replaces: ["tool:probe-absent"] };
 		case "refuse-duplicate": return { ...base, name: "probe-probe" };
+		case "refuse-duplicate-replacement": return { ...base, replaces: ["tool:probe", "tool:probe"], toolSources: [{ id: "probe-tools", tools: [PROBE] }] };
+		case "refuse-collision": return { ...base, toolSources: [{ id: "probe-tools", tools: [PROBE] }] };
 		case "output-observer": return { ...base, hooks: [{ hook: "output", handlerId: 1, order: "last" }] };
 		case "runtime": return { ...base, replaces: ["runtime"], runtime: { id: "probe-runtime", supports: {} }, toolSources: [{ id: "probe-tools", tools: [EFFECT] }],
 			providers: [{ id: model.provider, models, supports: { keepsState: false, runsTools: false } }],
@@ -107,8 +109,8 @@ async function runtime(m, { ask }) {
 		// The host asks the Runtime; Shared data: Recording order and ownership. Use this turn's committed input.
 		const input = (await history()).find((e) => e.kind === "input" && e.turnId === turn.turnId);
 		const text = input?.message?.content?.find((p) => p.type === "text")?.text;
-		test = text?.match(/^tool:probe-effect \{"value":"(omitted|changed|exact)"\}$/)?.[1] ??
-			text?.match(/^fixture (unoffered|latched|post-intent|burner)$/)?.[1];
+		test = text?.match(/^tool:probe-effect \{"value":"(omitted|changed|exact|refusal)"\}$/)?.[1] ??
+			text?.match(/^fixture (unoffered|latched|post-intent|burner|extra-response-member)$/)?.[1];
 		if (!test) throw rpcError("invalid_request", "unknown Runtime fixture input");
 		await callHost("hook", { hook: "turn.start", payload: {} });
 		const { id: stepId } = await callHost("newId");
@@ -134,7 +136,7 @@ async function runtime(m, { ask }) {
 		entries.push((await record({ kind: "response", stepId, message: response, modelVisible: true })).id);
 		const fake = await outcome(record({ kind: "setting", data: { key: "approval", value: "off" }, modelVisible: false }));
 		checks.hostKind = fake.error?.code === -32602 && codeOf(fake.error) === "invalid_request";
-		if (!["omitted", "changed", "exact", "unoffered"].includes(test)) {
+		if (!["omitted", "changed", "exact", "unoffered", "refusal"].includes(test)) {
 			await callHost("hook", { hook: "step.after", payload: { stepId, response } });
 			if (test === "latched") {
 				const next = await callHost("newId");
@@ -161,6 +163,15 @@ async function runtime(m, { ask }) {
 				checks.unofferedCall = call.id;
 				checks.unoffered = !checks.offered?.includes(call.name) && gate?.refused === "not offered" &&
 					saved?.data?.status === "refused" && saved.message?.content?.some((p) => p.type === "text" && p.text.includes("not offered")) && !records.some((e) => e.kind === "toolStarted");
+			} else if (test === "refusal") {
+				// Runtime records and effects; From core hooks to wire hooks.
+				const saved = (await history()).filter((e) => e.kind === "toolResult" && e.toolCallId === call.id);
+				const settled = gate?.result;
+				checks.refusedCall = call.id;
+				checks.refusedSettlement = typeof gate?.refused === "string" && settled?.callId === call.id && settled.status === "refused" &&
+					saved.length === 1 && saved[0].data?.status === settled.status && equal(saved[0].data?.value, settled.value) && equal(saved[0].message?.content, settled.content);
+				// Acknowledge only a settlement the host sent, without submitting any result.
+				if (checks.refusedSettlement) await callHost("hook", { hook: "tool.after", payload: { call: gate.value.call, result: settled } });
 			} else {
 				if (test === "exact") checks.repeatedGate = await refusedWithoutWrite(beforeHook);
 				const toolResult = await dispatch(test === "changed" ? { ...call, input: { value: "tampered" } } : call);
@@ -276,7 +287,7 @@ serve("probe", async (m, ctx) => {
 			}
 			if (config.role === "runtime" && p.handlerId === 3 && p.hook === "tool.before") {
 				trace({ gate: p.payload.call.id });
-				return null;
+				return p.payload.call.input?.value === "refusal" ? { refuse: "fixture gate refused" } : null;
 			}
 			if (config.role !== "output-observer" || p.handlerId !== 1 || p.hook !== "output") throw rpcError("unknown_handler");
 			trace(p.payload);
@@ -338,9 +349,12 @@ serve("probe", async (m, ctx) => {
 			trace({ providerDispatch: p.sessionId, offered: request.tools.map((t) => t.name) });
 			const last = request.messages.findLast((m) => m.role === "user");
 			const unoffered = last?.content?.some((p) => p.text === "fixture unoffered");
+			const extra = last?.content?.some((p) => p.text === "fixture extra-response-member");
 			const message = { role: "assistant", stop: unoffered ? "toolUse" : "finished", usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
 				content: unoffered ? [{ type: "toolCall", id: "probe-unoffered-call", name: EFFECT.name, arguments: { value: "unoffered" } }] : [{ type: "text", text: "fixture limit" }] };
-			await hook("provider.response", { message });
+			// The host asks a Provider: additive-field compatibility probe, not a normal sender fixture.
+			await hook("provider.response", { message, ...(extra ? { fixtureExtra: { data: "inert" } } : {}) });
+			if (extra) trace({ extraResponseAccepted: p.sessionId, message });
 			return message;
 		}
 		case "runtime/runTurn":

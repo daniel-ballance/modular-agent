@@ -61,7 +61,8 @@ export function portableProblems(sessionId, entries) {
 	const terminals = new Map([["turnEnd", new Set()], ["toolResult", new Set()], ["jobEnded", new Set()]]);
 	const jobReports = new Map(), questions = new Map(), pending = new Map();
 	const sameScope = (a, b) => a && b && ["turnId", "stepId", "toolCallId"].every((k) => a[k] === b[k]);
-	let head = null, tenant;
+	const members = new Map();
+	let head = null, tenant, limit = null;
 	let erasedIntake = false;
 	for (const e of entries) {
 		if (!obj(e)) { out.push("entry is not an object"); continue; }
@@ -78,6 +79,16 @@ export function portableProblems(sessionId, entries) {
 			if (e.sessionId !== sessionId || !count(e.time) || !id(e.writer) || typeof e.modelVisible !== "boolean" || !(standard || (custom && !e.modelVisible))) say(e, "invalid live entry envelope");
 			if (standard && !valid[e.kind](e, d)) say(e, "invalid standard payload");
 			if (!opt(e, "sources", (a) => ids(a) && a.every((i) => byId.has(i)))) say(e, "source is not an earlier entry");
+			// Shared data: Standard kinds, Append order and the branch, Session state.
+			// Contracts: Authority. Tenant policy comes from the operator, not the log.
+			if (e.kind === "actorJoined") {
+				const operator = d.operatorAdmission === true && !Object.hasOwn(e, "actorId");
+				const member = !Object.hasOwn(d, "operatorAdmission") && id(e.actorId) && e.actorId !== d.actor?.id &&
+					members.get(e.actorId)?.includes("grant") && (limit === null || limit.includes("grant"));
+				if (!operator && !member) say(e, "Standard kinds / Authority: actorJoined lacks operator admission or an earlier member with grant");
+				if (actor(d.actor)) members.set(d.actor.id, d.actor.rights);
+			} else if (e.kind === "actorLeft") members.delete(d.actorId);
+			else if (e.kind === "limit" && (d.rights === null || ids(d.rights))) limit = d.rights;
 			if (e.kind === "tenant") {
 				if (tenant !== undefined && tenant !== d.tenant) say(e, "tenant changed");
 				tenant = d.tenant;
