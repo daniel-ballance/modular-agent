@@ -1,0 +1,5 @@
+{
+  "sdk": "rust",
+  "build": "cd rust && mise exec -- cargo build -p sdk-scenarios --bin modular-agent-fixtures",
+  "command": ["{repo}/rust/target/debug/modular-agent-fixtures"]
+}

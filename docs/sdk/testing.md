@@ -51,6 +51,20 @@ For each run of a scenario in each placement, the runner creates a fresh, empty 
 - the agent's `dataDir`, which survives a crash and is reused on reopen;
 - the `counter` fixture's config `path`, an absolute path to its count file. A missing file counts as zero.
 
+### Finding the fixture programs
+
+Each SDK lists its fixture program in `conformance/sdk/fixtures/<sdk>.json`:
+
+```json
+{
+  "sdk": "rust",
+  "build": "cd rust && mise exec -- cargo build -p sdk-scenarios --bin modular-agent-fixtures",
+  "command": ["{repo}/rust/target/debug/modular-agent-fixtures"]
+}
+```
+
+`command` is the argument vector that starts the program; the runner appends the fixture's name and passes the counter's `path` in the plugin's config. `{repo}` stands for the repository's absolute root. A program whose `{repo}` paths do not exist has not been built: the runner skips that placement and says how to build it, unless `MODULAR_AGENT_SDK_REQUIRE` names that SDK or is `all`, in which case it fails. The program starts with the plugin binding's minimal environment, so `command` uses an absolute path wherever `PATH` alone would not find the program or its dependencies. Each runner uses its own SDK's freshly built program for its own placement.
+
 Steps that crash the agent run it as a separate process, in its own process group. A crash sends `SIGKILL` to the whole group, so served fixture plugins die with the agent, and the runner waits until every process in the group has exited before it reopens. Recovery then has nothing left running that could race it ([Working environment](../contracts.md#the-working-environment)).
 
 ### The fixture plugins

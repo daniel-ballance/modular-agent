@@ -66,6 +66,63 @@ impl Run {
     }
 }
 
+/// The repository root.
+pub fn repo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap()
+}
+
+/// Every SDK's fixture program, from `conformance/sdk/fixtures/*.json`, with `{repo}`
+/// replaced. Returns each SDK's placement, or why it is not available: a program whose
+/// paths do not exist has not been built.
+pub fn fixture_programs() -> Vec<(String, Result<Placement, String>)> {
+    let repo = repo();
+    let root = repo.to_string_lossy().to_string();
+    let mut files: Vec<_> = std::fs::read_dir(repo.join("conformance/sdk/fixtures"))
+        .expect("fixture program folder")
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|file| {
+            let v = load(&file);
+            let sdk = v["sdk"].as_str().unwrap_or("?").to_string();
+            let command: Vec<String> = v["command"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|a| a.as_str().unwrap_or_default().replace("{repo}", &root))
+                .collect();
+            let missing: Vec<_> = v["command"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str())
+                .filter(|a| a.starts_with("{repo}"))
+                .map(|a| a.replace("{repo}", &root))
+                .filter(|a| !Path::new(a).exists())
+                .collect();
+            let placement = if missing.is_empty() {
+                Ok(Placement::Process {
+                    sdk: sdk.clone(),
+                    command,
+                })
+            } else {
+                Err(format!(
+                    "not built ({}); build with: {}",
+                    missing.join(", "),
+                    v["build"].as_str().unwrap_or("?")
+                ))
+            };
+            (sdk, placement)
+        })
+        .collect()
+}
+
 /// The scenarios, in name order.
 pub fn scenarios() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../conformance/sdk/scenarios");
