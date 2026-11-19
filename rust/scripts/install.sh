@@ -19,10 +19,10 @@ echo "Installed $bin/ma"
 
 if command -v node >/dev/null 2>&1; then
   echo "Building the Claude sidecar..."
-  (cd "$repo/sidecars/claude" && npm install --ignore-scripts --no-audit --no-fund && npm run build)
+  (cd "$repo/typescript/sidecars/claude" && npm install --ignore-scripts --no-audit --no-fund && npm run build)
   # A link, so the sidecar keeps its node_modules and follows this checkout.
-  ln -sfn "$repo/sidecars/claude" "$share/claude"
-  echo "Linked $share/claude -> $repo/sidecars/claude"
+  ln -sfn "$repo/typescript/sidecars/claude" "$share/claude"
+  echo "Linked $share/claude -> $repo/typescript/sidecars/claude"
 else
   echo "node was not found: skipping the Claude sidecar. ChatGPT and Grok still work."
 fi

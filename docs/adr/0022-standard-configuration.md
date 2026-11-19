@@ -9,7 +9,7 @@ Seven rounds settled the specification and proved it with five builds. None of t
 
 ## Decision
 
-Build one **standard configuration** of the Harness: a coding agent with Pi's feature set, made only of plugins. Pi stays the reference for any detail this record does not settle ([ADR 0008](0008-pi-is-the-reference-implementation.md)). The build is in [`rust/`](../../rust/README.md), with one part in [`sidecars/claude`](../../sidecars/claude/README.md).
+Build one **standard configuration** of the Harness: a coding agent with Pi's feature set, made only of plugins. Pi stays the reference for any detail this record does not settle ([ADR 0008](0008-pi-is-the-reference-implementation.md)). The build is in [`rust/`](../../rust/README.md), with one part in [`sidecars/claude`](../../typescript/sidecars/claude/README.md).
 
 - **Start from the clean-room Rust build.** `modular-agent-rs` at `bc59845` is copied into `rust/` and extended. The clean-room rule ended with the experiment.
 - **The model is offered one tool.** `codemode` runs Python in a Monty sandbox. `read`, `exec`, `edit`, `write`, `find`, `list` and every MCP tool are functions on its `tools` object, and each call is a nested tool call through the Harness.

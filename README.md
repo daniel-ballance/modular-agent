@@ -23,9 +23,11 @@ The project has five layers. Each is made only from the layers below it, and a g
 |---|---|---|
 | 1. Specification | What every agent and part must do, and the wire | [`docs/`](docs/conformance.md#the-documents), [kits](conformance/) |
 | 2. SDK specification | What a developer sees, in each language | Not yet written |
-| 3. SDKs | One SDK in TypeScript, Python, Rust and Go | Not yet; the [builds](#builds) are the starting points |
-| 4. Reference implementations | Batteries-included agents, each in one language | The [standard configuration](#the-rust-build-and-the-standard-configuration) |
-| 5. Demonstrative implementations | Agents that show the ecosystem, across languages and placements | [`sidecars/claude`](sidecars/claude/README.md) |
+| 3. SDKs | One SDK in Rust, TypeScript, Go and Python, in that order | Not yet; the [builds](#builds) are the starting points |
+| 4. Reference implementations | Batteries-included agents, one for each language | Rust's [standard configuration](#rust); the others not yet |
+| 5. Demonstrative implementations | Agents that show the ecosystem, across languages and placements | None yet |
+
+Each language is a peer directory with its own toolchain: [`rust/`](rust/README.md), [`typescript/`](typescript/README.md), [`go/`](go/README.md) and [`python/`](python/README.md). Each links `conformance` to the shared [kits](conformance/).
 
 ## Reading order
 
@@ -58,13 +60,19 @@ Not requirements. They record how the specification was reached.
 
 ## Builds
 
-### The Rust build and the standard configuration
+The four builds below are the starting points for the SDKs. They are builds for testing the specification, not production systems. The Elixir build was used only for language diversity in the experiment; it stays in its own repository and gets no SDK.
 
-[`rust/`](rust/README.md) holds a working agent: the clean-room Rust build as its base, and on it a **standard configuration** with Pi's feature set. It has one code tool backed by a Monty sandbox, Providers for ChatGPT, Grok and Claude subscriptions, Agent Skills, an MCP client and a CLI, `ma`. [ADR 0022](docs/adr/0022-standard-configuration.md) records the decisions. The Claude Provider is a plugin in its own process, in [`sidecars/claude`](sidecars/claude/README.md).
+### Rust
 
-### The TypeScript build
+[`rust/`](rust/README.md) holds a working agent: the clean-room Rust build as its base, and on it a **standard configuration** with Pi's feature set. It has one code tool backed by a Monty sandbox, Providers for ChatGPT, Grok and Claude subscriptions, Agent Skills, an MCP client and a CLI, `ma`. [ADR 0022](docs/adr/0022-standard-configuration.md) records the decisions. The Claude Provider is a TypeScript plugin in its own process, in [`typescript/sidecars/claude`](typescript/sidecars/claude/README.md).
 
-`packages/` holds the TypeScript build: a Harness, transient and durable Runtimes, the vanilla Pi plugin set, subagents, a terminal UI, an ACP Interface that T3 Code drives, plugins over the plugin binding, and parts as HTTP services. [Status](docs/status.md) shows what it exercises. It is a build for testing the specification, not a production build.
+### TypeScript
+
+[`typescript/`](typescript/README.md) holds the TypeScript build: a Harness, transient and durable Runtimes, the vanilla Pi plugin set, subagents, a terminal UI, an ACP Interface that T3 Code drives, plugins over the plugin binding, and parts as HTTP services. [Status](docs/status.md) shows what it exercises.
+
+### Go and Python
+
+[`go/`](go/README.md) and [`python/`](python/README.md) hold the clean-room Go and Python builds, copied in unchanged. Each has a Harness, both Runtimes, ACP, the plugin host and served plugins, and history kept locally or in a service.
 
 ## Acceptance test
 

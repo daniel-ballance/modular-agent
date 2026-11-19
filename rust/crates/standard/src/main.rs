@@ -140,7 +140,7 @@ fn auth_status(standard: &Standard) -> Result<()> {
         claude_status()
     );
     if standard.claude_launch().is_none() {
-        println!("              the Claude sidecar is not installed (build sidecars/claude)");
+        println!("              the Claude sidecar is not installed (build typescript/sidecars/claude)");
     }
     Ok(())
 }

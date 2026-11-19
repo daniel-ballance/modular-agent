@@ -1,4 +1,4 @@
-// Copied from packages/plugin-wire/src/wire.ts in this repository, without the ENOENT helper.
+// Copied from typescript/packages/plugin-wire/src/wire.ts in this repository, without the ENOENT helper.
 /**
  * One end of a modular-agent-plugin/1 connection: JSON-RPC 2.0, one message per
  * line, requests in both directions, `$/cancel` and `$/ping` (docs/bindings/plugin.md).

@@ -124,13 +124,13 @@ impl Standard {
             .map(PathBuf::from)
             .into_iter()
             .chain(std::env::current_exe().ok().and_then(|exe| {
-                // A development build: rust/target/<profile>/ma beside sidecars/.
+                // A development build: rust/target/<profile>/ma beside typescript/sidecars/.
                 Some(
                     exe.parent()?
                         .parent()?
                         .parent()?
                         .parent()?
-                        .join("sidecars/claude/dist/main.js"),
+                        .join("typescript/sidecars/claude/dist/main.js"),
                 )
             }))
             .chain(std::env::var_os("HOME").map(|home| {
@@ -231,7 +231,7 @@ pub async fn compose(
         }
         if standard.claude && standard.scripted.is_none() {
             let launch = standard.claude_launch().ok_or_else(|| {
-                anyhow!("the Claude sidecar is not installed; build sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR")
+                anyhow!("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR")
             })?;
             plugin_stdio::load(&harness, launch, &project, &standard.state.join("plugins/claude"), 0)
                 .await

@@ -6,7 +6,7 @@ With Node.js, checks a disposable [history service](../../docs/bindings/history-
 node conformance/history/run.mjs "$MODULAR_AGENT_HISTORY_URL" "$MODULAR_AGENT_HISTORY_TOKEN_FILE"
 ```
 
-To start the TypeScript reference service from the repository root:
+To start the TypeScript build's service from `typescript/`:
 
 ```sh
 npm ci && npm run build

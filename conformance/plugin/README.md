@@ -8,7 +8,7 @@ Run on a disposable Linux environment with Node.js, Bash, `setsid` and GNU coreu
 node conformance/plugin/run.mjs -- <plugin command> [args...]
 ```
 
-For the TypeScript build, run `npm ci && npm run build` at the repository root, then use `node conformance/plugin/run.mjs -- node "$PWD/packages/plugin-wire/dist/src/serve-cli.js"`.
+For the TypeScript build, run `npm ci && npm run build` in `typescript/`, then from there use `node conformance/plugin/run.mjs -- node "$PWD/packages/plugin-wire/dist/src/serve-cli.js"`.
 
 Use `--verbose` before `--` for stderr and passing details. Use `--no-runtime` for the baseline roles alone. The default run also exercises the Runtime tiers; use `--no-runtime` if neither tier is offered. Exit code 0 means all checks run passed.
 

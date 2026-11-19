@@ -10,7 +10,7 @@ A working agent built on [production edition 3](../docs/adr/0021-production-edit
 | Part | Crate | What it does |
 |---|---|---|
 | Providers | `provider-responses` | ChatGPT subscription (`openai-codex/...`) and Grok subscription (`xai/...`) over the Responses API. Stateless. Sign-in and token refresh included. |
-| Provider | [`sidecars/claude`](../sidecars/claude/README.md) | Claude subscription (`claude/...`) through the Claude Agent SDK for TypeScript. A plugin in its own process over the plugin binding, started only when a Claude model is used. |
+| Provider | [`sidecars/claude`](../typescript/sidecars/claude/README.md) | Claude subscription (`claude/...`) through the Claude Agent SDK for TypeScript. A plugin in its own process over the plugin binding, started only when a Claude model is used. |
 | Tools | `tools-files` | `read`, `exec`, `edit`, `write`, `find` and `list`, with Pi's inputs, limits and wording. They work through the session's working environment. |
 | Tool | `tools-code` | `codemode`: Python in a [Monty](https://github.com/pydantic/monty) sandbox. Every other tool is a function on its `tools` object. |
 | MCP client | `tools-mcp`, `standard::mcp` | Servers from `mcp.json`, over stdio and Streamable HTTP. Their tools are `tools.mcp_SERVER__TOOL`. |
@@ -46,7 +46,7 @@ Linux only. Needs [mise](https://mise.jdx.dev) for the pinned Rust toolchain, an
 ```sh
 cd rust
 mise exec -- cargo build --release -p standard        # target/release/ma
-(cd ../sidecars/claude && npm install --ignore-scripts && npm run build)
+(cd ../typescript/sidecars/claude && npm install --ignore-scripts && npm run build)
 scripts/install.sh                                    # optional: ~/.local/bin/ma and the sidecar
 ```
 
@@ -99,7 +99,7 @@ Run from `rust/` with `TMPDIR` off `/tmp`:
 export TMPDIR="$HOME/.cache/ma-std-tmp"; mkdir -p "$TMPDIR"
 (cd ../conformance/acp && npm ci --ignore-scripts)          # once: the ACP kit's one dependency
 mise exec -- cargo test --workspace -- --test-threads=1
-(cd ../sidecars/claude && npm test)
+(cd ../typescript/sidecars/claude && npm test)
 ```
 
 - **The whole workspace: 262 tests pass, none fail** (2026-11-19, after the edition 4 draft). That includes the base build's suite, which runs the kits against the `modular-agent` binary.
@@ -136,7 +136,7 @@ mise exec -- cargo test --workspace -- --test-threads=1
 - **MCP:** tools only. No resources, prompts, sampling, elicitation or OAuth sign-in to a server. A server whose tool names are not letters, digits, `_` or `-`, or run past 64 characters with the prefix, is skipped whole.
 - **No approval, subagent or guardrail plugin** in the standard set, as in Pi. The base has all three (`feature-approval`, `feature-subagents`, `guardrail`).
 - **The terminal is line-based.** No full-screen UI, no markdown rendering, no history search.
-- **Claude through the sidecar** starts a Claude Code process per model request, replays earlier turns as text, and Claude Code adds some text of its own around the prompt. See the [sidecar's gaps](../sidecars/claude/README.md#known-gaps-and-open-problems).
+- **Claude through the sidecar** starts a Claude Code process per model request, replays earlier turns as text, and Claude Code adds some text of its own around the prompt. See the [sidecar's gaps](../typescript/sidecars/claude/README.md#known-gaps-and-open-problems).
 - **The production gaps of edition 3** are unchanged: secret staging, per-connection isolation, resource reservations and cross-session erasure.
 
 ## Where the specification was silent
@@ -179,7 +179,7 @@ rust/
   scripts/                                     fixtures and install.sh
   docs/clean-room/                             the base build's own notes and gap log
   conformance -> ../conformance                the kits
-sidecars/claude/                               the Claude Provider, in TypeScript
+typescript/sidecars/claude/                    the Claude Provider, in TypeScript
 ```
 
 To swap a part, change `compose` in [`crates/standard/src/lib.rs`](crates/standard/src/lib.rs): it is the one place that names the plugins.

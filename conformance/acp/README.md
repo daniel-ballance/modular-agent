@@ -9,7 +9,7 @@ npm ci --prefix conformance/acp
 node conformance/acp/run.mjs -- <agent command> [args...]
 ```
 
-To run against the TypeScript build, run `npm ci && npm run build` at the repository root, then use `node conformance/acp/run.mjs -- node "$PWD/packages/agent/dist/src/cli.js" --acp`. Append `--durable` to that agent command to select its durable Runtime.
+To run against the TypeScript build, run `npm ci && npm run build` in `typescript/`, then from there use `node conformance/acp/run.mjs -- node "$PWD/packages/agent/dist/src/cli.js" --acp`. Append `--durable` to that agent command to select its durable Runtime.
 
 Use Node.js and a Bash/POSIX test environment. The ACP client dependency needs a registry or package cache for installation. Basic execution uses no external model or service. Use absolute executable paths in the agent command. `--verbose` prints stderr and passing details. Exit code 0 means all checks run passed.
 

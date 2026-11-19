@@ -1,6 +1,6 @@
 # Claude sidecar
 
-A plugin for the [plugin binding](../../docs/bindings/plugin.md) `modular-agent-plugin/1`. It serves one part: a **Provider** named `claude` that reaches Claude models through the [Claude Agent SDK for TypeScript](https://code.claude.com/docs/en/agent-sdk/overview) and the Claude subscription that Claude Code is signed in to on this machine. It uses no API key. A host that loads it offers its models as `claude/<model-id>`.
+A plugin for the [plugin binding](../../../docs/bindings/plugin.md) `modular-agent-plugin/1`. It serves one part: a **Provider** named `claude` that reaches Claude models through the [Claude Agent SDK for TypeScript](https://code.claude.com/docs/en/agent-sdk/overview) and the Claude subscription that Claude Code is signed in to on this machine. It uses no API key. A host that loads it offers its models as `claude/<model-id>`.
 
 The Agent SDK is used as a plain model endpoint. The Harness keeps the agent loop, the tools, the system prompt and the history:
 
@@ -16,7 +16,7 @@ It is a port of the approach in the Pi extension `claude-subscription`, cut down
 Node.js 22 or newer.
 
 ```sh
-cd sidecars/claude
+cd typescript/sidecars/claude
 npm install --ignore-scripts
 npm run build      # tsc, output in dist/
 npm test           # build, then 44 offline tests
@@ -25,31 +25,31 @@ npm run live       # two real model requests on a Haiku model; spends subscripti
 
 `@anthropic-ai/claude-agent-sdk` is pinned to `0.3.323`, the version the reference package has installed. The SDK ships the Claude Code binary as an optional platform package (`@anthropic-ai/claude-agent-sdk-linux-x64` here, about 250 MB). `npm install --ignore-scripts` installs it; no postinstall step is needed. Do not install with `--omit=optional`.
 
-The entry point is `node sidecars/claude/dist/main.js`. It speaks the binding on stdin and stdout. Only protocol frames go to stdout. Diagnostics go to stderr. Per-request detail is logged only when `CLAUDE_SIDECAR_DEBUG` is set.
+The entry point is `node typescript/sidecars/claude/dist/main.js`. It speaks the binding on stdin and stdout. Only protocol frames go to stdout. Diagnostics go to stderr. Per-request detail is logged only when `CLAUDE_SIDECAR_DEBUG` is set.
 
 ## Launch configuration
 
 The Rust host reads `MODULAR_AGENT_PLUGINS`. Use absolute paths. The value that launches this sidecar from this checkout:
 
 ```sh
-export MODULAR_AGENT_PLUGINS='[{"command":["/ABSOLUTE/PATH/TO/node","/ABSOLUTE/PATH/TO/REPO/sidecars/claude/dist/main.js"],"env":{"HOME":"/home/YOUR_USER"}}]'
+export MODULAR_AGENT_PLUGINS='[{"command":["/ABSOLUTE/PATH/TO/node","/ABSOLUTE/PATH/TO/REPO/typescript/sidecars/claude/dist/main.js"],"env":{"HOME":"/home/YOUR_USER"}}]'
 ```
 
 For example, built in the shell:
 
 ```sh
-export MODULAR_AGENT_PLUGINS="$(printf '[{"command":["%s","%s"],"env":{"HOME":"%s"}}]' "$(command -v node)" "$PWD/sidecars/claude/dist/main.js" "$HOME")"
+export MODULAR_AGENT_PLUGINS="$(printf '[{"command":["%s","%s"],"env":{"HOME":"%s"}}]' "$(command -v node)" "$PWD/typescript/sidecars/claude/dist/main.js" "$HOME")"
 ```
 
 ### Environment the launch must pass
 
-The host starts a plugin with a minimal environment ([plugin binding, "Choosing plugins at start"](../../docs/bindings/plugin.md#choosing-plugins-at-start)). The Rust host passes `PATH` and whatever `env` lists, and nothing else. Claude Code has to find its login, so the launch must pass one of these:
+The host starts a plugin with a minimal environment ([plugin binding, "Choosing plugins at start"](../../../docs/bindings/plugin.md#choosing-plugins-at-start)). The Rust host passes `PATH` and whatever `env` lists, and nothing else. Claude Code has to find its login, so the launch must pass one of these:
 
 | Variable | When | Notes |
 |---|---|---|
 | `HOME` | Claude Code is signed in for this user in the usual place (`~/.claude`) | The normal choice. This is what the real run below used. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's configuration directory is somewhere else | Pass it instead of, or with, `HOME`. Claude Code also writes its own state there, so it must be writable. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | A machine with no browser login, using the token `claude setup-token` prints | Works, but it puts a credential in the launch environment, which [Security](../../docs/security.md#plugins) tells a host not to do. Prefer `HOME`. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | A machine with no browser login, using the token `claude setup-token` prints | Works, but it puts a credential in the launch environment, which [Security](../../../docs/security.md#plugins) tells a host not to do. Prefer `HOME`. |
 
 `PATH` is not needed by Claude Code itself: the SDK runs the binary from its own platform package. It is needed only if `command[0]` is a bare `node`.
 
@@ -93,7 +93,7 @@ The built-in list has the same 18 Claude models, limits and accepted levels as P
 | `high` | effort `high` | 16,384 tokens |
 | `xhigh` | effort `xhigh` | not offered |
 
-Which levels a model lists follows the reference: Fable 5.x cannot switch thinking off; Haiku 5.5 has no `minimal`; Opus 5.5 and Sonnet 5.5 have neither `off` nor `minimal`; Opus 4.6 and Sonnet 4.6 have no `xhigh`. A level the model does not list is lowered to the nearest listed level below it, or left unset if there is none, as [shared data](../../docs/bindings/data.md#models) requires. It is never raised. Claude's `max` effort has no shared level name and cannot be selected.
+Which levels a model lists follows the reference: Fable 5.x cannot switch thinking off; Haiku 5.5 has no `minimal`; Opus 5.5 and Sonnet 5.5 have neither `off` nor `minimal`; Opus 4.6 and Sonnet 4.6 have no `xhigh`. A level the model does not list is lowered to the nearest listed level below it, or left unset if there is none, as [shared data](../../../docs/bindings/data.md#models) requires. It is never raised. Claude's `max` effort has no shared level name and cannot be selected.
 
 `settings.maxOutput` is capped at the model's `maxOutput` and passed to Claude Code as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` for that one process.
 
@@ -125,7 +125,7 @@ The fake is selected in the built program with `CLAUDE_SIDECAR_TEST_FAKE_SDK` (t
 `conformance/plugin/run.mjs` checks a build's conformance plugin: Provider `conformance` with the scripted model `echo`, the fixture tools, environment and hooks, and `MODULAR_AGENT_PLUGIN_PARTS`. This sidecar is a real Provider and serves none of those, so the kit's Provider checks cannot apply; `stdio.test.ts` covers that ground instead. Run anyway with the fake and `--no-runtime`, the checks that do not depend on the fixture all pass: 18 of 31, covering ping, 64 and 65 JSON levels, CRLF, batch and malformed frames, id handling, a reused id closing the connection, the `method_not_found` envelope, shutdown, exit on EOF and `not_supported` for an unknown binding version. The 13 failures are all for fixture parts this plugin does not register.
 
 ```sh
-CLAUDE_SIDECAR_TEST_FAKE_SDK=1 node conformance/plugin/run.mjs --no-runtime -- "$(command -v node)" "$PWD/sidecars/claude/dist/main.js"
+CLAUDE_SIDECAR_TEST_FAKE_SDK=1 node conformance/plugin/run.mjs --no-runtime -- "$(command -v node)" "$PWD/typescript/sidecars/claude/dist/main.js"
 ```
 
 ### Real run (2026-11-19)
@@ -163,8 +163,8 @@ Two more single requests, made directly against the Provider class to look into 
 - **Cancel and the response hook.** Settled by the edition 4 draft as this sidecar had guessed: a cancelled request answers `cancelled` and sends no `provider.response`.
 - **A failed `provider.request` hook.** The binding says the Provider must wait for the successful answer. For an error answer (`cancelled`, `turn_limit`, `internal`, `lost`) the sidecar answers `provider/request` with the same error code and does no inference.
 - **Erasure by a stateless Provider.** `provider/discard` with `erase: true` answers `{ "outOfReach": [...] }` with one descriptive string, following the wording "report those copies out of reach". The binding does not define the strings.
-- **`sessionId` on a stateless Provider.** Accepted when present, never required, and copied into both hook payloads (`null` when absent, per [the hook table](../../docs/bindings/plugin.md#from-core-hooks-to-wire-hooks)).
+- **`sessionId` on a stateless Provider.** Accepted when present, never required, and copied into both hook payloads (`null` when absent, per [the hook table](../../../docs/bindings/plugin.md#from-core-hooks-to-wire-hooks)).
 - **A level the model does not list.** Settled by the edition 4 draft: lower it, never raise it. The sidecar now does.
-- **`cost` for a subscription.** [Messages](../../docs/bindings/data.md#messages) says to use zero for fields missing from a partial meter. Zero is reported.
+- **`cost` for a subscription.** [Messages](../../../docs/bindings/data.md#messages) says to use zero for fields missing from a partial meter. Zero is reported.
 - **Opaque reasoning data.** Thinking signatures are not returned as `providerData`, because history is never sent back as native turns and the data would only add bytes.
 - **The request after the hook.** If the hook answers with a request that is not a readable ModelRequest, inference has already been admitted, so the sidecar returns a `failed` message with kind `other` and still calls `provider.response`.
