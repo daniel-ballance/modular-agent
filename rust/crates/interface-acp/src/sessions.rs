@@ -83,17 +83,17 @@ impl Session {
         if open && self.api.is_running(&self.id) {
             self.cancel().await?;
         }
-        let _guard = self.gate.lock().await;
         self.stop.cancel();
+        let driver = self.driver.lock().unwrap().take();
+        if let Some(driver) = driver {
+            let _ = driver.await;
+        }
+        let _guard = self.gate.lock().await;
         let result = if open {
             self.api.close(&self.id).await
         } else {
             Ok(())
         };
-        let driver = self.driver.lock().unwrap().take();
-        if let Some(driver) = driver {
-            let _ = driver.await;
-        }
         let worker = self.worker.lock().unwrap().take();
         if let Some(worker) = worker {
             let _ = worker.await;
@@ -130,7 +130,7 @@ impl Session {
         {
             self.api.close(id).await?;
         }
-        if !receipt.duplicate && receipt.command.is_none() {
+        if !receipt.duplicate && receipt.command.is_none() && !self.api.is_running(&self.id) {
             self.api.next_turn(&self.id).await?;
         }
         // A duplicate of extension input may still be queued. It must describe
@@ -226,7 +226,16 @@ impl Session {
         }
         Ok(json!({"inputId":receipt.input,"taken":taken,"duplicate":receipt.duplicate}))
     }
-    pub async fn drive(self: Arc<Self>) {
+    pub async fn drive(self: Arc<Self>, reopening: bool) {
+        if reopening {
+            // Do not hold the admission gate here: a fresh prompt must be able
+            // to queue, even if recovery is waiting for a live answer.
+            if let Err(e) = self.api.run_recovery(&self.id).await {
+                eprintln!("ACP recovery failed: {e}");
+            }
+            self.completed.notify_waiters();
+            self.wake.notify_one();
+        }
         loop {
             tokio::select! { _ = self.stop.cancelled() => break, _ = self.wake.notified() => () }
             let _guard = tokio::select! { _ = self.stop.cancelled() => break, guard = self.gate.lock() => guard };
@@ -459,7 +468,6 @@ impl State {
             self.client.lock().unwrap().clone().unwrap_or_default(),
         ));
         *session.worker.lock().unwrap() = Some(worker);
-        *session.driver.lock().unwrap() = Some(tokio::spawn(session.clone().drive()));
         self.sessions
             .lock()
             .unwrap()
@@ -467,13 +475,21 @@ impl State {
         let setup:Result<Value> = async {
             // On reopen, host sources must exist before durable Runtime recovery.
             self.factory.attach(api.clone(),&id,&project,wire::optional(&p,"mcpServers").cloned().unwrap_or(json!([]))).await?;
-            if reopening {
-                api.open(&id).await?;
+            let handed_back = if reopening {
+                let inputs = api.install_recovery(&id).await?;
                 self.rewind_blocks.lock().unwrap().remove(&project);
-            }
+                inputs
+            } else {
+                vec![]
+            };
             require(api.as_ref(), &actor_scope(&id), "watch")?;
             let mut response = json!({"configOptions":config(api.as_ref(),&id)?,"_meta":{"modular-agent":{"declaration":self.factory.session_declaration(api.as_ref(), &id)?}}});
             if !reopening { response["sessionId"] = json!(id); }
+            if !handed_back.is_empty() {
+                response["_meta"]["modular-agent"]["handedBack"] = json!(handed_back.iter()
+                    .map(|input| json!({"inputId":input.id,"content":[{"type":"text","text":input.text}]}))
+                    .collect::<Vec<_>>());
+            }
             let gated = api.output(&actor_scope(&id), Output {
                 recipient: "interface.acp".into(),
                 value: json!({"method":method,"result":response}),
@@ -483,10 +499,14 @@ impl State {
             session.flush().await?;
             Ok(gated)
         }.await;
+        if setup.is_ok() || api.is_running(&id) {
+            // On failure after installation, run the cancelled recovery so it
+            // releases the reservation before close releases the writer.
+            *session.driver.lock().unwrap() = Some(tokio::spawn(session.clone().drive(reopening)));
+        }
         drop(gate);
         if setup.is_err() {
             // Reopen can fail before Harness admission. Also close pre-attached sources.
-            session.stop.cancel();
             let _ = session.close().await;
             self.factory.detach(api.clone(), &id).await;
             self.sessions.lock().unwrap().remove(&id);

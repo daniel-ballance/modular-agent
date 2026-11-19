@@ -106,6 +106,12 @@ pub trait AgentApi: Send + Sync {
             .is_some_and(|budget| info["tokens"]["used"].as_u64().unwrap_or(0) >= budget))
     }
     async fn open(&self, session: &str) -> Result<()>;
+    /// Open without waiting for an interrupted turn. Returns inputs handed
+    /// back on recovery, in admission order.
+    async fn install_recovery(&self, session: &str) -> Result<Vec<Input>>;
+    /// Drive installed recovery. The interface must keep routing authorized
+    /// reads, answers and cancellation while this runs.
+    async fn run_recovery(&self, session: &str) -> Result<()>;
     async fn close(&self, session: &str) -> Result<()>;
     async fn submit(
         &self,

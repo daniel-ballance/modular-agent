@@ -14,6 +14,7 @@ struct OpenSession {
     data: SessionData,
     _lease: Option<Box<dyn Lease>>,
     queue: VecDeque<Input>,
+    interrupted: Vec<(Arc<dyn Runtime>, Scope)>,
     active: bool,
     rewinding: bool,
     journal_uncertain: bool,
@@ -210,6 +211,7 @@ impl Harness {
                     data,
                     _lease: lease,
                     queue: VecDeque::new(),
+                    interrupted: Vec::new(),
                     active: false,
                     rewinding: false,
                     journal_uncertain: false,
@@ -255,6 +257,16 @@ impl Harness {
     }
 
     pub async fn open(&self, id: &str) -> Result<()> {
+        self.install_recovery(id).await?;
+        if let Err(error) = self.run_recovery(id).await {
+            let _ = self.close(id).await;
+            self.sessions.lock().unwrap().remove(id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn install_recovery(&self, id: &str) -> Result<Vec<Input>> {
         let _erasure = self
             .erasure
             .try_read()
@@ -308,6 +320,7 @@ impl Harness {
                     data,
                     _lease: Some(lease),
                     queue: VecDeque::new(),
+                    interrupted: Vec::new(),
                     active: false,
                     rewinding: recovery,
                     journal_uncertain: false,
@@ -351,30 +364,16 @@ impl Harness {
         }
         let snapshot = self.snapshot(id)?;
         let branch = snapshot.branch();
-        let starts: Vec<_> = branch.iter().filter(|e| e.kind == "turn.start").collect();
-        for start in starts {
+        let mut interrupted = Vec::new();
+        for start in branch.iter().filter(|e| e.kind == "turn.start") {
             if !branch
                 .iter()
                 .any(|e| e.kind == "turn.end" && e.scope.turn == start.scope.turn)
             {
-                let runtime: Arc<dyn Runtime> = capability(
-                    self,
-                    match snapshot.settings["_runtime"].as_str() {
-                        Some("durable") => "runtime.durable",
-                        Some("transient") => "runtime.transient",
-                        _ => "runtime",
-                    },
-                )?;
-                self.sessions.lock().unwrap().get_mut(id).unwrap().active = true;
-                let resumed = runtime.interrupted(self.api(), start.scope.clone()).await;
-                self.sessions.lock().unwrap().get_mut(id).unwrap().active = false;
-                if let Err(error) = resumed {
-                    let _ = self.close(id).await;
-                    self.sessions.lock().unwrap().remove(id);
-                    return Err(error);
-                }
+                interrupted.push((session_runtime(self, &snapshot)?, start.scope.clone()));
             }
         }
+        let mut handed_back = Vec::new();
         for (input_id, entry) in snapshot.pending_inputs() {
             {
                 let content = entry.content.as_ref().unwrap();
@@ -411,6 +410,7 @@ impl Harness {
                 )?;
                 self.emit(Event::new(&scope, "input.returned", json!(input)))
                     .await?;
+                handed_back.push(input);
             }
         }
         if let Err(error) = self
@@ -425,8 +425,37 @@ impl Harness {
             self.sessions.lock().unwrap().remove(id);
             return Err(error);
         }
-        Ok(())
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions.get_mut(id).unwrap();
+        // Reserve the session until recovery settles, even before its driver runs.
+        open.active = !interrupted.is_empty();
+        open.steer_closed = open.active;
+        open.interrupted = interrupted;
+        Ok(handed_back)
     }
+
+    async fn run_recovery(&self, id: &str) -> Result<()> {
+        let interrupted = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let open = sessions
+                .get_mut(id)
+                .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
+            std::mem::take(&mut open.interrupted)
+        };
+        if interrupted.is_empty() {
+            return Ok(());
+        }
+        let result = async {
+            for (runtime, scope) in interrupted {
+                runtime.interrupted(self.api(), scope).await?;
+            }
+            Ok(())
+        }
+        .await;
+        self.sessions.lock().unwrap().get_mut(id).unwrap().active = false;
+        result
+    }
+
     async fn prepare_session(&self, id: &str) -> Result<()> {
         self.invoke(
             &self.points["session.prepare"],
@@ -1430,6 +1459,12 @@ impl AgentApi for Harness {
     async fn open(&self, session: &str) -> Result<()> {
         Harness::open(self, session).await
     }
+    async fn install_recovery(&self, session: &str) -> Result<Vec<Input>> {
+        Harness::install_recovery(self, session).await
+    }
+    async fn run_recovery(&self, session: &str) -> Result<()> {
+        Harness::run_recovery(self, session).await
+    }
     async fn close(&self, session: &str) -> Result<()> {
         Harness::close(self, session).await
     }
@@ -2099,6 +2134,7 @@ impl AgentApi for Harness {
                 data: next,
                 _lease: lease,
                 queue: VecDeque::new(),
+                interrupted: Vec::new(),
                 active: false,
                 rewinding: false,
                 journal_uncertain: false,
