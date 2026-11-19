@@ -33,7 +33,10 @@ function pythonJson(value: unknown): PythonJson {
 async function run(pool: Monty, code: string, ctx: ToolContext) {
   const available = catalog(await ctx.tools.list());
   const modules = Object.fromEntries([...available.functions.keys()].map(name => [name, () => {}]));
-  await using sandbox = await pool.checkout({ scriptName: "main.py", limits: { maxTurnDurationSecs: 30, maxRecursionDepth: 200, maxMemory: 32 * 1024 * 1024 },
+  // The SDK counts nested tool calls below. Monty's suspension counter also
+  // includes lookups and must not cut off a run before its 500th tool call.
+  await using sandbox = await pool.checkout({ scriptName: "main.py", limits: { maxTurnDurationSecs: 30, maxRecursionDepth: 200,
+    maxMemory: 32 * 1024 * 1024, maxSuspensions: Number.MAX_SAFE_INTEGER },
     externalModules: { tools: new ExternalModule(modules) }, osPolicy: { datetime: "call_host", sleep: "call_host", randomStart: "call_host" } });
   let printed = "", bytes = 0, over = false, calls = 0;
   const error = (kind: string, message: string) => new MontyRuntimeError(kind, message);

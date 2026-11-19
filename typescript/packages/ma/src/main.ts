@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { realpath, stat } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgent, httpHistory, type Agent, type ProcessPlugin, type Settings } from "@modular-agent/core";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
@@ -150,38 +150,43 @@ async function main(argv: string[]) {
         return 0;
       }
       if (opts.resume && !opts.session) {
-        const candidates = await Promise.all(sessions.map(s => index.savedSession(s.id)));
-        candidates.sort((a, b) => b.updated - a.updated);
-        opts.session = candidates[0]?.id;
+        sessions.sort((a, b) => b.updated - a.updated);
+        opts.session = sessions[0]?.id;
         if (!opts.session) throw new Error("this folder has no saved session to continue");
       }
-      const saved = await index.savedSession(opts.session!);
+      const saved = await index.sessionInfo(opts.session!);
       project = saved.project;
       savedModel = modelRef(saved.settings.model);
     } finally { await index.close(); }
   }
-  const settings = { ...standardSettings(await settingsFor(p, project)), ...opts.settings };
-  let model = script ? "scripted/script" : conformance ? "conformance/echo" : modelRef(opts.settings.model) ?? savedModel ?? modelRef(settings.model);
-  if (conformance) settings.modelTools = null;
-  delete settings.model;
   const inspecting = opts.history || opts.declaration || opts.command === "models";
   const launch = !script && !conformance ? await claudeLaunch(p) : undefined;
-  if (!model && !inspecting) {
-    if (await auth.login("openai-codex")) model = "openai-codex/gpt-6.1-sol";
-    else if (await auth.login("xai")) model = "xai/grok-4.7";
-    else if (launch && claudeSignedIn().status === 0) model = "claude/claude-sonnet-5-5";
-    else if (!opts.acp) throw new Error(noModel);
-  }
-  const claude = model?.startsWith("claude/") || opts.acp || opts.command === "models" ? launch : undefined;
-  if (model?.startsWith("claude/") && !claude) throw new Error("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR");
   const overrides = script || conformance ? {} : await optionalJson(join(p.config, "models.json"));
-  const providers = script ? [script] : conformance ? [] : vendors.map(v => responses(v, auth, overrides));
-  const projectTrust = await trusted(p, project, opts.trust);
-  const mcp = standardMcpTools({ servers: async cwd => opts.declaration || opts.command === "models" ? {} :
-    mcpServers(p, cwd, cwd === project ? projectTrust : await trusted(p, cwd)) });
-  const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p), mcp];
-  const agent = await createAgent({ ...base, project, settings, model: opts.command === "models" ? undefined : model, providers, plugins,
-    compaction: !conformance, conformance, pluginHost: opts.acp || !!claude, ...(claude ? { processPlugins: [claude] } : {}) });
+  const projectMcp = async (cwd: string) => mcpServers(p, cwd, await trusted(p, cwd));
+  if (opts.trust) await trusted(p, project, true);
+  let defaultModel: string | undefined;
+  if (!script && !conformance && !inspecting) {
+    if (await auth.login("openai-codex")) defaultModel = "openai-codex/gpt-6.1-sol";
+    else if (await auth.login("xai")) defaultModel = "xai/grok-4.7";
+  }
+  const build = async (cwd: string, saved?: string) => {
+    const settings = { ...standardSettings(await settingsFor(p, cwd)), ...opts.settings };
+    let model = script ? "scripted/script" : conformance ? "conformance/echo" :
+      saved ?? modelRef(settings.model) ?? defaultModel;
+    if (!model && !inspecting && launch && claudeSignedIn().status === 0) model = "claude/claude-sonnet-5-5";
+    if (!model && !inspecting && !opts.acp) throw new Error(noModel);
+    if (conformance) settings.modelTools = null;
+    delete settings.model;
+    const claude = model?.startsWith("claude/") || opts.command === "models" ? launch : undefined;
+    if (model?.startsWith("claude/") && !claude) throw new Error("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR");
+    const providers = script ? [script] : conformance ? [] : vendors.map(v => responses(v, auth, overrides));
+    const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p)];
+    if (!opts.acp) plugins.push(standardMcpTools({ servers: projectMcp }));
+    return createAgent({ ...base, project: cwd, settings, model: opts.command === "models" ? undefined : model, providers, plugins,
+      compaction: !conformance, conformance, questionsOutlastTurns: true, jobReportsStartTurns: true, settingsDuringTurn: "refused",
+      pluginHost: opts.acp || !!claude, ...(claude ? { processPlugins: [claude] } : {}) });
+  };
+  const agent = await build(project, modelRef(opts.settings.model) ?? savedModel);
   try { return await run(agent); } finally { await agent.close(); }
 
   async function run(agent: Agent) {
@@ -191,24 +196,18 @@ async function main(argv: string[]) {
     }
     if (opts.declaration) { console.log(JSON.stringify(agent.declaration(), null, 2)); return 0; }
     if (opts.acp) {
-      await agent.serveAcp({ showApproval: conformance, async sessionSettings(cwd) {
-        const project = await realpath(cwd);
-        const initial: Settings = { ...standardSettings(await settingsFor(p, project)), ...opts.settings, cwd: project };
-        if (script || conformance) {
-          initial.model = model;
-          if (conformance) initial.modelTools = null;
-        } else if (!initial.model) delete initial.model;
-        return initial;
-      }, async attachMcp(id, cwd, servers) {
-        if (Object.values(servers).some(s => "command" in s && !isAbsolute(s.command))) throw new Error("ACP MCP executable paths must be absolute");
-        await mcp.attach(id, cwd, servers);
+      await agent.serveAcp({ projectMcp, compose: (cwd, saved) => {
+        if (cwd === project && (!saved || agent.models().some(m => `${m.provider}/${m.id}` === modelRef(saved.settings.model)))) {
+          return Promise.resolve(agent);
+        }
+        return build(cwd, modelRef(saved?.settings.model));
       } });
       return 0;
     }
     const session = opts.session ? await agent.openSession(opts.session) : await agent.session();
     if (opts.history) { console.log(JSON.stringify(await session.history(), null, 2)); return 0; }
     if (opts.session) {
-      if (opts.settings.model !== undefined) await session.setSetting("model", model);
+      if (opts.settings.model !== undefined) await session.setSetting("model", script ? "scripted/script" : opts.settings.model);
       if (opts.settings.reasoning !== undefined) await session.setSetting("thinking", opts.settings.reasoning);
     }
     return opts.prompt === undefined ? line(agent, session, !!opts.json, !!opts.verbose) : print(session, opts.prompt, !!opts.json, !!opts.verbose);

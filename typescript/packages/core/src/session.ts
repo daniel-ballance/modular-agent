@@ -262,7 +262,7 @@ export class Session {
     return checked(async () => structuredClone(await this.#api.gatedHistory(this.id, { recipient: local, all: options.all ?? true })));
   }
   /** Wait for the current turn and its queued follow-up inputs to settle. */
-  async waitForIdle(): Promise<void> {
+  async waitIdle(): Promise<void> {
     this.#check();
     await checked(() => this.#api.waitForIdle(this.id));
   }

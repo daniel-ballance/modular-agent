@@ -1,6 +1,6 @@
 export { Agent, createAgent, fileHistory, memoryHistory, httpHistory, serveHistory, FileHistory, HttpHistory } from "./agent.js";
 export { MemoryHistory } from "./history.js";
-export type { AgentOptions, Approval, Durability, ProcessPlugin, SessionInfo, SavedSessionInfo, SessionOptions, ServeAcpOptions } from "./agent.js";
+export type { AgentOptions, Approval, Durability, ProcessPlugin, SessionInfo, SessionSummary, SessionOptions, ServeAcpOptions } from "./agent.js";
 export { durableRuntime, transientRuntime, localEnvironment, environmentCredentials, fileCredentials } from "./parts.js";
 export type * from "./parts.js";
 export { Session } from "./session.js";
@@ -8,6 +8,7 @@ export type { Event, PromptOptions, PromptResult, ToolResult } from "./session.j
 export { AgentError } from "./errors.js";
 export type { ErrorCode } from "./errors.js";
 export { Tool, tool } from "./tool.js";
+export { standardMcpTools, type McpServerConfig } from "./mcp.js";
 export type { ToolContext, ToolEnvironment, ToolOutput } from "./tool.js";
 export type { JSONSchema, Schema, StandardSchema } from "./schema.js";
 export { definePlugin } from "./plugin.js";

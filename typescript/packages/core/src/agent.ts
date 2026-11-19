@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider } from "@modular-agent/harness";
+import { isAbsolute, join, resolve } from "node:path";
+import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
 import { contextCompaction } from "@modular-agent/context-compaction";
@@ -9,7 +9,7 @@ import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, pluginSpecsFromEnv, conformanceProvider, conformanceTools } from "@modular-agent/plugin-wire";
-import { acpInterface, type AcpOptions } from "@modular-agent/interface-acp";
+import { acpInterface } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
@@ -19,6 +19,7 @@ import { asWorkingEnvironment, MemoryEnvironment } from "./environment.js";
 import { MemoryHistory, memoryArchive, memoryStore } from "./history.js";
 import { wirePlugin } from "./serve.js";
 import { environmentCredentials } from "./parts.js";
+import { standardMcpTools, type McpServerConfig } from "./mcp.js";
 import { makeSession, type Session } from "./session.js";
 import type { Declaration, ModelInfo, ModelRef, Question, QuestionHandler, Settings, ToolCall } from "./data.js";
 
@@ -39,6 +40,9 @@ export interface AgentOptions {
   approval?: Approval;
   /** Enable the official context compaction plugin and /compact command. */
   compaction?: boolean;
+  questionsOutlastTurns?: boolean;
+  jobReportsStartTurns?: boolean;
+  settingsDuringTurn?: "nextTurn" | "refused";
   /** Offline fixtures for the ACP conformance kit; not for production use. */
   conformance?: boolean;
   onQuestion?: QuestionHandler;
@@ -48,9 +52,14 @@ export interface AgentOptions {
   credentials?: CredentialStore;
 }
 export interface SessionOptions { settings?: Settings }
-export type ServeAcpOptions = Omit<AcpOptions, "declaration">;
-export interface SessionInfo { id: string; project: string; created: number }
-export interface SavedSessionInfo extends SessionInfo { updated: number; settings: Settings }
+export interface ServeAcpOptions {
+  compose?(project: string, saved?: SessionInfo): Promise<Agent>;
+  projectSettings?(project: string): Settings | Promise<Settings>;
+  projectMcp?(project: string): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
+  showApproval?: boolean;
+}
+export interface SessionSummary { id: string; project: string; updated: number; model?: ModelRef; title?: string }
+export interface SessionInfo { id: string; project: string; created: number; updated: number; settings: Settings }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
 
 let fileArchive: (store: FileHistory) => HistoryArchive;
@@ -113,7 +122,9 @@ export class Agent {
   #close?: Promise<void>;
   #hostEnabled = false;
   #acp = false;
+  #project: string;
   #conformance = false;
+  #approval = false;
   #interfaces: AgentInterface[] = [];
   #startedInterfaces: AgentInterface[] = [];
   #api;
@@ -124,10 +135,11 @@ export class Agent {
   #interruption = new AbortController();
   #rebuild?: () => Promise<Agent>;
 
-  private constructor(harness: Harness, scratch: string, onQuestion?: QuestionHandler) {
+  private constructor(harness: Harness, scratch: string, project: string, onQuestion?: QuestionHandler) {
     this.#h = harness;
     this.#api = harness.api("sdk.host");
     this.#scratch = scratch;
+    this.#project = project;
     this.#defaultHandler = onQuestion;
   }
   static {
@@ -167,9 +179,11 @@ export class Agent {
       if (!(await stat(project)).isDirectory()) throw new Error("Project must be a directory");
       const home = options.dataDir ? resolve(options.dataDir) : scratch;
       await mkdir(home, { recursive: true });
-      const h = new Harness({ project, home, questionsOutlastTurns: false, settingsDuringTurn: "nextTurn", rejectUnknownModel: true });
-      agent = new Agent(h, scratch, options.onQuestion);
+      const h = new Harness({ project, home, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
+        jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn", rejectUnknownModel: true });
+      agent = new Agent(h, scratch, project, options.onQuestion);
       agent.#conformance = options.conformance ?? false;
+      agent.#approval = options.approval !== undefined || agent.#conformance;
       const settings = structuredClone(options.settings ?? {});
       if (options.approval !== undefined) settings.approval = options.approval;
       const history = options.history ?? (durability === "ephemeral" || !options.dataDir ? memoryHistory() : undefined);
@@ -211,7 +225,9 @@ export class Agent {
       agent.#hostEnabled = options.pluginHost ?? options.processPlugins !== undefined;
       await agent.#loadProcesses([...options.processPlugins ?? [], ...(agent.#hostEnabled ? pluginSpecsFromEnv() : [])]);
       const effectiveRuntime = h.use<Runtime>("runtime");
-      if (durability === "durable" && effectiveRuntime?.supports.continuesAfterRestart !== true) {
+      // The ACP kit substitutes its own Runtime to exercise the remote bridge.
+      if (durability === "durable" && effectiveRuntime?.supports.continuesAfterRestart !== true &&
+          !(options.conformance && agent.#external.has("runtime"))) {
         throw new Error("Durable agents need a Runtime that continues after restart");
       }
       const effectiveStore = h.use<HistoryStore>("history-store");
@@ -288,10 +304,12 @@ export class Agent {
     }
   }
   async #loadExternal(ext: Awaited<ReturnType<typeof startExternalPlugin>>) {
+    const refusal = ext.refusal(this.#h, this.#external);
+    if (refusal) {
+      await ext.stop("refused", refusal);
+      throw new Error(refusal);
+    }
     try {
-      if (ext.registration.hooks?.some(h => h.hook === "output")) throw new Error("The SDK does not support output gate hooks");
-      const refusal = ext.refusal(this.#h, this.#external);
-      if (refusal) throw new Error(refusal);
       for (const key of ext.replacements) {
         if (!(ext.registration.replaces ?? []).includes(key) && this.#h.hasItem(key)) throw new Error(`${key} is already registered`);
         this.#h.replacements.set(key, ext.registration.name);
@@ -387,12 +405,18 @@ export class Agent {
     await checked(() => this.#api.waitForIdle(id));
     return session;
   }
-  async sessions(filter?: { project?: string }): Promise<SessionInfo[]> {
+  async sessions(filter?: { project?: string }): Promise<SessionSummary[]> {
     this.#check();
-    return checked(() => this.#api.listSessions(filter?.project ?? null));
+    return checked(async () => {
+      const stored = await this.#api.listSessions(filter?.project ? await realpath(filter.project) : null);
+      return Promise.all(stored.map(async ({ id }) => {
+        const { project, settings, updated } = await this.sessionInfo(id);
+        return { id, project, updated, model: parseModel(settings.model), title: typeof settings.title === "string" ? settings.title : undefined };
+      }));
+    });
   }
   /** Read saved session metadata without opening it or starting recovery. */
-  async savedSession(id: string): Promise<SavedSessionInfo> {
+  async sessionInfo(id: string): Promise<SessionInfo> {
     this.#check();
     if (!/^[\w-]+$/.test(id)) throw new AgentError("invalid_params", "Invalid session id");
     return checked(async () => {
@@ -420,7 +444,7 @@ export class Agent {
       runsToolsAtProvider: providers.some(p => p.supports.runsTools === true),
       liveSessions: providers.some(p => p.supports.liveSessions === true),
       portableSessions: this.#portable && !providers.some(p => p.supports.runsTools === true || p.supports.keepsState === true),
-      nestedToolCalls: base.nestedToolCalls === true, questionsOutlastTurns: false, lateAnswersStartTurns: false, waitingThroughRestart: false,
+      nestedToolCalls: base.nestedToolCalls === true, lateAnswersStartTurns: base.questionsOutlastTurns === true,
       severalActors: false, tenants: false, sessionLimits: false, holdsOutput: false, mixedActorInput: "refused",
       startsTurnsUnasked: base.startsTurnsUnasked === "never" ? "never" : "jobReports",
     };
@@ -428,16 +452,74 @@ export class Agent {
   async serveAcp(options: ServeAcpOptions = {}): Promise<void> {
     this.#check();
     if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
-    if (!this.#hostEnabled) throw new AgentError("invalid_composition", "Build with pluginHost: true before serving ACP");
     this.#acp = true;
+    const agents = new Map<string, Promise<Agent>>();
+    const sessions = new Map<string, Agent>();
+    const attachments = new Map<PluginApi, ReturnType<typeof standardMcpTools>>();
+    const installMcp = async (agent: Agent) => {
+      const mcp = standardMcpTools({ servers: async project => await options.projectMcp?.(project) ?? {} });
+      await agent.#plugin(mcp);
+      attachments.set(agent.#api, mcp);
+    };
     try {
-      const binding = acpInterface(this.#conformance
-        ? { actorId: process.env.MODULAR_AGENT_ACTOR, ...options }
-        : { ...options, declaration: () => this.declaration() });
+      const binding = acpInterface({
+        actorId: this.#conformance ? process.env.MODULAR_AGENT_ACTOR : undefined,
+        showApproval: options.showApproval ?? this.#approval,
+        declaration: id => (id && sessions.get(id) || this).declaration(),
+        projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,
+        project: async (cwd, id) => {
+          const project = await checked(() => realpath(cwd), "invalid_params");
+          if (!(await stat(project)).isDirectory()) throw new AgentError("invalid_params", "Project must be a directory");
+          const saved = id && !sessions.has(id) ? await this.sessionInfo(id) : undefined;
+          if (saved && saved.project !== project || !options.compose && project !== this.#project) {
+            throw new AgentError("invalid_params", "Session belongs to a different project");
+          }
+          const ref = parseModel(saved?.settings.model);
+          const key = JSON.stringify([project, ref?.provider]);
+          let selected = id ? sessions.get(id) : undefined;
+          if (!selected && options.compose) {
+            let pending = agents.get(key);
+            if (!pending) {
+              pending = (async () => {
+                const agent = await options.compose!(project, saved);
+                if (agent === this) return agent;
+                try {
+                  if (agent.#project !== project || agent.#open.size || agent.#acp) throw new AgentError("invalid_composition", "Factory must return a fresh agent for this project");
+                  await installMcp(agent);
+                  await agent.#load({ name: binding.name, setup(api) {
+                    binding.acp.attach(api, false);
+                    api.provide("interface", binding.acp);
+                  } });
+                  return agent;
+                } catch (error) { await agent.close(); throw error; }
+              })();
+              agents.set(key, pending);
+              void pending.catch(() => { if (agents.get(key) === pending) agents.delete(key); });
+            }
+            selected = await pending;
+          }
+          selected ??= this;
+          if (id) sessions.set(id, selected);
+          return { api: selected.#api, cwd: project };
+        },
+        async attachMcp(id, project, servers, api) {
+          if (Object.values(servers).some(s => "command" in s && !isAbsolute(s.command))) {
+            throw new AgentError("invalid_params", "ACP MCP executable paths must be absolute");
+          }
+          await attachments.get(api)?.attach(id, project, servers);
+        },
+      });
+      await installMcp(this);
       await this.#load(binding);
       await binding.acp.serveStdio();
     } catch (error) { throw new AgentError("invalid_composition", messageOf(error), undefined, error); }
-    finally { await this.close(); }
+    finally {
+      await Promise.allSettled([...agents.values()].map(async pending => {
+        const agent = await pending;
+        if (agent !== this) await agent.close();
+      }));
+      await this.close();
+    }
   }
   close(): Promise<void> {
     return this.#close ??= (async () => {

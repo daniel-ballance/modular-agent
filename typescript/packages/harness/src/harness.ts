@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import { interruptedCalls, pendingToolCalls, restoreAnsweredStep } from "./view.js";
+import { interruptedCalls, modelView, pendingToolCalls, restoreAnsweredStep, withoutProviderData } from "./view.js";
 import { HookRegistry } from "./hooks.js";
 import { inputIdOf, inputKeyScope, type InputReceipt, type InputTiming, type QueuedInput, Session } from "./session.js";
 import {
@@ -72,7 +72,8 @@ export interface Plugin {
 export interface CommandContext { sessionId: string; actorId: string; api: PluginApi }
 export interface Command { description: string; run(args: string, context: CommandContext): Promise<string | void> | string | void }
 
-export interface SessionStartOptions { tenant?: string; settings?: Record<string, unknown>; actor?: Actor; forkFrom?: { sessionId: string; entryId: string }; parentSessionId?: string }
+export interface SessionStartOptions { tenant?: string; settings?: Record<string, unknown>; actor?: Actor; forkFrom?: { sessionId: string; entryId: string }; parentSessionId?: string; prepare?: SessionPrepare }
+export type SessionPrepare = (id: string) => Promise<void>;
 const schemaValidator = new Ajv2020({ strict: false, validateFormats: false, ownProperties: true, addUsedSchema: false });
 
 export interface InputOptions { resultShape?: Record<string, unknown>; content: ContentPart[] | string; when?: InputTiming; key?: string; actorId: string; kind?: string; delegatedBy?: string; startedBy?: QueuedInput["startedBy"]; sources?: string[] }
@@ -129,7 +130,7 @@ export interface PluginApi {
 	runCommand(sessionId: string, line: string, actorId: string): Promise<string | void>;
 	// sessions
 	startSession(options?: SessionStartOptions): Promise<string>;
-	openSession(id: string, actor?: Actor): Promise<string>;
+	openSession(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string>;
 	/** Add an actor to a session. Its authority must be within the authority of whoever grants it. */
 	join(sessionId: string, actor: Actor, grantedBy: string): Promise<void>;
 	leave(sessionId: string, actorId: string, requestedBy?: string): Promise<void>;
@@ -191,7 +192,7 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn"; rejectUnknownModel?: boolean }
+export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
@@ -216,7 +217,8 @@ export class Harness {
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
 	private readonly questionsOutlastTurns: boolean;
-	private readonly settingsDuringTurn?: "nextTurn";
+	private readonly settingsDuringTurn?: "nextTurn" | "refused";
+	private readonly jobReportsStartTurns: boolean;
 	private readonly rejectUnknownModel: boolean;
 	private newId: () => string;
 	private jobCancels = new Map<string, (jobId: string) => Promise<void>>();
@@ -233,11 +235,13 @@ export class Harness {
 		this.newId = options.newId ?? randomUUID;
 		this.questionsOutlastTurns = options.questionsOutlastTurns ?? true;
 		this.settingsDuringTurn = options.settingsDuringTurn;
+		this.jobReportsStartTurns = options.jobReportsStartTurns ?? true;
 		this.rejectUnknownModel = options.rejectUnknownModel === true;
 		this.hooks = new HookRegistry(({ hook, plugin, error }) => this.problem(plugin, `hook ${hook}`, error));
 		const h = (name: string, rule: HookRule, owner: string) => this.hooks.define(name, rule, owner);
 		// Harness hook points
 		h("plugin.load", "gate", "harness");
+		h("session.prepare", "observe", "harness");
 		h("session.start", "observe", "harness");
 		h("session.end", "observe", "harness");
 		h("input", "transform", "harness");
@@ -356,7 +360,7 @@ export class Harness {
 			commands: () => [...this.commandTable].map(([name, c]) => ({ name, description: c.description, plugin: c.plugin })),
 			runCommand: (sessionId, line, actorId) => this.runCommand(sessionId, line, actorId),
 			startSession: (options) => this.startSession(options),
-			openSession: (id, actor) => this.openSession(id, actor),
+			openSession: (id, actor, prepare) => this.openSession(id, actor, prepare),
 			join: (sessionId, actor, grantedBy) => this.join(this.session(sessionId), actor, grantedBy, pluginName),
 			leave: async (sessionId, actorId, requestedBy) => {
 				const s = this.session(sessionId);
@@ -630,6 +634,7 @@ export class Harness {
 			await store?.close(meta.id);
 			throw error;
 		}
+		await this.prepareSession(s, false, options.prepare);
 		await this.hooks.observe("session.start", { sessionId: s.id, resumed: false });
 		this.emit(s.id, "session.started", { meta }, "harness");
 		return s.id;
@@ -649,19 +654,32 @@ export class Harness {
 		return s;
 	}
 
-	async openSession(id: string, actor?: Actor): Promise<string> {
+	private async prepareSession(s: Session, resumed: boolean, prepare?: SessionPrepare) {
+		try {
+			await this.hooks.observe("session.prepare", { sessionId: s.id, project: s.meta.project, resumed });
+			await prepare?.(s.id);
+		} catch (error) {
+			await this.hooks.observe("session.end", { sessionId: s.id });
+			this.sessions.delete(s.id);
+			await this.use<HistoryStore>("history-store")?.close(s.id);
+			throw error;
+		}
+	}
+
+	async openSession(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string> {
 		if (this.opening.has(id) || this.sessions.get(id)?.closing) {
 			throw Object.assign(new Error("Session is busy"), { code: "busy" });
 		}
 		this.opening.add(id);
-		try { return await this.openStoredSession(id, actor); }
+		try { return await this.openStoredSession(id, actor, prepare); }
 		finally { this.opening.delete(id); }
 	}
 
-	private async openStoredSession(id: string, actor?: Actor): Promise<string> {
+	private async openStoredSession(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string> {
 		const opened = this.sessions.get(id);
 		if (opened) {
 			if (actor) await this.authorizeOpeningActor(opened, actor);
+			await prepare?.(id);
 			return id;
 		}
 		const store = this.use<HistoryStore>("history-store");
@@ -677,6 +695,7 @@ export class Harness {
 		catch (error) { await store.close(id); throw error; }
 		this.sessions.set(id, s);
 		s.reopening = true;
+		await this.prepareSession(s, true, prepare);
 		const latest = s.entries.get(s.order.at(-1) ?? "");
 		if (latest?.kind === "position") {
 			const data = latest.data as { to: string | null; restore?: { point: string; undo: string } };
@@ -882,6 +901,7 @@ export class Harness {
 
 	private async setSetting(s: Session, key: string, value: unknown, writer: string, actorId?: string): Promise<void> {
 		if (actorId) this.requireAuthority(s, actorId, "settings");
+		if (this.settingsDuringTurn === "refused" && s.isBusy()) throw Object.assign(new Error("Cannot change settings during a turn"), { code: "busy" });
 		await this.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
 		this.emit(s.id, "setting.changed", { key, value, appliesFrom: this.settingsDuringTurn === "nextTurn" ? "next turn" : "next step" }, writer, { actorId });
 	}
@@ -1674,9 +1694,22 @@ export class Harness {
 						!Array.isArray(prepared.request?.tools) || prepared.request.tools.some((tool) => !request.tools.some((offered) => isDeepStrictEqual(offered, tool))) ||
 						!isDeepStrictEqual(prepared.request.providerTools, request.providerTools)) throw new Error("Invalid provider.request transform");
 					await check();
+					// A hook sees readable context. Restore opaque data only to unmodified,
+					// unambiguously matched messages belonging to the selected Provider.
+					const originals = options.exactReplay ? [] : modelView(s.branch(), turnId, scope.provider)
+						.map(message => ({ message, readable: withoutProviderData(message) }));
+					const readable = options.exactReplay ? [] : prepared.request.messages.map(withoutProviderData);
+					const unchanged = readable.length === originals.length && readable.every((message, i) => isDeepStrictEqual(message, originals[i].readable));
+					const dispatched = options.exactReplay ? prepared.request : { ...prepared.request,
+						messages: unchanged ? originals.map(({ message }) => message) : readable.map(message => {
+							if (message.role !== "assistant") return message;
+							const matches = originals.filter(candidate => isDeepStrictEqual(candidate.readable, message));
+							return matches.length === 1 ? matches[0].message : message;
+						}),
+					};
 					const [intent] = await this.commit(s, [{
 						kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
-						data: { model: scope.model, safeToRepeat, tracksStepAfter: true, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat ? { request: prepared.request } : {}) },
+						data: { model: scope.model, safeToRepeat, tracksStepAfter: true, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat ? { request: dispatched } : {}) },
 						sources: state.sources.get(stepId),
 					}]);
 					try { await check(); }
@@ -1688,7 +1721,7 @@ export class Harness {
 						throw error;
 					}
 					options.onEffectiveRequest?.(prepared.request);
-					return prepared.request;
+					return dispatched;
 				};
 				const onEvent = (event: import("./types.js").ModelStreamEvent) => {
 					this.emit(s.id, "model.output", event, "harness", { turnId, stepId });
@@ -1698,7 +1731,7 @@ export class Harness {
 					if (model.prepareOnWire) return await model.request(request, { ...options, prepareDispatch, onEvent });
 					const finalRequest = await prepareDispatch();
 					const message = await model.request(finalRequest, { ...options, requestPrepared: true, onEvent });
-					await this.hooks.observe("provider.response", { ...scope, message });
+					await this.hooks.observe("provider.response", { ...scope, message: withoutProviderData(message) });
 					return message;
 				} finally { this.emit(s.id, "model.streamEnd", {}, "harness", { turnId, stepId }); }
 			});
@@ -2365,16 +2398,16 @@ export class Harness {
 						const drafts = [end];
 						if (report && !s.keys.has(`job:${job.id}`)) {
 							if (!this.workRights(s, [], [job.id]).includes("input")) throw new Error('Job report requires the "input" right');
-							queued = { id: this.newId(), actorId: job.actorId ?? "harness", when: "after", key: `job:${job.id}`, kind: "input",
+							queued = { id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key: `job:${job.id}`, kind: "input",
 								startedBy: { kind: "job", id: job.id }, sources: [end.id!], content: content ?? [] };
 							drafts.push({ kind: "inputAccepted", writer: "harness", modelVisible: false, inputId: queued.id, actorId: queued.actorId, jobId: job.id,
-								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: "after", taken: "after", parked: false } });
+								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose" } });
 						}
 						await this.commit(s, drafts);
 						job.state = state;
 						job.result = content;
 						this.emit(s.id, "job.ended", { state, result: content }, plugin, { jobId: job.id });
-						if (queued) { s.followUps.push(queued); this.startQueued(s); }
+						if (queued?.when === "after") { s.followUps.push(queued); this.startQueued(s); }
 					});
 				};
 				record.ending = work().catch((error) => { if (job.state === "running") record.ending = undefined; throw error; });
@@ -2393,7 +2426,7 @@ export class Harness {
 		await this.admit(s, async () => {
 			if (s.keys.has(key) || s.closed || s.closing || s.suspended) return;
 			await this.acceptInput(s, {
-				id: this.newId(), actorId: job.actorId ?? "harness", when: "after", key, kind: "input",
+				id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key, kind: "input",
 				startedBy: { kind: "job", id: job.id }, sources: [end.id],
 				content: data.result ?? [],
 			});
@@ -2448,7 +2481,7 @@ export class Harness {
 			tenants: true,
 			holdsOutput: true,
 			outputBypassesAgent: false,
-			startsTurnsUnasked: "when a job reports back",
+			startsTurnsUnasked: this.jobReportsStartTurns ? "when a job reports back" : "never",
 			cancellingTurnCancelsJobs: false,
 			pluginsDuringSession: false,
 			erasure: s?.ephemeral ? true : !!store?.erase,
@@ -2508,6 +2541,16 @@ class Follower {
 	}
 
 	private async deliver(event: AgentEvent): Promise<void> {
+		if (!this.raw && (event.type === "entry" || event.type === "entry.added")) {
+			const entry = event.data as HistoryEntry;
+			const data = entry.data as { request?: ModelRequest } | undefined;
+			event = { ...event, data: { ...entry,
+				...(entry.message ? { message: withoutProviderData(entry.message) } : {}),
+				...(entry.kind === "modelRequest" && data?.request && Array.isArray(data.request.messages) ? { data: { ...data, request: {
+					...data.request, messages: data.request.messages.map(withoutProviderData),
+				} } } : {}),
+			} };
+		}
 		const handlers = this.raw ? [] : this.hooks.raw("output");
 		const modelEnd = event.type === "model.streamEnd";
 		if (handlers.some((h) => h.stream)) {

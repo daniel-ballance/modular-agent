@@ -8,7 +8,7 @@ export interface ToolEnvironment {
   exists(path: string): Promise<boolean>;
   list(path: string): Promise<import("@modular-agent/harness").DirEntry[]>;
   write(path: string, data: string | Uint8Array): Promise<void>;
-  exec(command: string, options?: { timeoutMs?: number; onOutput?(chunk: string): void }): Promise<{ exitCode: number | null; output: string; timedOut: boolean }>;
+  exec(command: string, options?: { timeout?: number }): Promise<{ exitCode: number | null; output: string; timedOut: boolean }>;
 }
 export interface ToolContext {
   sessionId: string;
@@ -141,7 +141,9 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
             return env.list(path);
           }),
           write: (path, data) => checked(() => environment().writeFile(path, typeof data === "string" ? data : Buffer.from(data))),
-          exec: (command, opts) => checked(() => environment().exec(command, { ...opts, signal: base.signal })),
+          exec: (command, opts) => checked(() => environment().exec(command, {
+            timeoutMs: opts?.timeout, signal: base.signal, onOutput: chunk => base.progress([text(chunk)]),
+          })),
         },
         tools: {
           list: () => checked(() => {

@@ -77,7 +77,7 @@ export function standardFileTools({ spill }: { spill: string }) {
     }),
     make("exec", async ({ command, timeout }, ctx) => {
       const seconds = number("timeout", timeout as number | undefined), started = performance.now();
-      const result = await ctx.environment.exec(command as string, { timeoutMs: seconds ? seconds * 1000 : undefined, onOutput: chunk => ctx.progress(chunk) });
+      const result = await ctx.environment.exec(command as string, { timeout: seconds ? seconds * 1000 : undefined });
       const { content: output, truncated, byBytes, total, kept } = cut(result.output, true);
       const value = { output, truncated, exit_code: result.exitCode, wall_time_seconds: Math.round(performance.now() - started) / 1000,
         ...(result.timedOut ? { timed_out: true } : {}) } as Record<string, unknown>;

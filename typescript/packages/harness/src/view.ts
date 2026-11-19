@@ -56,8 +56,22 @@ export function pendingToolCalls(branch: HistoryEntry[], turnId: string, kept = 
 	return [...ordered, ...pending];
 }
 
+/** Strip opaque reasoning from a model or recipient projection, not from storage. */
+export function withoutProviderData<T extends ModelMessage>(message: T): T {
+	const content = message.content.flatMap((part): ContentPart[] => {
+		if (part.type !== "reasoning" || !("providerData" in part)) return [part];
+		const { providerData: _, ...readable } = part;
+		return typeof readable.text === "string" ? [readable] : [];
+	});
+	if (message.role === "assistant" && "providerData" in message) {
+		const { providerData: _, ...readable } = message;
+		return { ...readable, content } as T;
+	}
+	return { ...message, content };
+}
+
 /** Assemble the branch projection without changing the kept record. */
-export function modelView(entries: HistoryEntry[], _turnId?: string): ModelMessage[] {
+export function modelView(entries: HistoryEntry[], _turnId?: string, provider?: string): ModelMessage[] {
 	const pending = new Set(entries.flatMap((e) => {
 		if (e.erased || e.kind !== "turnEnd") return [];
 		return (e.data as { result?: { openToolCalls?: string[] } })?.result?.openToolCalls ?? [];
@@ -65,6 +79,7 @@ export function modelView(entries: HistoryEntry[], _turnId?: string): ModelMessa
 	const rows: { id: string; message: ModelMessage }[] = [];
 	const contexts = new Map<string, HistoryEntry>();
 	const byId = new Map(entries.map((e) => [e.id, e]));
+	const attempts = new Map<string, string>();
 	for (const e of entries) {
 		if (e.erased || e.kind.includes(".")) continue;
 		if (e.kind === "turnStart" && e.turnId && (e.data as { context?: ContentPart[] })?.context?.length) contexts.set(e.turnId, e);
@@ -83,7 +98,15 @@ export function modelView(entries: HistoryEntry[], _turnId?: string): ModelMessa
 			for (let i = rows.length - 1; i >= at; i--) if (selected.has(rows[i].id)) rows.splice(i, 1);
 			rows.splice(at, 0, { id: e.id, message: { role: "user", content: [text(data.summary)] } });
 		}
-		if (e.modelVisible && e.message) rows.push({ id: e.id, message: e.message });
+		const attempt = JSON.stringify([e.turnId, e.stepId]);
+		if (e.kind === "modelRequest") {
+			const owner = (e.data as { model?: { provider?: string } })?.model?.provider;
+			if (owner) attempts.set(attempt, owner);
+		}
+		if (e.modelVisible && e.message) {
+			const sameProvider = provider && e.kind === "response" && attempts.get(attempt) === provider;
+			rows.push({ id: e.id, message: sameProvider ? e.message : withoutProviderData(e.message) });
+		}
 	}
 	return pairToolResults(rows.map((r) => r.message), pending);
 }
