@@ -57,23 +57,24 @@ type ProcessPlugin struct {
 	Config  map[string]any    `json:"config,omitempty"`
 }
 type options struct {
-	project, dataDir, model string
-	durability              Durability
-	providers               []Provider
-	plugins                 []Plugin
-	tools                   []Tool
-	process                 []ProcessPlugin
-	wire                    []wirePlugin
-	environment             Environment
-	host                    *bool
-	settings                Settings
-	approval                Approval
-	handler                 QuestionHandler
-	history                 HistoryStore
-	mcp                     []MCPServer
-	mcpWarning              func(error)
-	conformance             bool
-	input                   func(context.Context, Content) (Content, error)
+	project, dataDir, model                 string
+	durability                              Durability
+	providers                               []Provider
+	plugins                                 []Plugin
+	tools                                   []Tool
+	process                                 []ProcessPlugin
+	wire                                    []wirePlugin
+	environment                             Environment
+	host                                    *bool
+	settings                                Settings
+	approval                                Approval
+	handler                                 QuestionHandler
+	history                                 HistoryStore
+	mcp                                     []MCPServer
+	mcpWarning                              func(error)
+	conformance                             bool
+	jobReports, lateAnswers, refuseSettings bool
+	input                                   func(context.Context, Content) (Content, error)
 }
 type Environment = api.WorkingEnvironment
 type DirEntry = api.DirEntry
@@ -137,22 +138,38 @@ func WithOnQuestion(h QuestionHandler) Option {
 	return func(o *options) error { o.handler = h; return nil }
 }
 
+// WithJobReportsStartTurns lets a job's report start a turn without new actor input.
+func WithJobReportsStartTurns(enabled bool) Option {
+	return func(o *options) error { o.jobReports = enabled; return nil }
+}
+
+// WithLateAnswersStartTurns lets a question stay open and its answer continue the call.
+func WithLateAnswersStartTurns(enabled bool) Option {
+	return func(o *options) error { o.lateAnswers = enabled; return nil }
+}
+
+// WithRefusedSettingsDuringTurn refuses settings changes while a turn is active.
+func WithRefusedSettingsDuringTurn() Option {
+	return func(o *options) error { o.refuseSettings = true; return nil }
+}
+
 type Agent struct {
-	h          *harness.Harness
-	a          api.API
-	project    string
-	scratch    string
-	persistent bool
-	erasure    bool
-	closed     atomic.Bool
-	restarting atomic.Bool
-	lifecycle  sync.Mutex
-	settingsMu sync.Mutex
-	pluginHost bool
-	q          *questionRouter
-	closeOnce  sync.Once
-	closeErr   error
-	restart    func(context.Context) (*Agent, error)
+	h                       *harness.Harness
+	a                       api.API
+	project                 string
+	scratch                 string
+	persistent              bool
+	jobReports, lateAnswers bool
+	erasure                 bool
+	closed                  atomic.Bool
+	restarting              atomic.Bool
+	lifecycle               sync.Mutex
+	settingsMu              sync.Mutex
+	pluginHost              bool
+	q                       *questionRouter
+	closeOnce               sync.Once
+	closeErr                error
+	restart                 func(context.Context) (*Agent, error)
 }
 type sessionDefaults struct{ settings *api.Settings }
 
@@ -239,7 +256,8 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	h := harness.NewWithLocalActor(localActor)
 	h.HandBackQueuedOnOpen()
-	a := &Agent{h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
+	h.ConfigureSessions(o.jobReports, o.lateAnswers, o.refuseSettings)
+	a := &Agent{jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
 	state := o.dataDir
 	if state == "" {
 		state, err = os.MkdirTemp("", "modular-go-")
@@ -467,8 +485,11 @@ func (a *Agent) Declaration() Declaration {
 	}
 	runtime, err := a.a.Get("runtime")
 	d["nestedToolCalls"] = err == nil && runtime.(api.Runtime).Declaration().NestedToolCalls
-	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = false, false
+	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = a.lateAnswers, a.lateAnswers
 	d["startsTurnsUnasked"] = "never"
+	if a.jobReports {
+		d["startsTurnsUnasked"] = "jobReports"
+	}
 	d["severalActors"], d["sessionLimits"], d["tenants"] = false, false, false
 	d["erasure"] = a.erasure
 	d["confinesFiles"], d["commandContainment"] = false, "none"

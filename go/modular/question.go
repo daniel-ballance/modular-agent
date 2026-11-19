@@ -32,6 +32,10 @@ func Allow() Answer                { return Answer{Value: "allow"} }
 func Decline(reason string) Answer { return Answer{Declined: true, Reason: reason} }
 
 type QuestionHandler func(context.Context, Question) (Answer, error)
+
+// LeftOpen signals that a call must be continued when its question is answered.
+var LeftOpen = api.ErrQuestionOpen
+
 type AskOptions struct {
 	Wait time.Duration
 	Then string

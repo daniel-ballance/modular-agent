@@ -86,7 +86,7 @@ func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionCon
 		snap.Settings.Approval = api.ApprovalInternal(string(v.Value))
 	}
 	if err = s.a.SetSettings(api.AsActor(ctx, st.actor), id, snap.Settings); err != nil {
-		return acp.SetSessionConfigOptionResponse{}, err
+		return acp.SetSessionConfigOptionResponse{}, outputReplyError(err)
 	}
 	opts, err = s.config(id)
 	return acp.SetSessionConfigOptionResponse{ConfigOptions: opts}, err

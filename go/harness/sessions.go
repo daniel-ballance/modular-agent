@@ -245,15 +245,20 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	s.queue = slices.DeleteFunc(s.queue, parked)
 	if c.h.handBackOnOpen && len(s.queue) > 0 {
 		ids := make([]string, 0, len(s.queue))
-		for _, in := range s.queue {
+		s.queue = slices.DeleteFunc(s.queue, func(in api.Input) bool {
+			if in.Job != "" && !c.h.parkJobReports {
+				return false
+			}
 			ids = append(ids, in.ID)
+			return true
+		})
+		if len(ids) > 0 {
+			if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
+				s.mu.Unlock()
+				_ = c.StopSession(id)
+				return err
+			}
 		}
-		if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
-			s.mu.Unlock()
-			_ = c.StopSession(id)
-			return err
-		}
-		s.queue = nil
 	}
 	s.external = externalRecovery(s.data)
 	nextInput := runnableInput(s.queue)
@@ -881,7 +886,12 @@ func recordedOutcome(snap api.Session) api.Outcome {
 }
 
 // SettingsDuringTurn describes the effect of supported model and approval settings.
-func (c *client) SettingsDuringTurn() string { return "nextTurn" }
+func (c *client) SettingsDuringTurn() string {
+	if c.h.refuseSettings {
+		return "refused"
+	}
+	return "nextTurn"
+}
 
 func (c *client) SetSettings(ctx context.Context, id string, settings api.Settings) error {
 	if !c.Authorize(id, api.Acting(ctx), "settings") {
@@ -894,6 +904,9 @@ func (c *client) SetSettings(ctx context.Context, id string, settings api.Settin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running {
+		if c.h.refuseSettings {
+			return api.ErrSettingsBusy
+		}
 		// Selection and approval changes apply to the next turn. The running
 		// turn retains its recorded settings, including across recovery.
 		before, after := s.data.Settings, settings

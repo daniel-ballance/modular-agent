@@ -28,7 +28,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 	if o.transient {
 		durability = modular.Kept
 	}
-	opts := []modular.Option{modular.WithProject(o.project), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp)}
+	opts := []modular.Option{modular.WithProject(o.project), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp), modular.WithJobReportsStartTurns(true), modular.WithLateAnswersStartTurns(true), modular.WithRefusedSettingsDuringTurn()}
 	fixture := o.acp && os.Getenv("MODULAR_AGENT_CONFORMANCE") == "1"
 	if fixture {
 		if os.Getenv("MODULAR_AGENT_DATA_DIR") == "" {

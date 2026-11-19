@@ -30,6 +30,9 @@ type handler struct {
 type Harness struct {
 	localActor      string
 	handBackOnOpen  bool
+	parkJobReports  bool
+	refuseSettings  bool
+	inTurnQuestions bool
 	tenants         map[string]tenantConfig
 	tenantConfigErr error
 	mu              sync.RWMutex
@@ -70,11 +73,22 @@ func NewWithLocalActor(actor string) *Harness {
 // HandBackQueuedOnOpen selects the embedded SDK's recovery policy before loading plugins.
 func (h *Harness) HandBackQueuedOnOpen() { h.handBackOnOpen = true }
 
-// QueuedRecoveryPolicy reports the policy actually used to install recovered work.
-// The harness handles queued jobs and ordinary queued input alike.
+// ConfigureSessions sets SDK policies before plugins or sessions are loaded.
+func (h *Harness) ConfigureSessions(jobReportsStartTurns, lateQuestions, refuseSettings bool) {
+	h.parkJobReports = !jobReportsStartTurns
+	h.inTurnQuestions = !lateQuestions
+	h.refuseSettings = refuseSettings
+}
+
+func (c *client) LateQuestions() bool { return !c.h.inTurnQuestions }
+
+// QueuedRecoveryPolicy reports the policy used when installing recovered work.
 func (h *Harness) QueuedRecoveryPolicy() (inputs, jobReports string) {
 	if h.handBackOnOpen {
-		return "handedBack", "handedBack"
+		if h.parkJobReports {
+			return "handedBack", "handedBack"
+		}
+		return "handedBack", "run"
 	}
 	return "run", "run"
 }

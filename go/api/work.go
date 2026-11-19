@@ -11,6 +11,8 @@ import (
 var ErrTenantTokens = errors.New("tenantTokens limit")
 var ErrTenantForbidden = errors.New("tenant access forbidden")
 
+var ErrSettingsBusy = errors.New("settings cannot change during a turn")
+
 var ErrProcessStopped = errors.New("agent process stopped")
 
 // Rights names the operations defined by the shared data binding.

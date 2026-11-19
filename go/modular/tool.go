@@ -8,7 +8,6 @@ import (
 	"os"
 	"slices"
 	"sync/atomic"
-	"time"
 
 	"github.com/OWNER/modular-agent/go/api"
 	"github.com/OWNER/modular-agent/go/pluginrpc"
@@ -157,7 +156,7 @@ type ToolContext struct {
 	ctx                        context.Context
 	settled                    atomic.Bool
 	refused                    atomic.Pointer[string]
-	ask                        func(context.Context, Question, time.Duration) (Answer, error)
+	ask                        func(context.Context, Question, AskOptions) (Answer, error)
 	progress                   func(string)
 }
 
@@ -186,15 +185,15 @@ func (t *ToolContext) Ask(ctx context.Context, q Question, options ...AskOptions
 	if q.Kind == "choice" && len(q.Options) == 0 {
 		return Answer{}, &Error{Code: InvalidRequest, Message: "choice needs options"}
 	}
-	var wait time.Duration
+	var opt AskOptions
 	if len(options) > 1 {
 		return Answer{}, &Error{Code: InvalidRequest, Message: "at most one ask option"}
 	}
 	if len(options) == 1 {
-		if options[0].Then == "leaveOpen" {
-			return Answer{}, &Error{Code: NotSupported, Message: "leaving a call open is not supported"}
-		}
-		wait = options[0].Wait
+		opt = options[0]
+	}
+	if opt.Then != "" && (opt.Then != "leaveOpen" || opt.Wait <= 0) {
+		return Answer{}, &Error{Code: InvalidRequest, Message: "leaveOpen requires a positive wait"}
 	}
 	work, cancel := context.WithCancel(t.ctx)
 	stop := context.AfterFunc(ctx, cancel)
@@ -202,7 +201,7 @@ func (t *ToolContext) Ask(ctx context.Context, q Question, options ...AskOptions
 	if ctx.Err() != nil {
 		cancel()
 	}
-	return t.ask(work, q, wait)
+	return t.ask(work, q, opt)
 }
 func (t *ToolContext) Progress(content Content) error {
 	if t.settled.Load() {
@@ -249,7 +248,8 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 		}
 	}
 	defer tc.settled.Store(true)
-	tc.ask = func(ctx context.Context, q Question, wait time.Duration) (Answer, error) {
+	tc.ask = func(ctx context.Context, q Question, opt AskOptions) (Answer, error) {
+		wait, leaveOpen := opt.Wait, opt.Then == "leaveOpen"
 		if s.server != nil {
 			var out Answer
 			req := pluginrpc.Object{"kind": q.Kind, "question": q.Question}
@@ -262,15 +262,31 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 			if wait > 0 {
 				req["timeLimitMs"] = max(1, wait.Milliseconds())
 			}
-			err := s.server.Callback(ctx, "host/ask", pluginrpc.Object{"sessionId": session.ID, "request": req}, &out)
-			return out, appError(err, Internal)
+			if leaveOpen {
+				req["whenTimeLimit"] = "leaveOpen"
+			}
+			var response struct {
+				Answer
+				Pending bool `json:"pending"`
+			}
+			err := s.server.Callback(ctx, "host/ask", pluginrpc.Object{"sessionId": session.ID, "request": req}, &response)
+			if response.Pending {
+				return out, LeftOpen
+			}
+			return response.Answer, appError(err, Internal)
 		}
 		value, err := s.a.Get("questions")
 		if err != nil {
 			return Answer{}, appError(err, NotSupported)
 		}
+		if policy, ok := s.a.(interface{ LateQuestions() bool }); leaveOpen && (!ok || !policy.LateQuestions()) {
+			return Answer{}, &Error{Code: NotSupported, Message: "leaving a call open is not supported"}
+		}
 		e := api.Executing(ctx)
-		ans, err := value.(api.Questions).Ask(ctx, api.Question{Session: session.ID, Turn: e.Turn, Call: call.ID, Actor: call.Actor, Kind: q.Kind, Prompt: q.Question, Options: q.Options, Details: q.Details, Wait: wait})
+		ans, err := value.(api.Questions).Ask(ctx, api.Question{Session: session.ID, Turn: e.Turn, Step: e.Call.Step, Call: call.ID, Actor: call.Actor, Kind: q.Kind, Prompt: q.Question, Options: q.Options, Details: q.Details, Wait: wait, Defer: leaveOpen})
+		if errors.Is(err, api.ErrQuestionOpen) {
+			return Answer{}, LeftOpen
+		}
 		var declined *api.QuestionDeclined
 		if errors.As(err, &declined) {
 			return Decline(declined.Reason), nil
@@ -294,6 +310,10 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 		}
 		if reason := tc.refused.Load(); reason != nil {
 			return fail(Refused, *reason)
+		}
+		if errors.Is(err, LeftOpen) {
+			result.Status = "open"
+			return result
 		}
 		if err != nil {
 			return fail(Failed, err.Error())
