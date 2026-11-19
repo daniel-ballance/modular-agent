@@ -96,8 +96,15 @@ export function fromAcp(blocks: acp.ContentBlock[]): ContentPart[] {
  * session is one of our sessions, with the same id.
  */
 /** The "mcp-servers" capability, as the tools-mcp plugin provides it. */
-type McpServerConfig = { command: string; args?: string[]; env?: Record<string, string> } | { url: string; headers?: Record<string, string> };
-interface McpServers { attach(sessionId: string, servers: Record<string, McpServerConfig>, cwd?: string): Promise<string[]> }
+export type AcpMcpServer = { command: string; args?: string[]; env?: Record<string, string> } | { url: string; headers?: Record<string, string> };
+interface McpServers { attach(sessionId: string, servers: Record<string, AcpMcpServer>, cwd?: string): Promise<string[]> }
+export interface AcpOptions {
+	actorId?: string;
+	declaration?: (sessionId?: string) => Record<string, boolean | string>;
+	sessionSettings?(project: string): Promise<Record<string, unknown>>;
+	attachMcp?(sessionId: string, project: string, servers: Record<string, AcpMcpServer>): Promise<unknown>;
+	showApproval?: boolean;
+}
 
 export class AcpInterface implements InterfaceCapability {
 	readonly id = "acp";
@@ -112,7 +119,7 @@ export class AcpInterface implements InterfaceCapability {
 	private sessions = new Map<string, SessionState>();
 	private pending = new Map<string, AbortController>();
 
-	constructor(private readonly options: { actorId?: string; declaration?: (sessionId?: string) => Record<string, boolean | string> } = {}) {
+	constructor(private readonly options: AcpOptions = {}) {
 		this.actorId = options.actorId ?? "acp-user";
 		this.app = agent({ name: "modular-agent" });
 		this.app.onConnect((connection) => {
@@ -151,13 +158,15 @@ export class AcpInterface implements InterfaceCapability {
 	/** Give the session the MCP servers the client passed. They are not recorded: their headers and env may hold secrets. */
 	private async attachMcp(sessionId: string, servers: acp.McpServer[] | undefined, cwd: string | undefined): Promise<void> {
 		const mcp = this.mcp();
-		if (!mcp || !servers?.length || !this.hasRight(sessionId, this.actorId, "tools")) return;
-		const configs: Record<string, McpServerConfig> = {};
-		for (const s of servers) {
-			if ("command" in s) configs[s.name] = { command: s.command, args: s.args, env: Object.fromEntries(s.env.map((e) => [e.name, e.value])) };
-			else if (s.type === "http") configs[s.name] = { url: s.url, headers: Object.fromEntries(s.headers.map((h) => [h.name, h.value])) };
-		}
-		await mcp.attach(sessionId, configs, cwd);
+		if ((!mcp && !this.options.attachMcp) || !servers?.length || !this.hasRight(sessionId, this.actorId, "tools")) return;
+		const configs = Object.fromEntries(servers.flatMap((s): [string, AcpMcpServer][] => {
+			if ("command" in s) return [[s.name, { command: s.command, args: s.args, env: Object.fromEntries(s.env.map((e) => [e.name, e.value])) }]];
+			if (s.type === "http") return [[s.name, { url: s.url, headers: Object.fromEntries(s.headers.map((h) => [h.name, h.value])) }]];
+			if (this.options.attachMcp) throw RequestError.invalidParams(undefined, "only stdio and Streamable HTTP MCP are supported");
+			return [];
+		}));
+		if (this.options.attachMcp) await this.options.attachMcp(sessionId, this.api.session(sessionId).project, configs);
+		else await mcp!.attach(sessionId, configs, cwd);
 	}
 
 	private register(): void {
@@ -177,7 +186,7 @@ export class AcpInterface implements InterfaceCapability {
 					promptCapabilities: { image: true, embeddedContext: true },
 					sessionCapabilities: { list: {}, resume: {}, close: {} },
 					// MCP servers the client passes are served only if a plugin can connect them.
-					mcpCapabilities: { http: !!this.mcp(), sse: false },
+					mcpCapabilities: { http: !!this.mcp() || !!this.options.attachMcp, sse: false },
 				},
 				agentInfo: { name: "modular-agent", title: "Modular Agent", version: "0.1.0" },
 				authMethods: [],
@@ -192,8 +201,12 @@ export class AcpInterface implements InterfaceCapability {
 		app.onRequest(methods.agent.session.new, async ({ params }) => {
 			const tenant = (params._meta?.[NS] as { tenant?: unknown } | undefined)?.tenant;
 			if (tenant !== undefined && typeof tenant !== "string") throw RequestError.invalidParams();
-			const sessionId = await this.checked(() => this.api.startSession({ tenant, settings: { cwd: params.cwd }, actor: this.actor() }));
-			await this.attachMcp(sessionId, params.mcpServers, params.cwd);
+			const sessionId = await this.checked(async () => {
+				const overrides = await this.options.sessionSettings?.(params.cwd);
+				return this.api.startSession({ tenant, settings: { cwd: params.cwd, ...overrides }, actor: this.actor() });
+			});
+			try { await this.attachMcp(sessionId, params.mcpServers, params.cwd); }
+			catch (error) { await this.api.closeSession(sessionId, this.actorId); throw error; }
 			this.open(sessionId);
 			return { sessionId, configOptions: await this.configOptions(sessionId), _meta: { [NS]: { declaration: this.bindingDeclaration(sessionId) } } };
 		});
@@ -235,7 +248,7 @@ export class AcpInterface implements InterfaceCapability {
 				if (value !== "default" && !thinkingLevels(model).includes(String(value))) throw RequestError.invalidParams(undefined, "Reasoning level is not offered");
 				await this.api.setSetting(params.sessionId, "thinking", value === "default" ? "off" : String(value), this.actorId);
 			}
-			else if (params.configId === "approval") {
+			else if (params.configId === "approval" && this.options.showApproval !== false) {
 				if (!APPROVAL.includes(String(value))) throw RequestError.invalidParams(undefined, `approval must be one of ${APPROVAL.join(", ")}`);
 				await this.api.setSetting(params.sessionId, "approval", String(value), this.actorId);
 			}
@@ -754,7 +767,7 @@ export class AcpInterface implements InterfaceCapability {
 		return [
 			{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options },
 			{ id: "thinking", name: "Reasoning", category: "thought_level", type: "select", currentValue: thinking, options: levels.map((v) => ({ value: v, name: v })) },
-			{ id: "approval", name: "Approval", type: "select", currentValue: APPROVAL.includes(String(settings.approval)) ? String(settings.approval) : "all", options: APPROVAL.map((v) => ({ value: v, name: v })) },
+			...(this.options.showApproval === false ? [] : [{ id: "approval", name: "Approval", type: "select" as const, currentValue: APPROVAL.includes(String(settings.approval)) ? String(settings.approval) : "all", options: APPROVAL.map((v) => ({ value: v, name: v })) }]),
 		];
 	}
 

@@ -4,17 +4,36 @@ import { pathToFileURL } from "node:url";
 import type { McpServerConfig } from "./index.js";
 export type { McpServerConfig };
 
-/** Connect at setup, publish only valid catalogs, and close peers at agent shutdown. */
-export function standardMcpTools(options: { project: string; servers: Record<string, McpServerConfig>; warn?: (message: string) => void }) {
-  const clients: McpClient[] = [];
+interface Connection { client: McpClient; tools: Tool[] }
+interface Options {
+  /** Resolve the servers independently for each session's actual project. */
+  servers(project: string): Promise<Record<string, McpServerConfig>>;
+  warn?: (message: string) => void;
+}
+
+/** Publish valid catalogs for each session, and close peers when it closes. */
+export function standardMcpTools(options: Options) {
+  const connections = new Map<string, Connection[]>();
+  const listeners = new Set<() => void>();
   const warn = options.warn ?? console.error;
-  return definePlugin({ name: "tools.mcp.standard", async setup(r) {
-    const names = new Set<string>();
-    for (const [server, config] of Object.entries(options.servers)) {
-      const client = new McpClient({ name: "modular-agent", version: "0.1.0", roots: [{ uri: pathToFileURL(options.project).href, name: "project" }] });
+  const changed = () => { for (const listener of listeners) listener(); };
+  const detach = async (id: string) => {
+    const list = connections.get(id);
+    connections.delete(id);
+    if (list) {
+      changed();
+      await Promise.allSettled(list.map(c => c.client.close()));
+    }
+  };
+  async function attach(id: string, project: string, servers: Record<string, McpServerConfig>) {
+    let current = connections.get(id);
+    if (!current) connections.set(id, current = []);
+    const names = new Set(current.flatMap(c => c.tools.map(t => t.definition.name)));
+    for (const [server, config] of Object.entries(servers)) {
+      const client = new McpClient({ name: "modular-agent", version: "0.1.0", roots: [{ uri: pathToFileURL(project).href, name: "project" }] });
       try {
         await client.connect("url" in config ? new StreamableHttpTransport({ url: config.url, headers: config.headers })
-          : new StdioTransport({ command: config.command, args: config.args, env: config.env, cwd: config.cwd ?? options.project, stderr: "pipe" }));
+          : new StdioTransport({ command: config.command, args: config.args, env: config.env, cwd: config.cwd ?? project, stderr: "pipe" }));
         const pending = new Map<string, Tool>();
         for (const entry of await client.listTools()) {
           const name = `mcp_${server}__${entry.name}`;
@@ -29,12 +48,24 @@ export function standardMcpTools(options: { project: string; servers: Record<str
               return { status: res.isError ? "failed" : "completed", content: limited.content as Content, value: res.structuredContent };
             } }));
         }
-        for (const [name, item] of pending) { names.add(name); r.tool(item); }
-        clients.push(client);
+        if (connections.get(id) !== current) { await client.close(); return; }
+        for (const name of pending.keys()) names.add(name);
+        current.push({ client, tools: [...pending.values()] });
+        changed();
       } catch (error) {
         warn(`MCP server ${server}: ${error instanceof Error ? error.message : String(error)}`);
         await client.close().catch(() => {});
       }
     }
-  }, async stop() { await Promise.allSettled(clients.splice(0).map(c => c.close())); } });
+  }
+  const plugin = definePlugin({ name: "tools.mcp.standard", setup(r) {
+    r.tools({ id: "tools.mcp.standard", tools: id => id ? (connections.get(id) ?? []).flatMap(c => c.tools) : [],
+      onChange(listener) { listeners.add(listener); return () => listeners.delete(listener); } });
+    r.on("session.start", async ({ sessionId }, ctx) => {
+      const { project } = ctx.session!();
+      await attach(sessionId, project, await options.servers(project));
+    }, "normal", { inProcessOnly: true });
+    r.on("session.end", ({ sessionId }) => detach(sessionId));
+  }, async stop() { await Promise.all([...connections.keys()].map(detach)); } });
+  return { ...plugin, attach };
 }

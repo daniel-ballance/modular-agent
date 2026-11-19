@@ -9,7 +9,7 @@ import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, pluginSpecsFromEnv, conformanceProvider, conformanceTools } from "@modular-agent/plugin-wire";
-import { acpInterface } from "@modular-agent/interface-acp";
+import { acpInterface, type AcpOptions } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
@@ -48,6 +48,7 @@ export interface AgentOptions {
   credentials?: CredentialStore;
 }
 export interface SessionOptions { settings?: Settings }
+export type ServeAcpOptions = Omit<AcpOptions, "declaration">;
 export interface SessionInfo { id: string; project: string; created: number }
 export interface SavedSessionInfo extends SessionInfo { updated: number; settings: Settings }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
@@ -424,15 +425,15 @@ export class Agent {
       startsTurnsUnasked: base.startsTurnsUnasked === "never" ? "never" : "jobReports",
     };
   }
-  async serveAcp(): Promise<void> {
+  async serveAcp(options: ServeAcpOptions = {}): Promise<void> {
     this.#check();
     if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
     if (!this.#hostEnabled) throw new AgentError("invalid_composition", "Build with pluginHost: true before serving ACP");
     this.#acp = true;
     try {
       const binding = acpInterface(this.#conformance
-        ? { actorId: process.env.MODULAR_AGENT_ACTOR }
-        : { declaration: () => this.declaration() });
+        ? { actorId: process.env.MODULAR_AGENT_ACTOR, ...options }
+        : { ...options, declaration: () => this.declaration() });
       await this.#load(binding);
       await binding.acp.serveStdio();
     } catch (error) { throw new AgentError("invalid_composition", messageOf(error), undefined, error); }

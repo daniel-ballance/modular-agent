@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { realpath, stat } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgent, httpHistory, type Agent, type ProcessPlugin, type Settings } from "@modular-agent/core";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
@@ -177,9 +177,9 @@ async function main(argv: string[]) {
   const overrides = script || conformance ? {} : await optionalJson(join(p.config, "models.json"));
   const providers = script ? [script] : conformance ? [] : vendors.map(v => responses(v, auth, overrides));
   const projectTrust = await trusted(p, project, opts.trust);
-  const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p)];
-  const servers = opts.declaration || opts.command === "models" ? {} : await mcpServers(p, project, projectTrust);
-  if (Object.keys(servers).length) plugins.push(standardMcpTools({ project, servers }));
+  const mcp = standardMcpTools({ servers: async cwd => opts.declaration || opts.command === "models" ? {} :
+    mcpServers(p, cwd, cwd === project ? projectTrust : await trusted(p, cwd)) });
+  const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p), mcp];
   const agent = await createAgent({ ...base, project, settings, model: opts.command === "models" ? undefined : model, providers, plugins,
     compaction: !conformance, conformance, pluginHost: opts.acp || !!claude, ...(claude ? { processPlugins: [claude] } : {}) });
   try { return await run(agent); } finally { await agent.close(); }
@@ -190,7 +190,21 @@ async function main(argv: string[]) {
       return 0;
     }
     if (opts.declaration) { console.log(JSON.stringify(agent.declaration(), null, 2)); return 0; }
-    if (opts.acp) { await agent.serveAcp(); return 0; }
+    if (opts.acp) {
+      await agent.serveAcp({ showApproval: conformance, async sessionSettings(cwd) {
+        const project = await realpath(cwd);
+        const initial: Settings = { ...standardSettings(await settingsFor(p, project)), ...opts.settings, cwd: project };
+        if (script || conformance) {
+          initial.model = model;
+          if (conformance) initial.modelTools = null;
+        } else if (!initial.model) delete initial.model;
+        return initial;
+      }, async attachMcp(id, cwd, servers) {
+        if (Object.values(servers).some(s => "command" in s && !isAbsolute(s.command))) throw new Error("ACP MCP executable paths must be absolute");
+        await mcp.attach(id, cwd, servers);
+      } });
+      return 0;
+    }
     const session = opts.session ? await agent.openSession(opts.session) : await agent.session();
     if (opts.history) { console.log(JSON.stringify(await session.history(), null, 2)); return 0; }
     if (opts.session) {
