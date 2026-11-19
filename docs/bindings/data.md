@@ -398,7 +398,7 @@ While an intent is unresolved, the Harness MUST block project work and keep othe
 
 ## Changes
 
-- **Production edition 3.** Session ownership of saved points (Go P11), independent gate and wire size limits (TypeScript), and I-JSON numbers (Elixir PE2-3, TypeScript). The `step.after` checkpoint distinguishes a due gate from a committed decision (Runtime E, Go with Rust, Python and Elixir, and TypeScript with Rust and Python: the host did not restore the answered step's gate state).
+- **Production edition 3.** A turn whose remaining calls are left open ends `completed`, never as a limit, and a host refuses rather than rewrites a Runtime's outcome (Python G107: a Runtime reported `limit: questions`). Session ownership of saved points (Go P11), independent gate and wire size limits (TypeScript), and I-JSON numbers (Elixir PE2-3, TypeScript). The `step.after` checkpoint distinguishes a due gate from a committed decision (Runtime E, Go with Rust, Python and Elixir, and TypeScript with Rust and Python: the host did not restore the answered step's gate state).
 
 - **Production edition 2.** Measure actual encoded bytes (Go P5), bound JSON nesting and preserve numeric value without requiring the original spelling (TypeScript), omit empty failed or aborted responses from the default model view (Elixir PE-6), and add the `resultFeedback` record and projection (TypeScript). Rewind preflight has a [remote point check](plugin.md#paths-and-points) (Elixir PE-5, Go P9, TypeScript, Python G82).
 
