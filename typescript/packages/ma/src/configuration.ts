@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type { Settings } from "@modular-agent/core";
 import type { McpServerConfig } from "@modular-agent/tools-mcp/sdk";
 import { discover } from "./skills.js";
@@ -20,7 +21,8 @@ export const paths = (env: NodeJS.ProcessEnv = process.env, home = env.HOME ?? h
     const config = resolve(env.MODULAR_AGENT_DATA_DIR);
     return { config, state: join(config, "state"), home };
   }
-  return { home, config: join(env.XDG_CONFIG_HOME || join(home, ".config"), "modular-agent"), state: join(env.XDG_STATE_HOME || join(home, ".local/state"), "modular-agent", "typescript") };
+  const xdg = (value: string | undefined, fallback: string) => value && isAbsolute(value) ? value : join(home, fallback);
+  return { home, config: join(xdg(env.XDG_CONFIG_HOME, ".config"), "modular-agent"), state: join(xdg(env.XDG_STATE_HOME, ".local/state"), "modular-agent", "typescript") };
 };
 export type Paths = ReturnType<typeof paths>;
 export function standardSettings(settings: Settings): Settings {
@@ -42,7 +44,11 @@ export async function trusted(p: Paths, project: string, grant = false) {
   const file = trustFile(p), saved = await optionalJson(file);
   if (grant && saved[project] !== true) {
     await mkdir(p.config, { recursive: true, mode: 0o700 });
-    await writeFile(file, JSON.stringify({ ...saved, [project]: true }, null, 2), { mode: 0o600 });
+    const temporary = join(p.config, `.trusted-projects-${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, JSON.stringify({ ...saved, [project]: true }, null, 2), { mode: 0o600, flag: "wx" });
+      await rename(temporary, file);
+    } finally { await rm(temporary, { force: true }); }
   }
   return grant || saved[project] === true;
 }

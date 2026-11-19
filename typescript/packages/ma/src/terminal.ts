@@ -56,16 +56,16 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
   const io = createInterface({ input: process.stdin, output: process.stderr, terminal: !!process.stdin.isTTY });
   const out = sink(json, verbose, true);
   const waiting = new Map<string, (answer: Answer) => void>();
-  const abort = new AbortController();
   if (!json) console.error(`Session ${session.id}`);
   const watch = (async () => {
     try { for await (const e of session.events((await session.history()).at(-1)?.id)) {
-      if (abort.signal.aborted) break;
       out.event(e);
-      if (e.type === "turnEnded") { if (!json && process.stdin.isTTY) io.prompt(); }
-    } } catch (error) { if (!abort.signal.aborted) out.show((error as Error).message); }
+      if (e.type === "turnEnded" && !json && process.stdin.isTTY) io.prompt();
+    } } catch (error) { out.show((error as Error).message); }
   })();
+  let eof = false;
   session.onQuestion((q, ctx) => new Promise(resolve => {
+    if (eof) { resolve("decline"); return; }
     const answer = (a: Answer) => { waiting.delete(q.id); resolve(a); };
     waiting.set(q.id, answer);
     ctx.cancelled.addEventListener("abort", () => answer("decline"), { once: true });
@@ -74,7 +74,6 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
   const cancel = () => { void session.cancel().catch(error => out.show((error as Error).message)); };
   io.on("SIGINT", cancel);
   process.on("SIGINT", cancel);
-  let turn: Promise<unknown> | undefined;
   const models = () => agent.models().map(m => `${m.provider}/${m.id}`);
   const say = (text?: string | void) => { if (text) console.log(text); };
   try {
@@ -100,17 +99,13 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
           if (value) await session.setSetting("thinking", value);
           else say(String(session.settings().reasoning ?? "off"));
         } else if (word.startsWith("/") && !word.startsWith("/skill:")) say(await session.runCommand(input));
-        else if (turn) await session.send(input, "steer");
-        else {
-          turn = session.prompt(input).catch(error => out.show((error as Error).message)).finally(() => { turn = undefined; });
-        }
+        else await session.send(input, "steer");
       } catch (err) { out.show((err as Error).message); }
-      if (process.stdin.isTTY && !turn && !json) io.prompt();
     }
+    eof = true;
     for (const answer of waiting.values()) answer("decline");
-    await turn;
+    await session.waitForIdle();
   } finally {
-    abort.abort();
     process.off("SIGINT", cancel);
     io.close();
     await session.close();

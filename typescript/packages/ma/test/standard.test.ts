@@ -1,4 +1,7 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import { createInterface } from "node:readline";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -24,7 +27,7 @@ async function project(t: TestContext) {
   const put = async (path: string, content: string) => { await mkdir(dirname(path), { recursive: true }); await writeFile(path, content); };
   await put(script, '[{"text":"ok"}]');
   const env = { PATH: process.env.PATH, HOME: home, MODULAR_AGENT_DATA_DIR: config, MODULAR_AGENT_SCRIPT: script, MODULAR_AGENT_SCRIPT_LOG: log };
-  return { dir, home, config, work, script, log, put, run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env }) };
+  return { dir, home, config, work, script, log, env, put, run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env }) };
 }
 const scripted = (code: string) => [{ toolCalls: [{ name: "codemode", input: { code } }] }, { text: "done" }];
 async function sandbox(t: TestContext, code: string) {
@@ -113,6 +116,22 @@ tools.read(path='icon.png')`);
   assert.deepEqual(r.content.find(c => c.type === "image"), { type: "image", mimeType: "image/png", data: "iVBORw==" });
 });
 
+test("line mode drains /after on EOF and writes verbose command output to stderr", { timeout: 10_000 }, async t => {
+  const p = await project(t);
+  await p.put(p.script, JSON.stringify([...scripted("tools.exec('printf progress')"), { text: "followed" }]));
+  const child = spawn(process.execPath, [cli, "--verbose"], { cwd: p.work, env: p.env, stdio: ["pipe", "pipe", "pipe"] });
+  t.after(() => { child.kill(); });
+  let stdout = "", stderr = "";
+  child.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+  child.stdin.end("first\n/after second\n");
+  const [status] = await once(child, "close");
+  assert.equal(status, 0, stderr);
+  assert.equal(stdout, "done\nfollowed\n");
+  assert.match(stderr, /-> exec\(command="printf progress"\)/);
+  assert.match(stderr, /\nprogress/);
+});
+
 test("state and configuration use the prescribed XDG paths and isolation override", () => {
   assert.deepEqual(paths({ XDG_CONFIG_HOME: "/config", XDG_STATE_HOME: "/state", HOME: "/home" }), { config: "/config/modular-agent", state: "/state/modular-agent/typescript", home: "/home" });
   assert.deepEqual(paths({ MODULAR_AGENT_DATA_DIR: "/isolated", HOME: "/home" }), { config: "/isolated", state: "/isolated/state", home: "/home" });
@@ -154,6 +173,71 @@ test("project MCP only loads after trust, and the setting persists beside global
   assert.equal(await readFile(join(p.work, "mcp.txt"), "utf8"), "echo: notes");
   assert.match((await p.run("mcp")).stdout, /local +stdio/);
   assert.deepEqual(JSON.parse(await readFile(join(p.config, "trusted-projects.json"), "utf8")), { [p.work]: true });
+});
+
+test("Streamable HTTP MCP expands config values and skips a whole invalid catalog", { timeout: 10_000 }, async t => {
+  const p = await project(t);
+  const calls: string[] = [];
+  const schema = { type: "object", properties: { text: { type: "string" } }, required: ["text"] };
+  const server = createServer(async (req, res) => {
+    if (req.method === "GET" || req.method === "DELETE") { res.writeHead(405).end(); return; }
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const msg = JSON.parse(body);
+    if (msg.id === undefined) { res.writeHead(202).end(); return; }
+    calls.push(`${req.url} ${msg.method}`);
+    const result = msg.method === "initialize" ? { protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
+      : msg.method === "tools/list" ? { tools: [{ name: "echo", inputSchema: schema }, ...(req.url === "/bad" ? [{ name: "invalid.name", inputSchema: schema }] : [])] }
+      : { content: [{ type: "text", text: `echo: ${msg.params.arguments.text}` }] };
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => { server.close(); server.closeAllConnections(); });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}`;
+  Object.assign(p.env, { MA_TEST_HTTP: url });
+  await p.put(join(p.config, "mcp.json"), JSON.stringify({ mcpServers: { ok: { url: "${MA_TEST_HTTP}/good" }, bad: { url: "${MA_TEST_HTTP}/bad" } } }));
+  await p.put(p.script, JSON.stringify(scripted("print(tools.mcp_ok__echo('wave'))")));
+  const result = await p.run("-p", "Echo");
+  assert.match(result.stderr, /MCP server bad: invalid MCP tool name mcp_bad__invalid.name/);
+  const requests = (await readFile(p.log, "utf8")).trim().split("\n").map(l => JSON.parse(l));
+  assert.doesNotMatch(requests[0].system, /mcp_bad__/);
+  assert.equal(requests[1].messages.at(-1).text, "echo: wave\n");
+  assert.ok(calls.includes("/good tools/call"));
+});
+
+test("ACP attaches a client MCP server to its own project and honors project settings", { timeout: 10_000 }, async t => {
+  const p = await project(t), work = join(p.work, "nested");
+  await p.put(join(work, ".modular-agent.json"), '{"model_tools":null}');
+  await p.put(p.script, JSON.stringify([{ toolCalls: [{ name: "mcp_host__echo", input: { text: "tides" } }] }, { text: "ok" }]));
+  const child = spawn(process.execPath, [cli, "--acp"], { cwd: p.work, env: p.env, stdio: ["pipe", "pipe", "pipe"] });
+  t.after(() => { child.stdin.end(); child.kill(); });
+  const lines = createInterface({ input: child.stdout });
+  const pending = new Map<number, (m: Record<string, unknown>) => void>();
+  lines.on("line", line => {
+    const message = JSON.parse(line);
+    if (pending.has(message.id)) { pending.get(message.id)!(message); pending.delete(message.id); }
+  });
+  let id = 0;
+  async function request(method: string, params: object) {
+    const message = await new Promise<Record<string, unknown>>(resolve => {
+      pending.set(++id, resolve);
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    });
+    assert.equal(message.error, undefined, JSON.stringify(message));
+    return message.result;
+  }
+  await request("initialize", { protocolVersion: 1 });
+  const opened = await request("session/new", { cwd: work, mcpServers: [{ name: "host", command: process.execPath,
+    args: [join(root, "conformance/reference/mcp-fixture.mjs")], env: [] }] }) as { sessionId: string };
+  await request("session/prompt", { sessionId: opened.sessionId, prompt: [{ type: "text", text: "Echo" }] });
+  await request("session/close", { sessionId: opened.sessionId });
+  const requests = (await readFile(p.log, "utf8")).trim().split("\n").map(l => JSON.parse(l));
+  assert.ok(requests[0].tools.includes("mcp_host__echo"));
+  assert.ok(requests[0].system.includes(`<cwd>\n${work}\n</cwd>`));
+  assert.equal(requests[1].messages.at(-1).text, "echo: tides");
 });
 
 test("ma composes only the public SDK and official SDK plugin entry points", async () => {
