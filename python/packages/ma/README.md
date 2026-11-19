@@ -25,7 +25,7 @@ Claude uses the [TypeScript sidecar](../../../typescript/sidecars/claude/README.
 - **ACP:** 116/116 default checks; 123/123 with `--crash-checks`. The kit ran against `ma --acp` with `MODULAR_AGENT_CONFORMANCE=1`.
 - **Python ma:** 19/19 tests. They test both device flows and Codex browser PKCE against loopback servers, both Providers' Responses requests and concurrent 401 refresh, an `auth.json` fixture in Rust's serde format, Monty limits and errors, skill discovery and prompt wording, MCP configuration and project trust, and the public SDK boundary. No real sign-in, credentials or model calls were used.
 - **Claude sidecar:** One offline end-to-end request from `ma` through the TypeScript sidecar's own fake SDK. The fake confirmed the requested model, system prompt and input; it did not start Claude Code.
-- **Python checks:** Ruff lint and format checks passed; strict mypy passed for the SDK and ma (27 source files). The existing base and SDK suite passed 336/336 in each local-binding run, transient and durable. The durable process-binding run passed 355/355 with the 19 new tests included. See the run commands below.
+- **Python checks:** Ruff lint and format checks passed; strict mypy passed for the SDK and ma (27 source files). The existing base and SDK suite passed 336/336 in each local-binding run, transient and durable. With the 19 new tests included, durable process binding passed 355/355. Transient process binding passed 354/355; `test_foreign_job_report_runs_as_a_turn`, the known base timeout, passed on its isolated rerun (1/1). See the run commands below.
 
 ```sh
 # From the repository root, after uv sync above:
