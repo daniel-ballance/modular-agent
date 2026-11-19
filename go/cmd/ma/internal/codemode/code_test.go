@@ -25,6 +25,31 @@ func TestPromptCatalogThreshold(t *testing.T) {
 	}
 }
 
+func TestStandardNestedCallBudget(t *testing.T) {
+	defs := []modular.ToolDefinition{files.Tools("")[0].Definition()}
+	fs, err := catalog(defs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	result, err := run(t.Context(), `
+for i in range(500):
+    search_tools('read')
+    describe_tool('read')
+    tools.read('fixture.txt', None)
+try:
+    tools.read('fixture.txt')
+except RuntimeError as e:
+    print(e)
+`, fs, func(context.Context, string, any) (modular.ToolResult, error) {
+		calls++
+		return modular.ToolResult{Status: modular.Completed, Content: modular.Text("fixture")}, nil
+	}, StandardLimits())
+	if err != nil || calls != 500 || !strings.Contains(result.Content.Text(), "more than 500 function calls") {
+		t.Fatalf("calls=%d, result=%+v, error=%v", calls, result, err)
+	}
+}
+
 func TestMontyCallsAndLimits(t *testing.T) {
 	var defs []modular.ToolDefinition
 	for _, d := range files.Tools("") {
