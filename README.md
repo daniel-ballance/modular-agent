@@ -22,7 +22,7 @@ The project has five layers. Each is made only from the layers below it, and a g
 | Layer | What it is | Where it is |
 |---|---|---|
 | 1. Specification | What every agent and part must do, and the wire | [`docs/`](docs/conformance.md#the-documents), [kits](conformance/) |
-| 2. SDK specification | What a developer sees, in each language | Not yet written |
+| 2. SDK specification | What a developer sees, in each language | [`docs/sdk/`](docs/sdk/README.md), draft 0.1; [shared scenarios](conformance/sdk/) |
 | 3. SDKs | One SDK in Rust, TypeScript, Go and Python, in that order | Not yet; the [builds](#builds) are the starting points |
 | 4. Reference implementations | Batteries-included agents, one for each language | Rust's [standard configuration](#rust); the others not yet |
 | 5. Demonstrative implementations | Agents that show the ecosystem, across languages and placements | None yet |
@@ -42,6 +42,7 @@ Each language is a peer directory with its own toolchain: [`rust/`](rust/README.
 | [Scenarios](docs/scenarios.md) | seventeen situations, told with the parts and rules | informative |
 | [Bindings](docs/bindings/README.md) | the wire: [shared data](docs/bindings/data.md), [plugins](docs/bindings/plugin.md), [ACP](docs/bindings/acp.md), [history service](docs/bindings/history-http.md) | linked bindings are normative |
 | [Conformance kits](conformance/) | programs that check a build against the bindings | informative |
+| [SDK specification](docs/sdk/README.md) | what a developer using the SDKs sees, in all four languages | draft; binds the SDKs, not conformance |
 | [Decision records](docs/adr/README.md) | why each decision was made, and what was rejected | informative |
 | [Open questions](docs/open-questions.md) | this edition's limits and implementation choices, with safe defaults | informative |
 

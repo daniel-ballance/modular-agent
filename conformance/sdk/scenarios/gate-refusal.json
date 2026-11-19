@@ -1,0 +1,21 @@
+{
+  "scenario": "gate-refusal",
+  "about": "A tool.before handler refuses a call; the call is settled refused, the tool never runs, and the turn carries on.",
+  "rules": ["contracts.md#gates-and-registration", "contracts.md#settlement"],
+  "agent": { "durability": "ephemeral", "plugins": ["gate", "counter"] },
+  "model": [
+    { "toolCalls": [{ "name": "bump", "input": { "note": "forbidden" } }] },
+    { "text": "That was refused." }
+  ],
+  "steps": [
+    {
+      "prompt": "Bump the counter.",
+      "expect": {
+        "outcome": "completed",
+        "text": "That was refused.",
+        "toolResults": [{ "name": "bump", "status": "refused" }],
+        "count": 0
+      }
+    }
+  ]
+}

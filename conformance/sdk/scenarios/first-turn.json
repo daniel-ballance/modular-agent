@@ -1,0 +1,17 @@
+{
+  "scenario": "first-turn",
+  "about": "A prompt with no tools starts one turn, which ends completed with the model's text.",
+  "rules": ["contracts.md#input", "bindings/data.md#recording-order-and-ownership"],
+  "agent": { "durability": "ephemeral", "plugins": [] },
+  "model": [{ "text": "Hello." }],
+  "steps": [
+    {
+      "prompt": "Say hello.",
+      "expect": {
+        "outcome": "completed",
+        "text": "Hello.",
+        "records": ["inputAccepted", "turnStart", "input", "modelRequest", "response", "turnEnd"]
+      }
+    }
+  ]
+}

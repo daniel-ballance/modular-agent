@@ -1,0 +1,21 @@
+{
+  "scenario": "approval-without-handler",
+  "about": "With approval on and no question handler, no one can answer, so the approval is refused at once and the tool never runs.",
+  "rules": ["contracts.md#approval-policy", "sdk/concepts.md#the-local-actor"],
+  "agent": { "durability": "ephemeral", "plugins": ["counter"], "approval": "all" },
+  "model": [
+    { "toolCalls": [{ "name": "bump", "input": {} }] },
+    { "text": "It was refused." }
+  ],
+  "steps": [
+    {
+      "prompt": "Bump the counter.",
+      "expect": {
+        "outcome": "completed",
+        "text": "It was refused.",
+        "toolResults": [{ "name": "bump", "status": "refused" }],
+        "count": 0
+      }
+    }
+  ]
+}

@@ -333,6 +333,14 @@ _Avoid_: API docs, SDK guide
 A published library, in one of Rust, TypeScript, Go or Python, for building agents and plugins from the specification and the SDK specification. The four are one SDK in four languages.
 _Avoid_: Base, framework, build
 
+**Servable plugin**:
+A plugin whose registered items the plugin binding can all carry, so it can run unchanged in its own process. A plugin that uses anything else is in-process only.
+_Avoid_: Portable plugin (portable describes sessions)
+
+**Durability**:
+What an agent keeps when its process ends: `ephemeral` keeps nothing, `kept` keeps sessions, `durable` also carries on interrupted turns.
+_Avoid_: Persistence mode
+
 **Placement**:
 Where a part runs: in the agent's process, in a child process over the plugin binding, or as a service. Chosen when an agent is put together, not in the part's code.
 _Avoid_: Topology, deployment mode

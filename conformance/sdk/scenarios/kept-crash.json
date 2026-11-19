@@ -1,0 +1,21 @@
+{
+  "scenario": "kept-crash",
+  "about": "With kept durability, a crash during a tool call leaves the turn failed on reopen, and the call that ran is settled outcomeUnknown, not repeated.",
+  "rules": ["contracts.md#recovery-and-repeating-work", "sdk/placement.md#durability"],
+  "agent": { "durability": "kept", "plugins": ["counter"] },
+  "model": [
+    { "toolCalls": [{ "name": "bump", "input": { "hold": true } }] },
+    { "text": "Done." }
+  ],
+  "steps": [
+    { "prompt": "Bump the counter.", "crashWhen": { "count": 1 } },
+    {
+      "reopen": true,
+      "expect": {
+        "outcome": "failed",
+        "toolResults": [{ "name": "bump", "status": "outcomeUnknown" }],
+        "count": 1
+      }
+    }
+  ]
+}

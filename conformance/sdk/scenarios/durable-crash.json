@@ -1,0 +1,23 @@
+{
+  "scenario": "durable-crash",
+  "about": "With durable durability, a crash during a tool call is recovered on reopen: the call is settled outcomeUnknown without running again, and the turn carries on to completion.",
+  "rules": ["contracts.md#recovery-and-repeating-work", "sdk/placement.md#durability"],
+  "agent": { "durability": "durable", "plugins": ["counter"] },
+  "model": [
+    { "toolCalls": [{ "name": "bump", "input": { "hold": true } }] },
+    { "text": "Done." }
+  ],
+  "steps": [
+    { "prompt": "Bump the counter.", "crashWhen": { "count": 1 } },
+    {
+      "reopen": true,
+      "expect": {
+        "outcome": "completed",
+        "text": "Done.",
+        "toolResults": [{ "name": "bump", "status": "outcomeUnknown" }],
+        "records": ["toolStarted", "toolResult", "modelRequest", "response", "turnEnd"],
+        "count": 1
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "scenario": "tool-call",
+  "about": "A model calls a tool and answers with its result.",
+  "rules": ["contracts.md#tool-dispatch", "contracts.md#recovery-and-repeating-work"],
+  "agent": { "durability": "ephemeral", "plugins": ["tide"] },
+  "model": [
+    { "toolCalls": [{ "name": "tide", "input": { "harbour": "Whitby" } }] },
+    { "text": "High tide is at 14:02." }
+  ],
+  "steps": [
+    {
+      "prompt": "When is high tide at Whitby?",
+      "expect": {
+        "outcome": "completed",
+        "text": "High tide is at 14:02.",
+        "toolResults": [{ "name": "tide", "status": "completed", "text": "High tide at Whitby is 14:02." }],
+        "records": ["turnStart", "modelRequest", "response", "toolStarted", "toolResult", "modelRequest", "response", "turnEnd"]
+      }
+    }
+  ]
+}

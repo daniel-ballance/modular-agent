@@ -1,0 +1,21 @@
+{
+  "scenario": "question-answered",
+  "about": "A tool asks a choice question; the app's handler answers it and the tool returns the answer.",
+  "rules": ["contracts.md#questions", "bindings/data.md#questions"],
+  "agent": { "durability": "ephemeral", "plugins": ["confirm"], "answers": [{ "value": "yes" }] },
+  "model": [
+    { "toolCalls": [{ "name": "confirm", "input": { "question": "Proceed?" } }] },
+    { "text": "You said yes." }
+  ],
+  "steps": [
+    {
+      "prompt": "Ask me whether to proceed.",
+      "expect": {
+        "outcome": "completed",
+        "text": "You said yes.",
+        "toolResults": [{ "name": "confirm", "status": "completed", "text": "yes" }],
+        "records": ["toolStarted", "inputRequest", "inputAnswer", "toolResult"]
+      }
+    }
+  ]
+}
