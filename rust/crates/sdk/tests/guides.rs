@@ -1,7 +1,7 @@
 //! The examples in docs/sdk/guides, run as tests. Each test names its guide section.
 //! When an example cannot be written as the guide shows it, the guide or the SDK changes.
 use futures_util::StreamExt;
-use modular_agent::{Event, Tool, ToolContext, ToolStatus, testing::test_agent};
+use modular_agent::{Tool, ToolContext, ToolStatus, testing::test_agent};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -32,9 +32,10 @@ async fn streams_the_answer() -> modular_agent::Result<()> {
         .prompt_stream("Describe Whitby harbour in two sentences.")
         .await?;
     while let Some(event) = events.next().await {
-        match event? {
-            Event::Text { delta, .. } => text.push_str(&delta),
-            Event::TurnEnded { .. } => ended = true,
+        let event = event?;
+        match event.event_type.as_str() {
+            "text" => text.push_str(event.data["delta"].as_str().unwrap()),
+            "turnEnded" => ended = true,
             _ => (),
         }
     }

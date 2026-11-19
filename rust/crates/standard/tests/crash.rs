@@ -82,9 +82,9 @@ fn a_killed_code_run_is_settled_as_unknown_and_never_repeated() {
         .collect();
     let turn = events
         .iter()
-        .find(|e| e["kind"] == "turn.result")
+        .find(|e| e["type"] == "turnEnded")
         .expect("no turn result");
-    assert_eq!(turn["content"]["text"], "It was interrupted.");
+    assert_eq!(turn["data"]["result"]["text"], "It was interrupted.");
 
     // One run of the command, and nothing after the kill point was done.
     assert_eq!(

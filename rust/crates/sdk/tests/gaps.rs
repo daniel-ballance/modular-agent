@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use modular_agent::{
-    Code, Durability, Event, Gate, Outcome, Plugin, PromptOptions, Result, Tool, ToolChange,
-    ToolOutput, ToolStatus,
+    Code, Durability, Gate, Outcome, Plugin, PromptOptions, Result, Tool, ToolChange, ToolOutput,
+    ToolStatus,
     testing::{restart, test_agent},
 };
 use serde_json::{Value, json};
@@ -160,7 +160,11 @@ async fn events_replay_from_last_delivered_entry_after_lag() -> Result<()> {
     let cursor = rows.last().unwrap()["id"].as_str().unwrap();
     let mut first = session.events(Some(after))?;
     assert!(
-        matches!(first.next().await.transpose()?, Some(Event::Entry { entry, .. }) if entry["id"] == cursor)
+        first
+            .next()
+            .await
+            .transpose()?
+            .is_some_and(|e| e.event_type == "entry" && e.data["entry"]["id"] == cursor)
     );
     session.prompt("second").await?;
     let lag = first.next().await.unwrap().unwrap_err();
@@ -171,13 +175,17 @@ async fn events_replay_from_last_delivered_entry_after_lag() -> Result<()> {
     let mut again = session.events(Some(cursor))?;
     for want in &after_lag[rows.len()..] {
         assert!(
-            matches!(again.next().await.transpose()?, Some(Event::Entry { entry, .. }) if entry == *want)
+            again
+                .next()
+                .await
+                .transpose()?
+                .is_some_and(|e| e.event_type == "entry" && e.data["entry"] == *want)
         );
     }
     session.prompt("third").await?;
     let live = tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while let Some(event) = again.next().await.transpose()? {
-            if matches!(event, Event::Text { delta, .. } if delta == "third") {
+            if event.event_type == "text" && event.data["delta"] == "third" {
                 return Ok::<_, modular_agent::Error>(true);
             }
         }

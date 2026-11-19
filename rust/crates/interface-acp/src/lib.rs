@@ -17,7 +17,7 @@ use acp::{
 };
 use agent_api::*;
 use agent_client_protocol as acp;
-pub use binding::declaration;
+pub use binding::{declaration, shared_question};
 use sessions::Session;
 use std::{
     collections::BTreeMap,

@@ -1,6 +1,7 @@
 //! Hosts plugins and owns sessions. Inference, turns, I/O and presentation are delegated.
 use agent_api::*;
 mod output;
+pub use output::encode as output_event;
 mod rewind;
 mod tenants;
 use std::{
@@ -247,6 +248,12 @@ impl Harness {
             self.sessions.lock().unwrap().remove(&id);
             return Err(error);
         }
+        self.emit(Event::new(
+            &Scope::session(&id),
+            "session.start",
+            json!({"reopened":false}),
+        ))
+        .await?;
         Ok(id)
     }
     /// Test-only crash seam. The caller has already dropped or stopped every worker.
@@ -491,6 +498,8 @@ impl Harness {
             "cancel and await the turn before closing"
         );
         self.invoke(&self.points["session.end"], &Scope::session(id), json!({}))
+            .await?;
+        self.emit(Event::new(&Scope::session(id), "session.end", json!({})))
             .await?;
         self.invalidate_providers(id)?;
         self.sessions

@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 use modular_agent::{
-    Code, Command, Disposition, Event, Gate, HookRule, Plugin, Result, Timing, Tool, ToolChange,
+    Code, Command, Disposition, Gate, HookRule, Plugin, Result, Timing, Tool, ToolChange,
     ToolContext, TurnAddition,
     testing::{memory_environment, test_agent},
 };
@@ -114,7 +114,9 @@ async fn hooks_commands_and_progress_have_wire_parity() -> Result<()> {
         let mut events = session.prompt_stream("go").await?;
         let mut progress = false;
         while let Some(event) = events.next().await {
-            if let Event::ToolOutput { text, .. } = event? {
+            let event = event?;
+            if event.event_type == "toolOutput" {
+                let text = event.data["chunk"].as_str().unwrap().to_owned();
                 progress |= text == "working";
             }
         }

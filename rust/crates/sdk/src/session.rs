@@ -233,29 +233,30 @@ impl Session {
         let rows = data.entries[at..]
             .iter()
             .filter(|e| e.writer != "rust.derived")
-            .map(|e| base::portable::entry(e, &data))
+            .map(|e| Ok((e.scope.clone(), e.at, base::portable::entry(e, &data)?)))
             .collect::<base::Result<Vec<_>>>()?;
         let me = self.clone();
         Ok(Box::pin(async_stream::try_stream! {
             let mut events = events;
-            for row in rows {
+            for (scope, time, row) in rows {
                 if let Some(view) = me.inner.harness.output(&scope, base::Output {
                     recipient: "interface.sdk".into(), value: json!({"entry":row}), stream: None, end: true,
                 }).await? {
                     cursor = row["id"].as_str().map(str::to_owned);
-                    yield Event::Entry { session_id: me.id.clone(), entry: view["entry"].clone() };
+                    yield Event::new(&scope, time, "entry", view);
                 }
             }
             loop {
                 match events.recv().await {
-                    Ok((_, event)) if event.session_id() == me.id => {
+                    Ok(event) if event.session_id == me.id => {
                         base::require(me.inner.harness.as_ref(), &scope, "watch")?;
-                        if let Event::Entry { entry, .. } = &event {
+                        if event.event_type == "entry" {
+                            let entry = &event.data["entry"];
                             let Some(id) = entry["id"].as_str() else { continue };
                             if existing.contains(id) { continue; }
                             cursor = Some(id.into());
                         }
-                        let ended = matches!(&event, Event::Other { kind, .. } if kind == "session.end");
+                        let ended = event.event_type == "sessionEnded";
                         yield event;
                         if ended { break; }
                     }
@@ -298,13 +299,13 @@ impl Session {
                     tokio::select! {
                         biased;
                         update = events.recv() => match update {
-                            Ok((turn, e)) if e.session_id() == me.id && turn.is_some() => {
+                            Ok(e) if e.session_id == me.id && e.turn_id.is_some() => {
                                 let data = match me.snapshot() {
                                     Ok(data) => data,
                                     Err(e) => return Some((Err(e), None)),
                                 };
-                                if turn == input_turn(&data, &input) {
-                                    let next = (!matches!(e, Event::TurnEnded { .. }))
+                                if e.turn_id == input_turn(&data, &input) {
+                                    let next = (e.event_type != "turnEnded")
                                         .then_some((events, run, input, me));
                                     return Some((Ok(e), next));
                                 }

@@ -328,7 +328,7 @@ pub(crate) fn prompt_response(data: &SessionData, receipt: &Receipt) -> Result<V
     Ok(json!({"stopReason":stop_reason(&outcome),"_meta":{"modular-agent":meta}}))
 }
 
-pub(crate) fn shared_question(q: Question) -> Value {
+pub fn shared_question(q: Question) -> Value {
     let mut value = json!({"id":q.id,"kind":q.kind,"question":q.text});
     if let Some(call_id) = q.scope.call {
         value["toolCallId"] = json!(call_id);

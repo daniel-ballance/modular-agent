@@ -3,7 +3,7 @@ use crate::sink::Sink;
 use anyhow::{Result, anyhow, bail};
 use futures_util::StreamExt;
 use modular_agent::{Agent, AgentBuilder, Answer, Outcome, Session, Timing};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     io::BufRead,
     sync::{Arc, Mutex},
@@ -99,13 +99,6 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
             Some(id) => agent.open_session(id).await?,
             None => agent.session().await?,
         };
-        if id.is_none() || mode != Mode::Json {
-            sink.show(
-                session.id(),
-                "session.open",
-                json!({"session":session.id()}),
-            );
-        }
         {
             for key in ["model", "thinking"] {
                 if (id.is_some() || key == "thinking")
@@ -137,11 +130,6 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
         Ok(())
     };
     tokio::pin!(run);
-    if let Some(id) = id
-        && mode == Mode::Json
-    {
-        sink.show(id, "session.open", json!({"session":id}));
-    }
     loop {
         tokio::select! {
             event = events.next() => match event {

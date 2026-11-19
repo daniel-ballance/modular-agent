@@ -180,7 +180,7 @@ impl Agent {
         Box::pin(async_stream::stream! {
             loop {
                 match live.recv().await {
-                    Ok((_, event)) => yield Ok(event),
+                    Ok(event) => yield Ok(event),
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         yield Err(Error::new(Code::Lost, "event reader fell behind"));
