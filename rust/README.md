@@ -121,7 +121,7 @@ mise exec -- cargo test --workspace -- --test-threads=1
 - **The two Responses Providers: 5 tests**, three of them against a loopback fixture: request shape per vendor, streamed text and tool calls, usage, error kinds, cancel, and that one vendor's reasoning items are never sent to the other.
 - **Sign-in: 4 tests** for the browser callback, the token claims, refresh and the credential file. Both sign-in flows were also started against the real services, which issued codes; no sign-in was completed.
 - **The Claude sidecar: 44 offline tests**, and four real requests of its own.
-- **Real runs through `ma`, on `claude/claude-haiku-5-5`:** one prompt that read a file and ran a command over two tool rounds; a two-input session that followed a project skill and wrote a file; and `ma -c` in a new process, which answered from the saved session.
+- **Real runs through `ma`, on `claude/claude-haiku-5-5`:** one prompt that read a file and ran a command over two tool rounds; a two-input session that followed a project skill and wrote a file; and `ma -c` in a new process, which answered from the saved session. After the base changes, one more: the model read a PNG through the code tool and named its colour.
 - **ACP:** `ma --acp` was driven by hand through `initialize`, `session/new` and `session/prompt` with a scripted model. The code call and its nested call arrived as tool calls, and the reply as text.
 
 ## What has not been checked, and known gaps
@@ -139,9 +139,9 @@ mise exec -- cargo test --workspace -- --test-threads=1
 - **Claude through the sidecar** starts a Claude Code process per model request, replays earlier turns as text, and Claude Code adds some text of its own around the prompt. See the [sidecar's gaps](../sidecars/claude/README.md#known-gaps-and-open-problems).
 - **The production gaps of edition 3** are unchanged: secret staging, per-connection isolation, resource reservations and cross-session erasure.
 
-## The edition 4 draft
+## Where the specification was silent
 
-Building this turned up seven places where edition 3 was silent. They are now draft rules, in [ADR 0023](../docs/adr/0023-edition-4-draft.md), and this build implements all of them:
+Building this turned up seven places where edition 3 was silent. They are now the edition 4 draft rules, in [ADR 0023](../docs/adr/0023-edition-4-draft.md), and this build implements all of them:
 
 | Rule | Where it lives here |
 |---|---|
