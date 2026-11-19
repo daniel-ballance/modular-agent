@@ -102,6 +102,11 @@ class ChildAPI(API):
         finally:
             self.objects.pop(key, None)
 
+    async def nested_tools(self, dispatch, name=None, arguments=None):
+        return await self.peer.request(
+            "nested_tools", {"dispatch": dispatch, "name": name, "arguments": arguments}
+        )
+
     async def hook(self, name, data):
         await self.flush()
         return await self.peer.request("hook", {"name": name, "data": data})
@@ -277,6 +282,8 @@ class ProcessPlugin(Plugin):
                 await self.invoke(d["emit"], None, [piece])
 
             return await self.api.call(d["target"], d["operation"], d["data"], emit)
+        if operation == "nested_tools":
+            return await self.api.nested_tools(d["dispatch"], d["name"], d["arguments"])
         if operation == "hook":
             return await self.api.hook(d["name"], d["data"])
         if operation == "emit":

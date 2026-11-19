@@ -99,7 +99,7 @@ class Turns:
                 "settings": {
                     k: v
                     for k, v in settings_out(settings).items()
-                    if k in {"reasoning", "maxSteps", "maxOutput"}
+                    if k in {"reasoning", "maxSteps", "maxOutput", "modelTools"}
                 },
             },
             additions,
@@ -137,9 +137,18 @@ class Turns:
                 "turn_start",
                 actor=queued["actor"],
                 first_input=self._taken_input(queued),
-                data={"input": queued["id"], "source": queued["data"].get("source"), **snapshot},
+                data={
+                    "input": queued["id"],
+                    "source": queued["data"].get("source"),
+                    **snapshot,
+                    **(
+                        {"result_schema": queued["data"]["result_schema"]}
+                        if "result_schema" in queued["data"]
+                        else {}
+                    ),
+                },
             )
-        result, usage = [], {}
+        result, usage, structured = [], {}, {}
         tenant_limit = False
         start = next(
             e
@@ -147,6 +156,7 @@ class Turns:
             if e.get("turn") == turn and e["kind"] == "turn_start"
         )
         actor = start["actor"]
+        schema = start["data"].get("result_schema")
         try:
             es = [e for e in await self._entries(sid) if e.get("turn") == turn]
             if start["data"].get("input") and not any(e["kind"] == "input" for e in es):
@@ -172,6 +182,16 @@ class Turns:
                     if "system" in start["data"]
                     else (await self.api.session("prepare", session=sid, turn=turn))
                 )
+            if schema is not None:
+                import json
+
+                additions = [
+                    *additions,
+                    {
+                        "system": "Return the final answer as a single JSON value matching this schema: "
+                        + json.dumps(schema)
+                    },
+                ]
             if recovering:
                 _, last = await self._step_checkpoint(sid, turn)
                 if last and last.get("decision") is not None:
@@ -212,6 +232,7 @@ class Turns:
                     last = ends[starts[-1]["step"]]["data"]
                     if not last["continue"]:
                         result = last.get("result", result)
+                        structured = {"value": last["value"]} if "value" in last else {}
                         outcome, error = last["outcome"], last.get("error")
                         break
                 pending = starts[-1] if starts and starts[-1]["step"] not in ends else None
@@ -298,10 +319,18 @@ class Turns:
                         outcome, error = "limit", "output limit"
                     else:
                         check = await self.api.hook(
-                            "result.ready", {"session": sid, "turn": turn, "result": result}
+                            "result.ready",
+                            {
+                                "session": sid,
+                                "turn": turn,
+                                "result": result,
+                                "result_schema": schema,
+                            },
                         )
                         if check and "result" in check:
                             result = check["result"]
+                        if check and "value" in check:
+                            structured = {"value": check["value"]}
                         if check and check.get("retry"):
                             await self._record(
                                 sid, turn, "result_feedback", data={"reason": check["reason"]}
@@ -325,7 +354,13 @@ class Turns:
                         for e in await self._entries(sid)
                         if e.get("turn") == turn and e["kind"] in {"response", "tool_result"}
                     ],
-                    data={"continue": more, "outcome": outcome, "error": error, "result": result},
+                    data={
+                        "continue": more,
+                        "outcome": outcome,
+                        "error": error,
+                        "result": result,
+                        **structured,
+                    },
                 )
                 await self.api.event("step_ended", session=sid, turn=turn, step=step, usage=usage)
         except asyncio.CancelledError:
@@ -367,6 +402,7 @@ class Turns:
             "error": error,
             "usage": usage,
             "open_calls": open_calls,
+            **(structured if outcome == "completed" else {}),
             **(
                 {"shared_outcome": {"kind": "limit", "limit": "tenantTokens"}}
                 if tenant_limit
@@ -457,6 +493,9 @@ class Turns:
         }
 
     async def _model(self, sid, turn, step, access, settings, tools, additions, usage):
+        model_tools = settings.get("modelTools")
+        if model_tools is not None:
+            tools = [t for t in tools if t["name"] in model_tools]
         es = [e for e in await self._entries(sid) if e.get("step") == step]
         outstanding = next(
             (e for e in reversed(es) if e["kind"] in {"model_started", "response", "model_error"}),
@@ -765,7 +804,8 @@ class Turns:
                 gate = {**gate, "refused": True, "reason": "Actor lacks authority: tools"}
             if gate.get("open") and not gate.get("refused"):
                 return unknown if replay else {"open": True, "request": gate["request"]}
-            if definition and call.get("initiator", "model") not in definition.get("callers", []):
+            caller = "plugin" if call.get("parentCallId") else call.get("initiator", "model")
+            if definition and caller not in definition.get("callers", []):
                 gate = {**gate, "refused": True, "reason": "Tool does not allow this initiator"}
             if "checked_input" in gate and gate["checked_input"] != gate["call"]["input"]:
                 gate = {**gate, "refused": True, "reason": "Tool input changed after approval"}
@@ -774,6 +814,8 @@ class Turns:
                     return unknown
                 answer.update(status="refused", content=content(gate.get("reason", "Refused")))
             elif definition is None:
+                if call.get("parentCallId"):
+                    answer["status"] = "refused"
                 answer["content"] = content("Unknown tool: " + call["name"])
             else:
                 changed = {**gate["call"], "id": call["id"], "name": call["name"]}
@@ -785,6 +827,7 @@ class Turns:
                     "tool_started",
                     step=step,
                     call=call["id"],
+                    actor=call["actor"],
                     data={
                         "call": changed,
                         "definition": definition,
@@ -897,7 +940,12 @@ class Turns:
         for e in es:
             if not cancelled and e.get("call") in deferred and e.get("call") not in receipts:
                 continue
-            if e["kind"] != "tool_call" or e.get("turn") != turn or e["call"] in done:
+            if (
+                e["kind"] != "tool_call"
+                or e.get("turn") != turn
+                or e["call"] in done
+                or e["data"].get("parentCallId")
+            ):
                 continue
             status = (
                 ("cancelled" if cancelled and e["call"] not in prior_starts else "outcome_unknown")

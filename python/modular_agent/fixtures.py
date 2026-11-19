@@ -1,4 +1,4 @@
-"""The four shared SDK fixtures, in process or over the plugin binding."""
+"""The shared SDK fixtures, in process or over the plugin binding."""
 
 from __future__ import annotations
 
@@ -26,6 +26,19 @@ async def confirm(question: str, cx: ToolContext) -> str:
     if answer.kind == "value":
         return str(answer.value)
     return "allow" if answer.kind == "allow" else "declined"
+
+
+@tool
+async def moor(harbour: str, cx: ToolContext) -> str:
+    """Moor at a harbour."""
+    raise cx.refuse("the quay is closed")
+
+
+@tool
+async def pilot(harbour: str, cx: ToolContext) -> str:
+    """Report the tide for a pilot."""
+    result = await cx.tools.call("tide", {"harbour": harbour})
+    return "Pilot: " + result.text()
 
 
 def count(path: Path) -> int:
@@ -74,6 +87,10 @@ def fixture(name: str, *, config: JsonObject | None = None) -> Plugin:
             return Plugin(name, tools=[confirm])
         case "counter":
             return Plugin(name, setup=_counter, config=config)
+        case "quay":
+            return Plugin(name, tools=[moor])
+        case "pilot":
+            return Plugin(name, tools=[pilot])
         case "gate":
             return Plugin(name, hooks={"tool.before": _gate})
         case _:

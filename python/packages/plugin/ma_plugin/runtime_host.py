@@ -75,6 +75,10 @@ class HostedRuntime(Runtime):
             "steering": bool(self.supports.get("inputDuringTurn")),
             "durable": bool(self.supports.get("continuesAfterRestart")),
             "waiting_through_restart": bool(self.supports.get("waitingThroughRestart")),
+            "nested_tools": False,
+            "queued_input_after_restart": "run"
+            if self.supports.get("continuesAfterRestart")
+            else "handedBack",
         }
 
     async def _turn(self, sid, queued=None, turn=None):
@@ -219,6 +223,11 @@ class HostedRuntime(Runtime):
             await self.wake(d, emit)
             return {}
 
+        # Hand-backs are open metadata, not recovered execution.
+        if not self.declarations["durable"]:
+            for queued in await self._pending(sid):
+                await self._return(sid, queued)
+
         async def resume():
             try:
                 results = [await self._turn(sid, turn=turn) for turn in turns]
@@ -243,10 +252,7 @@ class HostedRuntime(Runtime):
             self.cancelled.discard(sid)
             await self.api.session("invalidate", session=sid, reason="recovery")
             await self.api.session("busy", session=sid, value=True)
-            task = self.tasks[sid] = asyncio.create_task(resume(), name="external-recover:" + sid)
-        if not self.declarations["durable"]:
-            # ACP includes the synchronous transient hand-back in load metadata.
-            await asyncio.shield(task)
+            self.tasks[sid] = asyncio.create_task(resume(), name="external-recover:" + sid)
         return {"resuming": turns}
 
 
@@ -673,12 +679,16 @@ class TurnHost:
         )
         if self.additions is None:
             self.additions = await self.api.session("prepare", session=self.sid, turn=self.turn)
+        model_tools = self.settings.get("modelTools")
+        tools = await self.runtime._definitions(self.sid)
+        if model_tools is not None:
+            tools = [t for t in tools if t["name"] in model_tools]
         d = {
             **self.scope,
             "step": self.step,
             "access": self.access,
             "settings": self.settings,
-            "tools": await self.runtime._definitions(self.sid),
+            "tools": tools,
             "additions": self.additions,
             "usage": self.native_usage(p.get("usage") or {}),
         }

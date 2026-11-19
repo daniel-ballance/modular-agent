@@ -265,4 +265,4 @@ async def test_declaration(tmp_path):
             assert result["continuesAfterRestart"] == (durability == "durable")
             assert result["portableSessions"] == (durability != "ephemeral")
             assert result["waitingThroughRestart"] is False
-            assert result["nestedToolCalls"] is False
+            assert result["nestedToolCalls"] is True

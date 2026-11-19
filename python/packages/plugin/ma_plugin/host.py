@@ -19,7 +19,9 @@ from ma_core.wire import (
     response_in,
     response_out,
     result_in,
+    result_out,
     tool_in,
+    tool_out,
 )
 from .rpc import MAX_FRAME, Peer, WireError
 from .runtime_host import HostedRuntime
@@ -127,7 +129,7 @@ class Environment:
     async def invoke(self, op, d, emit=silent):
         s = await self.plugin.api.session("get", session=d["session"])
         params = {"cwd": d.get("cwd", s["project"]), "sessionId": s["id"]}
-        if op in {"read", "exists"}:
+        if op in {"read", "exists", "list"}:
             params["path"] = d["path"]
         elif op == "write":
             params.update(
@@ -159,6 +161,14 @@ class Environment:
 
     async def exists(self, d, emit):
         return await self.invoke("exists", d, emit)
+
+    async def list_directory(self, d, emit):
+        try:
+            return await self.invoke("list", d, emit)
+        except WireError as exc:
+            if exc.code == "method_not_found":
+                raise WireError(str(exc), "not_supported") from exc
+            raise
 
     async def read(self, d, emit):
         return base64.b64decode((await self.invoke("read", d, emit))["data"]).decode()
@@ -207,7 +217,7 @@ class External(Plugin):
         self.declarations = {}
         self.api = harness.api(self.name)
 
-    async def connect(self):
+    async def open_transport(self):
         decision = await self.h.fire(
             "@harness",
             "plugin.load",
@@ -234,6 +244,9 @@ class External(Plugin):
         self.peer = Peer(
             self.process.stdout, self.process.stdin, self.callback, self.notification, self.name
         )
+
+    async def connect(self):
+        await self.open_transport()
         self.home.mkdir(parents=True, exist_ok=True)
         self.registration = await asyncio.wait_for(
             self.peer.request(
@@ -265,6 +278,7 @@ class External(Plugin):
                 stops_commands_on_crash=environment["containment"] == "strong",
                 containment=environment["containment"],
                 rewind=bool(environment.get("points")),
+                confines_files=bool(environment.get("confinesFiles")),
                 platforms=environment.get("platforms", []),
             )
         providers = self.registration.get("providers", [])
@@ -545,9 +559,12 @@ class External(Plugin):
         except AgentError as exc:
             if isinstance(exc, WireError):
                 raise
-            code = {"process_lost": "lost", "not_found": "not_found"}.get(
-                exc.code, "invalid_request"
-            )
+            code = {
+                "process_lost": "lost",
+                "not_found": "not_found",
+                "not_supported": "not_supported",
+                "internal": "internal",
+            }.get(exc.code, "invalid_request")
             raise WireError(str(exc), code) from exc
 
     async def host_call(self, method, p, key):
@@ -564,7 +581,9 @@ class External(Plugin):
             "host/ask",
             "host/hook",
             "host/jobs/start",
-            *("host/env/" + op for op in ("read", "write", "exists", "exec")),
+            "host/tools/list",
+            "host/tools/call",
+            *("host/env/" + op for op in ("read", "write", "exists", "exec", "list")),
         }
         runtime_only = {
             "host/runtime/" + op
@@ -594,6 +613,21 @@ class External(Plugin):
             and key is not None
         ):
             raise WireError("Expected a notification", "invalid_request")
+        if p.get("parentRequestId") in self.peer.cancelled_outbound and (
+            method
+            in {
+                "host/ask",
+                "host/jobs/start",
+                "host/tools/call",
+                "host/env/write",
+                "host/env/exec",
+                "host/runtime/runToolCall",
+                "host/runtime/model",
+            }
+            or (method == "host/hook" and p.get("hook") == "provider.request")
+        ):
+            self.context(p)
+            raise WireError("Parent request was cancelled", "cancelled")
         if method in runtime_only:
             parent, d, _ = self.context(p)
             if not parent or not parent["method"].startswith("runtime/") or "runtime" not in d:
@@ -813,6 +847,18 @@ class External(Plugin):
                 },
             )
             return {"jobId": j["id"], "started": j["started"]}
+        if method in {"host/tools/list", "host/tools/call"}:
+            if not parent or parent["method"] != "tools/call" or not d.get("dispatch"):
+                raise WireError("Nested tools need a live dispatched parent", "invalid_request")
+            if method == "host/tools/list":
+                return {"tools": [tool_out(t) for t in await self.api.nested_tools(d["dispatch"])]}
+            if (
+                not isinstance(p.get("name"), str)
+                or not p["name"]
+                or not isinstance(p.get("input"), dict)
+            ):
+                raise WireError("Nested tools need a name and object input", "invalid_request")
+            return result_out(await self.api.nested_tools(d["dispatch"], p["name"], p["input"]))
         if method.startswith("host/env/"):
             if parent is None or p.get("sessionId") != sid or "tools" not in authority:
                 raise WireError("No parent work with tool authority", "invalid_request")
@@ -824,6 +870,7 @@ class External(Plugin):
                 "read": "read_bytes",
                 "write": "write_bytes",
                 "exists": "exists",
+                "list": "list_directory",
                 "exec": "bash",
             }
             if op not in operations:
@@ -842,6 +889,10 @@ class External(Plugin):
                 args["timeout"] = p.get("timeoutMs", 0) / 1000 or None
             try:
                 r = await self.api.call("environment", operations[op], args, output)
+            except AgentError as exc:
+                if op == "list" and exc.code in {"unavailable", "not_supported"}:
+                    raise WireError(str(exc), "not_supported") from exc
+                raise
             except TimeoutError:
                 if op != "exec":
                     raise
@@ -970,7 +1021,7 @@ class External(Plugin):
         self.stopping = True
         if self.runtime and hasattr(self.runtime, "api"):
             await self.runtime.stop()
-        if not self.process:
+        if not self.peer:
             return
         try:
             if self.peer and not self.peer.closed.is_set() and self.registration:
@@ -987,14 +1038,15 @@ class External(Plugin):
         finally:
             if self.peer:
                 await self.peer.close()
-            if self.process.stdin:
-                self.process.stdin.close()
-            try:
-                async with asyncio.timeout(5):
+            if self.process:
+                if self.process.stdin:
+                    self.process.stdin.close()
+                try:
+                    async with asyncio.timeout(5):
+                        await self.process.wait()
+                except TimeoutError:
+                    self.process.kill()
                     await self.process.wait()
-            except TimeoutError:
-                self.process.kill()
-                await self.process.wait()
             if hasattr(self, "watcher"):
                 await self.watcher
 
@@ -1019,7 +1071,7 @@ class ToolSource:
         return result_in(result, d["call"]["id"])
 
 
-async def load_plugins(harness, specs, project, home):
+async def load_plugins(harness, specs, project, home, *, external_factory=External):
     """Initialize in order, preflight collisions, then retract local registrations."""
     harness.external_tool_names = {
         t["name"]: ("local", t.get("target", "files"))
@@ -1050,7 +1102,9 @@ async def load_plugins(harness, specs, project, home):
             or not all(isinstance(s, str) for s in spec["command"])
         ):
             raise WireError("Plugin command must be a nonempty string array", "invalid_request")
-        plugin = External(harness, spec, project, Path(home) / "external" / str(index), index)
+        plugin = external_factory(
+            harness, spec, project, Path(home) / "external" / str(index), index
+        )
         snapshot = {
             key: getattr(harness, key).copy()
             for key in ("capabilities", "hooks", "handlers", "commands", "external_tool_names")

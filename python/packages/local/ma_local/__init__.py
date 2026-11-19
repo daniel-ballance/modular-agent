@@ -22,6 +22,8 @@ class Local(Plugin):
         "rewind": True,
         "stops_commands_on_crash": True,
         "normal_shutdown_cleanup": True,
+        "containment": "strong",
+        "confines_files": False,
         "platform": "Linux cgroup v2 with delegated subtree",
     }
 
@@ -55,6 +57,31 @@ class Local(Plugin):
         s = await self.api.session("get", session=d["session"])
         p = Path(d["path"]).expanduser()
         return p if p.is_absolute() else Path(d.get("cwd") or s["project"]) / p
+
+    async def list_directory(self, d, emit):
+        try:
+            path = await self._path(d)
+            return {
+                "entries": [
+                    {
+                        "name": item.name,
+                        "kind": "other"
+                        if item.is_symlink()
+                        else "directory"
+                        if item.is_dir()
+                        else "file"
+                        if item.is_file()
+                        else "other",
+                    }
+                    for item in sorted(path.iterdir())
+                ]
+            }
+        except FileNotFoundError as exc:
+            raise AgentError(str(exc), "not_found") from exc
+        except (NotADirectoryError, PermissionError, ValueError) as exc:
+            raise AgentError(str(exc), "invalid_request") from exc
+        except OSError as exc:
+            raise AgentError(str(exc), "internal") from exc
 
     async def read_bytes(self, d, emit):
         import base64

@@ -48,6 +48,7 @@ class Peer:
         self.dispatch, self.notification, self.label = dispatch, notification, label
         self.pending, self.running, self.parents, self.incoming_methods = {}, {}, {}, {}
         self.started, self.cancelled, self.answered = set(), set(), set()
+        self.cancelled_outbound = set()
         self.received_ids, self.sent_ids = set(), set()
         self.sequence = 0
         self.lock = asyncio.Lock()
@@ -99,6 +100,7 @@ class Peer:
             await self.send({"id": key, "method": method, "params": params})
             return await asyncio.shield(future)
         except asyncio.CancelledError:
+            self.cancelled_outbound.add(key)
             if not self.closed.is_set():
                 await self.notify("$/cancel", {"id": key})
                 children = [
@@ -122,6 +124,7 @@ class Peer:
         finally:
             self.pending.pop(key, None)
             self.answered.discard(key)
+            self.cancelled_outbound.discard(key)
             self.note_requests.discard(key)
             if future.done() and not future.cancelled():
                 future.exception()

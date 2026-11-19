@@ -10,7 +10,7 @@ from modular_agent import Plugin, serve, tool
 async def private() -> str:
     """An in-process-only tool."""
     return "unused"
-serve(Plugin("flagged", tools=[private]))
+serve(Plugin("flagged", setup=lambda r: r.tool(private)))
 '''
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-c", code, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE

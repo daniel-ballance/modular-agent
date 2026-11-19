@@ -14,6 +14,7 @@ from typing import Any, Literal, cast, get_type_hints, overload
 
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, create_model
+from referencing import Registry
 
 from ._types import (
     AgentError,
@@ -24,6 +25,7 @@ from ._types import (
     Json,
     JsonObject,
     QuestionSpec,
+    ToolResult,
     ToolStatus,
     _content,
 )
@@ -40,6 +42,30 @@ class _Refusal(Exception):
     pass
 
 
+class _NestedTools:
+    def __init__(self, context: ToolContext) -> None:
+        self._context = context
+
+    async def list(self) -> list[JsonObject]:
+        cx = self._context
+        cx._check()
+        return cast(list[JsonObject], await cx._nested("list", {}))
+
+    async def call(self, name: str, input: JsonObject) -> ToolResult:
+        cx = self._context
+        cx._check()
+        if not isinstance(name, str) or not name or not isinstance(input, dict):
+            raise AgentError(ErrorCode.INVALID_REQUEST, "Nested tools need a name and object input")
+        result = cast(dict[str, Any], await cx._nested("call", {"name": name, "input": input}))
+        return ToolResult(
+            name,
+            ToolStatus(result["status"]),
+            result["callId"],
+            result["content"],
+            result.get("value"),
+        )
+
+
 class ToolContext:
     def __init__(
         self,
@@ -48,6 +74,7 @@ class ToolContext:
         call_id: str,
         ask: Callable[[QuestionSpec, int, float | None], Awaitable[Answer]],
         progress: Callable[[Content], Awaitable[None]],
+        nested: Callable[[str, JsonObject], Awaitable[Json]],
     ) -> None:
         self.session_id = session_id
         self.actor_id = actor_id
@@ -55,6 +82,8 @@ class ToolContext:
         self.cancelled = asyncio.Event()
         self._ask = ask
         self._progress = progress
+        self._nested = nested
+        self.tools = _NestedTools(self)
         self._question_index = 0
         self._active = True
 
@@ -133,7 +162,7 @@ class Tool:
 
     async def _run(self, arguments: Json, context: ToolContext) -> JsonObject:
         try:
-            Draft202012Validator(self.parameters).validate(arguments)
+            Draft202012Validator(self.parameters, registry=Registry()).validate(arguments)
             kwargs = self._parse(cast(JsonObject, arguments))
             if self._context:
                 kwargs[self._context] = context
@@ -159,7 +188,9 @@ class Tool:
             if self._output is not None and result["status"] == "completed":
                 checked = self._output.validate_python(result.get("value"), strict=True)
                 encoded = cast(Json, self._output.dump_python(checked, mode="json"))
-                Draft202012Validator(self.definition["returns"]).validate(encoded)
+                Draft202012Validator(self.definition["returns"], registry=Registry()).validate(
+                    encoded
+                )
                 result["value"] = encoded
                 if not result["content"]:
                     result["content"] = _content(

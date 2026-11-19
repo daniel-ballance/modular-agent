@@ -20,6 +20,8 @@ class Runtime(Turns, Plugin):
         "jobs": True,
         "open_calls": True,
         "parallel_tools": True,
+        "nested_tools": True,
+        "queued_input_after_restart": "handedBack",
     }
 
     def __init__(self):
@@ -160,7 +162,7 @@ class Runtime(Turns, Plugin):
                 "key": key,
                 **({"submittedBy": submitter} if submitter != actor else {}),
                 "authority": authority,
-                **{k: d[k] for k in ("source", "resume", "acting_for") if k in d},
+                **{k: d[k] for k in ("source", "resume", "acting_for", "result_schema") if k in d},
             },
             **({"job": d["source"]["job"]} if d.get("source", {}).get("job") else {}),
         )
@@ -426,6 +428,9 @@ class Runtime(Turns, Plugin):
                 emit,
             )
         return {}
+
+    async def dispatch_nested(self, d, emit):
+        return await self._tool(d["session"], d["turn"], d["step"], d["call"], d["definition"])
 
     async def run_tool(self, d, emit):
         sid = d["session"]

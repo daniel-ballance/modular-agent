@@ -110,6 +110,9 @@ class API:
     async def hook(self, name, data):
         return await self._harness.fire(self.owner, name, data)
 
+    async def nested_tools(self, dispatch, name=None, arguments=None):
+        return await self._harness.nested_tools(dispatch, name, arguments)
+
     async def session(self, operation, **data):
         return await self.call("@harness", operation, data)
 

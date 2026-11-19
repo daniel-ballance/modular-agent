@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .output import redact
 
-from ma_core import content, identity, plain
+from ma_core import AgentError, content, identity, plain
+from ma_core.conformance import NEST
 from ma_durable import Durable
 from ma_runtime import Runtime
 from ma_local import Local
@@ -143,11 +144,13 @@ class Conformance(PluginServer):
                 }
             )
         if "tools" in parts:
-            self.tools = [tool_out(t) for t in DEFINITIONS if t["name"] in {"bash", "read"}]
+            self.tools = [
+                tool_out(t) for t in [*DEFINITIONS, NEST] if t["name"] in {"bash", "read", "nest"}
+            ]
             registration["toolSources"] = [
                 {"id": "conformance-tools", "tools": self.tools, "perSession": False}
             ]
-            registration["replaces"] += ["tool:bash", "tool:read"]
+            registration["replaces"] += ["tool:bash", "tool:read", "tool:nest"]
             methods.update({"tools/list": self.list_tools, "tools/call": self.call_tool})
         if "environment" in parts:
             registration["workingEnvironment"] = {
@@ -159,7 +162,16 @@ class Conformance(PluginServer):
             methods.update(
                 {
                     "env/" + op: self.environment
-                    for op in ("read", "write", "exists", "exec", "save", "checkPoint", "restore")
+                    for op in (
+                        "read",
+                        "write",
+                        "exists",
+                        "exec",
+                        "list",
+                        "save",
+                        "checkPoint",
+                        "restore",
+                    )
                 }
             )
         if "hooks" in parts:
@@ -285,6 +297,14 @@ class Conformance(PluginServer):
     async def call_tool(self, p, key):
         await self.list_tools(p, key)
         c = p["call"]
+        if c["name"] == "nest":
+            try:
+                result = await self.peer.request(
+                    "host/tools/call", {"parentRequestId": key, **c["input"]}
+                )
+            except WireError as exc:
+                return {"status": "failed", "content": content(exc.code)}
+            return {k: result[k] for k in ("status", "content")}
         d = {**c["input"], "parentRequestId": key, "cwd": p["project"], "sessionId": p["sessionId"]}
         try:
             if c["name"] == "read":
@@ -328,7 +348,16 @@ class Conformance(PluginServer):
             if op == "sessionEnded":
                 await self.local._close({"session": sid})
                 return {}
-            if op not in {"read", "write", "exists", "exec", "save", "checkPoint", "restore"}:
+            if op not in {
+                "read",
+                "write",
+                "exists",
+                "exec",
+                "list",
+                "save",
+                "checkPoint",
+                "restore",
+            }:
                 raise WireError("Unknown environment operation", "not_supported", -32601)
             cwd = str(Path(p["cwd"]).resolve())
             if op == "save":
@@ -341,6 +370,13 @@ class Conformance(PluginServer):
                 )
             path = Path(p.get("path", ""))
             path = path if path.is_absolute() else Path(cwd) / path
+            if op == "list":
+                try:
+                    return await self.local.list_directory(
+                        {"session": sid, "cwd": cwd, "path": str(path)}, None
+                    )
+                except AgentError as exc:
+                    raise WireError(str(exc), exc.code) from exc
             if op == "read":
                 return await self.local.read_bytes(
                     {"session": sid, "cwd": cwd, "path": str(path)}, None

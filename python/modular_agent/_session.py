@@ -121,10 +121,12 @@ class _Stream:
     async def next(self) -> Event:
         event = await self.queue.get()
         if isinstance(event, AgentError):
-            raise event
-        if isinstance(entry := event.data.fields.get("entry"), dict):
-            self.cursor = entry.get("id")
+            raise AgentError(ErrorCode.LOST, event.message, {"fromEntry": self.cursor})
         return event
+
+    def delivered(self, event: Event) -> None:
+        if event.type == "entry" and isinstance(entry := event.data.fields.get("entry"), dict):
+            self.cursor = entry.get("id")
 
 
 def _tool_result(e: dict[str, Any], name: str, call_id: str) -> ToolResult:
@@ -143,11 +145,20 @@ def _turn(e: dict[str, Any], records: list[dict[str, Any]]) -> PromptResult:
     picked = end.get("input") or (start and start["data"].get("input")) or ""
     outcome = turn_end_out(end)["outcome"]
     results = {
-        r["call"]: r for r in records if r.get("turn") == turn_id and r["kind"] == "tool_result"
+        r["call"]: r
+        for r in records
+        if r.get("turn") == turn_id
+        and r["kind"] == "tool_result"
+        and not r["data"].get("parentCallId")
     }
     tools = []
     for r in records:
-        if r.get("turn") == turn_id and r["kind"] == "tool_call" and r["call"] in results:
+        if (
+            r.get("turn") == turn_id
+            and r["kind"] == "tool_call"
+            and r["data"].get("initiator", "model") == "model"
+            and r["call"] in results
+        ):
             result = results.pop(r["call"])
             tools.append(
                 _tool_result(
@@ -167,7 +178,7 @@ def _turn(e: dict[str, Any], records: list[dict[str, Any]]) -> PromptResult:
         Disposition.TURN,
         Outcome(OutcomeKind(outcome["kind"]), outcome.get("error"), outcome.get("limit")),
         _text(end.get("content", [])),
-        end.get("value"),
+        turn_end_out(end)["result"].get("value"),
         turn_id,
         tuple(end.get("open_calls", [])),
         usage_out(end.get("usage", {})),
@@ -192,6 +203,24 @@ class Session:
         return cast(dict[str, Any], await self._native("get"))
 
     async def send(self, input: Input, timing: Timing, *, key: str | None = None) -> InputReceipt:
+        return await self._send(input, timing, key=key)
+
+    async def _send(
+        self,
+        input: Input,
+        timing: Timing,
+        *,
+        key: str | None = None,
+        result: JsonObject | None = None,
+    ) -> InputReceipt:
+        if result is not None:
+            from jsonschema import Draft202012Validator
+            from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
+
+            try:
+                Draft202012Validator.check_schema(result)
+            except SchemaError as exc:
+                raise AgentError(ErrorCode.INVALID_PARAMS, exc.message) from exc
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Session is not open")
         if timing not in {"now", "steer", "after", "propose"}:
@@ -214,6 +243,7 @@ class Session:
             content=_content(input),
             key=key,
             commands=False,
+            **({"result_schema": result} if result is not None else {}),
         )
         if data.get("handled"):
             return InputReceipt(
@@ -252,30 +282,34 @@ class Session:
                 raise AgentError(ErrorCode.LOST, "Input settled without a recorded outcome")
             await self._changed.wait()
 
-    async def prompt(self, input: Input, *, key: str | None = None) -> PromptResult:
-        return await self._result(await self.send(input, "now", key=key))
+    async def prompt(
+        self, input: Input, *, key: str | None = None, result: JsonObject | None = None
+    ) -> PromptResult:
+        return await self._result(await self._send(input, "now", key=key, result=result))
 
-    async def prompt_stream(self, input: Input, *, key: str | None = None) -> AsyncIterator[Event]:
+    async def prompt_stream(
+        self, input: Input, *, key: str | None = None, result: JsonObject | None = None
+    ) -> AsyncIterator[Event]:
         stream = _Stream()
         self._streams.add(stream)
         try:
-            receipt = await self.send(input, "now", key=key)
+            receipt = await self._send(input, "now", key=key, result=result)
             if receipt.disposition is not None:
                 return
             if receipt.duplicate:
-                result = await self._result(receipt)
-                if result.disposition is Disposition.TURN and result.outcome is not None:
+                settled = await self._result(receipt)
+                if settled.disposition is Disposition.TURN and settled.outcome is not None:
                     yield Event(
                         "turnEnded",
                         "",
                         self.id,
                         EventData(
                             {
-                                "outcome": {"kind": result.outcome.kind},
-                                "result": {"text": result.text},
+                                "outcome": {"kind": settled.outcome.kind},
+                                "result": {"text": settled.text},
                             }
                         ),
-                        result.turn_id,
+                        settled.turn_id,
                     )
                 return
             turn_id = None
@@ -292,9 +326,53 @@ class Session:
                 ):
                     return
                 if turn_id is not None and event.turn_id == turn_id:
+                    stream.delivered(event)
                     yield event
                     if event.type == "turnEnded":
                         return
+        finally:
+            self._streams.discard(stream)
+
+    async def events(self, from_entry: str | None = None) -> AsyncIterator[Event]:
+        stream = _Stream()
+        self._streams.add(stream)
+        try:
+            snapshot = (await self._state())["entries"]
+            entry_ids = {e["id"] for e in snapshot}
+            if from_entry is not None and from_entry not in entry_ids:
+                raise AgentError(ErrorCode.NOT_FOUND, "Unknown history cursor")
+            replay = from_entry is None
+            stream.cursor = from_entry
+            for raw in snapshot:
+                if not replay:
+                    replay = raw["id"] == from_entry
+                    continue
+                entry = await self._agent._session(
+                    "view", session=self.id, recipient="user", type="entry", value=entry_out(raw)
+                )
+                if entry is not None:
+                    event = Event(
+                        "entry",
+                        raw["time"],
+                        self.id,
+                        EventData({"entry": entry}),
+                        raw.get("turn"),
+                        raw.get("step"),
+                        raw.get("call"),
+                    )
+                    stream.delivered(event)
+                    yield event
+            while not self._closed:
+                event = await stream.next()
+                if (
+                    isinstance(entry := event.data.fields.get("entry"), dict)
+                    and entry.get("id") in entry_ids
+                ):
+                    continue
+                stream.delivered(event)
+                yield event
+                if event.type == "sessionEnded":
+                    return
         finally:
             self._streams.discard(stream)
 

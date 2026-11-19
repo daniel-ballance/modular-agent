@@ -188,7 +188,7 @@ async def _handle_hook(hook: _Hook, payload: JsonObject) -> JsonObject | None:
             and isinstance(prior, dict)
             and set(change) <= {"content", "value"}
         ):
-            return {"change": {"call": call, "result": {**prior, **change}}}
+            return {"value": {**payload, "result": {**prior, **change}}}
         raise AgentError(ErrorCode.INVALID_REQUEST, f"Invalid change at {hook.point}")
     return result
 

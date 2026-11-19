@@ -22,7 +22,7 @@ async def build(
     root, provider, secrets=(), runtime=None, subagents=None, project=None, process_plugins=None
 ):
     import os
-    from ma_fake.conformance import Echo
+    from ma_fake.conformance import Echo, Nest
 
     providers = [provider]
     if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
@@ -38,6 +38,7 @@ async def build(
             Credentials(root),
             Local(root),
             Tools(),
+            *([Nest()] if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1" else []),
             *providers,
             Selection([p.name for p in providers]),
             runtime or Runtime(),

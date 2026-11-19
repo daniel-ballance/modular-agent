@@ -11,6 +11,7 @@ from ._history import (
     file_history as file_history,
     http_history as http_history,
     memory_history as memory_history,
+    serve_history as serve_history,
 )
 from ._plugin import (
     CommandContext as CommandContext,

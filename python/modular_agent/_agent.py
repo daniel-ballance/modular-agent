@@ -5,29 +5,34 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Coroutine, Generator, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Generator, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import TracebackType
 from typing import Any, Self, cast
 
+from jsonschema import Draft202012Validator
+from referencing import Registry
+
 from ma_acp import ACP
 from ma_acp.binding import declaration as _declaration
 from ma_approval import Approval as _Approval
 from ma_context import Context
+from ma_core import plain
 from ma_core.wire import model_out, settings_in
 from ma_durable import Durable
 from ma_harness import Harness
 from ma_history import History
 from ma_history.http import HTTPHistory
-from ma_plugin.host import load_plugins
+from ma_local import Local
+from ma_plugin.host import External, load_plugins
 from ma_questions import Questions
 from ma_runtime import Runtime
 from ma_selection import Selection
 
+from ._environment import MemoryEnvironment
 from ._history import HistoryStore
 from ._native import (
-    _ConfinedLocal,
     _LocalPlugin,
     _MemoryHistory,
     _SdkTools,
@@ -37,6 +42,7 @@ from ._native import (
 )
 from ._plugin import Plugin, ProcessPlugin, _SUPPORTED_HOOKS
 from ._provider import ModelInfo, Provider, _ProviderAdapter
+from ._serve import _MemoryExternal, _OverWire
 from ._session import Session, _events
 from ._tool import Tool
 from ._types import (
@@ -55,6 +61,30 @@ def run[T](coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coro)
 
 
+async def _structured_result(d: dict[str, Any]) -> JsonObject | None:
+    if (schema := d.get("result_schema")) is None:
+        return None
+    try:
+
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"Invalid JSON constant: {value}")
+
+        value = json.loads(plain(d["result"]), parse_constant=reject_constant)
+        json.dumps(value, allow_nan=False)
+        error = next(Draft202012Validator(schema, registry=Registry()).iter_errors(value), None)
+        if error is not None:
+            return {
+                "retry": True,
+                "reason": f"Structured result does not match the schema: {error.message}",
+            }
+    except Exception as exc:
+        return {
+            "retry": True,
+            "reason": f"Expected one JSON value matching the result schema: {exc}",
+        }
+    return {"value": value}
+
+
 class _Questions(Questions):  # type: ignore[misc]  # Untyped base adapter.
     async def definitions(self, d: JsonObject) -> list[JsonObject]:
         return []
@@ -68,6 +98,8 @@ class _SdkRuntime(Runtime):  # type: ignore[misc]  # Untyped base adapter.
 
 
 class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
+    declarations = {**Durable.declarations, "queued_input_after_restart": "handedBack"}
+
     async def _safe_to_repeat(self, sid: str, definition: JsonObject | None) -> bool:
         return False
 
@@ -109,6 +141,8 @@ class Agent:
         self._lock = asyncio.Lock()
         self._closed = False
         self._plugin_host = False
+        self._restart: Callable[[], Awaitable[Agent]] | None = None
+        self._memory_store: _MemoryHistory | None = None
 
     async def _session(self, operation: str, **data: Any) -> Any:
         if self._closed:
@@ -257,12 +291,11 @@ class Agent:
     def declaration(self) -> JsonObject:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
-        value = _declaration(self._h.declarations())
-        environment_owner, environment = self._h.capabilities["environment"]
-        local = isinstance(environment, _ConfinedLocal)
-        remote_environment = getattr(self._h.plugins[environment_owner], "registration", {}).get(
-            "workingEnvironment", {}
-        )
+        parts = self._h.declarations()
+        value = _declaration(parts)
+        runtime = parts[self._h.capabilities["runtime"][0]]
+        environment = parts[self._h.capabilities["environment"][0]]
+        store = parts[self._h.capabilities["history"][0]]
         value.pop("plugins", None)
         value.update(
             waitingThroughRestart=False,
@@ -272,14 +305,20 @@ class Agent:
             tenants=False,
             questionsOutlastTurns=False,
             lateAnswersStartTurns=False,
-            nestedToolCalls=False,
-            erasure=not isinstance(self._h.capabilities["history"][1], _MemoryHistory),
-            portableSessions=not isinstance(self._h.capabilities["history"][1], _MemoryHistory),
+            erasure=bool(store.get("erasure")),
+            portableSessions=store.get("retention") != "process",
             settingsDuringTurn="refused",
-            confinesFiles=local or bool(remote_environment.get("confinesFiles")),
-            queuedInputAfterRestart="handedBack",
+            confinesFiles=bool(environment.get("confines_files")),
+            commandContainment=environment.get("containment", "none"),
+            nestedToolCalls=bool(runtime.get("nested_tools")),
+            queuedInputAfterRestart=runtime.get("queued_input_after_restart", "handedBack"),
             startsTurnsUnasked="never",
         )
+        queued_jobs = runtime.get(
+            "queued_job_reports_after_restart", value["queuedInputAfterRestart"]
+        )
+        if queued_jobs != value["queuedInputAfterRestart"]:
+            value["queuedJobReportsAfterRestart"] = queued_jobs
         return cast(JsonObject, value)
 
     async def serve_acp(self) -> None:
@@ -299,6 +338,34 @@ class Agent:
             await interface.serve()
         finally:
             await self.close()
+
+    async def _interrupt_and_restart(self) -> Agent:
+        async with self._lock:
+            if self._closed:
+                raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
+            if self._restart is None or "acp" in self._h.plugins:
+                raise AgentError(
+                    ErrorCode.NOT_SUPPORTED, "Restart simulation requires in-process plugins"
+                )
+            self._closed = True
+            sessions = list(self._h.sessions)
+            for sid in sessions:
+                self._h.sessions[sid]["suspending"] = True
+                await self._h.fire("@harness", "session.suspend", {"session": sid})
+            tasks = list(self._question_tasks.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for sid in sessions:
+                await self._api.call("history", "close", {"session": sid})
+                self._h.sessions.pop(sid)
+                if session := self._sessions.pop(sid, None):
+                    session._closed = True
+                    session._changed.set()
+            rebuilt = await self._restart()
+            rebuilt._test_project, self._test_project = self._test_project, None
+            self._scratch.cleanup()
+            return rebuilt
 
     async def close(self) -> None:
         async with self._lock:
@@ -360,6 +427,7 @@ def create_agent(
     data_dir: str | os.PathLike[str] | None = None,
     durability: Durability = "ephemeral",
     history: HistoryStore | None = None,
+    environment: MemoryEnvironment | None = None,
     providers: Sequence[Provider] = (),
     tools: Sequence[Tool] = (),
     plugins: Sequence[Plugin] = (),
@@ -371,6 +439,9 @@ def create_agent(
     on_question: QuestionHandler | None = None,
 ) -> AgentStart:
     async def build() -> Agent:
+        return await build_with_store()
+
+    async def build_with_store(memory_store: _MemoryHistory | None = None) -> Agent:
         if durability not in {"ephemeral", "kept", "durable"} or approval not in {
             None,
             "off",
@@ -379,10 +450,15 @@ def create_agent(
             "never",
         }:
             raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid durability or approval policy")
-        if durability != "ephemeral" and data_dir is None:
-            raise AgentError(
-                ErrorCode.INVALID_COMPOSITION, f"{durability} durability needs data_dir"
-            )
+        if data_dir is None and durability != "ephemeral":
+            if history is None:
+                raise AgentError(
+                    ErrorCode.INVALID_COMPOSITION, "Kept history needs a persistent store"
+                )
+            if environment is None:
+                raise AgentError(
+                    ErrorCode.INVALID_COMPOSITION, "Local environment recovery needs data_dir"
+                )
         if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "History does not match durability")
         if plugin_host is False and process_plugins is not None:
@@ -405,7 +481,7 @@ def create_agent(
             if history is not None and history._kind == "http":
                 store = HTTPHistory(history._url, history._path)
             elif durability == "ephemeral":
-                store = _MemoryHistory()
+                store = agent._memory_store = memory_store or _MemoryHistory()
             else:
                 store_root = history._path if history is not None else root
                 if store_root is None:
@@ -413,9 +489,10 @@ def create_agent(
                 store_root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 store = History(store_root)
             await h.load(store)
-            await h.load(_ConfinedLocal(Path(scratch.name) if durability == "ephemeral" else root))
+            await h.load(environment or Local(root))
             await h.load(_SdkTools())
             await h.load(_SdkDurable() if durability == "durable" else _SdkRuntime())
+            h.on("embedding", "result.ready", _structured_result, "last")
             await h.load(_Questions())
             h.on("embedding", "session.start", agent._present, "first")
             h.follow("embedding", "user", agent._event)
@@ -426,7 +503,10 @@ def create_agent(
             if approval is not None:
                 await h.load(_Approval())
             registered_tools: dict[str, _LocalPlugin] = {}
-            for plugin in [*(Plugin(t.name, tools=[t]) for t in tools), *plugins]:
+            for plugin in [
+                *(Plugin(t.name, tools=[t]) for t in tools),
+                *(p for p in plugins if not isinstance(p, _OverWire)),
+            ]:
                 if plugin.name in h.plugins:
                     raise AgentError(
                         ErrorCode.INVALID_COMPOSITION, f"Duplicate plugin: {plugin.name}"
@@ -454,15 +534,30 @@ def create_agent(
                 adapter = _LocalPlugin(plugin, registrar, folder)
                 await h.load(adapter)
                 registered_tools.update((name, adapter) for name in registrar._tools)
+            specs: list[dict[str, Any]] = [
+                {"command": [p.name], "config": p.config, "_over_wire": p.original}
+                for p in plugins
+                if isinstance(p, _OverWire)
+            ]
             if agent._plugin_host:
-                specs = [
+                processes = [
                     p._wire() if isinstance(p, ProcessPlugin) else p for p in process_plugins or ()
                 ]
                 env = json.loads(os.environ.get("MODULAR_AGENT_PLUGINS") or "[]")
                 if not isinstance(env, list):
                     raise ValueError("MODULAR_AGENT_PLUGINS must be an array")
-                if specs or env:
-                    await load_plugins(h, [*specs, *env], folder, root)
+                specs.extend([*processes, *env])
+            if specs:
+
+                def factory(
+                    harness: Any, spec: dict[str, Any], project: Path, home: Path, index: int
+                ) -> Any:
+                    kind = (
+                        _MemoryExternal if isinstance(spec.get("_over_wire"), Plugin) else External
+                    )
+                    return kind(harness, spec, project, home, index)
+
+                await load_plugins(h, specs, folder, root, external_factory=factory)
             runtime_owner = h.capabilities["runtime"][0]
             if bool(h.plugins[runtime_owner].declarations.get("durable")) != (
                 durability == "durable"
@@ -477,6 +572,8 @@ def create_agent(
                 raise AgentError(ErrorCode.INVALID_PARAMS, f"Unknown model: {selected}")
             if selected is not None:
                 defaults["model"] = selected
+            if not specs and not agent._plugin_host:
+                agent._restart = lambda: build_with_store(agent._memory_store)
             return agent
         except BaseException as exc:
             try:

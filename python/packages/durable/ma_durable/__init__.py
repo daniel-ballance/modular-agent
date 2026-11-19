@@ -8,7 +8,7 @@ from ma_runtime import Runtime
 
 class Durable(Runtime):
     name = "durable"
-    declarations = {**Runtime.declarations, "durable": True}
+    declarations = {**Runtime.declarations, "durable": True, "queued_input_after_restart": "run"}
 
     async def recover(self, d, emit):
         sid = d["session"]
