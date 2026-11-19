@@ -1,11 +1,12 @@
 # Modular Agent in TypeScript
 
-The TypeScript build from the experiment. It implements [production edition 3](../docs/adr/0021-production-edition.md): a Harness, transient and durable Runtimes, the vanilla Pi plugin set, subagents, a terminal UI, an ACP Interface that T3 Code drives, plugins over the plugin binding, and parts as HTTP services. The SDK, [`@modular-agent/core`](packages/core/README.md), wraps that build with embedded agents, sessions, typed tools, and plugins that can run in process or over stdio. There is no TypeScript reference implementation yet.
+This directory contains the TypeScript base, the public SDK, and [`ma`](packages/ma/README.md), the TypeScript reference implementation of the [standard configuration](../docs/reference/standard-configuration.md). The SDK, [`@modular-agent/core`](packages/core/README.md), wraps the base with embedded agents, sessions, typed tools, and plugins that can run in process or over stdio.
 
 | Path | Holds |
 |---|---|
 | `packages/` | The edition 3 base and SDK, as npm workspaces |
 | `packages/core/` | Public SDK and testing kit |
+| `packages/ma/` | The standard configuration, with the `ma` executable |
 | `packages/fixtures/` | SDK fixture program and shared-scenario runner |
 | `packages/openai/`, `packages/anthropic/` | SDK API-key Providers |
 | `sidecars/claude/` | The Claude Provider that Rust's standard configuration loads over the plugin binding. A separate package; see [its README](sidecars/claude/README.md). |
@@ -28,6 +29,8 @@ MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test
 ## Run
 
 ```sh
-npm run agent              # the terminal agent, ma
-npm run agent -- --acp     # ACP on stdio, for a host such as T3 Code
+node packages/ma/dist/src/main.js              # the standard terminal agent
+node packages/ma/dist/src/main.js --acp        # the standard ACP agent
 ```
+
+`npm run agent` still starts the development CLI for the base build.
