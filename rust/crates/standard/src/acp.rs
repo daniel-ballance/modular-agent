@@ -1,7 +1,7 @@
 //! The standard configuration behind the SDK's project-aware ACP Interface.
 use crate::{Standard, builder, default_model};
 use anyhow::{Result, anyhow, bail, ensure};
-use modular_agent::{AcpHost, Agent, History, async_trait};
+use modular_agent::{AcpComposition, Agent, History, async_trait};
 use modular_agent_mcp::{Mcp, Server};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -32,12 +32,16 @@ fn pairs(server: &Value, field: &str) -> Result<std::collections::BTreeMap<Strin
 }
 
 #[async_trait]
-impl AcpHost for Factory {
-    async fn agent(&self, project: &Path, reopening: Option<&str>) -> modular_agent::Result<Agent> {
+impl AcpComposition for Factory {
+    async fn compose(
+        &self,
+        project: &Path,
+        reopening: Option<&str>,
+    ) -> modular_agent::Result<Agent> {
         let mut standard = self.standard.clone();
         let configured = standard.configuration().settings(project)?;
         let recorded = match reopening {
-            Some(id) => Some(standard.history()?.session(id)?),
+            Some(id) => Some(standard.history()?.session_info(id)?),
             None => None,
         };
         let fallback = if standard.scripted.is_none() && !standard.conformance {
@@ -45,9 +49,9 @@ impl AcpHost for Factory {
         } else {
             None
         };
-        let chosen = recorded
-            .as_ref()
-            .and_then(|session| session.settings["model"].as_str())
+        let saved_model = recorded.and_then(|session| session.model.map(|model| model.to_string()));
+        let chosen = saved_model
+            .as_deref()
             .or(self.settings["model"].as_str())
             .or(configured["model"].as_str())
             .or(fallback);
@@ -66,16 +70,16 @@ impl AcpHost for Factory {
     fn trust(&self, project: &Path) -> modular_agent::Result<()> {
         self.standard.configuration().trust(project)
     }
-    fn initial_settings(&self) -> Value {
+    fn project_settings(&self, _project: &Path) -> modular_agent::Result<Value> {
         let mut settings = self.settings.clone();
         if self.standard.scripted.is_some() {
             settings["model"] = json!(modular_agent::testing::SCRIPTED_MODEL);
         } else if self.standard.conformance && settings["model"].is_null() {
             settings["model"] = json!("conformance/echo");
         }
-        settings
+        Ok(settings)
     }
-    async fn attach_mcp(
+    async fn project_mcp(
         &self,
         session: &str,
         project: &Path,

@@ -47,7 +47,7 @@ async fn compact(api: Api, scope: &Scope, system: &str, force: bool) -> Result<b
         system: format!(
             "{system}\nSummarize the supplied history faithfully and concisely. Preserve important facts and outstanding tool outcomes. Do not call tools."
         ),
-        messages: messages(old)?,
+        messages: messages_with_origins(old, &data.branch())?,
         thinking: data.settings["thinking"].as_str().unwrap_or("low").into(),
         output_limit: 1024,
         ..ModelRequest::default()
@@ -134,8 +134,10 @@ impl Plugin for ContextPlugin {
                     let data = api.snapshot(&scope.session)?;
                     let mut request: ModelRequest =
                         serde_json::from_value(value["request"].clone())?;
-                    let visible = view(&data.branch());
-                    let bytes = serde_json::to_vec(&messages(&visible)?)?.len()
+                    let branch = data.branch();
+                    let visible = view(&branch);
+                    let bytes = serde_json::to_vec(&messages_with_origins(&visible, &branch)?)?
+                        .len()
                         + request.system.len()
                         + serde_json::to_vec(&request.tools)?.len();
                     let window = value["limits"]["context_window"].as_u64().unwrap_or(128000);
@@ -147,7 +149,7 @@ impl Plugin for ContextPlugin {
                         compact(api.clone(), &scope, &request.system, false).await?;
                     }
                     let branch = api.snapshot(&scope.session)?.branch();
-                    request.messages = messages(&view(&branch))?;
+                    request.messages = messages_with_origins(&view(&branch), &branch)?;
                     for feedback in pending_result_feedback(&branch, scope.turn.as_deref()) {
                         if let Some(reason) =
                             feedback.content.as_ref().and_then(|v| v["reason"].as_str())

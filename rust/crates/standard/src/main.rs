@@ -284,16 +284,27 @@ async fn start() -> Result<()> {
     }
     if acp {
         ensure!(
-            terminal.prompt.is_none() && terminal.session.is_none() && !trust && !resume,
-            "with --acp the client creates sessions and grants trust"
+            terminal.prompt.is_none() && terminal.session.is_none() && !resume,
+            "with --acp the client creates or reopens sessions"
         );
-        sdk::serve_acp(standard::acp::Factory {
-            standard,
-            settings: terminal.settings,
-            mcp: Mcp::default(),
-        })
-        .await?;
-        return Ok(());
+        if trust {
+            standard.configuration().trust(&project)?;
+        }
+        let mcp = Mcp::default();
+        // The bootstrap agent supplies the declaration. Only the actual
+        // project/session composition can choose to start Claude.
+        let agent = builder(&standard, &project, &mcp, vec![])?.build().await?;
+        let served = agent
+            .serve_acp(sdk::AcpOptions {
+                compose: Some(std::sync::Arc::new(standard::acp::Factory {
+                    standard,
+                    settings: terminal.settings,
+                    mcp,
+                })),
+            })
+            .await;
+        let closed = agent.close().await;
+        return Ok(served.and(closed)?);
     }
     if terminal.list {
         let project = project.canonicalize()?;
@@ -301,7 +312,7 @@ async fn start() -> Result<()> {
             .history()?
             .sessions((!terminal.all_projects).then_some(project.as_path()))?;
         println!("{}", serde_json::to_string_pretty(&sessions.into_iter().map(|s| {
-            json!({"id":s.id,"project":s.project,"lastActive":s.last_active,"model":s.settings["model"]})
+            json!({"id":s.id,"project":s.project,"lastActive":s.last_active,"model":s.model.map(|model| model.to_string())})
         }).collect::<Vec<_>>())?);
         return Ok(());
     }
@@ -320,14 +331,24 @@ async fn start() -> Result<()> {
     }
     let recorded = match &terminal.session {
         Some(session) => {
-            let data = standard.history()?.session(session)?;
+            let data = standard.history()?.session_info(session)?;
             project = data.project;
-            data.settings["model"].as_str().map(str::to_owned)
+            data.model.map(|model| model.to_string())
         }
         None => None,
     };
     if trust {
         standard.configuration().trust(&project)?;
+    }
+    if terminal.declaration {
+        // A declaration describes the parts without opening a session or
+        // starting a sidecar for a model that will not be used.
+        let agent = builder(&standard, &project, &Mcp::default(), vec![])?
+            .build()
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&agent.declaration()?)?);
+        agent.close().await?;
+        return Ok(());
     }
     // Which model this run will use decides whether the Claude sidecar starts.
     let configured = {
@@ -342,7 +363,7 @@ async fn start() -> Result<()> {
         .map(str::to_owned)
         .or(recorded)
         .or(configured);
-    let inspecting = terminal.history || terminal.declaration;
+    let inspecting = terminal.history;
     let chosen = if standard.scripted.is_some() {
         Some(SCRIPTED_MODEL.into())
     } else if standard.conformance {
@@ -368,11 +389,6 @@ async fn start() -> Result<()> {
         b = questions.install(b);
     }
     let agent = b.build().await?;
-    if terminal.declaration {
-        println!("{}", serde_json::to_string_pretty(&agent.declaration()?)?);
-        agent.close().await?;
-        return Ok(());
-    }
     let result = standard::terminal::run(&agent, terminal, questions).await;
     let shutdown = agent.close().await;
     result.and(shutdown.map_err(Into::into))

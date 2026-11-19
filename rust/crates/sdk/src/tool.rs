@@ -513,12 +513,7 @@ impl ToolEnvironment<'_> {
             .map_err(crate::serve::from_fault)
     }
 
-    pub async fn read(&self, path: &str) -> Result<String> {
-        String::from_utf8(self.read_bytes(path).await?)
-            .map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))
-    }
-
-    pub async fn read_bytes(&self, path: &str) -> Result<Vec<u8>> {
+    pub async fn read(&self, path: &str) -> Result<Vec<u8>> {
         use base64::Engine;
         self.0.check()?;
         let bytes = match self.0.backend {
@@ -533,11 +528,7 @@ impl ToolEnvironment<'_> {
         Ok(bytes)
     }
 
-    pub async fn write(&self, path: &str, text: &str) -> Result<()> {
-        self.write_bytes(path, text.as_bytes()).await
-    }
-
-    pub async fn write_bytes(&self, path: &str, bytes: &[u8]) -> Result<()> {
+    pub async fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
         use base64::Engine;
         self.0.check()?;
         match self.0.backend {
@@ -594,11 +585,7 @@ impl ToolEnvironment<'_> {
         }
     }
 
-    pub async fn exec(&self, command: &str) -> Result<CommandOutput> {
-        self.exec_with(command, None).await
-    }
-
-    pub async fn exec_with(
+    pub async fn exec(
         &self,
         command: &str,
         timeout: Option<std::time::Duration>,

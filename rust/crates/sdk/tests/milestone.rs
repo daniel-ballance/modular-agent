@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 use modular_agent::{
-    Code, Command, Disposition, Event, Gate, HookRule, Plugin, Result, Timing, Tool, ToolChange,
+    Code, Command, Disposition, Gate, HookRule, Plugin, Result, Timing, Tool, ToolChange,
     ToolContext, TurnAddition,
     testing::{memory_environment, test_agent},
 };
@@ -64,7 +64,7 @@ fn hooks() -> Plugin {
             assert_eq!(before.input[0]["text"], "go");
             Ok(TurnAddition {
                 system: Some("A test contribution.".into()),
-                context: None,
+                ..Default::default()
             })
         })
         .on_tool_after(|after| async move {
@@ -114,7 +114,9 @@ async fn hooks_commands_and_progress_have_wire_parity() -> Result<()> {
         let mut events = session.prompt_stream("go").await?;
         let mut progress = false;
         while let Some(event) = events.next().await {
-            if let Event::ToolOutput { text, .. } = event? {
+            let event = event?;
+            if event.event_type == "toolOutput" {
+                let text = event.data["chunk"].as_str().unwrap().to_owned();
                 progress |= text == "working";
             }
         }
@@ -224,10 +226,15 @@ async fn memory_environment_reads_writes_and_runs_only_registered_commands() -> 
                     let greeting = environment.read("greeting").await?;
                     environment.write("result", &greeting).await?;
                     assert!(environment.exists("result").await?);
-                    let output = environment.exec(&format!("echo {greeting}")).await?;
+                    let greeting = String::from_utf8(greeting).unwrap();
+                    let output = environment.exec(&format!("echo {greeting}"), None).await?;
                     assert_eq!(output.exit_code, Some(0));
                     assert_eq!(
-                        environment.exec("unregistered").await.unwrap_err().code(),
+                        environment
+                            .exec("unregistered", None)
+                            .await
+                            .unwrap_err()
+                            .code(),
                         Code::NotSupported
                     );
                     Ok(output.output)

@@ -3,7 +3,7 @@ use crate::sink::Sink;
 use anyhow::{Result, anyhow, bail};
 use futures_util::StreamExt;
 use modular_agent::{Agent, AgentBuilder, Answer, Outcome, Session, Timing};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     io::BufRead,
     sync::{Arc, Mutex},
@@ -99,13 +99,6 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
             Some(id) => agent.open_session(id).await?,
             None => agent.session().await?,
         };
-        if id.is_none() || mode != Mode::Json {
-            sink.show(
-                session.id(),
-                "session.open",
-                json!({"session":session.id()}),
-            );
-        }
         {
             for key in ["model", "thinking"] {
                 if (id.is_some() || key == "thinking")
@@ -131,27 +124,24 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
                 bail!("turn {}", outcome.kind());
             }
         } else {
-            interactive(&session, questions).await?;
+            interactive(&session, questions, mode).await?;
         }
         session.close().await?;
         Ok(())
     };
     tokio::pin!(run);
-    if let Some(id) = id
-        && mode == Mode::Json
-    {
-        sink.show(id, "session.open", json!({"session":id}));
-    }
     loop {
         tokio::select! {
             event = events.next() => match event {
-                Some(Ok(event)) => sink.send(event),
+                Some(Ok(event)) if !history => sink.send(event),
+                Some(Ok(_)) => (),
                 Some(Err(error)) => return Err(error.into()),
                 None => return run.await,
             },
             result = &mut run => {
                 while let Some(Some(event)) = futures_util::FutureExt::now_or_never(events.next()) {
-                    sink.send(event?);
+                    let event = event?;
+                    if !history { sink.send(event); }
                 }
                 return result;
             }
@@ -159,7 +149,7 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
     }
 }
 
-async fn interactive(session: &Session, questions: Questions) -> Result<()> {
+async fn interactive(session: &Session, questions: Questions, mode: Mode) -> Result<()> {
     let mut lines = lines();
     loop {
         tokio::select! {
@@ -171,9 +161,14 @@ async fn interactive(session: &Session, questions: Questions) -> Result<()> {
                 let Some(line) = line.transpose()? else {
                     // A closed pipe cannot answer questions. Decline both those
                     // already shown and any opened while the last input drains.
-                    while session.pending_work()? {
+                    let idle = session.wait_idle();
+                    tokio::pin!(idle);
+                    loop {
                         questions.decline_all();
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        tokio::select! {
+                            result = &mut idle => { result?; break; }
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => (),
+                        }
                     }
                     break;
                 };
@@ -184,7 +179,7 @@ async fn interactive(session: &Session, questions: Questions) -> Result<()> {
                     session.cancel().await?;
                     break;
                 }
-                if let Err(error) = input(session, &questions, line).await {
+                if let Err(error) = input(session, &questions, mode, line).await {
                     eprintln!("{error:#}");
                 }
             }
@@ -193,7 +188,14 @@ async fn interactive(session: &Session, questions: Questions) -> Result<()> {
     Ok(())
 }
 
-async fn input(session: &Session, questions: &Questions, line: &str) -> Result<()> {
+async fn input(session: &Session, questions: &Questions, mode: Mode, line: &str) -> Result<()> {
+    let display = |text: &str| {
+        if mode == Mode::Json {
+            eprintln!("{text}");
+        } else {
+            println!("{text}");
+        }
+    };
     if line == "/cancel" {
         questions.decline_all();
         session.cancel().await?;
@@ -203,19 +205,15 @@ async fn input(session: &Session, questions: &Questions, line: &str) -> Result<(
             .ok_or_else(|| anyhow!("use /answer REQUEST_ID VALUE"))?;
         questions.answer(id, value)?;
     } else if line == "/questions" {
-        println!(
-            "{}",
-            serde_json::to_string(&questions.0.lock().unwrap().keys().collect::<Vec<_>>())?
-        );
+        display(&serde_json::to_string(
+            &questions.0.lock().unwrap().keys().collect::<Vec<_>>(),
+        )?);
     } else if let Some(args) = line.strip_prefix("/tool ") {
         let v: Value = serde_json::from_str(args)?;
         let name = v["name"]
             .as_str()
             .ok_or_else(|| anyhow!("tool name required"))?;
-        println!(
-            "{}",
-            session.call_tool(name, v["input"].clone()).await?.text()
-        );
+        display(session.call_tool(name, v["input"].clone()).await?.text());
     } else if let Some(text) = line.strip_prefix("/after ") {
         session.send(text, Timing::After).await?;
     } else if line == "/commands" {
@@ -234,11 +232,11 @@ async fn input(session: &Session, questions: &Questions, line: &str) -> Result<(
         );
         commands.sort();
         for name in commands {
-            println!("/{name}");
+            display(&format!("/{name}"));
         }
     } else if line.starts_with('/') && !line.starts_with("/skill:") {
         if let Some(text) = session.run_command(line).await? {
-            println!("{text}");
+            display(&text);
         }
     } else {
         let timing = if session.is_running() {

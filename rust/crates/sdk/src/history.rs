@@ -47,15 +47,22 @@ pub struct SessionInfo {
     pub id: String,
     pub project: std::path::PathBuf,
     pub settings: Value,
+    pub model: Option<crate::ModelRef>,
+    pub title: Option<String>,
+    pub created_at: u64,
     pub last_active: u64,
 }
 
 impl From<base::SessionData> for SessionInfo {
     fn from(data: base::SessionData) -> Self {
+        let settings = base::portable::settings_to_wire(&data.settings);
         Self {
+            model: serde_json::from_value(settings["model"].clone()).ok(),
+            title: settings["title"].as_str().map(str::to_owned),
             id: data.id,
             project: data.project,
-            settings: data.settings,
+            settings,
+            created_at: data.entries.first().map_or(0, |e| e.at),
             last_active: data.entries.last().map_or(0, |e| e.at),
         }
     }
@@ -63,15 +70,16 @@ impl From<base::SessionData> for SessionInfo {
 
 impl History {
     pub fn sessions(&self, project: Option<&Path>) -> Result<Vec<SessionInfo>> {
+        let project = project.map(Path::canonicalize).transpose()?;
         Ok(self
             .0
-            .list(project)?
+            .list(project.as_deref())?
             .into_iter()
             .map(SessionInfo::from)
             .collect())
     }
 
-    pub fn session(&self, id: &str) -> Result<SessionInfo> {
+    pub fn session_info(&self, id: &str) -> Result<SessionInfo> {
         Ok(self.0.load(id)?.into())
     }
 }

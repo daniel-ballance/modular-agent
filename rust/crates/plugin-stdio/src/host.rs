@@ -874,7 +874,7 @@ impl ModelAccess for RemoteModel {
             .unwrap()
             .insert(scope.session.clone(), scope.clone());
         let payload = json!({"provider":self.id,"model":wire::model_request_record(&self.info)["model"],
-            "request":attempt.replay.clone().unwrap_or_else(|| wire::request(&request,Some(&data))),"sessionId":scope.session});
+            "request":attempt.replay.clone().unwrap_or_else(|| wire::request_for_provider(&request,Some(&data),&self.id)),"sessionId":scope.session});
         let mut work = Work::new(&api, &scope, "provider/request", cancel.clone());
         Arc::get_mut(&mut work).unwrap().provider = Some(ProviderWork {
             payload: payload.clone(),

@@ -131,6 +131,22 @@ impl ModelAccess for Echo {
             }
             Ok(ModelResponse::text(&format!("echo: {text}")))
         })();
+        let result = async {
+            let response = result?;
+            let text = response.text_content();
+            if !text.is_empty() && !cancel.is_cancelled() {
+                let stream = wire::stream_id();
+                let mut piece = Event::new(&scope, "model.delta", json!(text));
+                piece.stream = Some(stream.clone());
+                api.emit(piece).await?;
+                let mut end = Event::new(&scope, "model.end", Value::Null);
+                end.stream = Some(stream);
+                end.end = true;
+                api.emit(end).await?;
+            }
+            Ok::<_, anyhow::Error>(response)
+        }
+        .await;
         result.map_err(|e| ModelFailure {
             kind: if cancel.is_cancelled() {
                 FailureKind::Cancelled

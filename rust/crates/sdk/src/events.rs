@@ -1,5 +1,5 @@
 //! Events and questions, delivered to the app (docs/sdk/api.md#events, #questions).
-use crate::tool::{Answer, ToolStatus};
+use crate::tool::Answer;
 use agent_api as base;
 use agent_harness::Harness;
 use futures_util::future::BoxFuture;
@@ -10,119 +10,89 @@ use tokio::sync::broadcast;
 /// The local actor. The base builds name the local person `user`.
 pub(crate) const LOCAL: &str = "user";
 
-/// Something that happened in a session. Each variant is a shared event type.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub enum Event {
-    /// Model text as it arrives (`text`).
-    Text { session_id: String, delta: String },
-    /// A call the model or a tool asked for (`toolCall`).
-    ToolCall {
-        session_id: String,
-        call_id: String,
-        name: String,
-        input: Value,
-    },
-    /// Live text progress from a tool.
-    ToolOutput {
-        session_id: String,
-        call_id: String,
-        text: String,
-    },
-    /// A call's settled result (`toolResult`).
-    ToolResult {
-        session_id: String,
-        call_id: String,
-        status: ToolStatus,
-        text: String,
-    },
-    /// A question opened for an actor (`questionOpened`).
-    QuestionOpened {
-        session_id: String,
-        question: Question,
-    },
-    /// The turn ended (`turnEnded`).
-    TurnEnded {
-        session_id: String,
-        outcome: String,
-        text: String,
-    },
-    /// A committed history entry, in the shared format.
-    Entry { session_id: String, entry: Value },
-    /// An event the SDK does not type yet, by the base build's own name.
-    Other {
-        session_id: String,
-        kind: String,
-        data: Value,
-    },
+/// A session event in the SDK's shared, tagged JSON shape. The payload is JSON
+/// so plugin-defined event types and future payload fields survive unchanged.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Event {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub time: u64,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    pub data: Value,
 }
 
 impl Event {
-    pub fn session_id(&self) -> &str {
-        match self {
-            Event::Text { session_id, .. }
-            | Event::ToolCall { session_id, .. }
-            | Event::ToolOutput { session_id, .. }
-            | Event::ToolResult { session_id, .. }
-            | Event::QuestionOpened { session_id, .. }
-            | Event::TurnEnded { session_id, .. }
-            | Event::Entry { session_id, .. }
-            | Event::Other { session_id, .. } => session_id,
+    pub(crate) fn new(scope: &base::Scope, time: u64, event_type: &str, data: Value) -> Self {
+        Self {
+            event_type: event_type.into(),
+            time,
+            session_id: scope.session.clone(),
+            turn_id: scope.turn.clone(),
+            step_id: scope.step.clone(),
+            tool_call_id: scope.call.clone(),
+            job_id: scope.job.clone(),
+            data,
         }
     }
-    fn from_base(e: &base::Event) -> Self {
-        let session_id = e.scope.session.clone();
-        match e.kind.as_str() {
-            "model.delta" => Event::Text {
-                session_id,
-                delta: e.content.as_str().unwrap_or_default().into(),
-            },
-            "tool.requested" => Event::ToolCall {
-                session_id,
-                call_id: e.content["id"].as_str().unwrap_or_default().into(),
-                name: e.content["name"].as_str().unwrap_or_default().into(),
-                input: e.content["input"].clone(),
-            },
-            "tool.progress" => Event::ToolOutput {
-                session_id,
-                call_id: e.scope.call.clone().unwrap_or_default(),
-                text: e.content.as_str().unwrap_or_default().into(),
-            },
-            "tool.ended" => match serde_json::from_value::<base::ToolResult>(e.content.clone()) {
-                Ok(r) => Event::ToolResult {
-                    session_id,
-                    call_id: r.call,
-                    status: ToolStatus::from_base(&r.status),
-                    text: r.text,
-                },
-                Err(_) => Event::Other {
-                    session_id,
-                    kind: e.kind.clone(),
-                    data: e.content.clone(),
-                },
-            },
-            "request.opened" => match serde_json::from_value::<base::Question>(e.content.clone()) {
-                Ok(q) => Event::QuestionOpened {
-                    session_id,
-                    question: Question::from_base(&q),
-                },
-                Err(_) => Event::Other {
-                    session_id,
-                    kind: e.kind.clone(),
-                    data: e.content.clone(),
-                },
-            },
-            "turn.result" => Event::TurnEnded {
-                session_id,
-                outcome: e.content["outcome"].as_str().unwrap_or("completed").into(),
-                text: e.content["text"].as_str().unwrap_or_default().into(),
-            },
-            _ => Event::Other {
-                session_id,
-                kind: e.kind.clone(),
-                data: e.content.clone(),
-            },
-        }
+
+    pub(crate) fn entry(entry: &base::Entry, view: Value) -> Self {
+        Self::new(&entry.scope, entry.at, "entry", json!({"entry":view}))
+    }
+
+    fn from_base(e: &base::Event, api: &dyn base::AgentApi) -> Option<Self> {
+        let (kind, data) = match e.kind.as_str() {
+            // Internal stream/turn markers; the final gated result ends the turn.
+            "model.end" | "turn.end" => return None,
+            "model.tool_input" | "model.audio" => {
+                let kind = if e.kind == "model.audio" {
+                    "audio"
+                } else {
+                    "toolInput"
+                };
+                (kind, json!({"delta":e.content}))
+            }
+            "tool.started" => (
+                "toolStarted",
+                json!({
+                    "call":base::wire::call(&serde_json::from_value(e.content.clone()).ok()?, &e.scope)
+                }),
+            ),
+            "request.opened" => (
+                "questionOpened",
+                interface_acp::shared_question(serde_json::from_value(e.content.clone()).ok()?),
+            ),
+            "request.answered" => ("questionAnswered", e.content.clone()),
+            "input.accepted" => ("inputAccepted", e.content.clone()),
+            "input.withdrawn" => ("inputWithdrawn", e.content.clone()),
+            "input.returned" => ("inputHandedBack", e.content.clone()),
+            "setting.changed" => ("settingChanged", e.content.clone()),
+            "session.start" => ("sessionStarted", e.content.clone()),
+            "session.end" => ("sessionEnded", e.content.clone()),
+            "step.start" => ("stepStarted", e.content.clone()),
+            "step.end" => ("stepEnded", e.content.clone()),
+            "job.started" => ("jobStarted", e.content.clone()),
+            "job.progress" => ("jobProgress", e.content.clone()),
+            "job.ended" => ("jobEnded", e.content.clone()),
+            _ => {
+                let shared = agent_harness::output_event(e, api).ok()?;
+                return Some(Self::new(
+                    &e.scope,
+                    e.at,
+                    shared["type"].as_str()?,
+                    shared["data"].clone(),
+                ));
+            }
+        };
+        Some(Self::new(&e.scope, e.at, kind, data))
     }
 }
 
@@ -169,7 +139,7 @@ pub(crate) type QuestionHandler = Arc<dyn Fn(Question) -> BoxFuture<'static, Ans
 
 /// The SDK's Interface: it hears every event and answers questions for the app.
 pub(crate) struct Hub {
-    pub events: broadcast::Sender<(Option<String>, Event)>,
+    pub events: broadcast::Sender<Event>,
     pub on_question: Option<QuestionHandler>,
     pub harness: OnceLock<Weak<Harness>>,
     crash: tokio_util::sync::CancellationToken,
@@ -194,11 +164,15 @@ impl Hub {
 
 impl base::EventSink for Hub {
     fn send(&self, event: base::Event) {
-        let turn = event.scope.turn.clone();
+        let Some(h) = self.harness.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        let question = (event.kind == "request.opened")
+            .then(|| serde_json::from_value::<base::Question>(event.content.clone()).ok())
+            .flatten()
+            .as_ref()
+            .map(Question::from_base);
         let event = if event.kind == "history.entry" {
-            let Some(h) = self.harness.get().and_then(Weak::upgrade) else {
-                return;
-            };
             let Ok(entry) = serde_json::from_value::<base::Entry>(event.content) else {
                 return;
             };
@@ -209,30 +183,36 @@ impl base::EventSink for Hub {
             let Ok(data) = h.snapshot(&event.scope.session) else {
                 return;
             };
-            let Ok(entry) = base::portable::entry(&entry, &data) else {
+            let Ok(view) = base::portable::public_entry(&entry, &data) else {
                 return;
             };
-            Event::Entry {
-                session_id: event.scope.session,
-                entry,
+            let kind = match entry.kind.as_str() {
+                "turn.start" => Some("turnStarted"),
+                "actor.identity" => Some("actorJoined"),
+                "actor.left" => Some("actorLeft"),
+                "position" => Some("positionMoved"),
+                "erasure" => Some("entriesErased"),
+                "request.closed" => Some("questionClosed"),
+                "request.invalidated" => Some("questionNoLongerAnswerable"),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                let _ = self.events.send(Event::new(
+                    &entry.scope,
+                    entry.at,
+                    kind,
+                    view["data"].clone(),
+                ));
             }
+            Event::entry(&entry, view)
         } else {
-            Event::from_base(&event)
+            let Some(event) = Event::from_base(&event, h.as_ref()) else {
+                return;
+            };
+            event
         };
-        if let (
-            Event::QuestionOpened {
-                session_id,
-                question,
-            },
-            Some(handler),
-            Some(h),
-        ) = (
-            &event,
-            &self.on_question,
-            self.harness.get().and_then(Weak::upgrade),
-        ) {
-            let (handler, session, question) =
-                (handler.clone(), session_id.clone(), question.clone());
+        if let (Some(question), Some(handler)) = (question, &self.on_question) {
+            let (handler, session) = (handler.clone(), event.session_id.clone());
             let crash = self.crash.clone();
             self.workers.spawn(async move {
                 tokio::select! { biased; _ = crash.cancelled() => (), _ = async move {
@@ -251,7 +231,7 @@ impl base::EventSink for Hub {
                 } => () }
             });
         }
-        let _ = self.events.send((turn, event));
+        let _ = self.events.send(event);
     }
 }
 

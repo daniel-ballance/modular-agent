@@ -556,7 +556,8 @@ impl TurnWork {
             extra: Value::Null,
             output_limit: self.input.settings["output_limit"]
                 .as_u64()
-                .unwrap_or(info.output_limit),
+                .unwrap_or(info.output_limit)
+                .min(info.output_limit),
         };
         let value = api
             .invoke(

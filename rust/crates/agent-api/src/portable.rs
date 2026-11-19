@@ -165,6 +165,28 @@ pub fn input_message(c: &Value) -> Value {
     parts.push(json!({"type":"text","text":c["text"].as_str().unwrap_or_default()}));
     json!({"role":"user","content":parts})
 }
+/// A history entry for an actor rather than a persistent store.
+pub fn public_entry(e: &Entry, session: &SessionData) -> Result<Value> {
+    let mut value = entry(e, session)?;
+    if let Some(message) = value.get_mut("message")
+        && message["role"] == "assistant"
+    {
+        omit_provider_data(message);
+    }
+    if e.kind == "model.request"
+        && let Some(messages) = value
+            .pointer_mut("/data/request/messages")
+            .and_then(Value::as_array_mut)
+    {
+        for message in messages {
+            if message["role"] == "assistant" {
+                omit_provider_data(message);
+            }
+        }
+    }
+    Ok(value)
+}
+
 pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
     let k = kind(&e.kind);
     let Some(c) = &e.content else {

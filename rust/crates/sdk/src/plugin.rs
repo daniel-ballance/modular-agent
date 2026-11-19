@@ -28,15 +28,6 @@ pub struct SessionPrepare {
     pub project: std::path::PathBuf,
 }
 
-/// Inputs for an in-process system prompt contribution. Tools here include
-/// those callable by other tools, not just those offered to the model.
-#[derive(Clone, Debug)]
-pub struct TurnSystem {
-    pub session_id: String,
-    pub project: std::path::PathBuf,
-    pub tools: Vec<Value>,
-}
-
 /// A named bundle of parts, added to an agent or served over the plugin binding.
 #[derive(Clone)]
 pub struct Plugin {
@@ -57,7 +48,6 @@ pub struct Registrar {
     defined: Vec<(String, HookRule)>,
     sources: Vec<(String, Arc<dyn ToolSource>)>,
     prepare: Vec<LocalHook<SessionPrepare, ()>>,
-    turn_system: Vec<(crate::Order, LocalHook<TurnSystem, String>)>,
 }
 
 #[derive(Clone)]
@@ -176,19 +166,6 @@ impl Plugin {
         })
     }
 
-    /// Contribute system text using the session's current tool catalog.
-    pub fn on_turn_system<F, Fut>(self, order: crate::Order, contribute: F) -> Self
-    where
-        F: Fn(TurnSystem) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<String>> + Send + 'static,
-    {
-        let contribute: LocalHook<TurnSystem, String> = Arc::new(move |p| Box::pin(contribute(p)));
-        self.setup(move |r| {
-            r.turn_system.push((order, contribute.clone()));
-            Ok(())
-        })
-    }
-
     pub fn setup<F>(mut self, setup: F) -> Self
     where
         F: Fn(&mut Registrar) -> Result<()> + Send + Sync + 'static,
@@ -206,7 +183,6 @@ impl Plugin {
             defined: vec![],
             sources: vec![],
             prepare: vec![],
-            turn_system: vec![],
         };
         for setup in &self.setups {
             setup(&mut r)?;
@@ -235,7 +211,7 @@ impl Registrar {
         if !self.sources.is_empty() {
             return Err(cannot_serve("dynamic tool source"));
         }
-        if !self.prepare.is_empty() || !self.turn_system.is_empty() {
+        if !self.prepare.is_empty() {
             return Err(cannot_serve("local lifecycle or system hook"));
         }
         if let Some(t) = self.tools.iter().find(|t| t.in_process_only) {
@@ -319,30 +295,6 @@ impl base::Plugin for InProcess {
                 }),
             );
         }
-        for (order, contribute) in &self.registered.turn_system {
-            let contribute = contribute.clone();
-            r.on(
-                "before.turn",
-                order.native(),
-                base::handler(move |api, scope, _| {
-                    let contribute = contribute.clone();
-                    Box::pin(async move {
-                        let data = api.snapshot(&scope.session)?;
-                        let tools = base::nested_tool_definitions(api.as_ref(), &data)?
-                            .iter()
-                            .map(base::wire::definition)
-                            .collect();
-                        let system = contribute(TurnSystem {
-                            session_id: scope.session,
-                            project: data.project,
-                            tools,
-                        })
-                        .await?;
-                        Ok(base::answer(json!({"system": system, "sources": []})))
-                    })
-                }),
-            );
-        }
         for (name, rule) in &self.registered.defined {
             r.define(name, rule.native())?;
         }
@@ -355,7 +307,18 @@ impl base::Plugin for InProcess {
                 base::handler(move |api, scope, original| {
                     let handle = handle.clone();
                     Box::pin(async move {
-                        let payload = plugin_stdio::hook_payload(point, &scope, &original, &api)?;
+                        let mut payload =
+                            plugin_stdio::hook_payload(point, &scope, &original, &api)?;
+                        if point == "turn.before" {
+                            let data = api.snapshot(&scope.session)?;
+                            payload["project"] = json!(data.project);
+                            payload["tools"] = json!(
+                                base::nested_tool_definitions(api.as_ref(), &data)?
+                                    .iter()
+                                    .map(base::wire::definition)
+                                    .collect::<Vec<_>>()
+                            );
+                        }
                         let reply = handle(payload)
                             .await
                             .map_err(|e| base::anyhow!("{}", e.message()))?;

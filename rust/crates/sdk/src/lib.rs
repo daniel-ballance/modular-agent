@@ -31,7 +31,7 @@ mod session;
 pub mod testing;
 mod tool;
 
-pub use acp::{AcpHost, serve_acp};
+pub use acp::{AcpComposition, AcpOptions};
 pub use agent::{Agent, AgentBuilder, Approval, Durability, ProcessPlugin};
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
@@ -44,9 +44,7 @@ pub use history::{
     http_history, http_history_from_env, memory_history, serve_history,
 };
 pub use hooks::*;
-pub use plugin::{
-    Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource, TurnSystem,
-};
+pub use plugin::{Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource};
 pub use provider::*;
 pub use serve::serve;
 pub use session::{

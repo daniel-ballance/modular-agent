@@ -188,7 +188,7 @@ impl Work<'_> {
     /// A command the tool runs for itself where the environment has no native
     /// operation. Its output is not streamed as the call's own.
     async fn command(&self, command: &str) -> Result<String> {
-        let result = self.0.exec(command).await?;
+        let result = self.0.exec(command, None).await?;
         ensure!(
             result.status == ToolStatus::Completed,
             "{}",
@@ -200,7 +200,7 @@ impl Work<'_> {
         let path = clean_path(string(input, "path")?);
         let offset = optional_number(input, "offset")?.map(|n| n as usize);
         let limit = optional_number(input, "limit")?.map(|n| n as usize);
-        let bytes = self.0.read_bytes(&path).await?;
+        let bytes = self.0.read(&path).await?;
         if let Some(mime) = image_type(&bytes) {
             if bytes.len() > MAX_IMAGE_BYTES {
                 return Ok((
@@ -225,7 +225,7 @@ impl Work<'_> {
     async fn write(&self, input: &Value) -> Result<(String, Option<Value>)> {
         let path = clean_path(string(input, "path")?);
         let content = string(input, "content")?;
-        self.0.write_bytes(&path, content.as_bytes()).await?;
+        self.0.write(&path, content.as_bytes()).await?;
         Ok((
             format!("Successfully wrote {} bytes to {path}", content.len()),
             None,
@@ -239,10 +239,10 @@ impl Work<'_> {
             .iter()
             .map(|edit| Ok((string(edit, "oldText")?, string(edit, "newText")?)))
             .collect::<Result<Vec<_>>>()?;
-        let bytes = self.0.read_bytes(&path).await?;
+        let bytes = self.0.read(&path).await?;
         let original = String::from_utf8(bytes).map_err(|_| anyhow!("{path} is not UTF-8 text"))?;
         let changed = apply_edits(&original, &edits, &path)?;
-        self.0.write_bytes(&path, changed.as_bytes()).await?;
+        self.0.write(&path, changed.as_bytes()).await?;
         Ok((
             format!("Successfully replaced {} block(s) in {path}.", edits.len()),
             None,
@@ -316,7 +316,7 @@ impl Work<'_> {
         let timeout = optional_number(input, "timeout")?.filter(|n| *n > 0.0);
         let started = std::time::Instant::now();
         let timeout_duration = timeout.map(Duration::try_from_secs_f64).transpose()?;
-        let result = self.0.exec_with(command, timeout_duration).await?;
+        let result = self.0.exec(command, timeout_duration).await?;
         let timed_out = result.timed_out;
         let exit_code = result.exit_code;
         let mut status = result.status;

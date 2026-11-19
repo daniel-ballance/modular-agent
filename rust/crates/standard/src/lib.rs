@@ -195,6 +195,7 @@ pub fn builder(
         .tenants(std::env::var("MODULAR_AGENT_TENANTS").ok())
         .history(standard.history()?)
         .default_prompt(false)
+        .compaction(true)
         .job_reports_start_turns(true)
         .plugin_host(true)
         .plugin(mcp.plugin(servers))

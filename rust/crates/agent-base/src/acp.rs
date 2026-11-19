@@ -42,8 +42,8 @@ impl interface_acp::Factory for Factory {
     fn trust(&self, project: &Path) -> Result<()> {
         config_files::FilesConfiguration::new(self.options.global_config.clone()).trust(project)
     }
-    fn initial_settings(&self) -> Value {
-        self.settings.clone()
+    fn project_settings(&self, _: &Path) -> Result<Value> {
+        Ok(self.settings.clone())
     }
     async fn attach(&self, api: Api, session: &str, project: &Path, servers: Value) -> Result<()> {
         let mut converted = Vec::new();

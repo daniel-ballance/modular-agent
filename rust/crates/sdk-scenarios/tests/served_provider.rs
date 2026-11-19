@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use modular_agent::{Agent, Event, Plugin, ProcessPlugin, Result};
+use modular_agent::{Agent, Plugin, ProcessPlugin, Result};
 use serde_json::json;
 use std::sync::{
     Arc,
@@ -44,10 +44,11 @@ async fn serves_a_provider_over_stdio_and_streams_through_both_callbacks() -> Re
     let mut stream = session.prompt_stream("hello").await?;
     let mut seen = false;
     while let Some(event) = stream.next().await.transpose()? {
-        match event {
-            Event::Text { delta, .. } if delta == "served" => seen = true,
-            Event::TurnEnded { outcome, text, .. } => {
-                assert_eq!((outcome.as_str(), text.as_str()), ("completed", "served"));
+        match event.event_type.as_str() {
+            "text" if event.data["delta"] == "served" => seen = true,
+            "turnEnded" => {
+                assert_eq!(event.data["outcome"]["kind"], "completed");
+                assert_eq!(event.data["result"]["text"], "served");
             }
             _ => (),
         }

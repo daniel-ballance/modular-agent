@@ -12,7 +12,11 @@ use crate::{
 use agent_api as base;
 use agent_harness::Harness;
 use serde_json::{Value, json};
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 /// What survives the agent's process (docs/sdk/placement.md#durability).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,7 +94,9 @@ pub(crate) struct Inner {
     pub hub: Arc<Hub>,
     pub project: PathBuf,
     pub persistent: bool,
+    pub history: History,
     pub plugin_host: bool,
+    pub acp_conformance: bool,
     pub acp: std::sync::OnceLock<Arc<crate::acp::Routes>>,
     pub session_settings: Value,
     pub drivers: std::sync::Mutex<
@@ -113,6 +119,7 @@ pub struct AgentBuilder {
     tenants: Option<String>,
     pub(crate) acp_conformance: bool,
     no_default_prompt: bool,
+    no_compaction: bool,
     job_reports_start_turns: bool,
     providers: Vec<Arc<dyn base::Plugin>>,
     tools: Vec<Tool>,
@@ -180,7 +187,7 @@ impl Agent {
         Box::pin(async_stream::stream! {
             loop {
                 match live.recv().await {
-                    Ok((_, event)) => yield Ok(event),
+                    Ok(event) => yield Ok(event),
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         yield Err(Error::new(Code::Lost, "event reader fell behind"));
@@ -191,16 +198,34 @@ impl Agent {
         })
     }
 
+    /// List stored sessions without opening them or starting recovery.
+    pub fn sessions(&self, project: Option<&Path>) -> Result<Vec<crate::SessionInfo>> {
+        self.inner.history.sessions(project)
+    }
+
+    /// Read stored session metadata without acquiring a writer lease.
+    pub fn session_info(&self, id: &str) -> Result<crate::SessionInfo> {
+        self.inner.history.session_info(id)
+    }
+
     /// What this agent supports, as the ACP declaration.
     pub fn declaration(&self) -> Result<Value> {
         self.declaration_for(None, false)
     }
 
     pub(crate) fn declaration_for(&self, session: Option<&str>, acp: bool) -> Result<Value> {
-        let api = self.inner.harness.as_ref();
+        self.project_declaration(self.inner.harness.as_ref(), session, acp)
+    }
+
+    pub(crate) fn project_declaration(
+        &self,
+        api: &dyn base::AgentApi,
+        session: Option<&str>,
+        acp: bool,
+    ) -> Result<Value> {
         let mut declaration = interface_acp::declaration(api, session)?;
         declaration["portableSessions"] = json!(self.inner.persistent);
-        if !acp {
+        if !acp || !self.inner.acp_conformance {
             declaration["severalActors"] = json!(false);
             declaration["sessionLimits"] = json!(false);
             declaration["tenants"] = json!(false);
@@ -270,6 +295,13 @@ impl AgentBuilder {
         self.history = Some(history);
         self
     }
+    /// Install the official context compaction part and its `/compact`
+    /// command (enabled by default).
+    pub fn compaction(mut self, enabled: bool) -> Self {
+        self.no_compaction = !enabled;
+        self
+    }
+
     /// Use a settings file and an external project trust ledger.
     pub fn configuration(mut self, configuration: crate::FilesConfiguration) -> Self {
         self.configuration = Some(configuration);
@@ -416,6 +448,7 @@ impl AgentBuilder {
             None if self.durability == Durability::Ephemeral => memory_history(),
             None => file_history(state.join("sessions"))?,
         };
+        let saved_history = History(history.clone(), persistent, store_name);
         if let Some(recipe) = &mut restart {
             recipe.project = Some(project.clone());
             recipe.history = Some(History(history.clone(), persistent, store_name));
@@ -466,10 +499,10 @@ impl AgentBuilder {
         if !self.no_default_prompt {
             plugins.push(Arc::new(feature_prompt::PromptPlugin));
         }
-        plugins.extend([
-            Arc::new(feature_model::ModelPlugin) as Arc<dyn base::Plugin>,
-            Arc::new(feature_context::ContextPlugin),
-        ]);
+        plugins.push(Arc::new(feature_model::ModelPlugin));
+        if !self.no_compaction {
+            plugins.push(Arc::new(feature_context::ContextPlugin));
+        }
         plugins.push(Arc::new(HubPlugin(hub.clone())));
         let mut own: Vec<(Arc<dyn base::Plugin>, Vec<String>)> =
             plugins.into_iter().map(|p| (p, vec![])).collect();
@@ -586,7 +619,9 @@ impl AgentBuilder {
             session_settings["model"] = json!(model);
         }
         let continues = harness.declaration()?["runtime"]["continues_after_restart"] == true;
-        if continues != (self.durability == Durability::Durable) {
+        // The offline ACP kit also installs a Runtime fixture to exercise the
+        // bridge. It may select transient recovery with persistent history.
+        if !self.acp_conformance && continues != (self.durability == Durability::Durable) {
             let _ = base::AgentApi::shutdown(harness.as_ref()).await;
             return Err(Error::new(
                 Code::InvalidComposition,
@@ -602,7 +637,9 @@ impl AgentBuilder {
                 hub,
                 project,
                 persistent,
+                history: saved_history,
                 plugin_host,
+                acp_conformance: self.acp_conformance,
                 acp: Default::default(),
                 session_settings,
                 drivers: Default::default(),

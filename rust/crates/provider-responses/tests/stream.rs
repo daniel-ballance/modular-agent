@@ -92,7 +92,7 @@ async fn agent(
         .plugin(Plugin::new("system").on_turn_before(|_| async {
             Ok(modular_agent::TurnAddition {
                 system: Some("Be brief.".into()),
-                context: None,
+                ..Default::default()
             })
         }));
     for plugin in plugins {
@@ -131,16 +131,13 @@ async fn a_streamed_answer_becomes_text_calls_and_usage() {
         .find(|e| e["kind"] == "response")
         .unwrap();
     let answer = &response["message"];
-    assert_eq!(answer["content"][1]["text"], "Hello");
+    assert_eq!(answer["content"][0]["text"], "Hello");
     assert_eq!(answer["stop"], "toolUse");
-    assert_eq!(answer["content"][2]["arguments"], json!({"code":"1+1"}));
+    assert_eq!(answer["content"][1]["arguments"], json!({"code":"1+1"}));
     assert_eq!(answer["usage"]["input"], 12);
     assert_eq!(answer["usage"]["output"], 5);
-    assert_eq!(answer["providerData"]["provider"], "openai-codex");
-    assert_eq!(
-        answer["providerData"]["output"].as_array().unwrap().len(),
-        3
-    );
+    assert!(answer.get("providerData").is_none());
+    assert!(!answer.to_string().contains("encrypted_content"));
     let session_header = format!("session-id: {}", session.id());
 
     let requests = server.requests.lock().unwrap();
