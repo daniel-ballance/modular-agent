@@ -1438,6 +1438,23 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 		return check, nil
 	}
 	changed, err := p.c.Invoke(ctx, name, v)
+	if name == "runtime.tool.after" {
+		before := v.(api.AfterTool)
+		result := before.Result
+		if err == nil {
+			after := changed.(api.AfterTool).Result
+			result.Content, result.Structured = after.Content, after.Structured
+			err = api.ValidateToolResult(result)
+		}
+		if err != nil {
+			// Preserve the fact and status of dispatch, not the unchecked output.
+			result.Content = api.Text("Tool result processing failed.")
+			result.Structured, result.Data, result.Wire = nil, nil, nil
+			result.ProcessingError = errors.Join(result.ProcessingError, err)
+		}
+		before.Result = result
+		return before, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1661,7 +1678,11 @@ func (p *turnPorts) RunTool(ctx context.Context, call api.Call) api.ToolResult {
 	if ctx.Err() != nil || p.CheckWriter() != nil {
 		return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
 	}
+	if err := validateToolInput(def, call.Input); err != nil {
+		return api.ToolResult{Call: call.ID, Status: "failed", Content: api.Text(err.Error()), NotDispatched: true}
+	}
 	result, err := p.executeTool(ctx, source, snap, call, api.ToolRegistration{Plugin: plugin, ToolSource: id}, 0)
+	result.Returns = def.Output
 	if err != nil {
 		result.ProcessingError = err
 	}

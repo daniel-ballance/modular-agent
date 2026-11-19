@@ -109,6 +109,48 @@ func TestStructuredResultRefusalRetriesUntilValidNull(t *testing.T) {
 	}
 }
 
+func TestToolResultSchemaIsCheckedAfterTransform(t *testing.T) {
+	for _, wire := range []bool{false, true} {
+		name := "inProcess"
+		if wire {
+			name = "wire"
+		}
+		t.Run(name, func(t *testing.T) {
+			tool := modular.NewTool("typed", "Return one string.", func(context.Context, struct{}, *modular.ToolContext) (string, error) {
+				return "original", nil
+			}, modular.Output[string]())
+			p := modular.Plugin{Name: "typed", Setup: func(r *modular.Registrar) error {
+				if err := r.Tool(tool); err != nil {
+					return err
+				}
+				return r.OnToolAfter(func(_ context.Context, in modular.ToolAfter) (modular.ToolChange, error) {
+					if string(in.Result.Value) != `"original"` {
+						return modular.ToolChange{}, errors.New("original value was not carried")
+					}
+					return modular.ToolChange{Value: json.RawMessage(`42`)}, nil
+				})
+			}}
+			opt := modular.WithPlugin(p)
+			if wire {
+				opt = modulartest.OverWire(p)
+			}
+			a := modulartest.Agent(t, opt, modulartest.Script(`[{"toolCalls":[{"name":"typed","input":{}}]}]`))
+			s, err := a.Session(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			turn, err := s.Prompt(t.Context(), "use the tool")
+			if err != nil || turn.Outcome == nil || turn.Outcome.Kind != "failed" || !strings.Contains(turn.Outcome.Error, "tool output:") {
+				t.Fatalf("wrong outcome: %+v, %v", turn.Outcome, err)
+			}
+			results := turn.ToolResults()
+			if len(results) != 1 || results[0].Status != modular.Completed || len(results[0].Value) != 0 || results[0].Text() != "Tool result processing failed." {
+				t.Fatalf("want one safe result preserving confirmed completion, got %+v", results)
+			}
+		})
+	}
+}
+
 func TestDeclarationUsesSelectedParts(t *testing.T) {
 	for _, durability := range []modular.Durability{modular.Ephemeral, modular.Kept, modular.Durable} {
 		t.Run(string(durability), func(t *testing.T) {

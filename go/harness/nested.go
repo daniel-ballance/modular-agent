@@ -95,7 +95,7 @@ func (i *invocation) Call(ctx context.Context, name string, input json.RawMessag
 	return result, err
 }
 
-func validateNested(def api.Tool, input json.RawMessage) error {
+func validateToolInput(def api.Tool, input json.RawMessage) error {
 	if len(def.Input) == 0 {
 		return nil
 	}
@@ -147,7 +147,7 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 		}
 		final := call
 		final.Input = check.Call.Input
-		if err := validateNested(def, final.Input); err != nil {
+		if err := validateToolInput(def, final.Input); err != nil {
 			fail("failed", err.Error())
 			break
 		}
@@ -201,6 +201,7 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 			continue
 		}
 		result, processing = p.executeTool(ctx, executor, snap, final, binding, depth)
+		result.Returns = def.Output
 		call = final
 		if result.Status == "open" {
 			fail("refused", "Nested calls cannot be left open.")
@@ -221,7 +222,8 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 	result.Call, result.Name = call.ID, call.Name
 	changed, err := p.Hook(api.WithNestedTools(ctx, nil), "runtime.tool.after", api.AfterTool{Call: call, Result: result})
 	if check, ok := changed.(api.AfterTool); err == nil && ok {
-		result.Content, result.Structured = check.Result.Content, check.Result.Structured
+		result = check.Result
+		processing = errors.Join(processing, result.ProcessingError)
 	} else if err != nil {
 		processing = errors.Join(processing, err)
 		result.Content, result.Structured, result.Wire, result.Data = api.Text("Nested result processing failed."), nil, nil, nil

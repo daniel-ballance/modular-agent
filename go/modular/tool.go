@@ -38,7 +38,6 @@ type Tool struct {
 	run        func(context.Context, json.RawMessage, *ToolContext) (any, error)
 	invalid    error
 	only       bool
-	output     *jsonschema.Resolved
 }
 
 func (t Tool) Definition() ToolDefinition {
@@ -68,7 +67,7 @@ func Output[T any]() ToolOption {
 	return func(t *Tool) {
 		schema, err := jsonschema.For[T](nil)
 		if err == nil {
-			t.definition.Returns, t.output, err = resolve(schema)
+			t.definition.Returns, _, err = resolve(schema)
 		}
 		if err != nil {
 			t.invalid = err
@@ -265,12 +264,14 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 			return fail(Failed, err.Error())
 		}
 		var value any
+		var hasValue bool
+		schema := len(t.definition.Returns) != 0
 		switch v := output.(type) {
 		case string:
-			if t.output == nil {
+			if !schema {
 				result.Content = api.Text(v)
 			} else {
-				value = v
+				value, hasValue = v, true
 			}
 		case Content:
 			result.Content = portable.ReadContent(v)
@@ -284,32 +285,24 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 				result.Status = portable.StatusIn(string(v.Status))
 			}
 			result.Content = portable.ReadContent(v.Content)
-			value = v.Value
+			value, hasValue = v.Value, v.Value != nil
 		default:
-			value = v
-		}
-		if result.Status == "completed" && t.output != nil {
-			b, err := json.Marshal(value)
-			if err != nil {
-				return fail(Failed, err.Error())
-			}
-			var decoded any
-			if err = json.Unmarshal(b, &decoded); err == nil {
-				err = t.output.Validate(decoded)
-			}
-			if err != nil {
-				return fail(Failed, "tool output: "+err.Error())
-			}
-			result.Structured = b
-		} else if value != nil {
-			if _, ok := output.(ToolOutput); !ok {
+			if !schema {
 				return fail(Failed, "tool returned a value without an output schema")
 			}
+			value, hasValue = v, true
+		}
+		if hasValue {
 			b, err := json.Marshal(value)
 			if err != nil {
-				return fail(Failed, err.Error())
+				if result.Status != "completed" || !schema {
+					return fail(Failed, err.Error())
+				}
+				// The host will check the missing value at settlement, after hooks.
+				result.Content = api.Text("Tool could not encode its result value.")
+			} else {
+				result.Structured = b
 			}
-			result.Structured = b
 		}
 		if len(result.Content) == 0 {
 			if result.Status != "completed" {
