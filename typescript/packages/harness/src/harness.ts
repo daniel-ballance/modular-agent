@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { interruptedCalls, pendingToolCalls, restoreAnsweredStep } from "./view.js";
@@ -1743,7 +1743,7 @@ export class Harness {
 
 	/** Run one tool call. Hook points are applied by whoever owns the operation. */
 	private async executeTool(s: Session, call: ToolCall, signal: AbortSignal, turnId?: string, state?: TurnState,
-		nested?: { depth: number; registration: NonNullable<ReturnType<Harness["findTool"]>> }): Promise<ToolResult | (ToolPending & { callId: string })> {
+		nested?: { depth: number; registration: NonNullable<ReturnType<Harness["findTool"]>>; approval: unknown }): Promise<ToolResult | (ToolPending & { callId: string })> {
 		const found = this.findTool(s, call.name);
 		if (s.erasing) return { callId: call.id, status: "refused", content: [text("Erasure is in progress")] };
 		if (!found) return { callId: call.id, status: "failed", content: [text(`Unknown tool: ${call.name}`)] };
@@ -1765,7 +1765,9 @@ export class Harness {
 		const env = await this.environmentFor(s);
 		const safeToRepeat = found.definition.hints?.safeToRepeat === true && env?.containment === "strong";
 		const point = !nested && !turnId && env?.points && env.save ? await env.save() : undefined;
-		if (!allowed() || s.erasing || s.suspended || !sameRegistration(this.findTool(s, call.name), found)) return refused();
+		const eligible = (current: ReturnType<Harness["findTool"]>) => allowed() && !s.erasing && !s.suspended &&
+			sameRegistration(current, found) && (!nested || nested.approval === s.settings.approval);
+		if (!eligible(this.findTool(s, call.name))) return refused();
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
 		this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
 		const [start] = await this.commit(s, [{ kind: "toolStarted", writer: "harness", modelVisible: false, turnId, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs), toolCallId: call.id, stepId: call.stepId,
@@ -1773,7 +1775,7 @@ export class Harness {
 			data: { call: { ...call, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs) }, source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition, safeToRepeat, point, openWorld: found.definition.hints?.openWorld ?? true,
 				authorizers: owners.map((actorId) => ({ sessionId: s.id, actorId })), rights: this.workRights(s, owners, state?.jobs) } }]);
 		const current = this.findTool(s, call.name);
-		if (!allowed() || s.erasing || s.suspended || !sameRegistration(current, found)) return refused();
+		if (!eligible(current)) return refused();
 		this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
 		this.emit(s.id, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
@@ -1865,18 +1867,19 @@ export class Harness {
 					if (!registration || (registration.definition.callers && !registration.definition.callers.includes("plugin"))) {
 						result = stop("refused", `Tool ${name} is not registered for plugin callers`); break;
 					}
+					const approval = s.settings.approval;
 					const gate = await this.toolGate({ sessionId: s.id, turnId, call, definition: registration.definition }, signal);
 					if (signal.aborted) { result = stop("notStarted", "Cancelled before it ran"); break; }
 					if (gate.pending !== undefined) { result = stop("refused", "A nested call cannot be left open"); break; }
 					const current = this.findTool(s, name);
-					if (!sameRegistration(current, registration)) {
+					if (!sameRegistration(current, registration) || approval !== s.settings.approval) {
 						if (pass >= 7) { result = stop("refused", "Registration kept changing"); break; }
 						registration = current;
 						continue;
 					}
 					if (gate.refused !== undefined) { result = stop("refused", gate.refused); break; }
 					executed = gate.value.call;
-					const ran = await this.executeTool(s, executed, signal, turnId, state, { depth, registration });
+					const ran = await this.executeTool(s, executed, signal, turnId, state, { depth, registration, approval });
 					result = isPending(ran) ? stop("refused", "A nested call cannot be left open") : ran;
 					break;
 				}
@@ -2018,7 +2021,7 @@ export class Harness {
 	}
 
 	/** A recorded answer to the question with this key, if it can still be used. */
-	private recordedAnswer(s: Session, draft: BoundRequest): { request: InputRequest; answer?: Answer } | undefined {
+	private recordedAnswer(s: Session, draft: BoundRequest, approval?: ApprovalBinding): { request: InputRequest; answer?: Answer } | undefined {
 		const branch = s.branch();
 		const entry = [...branch].reverse().find((e) => e.kind === "inputRequest" && !e.erased && readRequest(e).key === draft.key);
 		if (!entry) return undefined;
@@ -2026,6 +2029,12 @@ export class Harness {
 		if (request.kind !== draft.kind || request.question !== draft.question || request.details !== draft.details
 			|| JSON.stringify(request.options ?? []) !== JSON.stringify(draft.options ?? [])
 			|| (request.credential ?? undefined) !== (draft.credential ?? undefined) || request.toolCallId !== draft.toolCallId) return undefined;
+		if (approval?.call.startedBy === "tool") {
+			const prior = entry.data as Partial<ApprovalBinding> | undefined;
+			const exact = (value: unknown) => JSON.parse(JSON.stringify(value));
+			if (!prior?.call || !prior.source || !prior.definition ||
+				!isDeepStrictEqual(exact(approval), exact({ call: prior.call, source: prior.source, definition: prior.definition }))) return undefined;
+		}
 		const bound = (request as BoundRequest).boundCall;
 		if (bound && !isDeepStrictEqual(bound, draft.boundCall)) return undefined;
 		if (branch.some((e) => e.kind === "inputClosed" && (e.data as { requestId: string }).requestId === request.id)) return undefined;
@@ -2065,9 +2074,15 @@ export class Harness {
 		}
 		let request: InputRequest = { ...draft, id: this.newId(), sessionId: s.id, askedBy, answerers: draft.answerers ?? [], turnId: s.running?.turnId };
 		const stepId = call?.stepId ?? (draft.toolCallId ? s.order.map((id) => s.entries.get(id)!).findLast((e) => e.kind === "toolStarted" && e.toolCallId === draft.toolCallId)?.stepId : undefined);
+		const registered = draft.kind === "approval" && call ? this.findTool(s, call.name) : undefined;
+		const approval = registered && call ? { call, source: { plugin: registered.plugin, toolSource: registered.source.id }, definition: registered.definition } : undefined;
 		let reopened = false;
 		if (draft.key) {
-			const recorded = this.recordedAnswer(s, draft);
+			// Changed input or registration needs a new approval identity, not a replay of the old one.
+			const key = approval?.call.startedBy === "tool" ? draft.key + ":" + approvalKey(approval) : draft.key;
+			draft = { ...draft, key };
+			request = { ...request, key };
+			const recorded = this.recordedAnswer(s, draft, approval);
 			if (recorded?.answer) {
 				this.emit(s.id, "input.request.reused", { requestId: recorded.request.id, key: draft.key }, "harness", { toolCallId: request.toolCallId });
 				return recorded.answer;
@@ -2078,8 +2093,6 @@ export class Harness {
 			}
 		}
 		const viewers = this.viewersFor(s, request);
-		const registered = request.kind === "approval" && call ? this.findTool(s, call.name) : undefined;
-		const approval = registered && call ? { call, source: { plugin: registered.plugin, toolSource: registered.source.id }, definition: registered.definition } : {};
 		if (!reopened) {
 			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, data: { request: { ...request, answerable: viewers.length > 0 }, ...approval } }]);
 		}
@@ -2589,6 +2602,13 @@ function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Sessi
 }
 
 const turnLimit = (limit: string) => Object.assign(new Error(`Turn limit: ${limit}`), { code: "turn_limit", limit });
+
+type ApprovalBinding = { call: ToolCall; source: { plugin: string; toolSource: string }; definition: ToolDefinition };
+function approvalKey(binding?: ApprovalBinding): string {
+	return createHash("sha256").update(JSON.stringify(binding ?? null, (_, value) =>
+		value && typeof value === "object" && !Array.isArray(value)
+			? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value)).digest("hex");
+}
 
 type BoundRequest = InputRequestDraft & { boundCall?: Pick<ToolCall, "name" | "input"> };
 

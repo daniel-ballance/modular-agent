@@ -176,7 +176,7 @@ test("serving a memory history handle exposes its existing records, without bypa
     body: JSON.stringify({ owner: "another writer" }),
   });
   assert.equal(acquire.status, 409);
-  assert.equal((await acquire.json()).code, "held");
+  assert.equal((await acquire.json() as { code?: string }).code, "held");
   await a.close();
   const fromWire = await reader.openSession(local.id);
   assert.equal((await fromWire.lastTurn())?.text, "From local history");

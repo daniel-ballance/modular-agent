@@ -853,7 +853,9 @@ class WireToolSource implements ToolSource {
 			const { callId: _c, ...rest } = result as ToolResult;
 			return rest;
 		} catch (error) {
-			if (ctx.signal.aborted) return { status: "cancelled", content: [{ type: "text", text: "Cancelled" }] };
+			if (ctx.signal.aborted && (error as { code?: string }).code === "cancelled") {
+				return { status: "cancelled", content: [{ type: "text", text: "Cancelled" }] };
+			}
 			throw error;
 		} finally {
 			this.progress.delete(req.id);

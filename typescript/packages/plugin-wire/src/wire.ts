@@ -37,8 +37,11 @@ export async function listDirectory(env: import("@modular-agent/harness").Workin
 	try { return { entries: await env.list(path) }; }
 	catch (error) {
 		const code = (error as NodeJS.ErrnoException)?.code;
-		if (code === "ENOENT") throw new WireError("not_found", "Directory does not exist");
-		if (code === "ENOTDIR" || code === "EACCES" || code === "EPERM") throw new WireError("invalid_request", "Not an accessible directory");
+		if (code === "ENOENT" || code === "not_found") throw new WireError("not_found", "Directory does not exist");
+		if (code === "ENOTDIR" || code === "EACCES" || code === "EPERM" || code === "invalid_request") {
+			throw new WireError("invalid_request", "Not an accessible directory");
+		}
+		if (code === "not_supported") throw new WireError("not_supported", "This environment does not list directories");
 		throw error;
 	}
 }

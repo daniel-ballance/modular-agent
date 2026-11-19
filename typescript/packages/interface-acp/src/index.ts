@@ -480,7 +480,7 @@ export class AcpInterface implements InterfaceCapability {
 			if (!Array.isArray(params.entryIds) || !params.entryIds.every((id: unknown) => typeof id === "string")) throw RequestError.invalidParams();
 			this.requireRight(sessionId, this.actorId, "erase");
 			const report = await this.checked(() => this.api.erase(sessionId, params.entryIds, this.actorId));
-			return { erased: report.erasedPairs, pending: report.pendingPairs, outOfReach: [...new Set(report.outOfReach)] };
+			return { erased: report.erasedPairs, pending: report.pendingPairs, outOfReach: report.outOfReach };
 		});
 	}
 

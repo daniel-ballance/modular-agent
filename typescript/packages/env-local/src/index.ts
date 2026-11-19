@@ -73,9 +73,18 @@ export class LocalEnvironment implements WorkingEnvironment {
 	}
 	async list(path: string): Promise<DirEntry[]> {
 		if (typeof path !== "string" || !path || path.includes("\0")) throw Object.assign(new Error("Invalid directory path"), { code: "invalid_request" });
-		return (await readdir(await this.confined(path), { withFileTypes: true })).map(entry => ({
-			name: entry.name, kind: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other",
-		}));
+		try {
+			return (await readdir(await this.confined(path), { withFileTypes: true })).map(entry => ({
+				name: entry.name, kind: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other",
+			}));
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT") throw Object.assign(new Error("Directory does not exist"), { code: "not_found" });
+			if (code === "ENOTDIR" || code === "EACCES" || code === "EPERM") {
+				throw Object.assign(new Error("Not an accessible directory"), { code: "invalid_request" });
+			}
+			throw error;
+		}
 	}
 	async exists(path: string): Promise<boolean> {
 		try {
