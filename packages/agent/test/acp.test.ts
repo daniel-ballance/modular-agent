@@ -42,9 +42,10 @@ const kinds = (updates: SessionNotification[]) => updates.map((u) => u.update.se
 test("ACP: withheld history entries are omitted before the page reply gate", async (t) => {
 	const seen: string[][] = [];
 	const gate: Plugin = { name: "hide-entries", setup(api) {
-		api.on("output", (event: { type: string; data: any }) => {
-			if (event.type === "entry" && event.data.kind === "hidden.entry") return { action: "block" };
-			if (event.type === "reply" && event.data.method === "_modular-agent/history") {
+		api.on("output", ({ events }) => {
+			const event = events[0];
+			if (event?.type === "entry" && event.data.kind === "hidden.entry") return { action: "block" };
+			if (event?.type === "reply" && event.data.method === "_modular-agent/history") {
 				seen.push(event.data.result.entries.map((entry: HistoryEntry) => entry.kind));
 			}
 		});
