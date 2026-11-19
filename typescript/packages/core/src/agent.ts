@@ -75,6 +75,9 @@ async function tokenFrom(file: string): Promise<string> {
 export const httpHistory = (url: string, tokenFile: string): HttpHistory => new HttpHistory(url, tokenFile);
 export async function serveHistory(store: FileHistory | MemoryHistory | HttpHistory, options: { address: string; tokenFile: string }) {
   return checked(async () => {
+    if (!(store instanceof FileHistory || store instanceof MemoryHistory || store instanceof HttpHistory)) {
+      throw new AgentError("not_supported", "The store does not expose a history binding archive");
+    }
     const match = /^127\.0\.0\.1:(\d+)$/.exec(options.address);
     if (!match || Number(match[1]) > 65535) throw new AgentError("invalid_params", "Use a numeric loopback address: 127.0.0.1:port");
     const binding = { port: Number(match[1]), token: await tokenFrom(options.tokenFile) };

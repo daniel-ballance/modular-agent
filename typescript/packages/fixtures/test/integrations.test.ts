@@ -163,6 +163,7 @@ test("serving a memory history handle exposes its existing records, without bypa
   const token = randomBytes(32).toString("hex");
   await writeFile(tokenFile, token, { mode: 0o600 });
   const history = memoryHistory();
+  await assert.rejects(serveHistory({} as typeof history, { address: "127.0.0.1:0", tokenFile }), { code: "not_supported" });
   const a = await testAgent({ history, script: [{ text: "From local history" }] });
   const local = await a.session();
   await local.prompt("First");
