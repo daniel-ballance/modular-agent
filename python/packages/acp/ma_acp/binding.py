@@ -151,7 +151,7 @@ def declaration(plugins, provider=None):
         "inputKeys": bool(runtime.get("keyed_input")),
         "questionsOutlastTurns": bool(runtime.get("open_calls")),
         "startsTurnsUnasked": "jobReports",
-        "queuedInputAfterRestart": "run" if runtime.get("durable") else "handedBack",
+        "queuedInputAfterRestart": runtime.get("queued_input_after_restart", "handedBack"),
         "movingWithUnfinishedWork": "refused",
         "mixedActorInput": "shared",
         "settingsDuringTurn": "refused",

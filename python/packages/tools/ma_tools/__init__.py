@@ -3,6 +3,7 @@
 import asyncio
 
 from jsonschema import Draft202012Validator
+from referencing import Registry
 from ma_core import AgentError, Plugin, content
 
 
@@ -106,7 +107,13 @@ class Tools(Plugin):
             )
             if not tool:
                 raise AgentError("Unknown tool")
-            Draft202012Validator(tool["schema"]).validate(call["input"])
+            if d.get("definition") is not None and d["definition"] != tool:
+                return {
+                    "call": call["id"],
+                    "status": "refused",
+                    "content": content("Tool registration changed before dispatch"),
+                }
+            Draft202012Validator(tool["schema"], registry=Registry()).validate(call["input"])
             if tool.get("target"):
                 return await self.api.call(tool["target"], "run", d, emit)
             result = await self.api.call(

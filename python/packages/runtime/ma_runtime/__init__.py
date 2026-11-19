@@ -21,6 +21,7 @@ class Runtime(Turns, Plugin):
         "open_calls": True,
         "parallel_tools": True,
         "nested_tools": True,
+        "queued_input_after_restart": "handedBack",
     }
 
     def __init__(self):

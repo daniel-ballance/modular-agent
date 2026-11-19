@@ -70,6 +70,7 @@ async def _structured_result(d: dict[str, Any]) -> JsonObject | None:
             raise ValueError(f"Invalid JSON constant: {value}")
 
         value = json.loads(plain(d["result"]), parse_constant=reject_constant)
+        json.dumps(value, allow_nan=False)
         error = next(Draft202012Validator(schema, registry=Registry()).iter_errors(value), None)
         if error is not None:
             return {
@@ -97,6 +98,8 @@ class _SdkRuntime(Runtime):  # type: ignore[misc]  # Untyped base adapter.
 
 
 class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
+    declarations = {**Durable.declarations, "queued_input_after_restart": "handedBack"}
+
     async def _safe_to_repeat(self, sid: str, definition: JsonObject | None) -> bool:
         return False
 

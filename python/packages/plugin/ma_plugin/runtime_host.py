@@ -76,6 +76,9 @@ class HostedRuntime(Runtime):
             "durable": bool(self.supports.get("continuesAfterRestart")),
             "waiting_through_restart": bool(self.supports.get("waitingThroughRestart")),
             "nested_tools": False,
+            "queued_input_after_restart": "run"
+            if self.supports.get("continuesAfterRestart")
+            else "handedBack",
         }
 
     async def _turn(self, sid, queued=None, turn=None):

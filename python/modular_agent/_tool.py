@@ -14,6 +14,7 @@ from typing import Any, Literal, cast, get_type_hints, overload
 
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, create_model
+from referencing import Registry
 
 from ._types import (
     AgentError,
@@ -161,7 +162,7 @@ class Tool:
 
     async def _run(self, arguments: Json, context: ToolContext) -> JsonObject:
         try:
-            Draft202012Validator(self.parameters).validate(arguments)
+            Draft202012Validator(self.parameters, registry=Registry()).validate(arguments)
             kwargs = self._parse(cast(JsonObject, arguments))
             if self._context:
                 kwargs[self._context] = context
@@ -187,7 +188,9 @@ class Tool:
             if self._output is not None and result["status"] == "completed":
                 checked = self._output.validate_python(result.get("value"), strict=True)
                 encoded = cast(Json, self._output.dump_python(checked, mode="json"))
-                Draft202012Validator(self.definition["returns"]).validate(encoded)
+                Draft202012Validator(self.definition["returns"], registry=Registry()).validate(
+                    encoded
+                )
                 result["value"] = encoded
                 if not result["content"]:
                     result["content"] = _content(
