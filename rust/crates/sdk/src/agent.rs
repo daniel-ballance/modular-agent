@@ -296,6 +296,12 @@ impl AgentBuilder {
     }
     /// Load every part and check the composition. Nothing runs until this succeeds.
     pub async fn build(self) -> Result<Agent> {
+        if self.plugin_host == Some(false) && !self.process_plugins.is_empty() {
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "process plugins require a plugin host",
+            ));
+        }
         let mut restart = (self.restartable
             && self.process_plugins.is_empty()
             && self.wire_plugins.is_empty()
@@ -316,12 +322,12 @@ impl AgentBuilder {
         }
         if self.durability != Durability::Ephemeral
             && self.data_dir.is_none()
-            && self.history.is_none()
+            && (self.history.is_none() || self.environment.is_none())
         {
             return Err(Error::new(
                 Code::InvalidComposition,
                 format!(
-                    "durability {:?} keeps sessions on disk and needs a data_dir",
+                    "durability {:?} needs a persistent history store and a data_dir for local recovery bookkeeping",
                     self.durability
                 ),
             ));
@@ -498,7 +504,7 @@ impl AgentBuilder {
             if !valid {
                 let _ = base::AgentApi::shutdown(harness.as_ref()).await;
                 return Err(Error::new(
-                    Code::InvalidComposition,
+                    Code::InvalidRequest,
                     format!("unknown model {model}"),
                 ));
             }
