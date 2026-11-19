@@ -1,115 +1,141 @@
-//! The standard configuration, driven with a scripted model.
-use agent_api::*;
-use agent_harness::Harness;
-use interface_terminal::TerminalPlugin;
-use provider_fake::{FakePlugin, Probe, Script};
-use standard::Standard;
+//! The standard configuration, driven with the SDK scripted Provider.
+use modular_agent::{Agent, Gate, Outcome, Plugin, Session, Tool, ToolOutput};
+use modular_agent_mcp::Mcp;
+use serde_json::{Value, json};
+use standard::{Standard, script::Script};
 use std::{
+    collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tempfile::TempDir;
 
-#[derive(Default)]
-struct Events(Mutex<Vec<Event>>);
-impl EventSink for Events {
-    fn send(&self, event: Event) {
-        self.0.lock().unwrap().push(event);
-    }
-}
 struct Rig {
-    h: Arc<Harness>,
-    id: String,
+    agent: Agent,
+    session: Session,
     root: TempDir,
     project: TempDir,
-    probe: Arc<Probe>,
+    seen: Arc<Mutex<Vec<Value>>>,
+    ids: BTreeMap<String, String>,
 }
-fn code(id: &str, source: &str) -> Script {
-    let mut call = ToolCall::new("codemode", json!({"code": source}));
-    call.id = id.into();
-    Script::response(ModelResponse::calls(vec![call]))
+
+fn call(id: &str, name: &str, input: Value) -> Value {
+    json!({"toolCalls":[{"name":name,"input":input}],"label":id})
 }
-fn text(value: &str) -> Script {
-    Script::response(ModelResponse::text(value))
+fn code(id: &str, source: &str) -> Value {
+    call(id, "codemode", json!({"code":source}))
 }
+fn text(value: &str) -> Value {
+    json!({"text":value})
+}
+
 impl Rig {
-    async fn new(scripts: Vec<Script>) -> Self {
+    async fn new(scripts: Vec<Value>) -> Self {
         Self::with(scripts, vec![], json!({}), |_| ()).await
     }
     async fn with(
-        scripts: Vec<Script>,
-        plugins: Vec<Arc<dyn Plugin>>,
+        scripts: Vec<Value>,
+        plugins: Vec<Plugin>,
         settings: Value,
         prepare: impl FnOnce(&Path),
     ) -> Self {
         let root = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();
         prepare(project.path());
-        let fake = Arc::new(FakePlugin::new(scripts));
-        let probe = fake.probe.clone();
+        Self::start(scripts, plugins, settings, root, project, true).await
+    }
+    async fn start(
+        scripts: Vec<Value>,
+        mut plugins: Vec<Plugin>,
+        settings: Value,
+        root: TempDir,
+        project: TempDir,
+        durable: bool,
+    ) -> Self {
+        let ids = scripts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, step)| {
+                step["label"]
+                    .as_str()
+                    .map(|id| (id.into(), format!("call-{i}-0")))
+            })
+            .collect();
         let standard = Standard {
             config: root.path().join("config"),
             state: root.path().join("state"),
-            durable: true,
+            durable,
             claude: false,
-            scripted: Some(fake),
+            conformance: false,
+            scripted: Some(Script::new(json!(scripts), None)),
             code: tools_code::CodeTool {
                 compute: Duration::from_millis(300),
                 calls: 5,
                 ..Default::default()
             },
         };
-        let h = standard::compose(
-            &standard,
-            Arc::new(TerminalPlugin {
-                sink: Arc::new(Events::default()),
-            }),
-            project.path(),
-        )
-        .await
-        .unwrap();
-        for plugin in plugins {
-            h.load(plugin).await.unwrap();
+        let seen = Arc::new(Mutex::new(vec![]));
+        let probe = seen.clone();
+        plugins.push(Plugin::new("probe").on_step_before(move |p| {
+            probe.lock().unwrap().push(p.request);
+            async { Ok(None) }
+        }));
+        let mut b = standard::builder(&standard, project.path(), &Mcp::default(), plugins).unwrap();
+        for (k, v) in settings.as_object().unwrap() {
+            b = b.setting(k, v.clone());
         }
-        let mut initial = json!({"model":"fake"});
-        merge(&mut initial, settings);
-        let id = h.create(project.path(), initial).await.unwrap();
+        let agent = b.build().await.unwrap();
+        let session = agent.session().await.unwrap();
         Self {
-            h,
-            id,
+            agent,
+            session,
             root,
             project,
-            probe,
+            seen,
+            ids,
         }
     }
-    async fn run(&self, text: &str) -> TurnResult {
-        self.h
-            .submit(&self.id, "user", text, Timing::Now, None)
-            .await
-            .unwrap();
-        self.h.run_next(&self.id).await.unwrap().unwrap()
+    async fn run(&self, text: &str) -> Outcome {
+        self.session.prompt(text).await.unwrap().outcome.unwrap()
     }
-    fn entries(&self, kind: &str) -> Vec<Entry> {
-        self.h
-            .snapshot(&self.id)
+    fn entries(&self, kind: &str) -> Vec<Value> {
+        self.session
+            .history()
             .unwrap()
-            .entries
             .into_iter()
-            .filter(|e| e.kind == kind)
+            .filter(|e| e["kind"] == kind)
             .collect()
     }
-    /// The result of the model's own call, by id.
-    fn result(&self, call: &str) -> ToolResult {
-        self.entries("tool.result")
-            .iter()
-            .map(|e| serde_json::from_value::<ToolResult>(e.content.clone().unwrap()).unwrap())
-            .find(|r| r.call == call)
-            .unwrap()
+    fn result(&self, id: &str) -> ResultEntry {
+        let record = self
+            .entries("toolResult")
+            .into_iter()
+            .find(|e| e["toolCallId"] == self.ids[id])
+            .unwrap();
+        ResultEntry {
+            status: record["data"]["status"].as_str().unwrap().into(),
+            text: message_text(&record["message"]),
+        }
     }
-    fn requests(&self) -> Vec<ModelRequest> {
-        self.probe.requests.lock().unwrap().clone()
+    fn requests(&self) -> Vec<Value> {
+        self.seen.lock().unwrap().clone()
     }
+}
+
+struct ResultEntry {
+    status: String,
+    text: String,
+}
+fn array(v: &Value) -> &[Value] {
+    v.as_array().map(Vec::as_slice).unwrap_or_default()
+}
+fn message_text(message: &Value) -> String {
+    array(&message["content"])
+        .iter()
+        .filter_map(|p| p["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 #[tokio::test]
@@ -123,13 +149,13 @@ async fn the_model_is_offered_one_tool_and_its_calls_are_nested_and_private() {
     ])
     .await;
     let result = rig.run("go").await;
-    assert_eq!(result.outcome, Outcome::Completed);
+    assert_eq!(result, Outcome::Completed);
     assert_eq!(
         std::fs::read_to_string(rig.project.path().join("a.txt")).unwrap(),
         "one\n2\n"
     );
     let outer = rig.result("c1");
-    assert_eq!(outer.status, ToolStatus::Completed);
+    assert_eq!(outer.status, "completed");
     assert_eq!(outer.text, "printed\none\n2");
 
     // The model was offered the code tool and nothing else.
@@ -137,30 +163,43 @@ async fn the_model_is_offered_one_tool_and_its_calls_are_nested_and_private() {
     assert!(
         requests
             .iter()
-            .all(|r| r.tools.len() == 1 && r.tools[0].name == "codemode")
+            .all(|r| array(&r["tools"]).len() == 1 && r["tools"][0]["name"] == "codemode")
     );
-    assert!(requests[0].system.contains("## tools.read(path: str"));
-    assert!(requests[0].system.contains("tools.exec(command: str"));
+    assert!(
+        requests[0]["systemPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("## tools.read(path: str")
+    );
+    assert!(
+        requests[0]["systemPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("tools.exec(command: str")
+    );
 
     // Each call the code made is its own record, tied to the code call.
-    let calls = rig.entries("tool.call");
-    let nested: Vec<ToolCall> = calls
+    let calls = rig.entries("toolStarted");
+    let nested: Vec<_> = calls
         .iter()
-        .map(|e| serde_json::from_value::<ToolCall>(e.content.clone().unwrap()).unwrap())
-        .filter(|c| c.started_by == "tool")
+        .map(|e| &e["data"]["call"])
+        .filter(|c| c["startedBy"] == "tool")
         .collect();
     assert_eq!(
-        nested.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        nested
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
         ["write", "edit", "read"]
     );
-    assert!(nested.iter().all(|c| c.extra["parentCallId"] == "c1"));
-    assert_eq!(rig.entries("tool.started").len(), 4);
+    assert!(nested.iter().all(|c| c["parentCallId"] == rig.ids["c1"]));
+    assert_eq!(calls.len(), 4);
 
     // The model's next request holds its own call and that call's result only.
-    let second = &requests[1].messages;
-    let roles: Vec<&str> = second.iter().map(|m| m.role.as_str()).collect();
-    assert_eq!(roles, ["user", "assistant", "tool"]);
-    assert!(second[2].text_content().ends_with("printed\none\n2"));
+    let second = array(&requests[1]["messages"]);
+    let roles: Vec<&str> = second.iter().map(|m| m["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["user", "assistant", "toolResult"]);
+    assert!(message_text(&second[2]).ends_with("printed\none\n2"));
 }
 
 #[tokio::test]
@@ -176,9 +215,9 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
         text("done"),
     ])
     .await;
-    assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
+    assert_eq!(rig.run("go").await, Outcome::Completed);
     let first = rig.result("c1");
-    assert_eq!(first.status, ToolStatus::Completed);
+    assert_eq!(first.status, "completed");
     assert!(
         first
             .text
@@ -186,7 +225,7 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
     );
     assert!(first.text.contains("\"hi\\n\""));
     let second = rig.result("c2");
-    assert_eq!(second.status, ToolStatus::Failed);
+    assert_eq!(second.status, "failed");
     assert!(
         second
             .text
@@ -195,9 +234,9 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
         second.text
     );
     assert!(second.text.contains("line 1"));
-    assert_eq!(rig.result("c3").status, ToolStatus::Failed);
+    assert_eq!(rig.result("c3").status, "failed");
     let fourth = rig.result("c4");
-    assert_eq!(fourth.status, ToolStatus::Failed);
+    assert_eq!(fourth.status, "failed");
     assert!(fourth.text.contains("SyntaxError"), "{}", fourth.text);
 }
 
@@ -214,53 +253,38 @@ async fn the_sandbox_reaches_nothing_itself_and_is_bounded() {
         text("done"),
     ])
     .await;
-    assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
+    assert_eq!(rig.run("go").await, Outcome::Completed);
     let fs = rig.result("fs");
-    assert_eq!(fs.status, ToolStatus::Failed);
+    assert_eq!(fs.status, "failed");
     assert!(fs.text.contains("no direct access"), "{}", fs.text);
     let spin = rig.result("spin");
-    assert_eq!(spin.status, ToolStatus::Failed);
+    assert_eq!(spin.status, "failed");
     assert!(
         spin.text.to_lowercase().contains("time limit"),
         "{}",
         spin.text
     );
     let many = rig.result("many");
-    assert_eq!(many.status, ToolStatus::Failed);
+    assert_eq!(many.status, "failed");
     assert!(
         many.text.contains("more than 5 function calls"),
         "{}",
         many.text
     );
     let deep = rig.result("deep");
-    assert_eq!(deep.status, ToolStatus::Failed);
+    assert_eq!(deep.status, "failed");
     assert!(deep.text.contains("RecursionError"), "{}", deep.text);
 }
 
 /// A gate that refuses one tool, as an approval or policy plugin would.
-struct NoWrites;
-impl Plugin for NoWrites {
-    fn name(&self) -> &str {
-        "test.no-writes"
-    }
-    fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        r.on(
-            "runtime.before.tool",
-            Order::Normal,
-            handler(|_, _, value| {
-                Box::pin(async move {
-                    if value["call"]["name"] == "write" {
-                        return Ok(HookResult {
-                            refused: Some("writes are not allowed here".into()),
-                            ..HookResult::default()
-                        });
-                    }
-                    Ok(answer(value))
-                })
-            }),
-        );
-        Ok(())
-    }
+fn no_writes() -> Plugin {
+    Plugin::new("no-writes").on_tool_before(|p| async move {
+        Ok(if p.name == "write" {
+            Gate::Refuse("writes are not allowed here".into())
+        } else {
+            Gate::Allow
+        })
+    })
 }
 
 #[tokio::test]
@@ -273,47 +297,42 @@ async fn a_nested_call_passes_its_own_gate() {
             ),
             text("done"),
         ],
-        vec![Arc::new(NoWrites)],
+        vec![no_writes()],
         json!({}),
         |project| std::fs::write(project.join("kept.txt"), "k").unwrap(),
     )
     .await;
-    assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
+    assert_eq!(rig.run("go").await, Outcome::Completed);
     assert!(!rig.project.path().join("a.txt").exists());
     let outer = rig.result("c1");
-    assert_eq!(outer.status, ToolStatus::Completed);
+    assert_eq!(outer.status, "completed");
     assert!(outer.text.contains("write() was refused"), "{}", outer.text);
     assert!(outer.text.contains("writes are not allowed here"));
     assert!(outer.text.ends_with("kept.txt"));
     let refused = rig
-        .entries("tool.result")
+        .entries("toolResult")
         .iter()
-        .filter(|e| e.content.as_ref().unwrap()["status"] == "refused")
+        .filter(|e| e["data"]["status"] == "refused")
         .count();
     assert_eq!(refused, 1);
     // Refused before dispatch: the code call and list started, write did not.
-    assert_eq!(rig.entries("tool.started").len(), 2);
+    assert_eq!(rig.entries("toolStarted").len(), 2);
 }
 
 #[tokio::test]
 async fn without_the_setting_the_tools_are_offered_directly_too() {
-    let mut call = ToolCall::new("read", json!({"path":"a.txt"}));
-    call.id = "direct".into();
+    let call = call("direct", "read", json!({"path":"a.txt"}));
     let rig = Rig::with(
-        vec![
-            Script::response(ModelResponse::calls(vec![call])),
-            text("done"),
-        ],
+        vec![call, text("done")],
         vec![],
         json!({"model_tools": null}),
         |project| std::fs::write(project.join("a.txt"), "direct read").unwrap(),
     )
     .await;
-    assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
-    let offered: Vec<String> = rig.requests()[0]
-        .tools
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    let offered: Vec<String> = array(&rig.requests()[0]["tools"])
         .iter()
-        .map(|t| t.name.clone())
+        .map(|t| t["name"].as_str().unwrap().into())
         .collect();
     for name in ["codemode", "read", "exec", "edit", "write", "find", "list"] {
         assert!(
@@ -326,15 +345,10 @@ async fn without_the_setting_the_tools_are_offered_directly_too() {
 
 #[tokio::test]
 async fn a_direct_call_is_refused_when_only_the_code_tool_is_offered() {
-    let mut call = ToolCall::new("write", json!({"path":"a.txt","content":"x"}));
-    call.id = "direct".into();
-    let rig = Rig::new(vec![
-        Script::response(ModelResponse::calls(vec![call])),
-        text("done"),
-    ])
-    .await;
-    assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
-    assert_eq!(rig.result("direct").status, ToolStatus::Refused);
+    let call = call("direct", "write", json!({"path":"a.txt","content":"x"}));
+    let rig = Rig::new(vec![call, text("done")]).await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    assert_eq!(rig.result("direct").status, "refused");
     assert!(!rig.project.path().join("a.txt").exists());
 }
 
@@ -365,7 +379,7 @@ async fn instructions_and_skills_reach_the_prompt_and_a_skill_can_be_loaded_by_h
     rig.run("hello").await;
     rig.run("/skill:release for 2.0").await;
     let requests = rig.requests();
-    let system = &requests[0].system;
+    let system = requests[0]["systemPrompt"].as_str().unwrap();
     assert!(system.starts_with("You are a coding assistant running inside Modular Agent"));
     assert!(system.contains("Always answer in haiku."));
     assert!(system.contains("My own standing rule."));
@@ -373,10 +387,11 @@ async fn instructions_and_skills_reach_the_prompt_and_a_skill_can_be_loaded_by_h
     assert!(system.contains("<description>Cut a release.</description>"));
     let order = [
         "<rules>",
-        "# Functions in codemode",
         "<project_context>",
         "<skills>",
+        "# Functions in codemode",
         "<cwd>",
+        "<date>",
     ]
     .map(|part| {
         system
@@ -384,7 +399,7 @@ async fn instructions_and_skills_reach_the_prompt_and_a_skill_can_be_loaded_by_h
             .unwrap_or_else(|| panic!("{part} missing"))
     });
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
-    let loaded = requests[1].messages.last().unwrap().text_content();
+    let loaded = message_text(array(&requests[1]["messages"]).last().unwrap());
     assert!(loaded.starts_with("<skill name=\"release\""), "{loaded}");
     assert!(loaded.contains("Bump the version, then tag.\n</skill>\n\nfor 2.0"));
 }
@@ -407,55 +422,30 @@ async fn mcp_servers_from_configuration_are_functions_and_a_dead_one_is_skipped(
         .to_string(),
     )
     .unwrap();
-    let fake = Arc::new(FakePlugin::new(vec![
+    let rig = Rig::start(vec![
         code(
             "c1",
             "found = [t['name'] for t in search_tools('offline echo')]\nout = tools.mcp_notes__echo(text='hello')\n[found, out]",
         ),
         text("done"),
-    ]));
-    let probe = fake.probe.clone();
-    let standard = Standard {
-        config: root.path().join("config"),
-        state: root.path().join("state"),
-        durable: false,
-        claude: false,
-        scripted: Some(fake),
-        code: Default::default(),
-    };
-    let h = standard::compose(
-        &standard,
-        Arc::new(TerminalPlugin {
-            sink: Arc::new(Events::default()),
-        }),
-        project.path(),
-    )
-    .await
-    .unwrap();
-    // The broken server does not stop the session from opening.
-    let id = h
-        .create(project.path(), json!({"model":"fake"}))
-        .await
-        .unwrap();
-    h.submit(&id, "user", "go", Timing::Now, None)
-        .await
-        .unwrap();
-    assert_eq!(
-        h.run_next(&id).await.unwrap().unwrap().outcome,
-        Outcome::Completed
-    );
-    let requests = probe.requests.lock().unwrap().clone();
-    assert!(requests[0].tools.iter().all(|t| t.name == "codemode"));
+], vec![], json!({}), root, project, false).await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    let requests = rig.requests();
     assert!(
-        requests[0]
-            .system
+        array(&requests[0]["tools"])
+            .iter()
+            .all(|t| t["name"] == "codemode")
+    );
+    assert!(
+        requests[0]["systemPrompt"]
+            .as_str()
+            .unwrap()
             .contains("tools.mcp_notes__echo(text: str = None)")
     );
-    let result = requests[1].messages.last().unwrap().text_content();
+    let result = message_text(array(&requests[1]["messages"]).last().unwrap());
     assert!(result.contains("mcp_notes__echo"), "{result}");
     assert!(result.contains("noted:hello"), "{result}");
-    h.close(&id).await.unwrap();
-    h.shutdown().await.unwrap();
+    rig.agent.close().await.unwrap();
 }
 
 /// The smallest PNG there is: one transparent pixel.
@@ -468,7 +458,7 @@ const PNG: &[u8] = &[
 
 #[tokio::test]
 async fn an_image_read_in_code_reaches_the_model_and_survives_a_reopen() {
-    let rig = Rig::with(
+    let mut rig = Rig::with(
         vec![
             code("c1", "print('looking')\ntools.read('pic.png')"),
             text("seen"),
@@ -479,32 +469,29 @@ async fn an_image_read_in_code_reaches_the_model_and_survives_a_reopen() {
         |project| std::fs::write(project.join("pic.png"), PNG).unwrap(),
     )
     .await;
-    assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
-    let image_in = |request: &ModelRequest| {
-        let result = request
-            .messages
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    let image_in = |request: &Value| {
+        let result = array(&request["messages"])
             .iter()
-            .find(|m| m.role == "tool")
+            .find(|m| m["role"] == "toolResult")
             .expect("no tool message");
         assert_eq!(
-            result.text_content(),
+            message_text(result),
             "looking\nRead image file [image/png]\n"
         );
-        result
-            .parts
+        array(&result["content"])
             .iter()
-            .find_map(|part| match part {
-                Part::Other { name, data } if name == "image" => Some(data.clone()),
-                _ => None,
-            })
+            .find(|p| p["type"] == "image")
             .expect("the image did not reach the model")
+            .clone()
     };
     let live = image_in(&rig.requests()[1]);
     assert_eq!(live["mimeType"], "image/png");
     assert!(live["data"].as_str().unwrap().starts_with("iVBORw0KGgo"));
     // Through the store and back: the same message, image included.
-    rig.h.close(&rig.id).await.unwrap();
-    rig.h.open(&rig.id).await.unwrap();
+    let id = rig.session.id().to_owned();
+    rig.session.close().await.unwrap();
+    rig.session = rig.agent.open_session(&id).await.unwrap();
     rig.run("and now?").await;
     assert_eq!(image_in(&rig.requests()[2]), live);
 }
@@ -528,20 +515,25 @@ async fn nesting_is_bounded_and_a_deadline_ends_a_command() {
             ),
             text("done"),
         ],
-        vec![Arc::new(provider_fake::ConformancePlugin)],
+        vec![Plugin::new("nest").tool(Tool::new("nest", "Run one nested call.").input_schema(json!({
+            "type":"object","properties":{"name":{"type":"string"},"input":{"type":"object"}},"required":["name","input"]
+        })).run(|input: Value, cx| async move {
+            let reply = cx.tools().call(input["name"].as_str().unwrap(), input["input"].clone()).await?;
+            Ok(ToolOutput { status:reply.status, ..ToolOutput::from(reply.text()) })
+        }))],
         json!({}),
         |project| std::fs::write(project.join("here.txt"), "x").unwrap(),
     )
     .await;
-    assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
+    assert_eq!(rig.run("go").await, Outcome::Completed);
     let deep = rig.result("deep");
-    assert_eq!(deep.status, ToolStatus::Failed, "{}", deep.text);
+    assert_eq!(deep.status, "failed", "{}", deep.text);
     assert!(deep.text.contains("4 deep at most"), "{}", deep.text);
     let shallow = rig.result("shallow");
-    assert_eq!(shallow.status, ToolStatus::Completed, "{}", shallow.text);
+    assert_eq!(shallow.status, "completed", "{}", shallow.text);
     assert_eq!(shallow.text, "here.txt");
     let slow = rig.result("slow");
-    assert_eq!(slow.status, ToolStatus::Completed, "{}", slow.text);
+    assert_eq!(slow.status, "completed", "{}", slow.text);
     let value: Value = serde_json::from_str(&slow.text).unwrap();
     assert_eq!(value, json!([true, "begun\n", true]));
 }
@@ -553,27 +545,27 @@ async fn the_offer_is_a_portable_setting_and_a_call_from_the_ui_stays_out_of_con
     })
     .await;
     // A person runs a tool directly, outside any turn.
-    let runtime = session_runtime(rig.h.as_ref(), &rig.h.snapshot(&rig.id).unwrap()).unwrap();
-    let api: Api = rig.h.clone();
-    let direct = runtime
-        .tool(
-            api,
-            Scope::session(&rig.id),
-            ToolCall::new("read", json!({"path":"a.txt"})),
-        )
+    let direct = rig
+        .session
+        .call_tool("read", json!({"path":"a.txt"}))
         .await
         .unwrap();
-    assert_eq!(direct.text, "ui read this");
+    assert_eq!(direct.text(), "ui read this");
     rig.run("hello").await;
     let request = &rig.requests()[0];
-    assert_eq!(request.messages.len(), 1, "{:?}", request.messages);
-    assert!(!format!("{:?}", request.messages).contains("ui read this"));
+    assert_eq!(
+        array(&request["messages"]).len(),
+        1,
+        "{:?}",
+        array(&request["messages"])
+    );
+    assert!(!format!("{:?}", array(&request["messages"])).contains("ui read this"));
     // What another build would read: the standard key, not this build's own.
     let file = rig
         .root
         .path()
         .join("state/sessions")
-        .join(format!("{}.json", rig.id));
+        .join(format!("{}.json", rig.session.id()));
     let stored: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
     let setting = stored["entries"]
         .as_array()

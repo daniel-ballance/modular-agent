@@ -392,12 +392,7 @@ pub fn request(r: &ModelRequest, data: Option<&SessionData>) -> Value {
                     .and_then(|e| e.content.clone())
                     .and_then(|v| serde_json::from_value::<ToolResult>(v).ok())
                 {
-                    v["content"] = result
-                        .value
-                        .as_ref()
-                        .and_then(|v| v.get("_pluginWire"))
-                        .map(|v| v["content"].clone())
-                        .unwrap_or_else(|| json!([{"type":"text","text":result.text}]));
+                    v["content"] = self::result(&result)["content"].clone();
                     v["isError"] = json!(result.status != ToolStatus::Completed);
                 } else {
                     v["isError"] = json!(false);

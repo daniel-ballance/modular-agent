@@ -2,9 +2,14 @@
 //! edit, write, find and list. They follow Pi's built-in tools in inputs,
 //! limits and wording. Every operation goes through the session's working
 //! environment, so the same tools work against another environment.
-use agent_api::*;
+use anyhow::{Result, anyhow, bail, ensure};
 use base64::Engine;
-use std::{path::Path, sync::Arc, time::Duration};
+use modular_agent::{Code, Plugin, Tool, ToolEnvironment, ToolOutput, ToolStatus};
+use serde_json::{Value, json};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 pub mod text;
 use text::*;
@@ -16,57 +21,28 @@ const LIST_LIMIT: usize = 500;
 /// The largest image `read` attaches. Pi resizes larger ones; this build does not.
 pub const MAX_IMAGE_BYTES: usize = 4_718_592;
 
-/// `callers` limits who may start these tools; `None` allows every caller.
-/// Whether the model is offered them directly is the session's `model_tools`
-/// setting. The standard configuration offers only the code tool, which
-/// calls these.
-pub struct FileTools {
-    pub callers: Option<Vec<String>>,
-    /// Where exec keeps the full output of a call whose output was cut.
-    pub spill: std::path::PathBuf,
+pub struct Definition {
+    pub name: String,
+    pub description: String,
+    pub input: Value,
+    pub read_only: bool,
 }
-impl FileTools {
-    pub fn new(spill: std::path::PathBuf) -> Self {
-        Self {
-            callers: None,
-            spill,
-        }
-    }
-}
-impl Plugin for FileTools {
-    fn name(&self) -> &str {
-        "tools.files"
-    }
-    fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        r.provide::<dyn ToolSource>(
-            "tools.files",
-            Arc::new(Self {
-                callers: self.callers.clone(),
-                spill: self.spill.clone(),
-            }),
-        )
-    }
-}
-
 fn tool(
     name: &str,
     description: String,
     properties: Value,
     required: &[&str],
     read_only: bool,
-) -> ToolDefinition {
-    ToolDefinition {
+) -> Definition {
+    Definition {
         name: name.into(),
         description,
         input: json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
         read_only,
-        safe_to_repeat: read_only,
-        parallel: read_only,
-        hints: json!({}),
     }
 }
 
-pub fn definitions() -> Vec<ToolDefinition> {
+pub fn definitions() -> Vec<Definition> {
     let kb = MAX_BYTES / 1024;
     vec![
         tool(
@@ -179,11 +155,6 @@ fn clean_path(path: &str) -> String {
     }
     path.into()
 }
-fn unsupported(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<std::io::Error>()
-        .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported)
-}
 fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
@@ -212,39 +183,24 @@ fn image_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-struct Work {
-    api: Api,
-    scope: Scope,
-    cancel: CancellationToken,
-    project: std::path::PathBuf,
-    env: Arc<dyn WorkingEnvironment>,
-}
-impl Work {
+struct Work<'a>(ToolEnvironment<'a>);
+impl Work<'_> {
     /// A command the tool runs for itself where the environment has no native
     /// operation. Its output is not streamed as the call's own.
     async fn command(&self, command: &str) -> Result<String> {
-        let result = self
-            .env
-            .bash(
-                self.api.clone(),
-                self.scope.clone(),
-                self.project.clone(),
-                command,
-                self.cancel.clone(),
-            )
-            .await?;
+        let result = self.0.exec(command).await?;
         ensure!(
             result.status == ToolStatus::Completed,
             "{}",
-            result.text.trim()
+            result.output.trim()
         );
-        Ok(result.text)
+        Ok(result.output)
     }
     async fn read(&self, input: &Value) -> Result<(String, Option<Value>)> {
         let path = clean_path(string(input, "path")?);
         let offset = optional_number(input, "offset")?.map(|n| n as usize);
         let limit = optional_number(input, "limit")?.map(|n| n as usize);
-        let bytes = self.env.read_bytes(&self.project, &path).await?;
+        let bytes = self.0.read_bytes(&path).await?;
         if let Some(mime) = image_type(&bytes) {
             if bytes.len() > MAX_IMAGE_BYTES {
                 return Ok((
@@ -269,9 +225,7 @@ impl Work {
     async fn write(&self, input: &Value) -> Result<(String, Option<Value>)> {
         let path = clean_path(string(input, "path")?);
         let content = string(input, "content")?;
-        self.env
-            .write_bytes(&self.project, &path, content.as_bytes())
-            .await?;
+        self.0.write_bytes(&path, content.as_bytes()).await?;
         Ok((
             format!("Successfully wrote {} bytes to {path}", content.len()),
             None,
@@ -285,12 +239,10 @@ impl Work {
             .iter()
             .map(|edit| Ok((string(edit, "oldText")?, string(edit, "newText")?)))
             .collect::<Result<Vec<_>>>()?;
-        let bytes = self.env.read_bytes(&self.project, &path).await?;
+        let bytes = self.0.read_bytes(&path).await?;
         let original = String::from_utf8(bytes).map_err(|_| anyhow!("{path} is not UTF-8 text"))?;
         let changed = apply_edits(&original, &edits, &path)?;
-        self.env
-            .write_bytes(&self.project, &path, changed.as_bytes())
-            .await?;
+        self.0.write_bytes(&path, changed.as_bytes()).await?;
         Ok((
             format!("Successfully replaced {} block(s) in {path}.", edits.len()),
             None,
@@ -301,15 +253,15 @@ impl Work {
         let limit = optional_number(input, "limit")?
             .map(|n| (n as usize).max(1))
             .unwrap_or(LIST_LIMIT);
-        let mut names = match self.env.list_dir(&self.project, &path).await {
+        let mut names = match self.0.list(&path).await {
             Ok(names) => names,
-            Err(error) if unsupported(&error) => self
+            Err(error) if error.code() == Code::NotSupported => self
                 .command(&format!("ls -1Ap -- {}", shell_quote(&path)))
                 .await?
                 .lines()
                 .map(str::to_owned)
                 .collect(),
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         names.sort_by_key(|name| name.to_lowercase());
         if names.is_empty() {
@@ -331,9 +283,9 @@ impl Work {
         let limit = optional_number(input, "limit")?
             .map(|n| (n as usize).max(1))
             .unwrap_or(FIND_LIMIT);
-        let files = match self.env.walk_files(&self.project, &path).await {
+        let files = match self.0.walk_files(&path).await {
             Ok(files) => files,
-            Err(error) if unsupported(&error) => self
+            Err(error) if error.code() == Code::NotSupported => self
                 .command(&format!(
                     "cd -- {} && (git ls-files -co --exclude-standard 2>/dev/null || find . -type f -not -path './.git/*' | sed 's|^\\./||')",
                     shell_quote(&path)
@@ -342,7 +294,7 @@ impl Work {
                 .lines()
                 .map(str::to_owned)
                 .collect(),
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         let mut matches = glob_filter(files, pattern)?;
         matches.sort();
@@ -359,27 +311,16 @@ impl Work {
         }
         Ok((bounded_listing(matches, notices), None))
     }
-    async fn exec(&self, input: &Value, spill: &Path) -> Result<ToolResult> {
+    async fn exec(&self, input: &Value, spill: &Path) -> Result<ToolOutput> {
         let command = string(input, "command")?;
         let timeout = optional_number(input, "timeout")?.filter(|n| *n > 0.0);
         let started = std::time::Instant::now();
-        let mut result = self
-            .env
-            .exec(
-                self.api.clone(),
-                self.scope.clone(),
-                self.project.clone(),
-                command,
-                timeout.map(Duration::from_secs_f64),
-                self.cancel.clone(),
-            )
-            .await?;
-        let timed_out = result
-            .value
-            .as_ref()
-            .is_some_and(|value| value["timed_out"] == true);
-        let exit_code = result.value.as_ref().and_then(|v| v["exit_code"].as_i64());
-        let cut = truncate_tail(&result.text, MAX_LINES, MAX_BYTES);
+        let timeout_duration = timeout.map(Duration::try_from_secs_f64).transpose()?;
+        let result = self.0.exec_with(command, timeout_duration).await?;
+        let timed_out = result.timed_out;
+        let exit_code = result.exit_code;
+        let mut status = result.status;
+        let cut = truncate_tail(&result.output, MAX_LINES, MAX_BYTES);
         let mut text = cut.content.clone();
         let mut value = json!({
             "output": cut.content,
@@ -388,9 +329,9 @@ impl Work {
             "wall_time_seconds": (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0,
         });
         if cut.truncated {
-            let file = spill.join(format!("exec-{}.log", id()));
+            let file = spill.join(format!("exec-{}.log", uuid::Uuid::new_v4()));
             let saved = std::fs::create_dir_all(spill)
-                .and_then(|()| std::fs::write(&file, &result.text))
+                .and_then(|()| std::fs::write(&file, &result.output))
                 .is_ok();
             let first = cut.total_lines - cut.output_lines + 1;
             let mut note = format!(
@@ -411,117 +352,85 @@ impl Work {
             text = "(no output)".into();
         }
         if timed_out {
-            result.status = ToolStatus::Failed;
+            status = ToolStatus::Failed;
             text.push_str(&format!(
                 "\n\nCommand timed out after {} seconds",
                 timeout.unwrap_or_default()
             ));
             value["timed_out"] = json!(true);
-        } else if result.status == ToolStatus::Failed {
+        } else if status == ToolStatus::Failed {
             match exit_code {
                 Some(code) => text.push_str(&format!("\n\nCommand exited with code {code}")),
                 None => text.push_str("\n\nCommand was ended by a signal"),
             }
-        } else if result.status == ToolStatus::Cancelled {
+        } else if status == ToolStatus::Cancelled {
             text.push_str("\n\nCommand aborted");
         }
-        result.text = text;
-        result.value = Some(value);
-        Ok(result)
+        Ok(ToolOutput {
+            status,
+            text,
+            value: Some(value),
+            content: None,
+        })
     }
 }
 
-#[async_trait]
-impl ToolSource for FileTools {
-    fn tools(&self, _: &SessionData) -> Vec<ToolDefinition> {
-        match &self.callers {
-            Some(callers) => {
-                let callers: Vec<&str> = callers.iter().map(String::as_str).collect();
-                definitions()
-                    .into_iter()
-                    .map(|d| d.for_callers(&callers))
-                    .collect()
-            }
-            None => definitions(),
+/// Register the six file and command tools.
+pub fn files(spill: impl Into<PathBuf>) -> Plugin {
+    let spill = spill.into();
+    let mut plugin = Plugin::new("files");
+    for d in definitions() {
+        let name = d.name.clone();
+        let target = spill.clone();
+        let mut tool = Tool::new(d.name, d.description).input_schema(d.input);
+        if d.read_only {
+            tool = tool.read_only().safe_to_repeat().parallel();
         }
-    }
-    async fn run(
-        &self,
-        api: Api,
-        scope: Scope,
-        call: ToolCall,
-        cancel: CancellationToken,
-    ) -> ToolResult {
-        let result: Result<ToolResult> = async {
-            if cancel.is_cancelled() {
-                return Ok(ToolResult::new(&call, ToolStatus::Cancelled, "cancelled"));
-            }
-            let definition = definitions()
-                .into_iter()
-                .find(|d| d.name == call.name)
-                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
-            let object = call
-                .input
-                .as_object()
-                .ok_or_else(|| anyhow!("tool input must be an object"))?;
-            let properties = definition.input["properties"].as_object().unwrap();
-            if let Some(extra) = object.keys().find(|k| !properties.contains_key(*k)) {
-                bail!("unexpected field {extra}");
-            }
-            for required in definition.input["required"].as_array().unwrap() {
-                ensure!(
-                    object.contains_key(required.as_str().unwrap()),
-                    "missing field {required}"
-                );
-            }
-            let data = api.snapshot(&scope.session)?;
-            let env: Arc<dyn WorkingEnvironment> = capability(api.as_ref(), "environment")?;
-            let env = env
-                .scoped(api.clone(), scope.clone(), cancel.clone())
-                .unwrap_or(env);
-            let work = Work {
-                api,
-                scope,
-                cancel,
-                project: data.project,
-                env,
-            };
-            let (text, value) = match call.name.as_str() {
-                "read" => work.read(&call.input).await?,
-                "write" => work.write(&call.input).await?,
-                "edit" => work.edit(&call.input).await?,
-                "find" => work.find(&call.input).await?,
-                "list" => work.list(&call.input).await?,
-                "exec" => {
-                    let mut result = work.exec(&call.input, &self.spill).await?;
-                    result.call = call.id.clone();
-                    return Ok(result);
+        plugin = plugin.tool(tool.run(move |input: Value, cx| {
+            let name = name.clone();
+            let target = target.clone();
+            async move {
+                let work = Work(cx.environment());
+                let result: Result<ToolOutput> = async {
+                    let (text, parts) = match name.as_str() {
+                        "read" => work.read(&input).await?,
+                        "write" => work.write(&input).await?,
+                        "edit" => work.edit(&input).await?,
+                        "find" => work.find(&input).await?,
+                        "list" => work.list(&input).await?,
+                        "exec" => return work.exec(&input, &target).await,
+                        _ => unreachable!(),
+                    };
+                    let output = ToolOutput::from(text);
+                    Ok(match parts.and_then(|v| v.as_array().cloned()) {
+                        Some(parts) => output.with_content(parts),
+                        None => output,
+                    })
                 }
-                _ => bail!("unknown tool {}", call.name),
-            };
-            let result = ToolResult::new(&call, ToolStatus::Completed, text);
-            // `value` here is content parts, when a tool returns more than text.
-            Ok(match value.and_then(|v| v.as_array().cloned()) {
-                Some(content) => result.with_content(content),
-                None => result,
-            })
-        }
-        .await;
-        result.unwrap_or_else(|error| {
-            let status = if error.downcast_ref::<LostPart>().is_some() {
-                ToolStatus::Unknown
-            } else {
-                ToolStatus::Failed
-            };
-            let text = if is_file_not_found(&error) {
-                format!(
-                    "File not found: {}",
-                    call.input["path"].as_str().unwrap_or(".")
-                )
-            } else {
-                error.to_string()
-            };
-            ToolResult::new(&call, status, text)
-        })
+                .await;
+                Ok(result.unwrap_or_else(|error| {
+                    let sdk = error.downcast_ref::<modular_agent::Error>();
+                    let status = if sdk.is_some_and(|e| e.code() == Code::Lost) {
+                        ToolStatus::OutcomeUnknown
+                    } else {
+                        ToolStatus::Failed
+                    };
+                    let text = match sdk {
+                        Some(e) if e.code() == Code::NotFound => {
+                            format!("File not found: {}", input["path"].as_str().unwrap_or("."))
+                        }
+                        Some(e) => e.message().into(),
+                        None => error.to_string(),
+                    };
+                    ToolOutput {
+                        status,
+                        text,
+                        value: None,
+                        content: None,
+                    }
+                }))
+            }
+        }));
     }
+    plugin
 }

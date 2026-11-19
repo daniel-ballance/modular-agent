@@ -20,6 +20,9 @@ tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 
 environment-local = { path = "../environment-local" }
+config-files = { path = "../config-files" }
+provider-fake = { path = "../provider-fake" }
+tools-builtin = { path = "../tools-builtin" }
 feature-approval = { path = "../feature-approval" }
 feature-commands = { path = "../feature-commands" }
 feature-context = { path = "../feature-context" }

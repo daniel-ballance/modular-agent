@@ -1,12 +1,8 @@
-//! The system prompt, built as Pi builds its own: a preamble and rules, then
-//! the instruction files, the skills and the working directory. The code
-//! tool adds its function list between the two halves.
+//! System prompt for the standard configuration.
 use crate::skills::{self, SkillsPlugin};
-use agent_api::*;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use anyhow::{Context, Result};
+use modular_agent::{Order, Plugin};
+use std::path::{Path, PathBuf};
 
 const PREAMBLE: &str = "You are a coding assistant running inside Modular Agent, a coding agent harness. Help users inspect files, run commands, and modify code.";
 const RULES: &str = "<rules>
@@ -26,39 +22,27 @@ pub struct PromptPlugin {
     pub global: PathBuf,
 }
 
-fn optional(error: &anyhow::Error) -> bool {
-    is_file_not_found(error)
-        || error.downcast_ref::<std::io::Error>().is_some_and(|e| {
-            matches!(
-                e.kind(),
-                std::io::ErrorKind::Unsupported
-                    | std::io::ErrorKind::NotADirectory
-                    | std::io::ErrorKind::PermissionDenied
-            )
-        })
-}
-
-/// Instruction files from the outermost folder down to the project, read
-/// through the session's working environment.
-async fn project_files(
-    env: &Arc<dyn WorkingEnvironment>,
-    project: &Path,
-) -> Result<Vec<(String, String)>> {
-    let mut folders: Vec<&Path> = project.ancestors().collect();
-    folders.reverse();
+fn project_files(project: &Path) -> Result<Vec<(String, String)>> {
     let mut files = vec![];
-    for folder in folders {
+    for folder in project.ancestors().collect::<Vec<_>>().into_iter().rev() {
         for name in NAMES {
-            let path = folder.join(name).to_string_lossy().into_owned();
-            match env.read(project, &path).await {
+            let path = folder.join(name);
+            match std::fs::read_to_string(&path) {
                 Ok(text) => {
                     if !text.trim().is_empty() {
-                        files.push((path, text));
+                        files.push((path.to_string_lossy().into_owned(), text));
                     }
                     break;
                 }
-                Err(error) if optional(&error) => (),
-                Err(error) => return Err(error.context(format!("reading {path}"))),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::NotADirectory
+                            | std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::Unsupported
+                    ) => {}
+                Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
             }
         }
     }
@@ -77,63 +61,36 @@ fn render(files: &[(String, String)]) -> String {
     out
 }
 
-impl Plugin for PromptPlugin {
-    fn name(&self) -> &str {
-        "system.prompt"
-    }
-    fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        r.on(
-            "before.turn",
-            Order::First,
-            handler(|_, _, _| {
-                Box::pin(async move {
-                    Ok(answer(
-                        json!({"system": format!("{PREAMBLE}\n\n{RULES}"), "sources": []}),
-                    ))
-                })
-            }),
-        );
-        let global = self.global.clone();
-        r.on(
-            "before.turn",
-            Order::Last,
-            handler(move |api, scope, _| {
-                let global = global.clone();
-                Box::pin(async move {
-                    let session = api.snapshot(&scope.session)?;
-                    let env: Arc<dyn WorkingEnvironment> = capability(api.as_ref(), "environment")?;
-                    let env = env
-                        .scoped(
-                            api.clone(),
-                            scope.clone(),
-                            api.cancellation(&scope.session)?,
-                        )
-                        .unwrap_or(env);
-                    let mut files = vec![];
-                    // The person's own file is configuration, read from this machine.
-                    if let Ok(text) = std::fs::read_to_string(&global)
-                        && !text.trim().is_empty()
-                    {
-                        files.push((global.to_string_lossy().into_owned(), text));
-                    }
-                    files.extend(project_files(&env, &session.project).await?);
-                    let mut sections = vec![];
-                    if !files.is_empty() {
-                        sections.push(render(&files));
-                    }
-                    if let Ok(plugin) = capability::<SkillsPlugin>(api.as_ref(), "skills") {
-                        let listing = skills::prompt(&plugin.for_project(&session.project));
-                        if !listing.is_empty() {
-                            sections.push(format!("<skills>\n{listing}\n</skills>"));
-                        }
-                    }
-                    sections.push(format!("<cwd>\n{}\n</cwd>", session.project.display()));
-                    Ok(answer(
-                        json!({"system": sections.join("\n\n"), "sources": []}),
-                    ))
-                })
-            }),
-        );
-        Ok(())
+impl PromptPlugin {
+    pub fn plugin(self, skills: SkillsPlugin) -> Plugin {
+        Plugin::new("standard.prompt").on_turn_system(Order::Last, move |cx| {
+            let (global, skills) = (self.global.clone(), skills.clone());
+            async move {
+                let mut sections = vec![format!("{PREAMBLE}\n\n{RULES}")];
+                let mut files = vec![];
+                if let Ok(text) = std::fs::read_to_string(&global)
+                    && !text.trim().is_empty()
+                {
+                    files.push((global.to_string_lossy().into_owned(), text));
+                }
+                files.extend(project_files(&cx.project)?);
+                if !files.is_empty() {
+                    sections.push(render(&files));
+                }
+                let listing = skills::prompt(&skills.for_project(&cx.project));
+                if !listing.is_empty() {
+                    sections.push(format!("<skills>\n{listing}\n</skills>"));
+                }
+                sections.push(tools_code::catalog::prompt(&tools_code::functions(
+                    cx.tools,
+                )?));
+                sections.push(format!(
+                    "<cwd>\n{}\n</cwd>\n\n<date>\n{}\n</date>",
+                    cx.project.display(),
+                    jiff::Zoned::now().date()
+                ));
+                Ok(sections.join("\n\n"))
+            }
+        })
     }
 }

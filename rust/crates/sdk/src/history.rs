@@ -2,6 +2,7 @@
 use crate::{Code, Error, Result, core::MemoryHistory};
 use agent_api as base;
 pub use history_http::ServeHistoryOptions;
+use serde_json::Value;
 use std::{path::Path, sync::Arc};
 
 /// Serve a dedicated history store on loopback.
@@ -39,6 +40,47 @@ pub struct History(
     pub(crate) bool,
     pub(crate) &'static str,
 );
+
+/// Saved session metadata, available without acquiring its writer lease.
+#[derive(Clone, Debug)]
+pub struct SessionInfo {
+    pub id: String,
+    pub project: std::path::PathBuf,
+    pub settings: Value,
+    pub last_active: u64,
+}
+
+impl From<base::SessionData> for SessionInfo {
+    fn from(data: base::SessionData) -> Self {
+        Self {
+            id: data.id,
+            project: data.project,
+            settings: data.settings,
+            last_active: data.entries.last().map_or(0, |e| e.at),
+        }
+    }
+}
+
+impl History {
+    pub fn sessions(&self, project: Option<&Path>) -> Result<Vec<SessionInfo>> {
+        Ok(self
+            .0
+            .list(project)?
+            .into_iter()
+            .map(SessionInfo::from)
+            .collect())
+    }
+
+    pub fn session(&self, id: &str) -> Result<SessionInfo> {
+        Ok(self.0.load(id)?.into())
+    }
+}
+
+/// Opt into the history service configured by the binding's environment variables.
+pub fn http_history_from_env() -> Result<Option<History>> {
+    Ok(history_http::HttpHistory::from_env()?
+        .map(|store| History(std::sync::Arc::new(store), true, "http")))
+}
 
 pub fn memory_history() -> History {
     History(Arc::new(MemoryHistory::default()), false, "memory")

@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-agent-api.workspace = true
+modular-agent = { path = "../sdk" }
+uuid.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 serde.workspace = true
@@ -14,4 +15,3 @@ fs2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-agent-harness.workspace = true

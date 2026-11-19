@@ -1,8 +1,9 @@
 //! What the terminal shows. The answer goes to stdout. What the agent is
 //! doing (the code it runs, the calls that code makes, command output) goes
 //! to stderr, so `ma -p ... > file` captures only the answer.
-use agent_api::*;
-use interface_terminal::Mode;
+use crate::terminal::Mode;
+use modular_agent::Event;
+use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     io::{self, IsTerminal, Write},
@@ -64,24 +65,64 @@ fn one_line(value: &Value) -> String {
         None => text,
     }
 }
-impl EventSink for Sink {
-    fn send(&self, event: Event) {
+impl Sink {
+    pub fn send(&self, event: Event) {
+        let session = event.session_id().to_owned();
+        let (kind, content) = match event {
+            Event::Text { delta, .. } => ("model.delta".into(), json!(delta)),
+            Event::ToolCall {
+                name,
+                input,
+                call_id,
+                ..
+            } => (
+                "tool.requested".into(),
+                json!({"name":name,"input":input,"id":call_id}),
+            ),
+            Event::ToolOutput { text, .. } => ("tool.progress".into(), json!(text)),
+            Event::ToolResult {
+                call_id,
+                status,
+                text,
+                ..
+            } => (
+                "tool.ended".into(),
+                json!({"call":call_id,"status":status.as_str(),"text":text}),
+            ),
+            Event::QuestionOpened { question, .. } => (
+                "request.opened".into(),
+                json!({"id":question.id,"text":question.question,"options":question.options}),
+            ),
+            Event::TurnEnded { outcome, text, .. } => {
+                ("turn.result".into(), json!({"outcome":outcome,"text":text}))
+            }
+            Event::Entry { entry, .. } => ("history.entry".into(), entry),
+            Event::Other { kind, data, .. } => (kind, data),
+            _ => return,
+        };
+        self.show(&session, &kind, content);
+    }
+
+    pub fn show(&self, session: &str, kind: &str, content: Value) {
         let mut state = self.state.lock().unwrap();
         if self.mode == Mode::Json {
-            println!("{}", serde_json::to_string(&event).unwrap());
+            println!(
+                "{}",
+                json!({"kind":kind,"scope":{"session":session},"content":content})
+            );
             return;
         }
-        match event.kind.as_str() {
+        match kind {
             "session.open" => {
-                eprintln!("{}", self.dim(&format!("Session {}", event.scope.session)))
+                eprintln!("{}", self.dim(&format!("Session {}", session)))
             }
             "tool.started" => {
-                let name = event.content["name"].as_str().unwrap_or("");
-                let input = &event.content["input"];
-                if event.content["started_by"] == "tool" {
+                let name = content["name"].as_str().unwrap_or("");
+                let input = &content["input"];
+                if content["started_by"] == "tool" {
                     state
                         .nested
-                        .insert(event.content["id"].as_str().unwrap_or("").into());
+                        .insert(content["id"].as_str().unwrap_or("").into());
                     if self.verbose {
                         self.note(&mut state, &format!("  -> {name}({})", one_line(input)));
                     }
@@ -102,15 +143,15 @@ impl EventSink for Sink {
                     println!();
                     state.midline = false;
                 }
-                eprint!("{}", self.dim(event.content.as_str().unwrap_or("")));
+                eprint!("{}", self.dim(content.as_str().unwrap_or("")));
                 let _ = io::stderr().flush();
             }
             "tool.ended" => {
-                let call = event.content["call"].as_str().unwrap_or("");
+                let call = content["call"].as_str().unwrap_or("");
                 let nested = state.nested.remove(call);
-                let status = event.content["status"].as_str().unwrap_or("");
+                let status = content["status"].as_str().unwrap_or("");
                 if status != "completed" {
-                    let text = event.content["text"].as_str().unwrap_or("");
+                    let text = content["text"].as_str().unwrap_or("");
                     let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                     // A failed call inside a run is the code's to handle; say so only when asked.
                     if !nested || self.verbose {
@@ -120,7 +161,7 @@ impl EventSink for Sink {
                 }
             }
             "model.delta" if self.mode == Mode::Line => {
-                let text = event.content.as_str().unwrap_or("");
+                let text = content.as_str().unwrap_or("");
                 print!("{text}");
                 let _ = io::stdout().flush();
                 if !text.is_empty() {
@@ -128,33 +169,30 @@ impl EventSink for Sink {
                 }
             }
             "turn.result" => {
-                if self.mode == Mode::Print {
-                    println!("{}", event.content["text"].as_str().unwrap_or(""));
-                } else if state.midline {
+                if state.midline {
                     println!();
                 }
                 state.midline = false;
-                if let Some(error) = event.content["error"].as_str() {
+                if let Some(error) = content["error"].as_str() {
                     eprintln!("{error}");
                 }
             }
             "request.opened" => eprintln!(
                 "Question {}: {} {}\nUse /answer REQUEST_ID VALUE",
-                event.content["id"].as_str().unwrap_or(""),
-                event.content["text"].as_str().unwrap_or(""),
-                event.content["options"]
+                content["id"].as_str().unwrap_or(""),
+                content["text"].as_str().unwrap_or(""),
+                content["options"]
             ),
-            "command.result" => match &event.content {
+            "command.result" => match &content {
                 Value::String(text) => println!("{text}"),
                 other => println!(
                     "{}",
                     serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string())
                 ),
             },
-            "input.returned" => eprintln!(
-                "Returned input: {}",
-                event.content["text"].as_str().unwrap_or("")
-            ),
+            "input.returned" => {
+                eprintln!("Returned input: {}", content["text"].as_str().unwrap_or(""))
+            }
             _ => (),
         }
     }

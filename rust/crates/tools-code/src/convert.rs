@@ -1,6 +1,7 @@
 //! Values crossing the sandbox boundary, as JSON on the agent's side.
-use agent_api::*;
+use modular_agent::ToolStatus;
 use monty_types::{MontyObject, ObjectRef};
+use serde_json::{Value, json};
 
 pub fn to_python(value: &Value) -> MontyObject {
     match value {
@@ -62,7 +63,7 @@ pub fn status_word(status: &ToolStatus) -> &'static str {
         ToolStatus::Refused => "was refused",
         ToolStatus::Cancelled => "was cancelled",
         ToolStatus::NotStarted => "did not start",
-        ToolStatus::Unknown => "was interrupted, outcome unknown",
+        ToolStatus::OutcomeUnknown => "was interrupted, outcome unknown",
         _ => "failed",
     }
 }

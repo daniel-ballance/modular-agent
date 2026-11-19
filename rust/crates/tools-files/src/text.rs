@@ -1,6 +1,6 @@
 //! Text handling shared by the tools: line windows, output limits and edits.
 use crate::{MAX_BYTES, MAX_LINES};
-use agent_api::*;
+use anyhow::{Result, anyhow, bail, ensure};
 
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {

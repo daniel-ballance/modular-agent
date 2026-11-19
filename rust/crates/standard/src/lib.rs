@@ -11,16 +11,19 @@
 pub mod acp;
 pub mod mcp;
 pub mod prompt;
+pub mod script;
 pub mod sink;
 pub mod skills;
+pub mod terminal;
 
-use agent_api::*;
-use agent_harness::Harness;
-use provider_responses::{ResponsesPlugin, Vendor};
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
+use anyhow::{Result, anyhow};
+use modular_agent::{
+    Agent, AgentBuilder, Durability, FilesConfiguration, History, Plugin, ProcessPlugin,
 };
+use modular_agent_mcp::Mcp;
+use provider_responses::{ResponsesPlugin, Vendor};
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 pub const PROVIDERS: [&str; 3] = ["openai-codex", "xai", "claude"];
 
@@ -35,7 +38,8 @@ pub struct Standard {
     /// when a Claude model is wanted or the catalog is being listed.
     pub claude: bool,
     /// A scripted Provider in place of the real ones, for tests.
-    pub scripted: Option<Arc<dyn Plugin>>,
+    pub scripted: Option<script::Script>,
+    pub conformance: bool,
     /// The code tool's limits.
     pub code: tools_code::CodeTool,
 }
@@ -53,10 +57,10 @@ impl Standard {
         };
         // The ACP binding's directory holds both, so a host can isolate an agent.
         let (config, state) = match std::env::var_os("MODULAR_AGENT_DATA_DIR") {
-            Some(base) => (PathBuf::from(&base), PathBuf::from(base)),
+            Some(base) => (PathBuf::from(&base), PathBuf::from(base).join("state")),
             None => (
                 dir("XDG_CONFIG_HOME", ".config", "modular-agent"),
-                dir("XDG_STATE_HOME", ".local/state", "modular-agent"),
+                dir("XDG_STATE_HOME", ".local/state", "modular-agent").join("rust"),
             ),
         };
         Ok(Self {
@@ -64,7 +68,16 @@ impl Standard {
             state,
             durable: true,
             claude: false,
-            scripted: None,
+            scripted: std::env::var_os("MODULAR_AGENT_SCRIPT")
+                .map(|file| -> Result<_> {
+                    let responses = serde_json::from_slice(&std::fs::read(file)?)?;
+                    Ok(script::Script::new(
+                        responses,
+                        std::env::var_os("MODULAR_AGENT_SCRIPT_LOG").map(PathBuf::from),
+                    ))
+                })
+                .transpose()?,
+            conformance: std::env::var("MODULAR_AGENT_CONFORMANCE").as_deref() == Ok("1"),
             code: tools_code::CodeTool::default(),
         })
     }
@@ -74,8 +87,8 @@ impl Standard {
     pub fn auth(&self) -> credentials_auth::AuthFile {
         credentials_auth::AuthFile::new(self.config.join("auth.json"), &PROVIDERS)
     }
-    pub fn configuration(&self) -> config_files::FilesConfiguration {
-        config_files::FilesConfiguration {
+    pub fn configuration(&self) -> FilesConfiguration {
+        FilesConfiguration {
             global: self.settings_file(),
             defaults: Some(defaults()),
         }
@@ -98,28 +111,14 @@ impl Standard {
             Err(e) => Err(e.into()),
         }
     }
-    pub fn history(&self) -> Result<Arc<dyn Plugin>> {
-        Ok(match history_http::HttpHistory::from_env()? {
-            Some(http) => Arc::new(history_http::HttpPlugin(http)),
-            None => Arc::new(history_fs::HistoryPlugin {
-                root: self.state.join("sessions"),
-            }),
+    pub fn history(&self) -> Result<History> {
+        Ok(match modular_agent::http_history_from_env()? {
+            Some(history) => history,
+            None => modular_agent::file_history(self.state.join("sessions"))?,
         })
     }
-    pub fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
-        match history_http::HttpHistory::from_env()? {
-            Some(http) => http.list(project),
-            None => history_fs::FileHistory::new(&self.state.join("sessions"))?.list(project),
-        }
-    }
-    pub fn load(&self, session: &str) -> Result<SessionData> {
-        match history_http::HttpHistory::from_env()? {
-            Some(http) => http.load(session),
-            None => history_fs::FileHistory::new(&self.state.join("sessions"))?.load(session),
-        }
-    }
     /// How to start the Claude sidecar, if it is installed.
-    pub fn claude_launch(&self) -> Option<plugin_stdio::Launch> {
+    pub fn claude_launch(&self) -> Option<ProcessPlugin> {
         let script = std::env::var_os("MODULAR_AGENT_CLAUDE_SIDECAR")
             .map(PathBuf::from)
             .into_iter()
@@ -143,7 +142,7 @@ impl Standard {
             .into_iter()
             .filter_map(|name| Some((name.to_owned(), std::env::var(name).ok()?)))
             .collect();
-        Some(plugin_stdio::Launch {
+        Some(ProcessPlugin {
             command: vec!["node".into(), script.to_string_lossy().into_owned()],
             env,
             config: Value::Null,
@@ -162,123 +161,79 @@ pub fn defaults() -> Value {
     })
 }
 
-/// One composition serves one project, with that project's trust.
-pub async fn compose(
+/// One SDK composition serves one project, with that project's trust.
+pub fn builder(
     standard: &Standard,
-    interface: Arc<dyn Plugin>,
     project: &Path,
-) -> Result<Arc<Harness>> {
+    mcp: &Mcp,
+    extra: Vec<Plugin>,
+) -> Result<AgentBuilder> {
     let project = project.canonicalize()?;
-    let configuration = standard.configuration();
-    let trusted = configuration.trusted(&project)?;
-    let mcp = Arc::new(tools_mcp::Mcp::default());
-    let overrides = standard.model_overrides()?;
-    let runtime: Arc<dyn Plugin> = if standard.durable {
-        Arc::new(runtime_durable::DurablePlugin)
-    } else {
-        Arc::new(runtime_transient::TransientPlugin)
+    let mut configuration = standard.configuration();
+    if standard.conformance {
+        configuration.defaults.as_mut().unwrap()["model_tools"] = Value::Null;
+    }
+    let mcp_config = mcp::McpConfig {
+        global: standard.config.join("mcp.json"),
+        project_trusted: configuration.trusted(&project)?,
     };
-    let mut plugins: Vec<Arc<dyn Plugin>> = vec![
-        Arc::new(configuration),
-        standard.history()?,
-        Arc::new(standard.auth()),
-        Arc::new(environment_local::LocalPlugin {
-            state: standard.state.join("commands"),
-        }),
-        Arc::new(tools_files::FileTools::new(standard.state.join("output"))),
-        Arc::new(tools_mcp::McpPlugin {
-            servers: vec![],
-            service: mcp.clone(),
-        }),
-        Arc::new(mcp::McpConfig {
-            service: mcp,
-            global: standard.config.join("mcp.json"),
-            project_trusted: trusted,
-        }),
-        Arc::new(standard.code.clone()),
-        runtime,
-        Arc::new(feature_jobs::JobsPlugin),
-        Arc::new(feature_questions::QuestionsPlugin),
-    ];
-    match &standard.scripted {
-        Some(provider) => plugins.push(provider.clone()),
-        None => {
-            for vendor in [Vendor::Codex, Vendor::Xai] {
-                plugins.push(Arc::new(ResponsesPlugin::new(
-                    vendor,
-                    provider_responses::catalog(vendor, &overrides)?,
-                )));
+    let (servers, problems) = mcp_config.servers(&project);
+    for problem in problems {
+        eprintln!("MCP: {problem}");
+    }
+    let skills = standard.skills();
+    let mut b = Agent::builder()
+        .project(&project)
+        .data_dir(&standard.state)
+        .durability(if standard.durable {
+            Durability::Durable
+        } else {
+            Durability::Kept
+        })
+        .configuration(configuration)
+        .credentials(standard.auth())
+        .tenants(std::env::var("MODULAR_AGENT_TENANTS").ok())
+        .history(standard.history()?)
+        .default_prompt(false)
+        .job_reports_start_turns(true)
+        .plugin_host(true)
+        .plugin(mcp.plugin(servers))
+        .plugin(standard.code.plugin())
+        .plugin(skills.clone().plugin(project))
+        .plugin(
+            prompt::PromptPlugin {
+                global: standard.config.join("AGENTS.md"),
             }
-        }
-    }
-    plugins.extend([
-        Arc::new(feature_model::ModelPlugin) as Arc<dyn Plugin>,
-        // Skills see input before the command handler does.
-        Arc::new(standard.skills()),
-        Arc::new(prompt::PromptPlugin {
-            global: standard.config.join("AGENTS.md"),
-        }),
-        Arc::new(feature_context::ContextPlugin),
-        Arc::new(feature_commands::CommandsPlugin),
-        interface,
-        Arc::new(ProjectComposition(project.clone())),
-    ]);
-    let harness = Harness::for_project(project.clone());
-    harness.configure_tenants(std::env::var("MODULAR_AGENT_TENANTS").ok().as_deref())?;
-    let loaded: Result<()> = async {
-        for plugin in plugins {
-            harness.load(plugin).await?;
-        }
-        if standard.claude && standard.scripted.is_none() {
-            let launch = standard.claude_launch().ok_or_else(|| {
-                anyhow!("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR")
-            })?;
-            plugin_stdio::load(&harness, launch, &project, &standard.state.join("plugins/claude"), 0)
-                .await
-                .map_err(|e| anyhow!("the Claude sidecar did not start: {e:#}"))?;
-        }
-        Ok(())
-    }
-    .await;
-    if let Err(error) = loaded {
-        let _ = harness.shutdown().await;
-        return Err(error);
-    }
-    Ok(harness)
-}
-
-struct ProjectComposition(PathBuf);
-impl Plugin for ProjectComposition {
-    fn name(&self) -> &str {
-        "composition.project"
-    }
-    fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        let project = self.0.clone();
-        r.on(
-            "session.prepare",
-            Order::First,
-            handler(move |api, scope, _| {
-                let project = project.clone();
-                Box::pin(async move {
-                    ensure!(
-                        api.snapshot(&scope.session)?.project == project,
-                        "this composition belongs to a different project"
-                    );
-                    Ok(HookResult::default())
-                })
-            }),
+            .plugin(skills),
         );
-        Ok(())
+    if !standard.conformance || standard.scripted.is_some() {
+        b = b.plugin(modular_agent_files::files(standard.state.join("output")));
     }
-}
-
-/// Every model the composition offers, as `provider/id`.
-pub fn models(api: &dyn AgentApi) -> Result<Vec<ModelInfo>> {
-    let mut models = vec![];
-    for key in api.capability_names("provider.") {
-        models.extend(capability::<dyn Provider>(api, &key)?.catalog());
+    if let Some(scripted) = &standard.scripted {
+        b = b
+            .provider(scripted.provider())
+            .model(modular_agent::testing::SCRIPTED_MODEL);
+    } else if standard.conformance {
+        b = modular_agent::testing::acp_conformance(b);
+    } else {
+        let overrides = standard.model_overrides()?;
+        for vendor in [Vendor::Codex, Vendor::Xai] {
+            b = b.provider(ResponsesPlugin::new(
+                vendor,
+                provider_responses::catalog(vendor, &overrides)?,
+                standard.auth(),
+            )?);
+        }
+        if standard.claude {
+            b = b.process_plugin(standard.claude_launch().ok_or_else(|| {
+                anyhow!("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR")
+            })?);
+        }
     }
-    Ok(models)
+    for plugin in extra {
+        b = b.plugin(plugin);
+    }
+    Ok(b)
 }
 
 /// The model to start with when settings name none: the first Provider that
@@ -291,6 +246,18 @@ pub fn default_model(standard: &Standard) -> Option<&'static str> {
     } else if signed_in("xai") {
         Some("xai/grok-4.7")
     } else {
-        None
+        if standard.claude_launch().is_some() && claude_signed_in() {
+            Some("claude/claude-sonnet-5-5")
+        } else {
+            None
+        }
     }
+}
+
+pub fn claude_signed_in() -> bool {
+    std::process::Command::new("claude")
+        .args(["auth", "status"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|output| output.status.success())
 }

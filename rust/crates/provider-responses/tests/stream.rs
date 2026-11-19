@@ -1,8 +1,9 @@
 //! The Providers against a loopback fixture: what is sent, and what a
 //! streamed answer becomes. No network and no real sign-in.
-use agent_api::*;
-use agent_harness::Harness;
+use credentials_auth::AuthFile;
+use modular_agent::{Agent, Outcome, Plugin, Session};
 use provider_responses::{ResponsesPlugin, Vendor, catalog};
+use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -66,30 +67,41 @@ fn sse(events: &[Value]) -> String {
         .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
         .collect()
 }
-async fn bound(vendor: Vendor, model: &str, endpoint: &str) -> (Api, Arc<dyn ModelAccess>) {
-    let harness = Harness::new();
-    let plugin = ResponsesPlugin::new(vendor, catalog(vendor, &Value::Null).unwrap())
-        .with_test_endpoint(endpoint)
-        .unwrap();
-    let key = plugin.name().to_owned();
-    harness.load(Arc::new(plugin)).await.unwrap();
-    let api: Api = harness;
-    let provider: Arc<dyn Provider> = capability(api.as_ref(), &key).unwrap();
-    assert!(provider.bind("other/model").is_err());
-    let model = provider.bind(model).unwrap();
-    (api, model)
-}
-fn ask() -> ModelRequest {
-    ModelRequest {
-        session: "s1".into(),
-        system: "Be brief.".into(),
-        messages: vec![Message::text("user", "hi")],
-        thinking: "low".into(),
-        output_limit: 1000,
-        ..ModelRequest::default()
-    }
-}
 
+async fn agent(
+    vendor: Vendor,
+    model: &str,
+    endpoint: &str,
+    plugins: Vec<Plugin>,
+) -> (Agent, Session) {
+    let provider = ResponsesPlugin::new(
+        vendor,
+        catalog(vendor, &Value::Null).unwrap(),
+        AuthFile::new("unused-auth.json".into(), &[]),
+    )
+    .unwrap()
+    .with_test_endpoint(endpoint)
+    .unwrap();
+    let mut builder = Agent::builder()
+        .provider(provider)
+        .model(model)
+        .default_prompt(false)
+        .setting("maxOutput", json!(1000))
+        .setting("maxSteps", json!(1))
+        .setting("reasoning", json!("low"))
+        .plugin(Plugin::new("system").on_turn_before(|_| async {
+            Ok(modular_agent::TurnAddition {
+                system: Some("Be brief.".into()),
+                context: None,
+            })
+        }));
+    for plugin in plugins {
+        builder = builder.plugin(plugin);
+    }
+    let agent = builder.build().await.unwrap();
+    let session = agent.session().await.unwrap();
+    (agent, session)
+}
 #[tokio::test]
 async fn a_streamed_answer_becomes_text_calls_and_usage() {
     // The Codex backend leaves `output` empty on the last event.
@@ -103,22 +115,33 @@ async fn a_streamed_answer_becomes_text_calls_and_usage() {
         json!({"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"input_tokens":12,"output_tokens":5}}}),
     ]);
     let server = fixture(vec![(200, stream)]).await;
-    let (api, model) = bound(Vendor::Codex, "openai-codex/gpt-6.1-sol", &server.endpoint).await;
-    assert_eq!(model.info().name, "openai-codex/gpt-6.1-sol");
-    assert!(!model.info().keeps_state && !model.info().runs_tools);
-    let answer = model
-        .generate(api, Scope::session("s1"), ask(), CancellationToken::new())
-        .await
+    let (agent, session) = agent(
+        Vendor::Codex,
+        "openai-codex/gpt-6.1-sol",
+        &server.endpoint,
+        vec![],
+    )
+    .await;
+    assert_eq!(agent.models().unwrap()[0].model.provider, "openai-codex");
+    session.prompt("hi").await.unwrap();
+    let response = session
+        .history()
+        .unwrap()
+        .into_iter()
+        .find(|e| e["kind"] == "response")
         .unwrap();
-    assert_eq!(answer.text_content(), "Hello");
-    assert_eq!(answer.stop, "tools");
-    assert_eq!(answer.tool_calls()[0].input, json!({"code":"1+1"}));
+    let answer = &response["message"];
+    assert_eq!(answer["content"][1]["text"], "Hello");
+    assert_eq!(answer["stop"], "toolUse");
+    assert_eq!(answer["content"][2]["arguments"], json!({"code":"1+1"}));
+    assert_eq!(answer["usage"]["input"], 12);
+    assert_eq!(answer["usage"]["output"], 5);
+    assert_eq!(answer["providerData"]["provider"], "openai-codex");
     assert_eq!(
-        (answer.usage.input_tokens, answer.usage.output_tokens),
-        (12, 5)
+        answer["providerData"]["output"].as_array().unwrap().len(),
+        3
     );
-    assert_eq!(answer.opaque["provider"], "openai-codex");
-    assert_eq!(answer.opaque["output"].as_array().unwrap().len(), 3);
+    let session_header = format!("session-id: {}", session.id());
 
     let requests = server.requests.lock().unwrap();
     let (head, body) = &requests[0];
@@ -127,7 +150,7 @@ async fn a_streamed_answer_becomes_text_calls_and_usage() {
         "chatgpt-account-id: test-account",
         "openai-beta: responses=experimental",
         "originator: pi",
-        "session-id: s1",
+        &session_header,
         "accept: text/event-stream",
     ] {
         assert!(head.contains(header), "missing {header} in {head}");
@@ -148,27 +171,39 @@ async fn service_errors_are_told_apart() {
         (200, sse(&[json!({"type":"response.output_text.delta","delta":"cut"})])),
     ])
     .await;
-    let (api, model) = bound(Vendor::Xai, "xai/grok-4.7", &server.endpoint).await;
-    let mut kinds = vec![];
+    let seen = Arc::new(Mutex::new(vec![]));
+    let capture = seen.clone();
+    let plugin =
+        Plugin::new("failures").on_model_failed_with(modular_agent::Order::First, move |p| {
+            capture.lock().unwrap().push(p.error);
+            async { Ok(modular_agent::ModelDecision::Stop) }
+        });
+    let (_agent, session) =
+        agent(Vendor::Xai, "xai/grok-4.7", &server.endpoint, vec![plugin]).await;
     for _ in 0..5 {
-        let failure = model
-            .generate(
-                api.clone(),
-                Scope::session("s1"),
-                ask(),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        kinds.push((format!("{:?}", failure.kind), failure.message));
+        assert!(matches!(
+            session.prompt("hi").await.unwrap().outcome,
+            Some(Outcome::Failed { .. })
+        ));
     }
-    assert_eq!(kinds[0].0, "Other");
+    let kinds: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["kind"].as_str().unwrap().to_owned(),
+                e["message"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(kinds[0].0, "other");
     assert!(kinds[0].1.contains("usage limit"));
-    assert_eq!(kinds[1].0, "ContextTooLarge");
-    assert_eq!(kinds[2].0, "Temporary");
+    assert_eq!(kinds[1].0, "contextTooLarge");
+    assert_eq!(kinds[2].0, "temporary");
     assert!(kinds[2].1.contains("503"));
-    assert_eq!(kinds[3].0, "Temporary");
-    assert_eq!(kinds[4].0, "Temporary");
+    assert_eq!(kinds[3].0, "temporary");
+    assert_eq!(kinds[4].0, "temporary");
     assert!(kinds[4].1.contains("ended before a complete response"));
     // xAI takes the system prompt as the first input item, with no extra headers.
     let requests = server.requests.lock().unwrap();
@@ -192,20 +227,17 @@ async fn cancelling_stops_waiting_on_the_stream() {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         drop(stream);
     });
-    let (api, model) = bound(Vendor::Xai, "xai/grok-4.7", &endpoint).await;
-    let cancel = CancellationToken::new();
-    let stop = cancel.clone();
-    tokio::spawn(async move {
+    let (_agent, session) = agent(Vendor::Xai, "xai/grok-4.7", &endpoint, vec![]).await;
+    let prompt = session.prompt("hi");
+    let cancel = async {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        stop.cancel();
-    });
-    let failure = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        model.generate(api, Scope::session("s1"), ask(), cancel),
-    )
+        session.cancel().await.unwrap();
+    };
+    let (answer, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(prompt, cancel)
+    })
     .await
-    .expect("cancel was not prompt")
-    .unwrap_err();
-    assert_eq!(format!("{:?}", failure.kind), "Cancelled");
+    .expect("cancel was not prompt");
+    assert_eq!(answer.unwrap().outcome, Some(Outcome::Cancelled));
     held.abort();
 }

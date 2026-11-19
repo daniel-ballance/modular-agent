@@ -12,18 +12,13 @@ fn ma(data: &Path, project: &Path, script: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ma"));
     command
         .env("MODULAR_AGENT_DATA_DIR", data)
+        .env("MODULAR_AGENT_SCRIPT", script)
         .env_remove("MODULAR_AGENT_HISTORY_URL")
-        .args([
-            "--project",
-            project.to_str().unwrap(),
-            "--fake-script",
-            script.to_str().unwrap(),
-        ]);
+        .args(["--project", project.to_str().unwrap()]);
     command
 }
 fn call(code: &str) -> serde_json::Value {
-    serde_json::json!({"parts":[{"type":"tool_call","call":{"id":"c1","name":"codemode","input":{"code":code},"started_by":"model"}}],
-        "opaque":null,"stop":"tools","usage":{"input_tokens":0,"output_tokens":0,"cached_tokens":0}})
+    serde_json::json!({"toolCalls":[{"name":"codemode","input":{"code":code}}]})
 }
 
 #[test]
@@ -67,7 +62,7 @@ fn a_killed_code_run_is_settled_as_unknown_and_never_repeated() {
     let second = root.path().join("second.json");
     std::fs::write(
         &second,
-        serde_json::json!(["It was interrupted."]).to_string(),
+        serde_json::json!([{}, {"text":"It was interrupted."}]).to_string(),
     )
     .unwrap();
     let reopened = ma(&data, &project, &second)

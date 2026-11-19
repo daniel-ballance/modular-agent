@@ -7,7 +7,8 @@ use std::{
 };
 
 pub(crate) struct CorePlugin {
-    pub settings: Value,
+    pub configuration: Arc<dyn Configuration>,
+    pub credentials: Option<Arc<dyn crate::CredentialStore>>,
     pub history: Arc<dyn HistoryStore>,
 }
 
@@ -16,8 +17,12 @@ impl Plugin for CorePlugin {
         "sdk.core"
     }
     fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        r.provide::<dyn Configuration>("configuration", Arc::new(Defaults(self.settings.clone())))?;
-        r.provide::<dyn CredentialStore>("credentials", Arc::new(EnvironmentCredentials))?;
+        r.provide::<dyn Configuration>("configuration", self.configuration.clone())?;
+        let credentials: Arc<dyn CredentialStore> = match &self.credentials {
+            Some(credentials) => Arc::new(crate::credentials::StoreAdapter(credentials.clone())),
+            None => Arc::new(EnvironmentCredentials),
+        };
+        r.provide::<dyn CredentialStore>("credentials", credentials)?;
         r.provide::<dyn HistoryStore>("history", self.history.clone())
     }
 }
@@ -35,7 +40,7 @@ impl Plugin for SdkJobs {
 }
 
 /// Default settings for new sessions, from `createAgent`.
-struct Defaults(Value);
+pub(crate) struct Defaults(pub Value);
 impl Configuration for Defaults {
     fn settings(&self, _: &Path) -> Result<Value> {
         Ok(self.0.clone())

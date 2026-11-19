@@ -5,11 +5,16 @@
 pub mod body;
 pub mod oauth;
 
-use agent_api::*;
-use credentials_auth::{Login, Logins};
+use anyhow::{Result, anyhow, ensure};
+use credentials_auth::{AuthFile, Login};
 use futures_util::StreamExt;
+use modular_agent::{
+    AssistantMessage, Code, Error, ModelError, ModelErrorKind as FailureKind, ModelInfo, ModelRef,
+    ModelRequest, Piece, Provider, ProviderContext, async_trait,
+};
 use serde::Deserialize;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use serde_json::{Value, json};
+use std::{collections::BTreeMap, time::Duration};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Vendor {
@@ -77,123 +82,123 @@ pub struct ResponsesPlugin {
     pub vendor: Vendor,
     pub models: Vec<Model>,
     endpoint: String,
-    /// The Codex backend wants an `originator` on every request. Pi sends
-    /// "pi"; the header names a client family, it does not authenticate.
     pub originator: String,
-}
-impl ResponsesPlugin {
-    pub fn new(vendor: Vendor, models: Vec<Model>) -> Self {
-        Self {
-            vendor,
-            models,
-            endpoint: vendor.endpoint().into(),
-            originator: "pi".into(),
-        }
-    }
-    /// Offline protocol fixtures only. Never send a real sign-in to a fixture.
-    pub fn with_test_endpoint(mut self, endpoint: &str) -> Result<Self> {
-        let url = reqwest::Url::parse(endpoint)?;
-        ensure!(
-            url.scheme() == "http"
-                && url.host_str().is_some_and(|h| h
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())),
-            "test endpoint must be loopback HTTP"
-        );
-        self.endpoint = endpoint.into();
-        Ok(self)
-    }
-}
-#[derive(Clone)]
-struct Responses {
-    vendor: Vendor,
-    models: Arc<Vec<Model>>,
-    endpoint: String,
-    originator: String,
     client: reqwest::Client,
+    auth: AuthFile,
     test: bool,
-    /// This Provider's hold on its own sign-in.
-    claim: CredentialClaim,
 }
-struct Bound {
-    provider: Responses,
-    model: Model,
-}
-impl Plugin for ResponsesPlugin {
-    fn name(&self) -> &str {
-        match self.vendor {
-            Vendor::Codex => "provider.openai-codex",
-            Vendor::Xai => "provider.xai",
-        }
-    }
-    fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        // No overall timeout: a long answer is a long stream. A stream that
-        // goes quiet is cut instead.
+
+impl ResponsesPlugin {
+    pub fn new(vendor: Vendor, models: Vec<Model>, auth: AuthFile) -> Result<Self> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(300))
             .user_agent(concat!("modular-agent/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        let claim = r.claim_credentials(&[self.vendor.id()])?;
-        r.provide::<dyn Provider>(
-            self.name(),
-            Arc::new(Responses {
-                claim,
-                vendor: self.vendor,
-                models: Arc::new(self.models.clone()),
-                test: self.endpoint != self.vendor.endpoint(),
-                endpoint: self.endpoint.clone(),
-                originator: self.originator.clone(),
-                client,
-            }),
-        )
+        Ok(Self {
+            vendor,
+            models,
+            endpoint: vendor.endpoint().into(),
+            originator: "pi".into(),
+            client,
+            auth,
+            test: false,
+        })
+    }
+
+    /// Offline protocol fixtures only. Never send a real sign-in to a fixture.
+    pub fn with_test_endpoint(mut self, endpoint: &str) -> Result<Self> {
+        let url = reqwest::Url::parse(endpoint)?;
+        ensure!(
+            url.scheme() == "http"
+                && url
+                    .host_str()
+                    .and_then(|host| host
+                        .trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .ok())
+                    .is_some_and(|ip| ip.is_loopback()),
+            "test endpoint must be loopback HTTP"
+        );
+        self.endpoint = endpoint.into();
+        self.test = true;
+        self.client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(self)
     }
 }
-fn info(vendor: Vendor, model: &Model) -> ModelInfo {
-    ModelInfo {
-        name: format!("{}/{}", vendor.id(), model.id),
-        context_window: model.context_window,
-        output_limit: model.max_tokens,
-        thinking: LEVELS
-            .iter()
-            .filter(|level| model.effort.contains_key(**level))
-            .map(|level| level.to_string())
-            .collect(),
-        keeps_state: false,
-        runs_tools: false,
-        extra: json!({"label": model.name}),
-    }
-}
+
 #[async_trait]
-impl Provider for Responses {
-    fn catalog(&self) -> Vec<ModelInfo> {
-        self.models.iter().map(|m| info(self.vendor, m)).collect()
+impl Provider for ResponsesPlugin {
+    fn id(&self) -> &str {
+        self.vendor.id()
     }
-    fn bind(&self, model: &str) -> Result<Arc<dyn ModelAccess>> {
-        let id = model
-            .strip_prefix(self.vendor.id())
-            .and_then(|rest| rest.strip_prefix('/'))
-            .ok_or_else(|| anyhow!("{model} is not a {} model", self.vendor.id()))?;
+
+    fn models(&self) -> Vec<ModelInfo> {
+        self.models
+            .iter()
+            .map(|model| ModelInfo {
+                model: ModelRef {
+                    provider: self.vendor.id().into(),
+                    id: model.id.clone(),
+                },
+                context_window: model.context_window,
+                max_output: model.max_tokens,
+                thinking: LEVELS
+                    .iter()
+                    .filter(|level| model.effort.contains_key(**level))
+                    .map(|level| level.to_string())
+                    .collect(),
+                extra: serde_json::from_value(json!({"label":model.name}))
+                    .expect("model metadata is an object"),
+            })
+            .collect()
+    }
+
+    fn available(&self) -> bool {
+        self.test || self.auth.login(self.vendor.id()).is_ok_and(|v| v.is_some())
+    }
+
+    async fn request(
+        &self,
+        model: ModelRef,
+        request: ModelRequest,
+        cx: ProviderContext,
+    ) -> modular_agent::Result<AssistantMessage> {
         let model = self
             .models
             .iter()
-            .find(|m| m.id == id)
-            .ok_or_else(|| anyhow!("{} does not offer {id}", self.vendor.id()))?;
-        Ok(Arc::new(Bound {
-            provider: self.clone(),
-            model: model.clone(),
+            .find(|m| m.id == model.id)
+            .ok_or_else(|| Error::new(Code::InvalidRequest, "unknown model"))?;
+        let response = tokio::select! {
+            biased;
+            _ = cx.cancelled().cancelled() => return Err(Error::new(Code::Cancelled, "cancelled")),
+            response = self.generate(model, &request, &cx) => response,
+        };
+        Ok(response.unwrap_or_else(|e| {
+            e.downcast_ref::<Failure>()
+                .map(|f| f.0.clone())
+                .unwrap_or_else(|| ModelError::new(FailureKind::Other, format!("{e:#}")))
+                .failed()
         }))
     }
 }
 
-fn failed(kind: FailureKind, message: impl Into<String>) -> ModelFailure {
-    ModelFailure {
-        kind,
-        message: message.into(),
+#[derive(Debug)]
+struct Failure(ModelError);
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.message)
     }
 }
-fn api_failure(status: Option<u16>, error: &Value) -> ModelFailure {
+impl std::error::Error for Failure {}
+fn failed(kind: FailureKind, message: impl Into<String>) -> Failure {
+    Failure(ModelError::new(kind, message))
+}
+fn api_failure(status: Option<u16>, error: &Value) -> Failure {
     let code = error["code"]
         .as_str()
         .or_else(|| error["type"].as_str())
@@ -224,44 +229,40 @@ fn api_failure(status: Option<u16>, error: &Value) -> ModelFailure {
     failed(kind, message)
 }
 
-impl Bound {
-    async fn login(&self, api: &Api) -> Result<Login> {
-        let vendor = self.provider.vendor;
-        if self.provider.test {
+impl ResponsesPlugin {
+    async fn sign_in(&self, rejected: Option<&str>) -> Result<Login> {
+        if self.test {
             return Ok(Login::ApiKey {
                 key: "test-credential".into(),
             });
         }
-        let logins: Arc<Logins> = capability(api.as_ref(), "credentials.logins")?;
-        let client = self.provider.client.clone();
-        logins
-            .current(&self.provider.claim, vendor.id(), |old| async move {
-                oauth::refresh(&client, vendor, old).await
+        self.auth
+            .current(self.vendor.id(), rejected, |old| {
+                oauth::refresh(&self.client, self.vendor, old)
             })
             .await
             .map_err(|e| failed(FailureKind::Credentials, format!("{e:#}")).into())
     }
     async fn send(&self, login: &Login, session: &str, body: &Value) -> Result<reqwest::Response> {
         let mut request = self
-            .provider
             .client
-            .post(&self.provider.endpoint)
+            .post(&self.endpoint)
             .bearer_auth(login.secret())
             .header("accept", "text/event-stream")
             .json(body);
-        if self.provider.vendor == Vendor::Codex {
+        if self.vendor == Vendor::Codex {
             let account = match login {
                 Login::Oauth {
                     account: Some(account),
                     ..
                 } => account.clone(),
-                _ if self.provider.test => "test-account".into(),
+                _ if self.test => "test-account".into(),
                 _ => oauth::chatgpt_account(login.secret())?,
             };
             request = request
                 .header("chatgpt-account-id", account)
                 .header("OpenAI-Beta", "responses=experimental")
-                .header("originator", &self.provider.originator)
+                .header("originator", &self.originator)
                 .header("session-id", session)
                 .header("x-client-request-id", session);
         }
@@ -269,11 +270,8 @@ impl Bound {
     }
     async fn read_stream(
         &self,
-        api: &Api,
-        scope: &Scope,
+        cx: &ProviderContext,
         response: reqwest::Response,
-        cancel: &CancellationToken,
-        stream_id: &str,
     ) -> Result<Value> {
         let mut stream = response.bytes_stream();
         let mut buffer = vec![];
@@ -283,11 +281,7 @@ impl Bound {
         // items as they finish, in order.
         let mut items: Vec<Value> = vec![];
         loop {
-            let chunk = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(failed(FailureKind::Cancelled, "cancelled").into()),
-                chunk = stream.next() => chunk,
-            };
+            let chunk = stream.next().await;
             let Some(chunk) = chunk else { break };
             buffer.extend_from_slice(&chunk?);
             ensure!(buffer.len() < 16 * 1024 * 1024, "model event too large");
@@ -312,9 +306,12 @@ impl Bound {
                 data.clear();
                 match event["type"].as_str().unwrap_or("") {
                     "response.output_text.delta" => {
-                        let mut e = Event::new(scope, "model.delta", event["delta"].clone());
-                        e.stream = Some(stream_id.into());
-                        api.emit(e).await?;
+                        cx.piece(
+                            Piece::Text,
+                            event["delta"].as_str().unwrap_or_default(),
+                            None,
+                        )
+                        .await?;
                     }
                     "response.output_item.done" => items.push(event["item"].clone()),
                     "response.completed" | "response.incomplete" | "response.done" => {
@@ -346,42 +343,39 @@ impl Bound {
         }
         Ok(completed)
     }
-    async fn request(
+    async fn generate(
         &self,
-        api: &Api,
-        scope: &Scope,
+        model: &Model,
         request: &ModelRequest,
-        cancel: &CancellationToken,
-        stream_id: &str,
-    ) -> Result<ModelResponse> {
-        let vendor = self.provider.vendor;
-        let body = body::request(vendor, &self.model, request)?;
-        let mut login = self.login(api).await?;
+        cx: &ProviderContext,
+    ) -> Result<AssistantMessage> {
+        let vendor = self.vendor;
+        let body = body::request(vendor, model, request, cx.session_id())?;
+        let mut login = self.sign_in(None).await?;
         let mut retried = false;
         loop {
-            let response = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(failed(FailureKind::Cancelled, "cancelled").into()),
-                response = self.send(&login, &request.session, &body) => response,
-            }
-            .map_err(|e| failed(FailureKind::Temporary, format!("could not reach {}: {e}", vendor.label())))?;
+            let response = self
+                .send(&login, cx.session_id(), &body)
+                .await
+                .map_err(|e| {
+                    failed(
+                        FailureKind::Temporary,
+                        format!("could not reach {}: {e}", vendor.label()),
+                    )
+                })?;
             let status = response.status();
             if status.is_success() {
-                let raw = self
-                    .read_stream(api, scope, response, cancel, stream_id)
-                    .await?;
+                let raw = self.read_stream(cx, response).await?;
                 return body::response(vendor, &raw);
             }
             // A token the service no longer honours, though not yet past its
             // stated expiry: refresh once and try again.
             if status.as_u16() == 401
                 && !retried
-                && !self.provider.test
+                && !self.test
                 && matches!(login, Login::Oauth { .. })
             {
-                let logins: Arc<Logins> = capability(api.as_ref(), "credentials.logins")?;
-                logins.expire(&self.provider.claim, vendor.id())?;
-                login = self.login(api).await?;
+                login = self.sign_in(Some(login.secret())).await?;
                 retried = true;
                 continue;
             }
@@ -395,43 +389,14 @@ impl Bound {
                 json!({"message": text.chars().take(500).collect::<String>()})
             };
             let mut failure = api_failure(Some(status.as_u16()), &error);
-            if failure.kind == FailureKind::Credentials {
-                failure.message = format!(
+            if failure.0.kind == FailureKind::Credentials {
+                failure.0.message = format!(
                     "{} Run `ma login {}` to sign in again.",
-                    failure.message,
+                    failure.0.message,
                     vendor.id()
                 );
             }
             return Err(failure.into());
         }
-    }
-}
-#[async_trait]
-impl ModelAccess for Bound {
-    fn info(&self) -> ModelInfo {
-        info(self.provider.vendor, &self.model)
-    }
-    async fn generate(
-        &self,
-        api: Api,
-        scope: Scope,
-        request: ModelRequest,
-        cancel: CancellationToken,
-    ) -> std::result::Result<ModelResponse, ModelFailure> {
-        let stream_id = id();
-        let result = self
-            .request(&api, &scope, &request, &cancel, &stream_id)
-            .await;
-        let mut end = Event::new(&scope, "model.end", Value::Null);
-        end.stream = Some(stream_id);
-        end.end = true;
-        let emitted = api.emit(end).await;
-        result
-            .and_then(|response| emitted.map(|()| response))
-            .map_err(|e| {
-                e.downcast_ref::<ModelFailure>()
-                    .cloned()
-                    .unwrap_or_else(|| failed(FailureKind::Other, format!("{e:#}")))
-            })
     }
 }

@@ -182,6 +182,8 @@ pub struct ToolOutput {
     pub status: ToolStatus,
     pub text: String,
     pub value: Option<Value>,
+    /// Shared Content parts, if the result is not just text.
+    pub content: Option<Vec<Value>>,
 }
 
 impl ToolOutput {
@@ -192,7 +194,13 @@ impl ToolOutput {
             status: ToolStatus::Completed,
             text: value.to_string(),
             value: Some(value),
+            content: None,
         })
+    }
+
+    pub fn with_content(mut self, content: Vec<Value>) -> Self {
+        self.content = Some(content);
+        self
     }
 }
 
@@ -202,6 +210,7 @@ impl From<String> for ToolOutput {
             status: ToolStatus::Completed,
             text,
             value: None,
+            content: None,
         }
     }
 }
@@ -472,6 +481,8 @@ pub struct ToolEnvironment<'a>(&'a ToolContext);
 pub struct CommandOutput {
     pub exit_code: Option<i64>,
     pub output: String,
+    pub timed_out: bool,
+    pub status: ToolStatus,
 }
 
 impl ToolEnvironment<'_> {
@@ -503,6 +514,11 @@ impl ToolEnvironment<'_> {
     }
 
     pub async fn read(&self, path: &str) -> Result<String> {
+        String::from_utf8(self.read_bytes(path).await?)
+            .map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))
+    }
+
+    pub async fn read_bytes(&self, path: &str) -> Result<Vec<u8>> {
         use base64::Engine;
         self.0.check()?;
         let bytes = match self.0.backend {
@@ -514,24 +530,28 @@ impl ToolEnvironment<'_> {
                     .map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))?
             }
         };
-        String::from_utf8(bytes).map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))
+        Ok(bytes)
     }
 
     pub async fn write(&self, path: &str, text: &str) -> Result<()> {
+        self.write_bytes(path, text.as_bytes()).await
+    }
+
+    pub async fn write_bytes(&self, path: &str, bytes: &[u8]) -> Result<()> {
         use base64::Engine;
         self.0.check()?;
         match self.0.backend {
             Backend::Local { .. } => {
                 self.local()?
                     .2
-                    .write_bytes(&self.0.project, path, text.as_bytes())
+                    .write_bytes(&self.0.project, path, bytes)
                     .await?
             }
             Backend::Remote { .. } => {
                 self.remote(
                     "host/env/write",
                     json!({
-                        "path":path,"data":base64::prelude::BASE64_STANDARD.encode(text)
+                        "path":path,"data":base64::prelude::BASE64_STANDARD.encode(bytes)
                     }),
                 )
                 .await?;
@@ -550,7 +570,39 @@ impl ToolEnvironment<'_> {
         }
     }
 
+    pub async fn list(&self, path: &str) -> Result<Vec<String>> {
+        self.0.check()?;
+        match self.0.backend {
+            Backend::Local { .. } => Ok(self.local()?.2.list_dir(&self.0.project, path).await?),
+            Backend::Remote { .. } => {
+                let reply = self.remote("host/env/list", json!({"path":path})).await?;
+                Ok(base::wire::dir_names(&reply["entries"])?)
+            }
+        }
+    }
+
+    /// A native ignore-aware walk, when the local environment provides one.
+    /// There is no walk operation on the plugin binding.
+    pub async fn walk_files(&self, path: &str) -> Result<Vec<String>> {
+        self.0.check()?;
+        match self.0.backend {
+            Backend::Local { .. } => Ok(self.local()?.2.walk_files(&self.0.project, path).await?),
+            Backend::Remote { .. } => Err(Error::new(
+                Code::NotSupported,
+                "the binding has no native file walk",
+            )),
+        }
+    }
+
     pub async fn exec(&self, command: &str) -> Result<CommandOutput> {
+        self.exec_with(command, None).await
+    }
+
+    pub async fn exec_with(
+        &self,
+        command: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<CommandOutput> {
         self.0.check()?;
         let cx = self.0;
         match cx.backend {
@@ -562,22 +614,34 @@ impl ToolEnvironment<'_> {
                         scope,
                         cx.project.clone(),
                         command,
-                        None,
+                        timeout,
                         cx.cancelled.clone(),
                     )
                     .await?;
                 Ok(CommandOutput {
                     exit_code: out.value.as_ref().and_then(|v| v["exit_code"].as_i64()),
                     output: out.text,
+                    timed_out: out.value.as_ref().is_some_and(|v| v["timed_out"] == true),
+                    status: ToolStatus::from_base(&out.status),
                 })
             }
             Backend::Remote { .. } => {
-                let out = self
-                    .remote("host/env/exec", json!({"command":command}))
-                    .await?;
+                let mut params = json!({"command":command});
+                if let Some(duration) = timeout {
+                    params["timeoutMs"] = json!((duration.as_millis() as u64).max(1));
+                }
+                let out = self.remote("host/env/exec", params).await?;
+                let exit_code = out["exitCode"].as_i64();
+                let timed_out = out["timedOut"] == true;
                 Ok(CommandOutput {
-                    exit_code: out["exitCode"].as_i64(),
+                    exit_code,
                     output: out["output"].as_str().unwrap_or_default().into(),
+                    timed_out,
+                    status: if exit_code == Some(0) && !timed_out {
+                        ToolStatus::Completed
+                    } else {
+                        ToolStatus::Failed
+                    },
                 })
             }
         }
@@ -668,6 +732,7 @@ pub(crate) struct Settled {
     pub status: ToolStatus,
     pub text: String,
     pub value: Option<Value>,
+    pub content: Option<Vec<Value>>,
 }
 
 /// Run a tool's function with a context, wherever the agent is.
@@ -678,7 +743,7 @@ pub(crate) async fn execute(tool: &Tool, input: Value, cx: ToolContext) -> Settl
     let outcome = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
-            return Settled { status: ToolStatus::Cancelled, text: "The call was cancelled.".into(), value: None };
+            return Settled { status: ToolStatus::Cancelled, text: "The call was cancelled.".into(), value: None, content: None };
         }
         outcome = run => outcome,
     };
@@ -694,16 +759,19 @@ pub(crate) async fn execute(tool: &Tool, input: Value, cx: ToolContext) -> Settl
                 output.text
             },
             value: output.value,
+            content: output.content,
         },
         Err(e) if e.refusal => Settled {
             status: ToolStatus::Refused,
             text: e.message().to_string(),
             value: None,
+            content: None,
         },
         Err(e) => Settled {
             status: ToolStatus::Failed,
             text: e.message().to_string(),
             value: None,
+            content: None,
         },
     }
 }

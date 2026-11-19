@@ -749,14 +749,14 @@ dependencies = [
 name = "credentials-auth"
 version = "0.1.0"
 dependencies = [
- "agent-api",
- "agent-harness",
  "anyhow",
  "fs2",
+ "modular-agent",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2190,6 +2190,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "mcp-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2244,6 +2257,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.23.1",
+ "config-files",
  "environment-local",
  "feature-approval",
  "feature-commands",
@@ -2257,6 +2271,7 @@ dependencies = [
  "history-http",
  "interface-acp",
  "plugin-stdio",
+ "provider-fake",
  "provider-openai",
  "reqwest",
  "runtime-durable",
@@ -2267,6 +2282,30 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tools-builtin",
+]
+
+[[package]]
+name = "modular-agent-files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "globset",
+ "modular-agent",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "modular-agent-mcp"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "mcp-client",
+ "modular-agent",
+ "serde_json",
 ]
 
 [[package]]
@@ -2793,14 +2832,13 @@ dependencies = [
 name = "provider-responses"
 version = "0.1.0"
 dependencies = [
- "agent-api",
- "agent-harness",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "credentials-auth",
  "futures-util",
  "getrandom 0.3.4",
+ "modular-agent",
  "reqwest",
  "serde",
  "serde_json",
@@ -3863,36 +3901,19 @@ dependencies = [
 name = "standard"
 version = "0.1.0"
 dependencies = [
- "agent-api",
- "agent-harness",
  "anyhow",
- "async-trait",
- "config-files",
  "credentials-auth",
- "environment-local",
- "feature-commands",
- "feature-context",
- "feature-jobs",
- "feature-model",
- "feature-questions",
  "futures-util",
- "history-fs",
- "history-http",
- "interface-acp",
- "interface-terminal",
+ "jiff",
  "libc",
- "plugin-stdio",
- "provider-fake",
+ "modular-agent",
+ "modular-agent-files",
+ "modular-agent-mcp",
  "provider-responses",
- "runtime-durable",
- "runtime-transient",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tools-code",
- "tools-files",
- "tools-mcp",
 ]
 
 [[package]]
@@ -4194,26 +4215,12 @@ dependencies = [
 name = "tools-code"
 version = "0.1.0"
 dependencies = [
- "agent-api",
  "anyhow",
- "async-trait",
+ "modular-agent",
  "monty",
  "monty-types",
+ "serde",
  "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "tools-files"
-version = "0.1.0"
-dependencies = [
- "agent-api",
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "globset",
- "serde_json",
- "tempfile",
  "tokio",
 ]
 
@@ -4224,10 +4231,8 @@ dependencies = [
  "agent-api",
  "async-trait",
  "axum",
- "libc",
- "reqwest",
+ "mcp-client",
  "rmcp",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",

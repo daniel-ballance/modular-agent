@@ -227,7 +227,7 @@ impl Endpoint for Served {
                 };
                 let mut result = json!({
                     "status": settled.status.as_str(),
-                    "content": [{"type": "text", "text": text}],
+                    "content": settled.content.unwrap_or_else(|| vec![json!({"type":"text","text":text})]),
                 });
                 if let Some(value) = settled.value {
                     result["value"] = value;

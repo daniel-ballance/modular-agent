@@ -17,7 +17,9 @@
 mod acp;
 mod agent;
 mod api_key;
+mod configuration;
 mod core;
+mod credentials;
 mod error;
 mod events;
 mod history;
@@ -29,17 +31,22 @@ mod session;
 pub mod testing;
 mod tool;
 
+pub use acp::{AcpHost, serve_acp};
 pub use agent::{Agent, AgentBuilder, Approval, Durability, ProcessPlugin};
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
+pub use configuration::FilesConfiguration;
+pub use credentials::CredentialStore;
 pub use error::{Code, Error, Result};
 pub use events::{Event, Question, QuestionKind};
 pub use history::{
-    ErasedEntry, ErasureReport, History, ServeHistoryOptions, file_history, http_history,
-    memory_history, serve_history,
+    ErasedEntry, ErasureReport, History, ServeHistoryOptions, SessionInfo, file_history,
+    http_history, http_history_from_env, memory_history, serve_history,
 };
 pub use hooks::*;
-pub use plugin::{Command, CommandContext, Plugin, Registrar};
+pub use plugin::{
+    Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource, TurnSystem,
+};
 pub use provider::*;
 pub use serve::serve;
 pub use session::{

@@ -88,6 +88,8 @@ pub struct ToolResult {
     pub name: String,
     pub status: ToolStatus,
     pub value: Option<Value>,
+    /// Shared Content parts, including any non-text parts.
+    pub content: Vec<Value>,
     text: String,
 }
 
@@ -100,6 +102,7 @@ impl ToolResult {
             status: ToolStatus::from_base(&result.status),
             text: result.text,
             value: wire.get("value").cloned(),
+            content: wire["content"].as_array().cloned().unwrap_or_default(),
         }
     }
 
@@ -585,6 +588,33 @@ impl Session {
             end.scope.turn.clone(),
             &data,
         )))
+    }
+
+    /// Whether this session is currently driving a turn.
+    pub fn is_running(&self) -> bool {
+        use base::AgentApi;
+        self.inner.harness.is_running(&self.id)
+    }
+
+    pub fn pending_work(&self) -> Result<bool> {
+        Ok(self.is_running()
+            || self.driver.run.try_lock().is_err()
+            || !self.snapshot()?.pending_inputs().is_empty())
+    }
+
+    /// Run a tool on behalf of the local actor, outside the model's conversation.
+    pub async fn call_tool(&self, name: &str, input: Value) -> Result<ToolResult> {
+        let data = self.snapshot()?;
+        let api: base::Api = self.inner.harness.clone();
+        let runtime = base::session_runtime(api.as_ref(), &data)?;
+        let result = runtime
+            .tool(
+                api,
+                base::Scope::session(&self.id),
+                base::ToolCall::new(name, input),
+            )
+            .await?;
+        Ok(ToolResult::from_base(name.into(), result))
     }
 
     /// The recorded entries, in the shared format, oldest first.
