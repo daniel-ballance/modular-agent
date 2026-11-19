@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/OWNER/modular-agent/go/api"
+	"slices"
 	"sync"
+
+	"github.com/OWNER/modular-agent/go/api"
 )
 
 const interrupted = "Call did not finish; its outcome is unknown. Check outside state before relying on it. Do not assume its effects did or did not happen."
@@ -36,6 +38,25 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 	snap, err := t.IO.Snapshot()
 	if err != nil {
 		return nil, err
+	}
+	// Check model calls against the exact offer committed for the response,
+	// including when an answered step is recovered. A nil offer is an older
+	// journal without this field; its saved settings still apply.
+	var offered *[]string
+	if model != "" && !isBound {
+		var sources []string
+		for _, e := range snap.Entries {
+			if e.ID == model {
+				sources = e.Copies
+				break
+			}
+		}
+		for _, e := range snap.Entries {
+			if e.OfferedTools != nil && slices.Contains(sources, e.ID) {
+				offered = e.OfferedTools
+				break
+			}
+		}
 	}
 	batch := make([]pending, len(calls))
 	parallel := len(calls) > 1
@@ -212,6 +233,8 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			p.result = &api.ToolResult{Status: "cancelled", Content: api.Text("Turn cancelled before this call.")}
 		case p.started && !safe:
 			p.result = &api.ToolResult{Status: "unknown", Content: api.Text(interrupted)}
+		case known && model != "" && !isBound && (offered != nil && !slices.Contains(*offered, p.call.Name) || offered == nil && !api.OffersModelTool(t.Settings, def)):
+			p.result = &api.ToolResult{Status: "refused", Content: api.Text("tool was not offered to the model")}
 		case known && !api.CanCall(def, p.call.Origin):
 			p.result = &api.ToolResult{Status: "refused", Content: api.Text("tool does not allow this caller")}
 		case !known:

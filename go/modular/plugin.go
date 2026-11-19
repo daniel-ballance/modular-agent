@@ -328,7 +328,10 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 					}
 					add := result.(TurnContribution)
 					if add.System != "" {
-						before.System += "\n" + add.System
+						if before.System != "" {
+							before.System += "\n"
+						}
+						before.System += add.System
 					}
 					before.Context = append(before.Context, portable.ReadContent(add.Context)...)
 					return api.Decision{Value: before}, nil
