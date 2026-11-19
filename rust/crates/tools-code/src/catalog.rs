@@ -1,0 +1,185 @@
+//! Tools as Python functions: names, signatures, argument binding and the
+//! prompt section that lists them.
+use crate::convert;
+use agent_api::*;
+use monty_types::CallArgs;
+
+/// Tools listed with their full description. Past this, each gets one line
+/// and `describe_tool` gives the rest.
+const FULL_DESCRIPTIONS: usize = 12;
+
+pub struct Function {
+    /// The Python name: the tool's name with other characters as '_'.
+    pub name: String,
+    pub tool: ToolDefinition,
+    /// Parameter names in call order: required first, as declared, then the
+    /// optional ones by name.
+    pub parameters: Vec<String>,
+    required: Vec<String>,
+}
+
+fn identifier(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if out.chars().next().is_none_or(|c| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
+}
+fn python_type(schema: &Value) -> String {
+    match schema["type"].as_str() {
+        Some("string") => "str".into(),
+        Some("integer") => "int".into(),
+        Some("number") => "float".into(),
+        Some("boolean") => "bool".into(),
+        Some("array") => format!("list[{}]", python_type(&schema["items"])),
+        Some("object") => "dict".into(),
+        Some("null") => "None".into(),
+        _ => "Any".into(),
+    }
+}
+
+impl Function {
+    pub fn new(tool: ToolDefinition) -> Self {
+        let required: Vec<String> = tool.input["required"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        let mut parameters = required.clone();
+        if let Some(properties) = tool.input["properties"].as_object() {
+            parameters.extend(properties.keys().filter(|k| !required.contains(k)).cloned());
+        }
+        Self {
+            name: identifier(&tool.name),
+            tool,
+            parameters,
+            required,
+        }
+    }
+    pub fn signature(&self) -> String {
+        let parameters: Vec<String> = self
+            .parameters
+            .iter()
+            .map(|name| {
+                let kind = python_type(&self.tool.input["properties"][name]);
+                if self.required.contains(name) {
+                    format!("{name}: {kind}")
+                } else {
+                    format!("{name}: {kind} = None")
+                }
+            })
+            .collect();
+        format!("{}.{}({})", crate::MODULE, self.name, parameters.join(", "))
+    }
+    pub fn describe(&self) -> Value {
+        json!({
+            "name": self.name,
+            "signature": self.signature(),
+            "description": self.tool.description,
+            "parameters": self.tool.input,
+            "read_only": self.tool.read_only,
+        })
+    }
+    /// The tool input for a Python call. Keywords, positions, or one dict.
+    pub fn input(&self, args: &CallArgs) -> Result<Value> {
+        let mut positional = vec![];
+        while let Some(value) = args.arg(positional.len()) {
+            positional.push(convert::to_json(value));
+        }
+        let mut input = serde_json::Map::new();
+        let first_is_object = self
+            .parameters
+            .first()
+            .is_some_and(|name| self.tool.input["properties"][name]["type"] == "object");
+        if positional.len() == 1 && positional[0].is_object() && !first_is_object {
+            input = positional.remove(0).as_object().unwrap().clone();
+        }
+        ensure!(
+            positional.len() <= self.parameters.len(),
+            "takes at most {} arguments, got {}",
+            self.parameters.len(),
+            positional.len()
+        );
+        for (name, value) in self.parameters.iter().zip(positional) {
+            input.insert(name.clone(), value);
+        }
+        for (key, value) in args.kwargs() {
+            let key = key
+                .as_str()
+                .ok_or_else(|| anyhow!("keyword names must be strings"))?;
+            ensure!(!input.contains_key(key), "got two values for {key}");
+            input.insert(key.to_owned(), convert::to_json(value));
+        }
+        // None means "left out", as the signatures' defaults say.
+        input.retain(|_, value| !value.is_null());
+        if self.tool.input["additionalProperties"] == false
+            && let Some(properties) = self.tool.input["properties"].as_object()
+            && let Some(unknown) = input.keys().find(|k| !properties.contains_key(*k))
+        {
+            bail!("unexpected argument {unknown}; the signature is {}", self.signature());
+        }
+        if let Some(missing) = self.required.iter().find(|name| !input.contains_key(*name)) {
+            bail!("missing argument {missing}; the signature is {}", self.signature());
+        }
+        Ok(Value::Object(input))
+    }
+}
+
+fn first_line(text: &str) -> &str {
+    let line = text.lines().next().unwrap_or("");
+    match line.char_indices().nth(160) {
+        Some((at, _)) => &line[..at],
+        None => line,
+    }
+}
+
+pub fn prompt(functions: &[Function]) -> String {
+    let mut out = String::from(
+        "# Functions in codemode\n\nYou have one tool, `codemode`, which runs Python. These functions exist inside it, on the `tools` object, and nowhere else. Call them as written; no import and no `await` is needed. Arguments go by keyword or in the order shown. A function returns a string unless its entry says otherwise, and raises `RuntimeError` when the call fails, is refused or is cancelled. Do several steps in one run when the later steps do not depend on your judgement of the earlier ones.\n",
+    );
+    let full = functions.len() <= FULL_DESCRIPTIONS;
+    for function in functions {
+        if full {
+            out.push_str(&format!(
+                "\n## {}\n{}\n",
+                function.signature(),
+                function.tool.description
+            ));
+        } else {
+            out.push_str(&format!(
+                "\n- `{}`: {}",
+                function.signature(),
+                first_line(&function.tool.description)
+            ));
+        }
+    }
+    if !full {
+        out.push('\n');
+    }
+    out.push_str(
+        "\n## describe_tool(name: str)\nReturns a dict with the full description of the `tools` function of that name and the JSON schema of its parameters.\n\n## search_tools(query: str)\nReturns the functions whose name or description contains every word of the query, as a list of dicts with `name`, `signature` and `description`.\n",
+    );
+    if functions.iter().any(|f| f.name == "exec") {
+        out.push_str(
+            "\n`tools.exec` returns a dict: `output` (stdout and stderr together), `exit_code`, `truncated`, `wall_time_seconds`, and `full_output_path` when the output was cut. A command that exits non-zero returns its dict; it does not raise.\n",
+        );
+    }
+    out
+}
+
+pub fn search<'a>(functions: impl Iterator<Item = &'a Function>, query: &str) -> Value {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    Value::Array(
+        functions
+            .filter(|f| {
+                let text = format!("{} {}", f.name, f.tool.description).to_lowercase();
+                words.iter().all(|word| text.contains(word))
+            })
+            .map(|f| json!({"name":f.name,"signature":f.signature(),"description":first_line(&f.tool.description)}))
+            .collect(),
+    )
+}
