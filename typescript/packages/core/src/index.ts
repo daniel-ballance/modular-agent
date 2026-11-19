@@ -1,6 +1,6 @@
 export { Agent, createAgent, fileHistory, memoryHistory, httpHistory, serveHistory, FileHistory, HttpHistory } from "./agent.js";
 export { MemoryHistory } from "./history.js";
-export type { AgentOptions, Approval, Durability, ProcessPlugin, SessionInfo, SessionOptions } from "./agent.js";
+export type { AgentOptions, Approval, Durability, ProcessPlugin, SessionInfo, SavedSessionInfo, SessionOptions } from "./agent.js";
 export { durableRuntime, transientRuntime, localEnvironment, environmentCredentials, fileCredentials } from "./parts.js";
 export type * from "./parts.js";
 export { Session } from "./session.js";

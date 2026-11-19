@@ -1,0 +1,5 @@
+{
+  "language": "typescript",
+  "build": "cd typescript && npm ci && npm run build",
+  "command": ["node", "{repo}/typescript/packages/ma/dist/src/main.js"]
+}

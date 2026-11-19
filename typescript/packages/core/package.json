@@ -17,7 +17,8 @@
     "@modular-agent/interface-acp": "*",
     "@modular-agent/services": "*",
     "ajv": "^8.20.0",
-    "json-schema-to-ts": "^3.1.1"
+    "json-schema-to-ts": "^3.1.1",
+    "@modular-agent/context-compaction": "0.1.0"
   },
   "devDependencies": {
     "zod": "^4.6.7"

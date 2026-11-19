@@ -39,6 +39,8 @@ export interface CallContext {
   stepId?: string;
   callId?: string;
   cancelled: AbortSignal;
+  /** In-process access to the current session's project and tool catalog. */
+  session?(): { project: string; tools: ToolDefinition[] };
   log(message: string): void;
   history(cursor?: string): Promise<{ entries: HistoryEntry[]; next?: string }>;
   emit(type: string, data: unknown): void;
@@ -137,7 +139,7 @@ export interface Work {
   emit?: CallContext["emit"];
 }
 
-function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" | "turnId" | "stepId" | "callId">, work?: Work) {
+function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" | "turnId" | "stepId" | "callId">, work?: Work, inProcessOnly = false) {
   let live = true;
   const assert = () => {
     if (!live) throw new AgentError("invalid_request", "Call context has settled");
@@ -145,6 +147,11 @@ function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" 
   };
   const cx: CallContext = {
     ...ids, cancelled: work?.signal ?? new AbortController().signal,
+    ...(inProcessOnly && ids.sessionId ? { session() {
+      assert();
+      const id = ids.sessionId!;
+      return { project: api.session(id).project, tools: structuredClone(api.tools(id)) };
+    } } : {}),
     log(message) { assert(); console.error(message); },
     async history(cursor) {
       assert();
@@ -246,7 +253,7 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
         const { cx, finish } = context(api, {
           sessionId: p.sessionId, actorId: p.actorId ?? p.call?.actorId,
           turnId: p.turnId, stepId: p.stepId ?? p.call?.stepId, callId: p.call?.id,
-        }, work);
+        }, work, options?.inProcessOnly);
         try {
           const answer = await handler(structuredClone(payload), cx);
           if (answer === undefined || answer === null) return;
@@ -262,7 +269,7 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
       if (served && (options?.usesModel || options?.inProcessOnly)) unavailable(`command ${name}`);
       if (options?.usesModel) throw new AgentError("not_supported", `Model-using command ${name}`);
       registrations.push(api => api.registerCommand(name, { description, async run(args, ids) {
-        const { cx, finish } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId }, ids as Work);
+        const { cx, finish } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId }, ids as Work, options?.inProcessOnly);
         try { return await handler(args, cx as CommandContext); }
         finally { finish(); }
       } }));
