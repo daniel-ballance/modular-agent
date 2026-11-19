@@ -45,11 +45,19 @@ func (s *Session) Events(ctx context.Context, fromEntry ...string) iter.Seq2[Eve
 		}
 		seen := make(map[string]bool, len(view.Entries))
 		after := cursor == ""
+		lastDelivered := ""
+		lost := func() { yield(nil, streamLost("session event stream fell behind", lastDelivered)) }
 		for _, entry := range view.Entries {
 			seen[entry.ID] = true
 			if !after {
 				after = entry.ID == cursor
 				continue
+			}
+			select {
+			case <-lag:
+				lost()
+				return
+			default:
 			}
 			if ctx.Err() != nil {
 				yield(nil, appError(ctx.Err(), CancelledCode))
@@ -59,14 +67,11 @@ func (s *Session) Events(ctx context.Context, fromEntry ...string) iter.Seq2[Eve
 			if !yield(sdkEvent(raw), nil) {
 				return
 			}
-			cursor = entry.ID
+			lastDelivered = entry.ID
 		}
 		if !after {
 			yield(nil, &Error{Code: NotFound, Message: "unknown entry cursor"})
 			return
-		}
-		lost := func() {
-			yield(nil, &Error{Code: Lost, Message: "session event stream fell behind", Data: map[string]any{"fromEntry": cursor}})
 		}
 		for {
 			select {
@@ -89,14 +94,26 @@ func (s *Session) Events(ctx context.Context, fromEntry ...string) iter.Seq2[Eve
 						delete(seen, id)
 						continue
 					}
-					if id != "" {
-						cursor = id
-					}
 				}
-				if ev := sdkEvent(raw); ev != nil && !yield(ev, nil) {
-					return
+				if ev := sdkEvent(raw); ev != nil {
+					if !yield(ev, nil) {
+						return
+					}
+					if raw.Kind == "history.added" {
+						if id := api.Decode[api.Entry](raw.Data).ID; id != "" {
+							lastDelivered = id
+						}
+					}
 				}
 			}
 		}
 	}
+}
+
+func streamLost(message, lastDelivered string) *Error {
+	var cursor any
+	if lastDelivered != "" {
+		cursor = lastDelivered
+	}
+	return &Error{Code: Lost, Message: message, Data: map[string]any{"fromEntry": cursor}}
 }

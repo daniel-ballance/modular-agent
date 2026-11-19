@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/OWNER/modular-agent/go/api"
 	"github.com/OWNER/modular-agent/go/pluginrpc"
@@ -29,17 +30,26 @@ func serve(ctx context.Context, plugin Plugin, in io.ReadCloser, out io.Writer) 
 	if plugin.Name == "" {
 		return &Error{Code: InvalidComposition, Message: "plugin name is empty"}
 	}
-	var initialized bool
+	var startup sync.Mutex
+	var initialized, closed bool
 	var startupErr error
 	server := &pluginrpc.Server{}
 	server.Initialize = func(init pluginrpc.Object) error {
-		initialized = true
+		startup.Lock()
+		defer startup.Unlock()
+		if closed {
+			return serveFault(&Error{Code: Lost, Message: "plugin connection closed"})
+		}
+		if startupErr != nil {
+			return serveFault(startupErr)
+		}
 		config := map[string]any{}
 		if init["config"] != nil {
 			if err := decodeInto(init["config"], &config); err != nil {
 				return serveFault(appError(err, InvalidRequest))
 			}
 		}
+		initialized = true
 		r, err := register(plugin, config)
 		if err == nil {
 			err = canServe(r)
@@ -102,6 +112,9 @@ func serve(ctx context.Context, plugin Plugin, in io.ReadCloser, out io.Writer) 
 		return nil
 	}
 	err := server.Serve(ctx, in, out)
+	startup.Lock()
+	closed = true
+	startup.Unlock()
 	if initialized && plugin.Stop != nil {
 		err = errors.Join(err, plugin.Stop())
 	}
