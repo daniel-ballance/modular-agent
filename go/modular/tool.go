@@ -102,8 +102,8 @@ func NewTool[In, Out any](name, description string, run func(context.Context, In
 	return withToolSchema(t, s, run)
 }
 
-// NewSchemaTool uses an explicit JSON Schema, for tools with a shared or dynamic definition.
-func NewSchemaTool[In, Out any](name, description string, schema json.RawMessage, run func(context.Context, In, *ToolContext) (Out, error), opts ...ToolOption) Tool {
+// NewSchemaTool uses an explicit JSON Schema object, or that object as json.RawMessage.
+func NewSchemaTool[In, Out any](name, description string, schema any, run func(context.Context, In, *ToolContext) (Out, error), opts ...ToolOption) Tool {
 	t := Tool{definition: ToolDefinition{Name: name, Description: description, Hints: ToolHints{Destructive: true, OpenWorld: true}, Callers: []string{"model", "ui", "plugin"}}}
 	for _, opt := range opts {
 		opt(&t)
@@ -115,12 +115,17 @@ func NewSchemaTool[In, Out any](name, description string, schema json.RawMessage
 		t.invalid = errors.New("tool requires a name, description and function")
 		return t
 	}
+	raw, err := json.Marshal(schema)
+	if err != nil || len(raw) == 0 || raw[0] != '{' {
+		t.invalid = errors.New("tool input schema must be a JSON Schema object")
+		return t
+	}
 	var s jsonschema.Schema
-	if t.invalid = json.Unmarshal(schema, &s); t.invalid != nil {
+	if t.invalid = json.Unmarshal(raw, &s); t.invalid != nil {
 		return t
 	}
 	t = withToolSchema(t, &s, run)
-	t.definition.Parameters = slices.Clone(schema)
+	t.definition.Parameters = raw
 	return t
 }
 
