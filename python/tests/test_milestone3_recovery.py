@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from ma_fake import Fake
-from modular_agent import build
+from ma_cli import build
 from test_swap import until
 from test_vanilla import paired
 

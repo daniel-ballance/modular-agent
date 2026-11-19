@@ -8,7 +8,7 @@ import pytest
 
 from ma_core import AgentError, content, plain
 from ma_fake import Fake, call, reply
-from modular_agent import build
+from ma_cli import build
 from test_swap import until
 from test_vanilla import entries, paired, run
 

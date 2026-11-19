@@ -11,7 +11,7 @@ from test_jobs_subagents import RoutedFake
 from test_questions import interface
 from test_swap import dead, pid_ready, until
 from test_vanilla import entries, paired, run
-from modular_agent import build
+from ma_cli import build
 
 
 async def test_approval_cannot_be_answered_after_its_turn(agent, tmp_path):

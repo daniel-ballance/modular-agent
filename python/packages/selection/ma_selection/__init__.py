@@ -29,7 +29,9 @@ class Selection(Plugin):
 
     async def access(self, d, emit=None):
         s = await self.api.session("get", session=d["session"])
-        model = d.get("model") or s["settings"]["model"]
+        model = d.get("model") or s["settings"].get("model")
+        if not model:
+            raise AgentError("No model selected", "invalid_request")
         match = next(
             (m for m in await self.catalog({}) if model in {m["id"], m["target"] + "/" + m["id"]}),
             None,

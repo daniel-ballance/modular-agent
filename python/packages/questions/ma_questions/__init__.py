@@ -286,7 +286,7 @@ class Questions(Plugin):
             if d.get("park", True):
                 return {"open": True, "request": q["id"]}
             await self._accept(sid, q, q["actor"], "declined", "timeLimit")
-            return {"value": "declined"}
+            return {"value": "declined", "reason": "timeLimit", "request": q["id"]}
 
     async def valid_answer(self, d, emit):
         q = (await self._state(d["session"])).get(d["request"])
@@ -316,7 +316,7 @@ class Questions(Plugin):
             q["kind"] in {"approval", "choice"} and value not in [*q["options"], "declined"]
         ):
             raise AgentError("Answer is not one of the offered options")
-        accepted = await self._accept(d["session"], q, d["actor"], value)
+        accepted = await self._accept(d["session"], q, d["actor"], value, d.get("reason"))
         if accepted is False:
             raise AgentError("Question is closed or no longer answerable", "refused")
         return {"accepted": True}

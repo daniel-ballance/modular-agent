@@ -133,10 +133,10 @@ def answer(hook, d, a):
     elif hook == "step.after":
         result["response"] = response_in(changed["response"])
     elif hook == "input":
-        result.update(
-            content=changed["content"],
-            when="steer" if changed.get("when") == "inTurn" else changed.get("when", d.get("when")),
-        )
+        result["content"] = changed["content"]
+        if a.get("stop"):
+            result["handled"] = True
+            result.setdefault("result", None)
     elif hook.startswith("provider."):
         result = changed
     else:

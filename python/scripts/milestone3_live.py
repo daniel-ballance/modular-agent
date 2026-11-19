@@ -63,7 +63,7 @@ async def demonstrate(output):
     from ma_durable import Durable
     from ma_durable_subagents import DurableSubagents
     from ma_local.containment import delegated_root
-    from modular_agent import build
+    from ma_cli import build
 
     delegated_root()  # Preflight before inference.
     assert MODEL == "claude-haiku-5-5"

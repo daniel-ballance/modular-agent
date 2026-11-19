@@ -10,7 +10,7 @@ from ma_core import AgentError, Plugin, content
 from ma_fake import Fake, call, reply
 from ma_harness import Harness
 from ma_process import ProcessPlugin
-from modular_agent import build
+from ma_cli import build
 from test_swap import dead, pid_ready, until
 from test_vanilla import entries, paired, run
 
@@ -95,8 +95,10 @@ class Cleanup(Plugin):
         api.provide("cleanup", self)
 
     async def wait(self, d, emit):
-        await emit({"started": os.getpid()})
         try:
+            # Cancellation can arrive while sending the progress frame that
+            # wakes the test. Arm the cleanup before reporting readiness.
+            await emit({"started": os.getpid()})
             await asyncio.Event().wait()
         finally:
             await asyncio.sleep(0.03)

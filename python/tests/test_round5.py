@@ -12,7 +12,7 @@ from ma_core.wire import entry_out
 from ma_fake import Fake, reply
 from ma_fake.conformance import Echo
 from ma_history.http import HTTPHistory
-from modular_agent import build
+from ma_cli import build
 
 
 async def test_acp_v2_reports_a_failed_turn_as_an_error(tmp_path, runtime_kind):

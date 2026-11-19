@@ -12,7 +12,7 @@ from ma_config import Config
 from ma_core import AgentError, content
 from ma_fake import Fake
 from ma_mcp import MCP, tool_name
-from modular_agent import build
+from ma_cli import build
 from mcp_fixture import OfflineHTTP
 
 

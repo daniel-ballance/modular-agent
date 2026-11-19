@@ -72,7 +72,7 @@ with many sessions. Reopen without `--project` selects the saved project first.
 See `MILESTONE-4.md` for the settings format and trust boundary.
 
 Each part is an independently installable uv workspace package under `packages/`.
-The default composition is in `modular_agent/__init__.py`, outside the Harness.
+The default composition is in `ma_cli/__init__.py`, outside the Harness.
 See `DESIGN.md` for the API and SDK sources.
 
 For offline CLI use, pass `--fake-script FILE`, a JSON list of normalized
