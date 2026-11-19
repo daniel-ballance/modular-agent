@@ -348,7 +348,7 @@ impl base::ModelAccess for Bound {
                 ModelRequest(base::wire::request_for_provider(
                     &request,
                     None,
-                    Some(self.adapter.provider.id()),
+                    self.adapter.provider.id(),
                 )),
                 cx,
             )

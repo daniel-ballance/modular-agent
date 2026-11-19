@@ -354,15 +354,23 @@ pub fn parse_response(v: Value) -> Result<ModelResponse> {
     })
 }
 pub fn request(r: &ModelRequest, data: Option<&SessionData>) -> Value {
-    request_for_provider(r, data, None)
+    project_request(r, data, ProviderData::Keep)
 }
 
 /// Project a request for the specified Provider, retaining opaque state
 /// only when its recorded owner matches.
-pub fn request_for_provider(
+pub fn request_for_provider(r: &ModelRequest, data: Option<&SessionData>, provider: &str) -> Value {
+    project_request(r, data, ProviderData::OwnedBy(provider))
+}
+
+enum ProviderData<'a> {
+    Keep,
+    OwnedBy(&'a str),
+}
+fn project_request(
     r: &ModelRequest,
     data: Option<&SessionData>,
-    provider: Option<&str>,
+    policy: ProviderData<'_>,
 ) -> Value {
     let mut calls = std::collections::BTreeMap::new();
     let messages: Vec<_> = r
@@ -381,11 +389,16 @@ pub fn request_for_provider(
                 &m.role
             });
             v["content"] = merge_content(&v["content"], content(&m.parts));
-            // Native Providers store opaque state separately from their wire
-            // template. Preserve it for the matching Provider only.
+            let keep = match policy {
+                ProviderData::Keep => true,
+                ProviderData::OwnedBy(provider) => {
+                    m.opaque["_providerOwner"].as_str() == Some(provider)
+                }
+            };
+            // Native Providers store opaque state separately from their wire template.
             if m.role == "assistant"
-                && provider.is_some()
-                && m.opaque["_providerOwner"].as_str() == provider
+                && keep
+                && matches!(policy, ProviderData::OwnedBy(_))
                 && v.get("providerData").is_none()
                 && let Some(mut opaque) = m.opaque.as_object().cloned()
             {
@@ -404,9 +417,7 @@ pub fn request_for_provider(
                     }
                 );
             }
-            if m.role == "assistant"
-                && (provider.is_none() || m.opaque["_providerOwner"].as_str() != provider)
-            {
+            if m.role == "assistant" && !keep {
                 omit_provider_data(&mut v);
             }
             if m.role == "tool" {

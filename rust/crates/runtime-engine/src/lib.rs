@@ -197,6 +197,7 @@ impl Engine {
                 .model
                 .refresh(api, scope, input.cancel.clone())
                 .await?;
+            let info = input.model.info();
             let request = ModelRequest {
                 session: scope.session.clone(),
                 system: input.system.clone(),
@@ -206,7 +207,8 @@ impl Engine {
                 extra: Value::Null,
                 output_limit: input.settings["output_limit"]
                     .as_u64()
-                    .unwrap_or(input.model.info().output_limit),
+                    .unwrap_or(info.output_limit)
+                    .min(info.output_limit),
             };
             let request = retry_request.take().unwrap_or(request);
             let value = self

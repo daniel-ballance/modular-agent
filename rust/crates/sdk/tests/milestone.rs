@@ -226,10 +226,15 @@ async fn memory_environment_reads_writes_and_runs_only_registered_commands() -> 
                     let greeting = environment.read("greeting").await?;
                     environment.write("result", &greeting).await?;
                     assert!(environment.exists("result").await?);
-                    let output = environment.exec(&format!("echo {greeting}")).await?;
+                    let greeting = String::from_utf8(greeting).unwrap();
+                    let output = environment.exec(&format!("echo {greeting}"), None).await?;
                     assert_eq!(output.exit_code, Some(0));
                     assert_eq!(
-                        environment.exec("unregistered").await.unwrap_err().code(),
+                        environment
+                            .exec("unregistered", None)
+                            .await
+                            .unwrap_err()
+                            .code(),
                         Code::NotSupported
                     );
                     Ok(output.output)

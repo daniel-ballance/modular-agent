@@ -174,7 +174,9 @@ pub fn public_entry(e: &Entry, session: &SessionData) -> Result<Value> {
         omit_provider_data(message);
     }
     if e.kind == "model.request"
-        && let Some(messages) = value["data"]["request"]["messages"].as_array_mut()
+        && let Some(messages) = value
+            .pointer_mut("/data/request/messages")
+            .and_then(Value::as_array_mut)
     {
         for message in messages {
             if message["role"] == "assistant" {
