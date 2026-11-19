@@ -41,10 +41,7 @@ fn project_files(project: &Path) -> Result<Vec<(String, String)>> {
                             | std::io::ErrorKind::NotADirectory
                             | std::io::ErrorKind::PermissionDenied
                             | std::io::ErrorKind::Unsupported
-                    ) =>
-                {
-                    ()
-                }
+                    ) => {}
                 Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
             }
         }

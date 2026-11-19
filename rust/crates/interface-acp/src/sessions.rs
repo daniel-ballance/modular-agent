@@ -488,7 +488,7 @@ impl State {
         let (tx, rx) = mpsc::unbounded_channel();
         let api = self
             .factory
-            .build(&project, Arc::new(Sink(tx.clone())))
+            .build_for(&project, reopening_id, Arc::new(Sink(tx.clone())))
             .await?;
         let id = if let Some(data) = existing {
             data.id

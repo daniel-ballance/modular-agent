@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 modular-agent = { path = "../sdk" }
-modular-agent-files = { path = "../sdk-files" }
+modular-agent-files = { path = "../tools-files" }
 modular-agent-mcp = { path = "../sdk-mcp" }
 credentials-auth = { path = "../credentials-auth" }
 tools-code = { path = "../tools-code" }

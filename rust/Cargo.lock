@@ -751,6 +751,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fs2",
+ "modular-agent",
  "serde",
  "serde_json",
  "tempfile",
@@ -4220,20 +4221,6 @@ dependencies = [
  "monty-types",
  "serde",
  "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "tools-files"
-version = "0.1.0"
-dependencies = [
- "agent-api",
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "globset",
- "serde_json",
- "tempfile",
  "tokio",
 ]
 

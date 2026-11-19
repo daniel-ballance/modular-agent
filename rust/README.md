@@ -3,7 +3,7 @@
 An agent build and SDK based on [production edition 3](../docs/adr/0021-production-edition.md) and the [edition 4 draft](../docs/adr/0023-edition-4-draft.md). The Rust workspace has three parts:
 
 - **The base.** The Harness, the transient and durable Runtimes, ACP, the plugin host, history stores and the fixtures. This is the clean-room Rust build from the experiment (`modular-agent-rs` at `bc59845`), copied in unchanged and then extended. Its own notes are in [docs/clean-room](docs/clean-room/). Its binary is `modular-agent`, and it still passes every kit.
-- **The standard configuration.** A coding agent in Pi's shape, made only of plugins on that base. Its binary is `ma`. [ADR 0022](../docs/adr/0022-standard-configuration.md) records the decisions.
+- **The standard configuration.** A coding agent in Pi's shape, built on the public Rust SDK and its official plugins. Its binary is `ma`. [ADR 0022](../docs/adr/0022-standard-configuration.md) records the decisions.
 - **The SDK.** [`crates/sdk`](crates/sdk/README.md), the library crate `modular-agent`. Compose agents with `Agent::builder()`, embed sessions or serve them over ACP, and write tools, hooks and commands that run in process or over the plugin binding. Use `testing::test_agent()` for offline tests. [`crates/sdk-scenarios`](crates/sdk-scenarios) runs the shared scenarios and builds `modular-agent-fixtures`.
 
 The base's binary crate is now `crates/agent-base`, package `agent-base`, so that the SDK can have the name `modular-agent`. The binary is still `modular-agent`; the clean-room notes use the old package name.
@@ -14,13 +14,13 @@ The base's binary crate is now `crates/agent-base`, package `agent-base`, so tha
 |---|---|---|
 | Providers | `provider-responses` | ChatGPT subscription (`openai-codex/...`) and Grok subscription (`xai/...`) over the Responses API. Stateless. Sign-in and token refresh included. |
 | Provider | [`sidecars/claude`](../typescript/sidecars/claude/README.md) | Claude subscription (`claude/...`) through the Claude Agent SDK for TypeScript. A plugin in its own process over the plugin binding, started only when a Claude model is used. |
-| Tools | `tools-files` | `read`, `exec`, `edit`, `write`, `find` and `list`, with Pi's inputs, limits and wording. They work through the session's working environment. |
+| Tools | `modular-agent-files` | `read`, `exec`, `edit`, `write`, `find` and `list`, with Pi's inputs, limits and wording. They work through the session's working environment. |
 | Tool | `tools-code` | `codemode`: Python in a [Monty](https://github.com/pydantic/monty) sandbox. Every other tool is a function on its `tools` object. |
-| MCP client | `tools-mcp`, `standard::mcp` | Servers from `mcp.json`, over stdio and Streamable HTTP. Their tools are `tools.mcp_SERVER__TOOL`. |
+| MCP client | `modular-agent-mcp`, `standard::mcp` | Servers from `mcp.json`, over stdio and Streamable HTTP. Their tools are `tools.mcp_SERVER__TOOL`. |
 | Agent Skills | `standard::skills` | Finds skills, lists them in the prompt, and loads one on `/skill:NAME`. |
-| Prompt | `standard::prompt` | Pi's prompt structure: rules, `AGENTS.md` files, skills and the working folder. |
+| Prompt | `standard::prompt` | Pi's prompt structure: rules, `AGENTS.md` files, skills, codemode functions, the working folder and the date. |
 | Credential store | `credentials-auth` | `auth.json`, readable only by its owner, with a lock so two agents never spend one refresh token. |
-| The rest | base crates | Durable Runtime, local working environment, file history, compaction, model selection, commands, questions, terminal and ACP Interfaces. |
+| The rest | `modular-agent`, `standard::terminal` | Durable Runtime, local working environment, file history, compaction, model selection, commands, questions, terminal and ACP Interfaces. |
 
 ### One tool
 
@@ -48,8 +48,8 @@ Linux only. Needs [mise](https://mise.jdx.dev) for the pinned Rust toolchain, an
 
 ```sh
 cd rust
-mise exec -- cargo build --release -p standard        # target/release/ma
-(cd ../typescript/sidecars/claude && npm install --ignore-scripts && npm run build)
+mise exec -- cargo build --locked --release -p standard        # target/release/ma
+(cd ../typescript/sidecars/claude && npm ci --ignore-scripts && npm run build)
 scripts/install.sh                                    # optional: ~/.local/bin/ma and the sidecar
 ```
 
@@ -90,57 +90,59 @@ ma --acp                                     # serve ACP on stdio, for an editor
 | `PROJECT/.agents/skills/`, `PROJECT/.modular-agent/skills/` | Project skills |
 | `PROJECT/.modular-agent.json` | Project session defaults |
 | `PROJECT/.mcp.json` | Project MCP servers. Used only after `ma --trust-project`, because it starts programs. |
-| `~/.local/state/modular-agent/` | Sessions, command state and the full output of commands whose output was cut |
+| `~/.local/state/modular-agent/rust/` | Sessions, command state and the full output of commands whose output was cut |
 
-`MODULAR_AGENT_DATA_DIR` puts all of it in one folder, as the ACP binding requires of a host that isolates an agent. `MODULAR_AGENT_CLAUDE_SIDECAR` names the sidecar's `dist/main.js` if it is not beside the build or under `~/.local/share/modular-agent/sidecars/claude`.
+`MODULAR_AGENT_DATA_DIR` puts the configuration files directly in that folder and puts the state in its `state/` subfolder. Without it, the XDG configuration and state variables take precedence over the paths above. `MODULAR_AGENT_CLAUDE_SIDECAR` names the sidecar's `dist/main.js` if it is not beside the build or under `~/.local/share/modular-agent/sidecars/claude`.
 
-## What has been checked
+## What is checked
 
 Run from `rust/` with `TMPDIR` off `/tmp`:
 
 ```sh
 export TMPDIR="$HOME/.cache/ma-std-tmp"; mkdir -p "$TMPDIR"
-(cd ../conformance/acp && npm ci --ignore-scripts)          # once: the ACP kit's one dependency
-mise exec -- cargo test --workspace -- --test-threads=1
-(cd ../typescript/sidecars/claude && npm test)
+(cd ../conformance/acp && npm ci)
+mise exec -- cargo build --locked -p standard --bin ma
+node ../conformance/reference/run.mjs --agent rust
+MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs -- "$PWD/target/debug/ma" --acp
+MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs --crash-checks -- "$PWD/target/debug/ma" --acp
+mise exec -- cargo test --workspace --no-fail-fast -- --test-threads=1
+mise exec -- cargo fmt --all -- --check
+mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-- **The whole workspace: 262 tests pass, none fail** (2026-11-19, after the edition 4 draft). That includes the base build's suite, which runs the kits against the `modular-agent` binary.
-- **The kits, with the draft's checks:** ACP 116/116, and 132/132 with the fixture tools and environment served from a second process, where the fixture tool's nested call crosses the plugin binding. Plugin kit 146/146.
-- **The TypeScript build, left at edition 3, against the same kits:** ACP 104/104 and plugin 140/140. The draft's checks are not asked of a build that does not declare them.
-- **The standard configuration: 12 integration tests** with a scripted model, in `crates/standard/tests`:
-  - the model is offered only `codemode`, and a direct call to another tool is refused;
-  - nested calls are recorded with their parent and stay out of the model's context;
-  - a nested call passes its own gate, and a refusal reaches the code as an exception;
-  - tool failures, bad arguments, unknown functions and syntax errors come back readable;
-  - the sandbox cannot read a file itself, and the compute, call and recursion limits hold;
-  - instructions and skills reach the prompt in order, and `/skill:NAME` loads one;
-  - MCP servers from `mcp.json` become functions, and a server that fails to start is skipped;
-  - `model_tools: null` offers the tools directly, and the setting is stored under its standard name;
-  - nesting stops at four deep, and a command's deadline ends it;
-  - an image read in code reaches the model, and still does after a reopen;
-  - a call made from the UI stays out of the model's context;
-  - **a `kill -9` in the middle of a code run:** on reopening, the durable Runtime finishes the turn, the code run and the command it had started are both settled as outcome unknown, and neither runs again.
-- **The two Responses Providers: 5 tests**, three of them against a loopback fixture: request shape per vendor, streamed text and tool calls, usage, error kinds, cancel, and that one vendor's reasoning items are never sent to the other.
-- **Sign-in: 4 tests** for the browser callback, the token claims, refresh and the credential file. Both sign-in flows were also started against the real services, which issued codes; no sign-in was completed.
-- **The Claude sidecar: 44 offline tests**, and four real requests of its own.
-- **Real runs through `ma`, on `claude/claude-haiku-5-5`:** one prompt that read a file and ran a command over two tool rounds; a two-input session that followed a project skill and wrote a file; and `ma -c` in a new process, which answered from the saved session. After the base changes, one more: the model read a PNG through the code tool and named its colour.
-- **ACP:** `ma --acp` was driven by hand through `initialize`, `session/new` and `session/prompt` with a scripted model. The code call and its nested call arrived as tool calls, and the reply as text.
+- **Standard reference checks:** 12/12, including the durable and transient process crashes and the exact scripted request log.
+- **ACP against `ma`:** 116/116 by default and 123/123 with `--crash-checks`.
+- **Standard and its plugins:** 34 Rust tests. Of these, 16 cover the CLI composition, dependency boundary, prompt and skills, MCP, nested calls and crash recovery; 4 cover file handling; 2 cover auth bytes, permissions and refresh locking; and 12 cover subscription sign-in, refresh, request mapping, streaming, failures and cancellation.
+- **Offline only:** browser sign-in uses a simulated browser on loopback; both device flows and refresh use loopback HTTP fixtures. No credentials, real sign-ins or model requests were used.
 
-## What has not been checked, and known gaps
+To try the terminal without a login:
 
-- **ChatGPT and Grok have not made a real request.** Their sign-in needs you. The request shapes, headers, endpoints and client ids follow Pi 1.5.2. After `ma login openai-codex` and `ma login xai`, try `ma --model openai-codex/gpt-6.1-sol -p "say hi"` and the same for `xai/grok-4.7`. The Codex backend takes an `originator` header; this build sends Pi's value, `pi`, because that is the one known to be accepted.
-- **`ma` does not offer the conformance fixture,** so the ACP kit cannot run against it. The kits run against `modular-agent`, the same Harness with the fixture plugin set.
-- **Nested calls need this build's own Runtime.** With a Runtime served from another process the agent does not declare `nestedToolCalls`, and the code tool cannot call anything.
-- **Monty runs inside the agent's process.** Its authors recommend `monty-pool`, which runs the interpreter in worker processes, because a stack overflow or allocator abort in the interpreter takes its host with it. The limits above make that unlikely, not impossible. With the durable Runtime such a crash loses no history.
-- **No memory limit on the sandbox.** Monty's needs its own global allocator.
-- **Images** are attached as read, up to 4.5 MB, and not resized as Pi does. The Responses Providers send a tool result's image as a user item after it, which no real request has tried yet.
-- **`edit` matches exactly.** Pi falls back to a fuzzy match on whitespace and quote style.
-- **MCP:** tools only. No resources, prompts, sampling, elicitation or OAuth sign-in to a server. A server whose tool names are not letters, digits, `_` or `-`, or run past 64 characters with the prefix, is skipped whole.
-- **No approval, subagent or guardrail plugin** in the standard set, as in Pi. The base has all three (`feature-approval`, `feature-subagents`, `guardrail`).
-- **The terminal is line-based.** No full-screen UI, no markdown rendering, no history search.
-- **Claude through the sidecar** starts a Claude Code process per model request, replays earlier turns as text, and Claude Code adds some text of its own around the prompt. See the [sidecar's gaps](../typescript/sidecars/claude/README.md#known-gaps-and-open-problems).
-- **The production gaps of edition 3** are unchanged: secret staging, per-connection isolation, resource reservations and cross-session erasure.
+```sh
+scratch=$(mktemp -d)
+printf '[{"text":"Hello from the scripted model."}]\n' > "$scratch/script.json"
+MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
+  MODULAR_AGENT_SCRIPT_LOG="$scratch/requests.jsonl" target/debug/ma -p "Say hello."
+```
+
+## Known gaps
+
+- **Claude:** The sidecar must be installed separately. `ma --acp` loads it when the launch settings or the reopened session choose a Claude model, not when a client later switches a session that was composed without Claude. Claude Code starts per request and adds some text of its own; see the [sidecar's gaps](../typescript/sidecars/claude/README.md#known-gaps-and-open-problems). This migration did not exercise the sidecar with a real model.
+- **Monty runs in the agent process.** There is no sandbox memory limit. An interpreter abort can still stop the agent. The durable Runtime keeps the recorded history. Images are attached as read, up to 4.5 MiB; they are not resized.
+- **MCP:** tools only, no OAuth negotiation. The official MCP plugin's changing catalog is local to this agent; the SDK does not yet serve that plugin over stdio. It can still connect to remote MCP servers.
+- **Terminal:** line-based, with no markdown rendering. Embedded reopening waits for recovery before reading another terminal line. ACP installs recovery before returning the session and does not wait for the recovered turn to finish.
+- **Credential staging:** the Rust base stores a named answer directly; it does not implement the full staged-secret transaction.
+
+## Findings for docs/reference and docs/sdk
+
+These are proposed edits; the shared documents are unchanged in this branch.
+
+- **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools):** The existing Rust catalog used the full text for all entries only if the whole catalog fit. Replace the last sentence of the lookup bullet with: “The prompt describes every function in full if there are at most twelve. With more than twelve, it shows each signature and a short description; `describe_tool(name)` returns the full definition.” Replace “500 calls a run” with “500 nested tool calls a run; catalog lookups are not nested calls.”
+- **[`docs/reference`, Files](../docs/reference/standard-configuration.md#files):** Add after the per-language state bullet: “Rust no longer reads native sessions from the old, unsuffixed state root. To retain those sessions, move its `sessions/` and `commands/` directories together into `modular-agent/rust/` while the agent is stopped.” No configuration file needs moving.
+- **[`docs/reference`, Providers](../docs/reference/standard-configuration.md#providers):** Replace the last sentence with: “The Claude Provider uses the sidecar. The CLI starts it to run a Claude model or list its catalog. ACP starts it when the launch or saved session selects Claude; a client cannot switch to Claude in a composition that did not load it.”
+- **[`docs/sdk`, Building an agent](../docs/sdk/api.md#building-an-agent):** Add: “A builder may accept file-backed configuration and an explicit project trust ledger, a local credential store, deployment tenant configuration, and an option to replace the default prompt. SDK adapters may use the base's direct credential-write contract where staged secrets are not implemented, and must document that limitation.”
+- **[`docs/sdk`, Sessions and Interfaces](../docs/sdk/api.md#sessions-and-turns):** Add: “A persistent History can list and inspect saved session metadata without taking a writer lease. Interfaces may follow live Agent events before a session opens and dispatch a tool as the local actor without starting a turn. A project-aware ACP host supplies a composed Agent for each project and optional saved session, a history store, an explicit trust operation and an optional MCP attachment callback.”
+- **[`docs/sdk`, Hooks and tool sources](../docs/sdk/api.md#hooks):** Add: “An in-process session-prepare hook can install resources before recovery; the session-end hook releases them. An in-process turn-before contribution can receive the session project and the current tool definitions callable by other tools, including tools not offered to the model. Rust tool sources with a session-varying catalog are currently in-process only; serving such a source is refused until the SDK supports catalog change notifications over the binding.”
+- **[`docs/sdk`, Working environment](../docs/sdk/api.md#contexts):** Add: “The tool environment exposes byte reads and writes, directory listing and a command timeout. Command output includes exit code, status and whether it timed out. A native ignore-aware file walk is optional and in-process only; a served file tool may fall back to a command. Shared content parts, including images, are preserved in ToolOutput and ToolResult.”
 
 ## Where the specification was silent
 
@@ -156,7 +158,7 @@ Building this turned up seven places where edition 3 was silent. They are now th
 | `env/list` and `host/env/list` | `WorkingEnvironment::list_dir`, `plugin-stdio` |
 | A cancelled Provider request sends no response callback; an unlisted reasoning level is lowered, never raised; `outOfReach` text is for people | `provider-responses`, `sidecars/claude` |
 
-No other build implements the draft, and no swap has tested it.
+See the [SDK's checks](crates/sdk/README.md#what-is-checked) for the scenario matrix.
 
 ## Changes to the base since the seed
 
@@ -176,7 +178,9 @@ rust/
   crates/
     agent-api, agent-harness, runtime-*        the base
     interface-*, history-*, plugin-stdio, ...  the base
-    tools-files, tools-code                    standard: tools
+    sdk, tools-files, sdk-mcp                  SDK and official file/MCP plugins
+    mcp-client                                 shared MCP transport
+    tools-code                                 standard: codemode
     provider-responses, credentials-auth       standard: Providers and sign-in
     standard                                   standard: composition, prompt, skills, MCP config, the ma binary
   scripts/                                     fixtures and install.sh
@@ -185,4 +189,4 @@ rust/
 typescript/sidecars/claude/                    the Claude Provider, in TypeScript
 ```
 
-To swap a part, change `compose` in [`crates/standard/src/lib.rs`](crates/standard/src/lib.rs): it is the one place that names the plugins.
+To swap a part, change `builder` in [`crates/standard/src/lib.rs`](crates/standard/src/lib.rs): it is the one place that names the plugins.

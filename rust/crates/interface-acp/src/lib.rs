@@ -41,6 +41,14 @@ fn actor_scope(session: &str) -> Scope {
 pub trait Factory: Send + Sync {
     async fn declaration(&self) -> Result<Value>;
     async fn build(&self, project: &Path, sink: Arc<dyn EventSink>) -> Result<Api>;
+    async fn build_for(
+        &self,
+        project: &Path,
+        _session: Option<&str>,
+        sink: Arc<dyn EventSink>,
+    ) -> Result<Api> {
+        self.build(project, sink).await
+    }
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>>;
     fn trust(&self, project: &Path) -> Result<()>;
     /// The usual Factory builds one agent per session; an embedded agent shares one.

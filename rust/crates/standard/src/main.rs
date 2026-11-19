@@ -271,7 +271,9 @@ async fn start() -> Result<()> {
             "--continue" | "-c" => resume = true,
             "--print" | "-p" => {
                 terminal.prompt = Some(take(&mut args, &arg)?);
-                terminal.mode = Mode::Print;
+                if terminal.mode != Mode::Json {
+                    terminal.mode = Mode::Print;
+                }
             }
             "--verbose" | "-v" => terminal.verbose = true,
             "--json" => terminal.mode = Mode::Json,

@@ -1,5 +1,5 @@
 {
   "language": "rust",
-  "build": "cd rust && mise exec -- cargo build -p standard --bin ma",
+  "build": "cd rust && mise exec -- cargo build --locked -p standard --bin ma",
   "command": ["{repo}/rust/target/debug/ma"]
 }

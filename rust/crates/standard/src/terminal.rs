@@ -137,10 +137,10 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
         Ok(())
     };
     tokio::pin!(run);
-    if let Some(id) = id {
-        if mode == Mode::Json {
-            sink.show(id, "session.open", json!({"session":id}));
-        }
+    if let Some(id) = id
+        && mode == Mode::Json
+    {
+        sink.show(id, "session.open", json!({"session":id}));
     }
     loop {
         tokio::select! {

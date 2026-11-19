@@ -191,6 +191,7 @@ pub fn builder(
             Durability::Kept
         })
         .configuration(configuration)
+        .credentials(standard.auth())
         .tenants(std::env::var("MODULAR_AGENT_TENANTS").ok())
         .history(standard.history()?)
         .default_prompt(false)

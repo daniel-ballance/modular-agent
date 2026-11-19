@@ -13,7 +13,7 @@ type Sink = Arc<dyn base::EventSink>;
 /// An application that builds a separate SDK Agent for each ACP project/session.
 #[async_trait::async_trait]
 pub trait AcpHost: Send + Sync + 'static {
-    async fn agent(&self, project: &Path) -> Result<Agent>;
+    async fn agent(&self, project: &Path, reopening: Option<&str>) -> Result<Agent>;
     fn history(&self) -> Result<crate::History>;
     fn trust(&self, project: &Path) -> Result<()>;
 
@@ -43,17 +43,32 @@ struct ProjectFactory<H>(H);
 #[async_trait::async_trait]
 impl<H: AcpHost> interface_acp::Factory for ProjectFactory<H> {
     async fn declaration(&self) -> base::Result<Value> {
-        let agent = self.0.agent(&std::env::current_dir()?).await?;
+        let agent = self.0.agent(&std::env::current_dir()?, None).await?;
         let declaration = agent.declaration_for(None, true);
         agent.close().await?;
         Ok(declaration?)
     }
 
     async fn build(&self, project: &Path, sink: Sink) -> base::Result<base::Api> {
-        let agent = self.0.agent(project).await?;
+        self.build_for(project, None, sink).await
+    }
+
+    async fn build_for(
+        &self,
+        project: &Path,
+        reopening: Option<&str>,
+        sink: Sink,
+    ) -> base::Result<base::Api> {
+        let agent = self.0.agent(project, reopening).await?;
         if !agent.inner.plugin_host {
             agent.close().await?;
             return Err(base::anyhow!("serve_acp requires a plugin host"));
+        }
+        if agent.inner._scratch.is_some() {
+            agent.close().await?;
+            return Err(base::anyhow!(
+                "a project-aware ACP host must supply data_dir"
+            ));
         }
         let harness = agent.inner.harness.clone();
         if let Err(error) = harness

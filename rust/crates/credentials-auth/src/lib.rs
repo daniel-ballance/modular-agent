@@ -1,7 +1,7 @@
 //! The credential store of the standard configuration: one file, `auth.json`,
 //! readable only by its owner. It keeps a sign-in per Provider (an OAuth token
 //! set or an API key) and the named secrets a person gave in answer to a
-//! question. Providers refresh their own tokens through [`AuthFile::update`],
+//! question. Providers refresh their own tokens through [`AuthFile::current`],
 //! which holds a lock across processes so two agents never spend the same
 //! refresh token.
 use anyhow::{Result, anyhow, ensure};
@@ -208,6 +208,31 @@ impl AuthFile {
         let mut contents = self.read()?;
         contents.answers.insert(name.into(), value.into());
         self.write(&contents)
+    }
+}
+
+impl modular_agent::CredentialStore for AuthFile {
+    fn read(&self, name: &str) -> modular_agent::Result<String> {
+        Ok(self.answer(name)?)
+    }
+    fn read_provider(&self, provider: &str) -> modular_agent::Result<String> {
+        self.login(provider)?
+            .map(|login| login.secret().to_owned())
+            .ok_or_else(|| {
+                modular_agent::Error::new(
+                    modular_agent::Code::NotFound,
+                    format!("not signed in to {provider}"),
+                )
+            })
+    }
+    fn write(&self, name: &str, value: &str) -> modular_agent::Result<()> {
+        Ok(self.put_answer(name, value)?)
+    }
+    fn writable(&self) -> bool {
+        true
+    }
+    fn accepts(&self, name: &str) -> bool {
+        self.accepts(name)
     }
 }
 

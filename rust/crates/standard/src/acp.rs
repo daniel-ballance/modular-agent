@@ -33,19 +33,32 @@ fn pairs(server: &Value, field: &str) -> Result<std::collections::BTreeMap<Strin
 
 #[async_trait]
 impl AcpHost for Factory {
-    async fn agent(&self, project: &Path) -> modular_agent::Result<Agent> {
+    async fn agent(&self, project: &Path, reopening: Option<&str>) -> modular_agent::Result<Agent> {
         let mut standard = self.standard.clone();
         let configured = standard.configuration().settings(project)?;
-        let chosen = self.settings["model"]
-            .as_str()
+        let recorded = match reopening {
+            Some(id) => Some(standard.history()?.session(id)?),
+            None => None,
+        };
+        let fallback = if standard.scripted.is_none() && !standard.conformance {
+            default_model(&standard)
+        } else {
+            None
+        };
+        let chosen = recorded
+            .as_ref()
+            .and_then(|session| session.settings["model"].as_str())
+            .or(self.settings["model"].as_str())
             .or(configured["model"].as_str())
-            .or_else(|| default_model(&standard));
+            .or(fallback);
         standard.claude = !standard.conformance
             && standard.scripted.is_none()
             && chosen.is_some_and(|m| m.starts_with("claude/"));
-        Ok(builder(&standard, project, &self.mcp, vec![])?
-            .build()
-            .await?)
+        let mut b = builder(&standard, project, &self.mcp, vec![])?;
+        if let Some(fallback) = fallback {
+            b = b.setting("model", json!(fallback));
+        }
+        b.build().await
     }
     fn history(&self) -> modular_agent::Result<History> {
         Ok(self.standard.history()?)

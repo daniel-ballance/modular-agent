@@ -19,6 +19,7 @@ mod agent;
 mod api_key;
 mod configuration;
 mod core;
+mod credentials;
 mod error;
 mod events;
 mod history;
@@ -35,6 +36,7 @@ pub use agent::{Agent, AgentBuilder, Approval, Durability, ProcessPlugin};
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
 pub use configuration::FilesConfiguration;
+pub use credentials::CredentialStore;
 pub use error::{Code, Error, Result};
 pub use events::{Event, Question, QuestionKind};
 pub use history::{

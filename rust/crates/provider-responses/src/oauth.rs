@@ -173,12 +173,25 @@ fn tokens(vendor: Vendor, body: &Value, previous: Option<&str>) -> Result<Login>
 }
 
 pub async fn refresh(client: &reqwest::Client, vendor: Vendor, old: Login) -> Result<Login> {
+    let url = match vendor {
+        Vendor::Codex => CODEX_TOKEN,
+        Vendor::Xai => XAI_TOKEN,
+    };
+    refresh_at(client, vendor, old, url).await
+}
+
+async fn refresh_at(
+    client: &reqwest::Client,
+    vendor: Vendor,
+    old: Login,
+    url: &str,
+) -> Result<Login> {
     let Login::Oauth { refresh, .. } = old else {
         return Ok(old);
     };
-    let (url, id) = match vendor {
-        Vendor::Codex => (CODEX_TOKEN, CODEX_CLIENT),
-        Vendor::Xai => (XAI_TOKEN, XAI_CLIENT),
+    let id = match vendor {
+        Vendor::Codex => CODEX_CLIENT,
+        Vendor::Xai => XAI_CLIENT,
     };
     let (status, body) = form(
         client,
@@ -235,10 +248,15 @@ enum Poll<T> {
     Slower,
 }
 
-async fn xai_device(client: &reqwest::Client, show: &(dyn Fn(Step<'_>) + Sync)) -> Result<Login> {
+async fn xai_device(
+    client: &reqwest::Client,
+    show: &(dyn Fn(Step<'_>) + Sync),
+    code_url: &str,
+    token_url: &str,
+) -> Result<Login> {
     let (status, device) = form(
         client,
-        XAI_DEVICE_CODE,
+        code_url,
         &[
             ("client_id", XAI_CLIENT),
             ("scope", XAI_SCOPE),
@@ -272,7 +290,7 @@ async fn xai_device(client: &reqwest::Client, show: &(dyn Fn(Step<'_>) + Sync)) 
     poll(interval, limit, || async {
         let (status, body) = form(
             client,
-            XAI_TOKEN,
+            token_url,
             &[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("client_id", XAI_CLIENT),
@@ -299,10 +317,11 @@ async fn codex_exchange(
     code: &str,
     verifier: &str,
     redirect: &str,
+    token_url: &str,
 ) -> Result<Login> {
     let (status, body) = form(
         client,
-        CODEX_TOKEN,
+        token_url,
         &[
             ("grant_type", "authorization_code"),
             ("client_id", CODEX_CLIENT),
@@ -318,9 +337,15 @@ async fn codex_exchange(
     tokens(Vendor::Codex, &body, None)
 }
 
-async fn codex_device(client: &reqwest::Client, show: &(dyn Fn(Step<'_>) + Sync)) -> Result<Login> {
+async fn codex_device(
+    client: &reqwest::Client,
+    show: &(dyn Fn(Step<'_>) + Sync),
+    code_url: &str,
+    poll_url: &str,
+    token_url: &str,
+) -> Result<Login> {
     let response = client
-        .post(CODEX_DEVICE_CODE)
+        .post(code_url)
         .json(&json!({"client_id": CODEX_CLIENT}))
         .send()
         .await?;
@@ -353,7 +378,7 @@ async fn codex_device(client: &reqwest::Client, show: &(dyn Fn(Step<'_>) + Sync)
     });
     let (authorization, verifier) = poll(Duration::from_secs(interval), DEVICE_WAIT, || async {
         let response = client
-            .post(CODEX_DEVICE_TOKEN)
+            .post(poll_url)
             .json(&json!({"device_auth_id": device, "user_code": code}))
             .send()
             .await?;
@@ -378,7 +403,14 @@ async fn codex_device(client: &reqwest::Client, show: &(dyn Fn(Step<'_>) + Sync)
         }
     })
     .await?;
-    codex_exchange(client, &authorization, &verifier, CODEX_DEVICE_REDIRECT).await
+    codex_exchange(
+        client,
+        &authorization,
+        &verifier,
+        CODEX_DEVICE_REDIRECT,
+        token_url,
+    )
+    .await
 }
 
 /// Wait for the browser to come back to the local address with the code.
@@ -435,6 +467,7 @@ async fn codex_browser(
     client: &reqwest::Client,
     listener: tokio::net::TcpListener,
     show: &(dyn Fn(Step<'_>) + Sync),
+    token_url: &str,
 ) -> Result<Login> {
     let verifier = random(32)?;
     let challenge = b64(&sha2::Sha256::digest(verifier.as_bytes()));
@@ -448,7 +481,7 @@ async fn codex_browser(
     let code = tokio::time::timeout(DEVICE_WAIT, callback(listener, &state))
         .await
         .map_err(|_| anyhow!("the sign-in was not completed in time"))??;
-    codex_exchange(client, &code, &verifier, CODEX_REDIRECT).await
+    codex_exchange(client, &code, &verifier, CODEX_REDIRECT, token_url).await
 }
 
 /// Sign in to a subscription. `device` asks for a code typed on another
@@ -463,19 +496,39 @@ pub async fn login(
         .timeout(Duration::from_secs(30))
         .build()?;
     match vendor {
-        Vendor::Xai => xai_device(&client, show).await,
-        Vendor::Codex if device => codex_device(&client, show).await,
+        Vendor::Xai => xai_device(&client, show, XAI_DEVICE_CODE, XAI_TOKEN).await,
+        Vendor::Codex if device => {
+            codex_device(
+                &client,
+                show,
+                CODEX_DEVICE_CODE,
+                CODEX_DEVICE_TOKEN,
+                CODEX_TOKEN,
+            )
+            .await
+        }
         Vendor::Codex => match tokio::net::TcpListener::bind(("127.0.0.1", 1455)).await {
-            Ok(listener) => codex_browser(&client, listener, show).await,
+            Ok(listener) => codex_browser(&client, listener, show, CODEX_TOKEN).await,
             Err(_) => {
                 show(Step::Note(
                     "Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead.",
                 ));
-                codex_device(&client, show).await
+                codex_device(
+                    &client,
+                    show,
+                    CODEX_DEVICE_CODE,
+                    CODEX_DEVICE_TOKEN,
+                    CODEX_TOKEN,
+                )
+                .await
             }
         },
     }
 }
+
+#[cfg(test)]
+#[path = "oauth_loopback.rs"]
+mod loopback;
 
 #[cfg(test)]
 mod tests {

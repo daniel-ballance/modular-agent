@@ -8,6 +8,7 @@ use std::{
 
 pub(crate) struct CorePlugin {
     pub configuration: Arc<dyn Configuration>,
+    pub credentials: Option<Arc<dyn crate::CredentialStore>>,
     pub history: Arc<dyn HistoryStore>,
 }
 
@@ -17,7 +18,11 @@ impl Plugin for CorePlugin {
     }
     fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
         r.provide::<dyn Configuration>("configuration", self.configuration.clone())?;
-        r.provide::<dyn CredentialStore>("credentials", Arc::new(EnvironmentCredentials))?;
+        let credentials: Arc<dyn CredentialStore> = match &self.credentials {
+            Some(credentials) => Arc::new(crate::credentials::StoreAdapter(credentials.clone())),
+            None => Arc::new(EnvironmentCredentials),
+        };
+        r.provide::<dyn CredentialStore>("credentials", credentials)?;
         r.provide::<dyn HistoryStore>("history", self.history.clone())
     }
 }

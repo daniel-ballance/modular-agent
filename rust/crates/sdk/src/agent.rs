@@ -109,6 +109,7 @@ pub struct AgentBuilder {
     durability: Durability,
     history: Option<History>,
     configuration: Option<crate::FilesConfiguration>,
+    credentials: Option<Arc<dyn crate::CredentialStore>>,
     tenants: Option<String>,
     pub(crate) acp_conformance: bool,
     no_default_prompt: bool,
@@ -275,6 +276,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Use a local credential store instead of environment variables.
+    pub fn credentials(mut self, store: impl crate::CredentialStore) -> Self {
+        self.credentials = Some(Arc::new(store));
+        self
+    }
+
     /// Deployment limits and rights, in the binding's tenant configuration format.
     pub fn tenants(mut self, tenants: Option<String>) -> Self {
         self.tenants = tenants;
@@ -435,6 +442,7 @@ impl AgentBuilder {
                     }
                     None => Arc::new(crate::core::Defaults(defaults)),
                 },
+                credentials: self.credentials,
                 history,
             }),
             match self.environment {
