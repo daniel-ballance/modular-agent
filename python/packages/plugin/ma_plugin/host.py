@@ -613,6 +613,21 @@ class External(Plugin):
             and key is not None
         ):
             raise WireError("Expected a notification", "invalid_request")
+        if p.get("parentRequestId") in self.peer.cancelled_outbound and (
+            method
+            in {
+                "host/ask",
+                "host/jobs/start",
+                "host/tools/call",
+                "host/env/write",
+                "host/env/exec",
+                "host/runtime/runToolCall",
+                "host/runtime/model",
+            }
+            or (method == "host/hook" and p.get("hook") == "provider.request")
+        ):
+            self.context(p)
+            raise WireError("Parent request was cancelled", "cancelled")
         if method in runtime_only:
             parent, d, _ = self.context(p)
             if not parent or not parent["method"].startswith("runtime/") or "runtime" not in d:

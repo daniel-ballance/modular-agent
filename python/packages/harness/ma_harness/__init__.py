@@ -1048,7 +1048,7 @@ class Harness(Authority):
                             raise AgentError("Missing working environment point", "conflict")
                     point = points[0] if points else None
                     out_of_reach = [
-                        e["call"]
+                        f"Tool call {e['call']} may have changed things outside the working environment."
                         for e in later
                         if e["kind"] == "tool_started" and e["data"].get("openWorld", True)
                     ]

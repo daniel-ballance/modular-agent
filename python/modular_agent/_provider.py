@@ -9,6 +9,7 @@ from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from ma_core import Plugin as _BasePlugin
+from ma_core import lower_reasoning
 from ma_core.wire import model_in, request_out, response_in
 
 from ._types import AgentError, ErrorCode, Json, JsonObject, ModelRef
@@ -127,9 +128,13 @@ class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapt
             lambda: os.getenv(self.name.upper().replace("-", "_") + "_API_KEY"),
         )
         try:
-            reply = await self.provider.request(
-                model, d.get("_shared_request") or request_out(d), cx
-            )
+            request = d.get("_shared_request") or request_out(d)
+            settings = request.get("settings", {})
+            requested = settings.get("reasoning", "off")
+            level = lower_reasoning(requested, info.get("thinking") or ["off"])
+            if requested != level:
+                request = {**request, "settings": {**settings, "reasoning": level}}
+            reply = await self.provider.request(model, request, cx)
         except ModelFailure as exc:
             reply = {
                 "role": "assistant",

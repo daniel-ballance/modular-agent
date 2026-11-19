@@ -676,12 +676,16 @@ class TurnHost:
         )
         if self.additions is None:
             self.additions = await self.api.session("prepare", session=self.sid, turn=self.turn)
+        model_tools = self.settings.get("modelTools")
+        tools = await self.runtime._definitions(self.sid)
+        if model_tools is not None:
+            tools = [t for t in tools if t["name"] in model_tools]
         d = {
             **self.scope,
             "step": self.step,
             "access": self.access,
             "settings": self.settings,
-            "tools": await self.runtime._definitions(self.sid),
+            "tools": tools,
             "additions": self.additions,
             "usage": self.native_usage(p.get("usage") or {}),
         }
