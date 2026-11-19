@@ -340,6 +340,16 @@ async fn start() -> Result<()> {
     if trust {
         standard.configuration().trust(&project)?;
     }
+    if terminal.declaration {
+        // A declaration describes the parts without opening a session or
+        // starting a sidecar for a model that will not be used.
+        let agent = builder(&standard, &project, &Mcp::default(), vec![])?
+            .build()
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&agent.declaration()?)?);
+        agent.close().await?;
+        return Ok(());
+    }
     // Which model this run will use decides whether the Claude sidecar starts.
     let configured = {
         standard
@@ -353,7 +363,7 @@ async fn start() -> Result<()> {
         .map(str::to_owned)
         .or(recorded)
         .or(configured);
-    let inspecting = terminal.history || terminal.declaration;
+    let inspecting = terminal.history;
     let chosen = if standard.scripted.is_some() {
         Some(SCRIPTED_MODEL.into())
     } else if standard.conformance {
@@ -379,11 +389,6 @@ async fn start() -> Result<()> {
         b = questions.install(b);
     }
     let agent = b.build().await?;
-    if terminal.declaration {
-        println!("{}", serde_json::to_string_pretty(&agent.declaration()?)?);
-        agent.close().await?;
-        return Ok(());
-    }
     let result = standard::terminal::run(&agent, terminal, questions).await;
     let shutdown = agent.close().await;
     result.and(shutdown.map_err(Into::into))

@@ -88,7 +88,8 @@ ma --acp                                     # serve ACP on stdio, for an editor
 | `~/.config/modular-agent/skills/`, `~/.agents/skills/` | Your skills |
 | `PROJECT/AGENTS.md` (or `CLAUDE.md`), and the same in each folder above it | Project instructions |
 | `PROJECT/.agents/skills/`, `PROJECT/.modular-agent/skills/` | Project skills |
-| `PROJECT/.modular-agent.json` | Project session defaults |
+| `~/.config/modular-agent/trusted-projects.json` | Canonical project paths explicitly trusted by the operator |
+| `PROJECT/.modular-agent.json` | Project session defaults. It starts no programs, even in a trusted project. |
 | `PROJECT/.mcp.json` | Project MCP servers. Used only after `ma --trust-project`, because it starts programs. |
 | `~/.local/state/modular-agent/rust/` | Sessions, command state and the full output of commands whose output was cut |
 
@@ -105,15 +106,17 @@ mise exec -- cargo build --locked -p standard --bin ma
 node ../conformance/reference/run.mjs --agent rust
 MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs -- "$PWD/target/debug/ma" --acp
 MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs --crash-checks -- "$PWD/target/debug/ma" --acp
-mise exec -- cargo test --workspace --no-fail-fast -- --test-threads=1
+MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/target/debug/ma" --acp
+mise exec -- cargo test --workspace --no-fail-fast -- --test-threads=1 > "$TMPDIR/ma-workspace.log" 2>&1
 mise exec -- cargo fmt --all -- --check
 mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-- **Standard reference checks:** 12/12, including the durable and transient process crashes and the exact scripted request log.
-- **ACP against `ma`:** 116/116 by default and 123/123 with `--crash-checks`.
-- **Standard and its plugins:** 34 Rust tests. Of these, 16 cover the CLI composition, dependency boundary, prompt and skills, MCP, nested calls and crash recovery; 4 cover file handling; 2 cover auth bytes, permissions and refresh locking; and 12 cover subscription sign-in, refresh, request mapping, streaming, failures and cancellation.
-- **Workspace:** 302 passed, 0 failed, 0 ignored, including doctests and the base build's kit tests. Formatting and Clippy with `-D warnings` pass.
+- **Standard reference checks:** 15/15, including both Runtime crash cases, the declaration, the prompt tail and the SDK-shaped JSON stream.
+- **ACP against `ma`:** 116/116 by default, 123/123 with `--crash-checks`, and 214/214 with `--crash-checks --probe-checks --job-checks`. The expanded run covers late answers and job report turns, including after a crash.
+- **Standard and its plugins:** 35 Rust tests: 17 for `ma`, including the dependency boundary, prompt, skills, MCP, nested calls, crash recovery, state isolation and JSON event IDs; 4 for file tools; 2 for auth storage and locking; and 12 for subscription sign-in, refresh and requests.
+- **Workspace:** 304 passed, 0 failed, 0 ignored, including doctests and the base build's kit tests. Formatting and Clippy with `-D warnings` pass.
+- **SDK shared scenarios:** 55/55 placements: 11 in process and 11 each with the Rust, Go, Python and TypeScript fixture programs.
 - **Offline only:** browser sign-in uses a simulated browser on loopback; both device flows and refresh use loopback HTTP fixtures. No credentials, real sign-ins or model requests were used.
 
 To try the terminal without a login:
@@ -137,12 +140,10 @@ MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
 
 These are proposed edits; the shared documents are unchanged in this branch.
 
-- **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools):** The existing Rust catalog used the full text for all entries only if the whole catalog fit. Replace the last sentence of the lookup bullet with: “The prompt describes every function in full if there are at most twelve. With more than twelve, it shows each signature and a short description; `describe_tool(name)` returns the full definition.” Replace “500 calls a run” with “500 nested tool calls a run; catalog lookups are not nested calls.”
-- **[`docs/reference`, Files](../docs/reference/standard-configuration.md#files):** Add after the per-language state bullet: “Rust no longer reads native sessions from the old, unsuffixed state root. To retain those sessions, move its `sessions/` and `commands/` directories together into `modular-agent/rust/` while the agent is stopped.” No configuration file needs moving.
-- **[`docs/reference`, Providers](../docs/reference/standard-configuration.md#providers):** Replace the last sentence with: “The Claude Provider uses the sidecar. The CLI starts it to run a Claude model or list its catalog. ACP starts it when the launch or saved session selects Claude; a client cannot switch to Claude in a composition that did not load it.”
+- **[`docs/reference`, What it declares](../docs/reference/standard-configuration.md#what-it-declares):** Add: “Conformance mode may add test-only capabilities to the ACP declaration, such as several actors, session limits and tenants, so the kit can test them. `ma --declaration` reports the standard configuration without those additions.”
 - **[`docs/sdk`, Building an agent](../docs/sdk/api.md#building-an-agent):** Add: “A builder may accept file-backed configuration and an explicit project trust ledger, a local credential store, deployment tenant configuration, and an option to replace the default prompt. SDK adapters may use the base's direct credential-write contract where staged secrets are not implemented, and must document that limitation.”
-- **[`docs/sdk`, Sessions and Interfaces](../docs/sdk/api.md#sessions-and-turns):** Add: “A persistent History can list and inspect saved session metadata without taking a writer lease. Interfaces may follow live Agent events before a session opens and dispatch a tool as the local actor without starting a turn. A project-aware ACP host supplies a composed Agent for each project and optional saved session, a history store, an explicit trust operation and an optional MCP attachment callback.”
-- **[`docs/sdk`, Hooks and tool sources](../docs/sdk/api.md#hooks):** Add: “An in-process session-prepare hook can install resources before recovery; the session-end hook releases them. An in-process turn-before contribution can receive the session project and the current tool definitions callable by other tools, including tools not offered to the model. Rust tool sources with a session-varying catalog are currently in-process only; serving such a source is refused until the SDK supports catalog change notifications over the binding.”
+- **[`docs/sdk`, The agent](../docs/sdk/api.md#the-agent):** Replace the ACP options description with: “`compose(project, reopeningId?)` builds an Agent for the canonical project. The saved session id, when present, lets the factory select Providers and other launch parts before recovery. `projectSettings(project)` supplies settings for new sessions. `projectMcp` attaches the project’s trusted sources; client-supplied server specifications still follow the ACP binding’s separate `hostMcpServers` policy. A multi-project host supplies a shared history index and an explicit trust operation.”
+- **[`docs/sdk`, Hooks](../docs/sdk/api.md#hooks):** Add to `turn.before`: “A contribution may name the history entry ids it used in `sources`. An empty list means the contribution did not use session history. When omitted, the agent conservatively treats the contribution as derived from the current history.”
 - **[`docs/sdk`, Working environment](../docs/sdk/api.md#contexts):** Add: “The tool environment exposes byte reads and writes, directory listing and a command timeout. Command output includes exit code, status and whether it timed out. A native ignore-aware file walk is optional and in-process only; a served file tool may fall back to a command. Shared content parts, including images, are preserved in ToolOutput and ToolResult.”
 
 ## Where the specification was silent
