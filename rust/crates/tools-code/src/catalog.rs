@@ -175,6 +175,11 @@ pub fn prompt(functions: &[Function]) -> String {
     out.push_str(
         "\n## describe_tool(name: str)\nReturns a dict with the full description of the `tools` function of that name and the JSON schema of its parameters.\n\n## search_tools(query: str)\nReturns the functions whose name or description contains every word of the query, as a list of dicts with `name`, `signature` and `description`.\n",
     );
+    if functions.iter().any(|f| f.name == "read") {
+        out.push_str(
+            "\n`tools.read` on an image file (png, jpeg, gif, webp, bmp) returns a dict, not a string. To look at the image, make that dict the last expression of the run, alone or in a list.\n",
+        );
+    }
     if functions.iter().any(|f| f.name == "exec") {
         out.push_str(
             "\n`tools.exec` returns a dict: `output` (stdout and stderr together), `exit_code`, `truncated`, `wall_time_seconds`, and `full_output_path` when the output was cut. A command that exits non-zero returns its dict; it does not raise.\n",

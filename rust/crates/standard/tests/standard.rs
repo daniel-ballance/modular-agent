@@ -457,3 +457,130 @@ async fn mcp_servers_from_configuration_are_functions_and_a_dead_one_is_skipped(
     h.close(&id).await.unwrap();
     h.shutdown().await.unwrap();
 }
+
+/// The smallest PNG there is: one transparent pixel.
+const PNG: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, b'I', b'H', b'D', b'R', 0, 0, 0,
+    1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0d, b'I', b'D', b'A', b'T',
+    0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, b'I', b'E', b'N',
+    b'D', 0xae, 0x42, 0x60, 0x82,
+];
+
+#[tokio::test]
+async fn an_image_read_in_code_reaches_the_model_and_survives_a_reopen() {
+    let rig = Rig::with(
+        vec![
+            code("c1", "print('looking')\ntools.read('pic.png')"),
+            text("seen"),
+            text("again"),
+        ],
+        vec![],
+        json!({}),
+        |project| std::fs::write(project.join("pic.png"), PNG).unwrap(),
+    )
+    .await;
+    assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
+    let image_in = |request: &ModelRequest| {
+        let result = request
+            .messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("no tool message");
+        assert_eq!(
+            result.text_content(),
+            "looking\nRead image file [image/png]\n"
+        );
+        result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                Part::Other { name, data } if name == "image" => Some(data.clone()),
+                _ => None,
+            })
+            .expect("the image did not reach the model")
+    };
+    let live = image_in(&rig.requests()[1]);
+    assert_eq!(live["mimeType"], "image/png");
+    assert!(live["data"].as_str().unwrap().starts_with("iVBORw0KGgo"));
+    // Through the store and back: the same message, image included.
+    rig.h.close(&rig.id).await.unwrap();
+    rig.h.open(&rig.id).await.unwrap();
+    rig.run("and now?").await;
+    assert_eq!(image_in(&rig.requests()[2]), live);
+}
+
+#[tokio::test]
+async fn nesting_is_bounded_and_a_deadline_ends_a_command() {
+    let rig = Rig::with(
+        vec![
+            // codemode -> nest -> nest -> nest -> nest is five deep.
+            code(
+                "deep",
+                "tools.nest(name='nest', input={'name': 'nest', 'input': {'name': 'nest', 'input': {'name': 'nest', 'input': {'name': 'list', 'input': {}}}}})",
+            ),
+            code(
+                "shallow",
+                "tools.nest(name='nest', input={'name': 'list', 'input': {}})",
+            ),
+            code(
+                "slow",
+                "r = tools.exec(command='echo begun; sleep 20', timeout=0.3)\n[r.get('timed_out'), r['output'], r['wall_time_seconds'] < 10]",
+            ),
+            text("done"),
+        ],
+        vec![Arc::new(provider_fake::ConformancePlugin)],
+        json!({}),
+        |project| std::fs::write(project.join("here.txt"), "x").unwrap(),
+    )
+    .await;
+    assert_eq!(rig.run("go").await.outcome, Outcome::Completed);
+    let deep = rig.result("deep");
+    assert_eq!(deep.status, ToolStatus::Failed, "{}", deep.text);
+    assert!(deep.text.contains("4 deep at most"), "{}", deep.text);
+    let shallow = rig.result("shallow");
+    assert_eq!(shallow.status, ToolStatus::Completed, "{}", shallow.text);
+    assert_eq!(shallow.text, "here.txt");
+    let slow = rig.result("slow");
+    assert_eq!(slow.status, ToolStatus::Completed, "{}", slow.text);
+    let value: Value = serde_json::from_str(&slow.text).unwrap();
+    assert_eq!(value, json!([true, "begun\n", true]));
+}
+
+#[tokio::test]
+async fn the_offer_is_a_portable_setting_and_a_call_from_the_ui_stays_out_of_context() {
+    let rig = Rig::with(vec![text("first")], vec![], json!({}), |project| {
+        std::fs::write(project.join("a.txt"), "ui read this").unwrap()
+    })
+    .await;
+    // A person runs a tool directly, outside any turn.
+    let runtime = session_runtime(rig.h.as_ref(), &rig.h.snapshot(&rig.id).unwrap()).unwrap();
+    let api: Api = rig.h.clone();
+    let direct = runtime
+        .tool(
+            api,
+            Scope::session(&rig.id),
+            ToolCall::new("read", json!({"path":"a.txt"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(direct.text, "ui read this");
+    rig.run("hello").await;
+    let request = &rig.requests()[0];
+    assert_eq!(request.messages.len(), 1, "{:?}", request.messages);
+    assert!(!format!("{:?}", request.messages).contains("ui read this"));
+    // What another build would read: the standard key, not this build's own.
+    let file = rig
+        .root
+        .path()
+        .join("state/sessions")
+        .join(format!("{}.json", rig.id));
+    let stored: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let setting = stored["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "setting")
+        .expect("no setting entry");
+    assert_eq!(setting["data"]["value"]["modelTools"], json!(["codemode"]));
+    assert!(setting["data"]["value"].get("model_tools").is_none());
+}

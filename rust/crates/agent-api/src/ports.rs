@@ -204,7 +204,18 @@ pub trait Configuration: Send + Sync {
     fn settings(&self, project: &Path) -> Result<Value>;
 }
 pub trait CredentialStore: Send + Sync {
+    /// A named secret that no Provider claimed, such as an answer a person
+    /// gave. A store MUST refuse a Provider's credential here.
     fn get(&self, name: &str) -> Result<String>;
+    /// A Provider's own credential, to the plugin that claimed its name.
+    fn provider(&self, claim: &CredentialClaim, name: &str) -> Result<String> {
+        ensure!(
+            claim.covers(name),
+            "{} did not register the credential {name}",
+            claim.owner()
+        );
+        self.get(name)
+    }
     fn put(&self, _name: &str, _value: &str) -> Result<()> {
         bail!("credential store is read-only")
     }
@@ -326,7 +337,10 @@ pub async fn refresh_tool_sources(api: &Api, scope: &Scope) -> Result<()> {
     Ok(())
 }
 /// The registered tools a running call may start as nested calls.
-pub fn nested_tool_definitions(api: &dyn AgentApi, data: &SessionData) -> Result<Vec<ToolDefinition>> {
+pub fn nested_tool_definitions(
+    api: &dyn AgentApi,
+    data: &SessionData,
+) -> Result<Vec<ToolDefinition>> {
     let mut tools = vec![];
     for key in api.capability_names("tools.") {
         tools.extend(
@@ -429,6 +443,44 @@ pub trait WorkingEnvironment: Send + Sync {
         command: &str,
         cancel: CancellationToken,
     ) -> Result<ToolResult>;
+    /// Run a command with a deadline. `None` and zero mean no limit. When the
+    /// deadline ends the command, the result is `Failed` and its value has
+    /// `timed_out: true`. An environment that can enforce the deadline where
+    /// the command runs overrides this.
+    async fn exec(
+        &self,
+        api: Api,
+        scope: Scope,
+        project: PathBuf,
+        command: &str,
+        timeout: Option<std::time::Duration>,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult> {
+        let Some(limit) = timeout.filter(|limit| !limit.is_zero()) else {
+            return self.bash(api, scope, project, command, cancel).await;
+        };
+        let child = cancel.child_token();
+        let run = self.bash(api, scope, project, command, child.clone());
+        tokio::pin!(run);
+        let mut result = tokio::select! {
+            result = &mut run => return result,
+            _ = tokio::time::sleep(limit) => {
+                child.cancel();
+                run.await?
+            }
+        };
+        if !cancel.is_cancelled() {
+            result.status = ToolStatus::Failed;
+            let mut value = result
+                .value
+                .take()
+                .filter(Value::is_object)
+                .unwrap_or(json!({}));
+            value["timed_out"] = json!(true);
+            result.value = Some(value);
+        }
+        Ok(result)
+    }
 }
 pub trait EventSink: Send + Sync {
     fn send(&self, event: Event);

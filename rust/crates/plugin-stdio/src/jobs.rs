@@ -67,13 +67,12 @@ impl RemoteJobs {
                 let mut scope = parent.scope.clone();
                 require(api.as_ref(), &scope, "jobs")?;
                 let key = p["key"].as_str().map(str::to_owned);
-                if let Some(ref key) = key {
-                    if let Some(job) = jobs(&api.snapshot(&scope.session)?)?
+                if let Some(ref key) = key
+                    && let Some(job) = jobs(&api.snapshot(&scope.session)?)?
                         .into_iter()
                         .find(|j| j.key.as_ref() == Some(key))
-                    {
-                        return Ok(json!({"jobId":job.id,"started":false}));
-                    }
+                {
+                    return Ok(json!({"jobId":job.id,"started":false}));
                 }
                 let id = id();
                 let authority = work_authority(api.as_ref(), &scope)?;

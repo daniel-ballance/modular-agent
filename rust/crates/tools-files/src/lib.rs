@@ -3,6 +3,7 @@
 //! limits and wording. Every operation goes through the session's working
 //! environment, so the same tools work against another environment.
 use agent_api::*;
+use base64::Engine;
 use std::{path::Path, sync::Arc, time::Duration};
 
 pub mod text;
@@ -12,6 +13,8 @@ pub const MAX_LINES: usize = 2000;
 pub const MAX_BYTES: usize = 50 * 1024;
 const FIND_LIMIT: usize = 1000;
 const LIST_LIMIT: usize = 500;
+/// The largest image `read` attaches. Pi resizes larger ones; this build does not.
+pub const MAX_IMAGE_BYTES: usize = 4_718_592;
 
 /// `callers` limits who may start these tools; `None` allows every caller.
 /// Whether the model is offered them directly is the session's `model_tools`
@@ -69,7 +72,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         tool(
             "read",
             format!(
-                "Read the contents of a file. For text files, output is truncated to {MAX_LINES} lines or {kb}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
+                "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to {MAX_LINES} lines or {kb}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
             ),
             json!({
                 "path":{"type":"string","description":"Path to the file to read (relative or absolute)"},
@@ -243,12 +246,21 @@ impl Work {
         let limit = optional_number(input, "limit")?.map(|n| n as usize);
         let bytes = self.env.read_bytes(&self.project, &path).await?;
         if let Some(mime) = image_type(&bytes) {
+            if bytes.len() > MAX_IMAGE_BYTES {
+                return Ok((
+                    format!(
+                        "Read image file [{mime}], {}. It is over the {} limit for images, so it was not attached.",
+                        format_size(bytes.len()),
+                        format_size(MAX_IMAGE_BYTES)
+                    ),
+                    None,
+                ));
+            }
+            let note = format!("Read image file [{mime}]");
+            let image = json!({"type":"image","mimeType":mime,"data":base64::engine::general_purpose::STANDARD.encode(&bytes)});
             return Ok((
-                format!(
-                    "Read image file [{mime}], {}. This build does not pass images to the model.",
-                    format_size(bytes.len())
-                ),
-                None,
+                note.clone(),
+                Some(json!([{"type":"text","text":note}, image])),
             ));
         }
         let content = String::from_utf8_lossy(&bytes);
@@ -350,30 +362,22 @@ impl Work {
     async fn exec(&self, input: &Value, spill: &Path) -> Result<ToolResult> {
         let command = string(input, "command")?;
         let timeout = optional_number(input, "timeout")?.filter(|n| *n > 0.0);
-        let cancel = self.cancel.child_token();
         let started = std::time::Instant::now();
-        let run = self.env.bash(
-            self.api.clone(),
-            self.scope.clone(),
-            self.project.clone(),
-            command,
-            cancel.clone(),
-        );
-        tokio::pin!(run);
-        let mut timed_out = false;
-        let mut result = match timeout {
-            None => run.await?,
-            Some(seconds) => {
-                tokio::select! {
-                    result = &mut run => result?,
-                    _ = tokio::time::sleep(Duration::from_secs_f64(seconds)) => {
-                        timed_out = true;
-                        cancel.cancel();
-                        run.await?
-                    }
-                }
-            }
-        };
+        let mut result = self
+            .env
+            .exec(
+                self.api.clone(),
+                self.scope.clone(),
+                self.project.clone(),
+                command,
+                timeout.map(Duration::from_secs_f64),
+                self.cancel.clone(),
+            )
+            .await?;
+        let timed_out = result
+            .value
+            .as_ref()
+            .is_some_and(|value| value["timed_out"] == true);
         let exit_code = result.value.as_ref().and_then(|v| v["exit_code"].as_i64());
         let cut = truncate_tail(&result.text, MAX_LINES, MAX_BYTES);
         let mut text = cut.content.clone();
@@ -495,9 +499,12 @@ impl ToolSource for FileTools {
                 }
                 _ => bail!("unknown tool {}", call.name),
             };
-            let mut result = ToolResult::new(&call, ToolStatus::Completed, text);
-            result.value = value;
-            Ok(result)
+            let result = ToolResult::new(&call, ToolStatus::Completed, text);
+            // `value` here is content parts, when a tool returns more than text.
+            Ok(match value.and_then(|v| v.as_array().cloned()) {
+                Some(content) => result.with_content(content),
+                None => result,
+            })
         }
         .await;
         result.unwrap_or_else(|error| {

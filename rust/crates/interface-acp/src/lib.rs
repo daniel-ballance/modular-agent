@@ -698,10 +698,9 @@ pub async fn run(factory: Arc<dyn Factory>) -> Result<()> {
             async move |notification: UntypedMessage, _cx| {
                 if notification.method == "session/cancel"
                     && let Ok(session) = notifications.session(&notification.params)
+                    && require(session.api.as_ref(), &actor_scope(&session.id), "cancel").is_ok()
                 {
-                    if require(session.api.as_ref(), &actor_scope(&session.id), "cancel").is_ok() {
-                        let _ = session.cancel().await;
-                    }
+                    let _ = session.cancel().await;
                 }
                 Ok(())
             },

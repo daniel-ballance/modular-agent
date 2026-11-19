@@ -211,6 +211,18 @@ impl Run<'_> {
                     format!("{name}() could not run: {e:#}"),
                 )
             })?;
+        // A result with content beyond text: an image reaches the code as a
+        // dict it can return, as in Pi's codemode.
+        if result.status == ToolStatus::Completed
+            && let Some(content) = result.content()
+        {
+            return Ok(match content.iter().find(|part| part["type"] == "image") {
+                Some(image) => {
+                    json!({"type":"image","mimeType":image["mimeType"],"data":image["data"],"note":result.text})
+                }
+                None => json!(result.text),
+            });
+        }
         match (result.status, result.value) {
             (ToolStatus::Completed, Some(value)) => Ok(value),
             (ToolStatus::Completed, None) => Ok(json!(result.text)),
@@ -381,7 +393,31 @@ impl ToolSource for CodeTool {
         }
         match outcome {
             Ok(value) => {
-                let value = convert::to_json(value.as_ref());
+                let mut value = convert::to_json(value.as_ref());
+                // Images the code returns, alone or in a list, are attached
+                // to the result. The rest is shown as text.
+                let mut images = vec![];
+                let is_image = |v: &Value| {
+                    v["type"] == "image" && v["data"].is_string() && v["mimeType"].is_string()
+                };
+                if is_image(&value) {
+                    images.push(std::mem::take(&mut value));
+                } else if let Some(items) = value.as_array_mut() {
+                    let (found, rest): (Vec<Value>, Vec<Value>) =
+                        std::mem::take(items).into_iter().partition(|v| is_image(v));
+                    images = found;
+                    value = if rest.is_empty() && !images.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Array(rest)
+                    };
+                }
+                for image in &images {
+                    if let Some(note) = image["note"].as_str() {
+                        text.push_str(note);
+                        text.push('\n');
+                    }
+                }
                 match &value {
                     Value::Null => (),
                     Value::String(string) => text.push_str(string),
@@ -392,9 +428,18 @@ impl ToolSource for CodeTool {
                 if text.is_empty() {
                     text = "(no output)".into();
                 }
-                let mut result = ToolResult::new(&call, ToolStatus::Completed, bounded(text));
+                let text = bounded(text);
+                let mut result = ToolResult::new(&call, ToolStatus::Completed, text.clone());
                 result.value = Some(json!({"calls": run.made}));
-                result
+                if images.is_empty() {
+                    result
+                } else {
+                    let mut content = vec![json!({"type":"text","text":text})];
+                    content.extend(images.into_iter().map(|image| {
+                        json!({"type":"image","mimeType":image["mimeType"],"data":image["data"]})
+                    }));
+                    result.with_content(content)
+                }
             }
             Err(error) => {
                 text.push_str(&error.to_string());

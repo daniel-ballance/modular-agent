@@ -229,10 +229,9 @@ pub fn result(r: &ToolResult) -> Value {
         && r.value
             .as_ref()
             .is_none_or(|v| v.get("_pluginWire").is_none())
+        && let Some(value) = &r.value
     {
-        if let Some(value) = &r.value {
-            v["value"] = value.clone();
-        }
+        v["value"] = value.clone();
     }
     v
 }

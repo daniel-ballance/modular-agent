@@ -33,11 +33,13 @@ test("adaptive models take the effort of the same name", () => {
 	assert.deepEqual(thinkingFor(model("claude-opus-4-7"), "minimal"), { thinking: { type: "adaptive", display: "summarized" }, effort: "low" });
 });
 
-test("a level the model does not accept moves to the nearest accepted one", () => {
-	assert.equal(nearestLevel(model("claude-haiku-5-5"), "minimal"), "low");
-	assert.equal(nearestLevel(model("claude-opus-5-5"), "off"), "low");
+test("a level the model does not list is lowered, never raised", () => {
+	// Haiku 5.5 lists off and low, not minimal: minimal falls to off.
+	assert.equal(nearestLevel(model("claude-haiku-5-5"), "minimal"), "off");
+	// Opus 5.5 starts at low: nothing is below off, so nothing is set.
+	assert.equal(nearestLevel(model("claude-opus-5-5"), "off"), undefined);
+	assert.deepEqual(thinkingFor(model("claude-opus-5-5"), "off"), {});
 	assert.equal(nearestLevel(model("claude-opus-4-6"), "xhigh"), "high");
-	assert.equal(thinkingFor(model("claude-opus-5-5"), "off").effort, "low");
 	assert.equal(thinkingFor(model("claude-opus-4-6"), "xhigh").effort, "high");
 });
 

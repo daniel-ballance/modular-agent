@@ -75,6 +75,25 @@ pub struct Registry {
     handlers: BTreeMap<String, Vec<Registration>>,
     commands: BTreeMap<String, Owned<Arc<dyn Handler>>>,
     declarations: BTreeMap<String, Value>,
+    /// Credential name to the plugin that claimed it.
+    credentials: BTreeMap<String, String>,
+}
+/// Proof that a plugin registered a credential name as its own. Only the
+/// Registrar makes one, at install, so a plugin cannot make a claim for a
+/// name another plugin holds. A credential store gives a Provider's
+/// credential only against the claim.
+#[derive(Clone, Debug)]
+pub struct CredentialClaim {
+    owner: String,
+    names: Vec<String>,
+}
+impl CredentialClaim {
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+    pub fn covers(&self, name: &str) -> bool {
+        self.names.iter().any(|n| n == name)
+    }
 }
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &str;
@@ -133,6 +152,7 @@ impl Registry {
             next.plugins.retain(|p| p != old);
             next.capabilities.retain(|_, v| v.owner != old);
             next.commands.retain(|_, v| v.owner != old);
+            next.credentials.retain(|_, owner| owner != old);
             next.declarations.remove(old);
             next.hooks.retain(|_, v| v.point.owner != old);
             for handlers in next.handlers.values_mut() {
@@ -389,6 +409,27 @@ impl Registry {
 impl Registrar<'_> {
     pub fn declare(&mut self, value: Value) {
         self.registry.declarations.insert(self.owner.clone(), value);
+    }
+    /// Register credential names as this plugin's own. A name another plugin
+    /// holds is refused, which stops the load.
+    pub fn claim_credentials(&mut self, names: &[&str]) -> Result<CredentialClaim> {
+        for name in names {
+            if let Some(owner) = self.registry.credentials.get(*name) {
+                ensure!(
+                    owner == &self.owner,
+                    "credential {name} already belongs to {owner}"
+                );
+            }
+        }
+        for name in names {
+            self.registry
+                .credentials
+                .insert(name.to_string(), self.owner.clone());
+        }
+        Ok(CredentialClaim {
+            owner: self.owner.clone(),
+            names: names.iter().map(|n| n.to_string()).collect(),
+        })
     }
     pub fn provide<T: ?Sized + Send + Sync + 'static>(
         &mut self,

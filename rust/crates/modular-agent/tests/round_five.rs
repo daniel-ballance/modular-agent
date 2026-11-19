@@ -122,7 +122,11 @@ async fn a_handed_back_key_keeps_its_first_receipt_after_restart() {
 #[test]
 fn a_service_tombstone_retains_the_original_identity_and_nothing_else() {
     let row = json!({"id":"settled","parentId":null,"kind":"toolResult","erased":true,"turnId":"t","stepId":"s","toolCallId":"c","jobId":"j"});
-    let data = portable::session(&json!({"id":"sample","project":"/tmp"}), &[row.clone()]).unwrap();
+    let data = portable::session(
+        &json!({"id":"sample","project":"/tmp"}),
+        std::slice::from_ref(&row),
+    )
+    .unwrap();
     assert_eq!(data.entries[0].kind, "tool.result");
     assert_eq!(portable::entry(&data.entries[0], &data).unwrap(), row);
 }

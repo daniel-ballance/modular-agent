@@ -1149,10 +1149,13 @@ impl Runtime for Engine {
             .ok_or_else(|| anyhow!("a nested call needs a parent call"))?;
         let data = api.snapshot(&scope.session)?;
         ensure!(
-            data.entries.iter().any(|e| e.kind == "tool.started"
-                && e.scope.call.as_deref() == Some(&parent))
-                && !data.entries.iter().any(|e| e.kind == "tool.result"
-                    && e.scope.call.as_deref() == Some(&parent)),
+            data.entries
+                .iter()
+                .any(|e| e.kind == "tool.started" && e.scope.call.as_deref() == Some(&parent))
+                && !data
+                    .entries
+                    .iter()
+                    .any(|e| e.kind == "tool.result" && e.scope.call.as_deref() == Some(&parent)),
             "the parent call is not running"
         );
         ensure!(

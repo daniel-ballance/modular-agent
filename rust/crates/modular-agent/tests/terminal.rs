@@ -190,10 +190,31 @@ async fn credentials_are_read_on_demand_from_the_credential_store() {
     }))
     .await
     .unwrap();
+    // Only the plugin that claimed the name can read a Provider's credential.
+    struct Claims(Arc<std::sync::Mutex<Option<CredentialClaim>>>);
+    impl Plugin for Claims {
+        fn name(&self) -> &str {
+            "provider.openai"
+        }
+        fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
+            *self.0.lock().unwrap() = Some(r.claim_credentials(&["openai"])?);
+            Ok(())
+        }
+    }
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    h.load(Arc::new(Claims(slot.clone()))).await.unwrap();
+    let claim = slot.lock().unwrap().clone().unwrap();
     let store: Arc<dyn CredentialStore> = capability(h.as_ref(), "credentials").unwrap();
-    assert!(store.get("openai").is_err());
+    assert!(store.provider(&claim, "openai").is_err());
     std::fs::write(&file, "TEST-ONLY-NOT-A-KEY\n").unwrap();
-    assert_eq!(store.get("openai").unwrap(), "TEST-ONLY-NOT-A-KEY");
+    assert_eq!(
+        store.provider(&claim, "openai").unwrap(),
+        "TEST-ONLY-NOT-A-KEY"
+    );
     std::fs::write(&file, "CHANGED-TEST-VALUE").unwrap();
-    assert_eq!(store.get("openai").unwrap(), "CHANGED-TEST-VALUE");
+    assert_eq!(
+        store.provider(&claim, "openai").unwrap(),
+        "CHANGED-TEST-VALUE"
+    );
+    assert!(store.get("openai").is_err());
 }

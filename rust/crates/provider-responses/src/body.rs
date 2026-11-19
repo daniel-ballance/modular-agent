@@ -11,6 +11,24 @@ fn replayable(message: &Message, vendor: Vendor) -> Option<&Vec<Value>> {
         .flatten()
 }
 
+fn images(message: &Message) -> Vec<Value> {
+    message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Other { name, data } if name == "image" => Some(json!({
+                "type": "input_image",
+                "image_url": format!(
+                    "data:{};base64,{}",
+                    data["mimeType"].as_str()?,
+                    data["data"].as_str()?
+                ),
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
 fn input(vendor: Vendor, request: &ModelRequest) -> Result<Vec<Value>> {
     let mut input = vec![];
     for message in &request.messages {
@@ -47,10 +65,27 @@ fn input(vendor: Vendor, request: &ModelRequest) -> Result<Vec<Value>> {
                     input.push(json!({"type":"function_call","call_id":call.id,"name":call.name,"arguments":serde_json::to_string(&call.input)?}));
                 }
             }
-            "tool" => input.push(
-                json!({"type":"function_call_output","call_id":message.call,"output":message.text_content()}),
-            ),
-            role => input.push(json!({"role":role,"content":message.text_content()})),
+            "tool" => {
+                input.push(
+                    json!({"type":"function_call_output","call_id":message.call,"output":message.text_content()}),
+                );
+                // A tool result is text on this API. Its images follow as a user item.
+                let images = images(message);
+                if !images.is_empty() {
+                    input.push(json!({"role":"user","content":images}));
+                }
+            }
+            role => {
+                let images = images(message);
+                if images.is_empty() {
+                    input.push(json!({"role":role,"content":message.text_content()}));
+                } else {
+                    let mut content =
+                        vec![json!({"type":"input_text","text":message.text_content()})];
+                    content.extend(images);
+                    input.push(json!({"role":role,"content":content}));
+                }
+            }
         }
     }
     Ok(input)
@@ -74,8 +109,18 @@ pub fn request(vendor: Vendor, model: &Model, request: &ModelRequest) -> Result<
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
-    // A level the model does not accept is left out, never raised.
-    if let Some(effort) = model.effort.get(&request.thinking) {
+    // A level the model does not list is lowered to the nearest it does, or
+    // left out if there is none. It is never raised.
+    let level = crate::LEVELS
+        .iter()
+        .position(|level| *level == request.thinking)
+        .and_then(|asked| {
+            crate::LEVELS[..=asked]
+                .iter()
+                .rev()
+                .find(|level| model.effort.contains_key(**level))
+        });
+    if let Some(effort) = level.and_then(|level| model.effort.get(*level)) {
         body["reasoning"] = json!({"effort": effort, "summary": "auto"});
     }
     match vendor {
@@ -226,7 +271,7 @@ mod tests {
         assert!(codex.get("max_output_tokens").is_none());
         assert_eq!(codex["store"], false);
         assert_eq!(codex["input"], json!([{"role":"user","content":"hi"}]));
-        // This model has no "off": the level is left out, not raised.
+        // This model has no "off" and nothing lower: the level is left out, not raised.
         let off = request(
             Vendor::Codex,
             &model(Vendor::Codex, "gpt-6.1-sol"),
@@ -234,6 +279,42 @@ mod tests {
         )
         .unwrap();
         assert!(off.get("reasoning").is_none());
+        // Grok 4.7 lists low and up: "minimal" has nothing lower, and an
+        // unknown name is left out too.
+        for level in ["minimal", "max"] {
+            let body = request(
+                Vendor::Xai,
+                &model(Vendor::Xai, "grok-4.7"),
+                &ask(level, vec![]),
+            )
+            .unwrap();
+            assert!(body.get("reasoning").is_none(), "{level}");
+        }
+        // A model with a gap takes the nearest level below it.
+        let mut gapped = model(Vendor::Xai, "grok-4.7");
+        gapped.effort.remove("high");
+        let body = request(Vendor::Xai, &gapped, &ask("high", vec![])).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "medium");
+
+        // An image in a tool result follows it as a user item.
+        let mut result = Message::text("tool", "Read image file [image/png]");
+        result.call = Some("c1".into());
+        result.parts.push(Part::Other {
+            name: "image".into(),
+            data: json!({"type":"image","mimeType":"image/png","data":"AAAA"}),
+        });
+        let body = request(
+            Vendor::Codex,
+            &model(Vendor::Codex, "gpt-6.1-sol"),
+            &ask("low", vec![result]),
+        )
+        .unwrap();
+        assert_eq!(body["input"][0]["type"], "function_call_output");
+        assert_eq!(body["input"][0]["output"], "Read image file [image/png]");
+        assert_eq!(
+            body["input"][1],
+            json!({"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]})
+        );
 
         let xai = request(
             Vendor::Xai,

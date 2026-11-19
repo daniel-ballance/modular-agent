@@ -107,12 +107,14 @@ export interface Thinking {
 
 const BUDGETS: Record<Exclude<Reasoning, "off">, number> = { minimal: 1024, low: 2048, medium: 8192, high: 16384, xhigh: 16384 };
 
-/** The accepted level nearest to the one asked for: the next one up, or failing that the next one down. */
+/**
+ * The level to use for one asked for: itself if listed, otherwise the nearest listed level
+ * below it. Never a higher one. Undefined means no reasoning setting (shared data, Models).
+ */
 export function nearestLevel(model: CatalogModel, level: Reasoning): Reasoning | undefined {
 	if (model.thinking.includes(level)) return level;
 	const at = REASONING_LEVELS.indexOf(level);
-	return REASONING_LEVELS.slice(at + 1).find((l) => model.thinking.includes(l))
-		?? REASONING_LEVELS.slice(0, at).reverse().find((l) => model.thinking.includes(l));
+	return REASONING_LEVELS.slice(0, Math.max(at, 0)).reverse().find((l) => model.thinking.includes(l));
 }
 
 /**

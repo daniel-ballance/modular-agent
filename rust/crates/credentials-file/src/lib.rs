@@ -19,22 +19,24 @@ impl Plugin for FileCredentials {
 }
 impl CredentialStore for FileCredentials {
     fn get(&self, name: &str) -> Result<String> {
-        let path = if name == "openai" {
-            self.openai_key.clone()
-        } else {
-            self.named(name)?
-        };
-        let value = std::fs::read_to_string(path)
-            .map_err(|_| anyhow!("OpenAI credential file unavailable"))?;
-        let value = if name == "openai" {
-            value.trim().to_string()
-        } else {
-            value
-        };
         ensure!(
-            name != "openai" || !value.is_empty(),
-            "OpenAI credential file empty"
+            name != "openai",
+            "a Provider credential is read only by its Provider"
         );
+        std::fs::read_to_string(self.named(name)?)
+            .map_err(|_| anyhow!("credential file unavailable"))
+    }
+    fn provider(&self, claim: &CredentialClaim, name: &str) -> Result<String> {
+        ensure!(
+            name == "openai" && claim.covers(name),
+            "{} did not register the credential {name}",
+            claim.owner()
+        );
+        let value = std::fs::read_to_string(&self.openai_key)
+            .map_err(|_| anyhow!("OpenAI credential file unavailable"))?
+            .trim()
+            .to_string();
+        ensure!(!value.is_empty(), "OpenAI credential file empty");
         Ok(value)
     }
     fn accepts(&self, name: &str) -> bool {

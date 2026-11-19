@@ -4,7 +4,7 @@ A specification for an AI agent made of a small **Harness** and replaceable **pl
 
 The specification says **what** each part does, what passes between the parts, and what must always hold. It doesn't prescribe how a part works inside. The core prescribes no transport. Optional **bindings** fix the wire where two builds need to work together: ACP for hosts, a plugin protocol, and an HTTP history service. The bindings share JSON shapes.
 
-The current handoff is [production edition 3](docs/adr/0021-production-edition.md).
+The current handoff is [production edition 3](docs/adr/0021-production-edition.md). An [edition 4 draft](docs/adr/0023-edition-4-draft.md) adds rules found by the first working build; only the Rust build implements it.
 
 ## Why it holds up
 

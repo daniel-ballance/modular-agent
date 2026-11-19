@@ -93,7 +93,7 @@ The built-in list has the same 18 Claude models, limits and accepted levels as P
 | `high` | effort `high` | 16,384 tokens |
 | `xhigh` | effort `xhigh` | not offered |
 
-Which levels a model lists follows the reference: Fable 5.x cannot switch thinking off; Haiku 5.5 has no `minimal`; Opus 5.5 and Sonnet 5.5 have neither `off` nor `minimal`; Opus 4.6 and Sonnet 4.6 have no `xhigh`. A level the model does not list is moved to the nearest listed level above it, or below if there is none above. Claude's `max` effort has no shared level name and cannot be selected.
+Which levels a model lists follows the reference: Fable 5.x cannot switch thinking off; Haiku 5.5 has no `minimal`; Opus 5.5 and Sonnet 5.5 have neither `off` nor `minimal`; Opus 4.6 and Sonnet 4.6 have no `xhigh`. A level the model does not list is lowered to the nearest listed level below it, or left unset if there is none, as [shared data](../../docs/bindings/data.md#models) requires. It is never raised. Claude's `max` effort has no shared level name and cannot be selected.
 
 `settings.maxOutput` is capped at the model's `maxOutput` and passed to Claude Code as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` for that one process.
 
@@ -160,11 +160,11 @@ Two more single requests, made directly against the Provider class to look into 
 
 ## Where the binding had to be read closely or guessed
 
-- **Cancel and the response hook** ([Transport](../../docs/bindings/plugin.md#transport), [The host asks a Provider](../../docs/bindings/plugin.md#the-host-asks-a-provider)). `provider/request` defines no cancellation result, so a cancelled request answers the `cancelled` error. The binding does not say whether `provider.response` should be called with an `aborted` message first. This sidecar does not call it.
+- **Cancel and the response hook.** Settled by the edition 4 draft as this sidecar had guessed: a cancelled request answers `cancelled` and sends no `provider.response`.
 - **A failed `provider.request` hook.** The binding says the Provider must wait for the successful answer. For an error answer (`cancelled`, `turn_limit`, `internal`, `lost`) the sidecar answers `provider/request` with the same error code and does no inference.
 - **Erasure by a stateless Provider.** `provider/discard` with `erase: true` answers `{ "outOfReach": [...] }` with one descriptive string, following the wording "report those copies out of reach". The binding does not define the strings.
 - **`sessionId` on a stateless Provider.** Accepted when present, never required, and copied into both hook payloads (`null` when absent, per [the hook table](../../docs/bindings/plugin.md#from-core-hooks-to-wire-hooks)).
-- **A level the model does not list.** [Shared data, Models](../../docs/bindings/data.md#models) does not say what a Provider does with one. The sidecar moves it to the nearest listed level instead of failing.
+- **A level the model does not list.** Settled by the edition 4 draft: lower it, never raise it. The sidecar now does.
 - **`cost` for a subscription.** [Messages](../../docs/bindings/data.md#messages) says to use zero for fields missing from a partial meter. Zero is reported.
 - **Opaque reasoning data.** Thinking signatures are not returned as `providerData`, because history is never sent back as native turns and the data would only add bytes.
 - **The request after the hook.** If the hook answers with a request that is not a readable ModelRequest, inference has already been admitted, so the sidecar returns a `failed` message with kind `other` and still calls `provider.response`.

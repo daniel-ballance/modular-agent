@@ -26,11 +26,12 @@ pub(crate) struct Shared {
     pub(crate) sessions: Mutex<BTreeMap<String, Scope>>,
     pub(crate) job_lock: tokio::sync::Mutex<()>,
     pub(crate) running_jobs: std::sync::Mutex<BTreeSet<String>>,
-    changed: Mutex<BTreeSet<String>>,
     project: PathBuf,
     provider_points: BTreeMap<String, HookPoint>,
     sources: Mutex<Vec<Weak<Source>>>,
     identity: String,
+    /// This plugin's hold on its Providers' credentials, made at install.
+    credentials: Mutex<Option<CredentialClaim>>,
 }
 pub struct Remote {
     name: String,
@@ -56,11 +57,11 @@ pub async fn load(
         api: Arc::downgrade(&api),
         registration: Mutex::new(Value::Null),
         sessions: Mutex::default(),
-        changed: Mutex::default(),
         project: project.clone(),
         provider_points: harness.provider_points(),
         sources: Mutex::default(),
         identity: format!("external.{index}"),
+        credentials: Mutex::default(),
         job_lock: Default::default(),
         running_jobs: Default::default(),
     });
@@ -314,6 +315,16 @@ impl Plugin for Remote {
                 })
             }),
         );
+        // The plugin holds its own Providers' credentials and no others.
+        let ids: Vec<&str> = registration["providers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|provider| provider["id"].as_str())
+            .collect();
+        if !ids.is_empty() {
+            *self.shared.credentials.lock().unwrap() = Some(r.claim_credentials(&ids)?);
+        }
         for provider in registration["providers"].as_array().into_iter().flatten() {
             let id = wire::string(provider, "id")?.to_string();
             let models = provider["models"]
@@ -1101,14 +1112,24 @@ impl WorkingEnvironment for Environment {
         command: &str,
         cancel: CancellationToken,
     ) -> Result<ToolResult> {
+        self.exec(api, scope, project, command, None, cancel).await
+    }
+    /// The deadline goes to the environment, which is where the command runs.
+    async fn exec(
+        &self,
+        api: Api,
+        scope: Scope,
+        project: PathBuf,
+        command: &str,
+        timeout: Option<Duration>,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult> {
+        let mut params = json!({"cwd":project,"command":command});
+        if let Some(limit) = timeout.filter(|limit| !limit.is_zero()) {
+            params["timeoutMs"] = json!((limit.as_millis() as u64).max(1));
+        }
         let v = self
-            .request(
-                "env/exec",
-                json!({"cwd":project,"command":command}),
-                api,
-                scope.clone(),
-                cancel.clone(),
-            )
+            .request("env/exec", params, api, scope.clone(), cancel.clone())
             .await;
         let v = match v {
             Ok(v) => v,
@@ -1135,7 +1156,11 @@ impl WorkingEnvironment for Environment {
                 ToolStatus::Failed
             },
             text: v["output"].as_str().unwrap_or("").into(),
-            value: Some(json!({"exit_code":v["exitCode"]})),
+            value: Some(if v["timedOut"] == true {
+                json!({"exit_code":v["exitCode"],"timed_out":true})
+            } else {
+                json!({"exit_code":v["exitCode"]})
+            }),
         })
     }
 }
@@ -1467,7 +1492,8 @@ impl Callbacks {
                 let provider=wire::string(&p,"provider")?;
                 ensure!(self.0.registration.lock().unwrap()["providers"].as_array().into_iter().flatten().any(|v|v["id"]==provider),"provider not registered by this plugin");
                 let api=self.0.api.upgrade().ok_or_else(||anyhow!("host closed"))?;
-                let credential=capability::<dyn CredentialStore>(api.as_ref(),"credentials")?.get(provider).ok().map(|key|json!({"type":"apiKey","key":key}));
+                let claim=self.0.credentials.lock().unwrap().clone().ok_or_else(||anyhow!("no credential registered"))?;
+                let credential=capability::<dyn CredentialStore>(api.as_ref(),"credentials")?.provider(&claim,provider).ok().map(|key|json!({"type":"apiKey","key":key}));
                 return Ok(json!({"credential":credential}))
             }
             if method=="host/declaration"&&p["sessionId"].is_null()&&p["parentRequestId"].is_null() {
@@ -1522,16 +1548,9 @@ impl Callbacks {
                             "env/exec"=>{
                                 let relay:Api=Arc::new(crate::relay::Relay{inner:api.clone(),peer:peer.clone(),id,route:crate::relay::Route::Environment});
                                 // Zero is no limit, including when routing to a local environment.
-                                let child=token.child_token();
-                                let run=env.bash(relay,scope.clone(),cwd.to_path_buf(),wire::string(&p,"command")?,child.clone());
-                                tokio::pin!(run);
-                                let r=if let Some(ms)=p["timeoutMs"].as_u64().filter(|ms| *ms > 0) {
-                                    tokio::select! {
-                                        result=&mut run=>result,
-                                        _=tokio::time::sleep(Duration::from_millis(ms))=>{child.cancel();run.await}
-                                    }
-                                } else {run.await}?;
-                                let timed_out=child.is_cancelled()&&!token.is_cancelled();
+                                let limit=p["timeoutMs"].as_u64().filter(|ms| *ms > 0).map(Duration::from_millis);
+                                let r=env.exec(relay,scope.clone(),cwd.to_path_buf(),wire::string(&p,"command")?,limit,token.clone()).await?;
+                                let timed_out=r.value.as_ref().is_some_and(|v|v["timed_out"]==true);
                                 if token.is_cancelled(){bail!("cancelled");}
                                 Ok(json!({"exitCode":r.value.map(|v|v["exit_code"].clone()).unwrap_or(Value::Null),"output":r.text,"timedOut":timed_out}))
                             }

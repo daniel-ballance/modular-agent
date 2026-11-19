@@ -155,7 +155,7 @@ async fn start() -> Result<()> {
     }
     if trust_project {
         config_files::FilesConfiguration::new(options.global_config.clone())
-        .trust(&terminal.project)?;
+            .trust(&terminal.project)?;
     }
     let api = compose_project(options, provider, interface, runtime, &terminal.project).await?;
     if let Some(durable) = subagents {

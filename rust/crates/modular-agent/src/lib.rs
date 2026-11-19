@@ -94,7 +94,7 @@ pub async fn compose_project(
 ) -> Result<Arc<Harness>> {
     let project = project.canonicalize()?;
     let plan = config_files::FilesConfiguration::new(options.global_config.clone())
-    .plugin_plan(&project)?;
+        .plugin_plan(&project)?;
     let plugin_home = options.history.with_file_name("plugins");
     let h = compose_with(
         Harness::for_project(project.clone()),

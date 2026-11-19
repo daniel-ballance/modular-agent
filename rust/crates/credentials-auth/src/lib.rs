@@ -122,9 +122,12 @@ impl AuthFile {
         fs2::FileExt::lock_exclusive(&file)?;
         Ok(Locked(file))
     }
+    /// Operator use, as `ma auth` and `ma login` do. Plugins get a sign-in
+    /// through [`Logins`], against their claim.
     pub fn login(&self, provider: &str) -> Result<Option<Login>> {
         Ok(self.read()?.logins.remove(provider))
     }
+    /// Operator use.
     pub fn set_login(&self, provider: &str, login: Option<Login>) -> Result<()> {
         let _lock = self.lock()?;
         let mut contents = self.read()?;
@@ -138,11 +141,21 @@ impl AuthFile {
     /// `refresh` runs with the file locked against other agents, on the value
     /// read under that lock, so a token another process just refreshed is used
     /// instead of being spent again.
-    pub async fn current<F, Fut>(&self, provider: &str, refresh: F) -> Result<Login>
+    pub async fn current<F, Fut>(
+        &self,
+        claim: &CredentialClaim,
+        provider: &str,
+        refresh: F,
+    ) -> Result<Login>
     where
         F: FnOnce(Login) -> Fut,
         Fut: std::future::Future<Output = Result<Login>>,
     {
+        ensure!(
+            claim.covers(provider),
+            "{} did not register the credential {provider}",
+            claim.owner()
+        );
         let missing = || anyhow!("not signed in to {provider}; run `ma login {provider}`");
         let login = self.login(provider)?.ok_or_else(missing)?;
         if !login.expired() {
@@ -183,19 +196,73 @@ impl Plugin for AuthFile {
     }
     fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
         r.provide::<dyn CredentialStore>("credentials", Arc::new(self.clone()))?;
-        r.provide::<AuthFile>("credentials.auth", Arc::new(self.clone()))
+        r.provide::<Logins>("credentials.logins", Arc::new(Logins(self.clone())))
+    }
+}
+/// What a Provider plugin may do with sign-ins: read and refresh its own.
+pub struct Logins(AuthFile);
+impl Logins {
+    pub async fn current<F, Fut>(
+        &self,
+        claim: &CredentialClaim,
+        provider: &str,
+        refresh: F,
+    ) -> Result<Login>
+    where
+        F: FnOnce(Login) -> Fut,
+        Fut: std::future::Future<Output = Result<Login>>,
+    {
+        self.0.current(claim, provider, refresh).await
+    }
+    /// Mark the Provider's own token as spent, so the next read refreshes it.
+    pub fn expire(&self, claim: &CredentialClaim, provider: &str) -> Result<()> {
+        ensure!(
+            claim.covers(provider),
+            "{} did not register the credential {provider}",
+            claim.owner()
+        );
+        if let Some(Login::Oauth {
+            access,
+            refresh,
+            account,
+            ..
+        }) = self.0.login(provider)?
+        {
+            self.0.set_login(
+                provider,
+                Some(Login::Oauth {
+                    access,
+                    refresh,
+                    expires: 0,
+                    account,
+                }),
+            )?;
+        }
+        Ok(())
     }
 }
 impl CredentialStore for AuthFile {
     fn get(&self, name: &str) -> Result<String> {
-        let mut contents = self.read()?;
-        if let Some(login) = contents.logins.get(name) {
-            return Ok(login.secret().to_owned());
-        }
-        contents
+        ensure!(
+            !self.providers.iter().any(|p| p == name),
+            "a Provider sign-in is read only by its Provider"
+        );
+        self.read()?
             .answers
             .remove(name)
             .ok_or_else(|| anyhow!("no credential named {name}"))
+    }
+    fn provider(&self, claim: &CredentialClaim, name: &str) -> Result<String> {
+        ensure!(
+            claim.covers(name),
+            "{} did not register the credential {name}",
+            claim.owner()
+        );
+        self.read()?
+            .logins
+            .get(name)
+            .map(|login| login.secret().to_owned())
+            .ok_or_else(|| anyhow!("not signed in to {name}"))
     }
     fn put(&self, name: &str, value: &str) -> Result<()> {
         self.answer_name(name)?;
@@ -215,12 +282,49 @@ impl CredentialStore for AuthFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// A Provider plugin, as far as credentials go: it claims a name.
+    struct Claims(&'static str, Arc<Mutex<Option<CredentialClaim>>>);
+    impl Plugin for Claims {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
+            *self.1.lock().unwrap() = Some(r.claim_credentials(&["xai"])?);
+            Ok(())
+        }
+    }
 
     #[tokio::test]
-    async fn a_login_is_refreshed_once_and_kept_private() -> Result<()> {
+    async fn a_login_is_refreshed_once_kept_private_and_given_only_to_its_provider() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let auth = AuthFile::new(dir.path().join("auth.json"), &["xai"]);
-        assert!(auth.current("xai", |l| async { Ok(l) }).await.is_err());
+        let harness = agent_harness::Harness::new();
+        harness.load(Arc::new(auth.clone())).await?;
+        let slot = Arc::new(Mutex::new(None));
+        harness
+            .load(Arc::new(Claims("provider.xai", slot.clone())))
+            .await?;
+        let claim = slot.lock().unwrap().clone().unwrap();
+        // A second plugin cannot take the same name: its load is refused.
+        let thief = Arc::new(Mutex::new(None));
+        assert!(
+            harness
+                .load(Arc::new(Claims("provider.other", thief.clone())))
+                .await
+                .is_err()
+        );
+        assert!(thief.lock().unwrap().is_none());
+
+        let store: Arc<dyn CredentialStore> = capability(harness.as_ref(), "credentials")?;
+        let logins: Arc<Logins> = capability(harness.as_ref(), "credentials.logins")?;
+        assert!(
+            logins
+                .current(&claim, "xai", |l| async { Ok(l) })
+                .await
+                .is_err()
+        );
         let stale = Login::Oauth {
             access: "old".into(),
             refresh: "r1".into(),
@@ -242,18 +346,26 @@ mod tests {
                 account: None,
             })
         };
-        assert_eq!(auth.current("xai", fresh).await?.secret(), "new");
+        assert_eq!(logins.current(&claim, "xai", fresh).await?.secret(), "new");
         // Now current: the refresh must not run again.
-        let again = auth
-            .current("xai", |_| async { bail!("refreshed a current token") })
+        let again = logins
+            .current(&claim, "xai", |_| async {
+                bail!("refreshed a current token")
+            })
             .await?;
         assert_eq!(again.secret(), "new");
-        assert_eq!(auth.get("xai")?, "new");
-        assert!(!auth.accepts("xai") && auth.put("xai", "x").is_err());
-        auth.put("deploy-key", "s3")?;
-        assert_eq!(auth.get("deploy-key")?, "s3");
+        // The sign-in goes to its Provider and to nobody who only has the store.
+        assert_eq!(store.provider(&claim, "xai")?, "new");
+        assert!(store.get("xai").is_err());
+        assert!(store.provider(&claim, "openai-codex").is_err());
+        assert!(!store.accepts("xai") && store.put("xai", "x").is_err());
+        store.put("deploy-key", "s3")?;
+        assert_eq!(store.get("deploy-key")?, "s3");
+        // Marked as spent, the next read refreshes.
+        logins.expire(&claim, "xai")?;
+        assert!(auth.login("xai")?.unwrap().expired());
         auth.set_login("xai", None)?;
-        assert!(auth.get("xai").is_err());
+        assert!(store.provider(&claim, "xai").is_err());
         Ok(())
     }
 }

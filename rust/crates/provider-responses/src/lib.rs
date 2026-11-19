@@ -6,7 +6,7 @@ pub mod body;
 pub mod oauth;
 
 use agent_api::*;
-use credentials_auth::{AuthFile, Login};
+use credentials_auth::{Login, Logins};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -55,7 +55,7 @@ pub struct Model {
     #[serde(default)]
     pub effort: BTreeMap<String, String>,
 }
-const LEVELS: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+pub(crate) const LEVELS: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 /// The built-in catalog, with `overrides` (the same shape, by vendor id)
 /// replacing or adding models by id.
@@ -112,6 +112,8 @@ struct Responses {
     originator: String,
     client: reqwest::Client,
     test: bool,
+    /// This Provider's hold on its own sign-in.
+    claim: CredentialClaim,
 }
 struct Bound {
     provider: Responses,
@@ -133,9 +135,11 @@ impl Plugin for ResponsesPlugin {
             .read_timeout(Duration::from_secs(300))
             .user_agent(concat!("modular-agent/", env!("CARGO_PKG_VERSION")))
             .build()?;
+        let claim = r.claim_credentials(&[self.vendor.id()])?;
         r.provide::<dyn Provider>(
             self.name(),
             Arc::new(Responses {
+                claim,
                 vendor: self.vendor,
                 models: Arc::new(self.models.clone()),
                 test: self.endpoint != self.vendor.endpoint(),
@@ -228,13 +232,14 @@ impl Bound {
                 key: "test-credential".into(),
             });
         }
-        let auth: Arc<AuthFile> = capability(api.as_ref(), "credentials.auth")?;
+        let logins: Arc<Logins> = capability(api.as_ref(), "credentials.logins")?;
         let client = self.provider.client.clone();
-        auth.current(vendor.id(), |old| async move {
-            oauth::refresh(&client, vendor, old).await
-        })
-        .await
-        .map_err(|e| failed(FailureKind::Credentials, format!("{e:#}")).into())
+        logins
+            .current(&self.provider.claim, vendor.id(), |old| async move {
+                oauth::refresh(&client, vendor, old).await
+            })
+            .await
+            .map_err(|e| failed(FailureKind::Credentials, format!("{e:#}")).into())
     }
     async fn send(&self, login: &Login, session: &str, body: &Value) -> Result<reqwest::Response> {
         let mut request = self
@@ -372,11 +377,10 @@ impl Bound {
             if status.as_u16() == 401
                 && !retried
                 && !self.provider.test
-                && let Login::Oauth { expires, .. } = &mut login
+                && matches!(login, Login::Oauth { .. })
             {
-                *expires = 0;
-                let auth: Arc<AuthFile> = capability(api.as_ref(), "credentials.auth")?;
-                auth.set_login(vendor.id(), Some(login.clone()))?;
+                let logins: Arc<Logins> = capability(api.as_ref(), "credentials.logins")?;
+                logins.expire(&self.provider.claim, vendor.id())?;
                 login = self.login(api).await?;
                 retried = true;
                 continue;

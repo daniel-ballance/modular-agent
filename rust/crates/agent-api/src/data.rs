@@ -351,6 +351,22 @@ impl ToolResult {
             value: None,
         }
     }
+    /// Give the result content beyond text, such as an image, as shared
+    /// Content parts. The text parts together must equal `text`.
+    pub fn with_content(mut self, content: Vec<Value>) -> Self {
+        let mut wire = json!({"content": content});
+        if let Some(value) = self.value.take() {
+            wire["value"] = value;
+        }
+        self.value = Some(json!({"_pluginWire": wire}));
+        self
+    }
+    /// The content set by `with_content` or received over the wire, when it
+    /// still matches the text.
+    pub fn content(&self) -> Option<&Vec<Value>> {
+        let content = self.value.as_ref()?["_pluginWire"]["content"].as_array()?;
+        (crate::wire::text(&json!(content)) == self.text).then_some(content)
+    }
     pub fn refusal_text(reason: &str) -> String {
         format!("The call was refused and did not run: {reason}")
     }

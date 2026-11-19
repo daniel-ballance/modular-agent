@@ -98,26 +98,6 @@ pub fn abort_attempt(api: &dyn AgentApi, writer: &str, old: &Entry) -> Result<()
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn json_comparison_matches_values_without_rounding() {
-        let parse = |s: &str| serde_json::from_str::<Value>(s).unwrap();
-        assert!(same_json(
-            &parse(r#"{"a":1.00,"b":[-0,2e4]}"#),
-            &parse(r#"{"b":[0.0,20000],"a":1}"#)
-        ));
-        assert!(!same_json(
-            &parse("9007199254740992"),
-            &parse("9007199254740993.0")
-        ));
-        assert!(!same_json(&parse("1e400"), &parse("2e400")));
-        assert!(!same_json(&parse(r#"{"a":null}"#), &parse("{}")));
-    }
-}
-
 impl ModelAttempt {
     pub fn validate_tools(&self, request: &ModelRequest) -> Result<()> {
         let mut names = std::collections::BTreeSet::new();
@@ -199,5 +179,25 @@ impl ModelAttempt {
         ensure!(!cancel.is_cancelled(), "cancelled");
         api.check_writer(&scope.session)?;
         Ok(entry)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_comparison_matches_values_without_rounding() {
+        let parse = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+        assert!(same_json(
+            &parse(r#"{"a":1.00,"b":[-0,2e4]}"#),
+            &parse(r#"{"b":[0.0,20000],"a":1}"#)
+        ));
+        assert!(!same_json(
+            &parse("9007199254740992"),
+            &parse("9007199254740993.0")
+        ));
+        assert!(!same_json(&parse("1e400"), &parse("2e400")));
+        assert!(!same_json(&parse(r#"{"a":null}"#), &parse("{}")));
     }
 }

@@ -107,12 +107,9 @@ fn history_messages(entries: &[Entry]) -> Result<Vec<Message>> {
                         })
                         .and_then(|e| e.content.as_ref());
                     let text = if let Some(v) = done {
-                        let r: ToolResult = serde_json::from_value(v.clone())?;
-                        if v.get("message").is_some() {
-                            r.text
-                        } else {
-                            format!("{:?}: {}", r.status, r.text)
-                        }
+                        // The same text before and after a reopen, so that the
+                        // model's context does not change with a restart.
+                        serde_json::from_value::<ToolResult>(v.clone())?.text
                     } else {
                         "Waiting for an answer. This is a view placeholder, not the call's result."
                             .into()
@@ -122,23 +119,23 @@ fn history_messages(entries: &[Entry]) -> Result<Vec<Message>> {
                     if let Some(v) = done.and_then(|v| v.get("message")) {
                         m.parts = crate::wire::parts(&v["content"])?;
                         m.opaque = json!({"_pluginWire":v});
+                    } else if let Some(v) = done {
+                        // Not yet through a store: the result still holds its own content.
+                        let r: ToolResult = serde_json::from_value(v.clone())?;
+                        if r.status == ToolStatus::Completed
+                            && let Some(content) = r.content()
+                            && content.iter().any(|part| part["type"] != "text")
+                        {
+                            m.parts = crate::wire::parts(&json!(content))?;
+                        }
                     }
                     emitted.insert(call.id);
                     result.push(m);
                 }
             }
-            "tool.result" => {
-                let response: ToolResult = serde_json::from_value(value.clone())?;
-                if !emitted.contains(&response.call) {
-                    result.push(Message::text(
-                        "user",
-                        &format!(
-                            "Tool call {} (started outside this model context): {:?}: {}",
-                            response.call, response.status, response.text
-                        ),
-                    ));
-                }
-            }
+            // A result with no call in a model response on this branch is an
+            // orphan: a call the UI or a plugin started, or a nested call. The
+            // shared data binding leaves orphans out of the model's context.
             _ => (),
         }
     }

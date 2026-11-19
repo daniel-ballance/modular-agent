@@ -102,8 +102,10 @@ mise exec -- cargo test --workspace -- --test-threads=1
 (cd ../sidecars/claude && npm test)
 ```
 
-- **The whole workspace: 259 tests pass, none fail** (2026-11-19). That includes the base build's suite, which runs the ACP kit and the plugin kit against the `modular-agent` binary, so the changes to the base did not cost conformance.
-- **The standard configuration: 9 integration tests** with a scripted model, in `crates/standard/tests`:
+- **The whole workspace: 262 tests pass, none fail** (2026-11-19, after the edition 4 draft). That includes the base build's suite, which runs the kits against the `modular-agent` binary.
+- **The kits, with the draft's checks:** ACP 116/116, and 132/132 with the fixture tools and environment served from a second process, where the fixture tool's nested call crosses the plugin binding. Plugin kit 146/146.
+- **The TypeScript build, left at edition 3, against the same kits:** ACP 104/104 and plugin 140/140. The draft's checks are not asked of a build that does not declare them.
+- **The standard configuration: 12 integration tests** with a scripted model, in `crates/standard/tests`:
   - the model is offered only `codemode`, and a direct call to another tool is refused;
   - nested calls are recorded with their parent and stay out of the model's context;
   - a nested call passes its own gate, and a refusal reaches the code as an exception;
@@ -111,7 +113,10 @@ mise exec -- cargo test --workspace -- --test-threads=1
   - the sandbox cannot read a file itself, and the compute, call and recursion limits hold;
   - instructions and skills reach the prompt in order, and `/skill:NAME` loads one;
   - MCP servers from `mcp.json` become functions, and a server that fails to start is skipped;
-  - `model_tools: null` offers the tools directly;
+  - `model_tools: null` offers the tools directly, and the setting is stored under its standard name;
+  - nesting stops at four deep, and a command's deadline ends it;
+  - an image read in code reaches the model, and still does after a reopen;
+  - a call made from the UI stays out of the model's context;
   - **a `kill -9` in the middle of a code run:** on reopening, the durable Runtime finishes the turn, the code run and the command it had started are both settled as outcome unknown, and neither runs again.
 - **The two Responses Providers: 5 tests**, three of them against a loopback fixture: request shape per vendor, streamed text and tool calls, usage, error kinds, cancel, and that one vendor's reasoning items are never sent to the other.
 - **Sign-in: 4 tests** for the browser callback, the token claims, refresh and the credential file. Both sign-in flows were also started against the real services, which issued codes; no sign-in was completed.
@@ -123,9 +128,10 @@ mise exec -- cargo test --workspace -- --test-threads=1
 
 - **ChatGPT and Grok have not made a real request.** Their sign-in needs you. The request shapes, headers, endpoints and client ids follow Pi 1.5.2. After `ma login openai-codex` and `ma login xai`, try `ma --model openai-codex/gpt-6.1-sol -p "say hi"` and the same for `xai/grok-4.7`. The Codex backend takes an `originator` header; this build sends Pi's value, `pi`, because that is the one known to be accepted.
 - **`ma` does not offer the conformance fixture,** so the ACP kit cannot run against it. The kits run against `modular-agent`, the same Harness with the fixture plugin set.
+- **Nested calls need this build's own Runtime.** With a Runtime served from another process the agent does not declare `nestedToolCalls`, and the code tool cannot call anything.
 - **Monty runs inside the agent's process.** Its authors recommend `monty-pool`, which runs the interpreter in worker processes, because a stack overflow or allocator abort in the interpreter takes its host with it. The limits above make that unlikely, not impossible. With the durable Runtime such a crash loses no history.
 - **No memory limit on the sandbox.** Monty's needs its own global allocator.
-- **Images.** `read` on an image reports its type and size. Nothing passes images to a model yet.
+- **Images** are attached as read, up to 4.5 MB, and not resized as Pi does. The Responses Providers send a tool result's image as a user item after it, which no real request has tried yet.
 - **`edit` matches exactly.** Pi falls back to a fuzzy match on whitespace and quote style.
 - **MCP:** tools only. No resources, prompts, sampling, elicitation or OAuth sign-in to a server. A server whose tool names are not letters, digits, `_` or `-`, or run past 64 characters with the prefix, is skipped whole.
 - **No approval, subagent or guardrail plugin** in the standard set, as in Pi. The base has all three (`feature-approval`, `feature-subagents`, `guardrail`).
@@ -133,15 +139,32 @@ mise exec -- cargo test --workspace -- --test-threads=1
 - **Claude through the sidecar** starts a Claude Code process per model request, replays earlier turns as text, and Claude Code adds some text of its own around the prompt. See the [sidecar's gaps](../sidecars/claude/README.md#known-gaps-and-open-problems).
 - **The production gaps of edition 3** are unchanged: secret staging, per-connection isolation, resource reservations and cross-session erasure.
 
-## Where the specification was silent
+## The edition 4 draft
 
-Logged in the experiment's habit, with the swap test: would two builds that chose differently break a plugin or a host?
+Building this turned up seven places where edition 3 was silent. They are now draft rules, in [ADR 0023](../docs/adr/0023-edition-4-draft.md), and this build implements all of them:
 
-- **A tool calling a tool in process.** [Contracts](../docs/contracts.md#tool-dispatch) say a nested call passes its own gates, and [shared data](../docs/bindings/data.md#tools) gives it `startedBy: "tool"` and `parentCallId`. Neither says how an in-process tool source asks for one. This build adds `Runtime::nested_tool`. The plugin binding has no equivalent, so a tool source in another process cannot make nested calls. Swap test: yes for a code tool served over the wire.
-- **Whether a nested call must be in the model's offer.** The [recorded offer](../docs/contracts.md#recovery-and-repeating-work) governs calls "from that attempt". This build reads that as the model's own calls: a nested call needs a live registration that allows a tool as caller, not a place in the offer. Swap test: yes. A build that required the offer would refuse every nested call here.
-- **A nested call that asks a question past its deadline.** The call cannot be left open, since its parent would have to stay open too. This build refuses it. Swap test: no; it is a refusal either way.
-- **Which registered tools the model is offered.** `callers` on a definition is the tool source's own statement. This build adds a session setting, `model_tools`, for the operator's. Another build reopening the session ignores the key and offers its own set from then on; the turns already recorded keep their offers. Swap test: mild. Nothing breaks, but the model's tools change.
-- **Announcing a nested call.** This build emits the same event as for a model's call, so an ACP client receives `tool_call` before `tool_call_update`. The [ACP binding](../docs/bindings/acp.md#updates) does not say whether a client should be told the parent.
+| Rule | Where it lives here |
+|---|---|
+| A tool can start a nested call, in process or over the plugin binding (`host/tools/list`, `host/tools/call`) | `Runtime::nested_tool` in `runtime-engine`; the host side in `plugin-stdio`; the fixture tool `nest` |
+| A nested call needs a registration that allows a plugin as caller, not a place in the model's offer | `nested_tool_definitions` in `agent-api` |
+| A nested call is never left open; nesting is at most 4 deep | `runtime-engine` |
+| `modelTools` is a standard setting (`model_tools` in this build's settings files) | `agent-harness`, `agent-api::portable` |
+| An ACP client is told a nested call's parent | `interface-acp` |
+| `env/list` and `host/env/list` | `WorkingEnvironment::list_dir`, `plugin-stdio` |
+| A cancelled Provider request sends no response callback; an unlisted reasoning level is lowered, never raised; `outOfReach` text is for people | `provider-responses`, `sidecars/claude` |
+
+No other build implements the draft, and no swap has tested it.
+
+## Changes to the base since the seed
+
+Beyond the draft rules, these defects in the seeded build were fixed:
+
+- **A result with no call in the model's context is left out of it,** as shared data requires. The seed showed the model a call the UI had made.
+- **A tool result reads the same before and after a reopen.** The seed put the status in front of the text while the session was live and not after it was reloaded, so a restart changed the model's context.
+- **A command's deadline belongs to the working environment** (`WorkingEnvironment::exec`), so a remote environment enforces it where the command runs.
+- **Tool results can carry content beyond text,** such as an image, live and through the store.
+- **A Provider's credential goes only to the plugin that claimed its name** at load (`Registrar::claim_credentials`). Both credential stores refuse a sign-in to anyone else, and a second plugin claiming a held name fails to load.
+- **Lint:** `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check` are clean.
 
 ## Layout
 

@@ -247,7 +247,14 @@ fn acp_crash_kit(part: Option<&str>) {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("123/123 checks passed"), "{stdout}");
+    // A Runtime served from another process does not run nested calls, so
+    // the agent does not declare them and the kit leaves those checks out.
+    let expected = if part.is_some() {
+        "111/111 checks passed"
+    } else {
+        "123/123 checks passed"
+    };
+    assert!(stdout.contains(expected), "{stdout}");
 }
 #[tokio::test]
 async fn replacements_leave_local_items_out_and_route_tools_to_a_third_process() {
@@ -431,13 +438,14 @@ async fn output_gate_redacts_live_turn_end_entries_without_rebuilding_the_turn()
         .unwrap();
     let mut expected = json!(record);
     expected["content"]["text"] = json!("[redacted]");
-    let entries = rig.events.values.lock().unwrap();
-    let entry = entries
-        .iter()
-        .find(|e| e.kind == "history.entry" && e.content["id"] == record.id)
-        .expect("the gate must not drop the turnEnd entry");
-    assert_eq!(entry.content, expected);
-    drop(entries);
+    {
+        let entries = rig.events.values.lock().unwrap();
+        let entry = entries
+            .iter()
+            .find(|e| e.kind == "history.entry" && e.content["id"] == record.id)
+            .expect("the gate must not drop the turnEnd entry");
+        assert_eq!(entry.content, expected);
+    }
     rig.end(&id).await;
 }
 

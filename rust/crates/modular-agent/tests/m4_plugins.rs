@@ -15,8 +15,7 @@ async fn configured_plugins_load_with_options_only_after_project_trust() -> Resu
     )?;
     for trusted in [false, true] {
         if trusted {
-            config_files::FilesConfiguration::new(config.clone())
-            .trust(project.path())?;
+            config_files::FilesConfiguration::new(config.clone()).trust(project.path())?;
         }
         let h = modular_agent::compose_project(
             modular_agent::Options {

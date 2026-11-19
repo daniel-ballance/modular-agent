@@ -243,8 +243,12 @@ impl Endpoint for Conformance {
                         return Err(Fault::new("cancelled", "tool cancelled"));
                     }
                     return Ok(match asked {
-                        Ok(nested) => json!({"status":nested["status"],"content":nested["content"]}),
-                        Err(e) => json!({"status":"failed","content":[{"type":"text","text":e.code}]}),
+                        Ok(nested) => {
+                            json!({"status":nested["status"],"content":nested["content"]})
+                        }
+                        Err(e) => {
+                            json!({"status":"failed","content":[{"type":"text","text":e.code}]})
+                        }
                     });
                 }
                 let method = match name {
@@ -498,9 +502,9 @@ pub(crate) async fn environment(
         "env/list" => match env.list_dir(&cwd, name).await {
             Ok(names) => Ok(json!({"entries":wire::dir_entries(&names)})),
             Err(error)
-                if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
-                    e.kind() == std::io::ErrorKind::NotADirectory
-                }) =>
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotADirectory) =>
             {
                 Err(Fault::new("invalid_request", "not a directory"))
             }

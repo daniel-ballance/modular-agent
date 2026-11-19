@@ -119,17 +119,17 @@ pub fn settings_from_wire(v: &Value) -> Value {
                 }),
             );
         }
-        if let Some(model) = o.get("model").filter(|v| v.is_object()) {
-            if let (Some(p), Some(id)) = (model["provider"].as_str(), model["id"].as_str()) {
-                o.insert(
-                    "model".into(),
-                    json!(if p == native_provider(id) {
-                        id.to_owned()
-                    } else {
-                        format!("{p}/{id}")
-                    }),
-                );
-            }
+        if let Some(model) = o.get("model").filter(|v| v.is_object())
+            && let (Some(p), Some(id)) = (model["provider"].as_str(), model["id"].as_str())
+        {
+            o.insert(
+                "model".into(),
+                json!(if p == native_provider(id) {
+                    id.to_owned()
+                } else {
+                    format!("{p}/{id}")
+                }),
+            );
         }
     }
     output
@@ -473,10 +473,7 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
         "request.closed" | "request.invalidated" => {
             v["requestId"] = c["request"].clone();
             v.as_object_mut().unwrap().remove("actorId");
-            json!({"requestId":c["request"],"declined":true,"reason":match c["reason"].as_str() {
-                Some(reason @ ("timeLimit" | "cancelled" | "noLongerAnswerable" | "refused" | "superseded")) => reason,
-                _ => "noLongerAnswerable",
-            },"rust.closure":e.kind})
+            json!({"requestId":c["request"],"declined":true,"reason":c["reason"].as_str().unwrap_or("noLongerAnswerable"),"rust.closure":e.kind})
         }
         "request.answer" => {
             let a: Answer = serde_json::from_value(c.clone())?;

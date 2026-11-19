@@ -512,9 +512,8 @@ impl Turn<'_> {
                 false
             } else if !self.open.is_empty() {
                 false
-            } else if exact.is_some() {
-                true
-            } else if had_calls
+            } else if exact.is_some()
+                || had_calls
                 || self.host.ask("hasSteering", json!({}), true).await?["waiting"] == true
             {
                 true

@@ -44,6 +44,7 @@ struct OpenAi {
     mode: Mode,
     endpoint: String,
     state: Arc<State>,
+    claim: CredentialClaim,
 }
 impl Plugin for OpenAiPlugin {
     fn name(&self) -> &str {
@@ -59,6 +60,7 @@ impl Plugin for OpenAiPlugin {
             .build()?;
         r.declare(json!({"provider_state":self.mode == Mode::Stateful,"openai":{"mode":if self.mode == Mode::Stateful {"stateful"} else {"stateless"},"remote_erasure":"known response IDs are deleted; vendor logs and requests with unknown IDs are out of reach"}}));
         let provider = Arc::new(OpenAi {
+            claim: r.claim_credentials(&["openai"])?,
             client,
             before,
             piece,
@@ -135,6 +137,7 @@ impl Provider for OpenAi {
     fn bind(&self, model: &str) -> Result<Arc<dyn ModelAccess>> {
         ensure!(model == "gpt-6-luna", "only gpt-6-luna is allowed");
         Ok(Arc::new(Self {
+            claim: self.claim.clone(),
             client: self.client.clone(),
             before: self.before.clone(),
             piece: self.piece.clone(),

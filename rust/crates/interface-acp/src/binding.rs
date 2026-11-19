@@ -715,12 +715,12 @@ pub(crate) async fn extension(session: Arc<Session>, method: &str, p: &Value) ->
             {
                 return Err(request_error("conflict", "target is not a quiescent position").into());
             }
-            let position = Some(target.to_owned());
+            let position = target.to_owned();
             if method == "move" {
                 if p["rewind"] == true {
                     let out = session
                         .api
-                        .rewind(&scope, position.unwrap())
+                        .rewind(&scope, position)
                         .await
                         .map_err(|error| match error.downcast_ref::<RewindError>() {
                             Some(issue) => request_error(
@@ -738,11 +738,11 @@ pub(crate) async fn extension(session: Arc<Session>, method: &str, p: &Value) ->
                         return Ok(json!({"outOfReach":out}));
                     }
                 } else {
-                    session.api.move_position(&scope, position)?;
+                    session.api.move_position(&scope, Some(position))?;
                 }
                 Ok(json!({}))
             } else {
-                let id = session.api.fork(&scope, position)?;
+                let id = session.api.fork(&scope, Some(position))?;
                 session.api.close(&id).await?;
                 Ok(json!({"sessionId":id}))
             }

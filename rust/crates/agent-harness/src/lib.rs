@@ -603,7 +603,7 @@ impl Harness {
             }) {
                 let command = if e.kind == "command" {
                     self.output(
-                        &scope,
+                        scope,
                         Output {
                             recipient: "interface".into(),
                             value: e.content.as_ref().unwrap()["result"].clone(),
@@ -642,7 +642,7 @@ impl Harness {
         };
         if reply.stopped {
             let entry = self.append(
-                &scope,
+                scope,
                 "commands",
                 Draft::new(
                     "command",
@@ -657,7 +657,7 @@ impl Harness {
                         .collect(),
                 ),
             )?;
-            self.emit(Event::new(&scope, "command.result", reply.value.clone()))
+            self.emit(Event::new(scope, "command.result", reply.value.clone()))
                 .await?;
             return Ok(Receipt {
                 input: entry.id,
@@ -665,7 +665,7 @@ impl Harness {
                 erased: false,
                 command: self
                     .output(
-                        &scope,
+                        scope,
                         Output {
                             recipient: "interface".into(),
                             value: reply.value,
@@ -724,7 +724,7 @@ impl Harness {
             key,
         });
         self.pending_events.lock().unwrap().push(Event::new(
-            &scope,
+            scope,
             "input.accepted",
             json!({"input":entry.id,"timing":timing}),
         ));
@@ -1055,13 +1055,12 @@ impl Harness {
         let info = selected
             .as_ref()
             .map(|model| model.info())
-            .unwrap_or_else(|_| {
-                let mut info = ModelInfo::default();
-                info.name = data.settings["model"]
+            .unwrap_or_else(|_| ModelInfo {
+                name: data.settings["model"]
                     .as_str()
                     .unwrap_or("unknown")
-                    .to_owned();
-                info
+                    .to_owned(),
+                ..ModelInfo::default()
             });
         let contributions = self
             .invoke(

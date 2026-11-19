@@ -36,7 +36,7 @@ impl OpenAi {
     ) -> Result<()> {
         if !inventory.responses.is_empty() {
             let credentials: Arc<dyn CredentialStore> = capability(api.as_ref(), "credentials")?;
-            let key = credentials.get("openai")?;
+            let key = credentials.provider(&self.claim, "openai")?;
             for response in inventory.responses.clone() {
                 safe_id(&response)?;
                 let result = self
@@ -317,7 +317,7 @@ impl ModelAccess for OpenAi {
                 gate = self.state.gate.lock() => gate,
             };
             let credentials: Arc<dyn CredentialStore> = capability(api.as_ref(), "credentials")?;
-            let key = credentials.get("openai")?;
+            let key = credentials.provider(&self.claim, "openai")?;
             let result = self.request(api.clone(), &scope, &request, &cancel, &stream_id, &key).await;
             let mut end = Event::new(&scope, "model.end", Value::Null);
             end.stream = Some(stream_id); end.end = true;

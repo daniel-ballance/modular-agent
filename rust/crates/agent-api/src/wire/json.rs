@@ -177,7 +177,6 @@ fn equal_scale(a: &str, b: &str, mut difference: i128) -> bool {
 /// Only copy fields that changed between the two native projections. A
 /// single-entry projection cannot fill in fields that depend on the rest of
 /// the session, such as the turn's step count.
-
 #[cfg(test)]
 mod tests {
     use super::*;
