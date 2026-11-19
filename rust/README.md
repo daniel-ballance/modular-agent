@@ -1,10 +1,10 @@
 # Modular Agent in Rust
 
-A working agent built on [production edition 3](../docs/adr/0021-production-edition.md) of the specification. It has three parts:
+An agent build and SDK based on [production edition 3](../docs/adr/0021-production-edition.md) and the [edition 4 draft](../docs/adr/0023-edition-4-draft.md). The Rust workspace has three parts:
 
 - **The base.** The Harness, the transient and durable Runtimes, ACP, the plugin host, history stores and the fixtures. This is the clean-room Rust build from the experiment (`modular-agent-rs` at `bc59845`), copied in unchanged and then extended. Its own notes are in [docs/clean-room](docs/clean-room/). Its binary is `modular-agent`, and it still passes every kit.
 - **The standard configuration.** A coding agent in Pi's shape, made only of plugins on that base. Its binary is `ma`. [ADR 0022](../docs/adr/0022-standard-configuration.md) records the decisions.
-- **The SDK.** [`crates/sdk`](crates/sdk/README.md), the crate `modular-agent`: the Rust SDK of the [SDK specification](../docs/sdk/README.md), built on the base. Its shared-scenario runner is `crates/sdk-scenarios`.
+- **The SDK.** [`crates/sdk`](crates/sdk/README.md), the library crate `modular-agent`. Compose agents with `Agent::builder()`, embed sessions or serve them over ACP, and write tools, hooks and commands that run in process or over the plugin binding. Use `testing::test_agent()` for offline tests. [`crates/sdk-scenarios`](crates/sdk-scenarios) runs the shared scenarios and builds `modular-agent-fixtures`.
 
 The base's binary crate is now `crates/agent-base`, package `agent-base`, so that the SDK can have the name `modular-agent`. The binary is still `modular-agent`; the clean-room notes use the old package name.
 
