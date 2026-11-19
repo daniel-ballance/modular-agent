@@ -105,12 +105,13 @@ export class HookRegistry {
 	}
 
 	/** Each handler gets the previous result. A handler may stop the chain. */
-	async transform<T>(name: string, payload: T): Promise<{ value: T; stopped: boolean }> {
+	async transform<T>(name: string, payload: T, check?: (before: T, answer: NonNullable<TransformAnswer<T>>) => void): Promise<{ value: T; stopped: boolean }> {
 		let value = payload;
 		for (const h of this.point(name, "transform").handlers) {
 			let answer: TransformAnswer<T>;
 			try {
 				answer = (await h.handler(value)) as TransformAnswer<T>;
+				if (answer) check?.(value, answer);
 			} catch (error) {
 				throw this.failed(name, h.plugin, error);
 			}

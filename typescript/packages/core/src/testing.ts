@@ -3,7 +3,7 @@ export { restart } from "./agent.js";
 import { memoryEnvironment } from "./environment.js";
 export { memoryEnvironment, MemoryEnvironment } from "./environment.js";
 import { createAgent, type AgentOptions } from "./agent.js";
-import type { Answer, Content, ModelError, QuestionHandler, Usage } from "./data.js";
+import type { Answer, Content, ModelError, Question, QuestionHandler, Usage } from "./data.js";
 import { AgentError } from "./errors.js";
 import type { Provider } from "./provider.js";
 
@@ -48,10 +48,19 @@ export function testAgent({ script, ...options }: AgentOptions & { script: reado
     model: options.model ?? "scripted/script" });
 }
 
-export function answers(list: readonly Answer[]): QuestionHandler {
+export function answers(list: readonly Answer[]): QuestionHandler & { assertDone(): void } {
   const queue = structuredClone([...list]);
-  return () => {
-    if (!queue.length) throw new AgentError("invalid_request", "The test expected no more questions");
-    return queue.shift()!;
-  };
+  const unexpected: Question[] = [];
+  return Object.assign((question: Question): Answer => {
+    if (queue.length) return queue.shift()!;
+    unexpected.push(question);
+    return "decline";
+  }, {
+    assertDone() {
+      if (queue.length || unexpected.length) {
+        throw new AgentError("invalid_request",
+          `Unused answers: ${queue.length}; unexpected questions: ${unexpected.map(q => q.question).join(", ") || "none"}`);
+      }
+    },
+  });
 }

@@ -282,6 +282,8 @@ export interface WorkingEnvironment {
 	safeToRepeat?: boolean;
 	containment?: string;
 	confinesFiles?: boolean;
+	/** This part needs a state directory that survives agent restart. */
+	requiresDataDir?: boolean;
 	points?: boolean;
 	save?(): Promise<string>;
 	/** Check a point without touching project files, if the environment can. */

@@ -46,7 +46,7 @@ export interface Registration {
 	name: string;
 	providers?: { id: string; supports?: Record<string, boolean | string>; models: unknown[] }[];
 	toolSources?: { id: string; tools: unknown[]; perSession?: boolean }[];
-	workingEnvironment?: { containment: "strong" | "processGroup" | "none"; platforms?: string[]; points?: boolean };
+	workingEnvironment?: { containment: "strong" | "processGroup" | "none"; platforms?: string[]; points?: boolean; confinesFiles?: boolean };
 	hooks?: { hook: string; handlerId: number; order?: HandlerOrder }[];
 	runtime?: { id: string; supports: Record<string, boolean | string> };
 	commands?: { name: string; description: string }[];
@@ -397,7 +397,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 					changedBy.set(p.parentRequestId, Promise.all([previous, refresh]));
 				}
 			});
-			if (reg.workingEnvironment) api.provide("working-environment", new WireEnvironment(peer, api.project, reg.workingEnvironment.containment, reg.workingEnvironment.points === true));
+			if (reg.workingEnvironment) api.provide("working-environment", new WireEnvironment(peer, api.project, reg.workingEnvironment.containment, reg.workingEnvironment.points === true, undefined, reg.workingEnvironment.confinesFiles === true));
 			if (reg.runtime) api.provide("runtime", new WireRuntime(peer, reg.runtime.id, reg.runtime.supports, track));
 			else for (const method of ["newId", "prepareStep", "model", "hook", "definition", "runToolCall", "record", "takeSteering", "hasSteering"]) {
 				peer.handle(`host/runtime/${method}`, () => { throw new WireError("invalid_request", "This connection has no Runtime parent"); });
@@ -865,14 +865,15 @@ class WireToolSource implements ToolSource {
 
 class WireEnvironment implements WorkingEnvironment {
 	readonly id: string;
-	constructor(private peer: WirePeer, readonly cwd: string, readonly containment: string, readonly points: boolean, private sessionId?: string) {
+	constructor(private peer: WirePeer, readonly cwd: string, readonly containment: string, readonly points: boolean,
+		private sessionId?: string, readonly confinesFiles = false) {
 		this.id = `plugin:${cwd}`;
 	}
 	at(cwd: string): WorkingEnvironment {
-		return new WireEnvironment(this.peer, cwd, this.containment, this.points, this.sessionId);
+		return new WireEnvironment(this.peer, cwd, this.containment, this.points, this.sessionId, this.confinesFiles);
 	}
 	forSession(sessionId: string): WorkingEnvironment {
-		return new WireEnvironment(this.peer, this.cwd, this.containment, this.points, sessionId);
+		return new WireEnvironment(this.peer, this.cwd, this.containment, this.points, sessionId, this.confinesFiles);
 	}
 	get safeToRepeat(): boolean { return this.containment === "strong"; }
 	async save(): Promise<string> {

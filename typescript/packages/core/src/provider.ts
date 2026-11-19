@@ -1,6 +1,6 @@
 import type { Provider as BaseProvider } from "@modular-agent/harness";
 import type { AssistantMessage, ModelError, ModelInfo, ModelRef, ModelRequest } from "./data.js";
-import { AgentError } from "./errors.js";
+import { AgentError, messageOf } from "./errors.js";
 
 export interface ProviderContext {
   sessionId?: string;
@@ -45,8 +45,9 @@ export function adaptProvider(p: Provider, credential: () => Promise<string | un
           async credential() { check(); return credential(); },
         });
       } catch (error) {
-        if (error instanceof ModelFailure) return { role: "assistant", stop: "failed", content: [], error: error.modelError };
-        throw error;
+        opts.signal.throwIfAborted();
+        return { role: "assistant", stop: "failed", content: [],
+          error: error instanceof ModelFailure ? error.modelError : { kind: "other", message: messageOf(error) } };
       } finally { active = false; }
     },
   };

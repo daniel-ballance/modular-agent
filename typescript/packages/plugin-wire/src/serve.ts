@@ -181,7 +181,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			name: options.name,
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
-			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [{ darwin: "macos", win32: "windows" }[process.platform as "darwin" | "win32"] ?? process.platform], ...(environment.points && environment.save && environment.hasPoint && environment.restore ? { points: true } : {}) } } : {}),
+			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [{ darwin: "macos", win32: "windows" }[process.platform as "darwin" | "win32"] ?? process.platform], ...(environment.points && environment.save && environment.hasPoint && environment.restore ? { points: true } : {}), ...(environment.confinesFiles === true ? { confinesFiles: true } : {}) } } : {}),
 			...(runtime ? { runtime: { id: runtime.id, supports: Object.fromEntries(Object.entries(runtime.supports).filter(([key]) => key !== "rewinding")) } } : {}),
 			...(handlers.size ? { hooks: [...handlers].map(([handlerId, h]) => ({ hook: h.hook, handlerId, order: h.order })) } : {}),
 			...(commands.size ? { commands: [...commands].map(([name, c]) => ({ name, description: c.description })) } : {}),
