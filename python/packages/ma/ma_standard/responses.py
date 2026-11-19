@@ -79,6 +79,9 @@ def _input_rows(request: JsonObject) -> list[JsonObject]:
             if p.get("type") == "image"
         ]
         if role == "assistant":
+            rows.extend(
+                row for row in _rows(message.get("providerData")) if row.get("type") == "reasoning"
+            )
             calls = [p for p in parts if p.get("type") == "toolCall"]
             if text:
                 rows.append({"role": "assistant", "content": text})
@@ -201,6 +204,11 @@ def response_body(raw: JsonObject) -> JsonObject:
         "role": "assistant",
         "stop": stop,
         "content": list(parts),
+        **(
+            {"providerData": list[Json](reasoning)}
+            if (reasoning := [p for p in output if p.get("type") == "reasoning"])
+            else {}
+        ),
         "usage": {
             "input": usage.get("input_tokens", 0),
             "output": usage.get("output_tokens", 0),

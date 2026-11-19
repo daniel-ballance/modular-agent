@@ -79,7 +79,9 @@ async def payload(plugin, hook, d):
         p["result"] = {**d.get("shared_result", {}), "text": plain(d["result"])}
     elif hook == "turn.end":
         return {"sessionId": sid, "turnId": d["turn"], **turn_end_out(d)}
-    return p
+    from ma_core.wire import provider_projection
+
+    return provider_projection(p)
 
 
 def answer(hook, d, a):

@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from ma_core import API, AgentError, Stop, clone, content, identity, now, silent
-from ma_core.wire import recorded_as
+from ma_core.wire import provider_projection, recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
 from .output import gate
@@ -755,6 +755,7 @@ class Harness(Authority):
         return await gate(self, sid, recipient, events)
 
     async def _emit(self, event):
+        event = provider_projection(event)
         sid = event.get("session")
         for owner, recipient, handler in list(self.followers):
             try:
@@ -885,7 +886,9 @@ class Harness(Authority):
             return {}
         if op == "view":
             result = await self.fire(
-                "@harness", "output", {"recipient": d.get("recipient", "user"), "value": d["value"]}
+                "@harness",
+                "output",
+                {"recipient": d.get("recipient", "user"), "value": provider_projection(d["value"])},
             )
             if not result or result.get("value") is None or d.get("alreadyGated"):
                 return result.get("value") if result else None
