@@ -146,6 +146,8 @@ class Tool:
                 }
             elif isinstance(value, str):
                 result = {"status": "completed", "content": _content(value)}
+                if self._output is not None:
+                    result["value"] = value
             elif isinstance(value, list) and all(
                 isinstance(p, dict) and "type" in p for p in value
             ):
@@ -258,13 +260,15 @@ def tool(
             schema = declared.model_json_schema()
 
             def parse(arguments: JsonObject) -> dict[str, Any]:
-                return {model_param: declared.model_validate(arguments, strict=True)}
+                return {
+                    model_param: declared.model_validate_json(json.dumps(arguments), strict=True)
+                }
         else:
             model = create_model(func.__name__, __config__=ConfigDict(extra="forbid"), **fields)
             schema = model.model_json_schema()
 
             def parse(arguments: JsonObject) -> dict[str, Any]:
-                return dict(model.model_validate(arguments, strict=True))
+                return dict(model.model_validate_json(json.dumps(arguments), strict=True))
 
         return Tool(
             name or func.__name__,

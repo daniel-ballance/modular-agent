@@ -26,6 +26,7 @@ from ._types import AgentError, Answer, Content, ErrorCode, JsonObject, Question
 
 async def _serve(plugin: Plugin) -> None:
     registrar: Registrar | None = None
+    initialized = False
     stopped = False
     active: set[asyncio.Task[Any]] = set()
     registration: dict[str, Any] = {
@@ -39,7 +40,11 @@ async def _serve(plugin: Plugin) -> None:
         config = p.get("config", {})
         if not isinstance(config, dict):
             raise WireError("Plugin config must be an object", "invalid_request")
-        registrar = await plugin._register(config)
+        try:
+            registrar = await plugin._register(config)
+        except AgentError as exc:
+            code = "not_supported" if exc.code is ErrorCode.NOT_SUPPORTED else "invalid_request"
+            raise WireError(exc.message, code) from exc
         items = [f"tool:{t.name}" for t in registrar._tools.values() if t.in_process_only]
         items += [
             h.point
@@ -77,7 +82,7 @@ async def _serve(plugin: Plugin) -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        if registrar is not None:
+        if initialized:
             await plugin._close()
 
     def registered() -> Registrar:
@@ -97,6 +102,11 @@ async def _serve(plugin: Plugin) -> None:
             t is None
             or p.get("toolSource") != plugin.name
             or not isinstance(p.get("sessionId"), str)
+            or not p["sessionId"]
+            or not isinstance(call.get("id"), str)
+            or not call["id"]
+            or ("actorId" in call and not isinstance(call["actorId"], str))
+            or "input" not in call
         ):
             raise WireError("Unknown tool or invalid scope", "invalid_request")
 
@@ -118,11 +128,11 @@ async def _serve(plugin: Plugin) -> None:
         async def progress(parts: Content) -> None:
             await server.peer.notify("tools/progress", {"parentRequestId": key, "content": parts})
 
-        context = ToolContext(p["sessionId"], call["actorId"], call["id"], ask, progress)
+        context = ToolContext(
+            p["sessionId"], call.get("actorId", "user"), call["id"], ask, progress
+        )
         try:
-            return await t._run(
-                call["arguments"] if "arguments" in call else call["input"], context
-            )
+            return await t._run(call["input"], context)
         except asyncio.CancelledError:
             return {
                 "status": "cancelled",
@@ -158,8 +168,13 @@ async def _serve(plugin: Plugin) -> None:
 
     class Server(PluginServer):  # type: ignore[misc]  # Untyped base adapter.
         async def dispatch(self, method: str, params: dict[str, Any], key: str | int) -> Any:
+            nonlocal initialized
             task = asyncio.current_task()
-            if method not in {"plugin/initialize", "plugin/shutdown"} and task is not None:
+            if method == "plugin/initialize":
+                if initialized:
+                    raise WireError("Already initialized", "invalid_request")
+                initialized = True
+            if method != "plugin/shutdown" and task is not None:
                 active.add(task)
             try:
                 return await super().dispatch(method, params, key)
