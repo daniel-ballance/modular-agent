@@ -24,6 +24,7 @@ from ma_durable import Durable
 from ma_harness import Harness
 from ma_history import History
 from ma_history.http import HTTPHistory
+from ma_jobs import Jobs
 from ma_local import Local, ProcessGroupLocal
 from ma_local.containment import delegated_root
 from ma_fake.conformance import Echo, Nest
@@ -102,7 +103,11 @@ class _SdkRuntime(Runtime):  # type: ignore[misc]  # Untyped base adapter.
 
 
 class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
-    declarations = {**Durable.declarations, "queued_input_after_restart": "handedBack"}
+    def __init__(self, job_reports_start_turns: bool) -> None:
+        super().__init__()
+        self.declarations = {**Durable.declarations, "queued_input_after_restart": "handedBack"}
+        if job_reports_start_turns:
+            self.declarations["queued_job_reports_after_restart"] = "run"
 
     async def _safe_to_repeat(self, sid: str, definition: JsonObject | None) -> bool:
         return False
@@ -110,7 +115,11 @@ class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
     async def recover(self, data: dict[str, Any], emit: Any) -> Any:
         sid = data["session"]
         for queued in await self._pending(sid):
-            await self._return(sid, queued)
+            if not (
+                self.declarations.get("queued_job_reports_after_restart") == "run"
+                and (queued["data"].get("source") or {}).get("job")
+            ):
+                await self._return(sid, queued)
         return await super().recover(data, emit)
 
 
@@ -128,9 +137,12 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         return self._agent._settings
 
     async def declaration(self, sid: str | None = None) -> JsonObject:
-        if self._agent._conformance:
-            return cast(JsonObject, await super().declaration(sid))
-        return {**self._agent.declaration(), "plugins": self._agent._h.declarations()}
+        value = self._agent.declaration()
+        if sid:
+            selected = await super().declaration(sid)
+            for key in ("keepsStateAtProvider", "runsToolsAtProvider", "liveSessions"):
+                value[key] = selected[key]
+        return {**value, "plugins": self._agent._h.declarations()}
 
 
 class Agent:
@@ -327,13 +339,13 @@ class Agent:
         store = parts[self._h.capabilities["history"][0]]
         value.pop("plugins", None)
         value.update(
-            waitingThroughRestart=False,
+            waitingThroughRestart=bool(value["waitingThroughRestart"] and "questions" in parts),
             mixedActorInput="refused",
             severalActors=False,
             sessionLimits=False,
             tenants=False,
-            questionsOutlastTurns=False,
-            lateAnswersStartTurns=False,
+            questionsOutlastTurns=bool(runtime.get("open_calls") and "questions" in parts),
+            lateAnswersStartTurns=bool(runtime.get("open_calls") and "questions" in parts),
             erasure=bool(store.get("erasure")),
             portableSessions=store.get("retention") != "process",
             settingsDuringTurn="refused",
@@ -341,7 +353,9 @@ class Agent:
             commandContainment=environment.get("containment", "none"),
             nestedToolCalls=bool(runtime.get("nested_tools")),
             queuedInputAfterRestart=runtime.get("queued_input_after_restart", "handedBack"),
-            startsTurnsUnasked="never",
+            startsTurnsUnasked=(
+                "jobReports" if parts.get("jobs", {}).get("job_reports_start_turns") else "never"
+            ),
         )
         queued_jobs = runtime.get(
             "queued_job_reports_after_restart", value["queuedInputAfterRestart"]
@@ -472,6 +486,7 @@ def create_agent(
     project_settings: Callable[[Path], JsonObject] | None = None,
     commands: bool = False,
     conformance: bool = False,
+    job_reports_start_turns: bool = False,
 ) -> AgentStart:
     async def build() -> Agent:
         return await build_with_store()
@@ -536,7 +551,15 @@ def create_agent(
             await h.load(dispatcher)
             agent._conformance = conformance
             agent._project_settings = project_settings
-            await h.load(_SdkDurable() if durability == "durable" else _SdkRuntime())
+            await h.load(
+                _SdkDurable(job_reports_start_turns) if durability == "durable" else _SdkRuntime()
+            )
+            jobs = Jobs()
+            jobs.declarations = {
+                **Jobs.declarations,
+                "job_reports_start_turns": job_reports_start_turns,
+            }
+            await h.load(jobs)
             h.on("embedding", "result.ready", _structured_result, "last")
             if conformance:
                 await h.load(Echo())

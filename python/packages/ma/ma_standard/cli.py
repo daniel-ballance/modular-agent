@@ -412,6 +412,7 @@ async def _agent(
         process_plugins=processes,
         plugin_host=True,
         commands=True,
+        job_reports_start_turns=True,
         conformance=testing,
         project_mcp=None if inspecting else paths.mcp,
         project_settings=acp_settings if args.acp and not testing else None,
