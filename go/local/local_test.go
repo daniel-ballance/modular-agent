@@ -2,7 +2,7 @@ package local_test
 
 import (
 	"context"
-	"modular/local"
+	"github.com/OWNER/modular-agent/go/local"
 	"os"
 	"path/filepath"
 	"runtime"

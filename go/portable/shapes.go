@@ -3,7 +3,7 @@ package portable
 import (
 	"bytes"
 	"encoding/json"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"strings"
 )
 

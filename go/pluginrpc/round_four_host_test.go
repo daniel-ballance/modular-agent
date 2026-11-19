@@ -2,10 +2,10 @@ package pluginrpc_test
 
 import (
 	"context"
-	"modular/api"
-	"modular/conformancemodel"
-	"modular/pluginrpc"
-	"modular/vanilla"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/conformancemodel"
+	"github.com/OWNER/modular-agent/go/pluginrpc"
+	"github.com/OWNER/modular-agent/go/vanilla"
 	"testing"
 )
 

@@ -2,7 +2,7 @@ package harness
 
 import (
 	"context"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"strings"
 )
 

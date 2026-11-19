@@ -2,8 +2,8 @@ package pluginrpc_test
 
 import (
 	"context"
-	"modular/api"
-	"modular/vanilla"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/vanilla"
 	"os"
 	"path/filepath"
 	"strings"

@@ -4,8 +4,8 @@ package systemprompt
 import (
 	"context"
 	"errors"
+	"github.com/OWNER/modular-agent/go/api"
 	"io/fs"
-	"modular/api"
 )
 
 func Plugin() api.Plugin {

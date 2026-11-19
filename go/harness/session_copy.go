@@ -1,8 +1,8 @@
 package harness
 
 import (
+	"github.com/OWNER/modular-agent/go/api"
 	"maps"
-	"modular/api"
 	"slices"
 )
 

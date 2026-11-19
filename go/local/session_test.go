@@ -2,9 +2,9 @@ package local_test
 
 import (
 	"context"
-	"modular/api"
-	"modular/internal/proctest"
-	"modular/local"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/internal/proctest"
+	"github.com/OWNER/modular-agent/go/local"
 	"testing"
 )
 

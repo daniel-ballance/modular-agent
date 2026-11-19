@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"modular/api"
-	"modular/turnrun"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/turnrun"
 )
 
 type manager struct{ a api.API }

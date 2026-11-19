@@ -2,7 +2,7 @@ package pluginrpc
 
 import (
 	"context"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"reflect"
 	"strings"
 	"testing"

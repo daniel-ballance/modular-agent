@@ -3,8 +3,8 @@ package historyhttp_test
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/OWNER/modular-agent/go/historyhttp"
 	"io"
-	"modular/historyhttp"
 	"net/http"
 	"net/http/httptest"
 	"os"

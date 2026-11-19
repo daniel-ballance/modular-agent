@@ -2,8 +2,8 @@ package historyhttp_test
 
 import (
 	"encoding/json"
+	"github.com/OWNER/modular-agent/go/historyhttp"
 	"io"
-	"modular/historyhttp"
 	"net/http/httptest"
 	"strings"
 	"testing"

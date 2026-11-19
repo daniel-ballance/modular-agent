@@ -2,10 +2,10 @@ package contextview_test
 
 import (
 	"context"
-	"modular/api"
-	"modular/contextview"
-	"modular/fake"
-	"modular/internal/runtimetest"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/contextview"
+	"github.com/OWNER/modular-agent/go/fake"
+	"github.com/OWNER/modular-agent/go/internal/runtimetest"
 	"testing"
 )
 

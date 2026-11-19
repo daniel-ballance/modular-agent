@@ -6,8 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/OWNER/modular-agent/go/api"
 	"io"
-	"modular/api"
 	"strings"
 	"sync"
 )

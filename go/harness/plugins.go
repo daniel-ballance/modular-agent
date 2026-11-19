@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"modular/api"
+	"github.com/OWNER/modular-agent/go/api"
 	"sort"
 	"strings"
 	"sync"

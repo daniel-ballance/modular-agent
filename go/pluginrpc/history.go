@@ -1,8 +1,8 @@
 package pluginrpc
 
 import (
-	"modular/api"
-	"modular/portable"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
 )
 
 func entryOut(e api.Entry) object {

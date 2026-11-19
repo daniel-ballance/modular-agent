@@ -1,4 +1,4 @@
-module modular
+module github.com/OWNER/modular-agent/go
 
 go 1.27.4
 

@@ -1,9 +1,9 @@
 package historyhttp_test
 
 import (
-	"modular/api"
-	"modular/historyhttp"
-	"modular/servicehttp"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/historyhttp"
+	"github.com/OWNER/modular-agent/go/servicehttp"
 	"net/http"
 	"net/http/httptest"
 	"sync"

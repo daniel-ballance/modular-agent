@@ -2,9 +2,9 @@
 package runtimetest
 
 import (
-	"modular/api"
-	"modular/durable"
-	"modular/transient"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/durable"
+	"github.com/OWNER/modular-agent/go/transient"
 	"strings"
 	"testing"
 )

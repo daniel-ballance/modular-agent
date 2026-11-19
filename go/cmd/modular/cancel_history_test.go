@@ -3,8 +3,8 @@ package main_test
 import (
 	"context"
 	"fmt"
-	"modular/api"
-	"modular/history"
+	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/history"
 	"os"
 	"os/exec"
 	"path/filepath"

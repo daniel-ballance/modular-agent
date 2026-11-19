@@ -3,8 +3,8 @@ package pluginrpc
 import (
 	"context"
 	"errors"
+	"github.com/OWNER/modular-agent/go/api"
 	"io/fs"
-	"modular/api"
 	"os"
 	"path/filepath"
 	"strings"
