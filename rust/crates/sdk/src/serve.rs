@@ -22,7 +22,7 @@ pub async fn serve(plugin: Plugin) -> Result<()> {
     let endpoint = Served::new(plugin);
     let peer = Peer::start(tokio::io::stdin(), tokio::io::stdout(), endpoint.clone());
     peer.finished.cancelled().await;
-    endpoint.startup.lock().unwrap().take().map_or(Ok(()), Err)
+    endpoint.startup_error().map_or(Ok(()), Err)
 }
 
 pub(crate) struct Served {
@@ -39,6 +39,10 @@ impl Served {
             startup: Mutex::default(),
         })
     }
+    pub(crate) fn startup_error(&self) -> Option<Error> {
+        self.startup.lock().unwrap().take()
+    }
+
     fn registered(&self) -> std::result::Result<Arc<Registrar>, Fault> {
         self.registered
             .lock()
@@ -134,6 +138,7 @@ impl Endpoint for Served {
                     return Err(Fault::new("invalid_request", "unknown tool"));
                 };
                 let cx = ToolContext {
+                    project: p["project"].as_str().unwrap_or_default().into(),
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: call["actorId"].as_str().unwrap_or_default().into(),
                     call_id: call["id"].as_str().unwrap_or_default().into(),
@@ -166,9 +171,17 @@ impl Endpoint for Served {
                     .and_then(|i| r.hooks.get((i as usize).checked_sub(1)?))
                     .filter(|handler| p["hook"] == handler.point)
                     .ok_or_else(|| Fault::new("unknown_handler", "unknown handler"))?;
-                (handler.handle)(p["payload"].clone())
-                    .await
-                    .map_err(to_fault)
+                match (handler.handle)(p["payload"].clone()).await {
+                    Err(e)
+                        if matches!(
+                            handler.point,
+                            "plugin.load" | "tool.before" | "step.after" | "turn.result"
+                        ) =>
+                    {
+                        Ok(json!({"refuse":e.message()}))
+                    }
+                    result => result.map_err(to_fault),
+                }
             }
             "command/run" => {
                 let r = self.registered()?;

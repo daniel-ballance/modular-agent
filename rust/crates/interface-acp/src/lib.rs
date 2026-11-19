@@ -43,6 +43,13 @@ pub trait Factory: Send + Sync {
     async fn build(&self, project: &Path, sink: Arc<dyn EventSink>) -> Result<Api>;
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>>;
     fn trust(&self, project: &Path) -> Result<()>;
+    /// The usual Factory builds one agent per session; an embedded agent shares one.
+    fn owns_session_agent(&self) -> bool {
+        true
+    }
+    fn session_declaration(&self, api: &dyn AgentApi, session: &str) -> Result<Value> {
+        binding::declaration(api, Some(session))
+    }
     fn initial_settings(&self) -> Value {
         json!({})
     }
@@ -102,6 +109,7 @@ impl State {
         let sessions = std::mem::take(&mut *self.sessions.lock().unwrap());
         for (_, session) in sessions {
             let _ = session.close().await;
+            self.factory.detach(session.api.clone(), &session.id).await;
         }
     }
     async fn dispatch(
@@ -358,6 +366,7 @@ impl State {
                     .map_err(|_| request_error("not_open", "session is not attached"))?;
                 session.begin_close(true)?;
                 let result = session.finish_close().await;
+                self.factory.detach(session.api.clone(), &session.id).await;
                 self.sessions.lock().unwrap().remove(&session.id);
                 result?;
                 Ok(json!({}))

@@ -5,6 +5,7 @@ pub(crate) struct Session {
     pub id: String,
     pub project: PathBuf,
     pub api: Api,
+    owns_agent: bool,
     pub gate: tokio::sync::Mutex<()>,
     pub stop: CancellationToken,
     pub tx: mpsc::UnboundedSender<Message>,
@@ -97,8 +98,11 @@ impl Session {
         if let Some(worker) = worker {
             let _ = worker.await;
         }
-        let shutdown = self.api.shutdown().await;
-        result.and(shutdown)
+        if self.owns_agent {
+            result.and(self.api.shutdown().await)
+        } else {
+            result
+        }
     }
     pub async fn prompt(&self, text: &str, key: Option<String>) -> Result<Value> {
         let mut guard = Some(self.gate.lock().await);
@@ -423,7 +427,9 @@ impl State {
             {
                 Ok(id) => id,
                 Err(error) => {
-                    let _ = api.shutdown().await;
+                    if self.factory.owns_session_agent() {
+                        let _ = api.shutdown().await;
+                    }
                     return Err(error);
                 }
             }
@@ -432,6 +438,7 @@ impl State {
             id: id.clone(),
             project: project.clone(),
             api: api.clone(),
+            owns_agent: self.factory.owns_session_agent(),
             gate: tokio::sync::Mutex::new(()),
             stop: CancellationToken::new(),
             tx,
@@ -465,7 +472,7 @@ impl State {
                 self.rewind_blocks.lock().unwrap().remove(&project);
             }
             require(api.as_ref(), &actor_scope(&id), "watch")?;
-            let mut response = json!({"configOptions":config(api.as_ref(),&id)?,"_meta":{"modular-agent":{"declaration":binding::declaration(api.as_ref(),Some(&id))?}}});
+            let mut response = json!({"configOptions":config(api.as_ref(),&id)?,"_meta":{"modular-agent":{"declaration":self.factory.session_declaration(api.as_ref(), &id)?}}});
             if !reopening { response["sessionId"] = json!(id); }
             let gated = api.output(&actor_scope(&id), Output {
                 recipient: "interface.acp".into(),

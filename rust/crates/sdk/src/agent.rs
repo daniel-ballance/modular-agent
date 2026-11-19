@@ -1,9 +1,11 @@
 //! Building an agent and opening sessions (docs/sdk/api.md#building-an-agent).
 use crate::{
-    core::{CorePlugin, MemoryHistory},
+    core::CorePlugin,
     error::{Code, Error, Result},
     events::{Hub, HubPlugin, LOCAL, Question, QuestionHandler},
+    history::{History, file_history, memory_history},
     plugin::{InProcess, Plugin},
+    provider::{Provider, ProviderPlugin},
     session::Session,
     tool::{Answer, Tool},
 };
@@ -42,18 +44,6 @@ impl Approval {
             Approval::All => "ask_always",
             Approval::Never => "never_ask",
         }
-    }
-}
-
-/// Reaches models. Made by a Provider crate, or by `testing::scripted_provider`.
-#[derive(Clone)]
-pub struct Provider(pub(crate) Arc<dyn base::Plugin>);
-
-impl Provider {
-    /// Wrap a plugin of the base build that provides a Provider.
-    #[doc(hidden)]
-    pub fn from_base(plugin: Arc<dyn base::Plugin>) -> Self {
-        Provider(plugin)
     }
 }
 
@@ -96,6 +86,9 @@ pub(crate) struct Inner {
     pub harness: Arc<Harness>,
     pub hub: Arc<Hub>,
     pub project: PathBuf,
+    pub persistent: bool,
+    pub plugin_host: bool,
+    pub acp: std::sync::OnceLock<Arc<crate::acp::Routes>>,
     pub session_settings: Value,
     pub drivers: std::sync::Mutex<
         std::collections::HashMap<String, std::sync::Weak<crate::session::Driver>>,
@@ -111,10 +104,14 @@ pub struct AgentBuilder {
     project: Option<PathBuf>,
     data_dir: Option<PathBuf>,
     durability: Durability,
-    providers: Vec<Provider>,
+    history: Option<History>,
+    job_reports_start_turns: bool,
+    providers: Vec<Arc<dyn base::Plugin>>,
     tools: Vec<Tool>,
     plugins: Vec<Plugin>,
     process_plugins: Vec<ProcessPlugin>,
+    wire_plugins: Vec<Plugin>,
+    environment: Option<crate::testing::MemoryEnvironment>,
     plugin_host: Option<bool>,
     model: Option<String>,
     settings: serde_json::Map<String, Value>,
@@ -143,7 +140,7 @@ impl Agent {
     pub async fn open_session(&self, id: &str) -> Result<Session> {
         self.inner.harness.open(id).await.map_err(|e| {
             let e = Error::from(e);
-            if e.code() == Code::NotFound {
+            if matches!(e.code(), Code::NotFound | Code::Held | Code::Lost) {
                 e
             } else {
                 Error::new(Code::Busy, e.message())
@@ -162,7 +159,39 @@ impl Agent {
 
     /// What this agent supports, as the ACP declaration.
     pub fn declaration(&self) -> Result<Value> {
-        Ok(self.inner.harness.declaration()?)
+        self.declaration_for(None, false)
+    }
+
+    pub(crate) fn declaration_for(&self, session: Option<&str>, acp: bool) -> Result<Value> {
+        let api = self.inner.harness.as_ref();
+        let mut declaration = interface_acp::declaration(api, session)?;
+        let native = api.declaration()?;
+        declaration["confinesFiles"] = json!(native["environment"]["confines_files"] == true);
+        declaration["portableSessions"] = json!(self.inner.persistent);
+        declaration["erasure"] = json!(self.inner.persistent);
+        if !acp {
+            declaration["severalActors"] = json!(false);
+            declaration["sessionLimits"] = json!(false);
+            declaration["tenants"] = json!(false);
+            declaration["mixedActorInput"] = json!("refused");
+        }
+        Ok(declaration)
+    }
+
+    pub fn models(&self) -> Result<Vec<crate::ModelInfo>> {
+        let api = self.inner.harness.as_ref();
+        let mut models = vec![];
+        for key in base::AgentApi::capability_names(api, "provider.") {
+            let provider = base::capability::<dyn base::Provider>(api, &key)?;
+            for info in provider.catalog() {
+                let mut wire = base::wire::model_value(&info);
+                if !info.name.contains('/') {
+                    wire["provider"] = json!(key.trim_start_matches("provider."));
+                }
+                models.push(serde_json::from_value(wire)?);
+            }
+        }
+        Ok(models)
     }
 
     /// Keep a folder alive as long as the agent.
@@ -190,8 +219,19 @@ impl AgentBuilder {
         self.durability = durability;
         self
     }
-    pub fn provider(mut self, provider: Provider) -> Self {
-        self.providers.push(provider);
+    pub fn history(mut self, history: History) -> Self {
+        self.history = Some(history);
+        self
+    }
+    pub fn job_reports_start_turns(mut self, enabled: bool) -> Self {
+        self.job_reports_start_turns = enabled;
+        self
+    }
+    pub fn provider(mut self, provider: impl Provider) -> Self {
+        self.providers.push(Arc::new(ProviderPlugin {
+            name: format!("provider.{}", provider.id()),
+            provider: Arc::new(provider),
+        }));
         self
     }
     /// A tool, wrapped in a plugin named after it.
@@ -202,6 +242,14 @@ impl AgentBuilder {
     /// A plugin, in the agent's process.
     pub fn plugin(mut self, plugin: Plugin) -> Self {
         self.plugins.push(plugin);
+        self
+    }
+    pub(crate) fn wire_plugin(mut self, plugin: Plugin) -> Self {
+        self.wire_plugins.push(plugin);
+        self
+    }
+    pub fn environment(mut self, environment: crate::testing::MemoryEnvironment) -> Self {
+        self.environment = Some(environment);
         self
     }
     /// A plugin program, loaded after the agent's own plugins. Giving one makes the
@@ -247,7 +295,18 @@ impl AgentBuilder {
             None => std::env::current_dir()?,
         }
         .canonicalize()?;
-        if self.durability != Durability::Ephemeral && self.data_dir.is_none() {
+        if let Some(history) = &self.history
+            && history.1 != (self.durability != Durability::Ephemeral)
+        {
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "history persistence must match durability",
+            ));
+        }
+        if self.durability != Durability::Ephemeral
+            && self.data_dir.is_none()
+            && self.history.is_none()
+        {
             return Err(Error::new(
                 Code::InvalidComposition,
                 format!(
@@ -268,9 +327,10 @@ impl AgentBuilder {
             }
         };
         std::fs::create_dir_all(&state)?;
-        let history: Arc<dyn base::HistoryStore> = match self.durability {
-            Durability::Ephemeral => Arc::new(MemoryHistory::default()),
-            _ => Arc::new(history_fs::FileHistory::new(&state.join("sessions"))?),
+        let History(history, persistent) = match self.history {
+            Some(history) => history,
+            None if self.durability == Durability::Ephemeral => memory_history(),
+            None => file_history(state.join("sessions"))?,
         };
         let mut defaults = base::portable::settings_from_wire(&Value::Object(self.settings));
         if let Some(policy) = self.approval {
@@ -286,17 +346,20 @@ impl AgentBuilder {
                 settings: defaults,
                 history,
             }),
-            Arc::new(environment_local::LocalPlugin {
-                state: state.join("commands"),
-            }),
+            match self.environment {
+                Some(environment) => Arc::new(environment),
+                None => Arc::new(environment_local::LocalPlugin {
+                    state: state.join("commands"),
+                }),
+            },
             runtime,
-            Arc::new(feature_jobs::JobsPlugin),
+            Arc::new(crate::core::SdkJobs(self.job_reports_start_turns)),
             Arc::new(feature_questions::QuestionsPlugin),
         ];
         if self.approval.is_some() {
             plugins.push(Arc::new(feature_approval::ApprovalPlugin));
         }
-        plugins.extend(self.providers.iter().map(|p| p.0.clone()));
+        plugins.extend(self.providers);
         plugins.extend([
             Arc::new(feature_model::ModelPlugin) as Arc<dyn base::Plugin>,
             Arc::new(feature_prompt::PromptPlugin),
@@ -342,9 +405,8 @@ impl AgentBuilder {
                 },
             })
             .collect();
-        if self.plugin_host.unwrap_or(!launches.is_empty())
-            && let Ok(value) = std::env::var("MODULAR_AGENT_PLUGINS")
-        {
+        let plugin_host = self.plugin_host.unwrap_or(!launches.is_empty());
+        if plugin_host && let Ok(value) = std::env::var("MODULAR_AGENT_PLUGINS") {
             let named: Vec<plugin_stdio::Launch> = serde_json::from_str(&value).map_err(|e| {
                 Error::new(
                     Code::InvalidComposition,
@@ -353,7 +415,36 @@ impl AgentBuilder {
             })?;
             launches.extend(named);
         }
-        for (index, launch) in launches.into_iter().enumerate() {
+        let wire_count = self.wire_plugins.len();
+        for (index, plugin) in self.wire_plugins.into_iter().enumerate() {
+            if let Some(item) = plugin.local_items.first() {
+                let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                return Err(crate::plugin::cannot_serve(item));
+            }
+            let name = plugin.name.clone();
+            let config = plugin.config.clone();
+            let endpoint = crate::serve::Served::new(plugin);
+            let (host, remote) = tokio::io::duplex(64 * 1024);
+            let (read, write) = tokio::io::split(remote);
+            let _peer = plugin_stdio::rpc::Peer::start(read, write, endpoint.clone());
+            let home = state.join("plugins").join(index.to_string());
+            if let Err(error) =
+                plugin_stdio::load_pipe(&harness, host, config, &project, &home, index).await
+            {
+                let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                return Err(endpoint.startup_error().unwrap_or_else(|| {
+                    Error::new(
+                        Code::InvalidComposition,
+                        format!("plugin {name} failed to register: {error:#}"),
+                    )
+                }));
+            }
+        }
+        for (index, launch) in launches
+            .into_iter()
+            .enumerate()
+            .map(|(i, l)| (i + wire_count, l))
+        {
             let command = launch.command.join(" ");
             let home = state.join("plugins").join(index.to_string());
             if let Err(e) = plugin_stdio::load(&harness, launch, &project, &home, index).await {
@@ -381,6 +472,19 @@ impl AgentBuilder {
         };
         let mut session_settings = json!({});
         if let Some(model) = model {
+            let valid = base::AgentApi::capability_names(harness.as_ref(), "provider.")
+                .into_iter()
+                .filter_map(|key| {
+                    base::capability::<dyn base::Provider>(harness.as_ref(), &key).ok()
+                })
+                .any(|provider| provider.bind(&model).is_ok());
+            if !valid {
+                let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                return Err(Error::new(
+                    Code::InvalidComposition,
+                    format!("unknown model {model}"),
+                ));
+            }
             session_settings["model"] = json!(model);
         }
         Ok(Agent {
@@ -388,6 +492,9 @@ impl AgentBuilder {
                 harness,
                 hub,
                 project,
+                persistent,
+                plugin_host,
+                acp: Default::default(),
                 session_settings,
                 drivers: Default::default(),
                 _scratch: scratch,

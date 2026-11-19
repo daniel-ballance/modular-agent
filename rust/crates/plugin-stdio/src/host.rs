@@ -49,6 +49,43 @@ pub async fn load(
     index: usize,
 ) -> Result<Arc<Remote>> {
     ensure!(!launch.command.is_empty(), "empty plugin command");
+    let config = launch.config.clone();
+    load_transport(
+        harness,
+        Transport::Process(launch),
+        config,
+        project,
+        home,
+        index,
+    )
+    .await
+}
+
+/// Load a plugin through connected streams, with the same host and registration checks.
+pub async fn load_pipe(
+    harness: &Arc<Harness>,
+    pipe: tokio::io::DuplexStream,
+    config: Value,
+    project: &Path,
+    home: &Path,
+    index: usize,
+) -> Result<Arc<Remote>> {
+    load_transport(harness, Transport::Pipe(pipe), config, project, home, index).await
+}
+
+enum Transport {
+    Process(Launch),
+    Pipe(tokio::io::DuplexStream),
+}
+
+async fn load_transport(
+    harness: &Arc<Harness>,
+    transport: Transport,
+    config: Value,
+    project: &Path,
+    home: &Path,
+    index: usize,
+) -> Result<Arc<Remote>> {
     tokio::fs::create_dir_all(home).await?;
     let project = project.canonicalize()?;
     let home = home.canonicalize()?;
@@ -65,41 +102,58 @@ pub async fn load(
         job_lock: Default::default(),
         running_jobs: Default::default(),
     });
-    let mut cmd = Command::new(&launch.command[0]);
-    cmd.args(&launch.command[1..])
-        .env_clear()
-        .env(
-            "PATH",
-            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
-        )
-        .envs(launch.env)
-        .current_dir(&project)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .kill_on_drop(true);
-    let mut child = cmd.spawn()?;
-    let peer = Peer::start(
-        child.stdout.take().unwrap(),
-        child.stdin.take().unwrap(),
-        Arc::new(Callbacks(shared.clone())),
-    );
+    let callbacks = Arc::new(Callbacks(shared.clone()));
     let reaped = CancellationToken::new();
-    let p = peer.clone();
-    let done = reaped.clone();
-    tokio::spawn(async move {
-        tokio::select! { _=p.closed.cancelled()=>(), _=child.wait()=>{p.close();} }
-        if tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
-            .await
-            .is_err()
-        {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+    let peer = match transport {
+        Transport::Pipe(pipe) => {
+            let (read, write) = tokio::io::split(pipe);
+            let peer = Peer::start(read, write, callbacks);
+            let p = peer.clone();
+            let done = reaped.clone();
+            tokio::spawn(async move {
+                p.finished.cancelled().await;
+                done.cancel();
+            });
+            peer
         }
-        p.finished.cancelled().await;
-        done.cancel();
-    });
-    let registration=match peer.call("plugin/initialize",json!({"binding":"modular-agent-plugin/1","data":"modular-agent-data/1","host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},"project":project,"home":home,"config":launch.config}),None,CancellationToken::new()).await {
+        Transport::Process(launch) => {
+            let mut cmd = Command::new(&launch.command[0]);
+            cmd.args(&launch.command[1..])
+                .env_clear()
+                .env(
+                    "PATH",
+                    std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+                )
+                .envs(launch.env)
+                .current_dir(&project)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::inherit())
+                .kill_on_drop(true);
+            let mut child = cmd.spawn()?;
+            let peer = Peer::start(
+                child.stdout.take().unwrap(),
+                child.stdin.take().unwrap(),
+                callbacks,
+            );
+            let p = peer.clone();
+            let done = reaped.clone();
+            tokio::spawn(async move {
+                tokio::select! { _=p.closed.cancelled()=>(), _=child.wait()=>{p.close();} }
+                if tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                    .await
+                    .is_err()
+                {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+                p.finished.cancelled().await;
+                done.cancel();
+            });
+            peer
+        }
+    };
+    let registration=match peer.call("plugin/initialize",json!({"binding":"modular-agent-plugin/1","data":"modular-agent-data/1","host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},"project":project,"home":home,"config":config}),None,CancellationToken::new()).await {
         Ok(r)=>r,
         Err(e)=>{peer.close();reaped.cancelled().await;return Err(e.into())}
     };
@@ -1244,7 +1298,7 @@ impl Handler for RemoteHandler {
                 eprintln!("plugin observer {} failed: {e}", self.hook);
                 return Ok(HookResult::default());
             }
-            Err(e) => return Err(anyhow!(e.message)),
+            Err(e) => return Err(e.into()),
         };
         hook_result(&self.hook, &scope, value, reply)
     }
@@ -1257,7 +1311,7 @@ pub fn hook_payload(hook: &str, s: &Scope, v: &Value, api: &Api) -> Result<Value
     match hook {
         "plugin.load" => {
             p["name"] = v["plugin"].clone();
-            p["origin"] = v.get("origin").cloned().unwrap_or(json!("subprocess"));
+            p["origin"] = v.get("origin").cloned().unwrap_or(json!("global"));
             p["project"] = v["project"].clone();
         }
         "input" => {
@@ -1666,6 +1720,17 @@ impl Callbacks {
                                 }
                             }
                         }
+                        if q.kind == RequestKind::Approval {
+                            // The caller cannot substitute a different call for the actor to approve.
+                            q.extra.as_object_mut().unwrap().remove("approvalCall");
+                            if work.method == "tools/call" && scope.call.is_some()
+                                && let Some(call) = api.snapshot(&scope.session)?.entries.iter().rev()
+                                    .find(|e| e.kind == "tool.call" && e.scope.call == scope.call)
+                                    .and_then(|e| serde_json::from_value::<ToolCall>(e.content.clone()?).ok())
+                            {
+                                q.extra["approvalCall"] = wire::call(&call, &scope);
+                            }
+                        }
                         q.options=serde_json::from_value(wire::optional(draft,"options").cloned().unwrap_or(json!([])))?;
                         q.credential=draft["credential"].as_str().map(str::to_string);
                         q.timeout_ms=draft["timeLimitMs"].as_u64();
@@ -1730,7 +1795,10 @@ impl Callbacks {
             if let Some(fault) = e.downcast_ref::<Fault>() {
                 return fault.clone();
             }
-            if is_file_not_found(&e) {
+            if is_file_not_found(&e)
+                || e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported)
+            {
                 return Fault::from(e);
             }
             if e.downcast_ref::<LostPart>().is_some() {

@@ -1,14 +1,18 @@
 //! The testing kit (docs/sdk/testing.md#the-testing-kit): a scripted model and an agent
 //! built around it. No network and no credentials.
 use crate::{
-    agent::{Agent, AgentBuilder, Approval, Durability, Provider},
+    AssistantMessage, ModelError, ModelErrorKind, ModelInfo, ModelRef, ModelRequest, Piece,
+    Provider, ProviderContext, ProviderSupport,
+    agent::{Agent, AgentBuilder, Approval, Durability},
     error::Result,
     events::Question,
     tool::{Answer, Tool},
 };
-use agent_api as base;
 use serde_json::{Value, json};
 use std::{future::Future, path::PathBuf, sync::Arc};
+
+mod environment;
+pub use environment::{ExecOutput, MemoryEnvironment, memory_environment, memory_environment_with};
 
 /// The scripted model's id.
 pub const SCRIPTED_MODEL: &str = "scripted/script";
@@ -18,105 +22,70 @@ pub const SCRIPTED_MODEL: &str = "scripted/script";
 /// For each request it counts the assistant messages already in the request and answers
 /// with the response at that index, so a request repeated after a crash gets the same
 /// answer and a turn that carries on after a restart picks up where it left off.
-pub fn scripted_provider(script: Value) -> Provider {
-    let script = match script {
+pub fn scripted_provider(script: Value) -> impl Provider {
+    Scripted(match script {
         Value::Array(items) => items,
         other => vec![other],
-    };
-    Provider::from_base(Arc::new(Scripted(Arc::new(script))))
+    })
 }
 
-struct Scripted(Arc<Vec<Value>>);
-
-fn info() -> base::ModelInfo {
-    base::ModelInfo {
-        name: SCRIPTED_MODEL.into(),
-        context_window: 128_000,
-        output_limit: 4096,
-        thinking: vec![],
-        keeps_state: false,
-        runs_tools: false,
-        extra: Value::Null,
-    }
-}
-
-impl base::Plugin for Scripted {
-    fn name(&self) -> &str {
-        "provider.scripted"
-    }
-    fn install(&self, r: &mut base::Registrar<'_>) -> base::Result<()> {
-        r.provide::<dyn base::Provider>(
-            "provider.scripted",
-            Arc::new(ScriptedProvider(self.0.clone())),
-        )
-    }
-}
-
-struct ScriptedProvider(Arc<Vec<Value>>);
-
-impl base::Provider for ScriptedProvider {
-    fn catalog(&self) -> Vec<base::ModelInfo> {
-        vec![info()]
-    }
-    fn bind(&self, model: &str) -> base::Result<Arc<dyn base::ModelAccess>> {
-        base::ensure!(model == SCRIPTED_MODEL, "unknown scripted model {model}");
-        Ok(Arc::new(ScriptedProvider(self.0.clone())))
-    }
-}
+struct Scripted(Vec<Value>);
 
 #[async_trait::async_trait]
-impl base::ModelAccess for ScriptedProvider {
-    fn safe_to_repeat(&self) -> bool {
-        true
+impl Provider for Scripted {
+    fn id(&self) -> &str {
+        "scripted"
     }
-    fn info(&self) -> base::ModelInfo {
-        info()
+    fn models(&self) -> Vec<ModelInfo> {
+        vec![ModelInfo {
+            model: ModelRef {
+                provider: "scripted".into(),
+                id: "script".into(),
+            },
+            context_window: 128_000,
+            max_output: 4096,
+            thinking: vec![],
+            extra: Default::default(),
+        }]
     }
-    async fn generate(
+    fn supports(&self) -> ProviderSupport {
+        ProviderSupport {
+            safe_to_repeat: true,
+            keeps_state: false,
+        }
+    }
+    async fn request(
         &self,
-        api: base::Api,
-        scope: base::Scope,
-        request: base::ModelRequest,
-        _cancel: base::CancellationToken,
-    ) -> std::result::Result<base::ModelResponse, base::ModelFailure> {
-        let index = request
-            .messages
-            .iter()
-            .filter(|m| m.role == "assistant")
+        _: ModelRef,
+        request: ModelRequest,
+        cx: ProviderContext,
+    ) -> Result<AssistantMessage> {
+        let index = request.0["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["role"] == "assistant")
             .count();
-        let fail = |message: String| base::ModelFailure {
-            kind: base::FailureKind::Other,
-            message,
-        };
         let Some(step) = self.0.get(index) else {
-            return Err(fail("script exhausted".into()));
+            return Ok(ModelError::new(ModelErrorKind::Other, "script exhausted").failed());
         };
         if let Some(error) = step.get("error") {
-            let kind = match error["kind"].as_str() {
-                Some("temporary") => base::FailureKind::Temporary,
-                Some("contextTooLarge") => base::FailureKind::ContextTooLarge,
-                Some("credentials") => base::FailureKind::Credentials,
-                Some("refused") => base::FailureKind::Refused,
-                _ => base::FailureKind::Other,
-            };
-            return Err(base::ModelFailure {
+            let kind =
+                serde_json::from_value(error["kind"].clone()).unwrap_or(ModelErrorKind::Other);
+            return Ok(ModelError::new(
                 kind,
-                message: error["message"]
-                    .as_str()
-                    .unwrap_or("scripted failure")
-                    .into(),
-            });
+                error["message"].as_str().unwrap_or("scripted failure"),
+            )
+            .failed());
         }
         let mut parts = vec![];
         if let Some(text) = step["reasoning"].as_str() {
-            parts.push(base::Part::Reasoning {
-                data: json!({"text": text}),
-            });
+            cx.piece(Piece::Reasoning, text, None).await?;
+            parts.push(json!({"type":"reasoning","data":{"text":text}}));
         }
         if let Some(text) = step["text"].as_str() {
-            let event = base::Event::new(&scope, "model.delta", json!(text));
-            api.emit(event).await.map_err(|e| fail(e.to_string()))?;
-            parts.push(base::Part::Text { text: text.into() });
+            cx.piece(Piece::Text, text, None).await?;
+            parts.push(json!({"type":"text","text":text}));
         }
         let mut calls = false;
         for (i, call) in step["toolCalls"]
@@ -125,25 +94,16 @@ impl base::ModelAccess for ScriptedProvider {
             .flatten()
             .enumerate()
         {
-            let mut tool = base::ToolCall::new(
-                call["name"].as_str().unwrap_or_default(),
-                call["input"].clone(),
+            parts.push(
+                json!({"type":"toolCall","name":call["name"],"id":format!("call-{index}-{i}"),
+                "arguments":call["input"]}),
             );
-            tool.id = format!("call-{index}-{i}");
-            parts.push(base::Part::ToolCall { call: tool });
             calls = true;
         }
-        Ok(base::ModelResponse {
-            parts,
-            stop: if calls { "tools" } else { "finished" }.into(),
-            usage: serde_json::from_value(json!({
-                "input_tokens": step["usage"]["input"].as_u64().unwrap_or(0),
-                "output_tokens": step["usage"]["output"].as_u64().unwrap_or(0),
-                "cached_tokens": step["usage"]["cacheRead"].as_u64().unwrap_or(0),
-            }))
-            .unwrap_or_default(),
-            ..Default::default()
-        })
+        Ok(AssistantMessage(
+            json!({"role":"assistant","content":parts,"stop":if calls {"toolUse"} else {"finished"},
+            "usage":step["usage"]}),
+        ))
     }
 }
 
@@ -154,6 +114,7 @@ pub fn test_agent() -> TestAgentBuilder {
         builder: Agent::builder(),
         script: Value::Array(vec![]),
         project: None,
+        environment: memory_environment(),
     }
 }
 
@@ -162,6 +123,7 @@ pub struct TestAgentBuilder {
     builder: AgentBuilder,
     script: Value,
     project: Option<PathBuf>,
+    environment: MemoryEnvironment,
 }
 
 impl TestAgentBuilder {
@@ -219,6 +181,14 @@ impl TestAgentBuilder {
         self.builder = self.builder.plugin_host(host);
         self
     }
+    pub fn environment(mut self, environment: MemoryEnvironment) -> Self {
+        self.environment = environment;
+        self
+    }
+    pub fn over_wire(mut self, plugin: crate::Plugin) -> Self {
+        self.builder = self.builder.wire_plugin(plugin);
+        self
+    }
     pub fn process_plugin(mut self, plugin: crate::ProcessPlugin) -> Self {
         self.builder = self.builder.process_plugin(plugin);
         self
@@ -235,6 +205,7 @@ impl TestAgentBuilder {
         };
         let agent = self
             .builder
+            .environment(self.environment)
             .provider(scripted_provider(self.script))
             .model(SCRIPTED_MODEL)
             .project(project)

@@ -277,7 +277,12 @@ impl base::ToolSource for Source {
                 format!("no tool named {}", call.name),
             );
         };
+        let project = match api.snapshot(&scope.session) {
+            Ok(data) => data.project,
+            Err(e) => return base::ToolResult::new(&call, base::ToolStatus::Failed, e.to_string()),
+        };
         let cx = ToolContext {
+            project,
             session_id: scope.session.clone(),
             actor_id: scope.actor.clone(),
             call_id: call.id.clone(),

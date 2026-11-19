@@ -206,6 +206,7 @@ pub struct ToolContext {
     pub(crate) session_id: String,
     pub(crate) actor_id: String,
     pub(crate) call_id: String,
+    pub(crate) project: std::path::PathBuf,
     pub(crate) cancelled: CancellationToken,
     pub(crate) settled: CancellationToken,
 }
@@ -318,6 +319,11 @@ impl ToolContext {
         Ok(())
     }
 
+    /// The session's working environment, scoped to this call and project.
+    pub fn environment(&self) -> ToolEnvironment<'_> {
+        ToolEnvironment(self)
+    }
+
     /// List tools available to a nested call, or make one through its own gates.
     pub fn tools(&self) -> NestedTools<'_> {
         NestedTools(self)
@@ -396,6 +402,125 @@ impl ToolContext {
                     None => {
                         Answer::Value(answer["stored"].as_str().unwrap_or_default().to_string())
                     }
+                })
+            }
+        }
+    }
+}
+
+/// Call-scoped file and command operations.
+pub struct ToolEnvironment<'a>(&'a ToolContext);
+
+#[derive(Clone, Debug)]
+pub struct CommandOutput {
+    pub exit_code: Option<i64>,
+    pub output: String,
+}
+
+impl ToolEnvironment<'_> {
+    fn local(&self) -> Result<(base::Api, base::Scope, Arc<dyn base::WorkingEnvironment>)> {
+        let cx = self.0;
+        let Backend::Local { api, scope } = &cx.backend else {
+            unreachable!()
+        };
+        base::require(api.as_ref(), scope, "tools")
+            .map_err(|_| Error::new(Code::InvalidRequest, "environment requires tool authority"))?;
+        let env = base::capability::<dyn base::WorkingEnvironment>(api.as_ref(), "environment")?;
+        let env = env
+            .scoped(api.clone(), scope.clone(), cx.cancelled.clone())
+            .unwrap_or(env);
+        Ok((api.clone(), scope.clone(), env))
+    }
+
+    async fn remote(&self, method: &str, mut params: Value) -> Result<Value> {
+        let cx = self.0;
+        let Backend::Remote { peer, parent } = &cx.backend else {
+            unreachable!()
+        };
+        params["parentRequestId"] = parent.clone();
+        params["sessionId"] = json!(cx.session_id);
+        params["cwd"] = json!(cx.project);
+        peer.call(method, params, None, cx.cancelled.clone())
+            .await
+            .map_err(crate::serve::from_fault)
+    }
+
+    pub async fn read(&self, path: &str) -> Result<String> {
+        use base64::Engine;
+        self.0.check()?;
+        let bytes = match self.0.backend {
+            Backend::Local { .. } => self.local()?.2.read_bytes(&self.0.project, path).await?,
+            Backend::Remote { .. } => {
+                let reply = self.remote("host/env/read", json!({"path":path})).await?;
+                base64::prelude::BASE64_STANDARD
+                    .decode(reply["data"].as_str().unwrap_or_default())
+                    .map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))?
+            }
+        };
+        String::from_utf8(bytes).map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))
+    }
+
+    pub async fn write(&self, path: &str, text: &str) -> Result<()> {
+        use base64::Engine;
+        self.0.check()?;
+        match self.0.backend {
+            Backend::Local { .. } => {
+                self.local()?
+                    .2
+                    .write_bytes(&self.0.project, path, text.as_bytes())
+                    .await?
+            }
+            Backend::Remote { .. } => {
+                self.remote(
+                    "host/env/write",
+                    json!({
+                        "path":path,"data":base64::prelude::BASE64_STANDARD.encode(text)
+                    }),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn exists(&self, path: &str) -> Result<bool> {
+        self.0.check()?;
+        match self.0.backend {
+            Backend::Local { .. } => Ok(self.local()?.2.exists(&self.0.project, path).await?),
+            Backend::Remote { .. } => {
+                Ok(self.remote("host/env/exists", json!({"path":path})).await?["exists"] == true)
+            }
+        }
+    }
+
+    pub async fn exec(&self, command: &str) -> Result<CommandOutput> {
+        self.0.check()?;
+        let cx = self.0;
+        match cx.backend {
+            Backend::Local { .. } => {
+                let (api, scope, env) = self.local()?;
+                let out = env
+                    .exec(
+                        api,
+                        scope,
+                        cx.project.clone(),
+                        command,
+                        None,
+                        cx.cancelled.clone(),
+                    )
+                    .await?;
+                Ok(CommandOutput {
+                    exit_code: out.value.as_ref().and_then(|v| v["exit_code"].as_i64()),
+                    output: out.text,
+                })
+            }
+            Backend::Remote { .. } => {
+                let out = self
+                    .remote("host/env/exec", json!({"command":command}))
+                    .await?;
+                Ok(CommandOutput {
+                    exit_code: out["exitCode"].as_i64(),
+                    output: out["output"].as_str().unwrap_or_default().into(),
                 })
             }
         }

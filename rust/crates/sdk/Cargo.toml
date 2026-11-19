@@ -28,6 +28,11 @@ feature-prompt = { path = "../feature-prompt" }
 feature-questions = { path = "../feature-questions" }
 history-fs = { path = "../history-fs" }
 plugin-stdio = { path = "../plugin-stdio" }
+provider-openai = { path = "../provider-openai" }
+interface-acp = { path = "../interface-acp" }
+history-http = { path = "../history-http" }
+reqwest.workspace = true
+base64 = "=0.23.1"
 runtime-durable = { path = "../runtime-durable" }
 runtime-transient = { path = "../runtime-transient" }
 

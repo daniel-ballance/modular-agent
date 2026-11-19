@@ -22,6 +22,18 @@ impl Plugin for CorePlugin {
     }
 }
 
+pub(crate) struct SdkJobs(pub bool);
+impl Plugin for SdkJobs {
+    fn name(&self) -> &str {
+        feature_jobs::JobsPlugin.name()
+    }
+    fn install(&self, registrar: &mut Registrar<'_>) -> Result<()> {
+        feature_jobs::JobsPlugin.install(registrar)?;
+        registrar.declare(json!({"job_reports_start_turns":self.0,"starts_unasked_turns":self.0}));
+        Ok(())
+    }
+}
+
 /// Default settings for new sessions, from `createAgent`.
 struct Defaults(Value);
 impl Configuration for Defaults {
@@ -34,7 +46,12 @@ impl Configuration for Defaults {
 struct EnvironmentCredentials;
 impl CredentialStore for EnvironmentCredentials {
     fn get(&self, name: &str) -> Result<String> {
-        std::env::var(name).map_err(|_| anyhow!("credential {name} is not set in the environment"))
+        let key = match name {
+            "openai" => "OPENAI_API_KEY".to_owned(),
+            "anthropic" => "ANTHROPIC_API_KEY".to_owned(),
+            other => other.to_ascii_uppercase().replace('-', "_") + "_API_KEY",
+        };
+        std::env::var(&key).map_err(|_| anyhow!("credential {key} is not set in the environment"))
     }
 }
 

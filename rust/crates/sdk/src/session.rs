@@ -121,6 +121,7 @@ pub struct PromptResult {
     pub value: Option<Value>,
     pub turn_id: Option<String>,
     pub open_tool_calls: Vec<String>,
+    pub usage: Option<Value>,
     tool_results: Vec<ToolResult>,
 }
 
@@ -433,8 +434,40 @@ impl Session {
             .collect()
     }
 
-    /// Close the session.
+    /// List the commands available to the local actor.
+    pub fn commands(&self) -> Result<Vec<String>> {
+        self.snapshot()?;
+        Ok(self.inner.harness.commands())
+    }
+
+    /// Run a command without starting a turn. The result is text, if any.
+    pub async fn run_command(&self, line: &str) -> Result<Option<String>> {
+        let line = line.trim().trim_start_matches('/');
+        let (name, args) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        if !self.commands()?.iter().any(|command| command == name) {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("unknown command {name}"),
+            ));
+        }
+        let value = self
+            .inner
+            .harness
+            .command(&base::Scope::session(&self.id), name, args.trim())
+            .await?;
+        Ok(if let Some(content) = value.get("content") {
+            Some(base::wire::text(content))
+        } else if value.as_object().is_some_and(|object| object.is_empty()) || value.is_null() {
+            None
+        } else {
+            Some(value.to_string())
+        })
+    }
+
+    /// Close the session after cancelling and settling any queued or running work.
     pub async fn close(&self) -> Result<()> {
+        self.cancel().await?;
+        let _run = self.driver.run.lock().await;
         Ok(self.inner.harness.close(&self.id).await?)
     }
 }
@@ -458,6 +491,7 @@ fn no_turn(input_id: String, disposition: Disposition) -> PromptResult {
         value: None,
         turn_id: None,
         open_tool_calls: vec![],
+        usage: None,
         tool_results: vec![],
     }
 }
@@ -507,6 +541,7 @@ fn from_turn(
         value: result.value.clone(),
         turn_id: turn,
         open_tool_calls: result.open_calls.iter().map(|c| c.id.clone()).collect(),
+        usage: Some(base::wire::turn_outcome(result)["usage"].clone()),
         tool_results,
     }
 }

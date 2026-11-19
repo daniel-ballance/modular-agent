@@ -114,9 +114,23 @@ impl std::error::Error for Error {}
 impl From<anyhow::Error> for Error {
     fn from(error: anyhow::Error) -> Self {
         if let Some(e) = error.downcast_ref::<Error>() {
-            return Error::new(e.code, e.message.clone());
+            return Error {
+                code: e.code,
+                message: e.message.clone(),
+                data: e.data.clone(),
+                refusal: e.refusal,
+            };
         }
-        let code = if error.downcast_ref::<agent_api::LostPart>().is_some() {
+        if let Some(held) = error.downcast_ref::<agent_api::HistoryHeld>() {
+            return Error::new(Code::Held, held.to_string())
+                .with_data(serde_json::json!({"retryAfterMs":held.retry_after_ms}));
+        }
+        let code = if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported)
+        {
+            Code::NotSupported
+        } else if error.downcast_ref::<agent_api::LostPart>().is_some() {
             Code::Lost
         } else if agent_api::is_file_not_found(&error) {
             Code::NotFound
@@ -131,6 +145,7 @@ impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
         let code = match error.kind() {
             std::io::ErrorKind::NotFound => Code::NotFound,
+            std::io::ErrorKind::Unsupported => Code::NotSupported,
             _ => Code::Internal,
         };
         Error::new(code, error.to_string())
