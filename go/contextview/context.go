@@ -17,7 +17,10 @@ type summary struct {
 	Usage   api.Usage
 }
 
-func Plugin() api.Plugin {
+func Plugin() api.Plugin { return PluginWithCompaction(true) }
+
+// PluginWithCompaction installs context projection with optional summarization.
+func PluginWithCompaction(compact bool) api.Plugin {
 	return api.Plugin{Name: "context", Setup: func(a api.API) error {
 		m := &manager{a}
 		if err := a.Handle("session.fork", "", func(ctx context.Context, v any) (api.Decision, error) {
@@ -37,20 +40,22 @@ func Plugin() api.Plugin {
 		}); err != nil {
 			return err
 		}
-		if err := a.RegisterCommand("compact", func(ctx context.Context, id string, args []string) (string, error) {
-			if len(args) > 0 {
-				return "", errors.New("usage: /compact")
+		if compact {
+			if err := a.RegisterCommand("compact", func(ctx context.Context, id string, args []string) (string, error) {
+				if len(args) > 0 {
+					return "", errors.New("usage: /compact")
+				}
+				if err := m.compact(ctx, id); err != nil {
+					return "", err
+				}
+				return "Compacted. Raw history retained.", nil
+			}); err != nil {
+				return err
 			}
-			if err := m.compact(ctx, id); err != nil {
-				return "", err
-			}
-			return "Compacted. Raw history retained.", nil
-		}); err != nil {
-			return err
 		}
 		if err := a.Handle("runtime.step.before", "", func(ctx context.Context, v any) (api.Decision, error) {
 			sc := v.(api.StepContext)
-			if sc.Compact {
+			if compact && sc.Compact {
 				if err := m.compactTurn(ctx, sc); err != nil {
 					return api.Decision{}, err
 				}
@@ -67,7 +72,7 @@ func Plugin() api.Plugin {
 			if snap.Settings.ContextLimit > 0 {
 				limit = snap.Settings.ContextLimit
 			}
-			if estimate(sc.Request)+sc.Request.MaxOutput > limit {
+			if compact && estimate(sc.Request)+sc.Request.MaxOutput > limit {
 				if sc.Compact {
 					return api.Decision{}, errors.New("context remains too large after compaction")
 				}
@@ -99,6 +104,9 @@ func Plugin() api.Plugin {
 			return api.Decision{Value: sc}, nil
 		}); err != nil {
 			return err
+		}
+		if !compact {
+			return nil
 		}
 		return a.Handle("runtime.request.failed", "", func(ctx context.Context, v any) (api.Decision, error) {
 			f := v.(api.Failure)

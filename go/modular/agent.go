@@ -74,6 +74,7 @@ type options struct {
 	mcpWarning                              func(error)
 	conformance                             bool
 	jobReports, lateAnswers, refuseSettings bool
+	compaction                              bool
 	input                                   func(context.Context, Content) (Content, error)
 }
 type Environment = api.WorkingEnvironment
@@ -133,9 +134,14 @@ func WithApproval(a Approval) Option {
 		return nil
 	}
 }
-func OnQuestion(h QuestionHandler) Option { return WithOnQuestion(h) }
 func WithOnQuestion(h QuestionHandler) Option {
 	return func(o *options) error { o.handler = h; return nil }
+}
+
+// WithCompaction controls automatic summarization and the /compact command.
+// Compaction is enabled by default.
+func WithCompaction(enabled bool) Option {
+	return func(o *options) error { o.compaction = enabled; return nil }
 }
 
 // WithJobReportsStartTurns lets a job's report start a turn without new actor input.
@@ -176,7 +182,7 @@ type sessionDefaults struct{ settings *api.Settings }
 func (s sessionDefaults) Settings(string) (api.Settings, error) { return *s.settings, nil }
 
 func New(ctx context.Context, opts ...Option) (*Agent, error) {
-	o := options{durability: Ephemeral, settings: Settings{}}
+	o := options{durability: Ephemeral, settings: Settings{}, compaction: true}
 	for _, opt := range opts {
 		if opt == nil {
 			return nil, &Error{Code: InvalidParams, Message: "nil option"}
@@ -305,7 +311,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		{Name: "configuration", Setup: func(a api.API) error { return a.Provide("configuration", sessionDefaults{&defaults}) }},
 		{Name: "sdk-credentials", Setup: func(a api.API) error { return a.Provide("credentials", environmentCredentials{}) }},
 		configuration.BoundProject(project), environment, runtime,
-		modelselect.Plugin(), contextview.Plugin(), questions.Plugin(), acpinterface.Plugin(project),
+		modelselect.Plugin(), contextview.PluginWithCompaction(o.compaction), questions.Plugin(), jobs.Plugin(), acpinterface.Plugin(project),
 		mcptools.Configured(o.mcp, project, o.mcpWarning),
 		{Name: "sdk-model-admission", Setup: func(host api.API) error {
 			return host.Handle("input", "last", func(_ context.Context, payload any) (api.Decision, error) {
@@ -324,7 +330,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		core = append(core, approval.Plugin())
 	}
 	if o.conformance {
-		core = append(core, conformancemodel.Plugin(), pluginrpc.NestFixture(), jobs.Plugin())
+		core = append(core, conformancemodel.Plugin(), pluginrpc.NestFixture())
 	}
 	a.q = newQuestionRouter(a.a, o.handler)
 	core = append(core, a.q.plugin())
