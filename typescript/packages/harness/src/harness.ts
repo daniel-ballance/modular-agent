@@ -139,7 +139,7 @@ export interface PluginApi {
 	listSessions(project?: string | null): Promise<StoredSession[]>;
 	forkSession(sessionId: string, entryId: string): Promise<string>;
 	closeSession(sessionId: string, actorId?: string): Promise<void>;
-	session(sessionId: string): { id: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
+	session(sessionId: string): { id: string; project: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
 	// input and turns
 	input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }>;
 	withdraw(sessionId: string, inputId: string): QueuedInput | undefined;
@@ -373,7 +373,7 @@ export class Harness {
 			closeSession: (id, actorId) => this.closeSession(id, actorId),
 			session: (id) => {
 				const s = this.session(id);
-				return { id: s.id, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
+				return { id: s.id, project: s.meta.project, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
 			},
 			input: (sessionId, options) => this.input(sessionId, options),
 			withdraw: (sessionId, inputId) => this.withdraw(sessionId, inputId),

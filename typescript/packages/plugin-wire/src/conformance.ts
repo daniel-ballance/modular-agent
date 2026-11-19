@@ -61,9 +61,9 @@ const TOOLS: ToolDefinition[] = [
 /** The conformance plugin's tools: bash and read, using only the session's working environment. */
 export class ConformanceTools implements ToolSource {
 	readonly id = "conformance-tools";
-	constructor(private nestedOnly = false) {}
+	constructor(private nestedOnly = false, private exclude: readonly string[] = []) {}
 	tools(): ToolDefinition[] {
-		return this.nestedOnly ? TOOLS.filter(t => t.name === "nest") : TOOLS;
+		return TOOLS.filter(t => (!this.nestedOnly || t.name === "nest") && !this.exclude.includes(t.name));
 	}
 	async run(call: ToolCall, ctx: ToolContext): Promise<Omit<ToolResult, "callId">> {
 		if (call.name === "nest") {
@@ -92,8 +92,8 @@ export class ConformanceTools implements ToolSource {
 	}
 }
 
-export function conformanceTools(nestedOnly = false): Plugin {
-	return { name: "conformance-tools", setup: (api) => api.provide("tool-source", new ConformanceTools(nestedOnly)) };
+export function conformanceTools(nestedOnly = false, exclude?: readonly string[]): Plugin {
+	return { name: "conformance-tools", setup: (api) => api.provide("tool-source", new ConformanceTools(nestedOnly, exclude)) };
 }
 
 const SECRET = "conformance-secret";

@@ -4,11 +4,12 @@ import { join, resolve } from "node:path";
 import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
+import { contextCompaction } from "@modular-agent/context-compaction";
 import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
-import { startExternalPlugin, pluginSpecsFromEnv } from "@modular-agent/plugin-wire";
-import { acpInterface } from "@modular-agent/interface-acp";
+import { startExternalPlugin, pluginSpecsFromEnv, conformanceProvider, conformanceTools } from "@modular-agent/plugin-wire";
+import { acpInterface, type AcpOptions } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
@@ -36,6 +37,10 @@ export interface AgentOptions {
   model?: string | ModelRef;
   settings?: Settings;
   approval?: Approval;
+  /** Enable the official context compaction plugin and /compact command. */
+  compaction?: boolean;
+  /** Offline fixtures for the ACP conformance kit; not for production use. */
+  conformance?: boolean;
   onQuestion?: QuestionHandler;
   history?: MemoryHistory | FileHistory | HttpHistory;
   environment?: MemoryEnvironment | WorkingEnvironment;
@@ -43,7 +48,9 @@ export interface AgentOptions {
   credentials?: CredentialStore;
 }
 export interface SessionOptions { settings?: Settings }
+export type ServeAcpOptions = Omit<AcpOptions, "declaration">;
 export interface SessionInfo { id: string; project: string; created: number }
+export interface SavedSessionInfo extends SessionInfo { updated: number; settings: Settings }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
 
 let fileArchive: (store: FileHistory) => HistoryArchive;
@@ -106,6 +113,7 @@ export class Agent {
   #close?: Promise<void>;
   #hostEnabled = false;
   #acp = false;
+  #conformance = false;
   #interfaces: AgentInterface[] = [];
   #startedInterfaces: AgentInterface[] = [];
   #api;
@@ -161,6 +169,7 @@ export class Agent {
       await mkdir(home, { recursive: true });
       const h = new Harness({ project, home, questionsOutlastTurns: false, settingsDuringTurn: "nextTurn", rejectUnknownModel: true });
       agent = new Agent(h, scratch, options.onQuestion);
+      agent.#conformance = options.conformance ?? false;
       const settings = structuredClone(options.settings ?? {});
       if (options.approval !== undefined) settings.approval = options.approval;
       const history = options.history ?? (durability === "ephemeral" || !options.dataDir ? memoryHistory() : undefined);
@@ -190,10 +199,15 @@ export class Agent {
       await agent.#load(explicitRuntime ? { name: "sdk.runtime", setup: api => api.provide("runtime", explicitRuntime) }
         : durability === "durable" ? durableRuntime() : transientRuntime());
       await agent.#load(agent.#localInterface());
-      if (options.approval !== undefined) await agent.#load(approval({ policy: options.approval }));
+      if (options.approval !== undefined || options.conformance) await agent.#load(approval({ policy: options.approval ?? "off" }));
+      if (options.compaction) await agent.#load(contextCompaction());
+      if (options.conformance) {
+        await agent.#load(conformanceProvider());
+      }
       for (const p of options.providers ?? []) await agent.#plugin(definePlugin({ name: `provider.${p.id}`, setup: r => r.provider(p) }));
       for (const t of options.tools ?? []) await agent.#plugin(definePlugin({ name: `tool.${t.definition.name}`, tools: [t] }));
       for (const p of options.plugins ?? []) await agent.#plugin(p);
+      if (options.conformance) await agent.#load(conformanceTools(false, agent.#api.tools().map(t => t.name)));
       agent.#hostEnabled = options.pluginHost ?? options.processPlugins !== undefined;
       await agent.#loadProcesses([...options.processPlugins ?? [], ...(agent.#hostEnabled ? pluginSpecsFromEnv() : [])]);
       const effectiveRuntime = h.use<Runtime>("runtime");
@@ -377,6 +391,21 @@ export class Agent {
     this.#check();
     return checked(() => this.#api.listSessions(filter?.project ?? null));
   }
+  /** Read saved session metadata without opening it or starting recovery. */
+  async savedSession(id: string): Promise<SavedSessionInfo> {
+    this.#check();
+    if (!/^[\w-]+$/.test(id)) throw new AgentError("invalid_params", "Invalid session id");
+    return checked(async () => {
+      const store = this.#h.use<HistoryStore>("history-store")!;
+      const { meta, entries } = await store.load(id);
+      const settings: Settings = {};
+      for (const entry of entries) if (!entry.erased && entry.kind === "setting") {
+        const change = entry.data as { key: string; value: unknown };
+        settings[change.key] = change.value;
+      }
+      return { ...meta, updated: entries.at(-1)?.time ?? meta.created, settings };
+    });
+  }
   models(): ModelInfo[] {
     this.#check();
     return structuredClone(this.#h.useAll<BaseProvider>("provider").flatMap(p => p.models()));
@@ -396,13 +425,15 @@ export class Agent {
       startsTurnsUnasked: base.startsTurnsUnasked === "never" ? "never" : "jobReports",
     };
   }
-  async serveAcp(): Promise<void> {
+  async serveAcp(options: ServeAcpOptions = {}): Promise<void> {
     this.#check();
     if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
     if (!this.#hostEnabled) throw new AgentError("invalid_composition", "Build with pluginHost: true before serving ACP");
     this.#acp = true;
     try {
-      const binding = acpInterface({ declaration: () => this.declaration() });
+      const binding = acpInterface(this.#conformance
+        ? { actorId: process.env.MODULAR_AGENT_ACTOR, ...options }
+        : { ...options, declaration: () => this.declaration() });
       await this.#load(binding);
       await binding.acp.serveStdio();
     } catch (error) { throw new AgentError("invalid_composition", messageOf(error), undefined, error); }
