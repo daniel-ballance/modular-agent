@@ -220,6 +220,9 @@ pub trait Lease: Send + Sync {
     }
 }
 pub trait HistoryStore: Send + Sync {
+    fn supports_erasure(&self) -> bool {
+        false
+    }
     /// Opt in to storing opaque HTTP service snapshots. `save` must durably
     /// replace a whole snapshot, and `acquire` must exclude another server,
     /// even before the first `save`.

@@ -478,10 +478,75 @@ impl Session {
             ));
         }
         let patch = base::portable::settings_from_wire(&serde_json::json!({key: value}));
+        if key == "model" {
+            let name = patch["model"]
+                .as_str()
+                .ok_or_else(|| Error::new(Code::InvalidRequest, "invalid model"))?;
+            crate::agent::require_model(self.inner.harness.as_ref(), name)?;
+        }
         self.inner
             .harness
             .settings(&base::Scope::session(&self.id), patch)?;
         Ok(())
+    }
+
+    /// Erase kept entries and their known copies using the installed history store.
+    pub async fn erase(&self, entries: Vec<String>) -> Result<crate::ErasureReport> {
+        self.snapshot()?;
+        let harness = self.inner.harness.as_ref();
+        if harness.declaration()?["erasure"] != true {
+            return Err(Error::new(
+                Code::NotSupported,
+                "history store does not support erasure",
+            ));
+        }
+        let data = self.snapshot()?;
+        if entries.is_empty() {
+            return Err(Error::new(Code::InvalidParams, "entry ids are required"));
+        }
+        let entries: std::collections::BTreeSet<_> = entries.into_iter().collect();
+        for id in &entries {
+            let entry = data
+                .entries
+                .iter()
+                .find(|entry| &entry.id == id)
+                .ok_or_else(|| Error::new(Code::NotFound, "unknown erasure target"))?;
+            if base::authority_record(entry) || entry.kind == "erasure" {
+                return Err(Error::new(Code::Forbidden, "protected erasure target"));
+            }
+        }
+        if harness.is_running(&self.id) {
+            return Err(Error::new(Code::Busy, "erasure requires an idle session"));
+        }
+        let report = harness
+            .erase(
+                &base::Scope::session(&self.id),
+                entries.into_iter().collect(),
+            )
+            .await?;
+        let mut out = crate::ErasureReport {
+            out_of_reach: report.out_of_reach,
+            ..Default::default()
+        };
+        for (session_id, id) in report
+            .qualified
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if session_id != self.id {
+                out.out_of_reach.push("copies in other sessions".into());
+                continue;
+            }
+            let pair = crate::ErasedEntry { session_id, id };
+            if report.pending.contains(&pair.id) {
+                out.pending.push(pair);
+            } else {
+                out.erased.push(pair);
+            }
+        }
+        out.out_of_reach.sort();
+        out.out_of_reach.dedup();
+        Ok(out)
     }
 
     /// Fork at the current position.

@@ -184,8 +184,8 @@ async fn load_transport(
             ensure!(
                 environment.get("platforms").is_none_or(|value| value
                     .as_array()
-                    .is_some_and(|a| a.iter().any(|v| v == std::env::consts::OS))),
-                "not_supported: environment does not support this platform"
+                    .is_some_and(|a| a.iter().all(Value::is_string))),
+                "environment platforms must be a list of identifiers"
             );
         }
         for hook in registration["hooks"].as_array().into_iter().flatten() {
@@ -1019,7 +1019,17 @@ impl WorkingEnvironment for Environment {
         }))
     }
     fn declaration(&self) -> Value {
-        json!({"containment":self.declaration["containment"],"platforms":self.declaration["platforms"],"local":false,"rewinding":self.declaration["points"]==true,"stops_commands_after_sigkill":self.declaration["containment"]=="strong","normal_cleanup":true})
+        let platform = match std::env::consts::OS {
+            "macos" => "darwin",
+            "windows" => "win32",
+            os => os,
+        };
+        let containment = self.declaration["platforms"]
+            .as_array()
+            .filter(|platforms| platforms.iter().any(|p| p == platform))
+            .and_then(|_| self.declaration["containment"].as_str())
+            .unwrap_or("none");
+        json!({"containment":containment,"platforms":self.declaration["platforms"],"local":false,"rewinding":self.declaration["points"]==true,"confines_files":self.declaration["confinesFiles"]==true,"stops_commands_after_sigkill":containment=="strong","normal_cleanup":true})
     }
     async fn save_point(&self, session: &str, project: &Path) -> Result<String> {
         let api = self

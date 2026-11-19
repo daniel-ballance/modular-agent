@@ -1323,7 +1323,7 @@ impl Harness {
     pub fn declaration(&self) -> Result<Value> {
         let runtime: Arc<dyn Runtime> = capability(self, "runtime")?;
         let env: Arc<dyn WorkingEnvironment> = capability(self, "environment")?;
-        let mut declaration = json!({"runtime":runtime.declaration(),"environment":env.declaration(),"forking":true,"erasure":self.store().is_some(),"several_actors":true,"rewinding":env.declaration()["rewinding"] == true,"input_keys":true,"holds_output":false,"plugins_during_session":false,"live_sessions":false,"provider_state":false,"provider_tools":false,"starts_unasked_turns":false,"output_bypass":false,"questions_outlast_turn":false,"retention":"indefinite"});
+        let mut declaration = json!({"runtime":runtime.declaration(),"environment":env.declaration(),"forking":true,"erasure":self.store().is_some_and(|store|store.supports_erasure()),"several_actors":true,"rewinding":env.declaration()["rewinding"] == true,"input_keys":true,"holds_output":false,"plugins_during_session":false,"live_sessions":false,"provider_state":false,"provider_tools":false,"starts_unasked_turns":false,"output_bypass":false,"questions_outlast_turn":false,"queued_input_after_restart":"handedBack","queued_job_reports_after_restart":"run","settings_during_turn":"refused","retention":"indefinite"});
         merge(
             &mut declaration,
             self.registry.read().unwrap().declaration(),

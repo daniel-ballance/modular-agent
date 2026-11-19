@@ -35,7 +35,8 @@ pub use async_trait::async_trait;
 pub use error::{Code, Error, Result};
 pub use events::{Event, Question, QuestionKind};
 pub use history::{
-    History, ServeHistoryOptions, file_history, http_history, memory_history, serve_history,
+    ErasedEntry, ErasureReport, History, ServeHistoryOptions, file_history, http_history,
+    memory_history, serve_history,
 };
 pub use hooks::*;
 pub use plugin::{Command, CommandContext, Plugin, Registrar};
