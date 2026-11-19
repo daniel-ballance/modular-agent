@@ -14,6 +14,29 @@ type Setup = Arc<dyn Fn(&mut Registrar) -> Result<()> + Send + Sync>;
 type CommandHandler =
     Arc<dyn Fn(String, CommandContext) -> BoxFuture<'static, Result<Option<String>>> + Send + Sync>;
 
+type LocalHook<Input, Output> =
+    Arc<dyn Fn(Input) -> BoxFuture<'static, Result<Output>> + Send + Sync>;
+
+/// A session-scoped tool catalog, queried before dispatch.
+pub trait ToolSource: Send + Sync + 'static {
+    fn tools(&self, session_id: &str) -> Vec<Tool>;
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionPrepare {
+    pub session_id: String,
+    pub project: std::path::PathBuf,
+}
+
+/// Inputs for an in-process system prompt contribution. Tools here include
+/// those callable by other tools, not just those offered to the model.
+#[derive(Clone, Debug)]
+pub struct TurnSystem {
+    pub session_id: String,
+    pub project: std::path::PathBuf,
+    pub tools: Vec<Value>,
+}
+
 /// A named bundle of parts, added to an agent or served over the plugin binding.
 #[derive(Clone)]
 pub struct Plugin {
@@ -32,6 +55,9 @@ pub struct Registrar {
     pub(crate) hooks: Vec<Hook>,
     pub(crate) commands: Vec<Command>,
     defined: Vec<(String, HookRule)>,
+    sources: Vec<(String, Arc<dyn ToolSource>)>,
+    prepare: Vec<LocalHook<SessionPrepare, ()>>,
+    turn_system: Vec<(crate::Order, LocalHook<TurnSystem, String>)>,
 }
 
 #[derive(Clone)]
@@ -127,6 +153,42 @@ impl Plugin {
             Ok(())
         })
     }
+    /// Register a local source whose catalog may vary by session.
+    pub fn tool_source(self, name: impl Into<String>, source: impl ToolSource) -> Self {
+        let name = name.into();
+        let source: Arc<dyn ToolSource> = Arc::new(source);
+        self.setup(move |r| {
+            r.sources.push((name.clone(), source.clone()));
+            Ok(())
+        })
+    }
+
+    /// Run before a session is used, including before crash recovery.
+    pub fn on_session_prepare<F, Fut>(self, prepare: F) -> Self
+    where
+        F: Fn(SessionPrepare) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let prepare: LocalHook<SessionPrepare, ()> = Arc::new(move |p| Box::pin(prepare(p)));
+        self.setup(move |r| {
+            r.prepare.push(prepare.clone());
+            Ok(())
+        })
+    }
+
+    /// Contribute system text using the session's current tool catalog.
+    pub fn on_turn_system<F, Fut>(self, order: crate::Order, contribute: F) -> Self
+    where
+        F: Fn(TurnSystem) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String>> + Send + 'static,
+    {
+        let contribute: LocalHook<TurnSystem, String> = Arc::new(move |p| Box::pin(contribute(p)));
+        self.setup(move |r| {
+            r.turn_system.push((order, contribute.clone()));
+            Ok(())
+        })
+    }
+
     pub fn setup<F>(mut self, setup: F) -> Self
     where
         F: Fn(&mut Registrar) -> Result<()> + Send + Sync + 'static,
@@ -142,6 +204,9 @@ impl Plugin {
             hooks: vec![],
             commands: vec![],
             defined: vec![],
+            sources: vec![],
+            prepare: vec![],
+            turn_system: vec![],
         };
         for setup in &self.setups {
             setup(&mut r)?;
@@ -167,6 +232,12 @@ impl Registrar {
         self.defined.push((name.into(), rule));
     }
     pub(crate) fn check_servable(&self) -> Result<()> {
+        if !self.sources.is_empty() {
+            return Err(cannot_serve("dynamic tool source"));
+        }
+        if !self.prepare.is_empty() || !self.turn_system.is_empty() {
+            return Err(cannot_serve("local lifecycle or system hook"));
+        }
         if let Some(t) = self.tools.iter().find(|t| t.in_process_only) {
             return Err(cannot_serve(&format!("tool:{}", t.name())));
         }
@@ -220,8 +291,57 @@ impl base::Plugin for InProcess {
         if !self.registered.tools.is_empty() {
             r.provide::<dyn base::ToolSource>(
                 &format!("tools.{}", self.name),
-                Arc::new(Source(self.registered.tools.clone())),
+                Arc::new(Source(Arc::new(StaticTools(self.registered.tools.clone())))),
             )?;
+        }
+        for (name, source) in &self.registered.sources {
+            r.provide::<dyn base::ToolSource>(
+                &format!("tools.{name}"),
+                Arc::new(Source(source.clone())),
+            )?;
+        }
+        for prepare in &self.registered.prepare {
+            let prepare = prepare.clone();
+            r.on(
+                "session.prepare",
+                base::Order::Normal,
+                base::handler(move |api, scope, _| {
+                    let prepare = prepare.clone();
+                    Box::pin(async move {
+                        let project = api.snapshot(&scope.session)?.project;
+                        prepare(SessionPrepare {
+                            session_id: scope.session,
+                            project,
+                        })
+                        .await?;
+                        Ok(base::HookResult::default())
+                    })
+                }),
+            );
+        }
+        for (order, contribute) in &self.registered.turn_system {
+            let contribute = contribute.clone();
+            r.on(
+                "before.turn",
+                order.native(),
+                base::handler(move |api, scope, _| {
+                    let contribute = contribute.clone();
+                    Box::pin(async move {
+                        let data = api.snapshot(&scope.session)?;
+                        let tools = base::nested_tool_definitions(api.as_ref(), &data)?
+                            .iter()
+                            .map(base::wire::definition)
+                            .collect();
+                        let system = contribute(TurnSystem {
+                            session_id: scope.session,
+                            project: data.project,
+                            tools,
+                        })
+                        .await?;
+                        Ok(base::answer(json!({"system": system, "sources": []})))
+                    })
+                }),
+            );
         }
         for (name, rule) in &self.registered.defined {
             r.define(name, rule.native())?;
@@ -277,12 +397,23 @@ pub(crate) fn command_reply(text: Option<String>) -> Value {
     }
 }
 
-struct Source(Vec<Tool>);
+struct StaticTools(Vec<Tool>);
+impl ToolSource for StaticTools {
+    fn tools(&self, _: &str) -> Vec<Tool> {
+        self.0.clone()
+    }
+}
+
+struct Source(Arc<dyn ToolSource>);
 
 #[async_trait::async_trait]
 impl base::ToolSource for Source {
-    fn tools(&self, _: &base::SessionData) -> Vec<base::ToolDefinition> {
-        self.0.iter().map(|t| t.definition.clone()).collect()
+    fn tools(&self, session: &base::SessionData) -> Vec<base::ToolDefinition> {
+        self.0
+            .tools(&session.id)
+            .into_iter()
+            .map(|t| t.definition)
+            .collect()
     }
     async fn run(
         &self,
@@ -291,7 +422,12 @@ impl base::ToolSource for Source {
         call: base::ToolCall,
         cancel: base::CancellationToken,
     ) -> base::ToolResult {
-        let Some(tool) = self.0.iter().find(|t| t.definition.name == call.name) else {
+        let Some(tool) = self
+            .0
+            .tools(&scope.session)
+            .into_iter()
+            .find(|t| t.definition.name == call.name)
+        else {
             return base::ToolResult::new(
                 &call,
                 base::ToolStatus::Failed,
@@ -311,7 +447,7 @@ impl base::ToolSource for Source {
             cancelled: cancel,
             settled: Default::default(),
         };
-        let settled = execute(tool, call.input.clone(), cx).await;
+        let settled = execute(&tool, call.input.clone(), cx).await;
         // ToolResult::new words a refusal itself.
         let mut result = base::ToolResult::new(&call, settled.status.to_base(), settled.text);
         // Preserve the distinction between an omitted value and JSON null, and
@@ -319,6 +455,9 @@ impl base::ToolSource for Source {
         result.value = settled
             .value
             .map(|value| json!({"_pluginWire":{"value":value}}));
-        result
+        match settled.content {
+            Some(content) => result.with_content(content),
+            None => result,
+        }
     }
 }

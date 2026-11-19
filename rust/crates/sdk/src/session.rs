@@ -88,6 +88,8 @@ pub struct ToolResult {
     pub name: String,
     pub status: ToolStatus,
     pub value: Option<Value>,
+    /// Shared Content parts, including any non-text parts.
+    pub content: Vec<Value>,
     text: String,
 }
 
@@ -100,6 +102,7 @@ impl ToolResult {
             status: ToolStatus::from_base(&result.status),
             text: result.text,
             value: wire.get("value").cloned(),
+            content: wire["content"].as_array().cloned().unwrap_or_default(),
         }
     }
 

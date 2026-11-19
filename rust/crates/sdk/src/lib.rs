@@ -39,7 +39,9 @@ pub use history::{
     memory_history, serve_history,
 };
 pub use hooks::*;
-pub use plugin::{Command, CommandContext, Plugin, Registrar};
+pub use plugin::{
+    Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource, TurnSystem,
+};
 pub use provider::*;
 pub use serve::serve;
 pub use session::{
