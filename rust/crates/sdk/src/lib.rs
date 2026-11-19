@@ -34,7 +34,9 @@ pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
 pub use error::{Code, Error, Result};
 pub use events::{Event, Question, QuestionKind};
-pub use history::{History, file_history, http_history, memory_history};
+pub use history::{
+    History, ServeHistoryOptions, file_history, http_history, memory_history, serve_history,
+};
 pub use hooks::*;
 pub use plugin::{Command, CommandContext, Plugin, Registrar};
 pub use provider::*;

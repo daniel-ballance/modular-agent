@@ -8,6 +8,13 @@ agent-api = { path = "../agent-api" }
 reqwest.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+anyhow.workspace = true
+getrandom = "0.4"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+sha2 = "0.10"
+subtle = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true

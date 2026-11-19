@@ -1,6 +1,8 @@
 //! A synchronous HistoryStore port backed by a separately driven HTTP client.
 use agent_api::*;
+mod server;
 use reqwest::{Client, Method, StatusCode, Url};
+pub use server::{ServeHistoryOptions, serve_history};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
