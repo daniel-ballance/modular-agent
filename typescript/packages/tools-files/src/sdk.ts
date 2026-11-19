@@ -34,7 +34,7 @@ async function walk(ctx: ToolContext, root: string, pattern: string) {
     const file = posix.join(dir, ".gitignore");
     if (await ctx.environment.exists(file)) rules.push({ prefix: rel ? rel + "/" : "", filter: ignore().add((await ctx.environment.read(file)).toString()) });
     for (const item of await ctx.environment.list(dir)) {
-      if (item.name === ".git" || item.name.startsWith(".")) continue;
+      if (item.name === ".git") continue;
       const name = posix.join(rel, item.name);
       const test = name + (item.kind === "directory" ? "/" : "");
       let ignored = false;
@@ -44,7 +44,7 @@ async function walk(ctx: ToolContext, root: string, pattern: string) {
       }
       if (ignored) continue;
       if (item.kind === "directory") await visit(name, rules);
-      if (item.kind === "file" && minimatch(pattern.includes("/") ? name : item.name, pattern.replace(/^\.\//, ""), { nocomment: true, nonegate: true, noext: true })) files.push(name);
+      if (item.kind === "file" && minimatch(pattern.includes("/") ? name : item.name, pattern.replace(/^\.\//, ""), { nocomment: true, nonegate: true, noext: true, dot: true })) files.push(name);
     }
   }
   await visit("", []);

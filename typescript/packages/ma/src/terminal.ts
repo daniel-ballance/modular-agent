@@ -13,7 +13,7 @@ function sink(json: boolean, verbose: boolean, stream: boolean) {
       if (e.data.delta) midline = !e.data.delta.endsWith("\n");
     }
     if (e.type === "toolStarted") {
-      const call = e.data as ToolCall;
+      const { call } = e.data as { call: ToolCall };
       const nested = call.startedBy === "tool";
       calls.set(call.id, nested);
       const input = Object.entries(call.input ?? {}).sort(([a], [b]) => a < b ? -1 : 1).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ");
