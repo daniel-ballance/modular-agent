@@ -178,8 +178,9 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 				return nil, err
 			}
 		}
+		s.project = str(v, "project")
 		if s.Environment != nil {
-			project, err := filepath.EvalSymlinks(str(v, "project"))
+			project, err := filepath.EvalSymlinks(s.project)
 			if err != nil || !cwdInProject(project, project) {
 				return nil, fault("invalid_request", "working environment project must resolve to a directory")
 			}
@@ -242,7 +243,8 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		}
 		ctx = api.WithToolProgress(ctx, progress)
 		ctx = api.WithNestedTools(ctx, servedTools{s: s, ctx: ctx})
-		r := source.Run(ctx, api.Session{ID: str(v, "sessionId"), Project: str(v, "project")}, call, func(chunk string) {
+		project := s.project
+		r := source.Run(ctx, api.Session{ID: str(v, "sessionId"), Project: project}, call, func(chunk string) {
 			progress(api.Text(chunk))
 		})
 		if r.Status == "open" {
@@ -507,6 +509,12 @@ func environmentRequest(ctx context.Context, env api.WorkingEnvironment, method 
 }
 
 type progressKey struct{}
+
+// HostEnvironment exposes environment callbacks to an SDK tool invocation.
+func (s *Server) HostEnvironment() api.WorkingEnvironment {
+	return &remoteEnvironment{peer: s.peer, prefix: "host/"}
+}
+
 type remoteEnvironment struct {
 	peer        *Peer
 	project     string

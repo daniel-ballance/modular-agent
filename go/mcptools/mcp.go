@@ -52,7 +52,10 @@ var namePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func Name(server, tool string) string { return "mcp_" + server + "__" + tool }
 
-func Plugin(servers []Server, project string) api.Plugin {
+func Plugin(servers []Server, project string) api.Plugin { return Configured(servers, project, nil) }
+
+// Configured starts each configured server independently when warn is set.
+func Configured(servers []Server, project string, warn func(error)) api.Plugin {
 	m := &Manager{project: project, groups: map[string][]*connection{}}
 	return api.Plugin{Name: "mcp", Setup: func(a api.API) error {
 		m.a = a
@@ -72,13 +75,28 @@ func Plugin(servers []Server, project string) api.Plugin {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		return m.Add(ctx, "", servers)
+		if warn == nil {
+			return m.Add(ctx, "", servers)
+		}
+		for _, spec := range servers {
+			attempt, done := context.WithTimeout(context.Background(), 15*time.Second)
+			err := m.add(attempt, "", []Server{spec}, true)
+			done()
+			if err != nil {
+				warn(fmt.Errorf("server %s: %w", spec.Name, err))
+			}
+		}
+		return nil
 	}, Close: m.Close}
 }
 
 // Add prepares an entire group before publishing it. A failed connection leaves
 // no partial tools or child processes. Client-provided groups are never saved.
 func (m *Manager) Add(ctx context.Context, id string, specs []Server) error {
+	return m.add(ctx, id, specs, false)
+}
+
+func (m *Manager) add(ctx context.Context, id string, specs []Server, extend bool) error {
 	m.mu.RLock()
 	_, exists := m.groups[id]
 	closed := m.closed
@@ -86,7 +104,7 @@ func (m *Manager) Add(ctx context.Context, id string, specs []Server) error {
 	if closed {
 		return errors.New("MCP source is closed")
 	}
-	if exists {
+	if exists && !extend {
 		return errors.New("MCP group already attached")
 	}
 	seen := map[string]bool{}
@@ -114,7 +132,7 @@ func (m *Manager) Add(ctx context.Context, id string, specs []Server) error {
 		group = append(group, c)
 	}
 	m.mu.Lock()
-	if _, ok := m.groups[id]; ok || m.closed {
+	if _, ok := m.groups[id]; (ok && !extend) || m.closed {
 		m.mu.Unlock()
 		for _, c := range group {
 			c.close()
@@ -133,7 +151,7 @@ func (m *Manager) Add(ctx context.Context, id string, specs []Server) error {
 			}
 		}
 	}
-	m.groups[id] = group
+	m.groups[id] = append(m.groups[id], group...)
 	m.mu.Unlock()
 	return nil
 }

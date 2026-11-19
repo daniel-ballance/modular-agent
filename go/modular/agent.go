@@ -18,13 +18,16 @@ import (
 	"github.com/OWNER/modular-agent/go/approval"
 	"github.com/OWNER/modular-agent/go/commands"
 	"github.com/OWNER/modular-agent/go/configuration"
+	"github.com/OWNER/modular-agent/go/conformancemodel"
 	"github.com/OWNER/modular-agent/go/contextview"
 	"github.com/OWNER/modular-agent/go/durable"
 	"github.com/OWNER/modular-agent/go/harness"
+	"github.com/OWNER/modular-agent/go/jobs"
 	"github.com/OWNER/modular-agent/go/local"
 	"github.com/OWNER/modular-agent/go/mcptools"
 	"github.com/OWNER/modular-agent/go/modelselect"
 	"github.com/OWNER/modular-agent/go/pluginrpc"
+	"github.com/OWNER/modular-agent/go/portable"
 	"github.com/OWNER/modular-agent/go/questions"
 	"github.com/OWNER/modular-agent/go/transient"
 )
@@ -67,6 +70,10 @@ type options struct {
 	approval                Approval
 	handler                 QuestionHandler
 	history                 HistoryStore
+	mcp                     []MCPServer
+	mcpWarning              func(error)
+	conformance             bool
+	input                   func(context.Context, Content) (Content, error)
 }
 type Environment = api.WorkingEnvironment
 type DirEntry = api.DirEntry
@@ -196,6 +203,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		return nil, &Error{Code: InvalidParams, Message: "project must be a directory"}
 	}
 	defaults := api.Settings{Thinking: "off", MaxSteps: 12, MaxOutput: 1024}
+	if o.conformance {
+		defaults.Model, defaults.Approval = conformancemodel.ID, "off"
+	}
 	for k, v := range o.settings {
 		if err := applySetting(&defaults, k, v); err != nil {
 			return nil, err
@@ -277,7 +287,8 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		{Name: "configuration", Setup: func(a api.API) error { return a.Provide("configuration", sessionDefaults{&defaults}) }},
 		{Name: "sdk-credentials", Setup: func(a api.API) error { return a.Provide("credentials", environmentCredentials{}) }},
 		configuration.BoundProject(project), environment, runtime,
-		modelselect.Plugin(), contextview.Plugin(), commands.Plugin(), questions.Plugin(), mcptools.Plugin(nil, project), acpinterface.Plugin(project),
+		modelselect.Plugin(), contextview.Plugin(), questions.Plugin(), acpinterface.Plugin(project),
+		mcptools.Configured(o.mcp, project, o.mcpWarning),
 		{Name: "sdk-model-admission", Setup: func(host api.API) error {
 			return host.Handle("input", "last", func(_ context.Context, payload any) (api.Decision, error) {
 				input := payload.(api.InputEvent)
@@ -291,8 +302,11 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 				return api.Decision{}, nil
 			})
 		}}}
-	if o.approval != "" {
+	if o.approval != "" || o.conformance {
 		core = append(core, approval.Plugin())
+	}
+	if o.conformance {
+		core = append(core, conformancemodel.Plugin(), pluginrpc.NestFixture(), jobs.Plugin())
 	}
 	a.q = newQuestionRouter(a.a, o.handler)
 	core = append(core, a.q.plugin())
@@ -325,6 +339,28 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 			}
 			return nil, &Error{Code: InvalidComposition, Message: err.Error()}
 		}
+	}
+	if o.input != nil {
+		if err := h.Load(api.Plugin{Name: "sdk-input", Setup: func(a api.API) error {
+			return a.Handle("input", "first", func(ctx context.Context, payload any) (api.Decision, error) {
+				in := payload.(api.InputEvent)
+				var content Content
+				if err := decodeInto(portable.Content(in.Input.Content), &content); err != nil {
+					return api.Decision{}, err
+				}
+				out, err := o.input(ctx, content)
+				if err != nil {
+					return api.Decision{}, err
+				}
+				in.Input.Content = portable.ReadContent(out)
+				return api.Decision{Value: in}, nil
+			})
+		}}); err != nil {
+			return nil, appError(err, InvalidComposition)
+		}
+	}
+	if err := h.Load(commands.Plugin()); err != nil {
+		return nil, appError(err, InvalidComposition)
 	}
 	if err := pluginrpc.Load(ctx, h, project, state, specs); err != nil {
 		if ctx.Err() != nil {
@@ -457,7 +493,14 @@ func (a *Agent) Declaration() Declaration {
 	return d
 }
 
-func (a *Agent) ServeACP(ctx context.Context) error { return a.serveACP(ctx, os.Stdin, os.Stdout) }
+func (a *Agent) ServeACP(ctx context.Context) error {
+	return a.ServeACPStreams(ctx, os.Stdin, os.Stdout)
+}
+
+// ServeACPStreams serves ACP on the supplied streams until the connection ends.
+func (a *Agent) ServeACPStreams(ctx context.Context, in io.ReadCloser, out io.Writer) error {
+	return a.serveACP(ctx, in, out)
+}
 
 func (a *Agent) serveACP(ctx context.Context, in io.ReadCloser, out io.Writer) error {
 	if !a.pluginHost {
