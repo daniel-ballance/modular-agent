@@ -272,7 +272,6 @@ class Agent:
             tenants=False,
             questionsOutlastTurns=False,
             lateAnswersStartTurns=False,
-            nestedToolCalls=False,
             erasure=not isinstance(self._h.capabilities["history"][1], _MemoryHistory),
             portableSessions=not isinstance(self._h.capabilities["history"][1], _MemoryHistory),
             settingsDuringTurn="refused",

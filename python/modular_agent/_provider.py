@@ -117,6 +117,9 @@ class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapt
         import os
 
         model = ModelRef(self.name, d["access"]["id"])
+        info = next((item for item in self.provider.models() if item["id"] == model.id), None)
+        if info is None:
+            raise AgentError(ErrorCode.INVALID_REQUEST, f"Unknown model: {model}")
         cx = ProviderContext(
             d.get("session"),
             d.get("actor"),
@@ -137,6 +140,13 @@ class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapt
         except asyncio.CancelledError:
             cx.cancelled.set()
             raise
+        except Exception as exc:
+            reply = {
+                "role": "assistant",
+                "stop": "failed",
+                "content": [],
+                "error": {"kind": "other", "message": str(exc) or type(exc).__name__},
+            }
         finally:
             cx._active = False
         response = response_in(reply)

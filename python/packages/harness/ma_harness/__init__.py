@@ -3,13 +3,16 @@
 import asyncio
 from pathlib import Path
 
-from ma_core import API, AgentError, Stop, clone, identity, now, silent
+from ma_core import API, AgentError, Stop, clone, content, identity, now, silent
+from ma_core.wire import recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
 from .output import gate
 
 
 class Harness(Authority):
+    MAX_TOOL_DEPTH = 4
+
     def __init__(self, admin=None, tenant=None, process_plugins=None):
         import os
 
@@ -29,6 +32,7 @@ class Harness(Authority):
         self.commands = {}
         self.sessions = {}
         self.append_locks = {}
+        self.tool_dispatches = {}
         self.followers = []
         self.output_streams = {}
         self.trace = []
@@ -288,7 +292,151 @@ class Harness(Authority):
             and (target != "runtime" and target != "history")
         ):
             await self._assert_writable(sid)
-        return clone(await method(data, emit))
+        if target != "tools" or operation != "run" or "call" not in data:
+            return clone(await method(data, emit))
+        call = data["call"]
+        if "tools" not in self.permissions(
+            self.sessions[sid], call["actor"], call.get("authority")
+        ):
+            raise AgentError("Actor lacks authority: tools", "forbidden")
+        token = identity()
+        scope = {"data": data, "children": set(), "closing": False}
+        self.tool_dispatches[token] = scope
+        try:
+            return clone(await method({**data, "dispatch": token}, emit))
+        finally:
+            scope["closing"] = True
+            children = list(scope["children"])
+            for task in children:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+            await asyncio.gather(*children, return_exceptions=True)
+            self.tool_dispatches.pop(token, None)
+
+    async def nested_tools(self, token, name=None, arguments=None):
+        scope = self.tool_dispatches.get(token)
+        if scope is None or scope["closing"]:
+            raise AgentError("Nested tools need a live dispatched parent", "invalid_request")
+        runtime = self.capabilities.get("runtime", (None, None))[1]
+        if not getattr(runtime, "declarations", {}).get("nested_tools"):
+            raise AgentError("Nested calls are unavailable", "not_supported")
+        parent = scope["data"]
+        sid, turn, step = (parent.get(k) for k in ("session", "turn", "step"))
+        source = parent["call"]
+        if name is None:
+            return [t for t in await runtime._definitions(sid) if "plugin" in t.get("callers", [])]
+        if not isinstance(name, str) or not name or not isinstance(arguments, dict):
+            raise AgentError("Nested tools need a name and object input", "invalid_request")
+        depth = source.get("nesting_depth", 1) + 1
+        call = {
+            "id": identity(),
+            "name": name,
+            "input": clone(arguments),
+            "actor": source["actor"],
+            "authority": source.get("authority"),
+            "initiator": "tool",
+            "parentCallId": source["id"],
+            "nesting_depth": depth,
+        }
+
+        async def run():
+            answer = None
+            try:
+                await self.handle(
+                    "append",
+                    {
+                        "session": sid,
+                        "turn": turn,
+                        "step": step,
+                        "actor": call["actor"],
+                        "kind": "tool_call",
+                        "call": call["id"],
+                        "data": call,
+                        "writer": "@harness",
+                    },
+                    silent,
+                )
+                if depth > self.MAX_TOOL_DEPTH:
+                    answer = {
+                        "status": "refused",
+                        "content": content("Tool nesting depth exceeded"),
+                    }
+                else:
+                    definition = next(
+                        (t for t in await runtime._definitions(sid) if t["name"] == name), None
+                    )
+                    answer = await runtime._tool(sid, turn, step, call, definition)
+                    if answer.get("open"):
+                        await self._close_nested_questions(sid, call["id"])
+                        answer = {
+                            "status": "refused",
+                            "content": content("Nested calls cannot be left open"),
+                        }
+            finally:
+                if sid not in runtime.suspending and sid in self.sessions:
+                    await self._settle_nested(sid, only=call["id"], answer=answer, cancelled=True)
+            return {**answer, "call": call["id"]}
+
+        task = asyncio.create_task(run(), name="nested-tool:" + call["id"])
+        scope["children"].add(task)
+        try:
+            return await task
+        finally:
+            scope["children"].discard(task)
+
+    async def _close_nested_questions(self, sid, call):
+        if "questions" in self.capabilities:
+            await self.call("@harness", "questions", "close_call", {"session": sid, "call": call})
+
+    async def _settle_nested(self, sid, *, only=None, answer=None, cancelled=False):
+        entries = self.sessions[sid]["entries"]
+        results = {e.get("call") for e in entries if recorded_as(e, "tool_result")}
+        starts = {e["call"] for e in entries if e["kind"] == "tool_started"}
+        receipts = {e["call"]: e["data"] for e in entries if e["kind"] == "tool_finished"}
+        for e in reversed(entries):
+            if e["kind"] != "tool_call" or not e["data"].get("parentCallId"):
+                continue
+            cid = e["call"]
+            if cid in results or (only is not None and cid != only):
+                continue
+            await self._close_nested_questions(sid, cid)
+            result = answer or receipts.get(cid)
+            if result is None:
+                status = (
+                    ("cancelled" if cancelled else "outcome_unknown")
+                    if cid in starts
+                    else "not_started"
+                )
+                result = {
+                    "status": status,
+                    "content": content(
+                        {
+                            "cancelled": "Tool call cancelled",
+                            "outcome_unknown": "Tool outcome unknown after interruption",
+                            "not_started": "Tool call did not start",
+                        }[status]
+                    ),
+                }
+            await self.handle(
+                "append",
+                {
+                    "session": sid,
+                    "turn": e.get("turn"),
+                    "step": e.get("step"),
+                    "actor": e["data"]["actor"],
+                    "kind": "tool_result",
+                    "call": cid,
+                    "content": result["content"],
+                    "copies": [e["id"]],
+                    "writer": "@harness",
+                    "data": {
+                        **{k: v for k, v in result.items() if k not in {"call", "content"}},
+                        "toolName": e["data"]["name"],
+                        "parentCallId": e["data"]["parentCallId"],
+                    },
+                },
+                silent,
+            )
 
     async def _assert_writable(self, sid):
         if self.sessions[sid].get("writer_lost"):
@@ -684,6 +832,7 @@ class Harness(Authority):
                 connection_host=bool(d.get("connection_host") and d.get("actor")),
             )
             if d.get("recover", True):
+                await self._settle_nested(s["id"])
                 if "runtime" in self.capabilities:
                     await self.call("@harness", "runtime", "recover", {"session": s["id"]})
                 await self.fire("@harness", "session.ready", {"session": s["id"]})

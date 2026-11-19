@@ -143,11 +143,20 @@ def _turn(e: dict[str, Any], records: list[dict[str, Any]]) -> PromptResult:
     picked = end.get("input") or (start and start["data"].get("input")) or ""
     outcome = turn_end_out(end)["outcome"]
     results = {
-        r["call"]: r for r in records if r.get("turn") == turn_id and r["kind"] == "tool_result"
+        r["call"]: r
+        for r in records
+        if r.get("turn") == turn_id
+        and r["kind"] == "tool_result"
+        and not r["data"].get("parentCallId")
     }
     tools = []
     for r in records:
-        if r.get("turn") == turn_id and r["kind"] == "tool_call" and r["call"] in results:
+        if (
+            r.get("turn") == turn_id
+            and r["kind"] == "tool_call"
+            and r["data"].get("initiator", "model") == "model"
+            and r["call"] in results
+        ):
             result = results.pop(r["call"])
             tools.append(
                 _tool_result(

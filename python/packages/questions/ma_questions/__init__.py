@@ -467,6 +467,12 @@ class Questions(Plugin):
                 ):
                     await self._close_question(parent, proxy)
 
+    async def close_call(self, d, emit):
+        for q in (await self._state(d["session"])).values():
+            if q.get("call") == d["call"] and not q.get("answer") and not q.get("closed"):
+                await self._close_question(d["session"], q)
+        return {}
+
     async def close(self, d):
         for q in (await self._state(d["session"])).values():
             if not q.get("answer") and not q.get("closed"):

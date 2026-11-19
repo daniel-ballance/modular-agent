@@ -135,6 +135,7 @@ def declaration(plugins, provider=None):
         "continuesAfterRestart": bool(runtime.get("durable")),
         "rewinding": bool(environment.get("rewind")),
         "forking": True,
+        "nestedToolCalls": bool(runtime.get("nested_tools")),
         "portableSessions": True,
         "keepsStateAtProvider": bool(provider.get("stateful")),
         "runsToolsAtProvider": bool(provider.get("runs_tools")),

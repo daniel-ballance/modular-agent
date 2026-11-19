@@ -457,6 +457,9 @@ class Turns:
         }
 
     async def _model(self, sid, turn, step, access, settings, tools, additions, usage):
+        model_tools = settings.get("modelTools")
+        if model_tools is not None:
+            tools = [t for t in tools if t["name"] in model_tools]
         es = [e for e in await self._entries(sid) if e.get("step") == step]
         outstanding = next(
             (e for e in reversed(es) if e["kind"] in {"model_started", "response", "model_error"}),
@@ -765,7 +768,8 @@ class Turns:
                 gate = {**gate, "refused": True, "reason": "Actor lacks authority: tools"}
             if gate.get("open") and not gate.get("refused"):
                 return unknown if replay else {"open": True, "request": gate["request"]}
-            if definition and call.get("initiator", "model") not in definition.get("callers", []):
+            caller = "plugin" if call.get("parentCallId") else call.get("initiator", "model")
+            if definition and caller not in definition.get("callers", []):
                 gate = {**gate, "refused": True, "reason": "Tool does not allow this initiator"}
             if "checked_input" in gate and gate["checked_input"] != gate["call"]["input"]:
                 gate = {**gate, "refused": True, "reason": "Tool input changed after approval"}
@@ -774,6 +778,8 @@ class Turns:
                     return unknown
                 answer.update(status="refused", content=content(gate.get("reason", "Refused")))
             elif definition is None:
+                if call.get("parentCallId"):
+                    answer["status"] = "refused"
                 answer["content"] = content("Unknown tool: " + call["name"])
             else:
                 changed = {**gate["call"], "id": call["id"], "name": call["name"]}
@@ -785,6 +791,7 @@ class Turns:
                     "tool_started",
                     step=step,
                     call=call["id"],
+                    actor=call["actor"],
                     data={
                         "call": changed,
                         "definition": definition,
@@ -897,7 +904,12 @@ class Turns:
         for e in es:
             if not cancelled and e.get("call") in deferred and e.get("call") not in receipts:
                 continue
-            if e["kind"] != "tool_call" or e.get("turn") != turn or e["call"] in done:
+            if (
+                e["kind"] != "tool_call"
+                or e.get("turn") != turn
+                or e["call"] in done
+                or e["data"].get("parentCallId")
+            ):
                 continue
             status = (
                 ("cancelled" if cancelled and e["call"] not in prior_starts else "outcome_unknown")

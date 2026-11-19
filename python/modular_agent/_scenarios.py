@@ -226,6 +226,8 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                         compare(f"toolResults[{i}].status", w["status"], g.status.value)
                         if "text" in w:
                             compare(f"toolResults[{i}].text", w["text"], g.text())
+                        if "contains" in w and w["contains"] not in g.text():
+                            compare(f"toolResults[{i}].contains", w["contains"], g.text())
                 if "records" in expect:
                     kinds = [e["kind"] for e in await session.history()] if session else []
                     remaining = iter(kinds)

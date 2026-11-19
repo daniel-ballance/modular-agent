@@ -24,6 +24,7 @@ from ._types import (
     Json,
     JsonObject,
     QuestionSpec,
+    ToolResult,
     ToolStatus,
     _content,
 )
@@ -40,6 +41,30 @@ class _Refusal(Exception):
     pass
 
 
+class _NestedTools:
+    def __init__(self, context: ToolContext) -> None:
+        self._context = context
+
+    async def list(self) -> list[JsonObject]:
+        cx = self._context
+        cx._check()
+        return cast(list[JsonObject], await cx._nested("list", {}))
+
+    async def call(self, name: str, input: JsonObject) -> ToolResult:
+        cx = self._context
+        cx._check()
+        if not isinstance(name, str) or not name or not isinstance(input, dict):
+            raise AgentError(ErrorCode.INVALID_REQUEST, "Nested tools need a name and object input")
+        result = cast(dict[str, Any], await cx._nested("call", {"name": name, "input": input}))
+        return ToolResult(
+            name,
+            ToolStatus(result["status"]),
+            result["callId"],
+            result["content"],
+            result.get("value"),
+        )
+
+
 class ToolContext:
     def __init__(
         self,
@@ -48,6 +73,7 @@ class ToolContext:
         call_id: str,
         ask: Callable[[QuestionSpec, int, float | None], Awaitable[Answer]],
         progress: Callable[[Content], Awaitable[None]],
+        nested: Callable[[str, JsonObject], Awaitable[Json]],
     ) -> None:
         self.session_id = session_id
         self.actor_id = actor_id
@@ -55,6 +81,8 @@ class ToolContext:
         self.cancelled = asyncio.Event()
         self._ask = ask
         self._progress = progress
+        self._nested = nested
+        self.tools = _NestedTools(self)
         self._question_index = 0
         self._active = True
 

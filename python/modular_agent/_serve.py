@@ -21,7 +21,7 @@ from ._plugin import (
     _handle_hook,
 )
 from ._tool import ToolContext
-from ._types import AgentError, Answer, Content, ErrorCode, JsonObject, QuestionSpec
+from ._types import AgentError, Answer, Content, ErrorCode, Json, JsonObject, QuestionSpec
 
 
 async def _serve(plugin: Plugin) -> None:
@@ -128,8 +128,17 @@ async def _serve(plugin: Plugin) -> None:
         async def progress(parts: Content) -> None:
             await server.peer.notify("tools/progress", {"parentRequestId": key, "content": parts})
 
+        async def nested(operation: str, params: JsonObject) -> Json:
+            try:
+                reply: Json = await server.peer.request(
+                    "host/tools/" + operation, {"parentRequestId": key, **params}
+                )
+            except WireError as exc:
+                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+            return reply["tools"] if operation == "list" and isinstance(reply, dict) else reply
+
         context = ToolContext(
-            p["sessionId"], call.get("actorId", "user"), call["id"], ask, progress
+            p["sessionId"], call.get("actorId", "user"), call["id"], ask, progress, nested
         )
         try:
             return await t._run(call["input"], context)

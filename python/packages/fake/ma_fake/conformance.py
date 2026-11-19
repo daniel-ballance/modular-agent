@@ -5,6 +5,21 @@ import json
 from ma_core import AgentError, Plugin, content, identity, plain
 
 
+NEST = {
+    "name": "nest",
+    "description": "Run a nested tool",
+    "schema": {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "input": {"type": "object"}},
+        "required": ["name", "input"],
+        "additionalProperties": False,
+    },
+    "parallel": False,
+    "callers": ["model", "plugin", "interface"],
+    "hints": {},
+}
+
+
 class Echo(Plugin):
     name = "conformance"
     role = "provider"
@@ -13,6 +28,18 @@ class Echo(Plugin):
     async def start(self, api):
         await super().start(api)
         api.provide(self.name, self)
+        api.provide("conformance-nest", self)
+        api.on("tools.list", self.tools)
+
+    async def tools(self, d):
+        return [{**NEST, "target": "conformance-nest"}]
+
+    async def run(self, d, emit):
+        args = d["call"]["input"]
+        try:
+            return await self.api.nested_tools(d["dispatch"], args["name"], args["input"])
+        except AgentError as exc:
+            return {"status": "failed", "content": content(exc.code)}
 
     async def catalog(self, d, emit):
         return [
@@ -32,7 +59,11 @@ class Echo(Plugin):
         inputs = [e for e in entries if e["kind"] == "input"]
         text = plain(inputs[-1]["content"]) if inputs else ""
         turn = d.get("turn")
-        results = [e for e in entries if e["kind"] == "tool_result" and e.get("turn") == turn]
+        results = [
+            e
+            for e in entries
+            if e["kind"] == "tool_result" and e.get("turn") == turn and e.get("visible")
+        ]
         calls = []
         if text.startswith("fail:"):
             return {

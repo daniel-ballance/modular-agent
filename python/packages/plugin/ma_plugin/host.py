@@ -19,7 +19,9 @@ from ma_core.wire import (
     response_in,
     response_out,
     result_in,
+    result_out,
     tool_in,
+    tool_out,
 )
 from .rpc import MAX_FRAME, Peer, WireError
 from .runtime_host import HostedRuntime
@@ -127,7 +129,7 @@ class Environment:
     async def invoke(self, op, d, emit=silent):
         s = await self.plugin.api.session("get", session=d["session"])
         params = {"cwd": d.get("cwd", s["project"]), "sessionId": s["id"]}
-        if op in {"read", "exists"}:
+        if op in {"read", "exists", "list"}:
             params["path"] = d["path"]
         elif op == "write":
             params.update(
@@ -159,6 +161,14 @@ class Environment:
 
     async def exists(self, d, emit):
         return await self.invoke("exists", d, emit)
+
+    async def list_directory(self, d, emit):
+        try:
+            return await self.invoke("list", d, emit)
+        except WireError as exc:
+            if exc.code == "method_not_found":
+                raise WireError(str(exc), "not_supported") from exc
+            raise
 
     async def read(self, d, emit):
         return base64.b64decode((await self.invoke("read", d, emit))["data"]).decode()
@@ -545,9 +555,12 @@ class External(Plugin):
         except AgentError as exc:
             if isinstance(exc, WireError):
                 raise
-            code = {"process_lost": "lost", "not_found": "not_found"}.get(
-                exc.code, "invalid_request"
-            )
+            code = {
+                "process_lost": "lost",
+                "not_found": "not_found",
+                "not_supported": "not_supported",
+                "internal": "internal",
+            }.get(exc.code, "invalid_request")
             raise WireError(str(exc), code) from exc
 
     async def host_call(self, method, p, key):
@@ -564,7 +577,9 @@ class External(Plugin):
             "host/ask",
             "host/hook",
             "host/jobs/start",
-            *("host/env/" + op for op in ("read", "write", "exists", "exec")),
+            "host/tools/list",
+            "host/tools/call",
+            *("host/env/" + op for op in ("read", "write", "exists", "exec", "list")),
         }
         runtime_only = {
             "host/runtime/" + op
@@ -813,6 +828,18 @@ class External(Plugin):
                 },
             )
             return {"jobId": j["id"], "started": j["started"]}
+        if method in {"host/tools/list", "host/tools/call"}:
+            if not parent or parent["method"] != "tools/call" or not d.get("dispatch"):
+                raise WireError("Nested tools need a live dispatched parent", "invalid_request")
+            if method == "host/tools/list":
+                return {"tools": [tool_out(t) for t in await self.api.nested_tools(d["dispatch"])]}
+            if (
+                not isinstance(p.get("name"), str)
+                or not p["name"]
+                or not isinstance(p.get("input"), dict)
+            ):
+                raise WireError("Nested tools need a name and object input", "invalid_request")
+            return result_out(await self.api.nested_tools(d["dispatch"], p["name"], p["input"]))
         if method.startswith("host/env/"):
             if parent is None or p.get("sessionId") != sid or "tools" not in authority:
                 raise WireError("No parent work with tool authority", "invalid_request")
@@ -824,6 +851,7 @@ class External(Plugin):
                 "read": "read_bytes",
                 "write": "write_bytes",
                 "exists": "exists",
+                "list": "list_directory",
                 "exec": "bash",
             }
             if op not in operations:
@@ -842,6 +870,10 @@ class External(Plugin):
                 args["timeout"] = p.get("timeoutMs", 0) / 1000 or None
             try:
                 r = await self.api.call("environment", operations[op], args, output)
+            except AgentError as exc:
+                if op == "list" and exc.code in {"unavailable", "not_supported"}:
+                    raise WireError(str(exc), "not_supported") from exc
+                raise
             except TimeoutError:
                 if op != "exec":
                     raise

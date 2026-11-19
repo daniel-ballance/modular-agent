@@ -700,6 +700,9 @@ class ACP(Plugin):
                     name=call["name"],
                     status="pending",
                     raw_input=call["input"],
+                    field_meta={NAMESPACE: {"parentToolCallId": call["parentCallId"]}}
+                    if call.get("parentCallId")
+                    else None,
                 ),
             )
         elif kind == "tool_started":

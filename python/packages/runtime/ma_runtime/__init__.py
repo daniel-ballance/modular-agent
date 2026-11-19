@@ -20,6 +20,7 @@ class Runtime(Turns, Plugin):
         "jobs": True,
         "open_calls": True,
         "parallel_tools": True,
+        "nested_tools": True,
     }
 
     def __init__(self):
