@@ -157,7 +157,9 @@ def _hook_reply(point: str, answer: JsonObject | None) -> JsonObject | None:
         return add
     if point == "tool.before" and isinstance(answer.get("refuse"), str):
         return answer
-    if point in {"tool.before", "tool.after"} and isinstance(answer.get("change"), dict):
+    if point == "input" and answer == {"handle": True}:
+        return answer
+    if point in {"input", "tool.before", "tool.after"} and isinstance(answer.get("change"), dict):
         return answer
     if point in {"turn.end", "turn.start", "session.start", "session.end"}:
         return None
@@ -171,7 +173,11 @@ async def _handle_hook(hook: _Hook, payload: JsonObject) -> JsonObject | None:
     result = _hook_reply(hook.point, reply)
     # The SDK changes only the documented fields, even though the edition-3
     # wire expects a replacement enclosing the whole call/result.
+    if hook.point == "input" and result is not None and result.get("handle") is True:
+        return {"value": payload, "stop": True}
     if result is not None and isinstance(change := result.get("change"), dict):
+        if hook.point == "input" and set(change) == {"content"}:
+            return {"value": {**payload, "content": change["content"]}}
         call = payload.get("call")
         if hook.point == "tool.before" and isinstance(call, dict) and set(change) == {"input"}:
             return {"change": {"call": {**call, "input": change["input"]}}}
@@ -193,6 +199,7 @@ async def _handle_command(command: _Command, args: str, context: CommandContext)
 
 
 _SUPPORTED_HOOKS = {
+    "input",
     "session.start",
     "session.end",
     "turn.start",

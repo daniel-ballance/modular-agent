@@ -896,7 +896,7 @@ class External(Plugin):
                 **(
                     {"pending": True}
                     if r.get("open")
-                    else {"declined": True}
+                    else {"declined": True, **({"reason": r["reason"]} if r.get("reason") else {})}
                     if r.get("value") == "declined"
                     else {"stored": r["value"]["credential"]}
                     if isinstance(r.get("value"), dict) and "credential" in r["value"]

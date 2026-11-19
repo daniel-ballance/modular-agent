@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Sequence
+from os import PathLike
 from tempfile import TemporaryDirectory
-from typing import Any, Unpack, TypedDict
+from typing import Unpack, TypedDict
 
 from ._agent import Agent, AgentStart, create_agent
 from ._plugin import Plugin, ProcessPlugin
@@ -102,7 +103,7 @@ def answers(values: Sequence[AnswerInput]) -> QuestionHandler:
 
 
 class _Options(TypedDict, total=False):
-    data_dir: Any
+    data_dir: str | PathLike[str] | None
     durability: Durability
     tools: Sequence[Tool]
     plugins: Sequence[Plugin]
@@ -114,7 +115,10 @@ class _Options(TypedDict, total=False):
 
 
 def test_agent(
-    *, script: Sequence[JsonObject], project: Any = None, **options: Unpack[_Options]
+    *,
+    script: Sequence[JsonObject],
+    project: str | PathLike[str] | None = None,
+    **options: Unpack[_Options],
 ) -> AgentStart:
     async def build() -> Agent:
         scratch = TemporaryDirectory(prefix="modular-agent-test-") if project is None else None

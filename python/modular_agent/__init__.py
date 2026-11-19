@@ -6,6 +6,12 @@ from ._agent import (
     create_agent as create_agent,
     run as run,
 )
+from ._history import (
+    HistoryStore as HistoryStore,
+    file_history as file_history,
+    http_history as http_history,
+    memory_history as memory_history,
+)
 from ._plugin import (
     CommandContext as CommandContext,
     Plugin as Plugin,

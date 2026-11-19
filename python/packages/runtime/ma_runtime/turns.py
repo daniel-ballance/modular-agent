@@ -81,7 +81,7 @@ class Turns:
             settings = self._lower_reasoning(settings, access)
         except AgentError as exc:
             problem = exc
-            model = settings_out(settings)["model"]
+            model = settings_out(settings).get("model")
         try:
             additions = await self.api.session(
                 "prepare", session=sid, turn=turn, input=queued["content"]
@@ -91,7 +91,7 @@ class Turns:
             additions = []
         return (
             {
-                "model": {k: model[k] for k in ("provider", "id")},
+                "model": {k: model[k] for k in ("provider", "id")} if model else None,
                 "system": "\n\n".join(a.get("system", "") for a in additions),
                 "context": [p for a in additions for p in a.get("context", [])],
                 **await self._save_point(sid),
@@ -449,7 +449,10 @@ class Turns:
             "model": {k: model[k] for k in ("provider", "id")},
             "safeToRepeat": bool(
                 provider.get("requests_safe_to_repeat")
-                or not (provider.get("stateful") or provider.get("runs_tools"))
+                or (
+                    not provider.get("explicit_repeat_promise")
+                    and not (provider.get("stateful") or provider.get("runs_tools"))
+                )
             ),
         }
 

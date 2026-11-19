@@ -13,6 +13,10 @@ def pytest_addoption(parser):
     parser.addoption("--binding", choices=["local", "process"], default="local")
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "loopback: allow TCP to numeric IPv4 loopback only")
+
+
 @pytest.fixture
 def runtime_kind(request):
     return request.config.getoption("--runtime")
@@ -34,12 +38,19 @@ def subprocess_runtime(monkeypatch, runtime_kind, request):
 
 
 @pytest.fixture(autouse=True)
-def no_network(monkeypatch):
-    def refuse(*args, **kwargs):
-        raise AssertionError("Offline tests must not connect to a network")
+def no_network(monkeypatch, request):
+    loopback = request.node.get_closest_marker("loopback") is not None
 
-    monkeypatch.setattr(socket.socket, "connect", refuse)
-    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    def guarded(operation):
+        def connect(sock, address):
+            if loopback and sock.family == socket.AF_INET and address[0] == "127.0.0.1":
+                return operation(sock, address)
+            raise AssertionError("Offline tests must not connect outside loopback")
+
+        return connect
+
+    monkeypatch.setattr(socket.socket, "connect", guarded(socket.socket.connect))
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded(socket.socket.connect_ex))
 
 
 @pytest.fixture

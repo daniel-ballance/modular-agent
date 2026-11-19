@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from types import TracebackType
 from typing import Any, Self, cast
 
+from ma_acp import ACP
 from ma_acp.binding import declaration as _declaration
 from ma_approval import Approval as _Approval
 from ma_context import Context
@@ -18,11 +19,13 @@ from ma_core.wire import model_out, settings_in
 from ma_durable import Durable
 from ma_harness import Harness
 from ma_history import History
+from ma_history.http import HTTPHistory
 from ma_plugin.host import load_plugins
 from ma_questions import Questions
 from ma_runtime import Runtime
 from ma_selection import Selection
 
+from ._history import HistoryStore
 from ._native import (
     _ConfinedLocal,
     _LocalPlugin,
@@ -57,6 +60,33 @@ class _Questions(Questions):  # type: ignore[misc]  # Untyped base adapter.
         return []
 
 
+class _SdkRuntime(Runtime):  # type: ignore[misc]  # Untyped base adapter.
+    async def _safe_to_repeat(self, sid: str, definition: JsonObject | None) -> bool:
+        # Containment of environment commands does not prove cleanup of a
+        # plugin's effects. This composition offers no separate repeat promise.
+        return False
+
+
+class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
+    async def _safe_to_repeat(self, sid: str, definition: JsonObject | None) -> bool:
+        return False
+
+    async def recover(self, data: dict[str, Any], emit: Any) -> Any:
+        sid = data["session"]
+        for queued in await self._pending(sid):
+            await self._return(sid, queued)
+        return await super().recover(data, emit)
+
+
+class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
+    def __init__(self, agent: Agent) -> None:
+        super().__init__(agent._project, agent._settings, actor="user")
+        self._agent = agent
+
+    async def declaration(self, sid: str | None = None) -> JsonObject:
+        return {**self._agent.declaration(), "plugins": self._agent._h.declarations()}
+
+
 class Agent:
     def __init__(
         self,
@@ -78,6 +108,7 @@ class Agent:
         self._question_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
+        self._plugin_host = False
 
     async def _session(self, operation: str, **data: Any) -> Any:
         if self._closed:
@@ -227,7 +258,15 @@ class Agent:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         value = _declaration(self._h.declarations())
+        environment_owner, environment = self._h.capabilities["environment"]
+        local = isinstance(environment, _ConfinedLocal)
+        remote_environment = getattr(self._h.plugins[environment_owner], "registration", {}).get(
+            "workingEnvironment", {}
+        )
+        value.pop("plugins", None)
         value.update(
+            waitingThroughRestart=False,
+            mixedActorInput="refused",
             severalActors=False,
             sessionLimits=False,
             tenants=False,
@@ -237,10 +276,29 @@ class Agent:
             erasure=not isinstance(self._h.capabilities["history"][1], _MemoryHistory),
             portableSessions=not isinstance(self._h.capabilities["history"][1], _MemoryHistory),
             settingsDuringTurn="refused",
-            confinesFiles=True,
+            confinesFiles=local or bool(remote_environment.get("confinesFiles")),
+            queuedInputAfterRestart="handedBack",
             startsTurnsUnasked="never",
         )
         return cast(JsonObject, value)
+
+    async def serve_acp(self) -> None:
+        """Drive this agent over ACP on stdin/stdout until the client disconnects."""
+        if self._closed:
+            raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
+        if not self._plugin_host:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "ACP requires plugin_host=True")
+        if self._handler is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "ACP answers its own questions")
+        async with self._lock:
+            if self._h.sessions or "acp" in self._h.plugins:
+                raise AgentError(ErrorCode.BUSY, "ACP must start before any sessions open")
+            interface = _Interface(self)
+            await self._h.load(interface)
+        try:
+            await interface.serve()
+        finally:
+            await self.close()
 
     async def close(self) -> None:
         async with self._lock:
@@ -301,6 +359,7 @@ def create_agent(
     project: str | os.PathLike[str] | None = None,
     data_dir: str | os.PathLike[str] | None = None,
     durability: Durability = "ephemeral",
+    history: HistoryStore | None = None,
     providers: Sequence[Provider] = (),
     tools: Sequence[Tool] = (),
     plugins: Sequence[Plugin] = (),
@@ -324,6 +383,8 @@ def create_agent(
             raise AgentError(
                 ErrorCode.INVALID_COMPOSITION, f"{durability} durability needs data_dir"
             )
+        if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "History does not match durability")
         if plugin_host is False and process_plugins is not None:
             raise AgentError(
                 ErrorCode.INVALID_COMPOSITION, "process_plugins requires a plugin host"
@@ -340,10 +401,21 @@ def create_agent(
             if approval is not None:
                 defaults.update(settings_in({"approval": approval}))
             agent = Agent(h, folder, defaults, on_question, scratch)
-            await h.load(_MemoryHistory() if durability == "ephemeral" else History(root))
+            agent._plugin_host = plugin_host is True or process_plugins is not None
+            if history is not None and history._kind == "http":
+                store = HTTPHistory(history._url, history._path)
+            elif durability == "ephemeral":
+                store = _MemoryHistory()
+            else:
+                store_root = history._path if history is not None else root
+                if store_root is None:
+                    raise ValueError("File history needs a directory")
+                store_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                store = History(store_root)
+            await h.load(store)
             await h.load(_ConfinedLocal(Path(scratch.name) if durability == "ephemeral" else root))
             await h.load(_SdkTools())
-            await h.load(Durable() if durability == "durable" else Runtime())
+            await h.load(_SdkDurable() if durability == "durable" else _SdkRuntime())
             await h.load(_Questions())
             h.on("embedding", "session.start", agent._present, "first")
             h.follow("embedding", "user", agent._event)
@@ -382,7 +454,7 @@ def create_agent(
                 adapter = _LocalPlugin(plugin, registrar, folder)
                 await h.load(adapter)
                 registered_tools.update((name, adapter) for name in registrar._tools)
-            if plugin_host or process_plugins is not None:
+            if agent._plugin_host:
                 specs = [
                     p._wire() if isinstance(p, ProcessPlugin) else p for p in process_plugins or ()
                 ]

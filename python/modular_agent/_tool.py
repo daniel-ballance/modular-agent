@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -75,6 +76,10 @@ class ToolContext:
         self._check()
         if then is not None:
             raise AgentError(ErrorCode.NOT_SUPPORTED, "Leaving tool calls open is not supported")
+        if wait is not None and (not math.isfinite(wait) or wait < 0):
+            raise AgentError(
+                ErrorCode.INVALID_REQUEST, "Question wait must be finite, nonnegative seconds"
+            )
         self._question_index += 1
         return await self._ask(question, self._question_index, wait)
 

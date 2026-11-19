@@ -23,6 +23,7 @@ from ._types import (
     Outcome,
     OutcomeKind,
     PromptResult,
+    Question,
     QuestionHandler,
     Timing,
     ToolResult,
@@ -46,11 +47,14 @@ _EVENT_NAMES = {
     "input_request_opened": "questionOpened",
     "input_request_answered": "questionAnswered",
     "input_request_closed": "questionClosed",
+    "input_request_unanswerable": "questionNoLongerAnswerable",
     "history_entry": "entry",
     "session_started": "sessionStarted",
     "session_ended": "sessionEnded",
 }
 _RECORD_EVENTS = {
+    "turn_start": "turnStarted",
+    "question_closed": "questionClosed",
     "model_started": "stepStarted",
     "tool_call": "toolCall",
     "tool_started": "toolStarted",
@@ -82,9 +86,9 @@ def _events(d: dict[str, Any]) -> list[Event]:
     elif kind == "history_entry":
         entry = entry_out(ids)
         evt = _RECORD_EVENTS.get(ids["kind"])
-        return ([Event(evt, data=EventData(entry["data"]), **args)] if evt else []) + [
-            Event("entry", data=EventData({"entry": entry}), **args)
-        ]
+        return [Event("entry", data=EventData({"entry": entry}), **args)] + (
+            [Event(evt, data=EventData(entry["data"]), **args)] if evt else []
+        )
     else:
         data = {
             k: v
@@ -192,6 +196,15 @@ class Session:
             raise AgentError(ErrorCode.NOT_OPEN, "Session is not open")
         if timing not in {"now", "steer", "after", "propose"}:
             raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid input timing")
+        if key is not None and (not isinstance(key, str) or not key):
+            raise AgentError(ErrorCode.INVALID_PARAMS, "Expected a nonempty input key")
+        if not isinstance(input, str) and (
+            not isinstance(input, list)
+            or not all(
+                isinstance(part, dict) and isinstance(part.get("type"), str) for part in input
+            )
+        ):
+            raise AgentError(ErrorCode.INVALID_PARAMS, "Expected text or shared Content parts")
         data = await self._agent._call(
             "runtime",
             "submit",
@@ -339,6 +352,15 @@ class Session:
     async def answer(self, question_id: str, answer: AnswerInput) -> None:
         await self._state()
         await self._agent._answer(self.id, question_id, _answer(answer))
+
+    async def questions(self) -> list[Question]:
+        await self._state()
+        from ._native import _question
+
+        return [
+            _question(self.id, q)
+            for q in await self._agent._call("questions", "list", session=self.id, actor="user")
+        ]
 
     async def commands(self) -> dict[str, str]:
         await self._state()

@@ -104,7 +104,7 @@ async def _serve(plugin: Plugin) -> None:
             request: dict[str, Any] = dict(q)
             if wait is not None:
                 request["timeLimitMs"] = round(wait * 1000)
-                request["whenTimeLimit"] = "close"
+                request["whenTimeLimit"] = "decline"
             try:
                 reply = await server.peer.request(
                     "host/ask", {"parentRequestId": key, "request": request}
@@ -113,7 +113,7 @@ async def _serve(plugin: Plugin) -> None:
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
             if reply.get("allow") is True:
                 return Answer("allow")
-            return _read_answer(reply)
+            return _read_answer(reply, q["kind"])
 
         async def progress(parts: Content) -> None:
             await server.peer.notify("tools/progress", {"parentRequestId": key, "content": parts})

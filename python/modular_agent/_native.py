@@ -138,11 +138,11 @@ async def _reply(handler: QuestionHandler, q: Question) -> Answer:
         return Answer("decline")
 
 
-def _read_answer(result: dict[str, Any]) -> Answer:
+def _read_answer(result: dict[str, Any], kind: str) -> Answer:
     value = result.get("value")
     if result.get("declined") or value == "declined" or value is None:
         return Answer("decline", reason=result.get("reason"))
-    if value == "allow":
+    if kind == "approval" and value == "allow":
         return Answer("allow")
     return Answer("value", value)
 
@@ -171,7 +171,9 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                         return hooks.answer(item.point, d, await _handle_hook(item, payload))
                     except Exception as exc:
                         if item.point not in _OBSERVERS:
-                            raise
+                            raise _NativeError(
+                                f"{self.name} {item.point}: {exc}", "invalid_request"
+                            ) from exc
                         logging.getLogger(__name__).warning("%s hook failed: %s", item.point, exc)
                         return None
 
@@ -220,7 +222,9 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                 }
                 if question["kind"] == "approval":
                     params["approval_call"] = {"name": call["name"], "input": call["input"]}
-                return _read_answer(await self.api.call("questions", "ask", params))
+                return _read_answer(
+                    await self.api.call("questions", "ask", params), question["kind"]
+                )
             except (_NativeError, WireError) as exc:
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
 
