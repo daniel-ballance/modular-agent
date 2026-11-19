@@ -53,7 +53,7 @@ class Function:
 
     @property
     def parameters(self) -> list[str]:
-        return self.required + sorted(set(self.properties) - set(self.required))
+        return self.required + [name for name in self.properties if name not in self.required]
 
     @property
     def signature(self) -> str:
@@ -79,17 +79,9 @@ class Function:
 
     def bind(self, args: tuple[object, ...], kwargs: dict[str, object]) -> JsonObject:
         params = self.parameters
-        first = self.properties.get(params[0]) if params else None
-        if (
-            len(args) == 1
-            and isinstance(args[0], dict)
-            and not (isinstance(first, dict) and first.get("type") == "object")
-        ):
-            inputs = cast(dict[str, object], args[0]).copy()
-        else:
-            if len(args) > len(params):
-                raise TypeError(f"takes at most {len(params)} arguments, got {len(args)}")
-            inputs = dict(zip(params, args))
+        if len(args) > len(params):
+            raise TypeError(f"takes at most {len(params)} arguments, got {len(args)}")
+        inputs = dict(zip(params, args))
         for key, value in kwargs.items():
             if key in inputs:
                 raise TypeError(f"got two values for {key}")

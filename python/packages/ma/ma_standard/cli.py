@@ -294,6 +294,7 @@ async def _agent(
     *,
     saved_model: str | None = None,
     history_only: bool = False,
+    acp_session: bool = False,
 ) -> Agent:
     durability: Durability = "durable" if args.runtime == "durable" else "kept"
     url, token = (
@@ -322,7 +323,10 @@ async def _agent(
     model = (
         None
         if args.command == "models"
-        else args.model or saved_model or (configured_model if not args.acp else None)
+        else (saved_model if acp_session else args.model)
+        or args.model
+        or saved_model
+        or (configured_model if not args.acp or acp_session else None)
     )
     if script:
         script_data = json.loads(Path(script).read_text(encoding="utf-8"))
@@ -356,7 +360,9 @@ async def _agent(
                 raise ValueError(
                     "no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`."
                 )
-        if args.command == "models" or args.acp or (model and model.startswith("claude/")):
+        if acp_session and model is None:
+            model = _signed_in_model(paths)
+        if args.command == "models" or (model and model.startswith("claude/")):
             sidecar = claude_launch()
             if model and model.startswith("claude/") and sidecar is None:
                 raise ValueError(
@@ -382,21 +388,7 @@ async def _agent(
                     (level for level in reversed(levels[: asked + 1]) if level in info["thinking"]),
                     "off",
                 )
-    inspecting = args.command == "models" or args.declaration
-
-    def acp_settings(cwd: Path) -> JsonObject:
-        defaults = paths.settings(cwd)
-        if script:
-            defaults.update(model="scripted/script", thinking="off")
-        else:
-            if not testing and args.model is None and not defaults.get("model"):
-                if signed_in := _signed_in_model(paths):
-                    defaults["model"] = signed_in
-            if args.model:
-                defaults["model"] = args.model
-            if args.thinking:
-                defaults["thinking"] = args.thinking
-        return defaults
+    inspecting = args.command == "models" or args.declaration or args.acp
 
     return await create_agent(
         project=project,
@@ -413,9 +405,9 @@ async def _agent(
         plugin_host=True,
         commands=True,
         job_reports_start_turns=True,
+        late_answers_start_turns=True,
         conformance=testing,
         project_mcp=None if inspecting else paths.mcp,
-        project_settings=acp_settings if args.acp and not testing else None,
     )
 
 
@@ -476,7 +468,23 @@ async def _run(args: argparse.Namespace) -> int:
                 saved_model = f"{old['provider']}/{old['id']}"
     async with await _agent(paths, project, args, saved_model=saved_model) as agent:
         if args.acp:
-            await agent.serve_acp()
+
+            async def compose(folder: Path) -> Agent:
+                if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
+                    return agent
+                return await _agent(paths, folder, args, acp_session=True)
+
+            async def reopen(folder: Path, id: str) -> Agent:
+                saved = await agent.session_info(id)
+                if saved["project"] != str(folder):
+                    raise ValueError("Session is not in this project")
+                if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
+                    return agent
+                old = cast(JsonObject, saved["settings"]).get("model")
+                selected = f"{old['provider']}/{old['id']}" if isinstance(old, dict) else None
+                return await _agent(paths, folder, args, saved_model=selected, acp_session=True)
+
+            await agent.serve_acp(compose=compose, compose_reopen=reopen, project_mcp=paths.mcp)
             return 0
         if args.command == "models":
             for info in await agent.models():
