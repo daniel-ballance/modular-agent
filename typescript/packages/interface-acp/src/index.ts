@@ -112,7 +112,7 @@ export class AcpInterface implements InterfaceCapability {
 	private sessions = new Map<string, SessionState>();
 	private pending = new Map<string, AbortController>();
 
-	constructor(options: { actorId?: string } = {}) {
+	constructor(private readonly options: { actorId?: string; declaration?: (sessionId?: string) => Record<string, boolean | string> } = {}) {
 		this.actorId = options.actorId ?? "acp-user";
 		this.app = agent({ name: "modular-agent" });
 		this.app.onConnect((connection) => {
@@ -518,7 +518,7 @@ export class AcpInterface implements InterfaceCapability {
 
 	/** This agent's declaration, with the binding's keys and values. */
 	private bindingDeclaration(sessionId?: string): Record<string, unknown> {
-		const d = this.api.declaration(sessionId) as Record<string, unknown>;
+		const d = (this.options.declaration?.(sessionId) ?? this.api.declaration(sessionId)) as Record<string, unknown>;
 		const bool = (k: string) => d[k] === true;
 		return {
 			inputDuringTurn: bool("inputDuringTurn"),
@@ -541,7 +541,7 @@ export class AcpInterface implements InterfaceCapability {
 			portableSessions: bool("portableSessions"),
 			questionsOutlastTurns: bool("questionsOutlastTurns"),
 			lateAnswersStartTurns: bool("questionsOutlastTurns"),
-			startsTurnsUnasked: d.startsTurnsUnasked ? "jobReports" : "never",
+			startsTurnsUnasked: d.startsTurnsUnasked && d.startsTurnsUnasked !== "never" ? "jobReports" : "never",
 			queuedInputAfterRestart: d.queuedInputAfterRestart,
 			queuedJobReportsAfterRestart: d.queuedJobReportsAfterRestart,
 			movingWithUnfinishedWork: d.movingWithUnfinishedWork,
@@ -549,6 +549,8 @@ export class AcpInterface implements InterfaceCapability {
 			settingsDuringTurn: "nextTurn",
 			erasureDuringTurn: d.erasureDuringTurn,
 			commandContainment: d.commandContainment,
+			...(d.confinesFiles === undefined ? {} : { confinesFiles: bool("confinesFiles") }),
+			...(d.nestedToolCalls === undefined ? {} : { nestedToolCalls: bool("nestedToolCalls") }),
 		};
 	}
 
@@ -868,7 +870,7 @@ export class AcpInterface implements InterfaceCapability {
 	}
 }
 
-export function acpInterface(options: { actorId?: string } = {}): Plugin & { acp: AcpInterface } {
+export function acpInterface(options: ConstructorParameters<typeof AcpInterface>[0] = {}): Plugin & { acp: AcpInterface } {
 	const acpi = new AcpInterface(options);
 	return {
 		name: "interface-acp",

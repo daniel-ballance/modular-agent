@@ -1,6 +1,6 @@
 import { registerExternalPlugin, servePlugins, WireError, WirePeer, type ErrorCode } from "@modular-agent/plugin-wire";
 import { PassThrough } from "node:stream";
-import { collect, type Plugin } from "./plugin.js";
+import { collect, unservableTool, type Plugin } from "./plugin.js";
 import { AgentError, sdkError } from "./errors.js";
 
 async function endpoint(plugin: Plugin, input?: NodeJS.ReadableStream, output?: (line: string) => void): Promise<void> {
@@ -21,7 +21,11 @@ async function endpoint(plugin: Plugin, input?: NodeJS.ReadableStream, output?: 
 }
 
 /** Serve an SDK plugin on stdin and stdout. Setup runs after initialize supplies config. */
-export function serve(plugin: Plugin): Promise<void> { return endpoint(plugin); }
+export async function serve(plugin: Plugin): Promise<void> {
+  const blocked = unservableTool(plugin);
+  if (blocked) throw new AgentError("not_supported", `${plugin.name}: cannot serve tool ${blocked.definition.name}`);
+  await endpoint(plugin);
+}
 
 const onWire = new WeakMap<Plugin, Plugin>();
 

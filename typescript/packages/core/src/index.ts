@@ -1,11 +1,11 @@
-export { Agent, createAgent, fileHistory, memoryHistory, FileHistory } from "./agent.js";
+export { Agent, createAgent, fileHistory, memoryHistory, httpHistory, serveHistory, FileHistory, HttpHistory } from "./agent.js";
 export type { AgentOptions, Approval, Durability, ProcessPlugin, SessionInfo, SessionOptions } from "./agent.js";
 export { Session } from "./session.js";
 export type { Event, PromptOptions, PromptResult, ToolResult } from "./session.js";
 export { AgentError } from "./errors.js";
 export type { ErrorCode } from "./errors.js";
 export { Tool, tool } from "./tool.js";
-export type { ToolContext, ToolOutput } from "./tool.js";
+export type { ToolContext, ToolEnvironment, ToolOutput } from "./tool.js";
 export type { JSONSchema, Schema, StandardSchema } from "./schema.js";
 export { definePlugin } from "./plugin.js";
 export type { CallContext, CommandContext, CommandHandler, HookPoint, HookHandler, HookOrder, Plugin, Registrar } from "./plugin.js";

@@ -1,4 +1,4 @@
-import type { Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
+import type { CredentialStore, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
 import { AgentError } from "./errors.js";
 import { toolSource, type Tool } from "./tool.js";
 import { adaptProvider, type Provider } from "./provider.js";
@@ -66,19 +66,24 @@ export interface Plugin {
   stop?(): Awaitable<void>;
 }
 
+const staticTools = new WeakMap<Plugin, readonly Tool[]>();
+export const unservableTool = (plugin: Plugin) => staticTools.get(plugin)?.find(t => t.inProcessOnly);
+
 export function definePlugin(options: Omit<Plugin, "setup"> & {
   tools?: readonly Tool[];
   hooks?: { [P in HookPoint]?: HookHandler<P> };
   setup?: Plugin["setup"];
 }): Plugin {
   const { tools, hooks, setup, ...plugin } = options;
-  return { ...plugin, async setup(r) {
+  const built: Plugin = { ...plugin, async setup(r) {
     for (const t of tools ?? []) r.tool(t);
     for (const [point, handler] of Object.entries(hooks ?? {})) {
       r.on(point as HookPoint, handler as HookHandler<HookPoint>);
     }
     await setup?.(r);
   } };
+  staticTools.set(built, [...tools ?? []]);
+  return built;
 }
 
 function change(point: HookPoint, payload: Record<string, unknown>, answer: Record<string, unknown>) {
@@ -90,7 +95,10 @@ function change(point: HookPoint, payload: Record<string, unknown>, answer: Reco
       ["tool.before", "plugin.load", "turn.result"].includes(point)) return { refuse: answer.refuse };
   if ("change" in answer) {
     const update = answer.change;
-    if (point === "tool.before") return { change: { ...payload, call: { ...(payload.call as ToolCall), input: update } } };
+    if (point === "tool.before") {
+      if (!update || typeof update !== "object" || Array.isArray(update)) throw new AgentError("invalid_request", "Tool input must be an object");
+      return { change: { ...payload, call: { ...(payload.call as ToolCall), input: update } } };
+    }
     if (point === "tool.after") {
       const { content, value } = update as Partial<ResultFields>;
       return { value: { ...payload, result: { ...(payload.result as After["result"]),
@@ -169,7 +177,11 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
     provider(p) {
       add(`provider:${p.id}`);
       if (served && p.inProcessOnly) unavailable(`provider ${p.id}`);
-      registrations.push(api => api.provide("provider", adaptProvider(p)));
+      registrations.push(api => api.provide("provider", adaptProvider(p, async () => {
+        const value = await api.use<CredentialStore>("credential-store")?.read(p.id);
+        if (typeof value === "string") return value;
+        if (value && typeof value === "object" && "key" in value && typeof value.key === "string") return value.key;
+      })));
     },
     on(point, handler, order, options) {
       check();

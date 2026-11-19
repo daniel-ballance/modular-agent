@@ -2,7 +2,14 @@ import type { HistoryStore, HistoryEntry, StoredSession } from "@modular-agent/h
 import { AgentError } from "./errors.js";
 import { isDeepStrictEqual } from "node:util";
 
-export class MemoryHistory implements HistoryStore {
+const stores = new WeakMap<MemoryHistory, HistoryStore>();
+export class MemoryHistory {
+  declare private readonly memory: true;
+  constructor() { stores.set(this, new Records()); }
+}
+export const memoryStore = (history: MemoryHistory) => stores.get(history)!;
+
+class Records implements HistoryStore {
   supports = { portableSessions: false, erasure: false };
   #records = new Map<string, { meta: StoredSession; entries: HistoryEntry[] }>();
   #writers = new Set<string>();

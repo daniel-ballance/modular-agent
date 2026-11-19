@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createAgent, definePlugin, tool, type ToolContext, type Plugin } from "@modular-agent/core";
+import { createAgent, definePlugin, serve, tool, type ToolContext, type Plugin } from "@modular-agent/core";
 import { overWire, scriptedProvider, testAgent } from "@modular-agent/core/testing";
 
 const request = (name: string, input: Record<string, unknown> = {}) =>
@@ -56,6 +56,7 @@ test("a servable command and hooks keep their meaning on stdio", async t => {
     const a = await testAgent({ script: request("echo"), plugins: [plugin] });
     t.after(() => a.close());
     const s = await a.session();
+    assert.equal(await s.runCommand("/hello there"), "hello there");
     assert.equal((await s.prompt("/hello there")).disposition, "handled");
     const turn = await s.prompt("Echo");
     assert.equal(turn.toolResults()[0].text(), "new");
@@ -66,6 +67,7 @@ test("a servable command and hooks keep their meaning on stdio", async t => {
 
 test("serve refuses a flagged tool instead of serving a subset", async () => {
   const plugin = definePlugin({ name: "private", tools: [tool({ name: "secret", description: "Needs a named credential", input, inProcessOnly: true, run: () => "should not run" })] });
+  await assert.rejects(serve(plugin), { code: "not_supported", message: "private: cannot serve tool secret" });
   await assert.rejects(testAgent({ script: request("secret"), plugins: [overWire(plugin)] }), /cannot serve tool secret/);
 });
 
@@ -131,6 +133,28 @@ test("concurrent prompts follow their own turns; settings and fork are independe
   assert.equal(fork.settings().maxSteps, 3);
   await fork.close();
   await assert.rejects(fork.prompt("closed"), { code: "not_open" });
+});
+
+test("cancel settles a running call and hands back queued input", async t => {
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const a = await testAgent({ script: request("hold"), tools: [tool({
+    name: "hold", description: "Wait for cancellation", input, async run(_input, cx) {
+      entered();
+      await new Promise<void>(r => cx.cancelled.addEventListener("abort", () => r(), { once: true }));
+      return "This text will not become a completed result.";
+    },
+  })] });
+  t.after(() => a.close());
+  const s = await a.session();
+  const active = s.prompt("Start.");
+  await started;
+  const queued = await s.send("Later.", "after");
+  assert.equal(queued.taken, "after");
+  assert.deepEqual((await s.cancel()).map(i => i.inputId), [queued.inputId]);
+  const result = await active;
+  assert.equal(result.outcome?.kind, "cancelled");
+  assert.equal(result.toolResults()[0].status, "cancelled");
 });
 
 test("the guide stream yields live text and ends with turnEnded", async t => {

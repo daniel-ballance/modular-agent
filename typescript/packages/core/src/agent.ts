@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { ALL_AUTHORITY, Harness, parseModel, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider } from "@modular-agent/harness";
+import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
 import { approval } from "@modular-agent/approval";
@@ -9,12 +9,13 @@ import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, pluginSpecsFromEnv } from "@modular-agent/plugin-wire";
 import { acpInterface } from "@modular-agent/interface-acp";
+import { historyService, HttpHistoryStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type Plugin } from "./plugin.js";
 import { type Provider } from "./provider.js";
 import type { Tool } from "./tool.js";
 import { asWorkingEnvironment, type MemoryEnvironment } from "./environment.js";
-import { MemoryHistory } from "./history.js";
+import { MemoryHistory, memoryStore } from "./history.js";
 import { wirePlugin } from "./serve.js";
 import { makeSession, type Session } from "./session.js";
 import type { Declaration, ModelInfo, ModelRef, Question, QuestionHandler, Settings, ToolCall } from "./data.js";
@@ -35,18 +36,45 @@ export interface AgentOptions {
   settings?: Settings;
   approval?: Approval;
   onQuestion?: QuestionHandler;
-  history?: MemoryHistory | FileHistory;
+  history?: MemoryHistory | FileHistory | HttpHistory;
   environment?: MemoryEnvironment;
 }
 export interface SessionOptions { settings?: Settings }
 export interface SessionInfo { id: string; project: string; created: number }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
 
-let openFileHistory: (store: FileHistory) => HistoryStore;
+let fileDir: (store: FileHistory) => string;
+let openHttpHistory: (store: HttpHistory) => Promise<HistoryStore>;
 export class FileHistory {
   #dir: string;
   constructor(dir: string) { this.#dir = resolve(dir); }
-  static { openFileHistory = store => new JsonlHistoryStore(store.#dir); }
+  static { fileDir = store => store.#dir; }
+}
+export class HttpHistory {
+  #url: string;
+  #tokenFile: string;
+  constructor(url: string, tokenFile: string) { this.#url = url; this.#tokenFile = tokenFile; }
+  static { openHttpHistory = async store => {
+    const client = new HttpHistoryStore({ url: store.#url, token: await tokenFrom(store.#tokenFile) });
+    await client.initialize();
+    return client;
+  }; }
+}
+async function tokenFrom(file: string): Promise<string> {
+  const info = await stat(file);
+  if (!info.isFile() || (info.mode & 0o077) !== 0) throw new AgentError("invalid_params", "The token file must be private");
+  return (await readFile(file, "utf8")).trim();
+}
+export const httpHistory = (url: string, tokenFile: string): HttpHistory => new HttpHistory(url, tokenFile);
+export async function serveHistory(store: FileHistory, options: { address: string; tokenFile: string }) {
+  return checked(async () => {
+    if (!(store instanceof FileHistory)) throw new AgentError("not_supported", "The base history service needs file history");
+    const match = /^127\.0\.0\.1:(\d+)$/.exec(options.address);
+    if (!match || Number(match[1]) > 65535) throw new AgentError("invalid_params", "Use a numeric loopback address: 127.0.0.1:port");
+    const service = await historyService({ dir: fileDir(store), port: Number(match[1]), token: await tokenFrom(options.tokenFile) });
+    return { url: service.url, close: () => new Promise<void>((resolve, reject) =>
+      service.server.close(error => error ? reject(error) : resolve())) };
+  });
 }
 export const fileHistory = (dir: string): FileHistory => new FileHistory(dir);
 export const memoryHistory = (): MemoryHistory => new MemoryHistory();
@@ -66,6 +94,8 @@ export class Agent {
   #scratch: string;
   #h: Harness;
   #defaultHandler?: QuestionHandler;
+  #portable = false;
+  #confinesFiles = true;
 
   private constructor(harness: Harness, scratch: string, onQuestion?: QuestionHandler) {
     this.#h = harness;
@@ -81,7 +111,7 @@ export class Agent {
     if (options.approval !== undefined && !["off", "ask", "all", "never"].includes(options.approval)) {
       throw new AgentError("invalid_params", "Unknown approval policy");
     }
-    if (durability !== "ephemeral" && !options.dataDir && !(options.history instanceof FileHistory)) {
+    if (durability !== "ephemeral" && !options.dataDir && !(options.history instanceof FileHistory || options.history instanceof HttpHistory)) {
       throw new AgentError("invalid_composition", "Kept and durable agents need dataDir or persistent history");
     }
     if (durability !== "ephemeral" && options.history instanceof MemoryHistory) {
@@ -94,16 +124,25 @@ export class Agent {
       if (!(await stat(project)).isDirectory()) throw new Error("Project must be a directory");
       const home = options.dataDir ? resolve(options.dataDir) : scratch;
       await mkdir(home, { recursive: true });
-      const h = new Harness({ project, home });
+      const h = new Harness({ project, home, questionsOutlastTurns: false, settingsDuringTurn: "nextTurn" });
       agent = new Agent(h, scratch, options.onQuestion);
       const settings = structuredClone(options.settings ?? {});
       if (options.approval !== undefined) settings.approval = options.approval;
-      const store = options.history instanceof FileHistory ? openFileHistory(options.history) : options.history ??
-        (durability === "ephemeral" ? memoryHistory() : new JsonlHistoryStore(join(home, "history")));
+      const history = options.history ?? (durability === "ephemeral" ? memoryHistory() : fileHistory(join(home, "history")));
+      const store = history instanceof FileHistory ? new JsonlHistoryStore(fileDir(history))
+        : history instanceof HttpHistory ? await openHttpHistory(history) : memoryStore(history);
       await store.list();
+      agent.#portable = !(history instanceof MemoryHistory);
       const core: BasePlugin = { name: "sdk.core", setup(api) {
         api.provide("configuration", { get: (key: string) => key === "session" ? settings : undefined, plugin: () => ({}) });
         api.provide("history-store", store);
+        const credentials: CredentialStore = {
+          read: async id => process.env[`${id.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`],
+          list: async () => [],
+          modify: async () => { throw new AgentError("not_supported", "Environment credentials are read-only"); },
+          delete: async () => { throw new AgentError("not_supported", "Environment credentials are read-only"); },
+        };
+        api.provide("credential-store", credentials);
       } };
       await agent.#load(core);
       if (options.environment) {
@@ -120,6 +159,7 @@ export class Agent {
       agent.#hostEnabled = options.pluginHost ?? options.processPlugins !== undefined;
       agent.#specs = [...options.processPlugins ?? []];
       await agent.#loadProcesses([...agent.#specs, ...(agent.#hostEnabled ? pluginSpecsFromEnv() : [])]);
+      agent.#confinesFiles = !agent.#external.has("working-environment");
       const models = agent.models();
       const selected = options.model ?? settings.model;
       if (selected !== undefined) {
@@ -171,19 +211,20 @@ export class Agent {
     }
   }
   async #loadExternal(ext: Awaited<ReturnType<typeof startExternalPlugin>>) {
-      try {
-        const refusal = ext.refusal(this.#h, this.#external);
-        if (refusal) throw new Error(refusal);
-        for (const key of ext.replacements) {
-          if (!(ext.registration.replaces ?? []).includes(key) && this.#h.hasItem(key)) throw new Error(`${key} is already registered`);
-          this.#h.replacements.set(key, ext.registration.name);
-        }
-        await this.#load(ext.plugin);
-        for (const key of ext.items) this.#external.add(key);
-      } catch (error) {
-        if (!this.#h.plugins().includes(ext.plugin.name)) await ext.stop("refused", messageOf(error));
-        throw error;
+    try {
+      if (ext.registration.hooks?.some(h => h.hook === "output")) throw new Error("The SDK does not support output gate hooks");
+      const refusal = ext.refusal(this.#h, this.#external);
+      if (refusal) throw new Error(refusal);
+      for (const key of ext.replacements) {
+        if (!(ext.registration.replaces ?? []).includes(key) && this.#h.hasItem(key)) throw new Error(`${key} is already registered`);
+        this.#h.replacements.set(key, ext.registration.name);
       }
+      await this.#load(ext.plugin);
+      for (const key of ext.items) this.#external.add(key);
+    } catch (error) {
+      if (!this.#h.plugins().includes(ext.plugin.name)) await ext.stop("refused", messageOf(error));
+      throw error;
+    }
   }
   #localInterface(): BasePlugin {
     return { name: "sdk.local", setup: api => {
@@ -193,10 +234,13 @@ export class Agent {
         onInputRequest: request => {
           const handler = this.#handlers.get(request.sessionId) ?? this.#defaultHandler;
           if (!handler) return;
+          const { kind, id, question, sessionId, details, options, timeLimitMs } = request;
+          if (kind === "secret") {
+            api.answer(sessionId, { requestId: id, actorId: local.id, declined: true });
+            return;
+          }
           const controller = new AbortController();
           this.#questions.set(request.id, controller);
-          const { kind, id, question, sessionId, details, options, timeLimitMs } = request;
-          if (kind === "secret") return;
           const recorded = api.history(sessionId, { all: true }).findLast(e => e.kind === "inputRequest" && e.requestId === id);
           const call = (recorded?.data as { call?: ToolCall } | undefined)?.call;
           const q: Question = { kind, id, sessionId, question, details, options, call, deadline: timeLimitMs === undefined ? undefined : Date.now() + timeLimitMs };
@@ -273,7 +317,18 @@ export class Agent {
   }
   declaration(): Declaration {
     this.#check();
-    return { ...this.#api.declaration(), nestedToolCalls: false, questionsOutlastTurns: false, lateAnswersStartTurns: false, severalActors: false, tenants: false, sessionLimits: false, confinesFiles: true };
+    const base = this.#api.declaration();
+    const providers = this.#h.useAll<BaseProvider>("provider");
+    return {
+      ...base,
+      keepsStateAtProvider: providers.some(p => p.supports.keepsState === true),
+      runsToolsAtProvider: providers.some(p => p.supports.runsTools === true),
+      liveSessions: providers.some(p => p.supports.liveSessions === true),
+      portableSessions: this.#portable && !providers.some(p => p.supports.runsTools === true || p.supports.keepsState === true),
+      nestedToolCalls: false, questionsOutlastTurns: false, lateAnswersStartTurns: false, waitingThroughRestart: false,
+      severalActors: false, tenants: false, sessionLimits: false, holdsOutput: false, mixedActorInput: "refused",
+      startsTurnsUnasked: "never", settingsDuringTurn: "nextTurn", confinesFiles: this.#confinesFiles,
+    };
   }
   async serveAcp(): Promise<void> {
     this.#check();
@@ -281,7 +336,7 @@ export class Agent {
     this.#acp = true;
     try {
       if (!this.#hostEnabled) await this.#loadProcesses(pluginSpecsFromEnv());
-      const binding = acpInterface();
+      const binding = acpInterface({ declaration: () => this.declaration() });
       await this.#load(binding);
       await binding.acp.serveStdio();
     } catch (error) { throw new AgentError("invalid_composition", messageOf(error), undefined, error); }

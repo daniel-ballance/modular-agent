@@ -39,7 +39,7 @@ export function fixture(name: string, config?: Record<string, unknown>): Plugin 
       }));
     } });
     case "confirm": return definePlugin({ name, config, tools: [tool({
-      name: "confirm", description: "Ask the user a yes-or-no question.",
+      name: "confirm", description: "Ask whether to go ahead.",
       input: z.object({ question: z.string() }),
       async run({ question }, cx) {
         const answer = await cx.ask({ kind: "choice", question, options: ["yes", "no"] });

@@ -8,6 +8,7 @@ test("says hello", async () => {
   const agent = await testAgent({ script: [{ text: "Hello." }] });
   const turn = await (await agent.session()).prompt("Say hello.");
   assert.equal(turn.text, "Hello.");
+  await agent.close();
 });
 
 export const tide = tool({
@@ -31,4 +32,5 @@ test("looks up the tide", async () => {
   const [result] = turn.toolResults();
   assert.equal(result.status, "completed");
   assert.equal(result.text(), "High tide at Whitby is 14:02.");
+  await agent.close();
 });

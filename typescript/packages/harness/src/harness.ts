@@ -188,7 +188,7 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string }
+export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
@@ -211,6 +211,8 @@ export class Harness {
 	private listeners: { plugin: string; raw: boolean; fn: (e: AgentEvent) => void }[] = [];
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
+	private readonly questionsOutlastTurns: boolean;
+	private readonly settingsDuringTurn?: "nextTurn";
 	private newId: () => string;
 	private jobCancels = new Map<string, (jobId: string) => Promise<void>>();
 	private refusedTools = new Set<string>();
@@ -223,6 +225,8 @@ export class Harness {
 		this.home = options.home;
 		this.now = options.now ?? Date.now;
 		this.newId = options.newId ?? randomUUID;
+		this.questionsOutlastTurns = options.questionsOutlastTurns ?? true;
+		this.settingsDuringTurn = options.settingsDuringTurn;
 		this.hooks = new HookRegistry(({ hook, plugin, error }) => this.problem(plugin, `hook ${hook}`, error));
 		const h = (name: string, rule: HookRule, owner: string) => this.hooks.define(name, rule, owner);
 		// Harness hook points
@@ -855,7 +859,7 @@ export class Harness {
 	private async setSetting(s: Session, key: string, value: unknown, writer: string, actorId?: string): Promise<void> {
 		if (actorId) this.requireAuthority(s, actorId, "settings");
 		await this.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
-		this.emit(s.id, "setting.changed", { key, value, appliesFrom: "next step" }, writer, { actorId });
+		this.emit(s.id, "setting.changed", { key, value, appliesFrom: this.settingsDuringTurn === "nextTurn" ? "next turn" : "next step" }, writer, { actorId });
 	}
 
 	private async moveTo(sessionId: string, entryId: string, options: { rewind?: boolean; actorId?: string }, writer: string): Promise<{ outOfReach?: string[] }> {
@@ -1512,6 +1516,7 @@ export class Harness {
 				};
 				const payload = { sessionId: s.id, turnId, stepId, usage, model: model?.model, history: s.branch(), request };
 				const transformed = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
+				if (!Array.isArray(transformed?.tools) || transformed.tools.some(t => !request.tools.some(offered => isDeepStrictEqual(offered, t)))) throw new Error("step.before cannot widen the tool offer");
 				const prepared: ModelRequest = feedback.length ? { ...transformed, messages: [...transformed.messages,
 					...feedback.map((e): ModelMessage => ({ role: "user", content: [text((e.data as { reason: string }).reason)] }))] } : transformed;
 				// Hooks may copy or transform messages, so conservatively name their visible sources.
@@ -1545,8 +1550,10 @@ export class Harness {
 						return { value, ...(decision === null ? {} : { refused: decision.refuse }) } as never;
 					} finally { state.stepAfterRunning = false; }
 				}
-				const run = () => withAuthority(() => this.hooks.run(name, { ...payload, sessionId: s.id, turnId }));
-				const result = name === "tool.before" && payload.call ? await this.toolWork.run(payload.call, run) : await run();
+				const scope = { ...payload, sessionId: s.id, turnId };
+				const result = name === "tool.before" && payload.call
+					? await withAuthority(() => this.toolGate(scope))
+					: await withAuthority(() => this.hooks.run(name, scope));
 				if (name === "turn.result" && typeof result?.refused === "string") {
 					await this.commit(s, [{ kind: "resultFeedback", writer: "harness", turnId, modelVisible: true, data: { reason: result.refused } }]);
 				}
@@ -1766,11 +1773,33 @@ export class Harness {
 			this.emit(s.id, "tool.ended", { status: out.status }, found.source.id, { turnId, toolCallId: call.id });
 			return out;
 		} catch (error) {
-			const status = signal.aborted ? "cancelled" : "failed";
+			const status = (error as { code?: string })?.code === "lost" ? "outcomeUnknown" : signal.aborted ? "cancelled" : "failed";
 			const message = error instanceof Error ? error.message : String(error);
 			this.emit(s.id, "tool.ended", { status }, found.source.id, { turnId, toolCallId: call.id });
 			return { callId: call.id, status, content: [text(status === "cancelled" ? "Cancelled" : `Tool failed: ${message}`)] };
 		}
+	}
+
+	private async toolGate<T extends { call: ToolCall }>(payload: T): Promise<GateResult<T>> {
+		const { call } = payload;
+		let changed = false;
+		const pass = (p: T, second: boolean) => this.hooks.gate("tool.before", p, {
+			invoke: (value, handler) => this.toolWork.run(value.call, handler),
+			change: (before, after) => {
+				const candidate = after?.call;
+				if (!candidate || !isDeepStrictEqual({ ...call, input: {} }, { ...candidate, input: {} }) ||
+					!candidate.input || typeof candidate.input !== "object" || Array.isArray(candidate.input)) {
+					throw new Error("Tool gate changed the call identity or gave invalid input");
+				}
+				if (!isDeepStrictEqual(before.call.input, candidate.input)) {
+					if (second) throw new Error("Tool gate changed the call again");
+					changed = true;
+				}
+				return { ...before, call: { ...before.call, input: candidate.input } };
+			},
+		});
+		const first = await pass(payload, false);
+		return changed && first.refused === undefined && first.pending === undefined ? pass(first.value, true) : first;
 	}
 
 	/** A tool call a UI or plugin starts. The same checks apply. */
@@ -1785,7 +1814,7 @@ export class Harness {
 		const definition = this.findTool(s, call.name)?.definition;
 		const gate = definition?.callers && call.startedBy !== "tool" && !definition.callers.includes(call.startedBy as "ui" | "plugin")
 			? { refused: `${call.name} can't be called by a ${call.startedBy}`, value: { call } }
-			: await this.toolWork.run(call, () => this.hooks.gate("tool.before", { sessionId: s.id, call, definition }));
+			: await this.toolGate({ sessionId: s.id, call, definition });
 		let result: ToolResult;
 		if (gate.refused) result = { callId: call.id, status: "refused", content: [text(gate.refused)] };
 		else {
@@ -1869,6 +1898,7 @@ export class Harness {
 
 	private async ask(s: Session, draft: BoundRequest, askedBy: string, signal?: AbortSignal): Promise<Answer> {
 		signal?.throwIfAborted();
+		if (draft.whenTimeLimit === "leaveOpen" && !this.questionsOutlastTurns) throw Object.assign(new Error("Questions cannot outlast the turn"), { code: "not_supported" });
 		const call = this.toolWork.getStore();
 		if (call && call.id === draft.toolCallId) draft = { ...draft, boundCall: { name: call.name, input: call.input } };
 		if (draft.kind === "secret" && (!draft.credential || !this.use<CredentialStore>("credential-store"))) {
@@ -2196,7 +2226,7 @@ export class Harness {
 			portableSessions: true,
 			mixedActorInput: "shared",
 			erasureDuringTurn: "refused",
-			questionsOutlastTurns: true,
+			questionsOutlastTurns: this.questionsOutlastTurns,
 			queuedInputAfterRestart: "handedBack",
 			queuedJobReportsAfterRestart: "run",
 			movingWithUnfinishedWork: "refused",

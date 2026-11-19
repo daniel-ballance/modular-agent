@@ -83,7 +83,7 @@ function readTurn(entries: HistoryEntry[], end: HistoryEntry): PromptResult {
 const noTurn = (inputId: string, disposition: "handled" | "handedBack"): PromptResult =>
   ({ inputId, disposition, text: "", openToolCalls: [], toolResults: () => [] });
 
-export interface PromptOptions { key?: string; actor?: string }
+export interface PromptOptions { key?: string; actor?: string; result?: import("./schema.js").Schema }
 type Owner = { fork(entry?: string): Promise<Session>; close(): Promise<void>; handler(handler?: QuestionHandler): void };
 const local = "user";
 export let makeSession: (id: string, api: PluginApi, owner: Owner) => Session;
@@ -100,6 +100,7 @@ export class Session {
   }
   async send(input: Input, timing: InputTiming, options: PromptOptions = {}): Promise<InputReceipt> {
     this.#check();
+    if (options.result !== undefined) throw new AgentError("not_supported", "Structured prompt results are not supported");
     if (options.actor !== undefined && options.actor !== local) throw new AgentError("forbidden", "Only the local actor is supported");
     if (!["now", "steer", "after", "propose"].includes(timing) || options.key !== undefined && typeof options.key !== "string" ||
       typeof input !== "string" && (!Array.isArray(input) || input.some(p => typeof p?.type !== "string"))) {
@@ -177,6 +178,46 @@ export class Session {
         text: result.text, value: result.value, openToolCalls: result.openToolCalls,
       } },
     };
+  }
+
+  async *events(fromEntry?: string): AsyncIterable<Event> {
+    this.#check();
+    const entries = this.#api.history(this.id, { all: true });
+    const index = fromEntry === undefined ? -1 : entries.findIndex(e => e.id === fromEntry);
+    if (fromEntry !== undefined && index < 0) throw new AgentError("not_found", "Unknown entry cursor");
+    let wake = () => {};
+    const queue: AgentEvent[] = [];
+    let dropped = false;
+    let cursor = fromEntry;
+    const off = this.#api.follow(this.id, { recipient: local, fromEntry: index + 1 }, e => {
+      if (queue.length >= 1024) dropped = true;
+      else queue.push(e);
+      wake();
+    });
+    try {
+      for (;;) {
+        if (dropped) throw new AgentError("lost", "Session event reader fell behind", { fromEntry: cursor });
+        const next = queue.shift();
+        if (!next) { await new Promise<void>(r => { wake = r; }); continue; }
+        const event = eventOf(next);
+        if (!event) continue;
+        if (event.type === "entry") cursor = event.data.id;
+        yield event;
+        if (event.type === "sessionEnded") return;
+      }
+    } finally { off(); }
+  }
+
+  commands(): { name: string; description: string }[] {
+    this.#check();
+    return this.#api.commands().map(({ name, description }) => ({ name, description }));
+  }
+  async runCommand(line: string): Promise<string | void> {
+    this.#check();
+    const name = /^\/(\S+)/.exec(line.trim())?.[1];
+    if (!name) throw new AgentError("invalid_params", "A command starts with /");
+    if (!this.commands().some(c => c.name === name)) throw new AgentError("not_found", `Unknown command /${name}`);
+    return checked(() => this.#api.runCommand(this.id, line, local));
   }
 
   async lastTurn(): Promise<PromptResult | undefined> {

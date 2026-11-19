@@ -29,14 +29,14 @@ export class LocalEnvironment implements WorkingEnvironment {
 		// Kept until the environment stops, so a session reopened here still has its points.
 	}
 	save(): Promise<string> {
-		return this.snapshots.save(this.cwd, this.sessionId);
+		return this.confined(".").then(cwd => this.snapshots.save(cwd, this.sessionId));
 	}
 	hasPoint(point: string): Promise<boolean> {
-		return this.snapshots.has(this.cwd, point, this.sessionId);
+		return this.confined(".").then(cwd => this.snapshots.has(cwd, point, this.sessionId));
 	}
 
 	restore(point: string): Promise<void> {
-		return this.snapshots.restore(this.cwd, point, this.sessionId);
+		return this.confined(".").then(cwd => this.snapshots.restore(cwd, point, this.sessionId));
 	}
 	resolve(path: string): string {
 		return isAbsolute(path) ? path : resolve(this.cwd, path);
@@ -79,11 +79,12 @@ export class LocalEnvironment implements WorkingEnvironment {
 			return false;
 		}
 	}
-	exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult> {
-		if (options.signal.aborted) return Promise.resolve({ exitCode: null, output: "", timedOut: false });
+	async exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult> {
+		const cwd = await this.confined(".");
+		if (options.signal.aborted) return { exitCode: null, output: "", timedOut: false };
 		return new Promise((done) => {
 			const commandId = randomUUID();
-			const child = spawn("bash", ["-c", command], { cwd: this.cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...this.processes.env(), [COMMAND_MARKER]: commandId } });
+			const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...this.processes.env(), [COMMAND_MARKER]: commandId } });
 			if (child.pid) this.processes.started(child.pid, commandId, this.sessionId);
 			let output = "";
 			let timedOut = false;

@@ -48,8 +48,13 @@ export class Tool {
   private constructor(readonly definition: ToolDefinition, readonly inProcessOnly: boolean) {}
 
   static create<const S extends Schema>(options: ToolOptions<S>): Tool {
-    const input = schema(options.input);
-    const output = options.output && schema(options.output);
+    if (!options.name || typeof options.name !== "string" || typeof options.description !== "string" || typeof options.run !== "function") {
+      throw new AgentError("invalid_params", "A tool needs a name, description and function");
+    }
+    let input: ReturnType<typeof schema>;
+    let output: ReturnType<typeof schema> | undefined;
+    try { input = schema(options.input); output = options.output && schema(options.output); }
+    catch (error) { throw sdkError(error, "invalid_params"); }
     const definition: ToolDefinition = {
       name: options.name, description: options.description, parameters: input.parameters,
       ...(output ? { returns: output.parameters } : {}),
@@ -71,7 +76,7 @@ export class Tool {
         const out: Settled = typeof value === "string" && !output ? { status: "completed", content: [text(value)] }
           : value && typeof value === "object" && Array.isArray((value as ToolOutput).content)
             ? { ...(value as ToolOutput), status: (value as ToolOutput).status ?? "completed" }
-            : Array.isArray(value) && value.every(p => p && typeof p.type === "string")
+            : !output && Array.isArray(value) && value.every(p => p && typeof p.type === "string")
               ? { status: "completed", content: value }
               : { status: "completed", content: value === undefined ? [] : [text(JSON.stringify(value))], value };
         if (!["completed", "failed", "refused", "outcomeUnknown", "cancelled"].includes(out.status)) {

@@ -28,7 +28,7 @@ import type {
 /** One pi-ai provider (one vendor) as one Provider. */
 export class PiAiProvider implements Provider {
 	readonly supports = { keepsState: false, runsTools: false, liveSessions: false, lateAnswers: false };
-	constructor(readonly id: string, private collection: MutableModels, private api: PluginApi) {}
+	constructor(readonly id: string, private collection: MutableModels, private api?: Pick<PluginApi, "runHook">) {}
 
 	models(): ModelInfo[] {
 		return this.collection.getModels(this.id).map(toInfo);
@@ -42,11 +42,12 @@ export class PiAiProvider implements Provider {
 		}
 	}
 
-	async request(ref: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
-		const model = this.collection.getModel(this.id, ref.id);
+	async request(ref: ModelRef, request: ModelRequest, options: RequestOptions & { apiKey?: string; baseUrl?: string }): Promise<AssistantMessage> {
+		const found = this.collection.getModel(this.id, ref.id);
+		const model = found && (options.baseUrl ? { ...found, baseUrl: options.baseUrl } : found);
 		if (!model) return failed(`Unknown model ${this.id}/${ref.id}`, "other");
 		// "Before a model request": Provider middleware may change the request.
-		const { request: req } = options.requestPrepared ? { request } : await this.api.runHook<{ request: ModelRequest }>("provider.request", { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: ref.id }, request });
+		const { request: req } = options.requestPrepared || !this.api ? { request } : await this.api.runHook<{ request: ModelRequest }>("provider.request", { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: ref.id }, request });
 		const context: Context = {
 			systemPrompt: req.systemPrompt || undefined,
 			messages: req.messages.map((m) => toPi(m, model)),
@@ -56,6 +57,7 @@ export class PiAiProvider implements Provider {
 		try {
 			const stream = this.collection.streamSimple(model, context, {
 				signal: options.signal,
+				apiKey: options.apiKey,
 				sessionId: options.sessionId,
 				reasoning: req.settings.reasoning === "off" ? undefined : (req.settings.reasoning as never) || undefined,
 				maxTokens: req.settings.maxOutput,
@@ -70,7 +72,7 @@ export class PiAiProvider implements Provider {
 			return failed(error instanceof Error ? error.message : String(error), "other");
 		}
 		const message = fromPi(final, model);
-		if (!options.requestPrepared) await this.api.runHook("provider.response", { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: ref.id }, message });
+		if (!options.requestPrepared && this.api) await this.api.runHook("provider.response", { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: ref.id }, message });
 		return message;
 	}
 }
@@ -149,6 +151,14 @@ function toPi(m: ModelMessage, model: Model<Api>): PiMessage {
 
 function failed(message: string, kind: ModelError["kind"]): AssistantMessage {
 	return { role: "assistant", content: [], stop: "failed", error: { kind, message } };
+}
+
+/** The SDK APIs reuse the base adapter, but supply API-key auth per call. */
+export function apiKeyModelAdapter(id: "openai" | "anthropic") {
+	const collection = builtinModels();
+	const api = id === "openai" ? "openai-responses" : "anthropic-messages";
+	const models = collection.getModels(id).filter(m => m.api === api);
+	return { models: models.map(toInfo), provider: new PiAiProvider(id, collection) };
 }
 
 export interface PiAiProviderOptions {

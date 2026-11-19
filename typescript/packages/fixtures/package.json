@@ -6,6 +6,11 @@
   "bin": {
     "modular-agent-fixtures": "./dist/src/bin.js"
   },
+  "devDependencies": {
+    "@agentclientprotocol/sdk": "2.7.0",
+    "@modular-agent/openai": "*",
+    "@modular-agent/anthropic": "*"
+  },
   "dependencies": {
     "@modular-agent/core": "*",
     "zod": "^4.6.7"
