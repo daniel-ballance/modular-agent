@@ -150,6 +150,13 @@ func decodeSnapshot(id string, b []byte) (api.Session, error) {
 			snap.Entries = append(snap.Entries, e)
 		}
 		snap = portable.Session(snap)
+		if len(snap.HistoryMeta) != 0 {
+			for i, entry := range snap.Entries {
+				if entry.IsErased() && portable.ReadErased(disk.Entries[i]) {
+					snap.Entries[i].Wire = disk.Entries[i]
+				}
+			}
+		}
 	}
 	if snap.Version != 1 || snap.ID != id {
 		return snap, errors.New("unsupported or mismatched history snapshot")
@@ -202,7 +209,7 @@ func (l *lease) Save(snap api.Session) error {
 				return errors.New("history cannot shrink")
 			}
 			for i, e := range old.Entries {
-				if !portable.Same(e, snap.Entries[i]) {
+				if !sameStoredEntry(old, snap, e, snap.Entries[i]) {
 					return fmt.Errorf("history cannot change outside erasure: %s (%s)", e.ID, e.Kind)
 				}
 			}
@@ -222,7 +229,7 @@ func (l *lease) Save(snap api.Session) error {
 			wire[i] = prefix[i].wire
 			continue
 		}
-		b := api.JSON(portable.Entry(e))
+		b := portable.HistoryEntry(snap, e)
 		wire[i] = b
 		// A journal entry can redact earlier records during a full fold. Do
 		// not cache that case or any entry which changes when read back.
@@ -272,7 +279,7 @@ func stableEntry(session string, e api.Entry, wire json.RawMessage) bool {
 func (s *Store) save(snap api.Session) error {
 	entries := make([]json.RawMessage, len(snap.Entries))
 	for i, e := range snap.Entries {
-		entries[i] = api.JSON(portable.Entry(e))
+		entries[i] = portable.HistoryEntry(snap, e)
 	}
 	_, err := s.writeSnapshot(snap, entries)
 	return err
