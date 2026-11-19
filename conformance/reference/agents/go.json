@@ -1,0 +1,5 @@
+{
+  "language": "go",
+  "build": "cd go && mkdir -p .bin && mise exec -- go build -o .bin/ma ./cmd/ma",
+  "command": ["{repo}/go/.bin/ma"]
+}

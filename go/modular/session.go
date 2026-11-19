@@ -365,6 +365,19 @@ func (s *Session) History(ctx context.Context) ([]HistoryEntry, error) {
 	}
 	return out, nil
 }
+
+// Busy reports whether the session has active work.
+func (s *Session) Busy() (bool, error) {
+	busy, err := s.agent.h.Busy(s.id)
+	return busy, appError(err, NotOpen)
+}
+
+// WaitIdle waits until the session has settled its admitted work.
+func (s *Session) WaitIdle(ctx context.Context) error {
+	_, err := s.agent.a.Wait(s.ctx(ctx), s.id)
+	return appError(err, Lost)
+}
+
 func (s *Session) Cancel(ctx context.Context) ([]InputReceipt, error) {
 	ctx = s.ctx(ctx)
 	if err := ctx.Err(); err != nil {

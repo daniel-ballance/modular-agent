@@ -16,6 +16,14 @@ if err != nil || turn.Text != "Hello." {
 
 Import `github.com/OWNER/modular-agent/go/modular/modulartest` for tests and `github.com/OWNER/modular-agent/go/modular` for applications. The only direct dependency newly used by the SDK is `github.com/google/jsonschema-go`, already in the base's module graph and named in the SDK specification. It generates and validates tool schemas.
 
+## Official file and MCP tools
+
+- `modular/files.Plugin(spill)` registers the six standard file and command tools. It uses `ToolContext.Environment`, which scopes file and command operations to the current call and works both in process and through the plugin binding.
+- `modular/mcp.WithServers(servers, warn)` connects trusted MCP servers. A warning handler opts into skipping failed configured servers, while client-supplied ACP attachments remain scoped to their session.
+- `NewSchemaTool` accepts an explicit JSON Schema. `Agent.ToolCatalog(sessionID)` lists plugin-callable tool definitions without granting call authority. `HistoryStore.Sessions` lists saved sessions without opening them. `Session.Busy` and `Session.WaitIdle` let a terminal distinguish active work from an idle session.
+
+The [Go `ma` README](../cmd/ma/README.md) shows these parts composed and tested as the standard configuration.
+
 ## Checks
 
 From the repository root:

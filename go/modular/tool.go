@@ -100,6 +100,32 @@ func NewTool[In, Out any](name, description string, run func(context.Context, In
 		t.invalid = err
 		return t
 	}
+	return withToolSchema(t, s, run)
+}
+
+// NewSchemaTool uses an explicit JSON Schema, for tools with a shared or dynamic definition.
+func NewSchemaTool[In, Out any](name, description string, schema json.RawMessage, run func(context.Context, In, *ToolContext) (Out, error), opts ...ToolOption) Tool {
+	t := Tool{definition: ToolDefinition{Name: name, Description: description, Hints: ToolHints{Destructive: true, OpenWorld: true}, Callers: []string{"model", "ui", "plugin"}}}
+	for _, opt := range opts {
+		opt(&t)
+	}
+	if t.invalid != nil {
+		return t
+	}
+	if run == nil || name == "" || description == "" {
+		t.invalid = errors.New("tool requires a name, description and function")
+		return t
+	}
+	var s jsonschema.Schema
+	if t.invalid = json.Unmarshal(schema, &s); t.invalid != nil {
+		return t
+	}
+	t = withToolSchema(t, &s, run)
+	t.definition.Parameters = slices.Clone(schema)
+	return t
+}
+
+func withToolSchema[In, Out any](t Tool, s *jsonschema.Schema, run func(context.Context, In, *ToolContext) (Out, error)) Tool {
 	var validator *jsonschema.Resolved
 	t.definition.Parameters, validator, t.invalid = resolve(s)
 	t.run = func(ctx context.Context, input json.RawMessage, tc *ToolContext) (any, error) {
@@ -126,6 +152,7 @@ type ToolOutput struct {
 }
 type ToolContext struct {
 	Tools                      ToolCalls
+	Environment                ToolEnvironment
 	SessionID, ActorID, CallID string
 	ctx                        context.Context
 	settled                    atomic.Bool
@@ -213,6 +240,14 @@ func (s *toolSource) Tools(api.Session) []api.Tool {
 func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call, progress func(string)) api.ToolResult {
 	tc := &ToolContext{SessionID: session.ID, ActorID: call.Actor, CallID: call.ID, ctx: ctx, progress: progress}
 	tc.Tools = ToolCalls{tc: tc, port: api.InvocationTools(ctx)}
+	tc.Environment = ToolEnvironment{tc: tc, project: session.Project}
+	if s.server != nil {
+		tc.Environment.port = s.server.HostEnvironment()
+	} else if s.a != nil {
+		if v, err := s.a.Get("working-environment"); err == nil {
+			tc.Environment.port, _ = v.(api.WorkingEnvironment)
+		}
+	}
 	defer tc.settled.Store(true)
 	tc.ask = func(ctx context.Context, q Question, wait time.Duration) (Answer, error) {
 		if s.server != nil {

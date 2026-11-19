@@ -16,6 +16,7 @@ type ModelInfo struct {
 	MaxOutput     int      `json:"maxOutput"`
 	Input         []string `json:"input"`
 	Reasoning     bool     `json:"reasoning"`
+	Thinking      []string `json:"thinking,omitempty"`
 }
 type ModelErrorKind string
 
@@ -35,25 +36,28 @@ type ModelError struct {
 func (e *ModelError) Error() string { return e.Message }
 
 type ModelRequest struct {
+	SessionID    string           `json:"sessionId,omitempty"`
 	SystemPrompt string           `json:"systemPrompt"`
 	Messages     []Message        `json:"messages"`
 	Tools        []ToolDefinition `json:"tools"`
 	Settings     Settings         `json:"settings"`
 }
 type Message struct {
-	Role       string  `json:"role"`
-	Content    Content `json:"content"`
-	Stop       string  `json:"stop,omitempty"`
-	ToolCallID string  `json:"toolCallId,omitempty"`
-	ToolName   string  `json:"toolName,omitempty"`
-	IsError    bool    `json:"isError,omitempty"`
+	Role         string          `json:"role"`
+	Content      Content         `json:"content"`
+	Stop         string          `json:"stop,omitempty"`
+	ToolCallID   string          `json:"toolCallId,omitempty"`
+	ToolName     string          `json:"toolName,omitempty"`
+	IsError      bool            `json:"isError,omitempty"`
+	ProviderData json.RawMessage `json:"providerData,omitempty"`
 }
 type AssistantMessage struct {
-	Role    string      `json:"role"`
-	Content Content     `json:"content"`
-	Stop    string      `json:"stop"`
-	Usage   Usage       `json:"usage"`
-	Error   *ModelError `json:"error,omitempty"`
+	Role         string          `json:"role"`
+	Content      Content         `json:"content"`
+	Stop         string          `json:"stop"`
+	Usage        Usage           `json:"usage"`
+	Error        *ModelError     `json:"error,omitempty"`
+	ProviderData json.RawMessage `json:"providerData,omitempty"`
 }
 type ProviderContext struct {
 	piece      func(Part)
@@ -124,6 +128,9 @@ func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.
 	var request ModelRequest
 	if err := decodeInto(portable.Request(r), &request); err != nil {
 		return failedModelResponse(err), nil
+	}
+	if request.SessionID == "" {
+		request.SessionID = api.Executing(ctx).Session
 	}
 	ref := ModelRef{Provider: m.model.Provider, ID: strings.TrimPrefix(m.model.ID, m.model.Provider+"/")}
 	pc := &ProviderContext{credential: func() (string, error) {
