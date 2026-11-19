@@ -80,7 +80,7 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `settingsDuringTurn` | `nextTurn` |
 | `erasureDuringTurn` | `refused` |
 | `commandContainment` | from the working environment; `processGroup` for the local one |
-| `confinesFiles` | from the working environment; true for the local one, which refuses paths that resolve outside the project |
+| `confinesFiles` | from the working environment. False for the local one: it resolves paths against the project but does not refuse ones that lead outside it. True for the testing kit's memory environment, which has no other files. |
 | `nestedToolCalls` | true |
 
 The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check these values.

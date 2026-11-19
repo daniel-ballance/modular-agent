@@ -105,7 +105,7 @@ impl WorkingEnvironment for LocalEnvironment {
         .await?
     }
     fn declaration(&self) -> Value {
-        json!({"local":true,"confines_files":true,"rewinding":true,"stops_commands_after_sigkill":true,"escaped_process_groups":true,"normal_cleanup":true,"containment":"linux-ptrace-exitkill","startup_cleanup":true})
+        json!({"local":true,"rewinding":true,"stops_commands_after_sigkill":true,"escaped_process_groups":true,"normal_cleanup":true,"containment":"linux-ptrace-exitkill","startup_cleanup":true})
     }
     async fn save_point(&self, session: &str, project: &Path) -> Result<String> {
         let (points, session, project, state) = (

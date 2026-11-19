@@ -259,3 +259,19 @@ async fn declaration_matches_installed_parts() -> Result<()> {
     assert_eq!(d["nestedToolCalls"], true);
     agent.close().await
 }
+
+/// The local environment resolves paths against the project without refusing ones that
+/// lead outside it, so it must not claim to confine files.
+#[tokio::test]
+async fn the_local_environment_does_not_claim_to_confine_files() -> Result<()> {
+    let project = tempfile::tempdir()?;
+    let agent = modular_agent::Agent::builder()
+        .provider(modular_agent::testing::scripted_provider(
+            serde_json::json!([]),
+        ))
+        .project(project.path())
+        .build()
+        .await?;
+    assert_eq!(agent.declaration()?["confinesFiles"], false);
+    agent.close().await
+}
