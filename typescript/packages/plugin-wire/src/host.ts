@@ -6,6 +6,7 @@ import type {
 	Answer,
 	AssistantMessage,
 	CredentialStore,
+	DirEntry,
 	ExecResult,
 	HandlerOrder,
 	InterruptedTurn,
@@ -30,7 +31,7 @@ import type {
 } from "@modular-agent/harness";
 import { mapOutput } from "./output.js";
 import { fromWire, toWire } from "./translate.js";
-import { DATA_BINDING, notFoundAsEnoent, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+import { DATA_BINDING, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 /** One external plugin to start, as MODULAR_AGENT_PLUGINS lists it. */
 export interface ExternalPluginSpec {
@@ -207,7 +208,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				if (!isAbsolute(p.cwd ?? "") || path === ".." || path.startsWith(".." + sep) || isAbsolute(path)) throw new WireError("invalid_request", "cwd is outside the session project");
 				const base = api.use<WorkingEnvironment>("working-environment");
 				const env = parent.tool?.environment ?? (await base?.forSession?.(sessionId)) ?? base;
-				if (!env) throw new WireError("invalid_request", "There is no working environment");
+				if (!env) throw new WireError("not_supported", "There is no working environment");
 				return env.cwd !== p.cwd && env.at ? env.at(p.cwd) : env;
 			};
 			const signalOf = (parentId: unknown, signal: AbortSignal) => {
@@ -216,6 +217,14 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			};
 
 			// ---------- what the plugin may ask the host ----------
+			const nestedTools = (p: any) => {
+				const tool = parentOf(p).tool;
+				if (!tool) throw new WireError("invalid_request", "Nested calls require a live tools/call parent");
+				if (!tool.tools) throw new WireError("not_supported", "The host does not run nested calls");
+				return tool.tools;
+			};
+			peer.handle("host/tools/list", async p => ({ tools: toWire(await nestedTools(p).list()) }));
+			peer.handle("host/tools/call", async (p, ctx) => toWire(await nestedTools(p).call(p.name, fromWire(p.input), ctx.signal)));
 			peer.handle("host/ask", async (p, ctx) => {
 				const tool = parentOf(p).tool;
 				if (!tool) throw new WireError("invalid_request", "host/ask needs the tool call it belongs to");
@@ -237,6 +246,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				await env.writeFile(p.path, Buffer.from(p.data, "base64"));
 				return {};
 			});
+			peer.handle("host/env/list", async p => listDirectory(await environment(p), p.path));
 			peer.handle("host/env/exists", async (p) => ({ exists: await (await environment(p)).exists(p.path) }));
 			peer.handle("host/env/exec", async (p, ctx) => {
 				const env = await environment(p);
@@ -843,7 +853,9 @@ class WireToolSource implements ToolSource {
 			const { callId: _c, ...rest } = result as ToolResult;
 			return rest;
 		} catch (error) {
-			if (ctx.signal.aborted) return { status: "cancelled", content: [{ type: "text", text: "Cancelled" }] };
+			if (ctx.signal.aborted && (error as { code?: string }).code === "cancelled") {
+				return { status: "cancelled", content: [{ type: "text", text: "Cancelled" }] };
+			}
 			throw error;
 		} finally {
 			this.progress.delete(req.id);
@@ -884,6 +896,9 @@ class WireEnvironment implements WorkingEnvironment {
 	}
 	async writeFile(path: string, data: string | Buffer): Promise<void> {
 		await this.peer.request("env/write", { cwd: this.cwd, sessionId: this.sessionId, path, data: Buffer.from(data).toString("base64") });
+	}
+	async list(path: string): Promise<DirEntry[]> {
+		return (await this.peer.request<{ entries: DirEntry[] }>("env/list", { cwd: this.cwd, sessionId: this.sessionId, path }).catch(optionalMethod)).entries;
 	}
 	async exists(path: string): Promise<boolean> {
 		return (await this.peer.request<{ exists: boolean }>("env/exists", { cwd: this.cwd, sessionId: this.sessionId, path })).exists;

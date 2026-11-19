@@ -6,6 +6,7 @@ import { schema, type Infer, type Schema } from "./schema.js";
 export interface ToolEnvironment {
   read(path: string): Promise<Buffer>;
   exists(path: string): Promise<boolean>;
+  list(path: string): Promise<import("@modular-agent/harness").DirEntry[]>;
   write(path: string, data: string | Uint8Array): Promise<void>;
   exec(command: string, options?: { timeoutMs?: number; onOutput?(chunk: string): void }): Promise<{ exitCode: number | null; output: string; timedOut: boolean }>;
 }
@@ -15,6 +16,10 @@ export interface ToolContext {
   callId: string;
   cancelled: AbortSignal;
   environment: ToolEnvironment;
+  tools: {
+    list(): Promise<ToolDefinition[]>;
+    call(name: string, input: Record<string, unknown>): Promise<import("@modular-agent/harness").ToolResult>;
+  };
   refuse(reason: string): never;
   ask(question: QuestionDraft, wait?: { wait: number; then: "leaveOpen" }): Promise<Answer>;
   progress(content: Input): void;
@@ -130,8 +135,25 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
         environment: {
           read: path => checked(() => environment().readFile(path)),
           exists: path => checked(() => environment().exists(path)),
+          list: path => checked(() => {
+            const env = environment();
+            if (!env.list) throw new AgentError("not_supported", "The environment does not list directories");
+            return env.list(path);
+          }),
           write: (path, data) => checked(() => environment().writeFile(path, typeof data === "string" ? data : Buffer.from(data))),
           exec: (command, opts) => checked(() => environment().exec(command, { ...opts, signal: base.signal })),
+        },
+        tools: {
+          list: () => checked(() => {
+            check();
+            if (!base.tools) throw new AgentError("not_supported", "The host does not run nested calls");
+            return base.tools.list();
+          }),
+          call: (name, input) => checked(() => {
+            check();
+            if (!base.tools) throw new AgentError("not_supported", "The host does not run nested calls");
+            return base.tools.call(name, input);
+          }),
         },
         sessionId: base.sessionId, actorId: call.actorId, callId: call.id, cancelled: base.signal,
         refuse(reason) { check(); throw new Refusal(reason); },

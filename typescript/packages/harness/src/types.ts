@@ -186,6 +186,10 @@ export interface ToolContext {
 	sessionId: string;
 	signal: AbortSignal;
 	call: ToolCall;
+	tools?: {
+		list(): Promise<ToolDefinition[]>;
+		call(name: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult>;
+	};
 	/** Report progress while the call runs. */
 	progress(content: ContentPart[]): void;
 	/** The session's working environment, if one is provided. */
@@ -269,6 +273,7 @@ export interface CredentialStore {
 
 // ---------- Working environment ----------
 
+export interface DirEntry { name: string; kind: "file" | "directory" | "other" }
 export interface ExecResult { exitCode: number | null; output: string; timedOut: boolean }
 export interface WorkingEnvironment {
 	id: string;
@@ -276,6 +281,7 @@ export interface WorkingEnvironment {
 	/** Nothing from an interrupted attempt is still running when recovery begins. */
 	safeToRepeat?: boolean;
 	containment?: string;
+	confinesFiles?: boolean;
 	points?: boolean;
 	save?(): Promise<string>;
 	/** Check a point without touching project files, if the environment can. */
@@ -286,6 +292,7 @@ export interface WorkingEnvironment {
 	readFile(path: string): Promise<Buffer>;
 	writeFile(path: string, data: string | Buffer): Promise<void>;
 	exists(path: string): Promise<boolean>;
+	list?(path: string): Promise<DirEntry[]>;
 	exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult>;
 	/** The same environment, working in another directory. */
 	at?(cwd: string): WorkingEnvironment | Promise<WorkingEnvironment>;

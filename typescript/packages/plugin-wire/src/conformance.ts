@@ -53,6 +53,7 @@ export function conformanceProvider(): Plugin {
 }
 
 const TOOLS: ToolDefinition[] = [
+	{ name: "nest", description: "Run a nested tool call", parameters: { type: "object", properties: { name: { type: "string" }, input: { type: "object" } }, required: ["name", "input"] } },
 	{ name: "bash", description: "Run a shell command in the working environment", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }, hints: { destructive: true, openWorld: true } },
 	{ name: "read", description: "Read a file in the working environment", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }, hints: { readOnly: true, safeToRepeat: true } },
 ];
@@ -60,10 +61,19 @@ const TOOLS: ToolDefinition[] = [
 /** The conformance plugin's tools: bash and read, using only the session's working environment. */
 export class ConformanceTools implements ToolSource {
 	readonly id = "conformance-tools";
+	constructor(private nestedOnly = false) {}
 	tools(): ToolDefinition[] {
-		return TOOLS;
+		return this.nestedOnly ? TOOLS.filter(t => t.name === "nest") : TOOLS;
 	}
 	async run(call: ToolCall, ctx: ToolContext): Promise<Omit<ToolResult, "callId">> {
+		if (call.name === "nest") {
+			try {
+				if (!ctx.tools) return { status: "failed", content: [text("not_supported")] };
+				return await ctx.tools.call(String(call.input.name), call.input.input as Record<string, unknown>);
+			} catch (error) {
+				return { status: "failed", content: [text((error as { code?: string }).code ?? "internal")] };
+			}
+		}
 		const env = ctx.environment;
 		if (!env) return { status: "failed", content: [text("There is no working environment")] };
 		if (call.name === "read") {
@@ -82,8 +92,8 @@ export class ConformanceTools implements ToolSource {
 	}
 }
 
-export function conformanceTools(): Plugin {
-	return { name: "conformance-tools", setup: (api) => api.provide("tool-source", new ConformanceTools()) };
+export function conformanceTools(nestedOnly = false): Plugin {
+	return { name: "conformance-tools", setup: (api) => api.provide("tool-source", new ConformanceTools(nestedOnly)) };
 }
 
 const SECRET = "conformance-secret";

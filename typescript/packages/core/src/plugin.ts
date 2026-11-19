@@ -1,4 +1,5 @@
-import type { CredentialStore, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
+import type { Configuration, CredentialStore, HistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
+import type { Agent } from "./agent.js";
 import { AgentError } from "./errors.js";
 import { toolSource, type Tool } from "./tool.js";
 import { adaptProvider, type Provider } from "./provider.js";
@@ -24,7 +25,7 @@ type Hooks = {
   "tool.before": [Before, "allow" | { refuse: string } | { change: ToolCall["input"] }];
   "tool.after": [After, { change: Partial<ResultFields> }];
   "model.failed": [Observe & { error: ModelError; request: ModelRequest }, "stop" | { retry: true | ModelRequest }];
-  "turn.result": [Observe & { result: TurnResult }, "accept" | { refuse: string }];
+  "turn.result": [Observe & { result: Pick<TurnResult, "text" | "value">; shape?: Record<string, unknown> }, "accept" | { refuse: string }];
   "turn.end": [Observe & { outcome: Outcome; result: TurnResult }, void];
   "provider.request": [{ sessionId: string | null; provider: string; model: ModelRef; request: ModelRequest }, { change: ModelRequest }];
   "provider.response": [{ sessionId: string | null; provider: string; model: ModelRef; message: AssistantMessage }, void];
@@ -50,12 +51,30 @@ export type CommandHandler = (args: string, context: CommandContext) => Awaitabl
 export interface Registrar {
   config(): Settings;
   tool(tool: Tool): void;
+  tools(source: ToolCatalog): void;
+  environment(environment: WorkingEnvironment): void;
+  runtime(runtime: Runtime): void;
+  historyStore(store: HistoryStore): void;
+  credentialStore(store: CredentialStore): void;
+  configuration(source: Configuration): void;
+  interface(part: AgentInterface): void;
   provider(provider: Provider): void;
   on<P extends HookPoint>(point: P, handler: HookHandler<P>, order?: HookOrder,
     options?: { inProcessOnly?: boolean }): void;
   command(name: string, description: string, handler: CommandHandler,
     options?: { usesModel?: boolean; inProcessOnly?: boolean }): void;
   defineHook(name: string, rule: "observe" | "gate" | "transform" | "collect" | "firstAnswer"): void;
+}
+
+export interface AgentInterface {
+  start(agent: Agent): Awaitable<void>;
+  stop?(): Awaitable<void>;
+}
+
+export interface ToolCatalog {
+  id: string;
+  tools(sessionId?: string): readonly Tool[];
+  onChange?(handler: () => void): () => void;
 }
 
 export interface Plugin {
@@ -153,6 +172,7 @@ const points = new Set("plugin.load session.start session.end input turn.before 
 
 export async function collect(plugin: Plugin, config: Settings, served = false) {
   const tools: Tool[] = [];
+  const interfaces: AgentInterface[] = [];
   const items = new Set<string>();
   const registrations: ((api: PluginApi) => unknown)[] = [];
   let settingUp = true;
@@ -167,12 +187,45 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
   const unavailable = (item: string) => {
     throw new AgentError("not_supported", `${plugin.name}: cannot serve ${item}`);
   };
+  const part = (name: string, value: unknown, servable: boolean) => {
+    add(name);
+    if (served && !servable) unavailable(name);
+    registrations.push(api => api.provide(name, value));
+  };
   const r: Registrar = {
+    environment: env => part("working-environment", env, true),
+    runtime: runtime => part("runtime", runtime, true),
+    historyStore: store => part("history-store", store, false),
+    credentialStore: store => part("credential-store", store, false),
+    configuration: source => part("configuration", source, false),
+    interface(part) {
+      check();
+      if (served) unavailable("interface");
+      interfaces.push(part);
+    },
     config() { check(); return structuredClone(config); },
     tool(t) {
       add(`tool:${t.definition.name}`);
       if (served && t.inProcessOnly) unavailable(`tool ${t.definition.name}`);
       tools.push(t);
+    },
+    tools(catalog) {
+      for (const t of catalog.tools()) {
+        add(`tool:${t.definition.name}`);
+        if (served && t.inProcessOnly) unavailable(`tool ${t.definition.name}`);
+      }
+      const at = (id?: string) => {
+        const current = [...catalog.tools(id)];
+        const blocked = served && current.find(t => t.inProcessOnly);
+        if (blocked) unavailable(`tool ${blocked.definition.name}`);
+        return toolSource(catalog.id, current);
+      };
+      registrations.push(api => api.provide("tool-source", {
+        id: catalog.id, tools: (id?: string) => at(id).tools(),
+        run: (call: Parameters<ReturnType<typeof toolSource>["run"]>[0], cx: Parameters<ReturnType<typeof toolSource>["run"]>[1]) =>
+          at(cx.sessionId).run(call, cx),
+        onChange: catalog.onChange?.bind(catalog),
+      }));
     },
     provider(p) {
       add(`provider:${p.id}`);
@@ -230,5 +283,5 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
     if (tools.length) api.provide("tool-source", toolSource(plugin.name, tools));
     for (const register of registrations) register(api);
   } };
-  return { items, base };
+  return { items, base, interfaces };
 }

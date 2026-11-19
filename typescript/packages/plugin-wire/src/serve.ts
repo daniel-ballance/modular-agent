@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
-import { interruptedCalls, pendingToolCalls, restoreAnsweredStep } from "@modular-agent/harness";
+import { interruptedCalls, lowerReasoning, pendingToolCalls, restoreAnsweredStep } from "@modular-agent/harness";
 import type {
 	Answer,
 	AssistantMessage,
@@ -13,6 +13,7 @@ import type {
 	TurnInput,
 	TurnOutcome,
 	CredentialStore,
+	DirEntry,
 	ExecResult,
 	HandlerOrder,
 	InputRequestDraft,
@@ -24,7 +25,7 @@ import type {
 	WorkingEnvironment,
 } from "@modular-agent/harness";
 import { fromWire, toWire } from "./translate.js";
-import { notFoundAsEnoent, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+import { listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 export interface ServeOptions {
 	/** The plugin's name in its registration. */
@@ -94,6 +95,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			}
 		},
 		writeFile: async (path, data) => void (await peer.request("host/env/write", { parentRequestId, cwd, sessionId, path, data: Buffer.from(data).toString("base64") })),
+		list: async path => (await peer.request<{ entries: DirEntry[] }>("host/env/list", { parentRequestId, cwd, sessionId, path }).catch(optionalMethod)).entries,
 		exists: async (path) => (await peer.request<{ exists: boolean }>("host/env/exists", { parentRequestId, cwd, sessionId, path })).exists,
 		exec: async (command, o) => {
 			const req = peer.request<ExecResult>("host/env/exec", { parentRequestId, cwd, sessionId, command, ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}) }, o.signal);
@@ -203,13 +205,26 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		const prepared = await peer.request<{ request: unknown }>("host/hook", {
 			parentRequestId: ctx.id, hook: "provider.request", payload: { ...scope, request: p.request },
 		}, ctx.signal);
-		ctx.signal.throwIfAborted();
-		const message = toWire(await currentParent.run(ctx.id, () => impl.request(p.model, fromWire(prepared.request) as ModelRequest, {
-			signal: ctx.signal,
-			sessionId: p.sessionId,
-			requestPrepared: true,
-			onEvent: (event) => peer.notify("provider/event", { parentRequestId: ctx.id, event }),
-		})));
+		const checkCancelled = () => {
+			if (ctx.signal.aborted) throw new WireError("cancelled", "Provider request cancelled");
+		};
+		checkCancelled();
+		const request = fromWire(prepared.request) as ModelRequest;
+		const modelInfo = impl.models().find(m => m.id === p.model.id);
+		request.settings = { ...request.settings, reasoning: lowerReasoning(request.settings?.reasoning, modelInfo) };
+		let message: unknown;
+		try {
+			message = toWire(await currentParent.run(ctx.id, () => impl.request(p.model, request, {
+				signal: ctx.signal,
+				sessionId: p.sessionId,
+				requestPrepared: true,
+				onEvent: (event) => { if (!ctx.signal.aborted) peer.notify("provider/event", { parentRequestId: ctx.id, event }); },
+			})));
+		} catch (error) {
+			checkCancelled();
+			throw error;
+		}
+		checkCancelled();
 		await peer.request("host/hook", { parentRequestId: ctx.id, hook: "provider.response", payload: { ...scope, message } });
 		return message;
 	});
@@ -228,6 +243,11 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			call,
 			progress: (content) => peer.notify("tools/progress", { parentRequestId: ctx.id, content: toWire(content) }),
 			environment: hostEnvironment(ctx.id, String(p.project), String(p.sessionId)),
+			tools: {
+				list: async () => fromWire((await peer.request("host/tools/list", { parentRequestId: ctx.id }, ctx.signal).catch(optionalMethod)).tools),
+				call: async (name, input, signal) => fromWire(await peer.request("host/tools/call", { parentRequestId: ctx.id, name, input: toWire(input) },
+					signal ? AbortSignal.any([ctx.signal, signal]) : ctx.signal).catch(optionalMethod)),
+			},
 			ask: async (request: InputRequestDraft) => fromWire(await peer.request<Answer>("host/ask", { parentRequestId: ctx.id, request: toWire(request) }, ctx.signal)) as Answer,
 		}));
 		return toWire(result);
@@ -252,6 +272,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		}
 	});
 	peer.handle("env/write", async (p) => (await (await envAt(p)).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
+	peer.handle("env/list", async p => listDirectory(await envAt(p), p.path));
 	peer.handle("env/exists", async (p) => ({ exists: await (await envAt(p)).exists(p.path) }));
 	peer.handle("env/save", async (p) => {
 		const e = await envAt(p);

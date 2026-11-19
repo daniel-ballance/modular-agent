@@ -34,7 +34,7 @@ export interface TurnProgress {
 	calls: Map<string, boolean>;
 }
 
-interface TurnExit { outcome: Outcome; text?: string }
+interface TurnExit { outcome: Outcome; text?: string; value?: unknown }
 const hasOpenCalls = (progress: TurnProgress) => [...progress.calls.values()].some(Boolean);
 
 export interface TransientRuntimeOptions {
@@ -69,7 +69,8 @@ export class TransientRuntime implements Runtime {
 		}
 		const outcome: Outcome = signal.aborted ? { kind: "cancelled" } : exit.outcome;
 		const openToolCalls = outcome.kind === "cancelled" ? [] : [...progress.calls].filter(([, pending]) => pending).map(([id]) => id);
-		const result = { ...(exit.text === undefined ? {} : { text: exit.text }), openToolCalls };
+		const result = { ...(exit.text === undefined ? {} : { text: exit.text }),
+			...(outcome.kind === "completed" && exit.value !== undefined ? { value: exit.value } : {}), openToolCalls };
 		await host.hook("turn.end", { sessionId: input.sessionId, turnId: input.turnId, outcome, result });
 		return { outcome, result, entries: progress.entries, usage: progress.usage };
 	}
@@ -239,18 +240,19 @@ export class TransientRuntime implements Runtime {
 				if (this.supports.inputDuringTurn) for (const e of await host.takeSteering(true)) entries.push(e.id);
 				return done({ kind: "completed" }, message);
 			}
-			if (progress.steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, message);
-
 			if (calls.length === 0) {
 				const taken = this.supports.inputDuringTurn ? await host.takeSteering(true) : [];
 				for (const e of taken) entries.push(e.id);
 				if (taken.length) continue;
 				// "The turn's result is ready": a plugin may send the model back.
-				const check = await host.hook<GateResult<unknown>>("turn.result", { result: { text: textOf(message.content) }, shape: input.resultShape });
-				if (check?.refused) {
-					continue;
+				const text = textOf(message.content);
+				let value: unknown;
+				if (input.resultShape) {
+					try { value = JSON.parse(text); } catch { /* The Harness refuses a missing value. */ }
 				}
-				return done({ kind: "completed" }, message);
+				const check = await host.hook<GateResult<unknown>>("turn.result", { result: { text, value }, shape: input.resultShape });
+				if (check?.refused !== undefined) continue;
+				return { outcome: { kind: "completed" }, text, value };
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { interruptedCalls, pendingToolCalls, restoreAnsweredStep } from "./view.js";
 import { HookRegistry } from "./hooks.js";
 import { inputIdOf, inputKeyScope, type InputReceipt, type InputTiming, type QueuedInput, Session } from "./session.js";
@@ -72,7 +73,9 @@ export interface CommandContext { sessionId: string; actorId: string; api: Plugi
 export interface Command { description: string; run(args: string, context: CommandContext): Promise<string | void> | string | void }
 
 export interface SessionStartOptions { tenant?: string; settings?: Record<string, unknown>; actor?: Actor; forkFrom?: { sessionId: string; entryId: string }; parentSessionId?: string }
-export interface InputOptions { content: ContentPart[] | string; when?: InputTiming; key?: string; actorId: string; kind?: string; delegatedBy?: string; startedBy?: QueuedInput["startedBy"]; sources?: string[] }
+const schemaValidator = new Ajv2020({ strict: false, validateFormats: false, ownProperties: true, addUsedSchema: false });
+
+export interface InputOptions { resultShape?: Record<string, unknown>; content: ContentPart[] | string; when?: InputTiming; key?: string; actorId: string; kind?: string; delegatedBy?: string; startedBy?: QueuedInput["startedBy"]; sources?: string[] }
 export interface ErasureReport {
 	erased: string[]; pending: string[]; outOfReach: string[];
 	erasedPairs: { sessionId: string; id: string }[]; pendingPairs: { sessionId: string; id: string }[];
@@ -97,7 +100,7 @@ export interface Transaction {
 	setSetting(key: string, value: unknown, actorId?: string): void;
 	input(options: InputOptions): void;
 }
-export interface FollowOptions { recipient: string; fromEntry?: number; raw?: boolean }
+export interface FollowOptions { recipient: string; fromEntry?: number; raw?: boolean; onLag?: () => void }
 
 /** Everything a plugin can do. A plugin can do nothing else. */
 export interface PluginApi {
@@ -218,6 +221,7 @@ export class Harness {
 	private refusedTools = new Set<string>();
 	private turnAuthority = new AsyncLocalStorage<{ sessionId: string; actors: Set<string>; jobs: Set<string> }>();
 	private toolWork = new AsyncLocalStorage<ToolCall>();
+	private gateSignal = new AsyncLocalStorage<AbortSignal | undefined>();
 	readonly problems: { plugin: string; where: string; error: string }[] = [];
 
 	constructor(options: HarnessOptions) {
@@ -284,6 +288,10 @@ export class Harness {
 	 * close: running turns and jobs are abandoned without being recorded as ended,
 	 * so reopening a session lets its Runtime and job plugins decide what happens.
 	 */
+	async interrupt(): Promise<void> {
+		for (const id of [...this.sessions.keys()]) await this.suspendSession(id);
+	}
+
 	async stop(): Promise<void> {
 		for (const id of [...this.sessions.keys()]) await this.suspendSession(id).catch(() => undefined);
 		for (const { plugin } of [...this.loaded].reverse()) {
@@ -516,12 +524,13 @@ export class Harness {
 	private pluginFollowers: Follower[] = [];
 
 	private follow(s: Session, options: FollowOptions, listener: (event: AgentEvent) => unknown): (() => void) & { idle(): Promise<void> } {
-		const follower = new Follower(this.hooks, options.recipient, options.raw ?? false, listener, (e) => this.problem("harness", "follow", e));
+		const follower = new Follower(this.hooks, options.recipient, options.raw ?? false, listener, (e) => this.problem("harness", "follow", e),
+			options.onLag && (() => { s.followers.delete(follower); options.onLag!(); }));
 		// History first, from the requested point, then live events.
 		const from = options.fromEntry ?? s.order.length;
 		for (const id of s.order.slice(from)) follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: s.entries.get(id) });
 		s.followers.add(follower);
-		return Object.assign(() => { s.followers.delete(follower); }, { idle: () => follower.idle() });
+		return Object.assign(() => { s.followers.delete(follower); follower.disconnect(); }, { idle: () => follower.idle() });
 	}
 
 	// ---------- commands ----------
@@ -678,6 +687,7 @@ export class Harness {
 		s.followUps.push(...admissions.filter((q) => q.startedBy.kind === "job"));
 		await this.handBack(s, s.recoveredInput, "restart");
 		await this.hooks.observe("session.start", { sessionId: s.id, resumed: true });
+		await this.recoverNestedCalls(s);
 		await this.recoverInterruptedTurn(s);
 		await this.recoverReports(s);
 		s.reopening = false;
@@ -1169,6 +1179,7 @@ export class Harness {
 		content = transformed.value.content;
 		const queued: QueuedInput = {
 			id: this.newId(), content, actorId: options.actorId, when: options.when ?? "now", key: options.key,
+			resultShape: options.resultShape,
 			startedBy: options.startedBy ?? { kind: "actor", id: options.actorId }, kind: options.kind ?? "input", sources: options.sources, delegatedBy: options.delegatedBy,
 		};
 		return this.admit(s, async () => {
@@ -1322,8 +1333,10 @@ export class Harness {
 			request: async () => ({ role: "assistant", content: [], stop: "failed", error: { kind: "other", message: `Model ${ref.provider}/${ref.id} is not offered` } }),
 		} : undefined);
 		const settings = this.turnSettings(s, model?.model);
-		const tools = this.toolDefinitions(s).filter((t) => !t.callers || t.callers.includes("model"));
-		const resultShape = s.settings.resultShape as Record<string, unknown> | undefined;
+		const modelTools = s.settings.modelTools;
+		const tools = this.toolDefinitions(s).filter((t) => (!t.callers || t.callers.includes("model")) &&
+			(modelTools == null || (Array.isArray(modelTools) && modelTools.includes(t.name))));
+		const resultShape = queued.resultShape ?? s.settings.resultShape as Record<string, unknown> | undefined;
 		let point: string | undefined;
 		let contributions: { system?: string; context?: ContentPart[] }[] = [];
 		let failure: string | undefined;
@@ -1359,16 +1372,16 @@ export class Harness {
 					sessionId: s.id, turnId, startedBy: queued.startedBy, model: this.turnModel(s, turnId, state, model),
 					settings, resultShape,
 				};
-				const host = this.runtimeHost(s, turnId, state);
+				const host = this.runtimeHost(s, turnId, state, resultShape);
 				outcome = continuing ? await runtime.continueOpenCalls(input, host, signal, continuing) : await runtime.runTurn(input, host, signal);
 			} catch (error) {
 				outcome = this.failedOutcome(error instanceof Error ? error.message : String(error));
 			}
 		}
-		await this.finishTurn(s, turnId, outcome, state, signal);
+		await this.finishTurn(s, turnId, outcome, state, signal, resultShape);
 	}
 
-	private async finishTurn(s: Session, turnId: string, outcome: TurnOutcome, state?: TurnState, signal?: AbortSignal): Promise<void> {
+	private async finishTurn(s: Session, turnId: string, outcome: TurnOutcome, state?: TurnState, signal?: AbortSignal, resultShape?: Record<string, unknown>): Promise<void> {
 		// The process stopped: the turn is interrupted, not ended. Nothing is recorded or announced here;
 		// reopening the session finds the turn and hands it to the Runtime.
 		if (s.suspended || this.use<HistoryStore>("history-store")?.writerSignal?.(s.id)?.aborted) return;
@@ -1382,6 +1395,13 @@ export class Harness {
 		if (signal?.aborted && outcome.outcome.kind !== "completed") outcome = { ...outcome, outcome: { kind: "cancelled" } };
 		else if (outcome.outcome.kind !== "cancelled" && (state?.tenantLimit || (responses.length > 0 && await this.tenantBudgetReached(s)))) {
 			outcome = { ...outcome, outcome: { kind: "limit", limit: "tenantTokens" } };
+		}
+		if (outcome.outcome.kind === "completed" && resultShape) {
+			const reason = shapeViolation(resultShape, outcome.result.value);
+			if (reason !== undefined) {
+				await this.commit(s, [{ kind: "resultFeedback", writer: "harness", turnId, modelVisible: true, data: { reason } }]);
+				outcome = { ...outcome, outcome: { kind: "failed", error: reason }, result: { ...outcome.result, value: undefined } };
+			}
 		}
 		// Committed dispositions survive a lost or invalid Runtime outcome.
 		const branch = s.branch();
@@ -1442,7 +1462,7 @@ export class Harness {
 			await this.endInterruptedTurn(s, { turnId, calls: calls.filter((c) => !eligible.includes(c)) });
 			outcome = await runtime.resumeTurn(
 				{ sessionId: s.id, turnId, startedBy, model: this.turnModel(s, turnId, state, model), settings: state.settings, resultShape: snapshot?.resultShape },
-				this.runtimeHost(s, turnId, state),
+				this.runtimeHost(s, turnId, state, snapshot?.resultShape),
 				signal,
 				{ turnId, calls: eligible, ...(restored ? { lastStep: restored.lastStep } : {}) },
 			);
@@ -1455,7 +1475,7 @@ export class Harness {
 			const open = new Set(pendingToolCalls(s.branch(), turnId, keptNow));
 			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !terminal.has(c.id) && !open.has(c.id)) });
 		}
-		await this.finishTurn(s, turnId, outcome, state, signal);
+		await this.finishTurn(s, turnId, outcome, state, signal, snapshot?.resultShape);
 	}
 
 	private recordedTurnActors(branch: HistoryEntry[], turnId: string): string[] {
@@ -1497,7 +1517,7 @@ export class Harness {
 		return { outcome: { kind: "failed", error }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
 	}
 
-	private runtimeHost(s: Session, turnId: string, state: TurnState): RuntimeHost {
+	private runtimeHost(s: Session, turnId: string, state: TurnState, resultShape?: Record<string, unknown>): RuntimeHost {
 		const withAuthority = <T>(fn: () => T): T => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs }, fn);
 		return {
 			newId: async () => this.newId(),
@@ -1551,7 +1571,9 @@ export class Harness {
 					} finally { state.stepAfterRunning = false; }
 				}
 				const scope = { ...payload, sessionId: s.id, turnId };
-				const result = name === "tool.before" && payload.call
+				if (name === "turn.result") scope.shape = resultShape;
+				const violation = name === "turn.result" && resultShape ? shapeViolation(resultShape, scope.result?.value) : undefined;
+				const result = violation ? { value: scope, refused: violation } : name === "tool.before" && payload.call
 					? await withAuthority(() => this.toolGate(scope))
 					: await withAuthority(() => this.hooks.run(name, scope));
 				if (name === "turn.result" && typeof result?.refused === "string") {
@@ -1695,7 +1717,7 @@ export class Harness {
 		return undefined;
 	}
 
-	private toolDefinitions(s?: Session): ToolDefinition[] {
+	private toolDefinitions(s?: Session, applyLegacyFilter = true): ToolDefinition[] {
 		const seen = new Set<string>();
 		const out: ToolDefinition[] = [];
 		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
@@ -1716,18 +1738,24 @@ export class Harness {
 			}
 		}
 		const allowed = s?.settings.tools as string[] | undefined;
-		return allowed ? out.filter((t) => allowed.includes(t.name)) : out;
+		return applyLegacyFilter && allowed ? out.filter((t) => allowed.includes(t.name)) : out;
 	}
 
 	/** Run one tool call. Hook points are applied by whoever owns the operation. */
-	private async executeTool(s: Session, call: ToolCall, signal: AbortSignal, turnId?: string, state?: TurnState): Promise<ToolResult | (ToolPending & { callId: string })> {
+	private async executeTool(s: Session, call: ToolCall, signal: AbortSignal, turnId?: string, state?: TurnState,
+		nested?: { depth: number; registration: NonNullable<ReturnType<Harness["findTool"]>>; approval: unknown }): Promise<ToolResult | (ToolPending & { callId: string })> {
 		const found = this.findTool(s, call.name);
 		if (s.erasing) return { callId: call.id, status: "refused", content: [text("Erasure is in progress")] };
 		if (!found) return { callId: call.id, status: "failed", content: [text(`Unknown tool: ${call.name}`)] };
+		if (nested) {
+			const violation = shapeViolation(found.definition.parameters, call.input);
+			if (violation) return { callId: call.id, status: "failed", content: [text(violation)] };
+		}
 		const missing = requiredMissing(found.definition.parameters, call.input);
 		if (missing.length) return { callId: call.id, status: "failed", content: [text(`Missing required input: ${missing.join(", ")}`)] };
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
-		if (state && !state.tools.some((t) => t.name === call.name)) return { callId: call.id, status: "refused", content: [text("Tool was not offered to this turn")] };
+		if (nested && !sameRegistration(found, nested.registration)) return { callId: call.id, status: "refused", content: [text("Registration changed before dispatch")] };
+		if (!nested && state && !state.tools.some((t) => t.name === call.name)) return { callId: call.id, status: "refused", content: [text("Tool was not offered to this turn")] };
 		// The "tools" right: every actor the work belongs to must let tools run for it (docs/bindings/data.md#actors).
 		const owners = state ? [...state.actors] : call.actorId ? [call.actorId] : [];
 		call = { ...call, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs) };
@@ -1736,18 +1764,37 @@ export class Harness {
 		if (!allowed()) return refused();
 		const env = await this.environmentFor(s);
 		const safeToRepeat = found.definition.hints?.safeToRepeat === true && env?.containment === "strong";
-		const point = !turnId && env?.points && env.save ? await env.save() : undefined;
-		if (!allowed()) return refused();
+		const point = !nested && !turnId && env?.points && env.save ? await env.save() : undefined;
+		const eligible = (current: ReturnType<Harness["findTool"]>) => allowed() && !s.erasing && !s.suspended &&
+			sameRegistration(current, found) && (!nested || nested.approval === s.settings.approval);
+		if (!eligible(this.findTool(s, call.name))) return refused();
+		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
+		this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
 		const [start] = await this.commit(s, [{ kind: "toolStarted", writer: "harness", modelVisible: false, turnId, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs), toolCallId: call.id, stepId: call.stepId,
+			sources: nested ? s.branch().filter(e => e.kind === "modular-agent.nestedCall" && e.toolCallId === call.id).map(e => e.id) : undefined,
 			data: { call: { ...call, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs) }, source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition, safeToRepeat, point, openWorld: found.definition.hints?.openWorld ?? true,
 				authorizers: owners.map((actorId) => ({ sessionId: s.id, actorId })), rights: this.workRights(s, owners, state?.jobs) } }]);
 		const current = this.findTool(s, call.name);
-		if (!allowed() || current?.source !== found.source || !isDeepStrictEqual(current?.definition, found.definition)) return refused();
+		if (!eligible(current)) return refused();
 		this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
 		this.emit(s.id, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
 		let asked = 0;
 		const pendingQuestions: string[] = [];
+		const children = new Set<Promise<ToolResult>>();
+		const lifetime = new AbortController();
+		let live = true;
+		const check = () => {
+			if (!live) throw Object.assign(new Error("There is no live parent"), { code: "invalid_request" });
+			if (signal.aborted) throw Object.assign(new Error("The parent was cancelled"), { code: "cancelled" });
+			if (!allowed() || s.erasing || s.suspended) throw Object.assign(new Error("The parent cannot run tools"), { code: "invalid_request" });
+			this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
+		};
+		const drain = async () => {
+			live = false;
+			lifetime.abort();
+			await Promise.allSettled(children);
+		};
 		try {
 			const result = await this.toolWork.run(call, () => found.source.run(call, {
 				sessionId: s.id,
@@ -1757,13 +1804,32 @@ export class Harness {
 					for (const part of content) this.emit(s.id, "tool.progress", { content: [part] }, found.source.id, { turnId, toolCallId: call.id });
 				},
 				environment: env,
+				tools: {
+					list: async () => {
+						check();
+						return structuredClone(this.toolDefinitions(s, false).filter(t => !t.callers || t.callers.includes("plugin")));
+					},
+					call: async (name, input, askingSignal) => {
+						check();
+						if (typeof name !== "string" || !name || !input || typeof input !== "object" || Array.isArray(input)) {
+							throw Object.assign(new Error("A tool name and input object are required"), { code: "invalid_request" });
+						}
+						const childSignal = AbortSignal.any([signal, lifetime.signal, ...(askingSignal ? [askingSignal] : [])]);
+						if (childSignal.aborted) throw Object.assign(new Error("The callback was cancelled"), { code: "cancelled" });
+						const work = this.callNested(s, call, name, structuredClone(input), childSignal, (nested?.depth ?? 0) + 1, turnId, state, start.id);
+						children.add(work);
+						try { return await work; } finally { children.delete(work); }
+					},
+				},
 				ask: (request, askingSignal) => {
 					const n = ++asked;
 					return this.ask(s, { ...request, toolCallId: call.id, key: request.key ?? `call:${call.id}:${n}` }, found.source.id, askingSignal ? AbortSignal.any([signal, askingSignal]) : signal)
 						.then((answer) => { if (answer.pending) pendingQuestions.push(answer.requestId); return answer; });
 				},
 			}));
+			await drain();
 			if (isPending(result)) {
+				if (nested) return { callId: call.id, status: "refused", content: [text("A nested call cannot be left open")] };
 				if (!turnId || !pendingQuestions.length) return { callId: call.id, status: "failed", content: [text("No qualifying question for a pending result")] };
 				await this.commit(s, [{ kind: "toolPending", writer: "harness", modelVisible: false, turnId, stepId: call.stepId, toolCallId: call.id, data: { requestIds: [...new Set(pendingQuestions)], toolStartedId: start.id } }]);
 				this.emit(s.id, "tool.ended", { status: "open", reason: result.pending }, found.source.id, { turnId, toolCallId: call.id });
@@ -1773,6 +1839,7 @@ export class Harness {
 			this.emit(s.id, "tool.ended", { status: out.status }, found.source.id, { turnId, toolCallId: call.id });
 			return out;
 		} catch (error) {
+			await drain();
 			const status = (error as { code?: string })?.code === "lost" ? "outcomeUnknown" : signal.aborted ? "cancelled" : "failed";
 			const message = error instanceof Error ? error.message : String(error);
 			this.emit(s.id, "tool.ended", { status }, found.source.id, { turnId, toolCallId: call.id });
@@ -1780,11 +1847,104 @@ export class Harness {
 		}
 	}
 
-	private async toolGate<T extends { call: ToolCall }>(payload: T): Promise<GateResult<T>> {
+	/** Nested calls never use a model offer and are settled by the Harness, not the Runtime. */
+	private async callNested(s: Session, parent: ToolCall, name: string, input: Record<string, unknown>,
+		signal: AbortSignal, depth: number, turnId: string | undefined, state: TurnState | undefined, parentStart: string): Promise<ToolResult> {
+		const call: ToolCall = { id: this.newId(), name, input, startedBy: "tool", parentCallId: parent.id, actorId: parent.actorId, stepId: parent.stepId };
+		const scope = { turnId, stepId: call.stepId, actorId: call.actorId, toolCallId: call.id };
+		const [intent] = await this.commit(s, [{ ...scope, kind: "modular-agent.nestedCall", writer: "harness", modelVisible: false, sources: [parentStart], data: { call } }]);
+		const stop = (status: ToolResult["status"], reason: string): ToolResult => ({ callId: call.id, status, content: [text(reason)] });
+		let registration = this.findTool(s, name);
+		let executed = call;
+		let result: ToolResult;
+		let processingError: unknown;
+		try {
+			if (signal.aborted) result = stop("notStarted", "Cancelled before it ran");
+			else if (depth > 8) result = stop("refused", "Nested tool call depth exceeds 8");
+			else {
+				// A replacement while a gate waits invalidates its answer. Limit churn so the child always settles.
+				for (let pass = 0; ; pass++) {
+					if (!registration || (registration.definition.callers && !registration.definition.callers.includes("plugin"))) {
+						result = stop("refused", `Tool ${name} is not registered for plugin callers`); break;
+					}
+					const approval = s.settings.approval;
+					const gate = await this.toolGate({ sessionId: s.id, turnId, call, definition: registration.definition }, signal);
+					if (signal.aborted) { result = stop("notStarted", "Cancelled before it ran"); break; }
+					if (gate.pending !== undefined) { result = stop("refused", "A nested call cannot be left open"); break; }
+					const current = this.findTool(s, name);
+					if (!sameRegistration(current, registration) || approval !== s.settings.approval) {
+						if (pass >= 7) { result = stop("refused", "Registration kept changing"); break; }
+						registration = current;
+						continue;
+					}
+					if (gate.refused !== undefined) { result = stop("refused", gate.refused); break; }
+					executed = gate.value.call;
+					const ran = await this.executeTool(s, executed, signal, turnId, state, { depth, registration, approval });
+					result = isPending(ran) ? stop("refused", "A nested call cannot be left open") : ran;
+					break;
+				}
+			}
+		} catch (error) {
+			processingError = error;
+			result = stop(signal.aborted ? "notStarted" : "failed", "Could not process the nested call");
+		}
+		await this.closeNestedQuestions(s, call.id);
+		try {
+			const after = (await this.hooks.transform("tool.after", { sessionId: s.id, turnId, call: executed, result: structuredClone(result) })).value.result;
+			if (after.callId !== result.callId || after.status !== result.status || !Array.isArray(after.content)) throw new Error("Invalid nested tool result transform");
+			result = { ...result, content: after.content, value: after.value };
+		} catch (error) {
+			processingError ??= error;
+			result = stop(result.status, "Could not process the nested tool result");
+		}
+		await this.recordNestedResult(s, executed, turnId, result, intent?.id);
+		if (processingError !== undefined) {
+			this.problem("harness", "nested tool result", processingError);
+			throw processingError;
+		}
+		return result;
+	}
+
+	private async recordNestedResult(s: Session, call: ToolCall, turnId: string | undefined, result: ToolResult, intent?: string): Promise<void> {
+		await this.commit(s, [{ kind: "toolResult", writer: "harness", modelVisible: false, turnId, stepId: call.stepId,
+			actorId: call.actorId, toolCallId: call.id, sources: intent ? [intent] : undefined,
+			message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: result.content, isError: result.status !== "completed" },
+			data: { status: result.status, value: result.value, call } }]);
+	}
+
+	private async closeNestedQuestions(s: Session, callId: string): Promise<void> {
+		for (const request of this.recordedOpenRequests(s).filter(r => r.toolCallId === callId)) {
+			if (s.lateAnswers.has(request.id)) continue;
+			const answer = { requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable" };
+			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId,
+				toolCallId: callId, requestId: request.id, data: answer }]);
+			s.waiting.delete(request.id);
+			for (const viewer of this.viewersFor(s, request)) viewer.onInputRequestClosed?.(request.id);
+			this.emit(s.id, "input.request.closed", answer, "harness", { turnId: request.turnId, toolCallId: callId });
+		}
+	}
+
+	private async recoverNestedCalls(s: Session): Promise<void> {
+		const entries = s.branch();
+		const terminal = new Set(entries.filter(e => e.kind === "toolResult").map(e => e.toolCallId));
+		const started = new Set(entries.filter(e => e.kind === "toolStarted").map(e => e.toolCallId));
+		for (const e of entries.slice().reverse()) {
+			if ((e.kind !== "modular-agent.nestedCall" && e.kind !== "toolStarted") || terminal.has(e.toolCallId)) continue;
+			const call = (e.data as { call?: ToolCall } | undefined)?.call;
+			if (!call || call.startedBy !== "tool" || !call.parentCallId) continue;
+			terminal.add(call.id);
+			await this.closeNestedQuestions(s, call.id);
+			const dispatched = started.has(call.id);
+			await this.recordNestedResult(s, call, e.turnId, { callId: call.id,
+				status: dispatched ? "outcomeUnknown" : "notStarted", content: [text(interruptedNote(dispatched))] }, e.id);
+		}
+	}
+
+	private async toolGate<T extends { call: ToolCall }>(payload: T, signal?: AbortSignal): Promise<GateResult<T>> {
 		const { call } = payload;
 		let changed = false;
 		const pass = (p: T, second: boolean) => this.hooks.gate("tool.before", p, {
-			invoke: (value, handler) => this.toolWork.run(value.call, handler),
+			invoke: (value, handler) => this.gateSignal.run(signal, () => this.toolWork.run(value.call, handler)),
 			change: (before, after) => {
 				const candidate = after?.call;
 				if (!candidate || !isDeepStrictEqual({ ...call, input: {} }, { ...candidate, input: {} }) ||
@@ -1861,7 +2021,7 @@ export class Harness {
 	}
 
 	/** A recorded answer to the question with this key, if it can still be used. */
-	private recordedAnswer(s: Session, draft: BoundRequest): { request: InputRequest; answer?: Answer } | undefined {
+	private recordedAnswer(s: Session, draft: BoundRequest, approval?: ApprovalBinding): { request: InputRequest; answer?: Answer } | undefined {
 		const branch = s.branch();
 		const entry = [...branch].reverse().find((e) => e.kind === "inputRequest" && !e.erased && readRequest(e).key === draft.key);
 		if (!entry) return undefined;
@@ -1869,6 +2029,12 @@ export class Harness {
 		if (request.kind !== draft.kind || request.question !== draft.question || request.details !== draft.details
 			|| JSON.stringify(request.options ?? []) !== JSON.stringify(draft.options ?? [])
 			|| (request.credential ?? undefined) !== (draft.credential ?? undefined) || request.toolCallId !== draft.toolCallId) return undefined;
+		if (approval?.call.startedBy === "tool") {
+			const prior = entry.data as Partial<ApprovalBinding> | undefined;
+			const exact = (value: unknown) => JSON.parse(JSON.stringify(value));
+			if (!prior?.call || !prior.source || !prior.definition ||
+				!isDeepStrictEqual(exact(approval), exact({ call: prior.call, source: prior.source, definition: prior.definition }))) return undefined;
+		}
 		const bound = (request as BoundRequest).boundCall;
 		if (bound && !isDeepStrictEqual(bound, draft.boundCall)) return undefined;
 		if (branch.some((e) => e.kind === "inputClosed" && (e.data as { requestId: string }).requestId === request.id)) return undefined;
@@ -1897,6 +2063,8 @@ export class Harness {
 	}
 
 	private async ask(s: Session, draft: BoundRequest, askedBy: string, signal?: AbortSignal): Promise<Answer> {
+		const gateSignal = this.gateSignal.getStore();
+		signal = signal && gateSignal ? AbortSignal.any([signal, gateSignal]) : signal ?? gateSignal;
 		signal?.throwIfAborted();
 		if (draft.whenTimeLimit === "leaveOpen" && !this.questionsOutlastTurns) throw Object.assign(new Error("Questions cannot outlast the turn"), { code: "not_supported" });
 		const call = this.toolWork.getStore();
@@ -1906,9 +2074,15 @@ export class Harness {
 		}
 		let request: InputRequest = { ...draft, id: this.newId(), sessionId: s.id, askedBy, answerers: draft.answerers ?? [], turnId: s.running?.turnId };
 		const stepId = call?.stepId ?? (draft.toolCallId ? s.order.map((id) => s.entries.get(id)!).findLast((e) => e.kind === "toolStarted" && e.toolCallId === draft.toolCallId)?.stepId : undefined);
+		const registered = draft.kind === "approval" && call ? this.findTool(s, call.name) : undefined;
+		const approval = registered && call ? { call, source: { plugin: registered.plugin, toolSource: registered.source.id }, definition: registered.definition } : undefined;
 		let reopened = false;
 		if (draft.key) {
-			const recorded = this.recordedAnswer(s, draft);
+			// Changed input or registration needs a new approval identity, not a replay of the old one.
+			const key = approval?.call.startedBy === "tool" ? draft.key + ":" + approvalKey(approval) : draft.key;
+			draft = { ...draft, key };
+			request = { ...request, key };
+			const recorded = this.recordedAnswer(s, draft, approval);
 			if (recorded?.answer) {
 				this.emit(s.id, "input.request.reused", { requestId: recorded.request.id, key: draft.key }, "harness", { toolCallId: request.toolCallId });
 				return recorded.answer;
@@ -1919,8 +2093,6 @@ export class Harness {
 			}
 		}
 		const viewers = this.viewersFor(s, request);
-		const registered = request.kind === "approval" && call ? this.findTool(s, call.name) : undefined;
-		const approval = registered && call ? { call, source: { plugin: registered.plugin, toolSource: registered.source.id }, definition: registered.definition } : {};
 		if (!reopened) {
 			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, data: { request: { ...request, answerable: viewers.length > 0 }, ...approval } }]);
 		}
@@ -2224,6 +2396,7 @@ export class Harness {
 			erasure: s?.ephemeral ? true : !!store?.erase,
 			inputKeys: true,
 			portableSessions: true,
+			nestedToolCalls: true,
 			mixedActorInput: "shared",
 			erasureDuringTurn: "refused",
 			questionsOutlastTurns: this.questionsOutlastTurns,
@@ -2237,6 +2410,8 @@ export class Harness {
 
 /** One recipient following a session, through the output gate. */
 class Follower {
+	private pending = 0;
+	private disconnected = false;
 	private held: AgentEvent[] = [];
 	private streams = new Map<string, AgentEvent[]>();
 	private chain: Promise<void> = Promise.resolve();
@@ -2246,10 +2421,25 @@ class Follower {
 		private raw: boolean,
 		private listener: (event: AgentEvent) => unknown,
 		private onError: (e: unknown) => void,
+		private onLag?: () => void,
 	) {}
 
+	disconnect(): void {
+		this.disconnected = true;
+		this.held = [];
+		this.streams.clear();
+	}
+
 	push(event: AgentEvent): void {
-		this.chain = this.chain.then(() => this.deliver(event)).catch(this.onError);
+		if (this.disconnected) return;
+		if (this.onLag && this.pending >= 1024) {
+			if (event.type === "model.output" || event.type === "tool.progress") return;
+			this.disconnect();
+			this.onLag();
+			return;
+		}
+		this.pending++;
+		this.chain = this.chain.then(() => this.disconnected ? undefined : this.deliver(event)).catch(this.onError).finally(() => { this.pending--; });
 	}
 
 	/** Resolves once everything pushed so far has been delivered or blocked. */
@@ -2305,7 +2495,7 @@ class Follower {
 			if (answer.events) events = answer.events;
 		}
 		this.held = [];
-		for (const e of events) await this.listener(e);
+		for (const e of events) if (!this.disconnected) await this.listener(e);
 	}
 }
 
@@ -2413,6 +2603,13 @@ function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Sessi
 
 const turnLimit = (limit: string) => Object.assign(new Error(`Turn limit: ${limit}`), { code: "turn_limit", limit });
 
+type ApprovalBinding = { call: ToolCall; source: { plugin: string; toolSource: string }; definition: ToolDefinition };
+function approvalKey(binding?: ApprovalBinding): string {
+	return createHash("sha256").update(JSON.stringify(binding ?? null, (_, value) =>
+		value && typeof value === "object" && !Array.isArray(value)
+			? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value)).digest("hex");
+}
+
 type BoundRequest = InputRequestDraft & { boundCall?: Pick<ToolCall, "name" | "input"> };
 
 function readRequest(entry: HistoryEntry): InputRequest {
@@ -2470,6 +2667,19 @@ export function normalizeSetting({ key, value }: { key: string; value: unknown }
 
 function inputActors(q: QueuedInput): string[] {
 	return [q.startedBy.kind === "job" ? undefined : q.actorId, q.releasedBy, q.delegatedBy, ...(q.authorityActors ?? [])].filter((id): id is string => id !== undefined);
+}
+
+function shapeViolation(shape: Record<string, unknown>, value: unknown): string | undefined {
+	if (value === undefined) return "Return a JSON value matching the result schema.";
+	try {
+		const validate = schemaValidator.compile(shape);
+		if (!validate(value)) return `Value does not match the schema: ${schemaValidator.errorsText(validate.errors)}`;
+	} catch { return "Invalid JSON Schema"; }
+}
+
+function sameRegistration(a: { plugin: string; source: ToolSource; definition: ToolDefinition } | undefined,
+	b: { plugin: string; source: ToolSource; definition: ToolDefinition }): boolean {
+	return !!a && a.plugin === b.plugin && a.source === b.source && isDeepStrictEqual(a.definition, b.definition);
 }
 
 function requiredMissing(schema: Record<string, unknown>, input: Record<string, unknown>): string[] {

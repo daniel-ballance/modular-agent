@@ -16,7 +16,7 @@ export type Infer<S extends Schema> = S extends StandardSchema<infer T> ? T
   : S extends JSONSchema ? FromSchema<S> : never;
 
 // No remote loader or custom keywords. Format is annotation in the default vocabulary.
-const ajv = new Ajv2020({ strict: false, validateFormats: false, ownProperties: true });
+const ajv = new Ajv2020({ strict: false, validateFormats: false, ownProperties: true, addUsedSchema: false });
 const draft = "https://json-schema.org/draft/2020-12/schema";
 
 export function schema(input: Schema) {

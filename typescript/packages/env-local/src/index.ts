@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { access, lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { join } from "node:path";
-import type { ExecResult, Plugin, WorkingEnvironment } from "@modular-agent/harness";
+import type { DirEntry, ExecResult, Plugin, WorkingEnvironment } from "@modular-agent/harness";
 import { randomUUID } from "node:crypto";
 import { SavedPoints } from "./points.js";
 import { COMMAND_MARKER, markedProcesses, ProcessTracker } from "./processes.js";
@@ -15,6 +15,7 @@ export class LocalEnvironment implements WorkingEnvironment {
 	readonly containment = process.platform === "linux" ? "strong" : "processGroup";
 	readonly safeToRepeat = this.containment === "strong";
 	readonly points = true;
+	get confinesFiles(): boolean { return this.root !== undefined; }
 	constructor(readonly cwd: string, private processes = new ProcessTracker(), private sessionId?: string, private snapshots = new SavedPoints(), private root?: string) {
 		this.id = `local:${cwd}`;
 	}
@@ -69,6 +70,21 @@ export class LocalEnvironment implements WorkingEnvironment {
 		const full = await this.confined(path);
 		await mkdir(dirname(full), { recursive: true });
 		await writeFile(full, data);
+	}
+	async list(path: string): Promise<DirEntry[]> {
+		if (typeof path !== "string" || !path || path.includes("\0")) throw Object.assign(new Error("Invalid directory path"), { code: "invalid_request" });
+		try {
+			return (await readdir(await this.confined(path), { withFileTypes: true })).map(entry => ({
+				name: entry.name, kind: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other",
+			}));
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT") throw Object.assign(new Error("Directory does not exist"), { code: "not_found" });
+			if (code === "ENOTDIR" || code === "EACCES" || code === "EPERM") {
+				throw Object.assign(new Error("Not an accessible directory"), { code: "invalid_request" });
+			}
+			throw error;
+		}
 	}
 	async exists(path: string): Promise<boolean> {
 		try {

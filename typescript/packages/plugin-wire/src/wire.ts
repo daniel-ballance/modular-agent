@@ -23,6 +23,29 @@ export function notFoundAsEnoent(error: unknown, path: string): unknown {
 	return error;
 }
 
+/** An edition 3 peer can report a missing optional method as JSON-RPC method-not-found. */
+export function optionalMethod(error: unknown): never {
+	if (error instanceof WireError && (error.code === "method_not_found" || error.rpcCode === -32601)) {
+		throw new WireError("not_supported", error.message);
+	}
+	throw error;
+}
+
+export async function listDirectory(env: import("@modular-agent/harness").WorkingEnvironment, path: unknown) {
+	if (!env.list) throw new WireError("not_supported", "This environment does not list directories");
+	if (typeof path !== "string" || !path || path.includes("\0")) throw new WireError("invalid_request", "Invalid directory path");
+	try { return { entries: await env.list(path) }; }
+	catch (error) {
+		const code = (error as NodeJS.ErrnoException)?.code;
+		if (code === "ENOENT" || code === "not_found") throw new WireError("not_found", "Directory does not exist");
+		if (code === "ENOTDIR" || code === "EACCES" || code === "EPERM" || code === "invalid_request") {
+			throw new WireError("invalid_request", "Not an accessible directory");
+		}
+		if (code === "not_supported") throw new WireError("not_supported", "This environment does not list directories");
+		throw error;
+	}
+}
+
 /** What handles one incoming request: its params, an abort signal for `$/cancel`, and the request's id. */
 export type Handler = (params: any, ctx: { signal: AbortSignal; id: number | string }) => unknown | Promise<unknown>;
 export type NoteHandler = (params: any) => void;
