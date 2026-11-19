@@ -1,10 +1,13 @@
 # Modular Agent in TypeScript
 
-The TypeScript build from the experiment. It implements [production edition 3](../docs/adr/0021-production-edition.md): a Harness, transient and durable Runtimes, the vanilla Pi plugin set, subagents, a terminal UI, an ACP Interface that T3 Code drives, plugins over the plugin binding, and parts as HTTP services. It is the starting point for the TypeScript SDK, second in [the SDK order](../docs/adr/0024-five-layers.md#choices). It is not yet an SDK, and it has no reference implementation yet.
+The TypeScript build from the experiment. It implements [production edition 3](../docs/adr/0021-production-edition.md): a Harness, transient and durable Runtimes, the vanilla Pi plugin set, subagents, a terminal UI, an ACP Interface that T3 Code drives, plugins over the plugin binding, and parts as HTTP services. The SDK, [`@modular-agent/core`](packages/core/README.md), wraps that build with embedded agents, sessions, typed tools, and plugins that can run in process or over stdio. There is no TypeScript reference implementation yet.
 
 | Path | Holds |
 |---|---|
-| `packages/` | The build, as npm workspaces |
+| `packages/` | The edition 3 base and SDK, as npm workspaces |
+| `packages/core/` | Public SDK and testing kit |
+| `packages/fixtures/` | SDK fixture program and shared-scenario runner |
+| `packages/openai/`, `packages/anthropic/` | SDK API-key Providers |
 | `sidecars/claude/` | The Claude Provider that Rust's standard configuration loads over the plugin binding. A separate package; see [its README](sidecars/claude/README.md). |
 | `scripts/acp-smoke.mjs` | Drives `ma --acp` over stdio with a real model |
 | `conformance` | A link to this repository's kits |
@@ -20,7 +23,7 @@ npm test
 MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test
 ```
 
-`npm test` includes runs of the ACP kit against the agent, with history kept locally and in a history service, and of the history kit against its own service. [Status](../docs/status.md) records what the build exercises.
+`npm test` includes runs of the ACP kit against the agent, with history kept locally and in a history service, and of the history kit against its own service. It also runs the SDK tests and shared scenarios against each built fixture program. [Status](../docs/status.md) records what the build exercises.
 
 ## Run
 
