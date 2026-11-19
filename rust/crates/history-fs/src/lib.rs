@@ -135,6 +135,9 @@ impl FileHistory {
     }
 }
 impl HistoryStore for FileHistory {
+    fn supports_erasure(&self) -> bool {
+        true
+    }
     fn supports_service_snapshots(&self) -> bool {
         true
     }

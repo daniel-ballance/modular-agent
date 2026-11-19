@@ -83,17 +83,17 @@ impl Session {
         if open && self.api.is_running(&self.id) {
             self.cancel().await?;
         }
-        let _guard = self.gate.lock().await;
         self.stop.cancel();
+        let driver = self.driver.lock().unwrap().take();
+        if let Some(driver) = driver {
+            let _ = driver.await;
+        }
+        let _guard = self.gate.lock().await;
         let result = if open {
             self.api.close(&self.id).await
         } else {
             Ok(())
         };
-        let driver = self.driver.lock().unwrap().take();
-        if let Some(driver) = driver {
-            let _ = driver.await;
-        }
         let worker = self.worker.lock().unwrap().take();
         if let Some(worker) = worker {
             let _ = worker.await;
@@ -130,7 +130,7 @@ impl Session {
         {
             self.api.close(id).await?;
         }
-        if !receipt.duplicate && receipt.command.is_none() {
+        if !receipt.duplicate && receipt.command.is_none() && !self.api.is_running(&self.id) {
             self.api.next_turn(&self.id).await?;
         }
         // A duplicate of extension input may still be queued. It must describe
@@ -226,7 +226,16 @@ impl Session {
         }
         Ok(json!({"inputId":receipt.input,"taken":taken,"duplicate":receipt.duplicate}))
     }
-    pub async fn drive(self: Arc<Self>) {
+    pub async fn drive(self: Arc<Self>, reopening: bool) {
+        if reopening {
+            // Do not hold the admission gate here: a fresh prompt must be able
+            // to queue, even if recovery is waiting for a live answer.
+            if let Err(e) = self.api.run_recovery(&self.id).await {
+                eprintln!("ACP recovery failed: {e}");
+            }
+            self.completed.notify_waiters();
+            self.wake.notify_one();
+        }
         loop {
             tokio::select! { _ = self.stop.cancelled() => break, _ = self.wake.notified() => () }
             let _guard = tokio::select! { _ = self.stop.cancelled() => break, guard = self.gate.lock() => guard };
@@ -333,14 +342,62 @@ pub(crate) fn config(api: &dyn AgentApi, id: &str) -> Result<Value> {
         {"id":"approval","name":"Approval","type":"select","currentValue":match settings["approval"].as_str().unwrap_or("off") {"ask_always"=>"all","ask_unless_read_only"=>"ask","never_ask"=>"never",_=>"off"},"options":[{"value":"off","name":"Off"},{"value":"ask","name":"Ask unless read-only"},{"value":"all","name":"Ask always"},{"value":"never","name":"Refuse without asking"}]}
     ]))
 }
+struct Opening<'a>(&'a Mutex<std::collections::BTreeSet<String>>, String);
+impl Drop for Opening<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().remove(&self.1);
+    }
+}
+
 impl State {
+    async fn open_response(
+        &self,
+        session: &Session,
+        method: &str,
+        cx: &ConnectionTo<acp::Client>,
+        handed_back: &[Input],
+    ) -> Result<Value> {
+        let api = &session.api;
+        let id = &session.id;
+        require(api.as_ref(), &actor_scope(id), "watch")?;
+        let mut response = json!({
+            "configOptions": config(api.as_ref(), id)?,
+            "_meta": {"modular-agent": {"declaration": self.factory.session_declaration(api.as_ref(), id)?}},
+        });
+        if method == "session/new" {
+            response["sessionId"] = json!(id);
+        }
+        if !handed_back.is_empty() {
+            response["_meta"]["modular-agent"]["handedBack"] = json!(handed_back.iter()
+                .map(|input| json!({"inputId":input.id,"content":[{"type":"text","text":input.text}]}))
+                .collect::<Vec<_>>());
+        }
+        let gated = api
+            .output(
+                &actor_scope(id),
+                Output {
+                    recipient: "interface.acp".into(),
+                    value: json!({"method":method,"result":response}),
+                    stream: None,
+                    end: true,
+                },
+            )
+            .await?
+            .and_then(|v| v.get("result").cloned())
+            .ok_or_else(withheld)?;
+        if method == "session/load" {
+            events::replay(api.clone(), id, cx).await?;
+        }
+        session.flush().await?;
+        Ok(gated)
+    }
+
     pub(crate) async fn setup_session(
         &self,
         method: &str,
         mut p: Value,
         cx: ConnectionTo<acp::Client>,
     ) -> Result<Value> {
-        let _guard = self.setup.lock().await;
         if p.is_object() && p["mcpServers"].is_null() {
             p["mcpServers"] = json!([]);
         }
@@ -369,17 +426,35 @@ impl State {
             "additional roots are not supported"
         );
         let reopening = method != "session/new";
-        let existing = if reopening {
-            let id = string(&p, "sessionId")?;
+        let _opening = if reopening {
+            let id = string(&p, "sessionId")?.to_owned();
             ensure!(
-                !self.sessions.lock().unwrap().contains_key(id),
-                "session already open"
+                self.opening.lock().unwrap().insert(id.clone()),
+                request_error("busy", "session is already opening")
             );
+            Some(Opening(&self.opening, id))
+        } else {
+            None
+        };
+        let _guard = self.setup.lock().await;
+        let existing = if let Some(Opening(_, id)) = &_opening {
+            let opened = self.sessions.lock().unwrap().get(id).cloned();
+            if let Some(session) = opened {
+                ensure!(
+                    session.project == project,
+                    "cwd differs from recorded session project"
+                );
+                ensure!(
+                    !session.closing.load(std::sync::atomic::Ordering::SeqCst),
+                    request_error("busy", "session is closing")
+                );
+                return self.open_response(&session, method, &cx, &[]).await;
+            }
             let data = self
                 .factory
                 .list(None)?
                 .into_iter()
-                .find(|s| s.id == id)
+                .find(|s| &s.id == id)
                 .ok_or_else(|| anyhow!("unknown session"))?;
             ensure!(
                 data.project == project,
@@ -450,7 +525,6 @@ impl State {
             completed: tokio::sync::Notify::new(),
             approval_views: Mutex::default(),
         });
-        let gate = session.gate.lock().await;
         requests(api.as_ref())?.presence(&id, connection_actor().as_str(), true);
         let worker = tokio::spawn(events::pump(
             session.clone(),
@@ -459,37 +533,41 @@ impl State {
             self.client.lock().unwrap().clone().unwrap_or_default(),
         ));
         *session.worker.lock().unwrap() = Some(worker);
-        *session.driver.lock().unwrap() = Some(tokio::spawn(session.clone().drive()));
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(id.clone(), session.clone());
-        let setup:Result<Value> = async {
+        let setup: Result<Value> = async {
             // On reopen, host sources must exist before durable Runtime recovery.
-            self.factory.attach(api.clone(),&id,&project,wire::optional(&p,"mcpServers").cloned().unwrap_or(json!([]))).await?;
-            if reopening {
-                api.open(&id).await?;
+            self.factory
+                .attach(
+                    api.clone(),
+                    &id,
+                    &project,
+                    wire::optional(&p, "mcpServers")
+                        .cloned()
+                        .unwrap_or(json!([])),
+                )
+                .await?;
+            let handed_back = if reopening {
+                let inputs = api.install_recovery(&id).await?;
                 self.rewind_blocks.lock().unwrap().remove(&project);
+                inputs
+            } else {
+                vec![]
+            };
+            self.open_response(&session, method, &cx, &handed_back)
+                .await
+        }
+        .await;
+        if setup.is_ok() {
+            *session.driver.lock().unwrap() = Some(tokio::spawn(session.clone().drive(reopening)));
+            self.sessions.lock().unwrap().insert(id, session);
+        } else {
+            // Release the writer even if an error after installation stranded an
+            // interrupted turn. No turn driver was started in this case.
+            if api.is_running(&id) {
+                let _ = api.cancel(&id).await;
+                let _ = api.run_recovery(&id).await;
             }
-            require(api.as_ref(), &actor_scope(&id), "watch")?;
-            let mut response = json!({"configOptions":config(api.as_ref(),&id)?,"_meta":{"modular-agent":{"declaration":self.factory.session_declaration(api.as_ref(), &id)?}}});
-            if !reopening { response["sessionId"] = json!(id); }
-            let gated = api.output(&actor_scope(&id), Output {
-                recipient: "interface.acp".into(),
-                value: json!({"method":method,"result":response}),
-                stream: None, end: true,
-            }).await?.and_then(|v| v.get("result").cloned()).ok_or_else(withheld)?;
-            if method == "session/load" { events::replay(api.clone(),&id,&cx).await?; }
-            session.flush().await?;
-            Ok(gated)
-        }.await;
-        drop(gate);
-        if setup.is_err() {
-            // Reopen can fail before Harness admission. Also close pre-attached sources.
-            session.stop.cancel();
             let _ = session.close().await;
-            self.factory.detach(api.clone(), &id).await;
-            self.sessions.lock().unwrap().remove(&id);
+            self.factory.detach(api, &id).await;
         }
         setup
     }

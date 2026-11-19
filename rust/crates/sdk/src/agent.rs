@@ -144,8 +144,14 @@ impl Agent {
     /// before this returns.
     pub async fn open_session(&self, id: &str) -> Result<Session> {
         self.check_crashed()?;
-        self.inner.harness.open(id).await?;
+        let harness = self.inner.harness.as_ref();
+        base::AgentApi::install_recovery(harness, id).await?;
+        // Register the app's answerer before durable recovery can ask it.
         self.attach(id)?;
+        if let Err(error) = base::AgentApi::run_recovery(harness, id).await {
+            let _ = harness.close(id).await;
+            return Err(error.into());
+        }
         Ok(Session::new(self.inner.clone(), id.to_string()))
     }
 
@@ -171,10 +177,7 @@ impl Agent {
     pub(crate) fn declaration_for(&self, session: Option<&str>, acp: bool) -> Result<Value> {
         let api = self.inner.harness.as_ref();
         let mut declaration = interface_acp::declaration(api, session)?;
-        let native = api.declaration()?;
-        declaration["confinesFiles"] = json!(native["environment"]["confines_files"] == true);
         declaration["portableSessions"] = json!(self.inner.persistent);
-        declaration["erasure"] = json!(self.inner.persistent);
         if !acp {
             declaration["severalActors"] = json!(false);
             declaration["sessionLimits"] = json!(false);
@@ -209,6 +212,22 @@ impl Agent {
     pub async fn close(&self) -> Result<()> {
         use base::AgentApi;
         Ok(self.inner.harness.shutdown().await?)
+    }
+}
+
+pub(crate) fn require_model(api: &dyn base::AgentApi, model: &str) -> Result<()> {
+    let offered = api
+        .capability_names("provider.")
+        .into_iter()
+        .filter_map(|key| base::capability::<dyn base::Provider>(api, &key).ok())
+        .any(|provider| provider.catalog().iter().any(|info| info.name == model));
+    if offered {
+        Ok(())
+    } else {
+        Err(Error::new(
+            Code::InvalidRequest,
+            format!("unknown model {model}"),
+        ))
     }
 }
 
@@ -296,6 +315,12 @@ impl AgentBuilder {
     }
     /// Load every part and check the composition. Nothing runs until this succeeds.
     pub async fn build(self) -> Result<Agent> {
+        if self.plugin_host == Some(false) && !self.process_plugins.is_empty() {
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "process plugins require a plugin host",
+            ));
+        }
         let mut restart = (self.restartable
             && self.process_plugins.is_empty()
             && self.wire_plugins.is_empty()
@@ -314,17 +339,19 @@ impl AgentBuilder {
                 "history persistence must match durability",
             ));
         }
-        if self.durability != Durability::Ephemeral
-            && self.data_dir.is_none()
-            && self.history.is_none()
-        {
-            return Err(Error::new(
-                Code::InvalidComposition,
-                format!(
-                    "durability {:?} keeps sessions on disk and needs a data_dir",
-                    self.durability
-                ),
-            ));
+        if self.durability != Durability::Ephemeral && self.data_dir.is_none() {
+            if self.history.is_none() {
+                return Err(Error::new(
+                    Code::InvalidComposition,
+                    "kept and durable agents need a persistent history store",
+                ));
+            }
+            if self.environment.is_none() {
+                return Err(Error::new(
+                    Code::InvalidComposition,
+                    "the local working environment needs a data_dir for recovery bookkeeping",
+                ));
+            }
         }
         // The local environment keeps command state on disk; an ephemeral agent puts it
         // in a scratch folder that goes with the agent.
@@ -338,14 +365,14 @@ impl AgentBuilder {
             }
         };
         std::fs::create_dir_all(&state)?;
-        let History(history, persistent) = match self.history {
+        let History(history, persistent, store_name) = match self.history {
             Some(history) => history,
             None if self.durability == Durability::Ephemeral => memory_history(),
             None => file_history(state.join("sessions"))?,
         };
         if let Some(recipe) = &mut restart {
             recipe.project = Some(project.clone());
-            recipe.history = Some(History(history.clone(), persistent));
+            recipe.history = Some(History(history.clone(), persistent, store_name));
         }
         let mut defaults = base::portable::settings_from_wire(&Value::Object(self.settings));
         if let Some(policy) = self.approval {
@@ -423,13 +450,14 @@ impl AgentBuilder {
             })
             .collect();
         let plugin_host = self.plugin_host.unwrap_or(!launches.is_empty());
-        if plugin_host && let Ok(value) = std::env::var("MODULAR_AGENT_PLUGINS") {
-            let named: Vec<plugin_stdio::Launch> = serde_json::from_str(&value).map_err(|e| {
-                Error::new(
-                    Code::InvalidComposition,
-                    format!("MODULAR_AGENT_PLUGINS is malformed: {e}"),
-                )
-            })?;
+        if plugin_host && let Some(value) = std::env::var_os("MODULAR_AGENT_PLUGINS") {
+            let named: Vec<plugin_stdio::Launch> = serde_json::from_slice(value.as_encoded_bytes())
+                .map_err(|e| {
+                    Error::new(
+                        Code::InvalidComposition,
+                        format!("MODULAR_AGENT_PLUGINS is malformed: {e}"),
+                    )
+                })?;
             launches.extend(named);
         }
         let wire_count = self.wire_plugins.len();
@@ -489,20 +517,19 @@ impl AgentBuilder {
         };
         let mut session_settings = json!({});
         if let Some(model) = model {
-            let valid = base::AgentApi::capability_names(harness.as_ref(), "provider.")
-                .into_iter()
-                .filter_map(|key| {
-                    base::capability::<dyn base::Provider>(harness.as_ref(), &key).ok()
-                })
-                .any(|provider| provider.bind(&model).is_ok());
-            if !valid {
+            if let Err(error) = require_model(harness.as_ref(), &model) {
                 let _ = base::AgentApi::shutdown(harness.as_ref()).await;
-                return Err(Error::new(
-                    Code::InvalidComposition,
-                    format!("unknown model {model}"),
-                ));
+                return Err(error);
             }
             session_settings["model"] = json!(model);
+        }
+        let continues = harness.declaration()?["runtime"]["continues_after_restart"] == true;
+        if continues != (self.durability == Durability::Durable) {
+            let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "runtime recovery does not match the chosen durability",
+            ));
         }
         Ok(Agent {
             inner: Arc::new(Inner {

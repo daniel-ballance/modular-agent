@@ -161,9 +161,19 @@ async fn nested_result_and_stale_context_in_both_placements() -> Result<()> {
         }
         .build()
         .await?;
-        let result = agent.session().await?.prompt("go").await?;
+        let session = agent.session().await?;
+        let result = session.prompt("go").await?;
         let texts: Vec<_> = result.tool_results().iter().map(|r| r.text()).collect();
-        assert_eq!(texts, ["child result", "child result"], "wire={wire}");
+        assert_eq!(texts, ["child result"], "wire={wire}");
+        assert_eq!(
+            session
+                .history()?
+                .iter()
+                .filter(|e| e["kind"] == "toolResult")
+                .count(),
+            2,
+            "wire={wire}"
+        );
         let cx = stored.lock().unwrap().take().unwrap();
         assert_eq!(
             cx.tools().list().await.err().unwrap().code(),

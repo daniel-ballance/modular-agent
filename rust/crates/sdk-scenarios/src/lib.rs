@@ -1,7 +1,7 @@
 //! A runner for the shared SDK scenarios (docs/sdk/testing.md#the-shared-scenarios).
 use modular_agent::{
     Agent, Answer, Approval, Durability, ProcessPlugin,
-    testing::{fixtures, test_agent},
+    testing::{Answers, answers, fixtures, test_agent},
 };
 use serde_json::Value;
 use std::{
@@ -140,7 +140,7 @@ pub fn load(path: &Path) -> Value {
 }
 
 /// Build the scenario's agent over this run's files.
-pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<Agent> {
+pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent, Option<Answers>)> {
     let spec = &scenario["agent"];
     std::fs::create_dir_all(run.project())?;
     let mut builder = test_agent()
@@ -175,19 +175,17 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<Agent> 
             _ => Approval::Never,
         });
     }
-    if let Some(answers) = spec["answers"].as_array() {
-        builder = builder.answers(
-            answers
-                .iter()
-                .map(|a| match a {
-                    Value::String(s) if s == "allow" => Answer::Allow,
-                    Value::String(_) => Answer::Declined { reason: None },
-                    other => Answer::Value(other["value"].as_str().unwrap_or_default().into()),
-                })
-                .collect(),
-        );
+    let queue = spec["answers"].as_array().map(|list| {
+        answers(list.iter().map(|a| match a {
+            Value::String(s) if s == "allow" => Answer::Allow,
+            Value::String(_) => Answer::Declined { reason: None },
+            other => Answer::Value(other["value"].as_str().unwrap_or_default().into()),
+        }))
+    });
+    if let Some(queue) = &queue {
+        builder = builder.answers(queue.clone());
     }
-    builder.build().await
+    Ok((builder.build().await?, queue))
 }
 
 /// Whether a scenario applies to a placement.
@@ -220,7 +218,7 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
     let mut fail =
         |step: usize, what: String| failures.push(format!("{name} ({label}) step {step}: {what}"));
 
-    let mut current: Option<(Agent, modular_agent::Session)> = None;
+    let mut current: Option<(Agent, modular_agent::Session, Option<Answers>)> = None;
     let mut session_id = None;
     for (index, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
         let expect = &step["expect"];
@@ -235,10 +233,10 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
             }
             if current.is_none() {
                 match agent(&scenario, &run).await {
-                    Ok(a) => match a.session().await {
+                    Ok((a, queue)) => match a.session().await {
                         Ok(s) => {
                             session_id = Some(s.id().to_string());
-                            current = Some((a, s));
+                            current = Some((a, s, queue));
                         }
                         Err(e) => {
                             fail(index, format!("session: {e}"));
@@ -251,7 +249,7 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
                     }
                 }
             }
-            let (_, session) = current.as_ref().unwrap();
+            let (_, session, _) = current.as_ref().unwrap();
             match session.prompt(prompt).await {
                 Ok(r) => result = Some(r),
                 Err(e) => {
@@ -260,21 +258,24 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
                 }
             }
         } else if step["reopen"] == true {
-            if let Some((a, _)) = current.take() {
+            if let Some((a, _, queue)) = current.take() {
                 let _ = a.close().await;
+                if let Some(Err(e)) = queue.map(|q| q.assert_done()) {
+                    fail(index, e.to_string());
+                }
             }
             let Some(id) = session_id.clone() else {
                 fail(index, "no session to reopen".into());
                 break;
             };
             let opened = match agent(&scenario, &run).await {
-                Ok(a) => a.open_session(&id).await.map(|s| (a, s)),
+                Ok((a, queue)) => a.open_session(&id).await.map(|s| (a, s, queue)),
                 Err(e) => Err(e),
             };
             match opened {
-                Ok((a, s)) => {
+                Ok((a, s, queue)) => {
                     result = s.last_turn().ok().flatten();
-                    current = Some((a, s));
+                    current = Some((a, s, queue));
                 }
                 Err(e) => {
                     fail(index, format!("reopen: {e}"));
@@ -335,18 +336,27 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
                         ),
                     );
                 }
+                let actual = g.text();
                 if let Some(text) = w["text"].as_str()
-                    && g.text() != text
+                    && actual != text
                 {
                     fail(
                         index,
-                        format!("toolResult text: want {text:?}, got {:?}", g.text()),
+                        format!("toolResult text: want {text:?}, got {actual:?}"),
+                    );
+                }
+                if let Some(part) = w["contains"].as_str()
+                    && !actual.contains(part)
+                {
+                    fail(
+                        index,
+                        format!("toolResult text: want substring {part:?}, got {actual:?}"),
                     );
                 }
             }
         }
         if let Some(want) = expect["records"].as_array() {
-            let (_, session) = current.as_ref().unwrap();
+            let (_, session, _) = current.as_ref().unwrap();
             let kinds: Vec<String> = session
                 .history()
                 .unwrap_or_default()
@@ -375,8 +385,18 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
             }
         }
     }
-    if let Some((a, _)) = current {
+    if let Some((a, _, queue)) = current {
         let _ = a.close().await;
+        if let Some(Err(e)) = queue.map(|q| q.assert_done()) {
+            fail(
+                scenario["steps"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+                    .saturating_sub(1),
+                e.to_string(),
+            );
+        }
     }
     failures
 }
@@ -408,32 +428,90 @@ fn crash_run(
         .spawn()
         .map_err(|e| format!("spawn: {e}"))?;
     let pid = child.id() as i32;
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap())
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    let id = line
-        .trim()
-        .strip_prefix("SESSION ")
-        .ok_or(format!("no session id: {line:?}"))?
-        .to_string();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let reached = match crash.get("count").and_then(Value::as_u64) {
-            Some(n) => fixtures::count(&run.counter()) >= n,
-            None => return Err("only crashWhen.count is supported yet".into()),
-        };
-        if reached {
-            break;
+    let result = (|| {
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        let id = line
+            .trim()
+            .strip_prefix("SESSION ")
+            .ok_or(format!("no session id: {line:?}"))?
+            .to_string();
+        let count = crash["count"]
+            .as_u64()
+            .ok_or("only crashWhen.count is supported yet")?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while fixtures::count(&run.counter()) < count {
+            if Instant::now() > deadline {
+                return Err("the crash condition never held".into());
+            }
+            // Do not reap here: keep the child's group id until we have signalled it.
+            std::thread::sleep(Duration::from_millis(20));
         }
+        Ok(id)
+    })();
+    // Signal the group even on a fixture failure. wait() only reaps our direct
+    // child, not the plugin grandchildren that may still be exiting.
+    let signal = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    let signal_error = (signal != 0).then(std::io::Error::last_os_error);
+    child.wait().map_err(|e| format!("reap crash agent: {e}"))?;
+    if let Some(e) = signal_error
+        && e.raw_os_error() != Some(libc::ESRCH)
+    {
+        return Err(format!("kill crash agent group: {e}"));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while group_can_run(pid).map_err(|e| format!("inspect crash agent group: {e}"))? {
         if Instant::now() > deadline {
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
-            let _ = child.wait();
-            return Err("the crash condition never held".into());
+            return Err("some of the crash agent's process group did not exit".into());
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    unsafe { libc::kill(-pid, libc::SIGKILL) };
-    let _ = child.wait();
-    Ok(id)
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn group_can_run(pgid: i32) -> std::io::Result<bool> {
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+            .is_none()
+        {
+            continue;
+        }
+        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        // The command in parentheses may itself contain spaces and parens.
+        if let Some((_, fields)) = stat.rsplit_once(')') {
+            let mut fields = fields.split_whitespace();
+            if !matches!(fields.next(), Some("Z" | "X" | "x"))
+                && fields.nth(1).and_then(|group| group.parse().ok()) == Some(pgid)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn group_can_run(pgid: i32) -> std::io::Result<bool> {
+    let status = Command::new("ps")
+        .args(["-ax", "-o", "pgid=,stat="])
+        .output()?;
+    if !status.status.success() {
+        return Err(std::io::Error::other("ps failed"));
+    }
+    Ok(String::from_utf8_lossy(&status.stdout).lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next().and_then(|group| group.parse().ok()) == Some(pgid)
+            && fields.next().is_some_and(|state| !state.starts_with('Z'))
+    }))
 }

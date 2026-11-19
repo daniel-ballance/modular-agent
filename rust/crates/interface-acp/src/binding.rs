@@ -43,7 +43,13 @@ pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
             }
         }
     }
-    Ok(json!({
+    let queued = d["queued_input_after_restart"]
+        .as_str()
+        .unwrap_or("handedBack");
+    let queued_reports = d["queued_job_reports_after_restart"]
+        .as_str()
+        .unwrap_or(queued);
+    let mut declaration = json!({
         "inputDuringTurn":d["runtime"]["input_during_turn"] == true,
         "waitingThroughRestart":d["runtime"]["waits_through_restart"] == true,
         "continuesAfterRestart":d["runtime"]["continues_after_restart"] == true,
@@ -55,11 +61,16 @@ pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
         "pluginsDuringSession":d["plugins_during_session"] == true, "erasure":d["erasure"] == true,
         "sessionLimits":true, "tenants":true, "portableSessions":true, "inputKeys":d["input_keys"] == true, "questionsOutlastTurns":d["questions_outlast_turn"] == true, "lateAnswersStartTurns":d["questions_outlast_turn"] == true,
         "startsTurnsUnasked":if d["job_reports_start_turns"] == true {"jobReports"} else {"never"},
-        "queuedInputAfterRestart":"handedBack", "queuedJobReportsAfterRestart":"run", "movingWithUnfinishedWork":"refused",
-        "mixedActorInput":"shared", "settingsDuringTurn":"refused", "erasureDuringTurn":"refused",
+        "queuedInputAfterRestart":queued, "movingWithUnfinishedWork":"refused",
+        "mixedActorInput":"shared", "settingsDuringTurn":d["settings_during_turn"].as_str().unwrap_or("refused"), "erasureDuringTurn":"refused",
         "nestedToolCalls":d["runtime"]["nested_tools"] == true,
+        "confinesFiles":d["environment"]["confines_files"] == true,
         "commandContainment":if d["environment"]["stops_commands_after_sigkill"] == true {"strong"} else if d["environment"]["containment"] == "processGroup" {"processGroup"} else {"none"}
-    }))
+    });
+    if queued_reports != queued {
+        declaration["queuedJobReportsAfterRestart"] = json!(queued_reports);
+    }
+    Ok(declaration)
 }
 
 pub(crate) fn model_id(provider: &str, name: &str) -> String {

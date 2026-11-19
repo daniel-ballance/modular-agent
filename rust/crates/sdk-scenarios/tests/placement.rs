@@ -17,6 +17,18 @@ async fn placement_rules() {
         Some(Code::InvalidComposition)
     );
 
+    // Listed programs cannot be used to bypass mandatory host discovery.
+    let contradictory = test_agent()
+        .plugin_host(false)
+        .process_plugin(ProcessPlugin::new([FIXTURES, "tide"]))
+        .build()
+        .await;
+    let error = contradictory
+        .err()
+        .expect("must refuse a non-host with a program");
+    assert_eq!(error.code(), Code::InvalidComposition);
+    assert!(error.message().contains("require a plugin host"));
+
     // So does one that exits before registering.
     let unknown = test_agent()
         .process_plugin(ProcessPlugin::new([FIXTURES, "no-such-fixture"]))

@@ -31,6 +31,12 @@ impl AgentApi for Relay {
     async fn open(&self, s: &str) -> Result<()> {
         self.inner.open(s).await
     }
+    async fn install_recovery(&self, s: &str) -> Result<Vec<Input>> {
+        self.inner.install_recovery(s).await
+    }
+    async fn run_recovery(&self, s: &str) -> Result<()> {
+        self.inner.run_recovery(s).await
+    }
     async fn close(&self, s: &str) -> Result<()> {
         self.inner.close(s).await
     }

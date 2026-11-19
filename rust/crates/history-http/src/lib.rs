@@ -530,6 +530,9 @@ impl HttpHistory {
     }
 }
 impl HistoryStore for HttpHistory {
+    fn supports_erasure(&self) -> bool {
+        true
+    }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
         let mut held = self.held.lock().unwrap();
         ensure!(

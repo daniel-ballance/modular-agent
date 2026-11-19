@@ -106,6 +106,12 @@ pub trait AgentApi: Send + Sync {
             .is_some_and(|budget| info["tokens"]["used"].as_u64().unwrap_or(0) >= budget))
     }
     async fn open(&self, session: &str) -> Result<()>;
+    /// Open without waiting for an interrupted turn. Returns inputs handed
+    /// back on recovery, in admission order.
+    async fn install_recovery(&self, session: &str) -> Result<Vec<Input>>;
+    /// Drive installed recovery. The interface must keep routing authorized
+    /// reads, answers and cancellation while this runs.
+    async fn run_recovery(&self, session: &str) -> Result<()>;
     async fn close(&self, session: &str) -> Result<()>;
     async fn submit(
         &self,
@@ -214,6 +220,9 @@ pub trait Lease: Send + Sync {
     }
 }
 pub trait HistoryStore: Send + Sync {
+    fn supports_erasure(&self) -> bool {
+        false
+    }
     /// Opt in to storing opaque HTTP service snapshots. `save` must durably
     /// replace a whole snapshot, and `acquire` must exclude another server,
     /// even before the first `save`.

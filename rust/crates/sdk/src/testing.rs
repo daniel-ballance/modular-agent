@@ -9,7 +9,12 @@ use crate::{
     tool::{Answer, Tool},
 };
 use serde_json::{Value, json};
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 mod environment;
 pub use environment::{ExecOutput, MemoryEnvironment, memory_environment, memory_environment_with};
@@ -107,6 +112,47 @@ impl Provider for Scripted {
     }
 }
 
+/// A shared answer queue and its verification handle. Pass a clone to the handler
+/// and call `assert_done` on the original after the agent has finished asking.
+#[derive(Clone)]
+pub struct Answers(Arc<Mutex<AnswerQueue>>);
+
+struct AnswerQueue {
+    pending: VecDeque<Answer>,
+    unexpected: Vec<Question>,
+}
+
+pub fn answers(list: impl IntoIterator<Item = Answer>) -> Answers {
+    Answers(Arc::new(Mutex::new(AnswerQueue {
+        pending: list.into_iter().collect(),
+        unexpected: Vec::new(),
+    })))
+}
+
+impl Answers {
+    pub fn answer(&self, question: Question) -> Answer {
+        let mut queue = self.0.lock().unwrap();
+        queue.pending.pop_front().unwrap_or_else(|| {
+            queue.unexpected.push(question);
+            Answer::Declined {
+                reason: Some("the test expected no more questions".into()),
+            }
+        })
+    }
+
+    pub fn assert_done(&self) -> Result<()> {
+        let queue = self.0.lock().unwrap();
+        if queue.pending.is_empty() && queue.unexpected.is_empty() {
+            return Ok(());
+        }
+        Err(crate::Error::msg(format!(
+            "{} unused answers; unexpected questions: {:?}",
+            queue.pending.len(),
+            queue.unexpected,
+        )))
+    }
+}
+
 /// An agent for tests: the scripted Provider and its model, ephemeral durability and a
 /// scratch project folder, unless told otherwise.
 pub fn test_agent() -> TestAgentBuilder {
@@ -159,19 +205,9 @@ impl TestAgentBuilder {
         self.builder = self.builder.on_question(handler);
         self
     }
-    /// A question handler that answers in order from a list, and declines anything more.
-    pub fn answers(self, answers: Vec<Answer>) -> Self {
-        let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
-            answers,
-        )));
-        self.on_question(move |_| {
-            let next = queue.lock().unwrap().pop_front();
-            async move {
-                next.unwrap_or(Answer::Declined {
-                    reason: Some("the test expected no more questions".into()),
-                })
-            }
-        })
+    /// Use a shared answer queue. Keep a clone to verify it with `Answers::assert_done`.
+    pub fn answers(self, queue: Answers) -> Self {
+        self.on_question(move |question| std::future::ready(queue.answer(question)))
     }
     pub fn plugin(mut self, plugin: crate::Plugin) -> Self {
         self.builder = self.builder.plugin(plugin);
@@ -258,6 +294,22 @@ pub mod fixtures {
     pub fn fixture(name: &str) -> Option<Plugin> {
         Some(match name {
             "tide" => Plugin::new("tide").tool(tide()),
+            "quay" => Plugin::new("quay").tool(Tool::new("moor", "Moor at a harbour.").run(
+                |_: TideInput, cx: ToolContext| async move {
+                    Err::<String, _>(cx.refuse("the quay is closed"))
+                },
+            )),
+            "pilot" => {
+                Plugin::new("pilot").tool(Tool::new("pilot", "Ask the pilot about a harbour.").run(
+                    |input: TideInput, cx: ToolContext| async move {
+                        let result = cx
+                            .tools()
+                            .call("tide", json!({"harbour":input.harbour}))
+                            .await?;
+                        Ok(format!("Pilot: {}", result.text()))
+                    },
+                ))
+            }
             "confirm" => Plugin::new("confirm").tool(confirm()),
             "gate" => Plugin::new("gate").on_tool_before(|before| async move {
                 Ok(if before.input.to_string().contains("forbidden") {
