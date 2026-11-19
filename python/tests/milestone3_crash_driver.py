@@ -11,7 +11,7 @@ from ma_durable_subagents import DurableSubagents
 from ma_fake import Fake, call, reply
 from ma_runtime import Runtime
 from ma_subagents import Subagents
-from modular_agent import build
+from ma_cli import build
 
 
 async def main():

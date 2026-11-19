@@ -125,7 +125,7 @@ async def demonstrate(output, offline=False, runtime="durable"):
     from ma_local.containment import delegated_root
     from ma_process import ProcessPlugin
     from ma_runtime import Runtime
-    from modular_agent import build
+    from ma_cli import build
 
     delegated_root()  # Refuse before inference if command containment is unavailable.
     output = output.resolve()

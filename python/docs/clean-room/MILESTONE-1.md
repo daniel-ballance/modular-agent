@@ -5,7 +5,7 @@ Milestone 1 is complete. No milestone 2 features were started.
 ## What was built
 
 The Harness, 14 plugin packages and a shared API package. The default
-composition is in `modular_agent/__init__.py`. All dependencies between plugins
+composition is in `ma_cli/__init__.py`. All dependencies between plugins
 go through the addressed API in `packages/core/ma_core/__init__.py`.
 The Harness hosts plugins, dispatches owner-defined hooks and holds open sessions.
 It contains no turn loop, model client, tool implementation or durable store.

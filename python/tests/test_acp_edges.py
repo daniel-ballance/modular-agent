@@ -159,7 +159,7 @@ async def test_command_actor_cannot_erase_or_change_settings_via_feature_plugin(
 
 async def test_acp_gates_declaration_metadata_and_protocol_errors(tmp_path, runtime_type):
     from ma_fake import Fake
-    from modular_agent import build
+    from ma_cli import build
 
     class Canary(Plugin):
         name = "canary"

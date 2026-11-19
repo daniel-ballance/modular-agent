@@ -11,7 +11,7 @@ from ma_core import AgentError, content
 from ma_core.wire import entry_out
 
 from ma_fake import Fake, call, reply
-from modular_agent import build
+from ma_cli import build
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVE = [str(ROOT / ".venv/bin/modular-agent-plugin")]

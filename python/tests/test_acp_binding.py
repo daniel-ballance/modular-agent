@@ -12,7 +12,7 @@ import pytest
 from acp_fixture import Client, prompt, running
 from ma_core import content
 from ma_fake import Fake, reply
-from modular_agent import build
+from ma_cli import build
 
 ROOT = Path(__file__).resolve().parents[1]
 

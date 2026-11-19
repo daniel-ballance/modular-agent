@@ -8,7 +8,7 @@ from ma_config import Config
 from ma_core import AgentError, Plugin
 from ma_fake import Fake
 from ma_harness import Harness
-from modular_agent import build
+from ma_cli import build
 
 
 class Example(Plugin):

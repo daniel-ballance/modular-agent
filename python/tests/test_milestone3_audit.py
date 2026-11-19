@@ -6,7 +6,7 @@ import pytest
 
 from ma_core import AgentError
 from ma_fake import call, reply
-from modular_agent import build
+from ma_cli import build
 from test_jobs_subagents import RoutedFake
 from test_questions import interface
 from test_terminal import process

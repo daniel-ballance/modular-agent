@@ -5,7 +5,7 @@ import pytest
 from ma_fake import Fake
 from ma_durable import Durable
 from ma_runtime import Runtime
-from modular_agent import build
+from ma_cli import build
 
 
 def pytest_addoption(parser):

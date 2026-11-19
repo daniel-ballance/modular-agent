@@ -10,7 +10,7 @@ from ma_core import AgentError, content
 from ma_fake import Fake, reply
 from ma_history.http import HTTPHistory, ServiceError
 
-from modular_agent import build
+from ma_cli import build
 
 
 async def test_lease_waits_and_never_reacquires_after_loss(tmp_path, monkeypatch):

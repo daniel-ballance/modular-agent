@@ -12,7 +12,7 @@ from ma_core import AgentError
 from ma_fake import Fake
 from ma_local import Local
 from ma_local.containment import journal, owner_identity, recover
-from modular_agent import build
+from ma_cli import build
 from test_swap import dead, pid_ready, spawn_driver, until
 
 
@@ -68,7 +68,7 @@ async def test_completed_background_double_fork_dies_with_agent(tmp_path, runtim
 import asyncio, sys
 from pathlib import Path
 from ma_fake import Fake
-from modular_agent import build
+from ma_cli import build
 async def main():
  h = await build(Path(sys.argv[1]), Fake())
  s = await h.api().session('create', project=sys.argv[2], settings={'model':'fake'})

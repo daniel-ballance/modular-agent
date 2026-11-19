@@ -11,7 +11,7 @@ from acp_fixture import running
 from ma_core import AgentError, content
 from ma_core.wire import entry_out
 from ma_fake import Fake, call, reply
-from modular_agent import build
+from ma_cli import build
 
 
 async def test_tenant_budget_spans_sessions_and_restarts(tmp_path, runtime_type, monkeypatch):

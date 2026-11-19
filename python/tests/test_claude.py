@@ -14,7 +14,7 @@ import ma_claude
 from ma_claude import Claude, MODEL, PREFIX, Transport, isolated_options
 from ma_core import AgentError, content, plain
 from ma_tools import DEFINITIONS
-from modular_agent import build
+from ma_cli import build
 
 
 def result():

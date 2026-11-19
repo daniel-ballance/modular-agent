@@ -1,3 +1,3 @@
-from modular_agent import main
+from ma_cli import main
 
 main()

@@ -4,7 +4,7 @@ import asyncio
 
 from ma_core import content
 from ma_fake import Fake, call, reply
-from modular_agent import build
+from ma_cli import build
 from test_jobs_subagents import RoutedFake
 from test_questions import interface
 from test_swap import until

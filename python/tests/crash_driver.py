@@ -10,7 +10,7 @@ from ma_core import content
 from ma_durable import Durable
 from ma_fake import Fake, call, reply
 from ma_runtime import Runtime
-from modular_agent import build
+from ma_cli import build
 
 
 def refuse(*args, **kwargs):

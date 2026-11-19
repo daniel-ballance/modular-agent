@@ -10,7 +10,7 @@ from ma_core import AgentError, Plugin, content
 from ma_fake import Fake, call, reply
 from ma_harness import Harness
 from ma_process import ProcessPlugin
-from modular_agent import build
+from ma_cli import build
 from test_swap import dead, pid_ready, until
 from test_vanilla import entries, paired, run
 

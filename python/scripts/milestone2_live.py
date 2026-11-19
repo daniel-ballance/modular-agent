@@ -195,7 +195,7 @@ async def main(output):
             os.close(fd)
         # Clean any old working-environment journal, even after a failed assertion.
         from ma_fake import Fake
-        from modular_agent import build
+        from ma_cli import build
 
         h = await build(home, Fake())
         await h.stop()
