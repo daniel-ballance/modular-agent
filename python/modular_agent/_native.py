@@ -235,7 +235,16 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
             except _NativeError as exc:
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
 
-        context = ToolContext(sid, call["actor"], call["id"], ask, progress, nested)
+        async def environment(operation: str, params: JsonObject) -> Json:
+            try:
+                return cast(
+                    Json,
+                    await self.api.call("environment", operation, {"session": sid, **params}, emit),
+                )
+            except Exception as exc:
+                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+
+        context = ToolContext(sid, call["actor"], call["id"], ask, progress, nested, environment)
         result = await self.registrar._tools[call["name"]]._run(call["input"], context)
         return cast(JsonObject, result_in(result, call["id"]))
 
