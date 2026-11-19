@@ -153,4 +153,3 @@ test("prompt stream lag includes the last delivered kept entry (or null)", async
   assert.equal((await resumed.next()).value.data.id, entries[entries.findIndex(e => e.id === cursor) + 1].id);
   await resumed.return?.();
 });
-
