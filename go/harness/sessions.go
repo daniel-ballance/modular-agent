@@ -150,6 +150,10 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		}
 		return "", err
 	}
+	if _, err = c.h.API().Invoke(ctx, "session.prepare", api.SessionPrepare{Session: clone(s.data)}); err != nil {
+		_ = c.CloseSession(id)
+		return "", err
+	}
 	if _, err = c.h.API().Invoke(ctx, "session.start", clone(s.data)); err != nil {
 		_ = c.CloseSession(id)
 		return "", err
@@ -218,6 +222,10 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	s := &session{id: id, project: project, data: snap, lease: lease, last: recordedOutcome(snap), opening: true}
 	if err = c.registerOpen(ctx, s, host, savedApproval); err != nil {
 		_ = lease.Close()
+		return err
+	}
+	if _, err = c.h.API().Invoke(ctx, "session.prepare", api.SessionPrepare{Session: clone(snap), Reopened: true}); err != nil {
+		_ = c.StopSession(id)
 		return err
 	}
 	if err = c.recoverNested(s); err != nil {
@@ -1139,7 +1147,18 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	}
 	ctx = api.WithExecution(api.AsActor(ctx, in.Actor), api.Execution{Session: snap.ID, Turn: turnID})
 	ctx = api.WithJobContributors(ctx, in.Actor, in.ViaActor, in.ReleasedBy)
-	before := api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content}
+	var tools []api.Tool
+	seen := map[string]bool{}
+	for _, source := range h.API().All("tools.") {
+		for _, tool := range source.(api.ToolSource).Tools(snap) {
+			if seen[tool.Name] {
+				return api.Outcome{Status: "failed", Error: "duplicate tool " + tool.Name}
+			}
+			seen[tool.Name] = true
+			tools = append(tools, tool)
+		}
+	}
+	before := api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content, Tools: tools}
 	prepared, err := h.API().Invoke(ctx, "turn.prepare", before)
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
@@ -1159,17 +1178,6 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 			return unavailableTurn(ctx, ports, selectionView.Settings, before, nil, resume, err)
 		}
 		return api.Outcome{Status: "failed", Error: err.Error()}
-	}
-	var tools []api.Tool
-	seen := map[string]bool{}
-	for _, source := range h.API().All("tools.") {
-		for _, tool := range source.(api.ToolSource).Tools(snap) {
-			if seen[tool.Name] {
-				return api.Outcome{Status: "failed", Error: "duplicate tool " + tool.Name}
-			}
-			seen[tool.Name] = true
-			tools = append(tools, tool)
-		}
 	}
 	h.mu.RLock()
 	owner := h.caps["runtime"].owner

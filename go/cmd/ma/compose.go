@@ -48,7 +48,6 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		}
 		return modular.New(ctx, append(opts, modular.WithConformanceFixtures(), modular.WithTool(files.FixtureBash()), modular.WithTool(files.Tools("")[0]))...)
 	}
-	var agent *modular.Agent
 	if !o.acp {
 		opts = append(opts, mcp.WithServers(d.mcp(o.project, stderr), func(err error) { fmt.Fprintln(stderr, err) }))
 	}
@@ -79,10 +78,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 				return err
 			}
 			return r.OnTurnBefore(func(_ context.Context, turn modular.TurnBefore) (modular.TurnContribution, error) {
-				defs, err := agent.ToolCatalog(turn.SessionID)
-				if err != nil {
-					return modular.TurnContribution{}, err
-				}
+				defs := turn.Tools
 				// List the file tools in the Rust definition order, then MCP names.
 				order := map[string]int{"read": 0, "exec": 1, "edit": 2, "write": 3, "find": 4, "list": 5}
 				rank := func(s string) int {
@@ -101,8 +97,8 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 				if err != nil {
 					return modular.TurnContribution{}, err
 				}
-				skills, _ := discover(skillFolders(d.config, d.home, o.project))
-				prompt, err := systemPrompt(filepath.Join(d.config, "AGENTS.md"), o.project, skills, catalog, time.Now())
+				skills, _ := discover(skillFolders(d.config, d.home, turn.Project))
+				prompt, err := systemPrompt(filepath.Join(d.config, "AGENTS.md"), turn.Project, skills, catalog, time.Now())
 				return modular.TurnContribution{System: prompt}, err
 			})
 		}}))
@@ -139,9 +135,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 			opts = append(opts, modular.WithPluginHost(true), modular.WithProcessPlugin(modular.ProcessPlugin{Command: []string{"node", script}, Env: env}))
 		}
 	}
-	var err error
-	agent, err = modular.New(ctx, append(opts, modular.WithSettings(settings))...)
-	return agent, err
+	return modular.New(ctx, append(opts, modular.WithSettings(settings))...)
 }
 func scripted(path, log string) (modular.Provider, error) {
 	var script []modulartest.Reply

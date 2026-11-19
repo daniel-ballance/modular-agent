@@ -2,12 +2,12 @@ package modular
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"time"
 
 	"github.com/OWNER/modular-agent/go/api"
 	"github.com/OWNER/modular-agent/go/mcptools"
-	"github.com/OWNER/modular-agent/go/portable"
 )
 
 // MCPServer describes a trusted stdio or Streamable HTTP server.
@@ -26,8 +26,9 @@ func WithConformanceFixtures() Option {
 
 // SessionInfo identifies a stored session without opening or recovering it.
 type SessionInfo struct {
-	ID, Project, Model string
-	LastActivity       time.Time
+	ID, Project, Model, Title string
+	Settings                  Settings
+	CreatedAt, LastActivity   time.Time
 }
 
 // Sessions lists saved sessions. An empty project selects every project.
@@ -38,17 +39,73 @@ func (s HistoryStore) Sessions(ctx context.Context, project string) ([]SessionIn
 	if s.make == nil {
 		return nil, &Error{Code: NotSupported, Message: "history store is not readable"}
 	}
-	if project != "" {
-		p, err := filepath.EvalSymlinks(project)
-		if err != nil {
-			return nil, err
-		}
-		project, err = filepath.Abs(p)
+	return storedSessions(s.make, project)
+}
+
+// SessionInfo returns stored metadata without leasing or recovering the session.
+func (s HistoryStore) SessionInfo(ctx context.Context, id string) (SessionInfo, error) {
+	rows, err := s.Sessions(ctx, "")
+	return findSessionInfo(rows, id, err)
+}
+
+// Sessions lists stored sessions without opening them. An empty project selects all.
+func (a *Agent) Sessions(ctx context.Context, project ...string) ([]SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, appError(err, CancelledCode)
+	}
+	if len(project) > 1 {
+		return nil, &Error{Code: InvalidParams, Message: "at most one project filter"}
+	}
+	filter := ""
+	if len(project) == 1 {
+		var err error
+		filter, err = canonicalSessionProject(project[0])
 		if err != nil {
 			return nil, err
 		}
 	}
-	store, err := s.make()
+	rows, err := a.a.List(filter)
+	return sessionInfos(rows), appError(err, Internal)
+}
+
+// SessionInfo returns one stored session without opening it.
+func (a *Agent) SessionInfo(ctx context.Context, id string) (SessionInfo, error) {
+	rows, err := a.Sessions(ctx)
+	return findSessionInfo(rows, id, err)
+}
+
+func findSessionInfo(rows []SessionInfo, id string, err error) (SessionInfo, error) {
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	for _, row := range rows {
+		if row.ID == id {
+			return row, nil
+		}
+	}
+	return SessionInfo{}, &Error{Code: NotFound, Message: "session not found"}
+}
+
+func canonicalSessionProject(project string) (string, error) {
+	if project != "" {
+		p, err := filepath.EvalSymlinks(project)
+		if err != nil {
+			return "", appError(err, InvalidParams)
+		}
+		project, err = filepath.Abs(p)
+		if err != nil {
+			return "", appError(err, InvalidParams)
+		}
+	}
+	return project, nil
+}
+
+func storedSessions(open func() (api.Store, error), project string) ([]SessionInfo, error) {
+	project, err := canonicalSessionProject(project)
+	if err != nil {
+		return nil, err
+	}
+	store, err := open()
 	if err != nil {
 		return nil, appError(err, Internal)
 	}
@@ -59,43 +116,27 @@ func (s HistoryStore) Sessions(ctx context.Context, project string) ([]SessionIn
 	if err != nil {
 		return nil, appError(err, Internal)
 	}
+	return sessionInfos(snaps), nil
+}
+
+func sessionInfos(snaps []api.Session) []SessionInfo {
 	sessions := make([]SessionInfo, 0, len(snaps))
 	for _, snap := range snaps {
-		info := SessionInfo{ID: snap.ID, Project: snap.Project, Model: snap.Settings.Model}
+		info := SessionInfo{ID: snap.ID, Project: snap.Project, Model: snap.Settings.Model, Settings: sessionSettings(snap.Settings)}
+		var meta struct{ Title string }
+		_ = json.Unmarshal(snap.HistoryMeta, &meta)
+		info.Title = meta.Title
 		for _, e := range snap.Entries {
+			if info.CreatedAt.IsZero() || e.Time.Before(info.CreatedAt) {
+				info.CreatedAt = e.Time
+			}
 			if e.Time.After(info.LastActivity) {
 				info.LastActivity = e.Time
 			}
 		}
 		sessions = append(sessions, info)
 	}
-	return sessions, nil
-}
-
-// ToolCatalog returns definitions plugins can invoke in the specified session.
-// Pass an empty session ID to enumerate globally registered tools.
-func (a *Agent) ToolCatalog(sessionID string) ([]ToolDefinition, error) {
-	snap := api.Session{Project: a.project}
-	if sessionID != "" {
-		var err error
-		snap, err = a.a.Snapshot(sessionID)
-		if err != nil {
-			return nil, appError(err, NotOpen)
-		}
-	}
-	out := []ToolDefinition{}
-	for _, v := range a.a.All("tools.") {
-		for _, d := range v.(api.ToolSource).Tools(snap) {
-			if api.CanCall(d, "plugin") {
-				var def ToolDefinition
-				if err := decodeInto(portable.Tool(d), &def); err != nil {
-					return nil, err
-				}
-				out = append(out, def)
-			}
-		}
-	}
-	return out, nil
+	return sessions
 }
 
 // WithInputTransform expands an input before the built-in command handler runs.

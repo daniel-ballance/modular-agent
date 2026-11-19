@@ -408,20 +408,20 @@ func (s *Session) Settings(ctx context.Context) (Settings, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := snap.Settings
+	return sessionSettings(snap.Settings), nil
+}
+
+func sessionSettings(b api.Settings) Settings {
 	out := Settings{"reasoning": b.Thinking, "approval": api.ApprovalWire(b.Approval), "maxSteps": b.MaxSteps, "maxOutput": b.MaxOutput}
 	if b.ModelTools == nil {
 		out["modelTools"] = nil
 	} else {
 		out["modelTools"] = slices.Clone(*b.ModelTools)
 	}
-	for _, m := range s.agent.Models() {
-		if m.ModelRef.String() == b.Model {
-			out["model"] = m.ModelRef
-			break
-		}
+	if provider, id, ok := strings.Cut(b.Model, "/"); ok {
+		out["model"] = ModelRef{Provider: provider, ID: id}
 	}
-	return out, nil
+	return out
 }
 func (s *Session) SetSetting(ctx context.Context, key string, value any) error {
 	s.agent.settingsMu.Lock()

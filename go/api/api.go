@@ -498,7 +498,13 @@ type Forked struct {
 	Session Session
 	Mapping map[string]string
 }
+type SessionPrepare struct {
+	Session  Session
+	Reopened bool
+}
+
 type BeforeTurn struct {
+	Tools   []Tool
 	Turn    string
 	Input   Content
 	Session Session

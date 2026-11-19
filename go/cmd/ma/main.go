@@ -324,14 +324,12 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 					projectSettings["reasoning"] = o.thinking
 				}
 				if id := modular.ACPReopeningSession(ctx); id != "" && !config {
-					rows, err := store.Sessions(ctx, project)
+					row, err := store.SessionInfo(ctx, id)
 					if err != nil {
 						return nil, err
 					}
-					for _, row := range rows {
-						if row.ID == id && strings.HasPrefix(row.Model, "claude/") {
-							projectSettings["model"] = row.Model
-						}
+					if row.Project == project && strings.HasPrefix(row.Model, "claude/") {
+						projectSettings["model"] = row.Model
 					}
 				}
 				if o.model == "" && chosenModel(projectSettings) == "" && chosenModel(settings) != "" && !config {
