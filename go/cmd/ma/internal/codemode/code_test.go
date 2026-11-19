@@ -41,6 +41,7 @@ func TestMontyCallsAndLimits(t *testing.T) {
 	}{
 		{"invoke", "print(tools.read(path='in.txt').upper())", "WHITBY", false, 1},
 		{"alias", "t = tools\nt.read('in.txt')", "whitby", false, 1},
+		{"positional and None", "tools.read('in.txt', None, None)", "whitby", false, 1},
 		{"count", "tools.read('in.txt')\ntools.read('in.txt')", "more than 1 function calls", true, 1},
 		{"bad args", "tools.read(other='x')", "unexpected argument other", true, 0},
 		{"exception", "tools.read('missing')", "read() failed: file missing", true, 1},

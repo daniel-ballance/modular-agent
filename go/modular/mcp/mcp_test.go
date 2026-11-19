@@ -41,18 +41,21 @@ func TestStreamableHTTPStartsOnlyValidServers(t *testing.T) {
 	}
 	good, bad := newServer(false), newServer(true)
 	var warnings []string
-	a := modulartest.Agent(t, tools.WithServers([]tools.Server{{Name: "bad", URL: bad.URL, Headers: map[string]string{"X-Fixture": "yes"}}, {Name: "fixture", URL: good.URL, Headers: map[string]string{"X-Fixture": "yes"}}, {Name: "missing", Command: "/not-an-installed-mcp-program"}}, func(err error) { warnings = append(warnings, err.Error()) }), modulartest.Script(`[{"toolCalls":[{"name":"mcp_fixture__echo","input":{"text":"harbour"}}]},{"text":"ok"}]`))
+	a := modulartest.Agent(t, tools.WithServers([]tools.Server{{Name: "bad", URL: bad.URL, Headers: map[string]string{"X-Fixture": "yes"}}, {Name: "fixture", URL: good.URL, Headers: map[string]string{"X-Fixture": "yes"}}, {Name: "missing", Command: "/not-an-installed-mcp-program"}}, func(err error) { warnings = append(warnings, err.Error()) }), modular.WithPlugin(modular.Plugin{Name: "catalog-check", Setup: func(r *modular.Registrar) error {
+		return r.OnTurnBefore(func(_ context.Context, turn modular.TurnBefore) (modular.TurnContribution, error) {
+			defs := slices.DeleteFunc(turn.Tools, func(d modular.ToolDefinition) bool { return !strings.HasPrefix(d.Name, "mcp_") })
+			if len(defs) != 1 || defs[0].Name != "mcp_fixture__echo" {
+				return modular.TurnContribution{}, fmt.Errorf("MCP definitions: %v", defs)
+			}
+			return modular.TurnContribution{}, nil
+		})
+	}}), modulartest.Script(`[{"toolCalls":[{"name":"mcp_fixture__echo","input":{"text":"harbour"}}]},{"text":"ok"}]`))
 	if len(warnings) != 2 || !strings.Contains(warnings[0], "bad") || !strings.Contains(warnings[1], "missing") {
 		t.Fatal(warnings)
 	}
 	session, err := a.Session(t.Context())
 	if err != nil {
 		t.Fatal(err)
-	}
-	defs, err := a.ToolCatalog(session.ID())
-	defs = slices.DeleteFunc(defs, func(d modular.ToolDefinition) bool { return !strings.HasPrefix(d.Name, "mcp_") })
-	if err != nil || len(defs) != 1 || defs[0].Name != "mcp_fixture__echo" {
-		t.Fatal(defs, err)
 	}
 	res, err := session.Prompt(t.Context(), "Echo.")
 	if err != nil {
