@@ -122,7 +122,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 			opts = append(opts, modular.WithProvider(subscription.Provider(v, models, d.auth())))
 		}
 		script := d.claudeSidecar()
-		if containsClaude(settings) || o.command == "models" && script != "" {
+		if containsClaude(settings) || o.loadClaude || o.command == "models" && script != "" {
 			if script == "" {
 				return nil, errors.New("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR")
 			}

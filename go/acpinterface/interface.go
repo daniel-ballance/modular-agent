@@ -108,7 +108,7 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 	if len(configs) > 0 {
 		s.resources = configs[0]
 		if s.resources.Compose != nil {
-			s.projects = &projectHosts{compose: s.resources.Compose, hosts: map[string]*server{}}
+			s.projects = &projectHosts{compose: s.resources.Compose, hosts: map[projectKey]*server{}}
 		}
 	}
 	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, in, acp.ConnectionOptions{MaxFrameSize: (64 << 20) + 2})

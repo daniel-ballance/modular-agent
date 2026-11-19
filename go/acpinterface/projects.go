@@ -28,10 +28,12 @@ type Project struct {
 	Close       func() error
 }
 
+type projectKey struct{ project, savedModel string }
+
 type projectHosts struct {
 	mu       sync.Mutex
 	compose  func(context.Context, string, string) (Project, error)
-	hosts    map[string]*server
+	hosts    map[projectKey]*server
 	cleanups []func()
 	closed   bool
 }
@@ -50,6 +52,7 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 	if err != nil {
 		return nil, acp.NewInvalidParams(map[string]string{"reason": err.Error()})
 	}
+	key := projectKey{project: project}
 	if id != "" {
 		if host := s.sessionHost(id); host != s {
 			if host.project != project {
@@ -67,6 +70,7 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 		for _, row := range list {
 			if row.ID == id {
 				found = true
+				key.savedModel = row.Settings.Model
 				break
 			}
 		}
@@ -80,8 +84,13 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 	if h.closed || s.ctx.Err() != nil {
 		return nil, acpError("not_open")
 	}
-	if host := h.hosts[project]; host != nil {
+	if host := h.hosts[key]; host != nil {
 		return host, nil
+	}
+	if key.savedModel != "" {
+		if host := h.hosts[projectKey{project: project}]; host != nil && host.offers(key.savedModel) {
+			return host, nil
+		}
 	}
 	part, err := h.compose(s.ctx, project, id)
 	if err != nil {
@@ -94,13 +103,24 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 		peer: s.peer, initialized: true, binding: s.binding, capabilities: s.capabilities,
 		represents: s.represents, sessions: map[string]*attachment{}, resources: s.resources}
 	unsubscribe := host.subscribe()
-	h.hosts[project] = host
+	h.hosts[key] = host
 	h.cleanups = append(h.cleanups, func() {
 		unsubscribe()
 		host.stop()
 		_ = part.Close()
 	})
 	return host, nil
+}
+
+func (s *server) offers(model string) bool {
+	for _, p := range s.a.All("provider.") {
+		for _, m := range p.(api.Provider).Catalog() {
+			if modelMatches(m, model) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *server) sessionHost(id string) *server {

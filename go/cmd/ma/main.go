@@ -56,6 +56,7 @@ Files: settings.json, mcp.json, models.json, AGENTS.md and skills/ in
 type options struct {
 	command, provider, project, session, model, thinking                            string
 	prompt                                                                          *string
+	loadClaude                                                                      bool
 	device, resume, all, trust, transient, verbose, json, history, declaration, acp bool
 }
 
@@ -291,14 +292,14 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 	if o.thinking != "" {
 		settings["reasoning"] = o.thinking
 	}
-	if os.Getenv("MODULAR_AGENT_SCRIPT") == "" && !config && chosenModel(settings) == "" && o.command != "models" && !o.history && !o.declaration {
+	if os.Getenv("MODULAR_AGENT_SCRIPT") == "" && !config && !o.acp && chosenModel(settings) == "" && o.command != "models" && !o.history && !o.declaration {
 		name, err := d.defaultModel(ctx)
 		if err != nil {
 			return err
 		}
 		if name != "" {
 			settings["model"] = name
-		} else if !o.acp {
+		} else {
 			return errors.New("no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`.")
 		}
 	}
@@ -329,11 +330,17 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 						return nil, err
 					}
 					if row.Project == project && strings.HasPrefix(row.Model, "claude/") {
-						projectSettings["model"] = row.Model
+						projectOptions.loadClaude = true
 					}
 				}
-				if o.model == "" && chosenModel(projectSettings) == "" && chosenModel(settings) != "" && !config {
-					projectSettings["model"] = chosenModel(settings)
+				if chosenModel(projectSettings) == "" && !config && os.Getenv("MODULAR_AGENT_SCRIPT") == "" {
+					model, err := d.defaultModel(ctx)
+					if err != nil {
+						return nil, err
+					}
+					if model != "" {
+						projectSettings["model"] = model
+					}
 				}
 				return d.compose(ctx, projectOptions, projectSettings, store, stderr)
 			},
