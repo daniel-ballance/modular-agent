@@ -84,27 +84,25 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 	const plugins = [projectTrust(home), ...vanillaPlugins(options), ...historyService, ...fromSettings.plugins].map((p) => (remote.has(p.name) && p.spawn ? remotePlugin(p) : p));
 	await harness.load(plugins);
 	const owned = new Set<string>();
-	for (const spec of options.externalPlugins ?? pluginSpecsFromEnv()) {
-		try {
+	try {
+		for (const spec of options.externalPlugins ?? pluginSpecsFromEnv()) {
 			const external = await startExternalPlugin(spec, { project, home });
-			const detail = external.refusal(harness, owned);
-			if (detail) {
-				await external.stop("refused", detail);
-				harness.api(external.plugin.name).reportProblem("registration", new Error(detail));
-				continue;
+			try {
+				const detail = external.refusal(harness, owned);
+				if (detail) throw new Error(detail);
+				const plugin = external.plugin;
+				for (const item of external.replacements) harness.replacements.set(item, plugin.name);
+				await harness.load([plugin]);
+				if (!harness.plugins().includes(plugin.name)) throw new Error("The host refused to load this plugin");
+				for (const item of external.items) owned.add(item);
+			} catch (error) {
+				await external.stop("refused", error instanceof Error ? error.message : String(error));
+				throw error;
 			}
-			const plugin = external.plugin;
-			for (const item of external.replacements) harness.replacements.set(item, plugin.name);
-			await harness.load([plugin]);
-			if (!harness.plugins().includes(plugin.name)) {
-				for (const item of external.replacements) harness.replacements.delete(item);
-				await external.stop("refused", "The host refused to load this plugin");
-				continue;
-			}
-			for (const item of external.items) owned.add(item);
-		} catch (error) {
-			harness.api(spec.command[0]).reportProblem("registration", error);
 		}
+	} catch (error) {
+		await harness.stop();
+		throw error;
 	}
 	return harness;
 }
