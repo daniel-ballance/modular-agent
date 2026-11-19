@@ -65,16 +65,17 @@ function readTurn(entries: HistoryEntry[], end: HistoryEntry): PromptResult {
   const turn = entries.filter(e => e.turnId === end.turnId);
   const order = new Map<string, number>();
   for (const e of turn) {
-    if (e.message?.role === "assistant") {
+    if (e.kind === "response" && e.modelVisible && e.message?.role === "assistant") {
       for (const part of e.message.content.filter(isToolCall)) order.set(part.id, order.size);
     }
   }
   const results = turn.flatMap(e => {
     if (e.erased || e.kind !== "toolResult" || e.message?.role !== "toolResult") return [];
     const { content, toolCallId: callId, toolName: name } = e.message;
+    if (!order.has(callId)) return [];
     const { status, value } = e.data as { status: ToolStatus; value?: unknown };
     return [{ callId, name, content, status, value, text: () => textOf(content) }];
-  }).sort((a, b) => (order.get(a.callId) ?? Infinity) - (order.get(b.callId) ?? Infinity));
+  }).sort((a, b) => order.get(a.callId)! - order.get(b.callId)!);
   return {
     inputId: turn.find(e => e.kind === "input")?.inputId ?? "", disposition: "turn", turnId: end.turnId,
     text: result.text ?? "", value: result.value, openToolCalls: result.openToolCalls, outcome, usage,
@@ -112,10 +113,10 @@ export class Session {
     return checked(() => this.#api.input(this.id, { content: structuredClone(input), when: timing, key: options.key, actorId: local, resultShape }));
   }
 
-  async #run(input: Input, options: PromptOptions, stream?: { event(e: AgentEvent): void; admitted(id: string): void }): Promise<PromptResult> {
+  async #run(input: Input, options: PromptOptions, stream?: { event(e: AgentEvent): void; admitted(id: string): void; lag(): void }): Promise<PromptResult> {
     this.#check();
     let wake: () => void = () => {};
-    const off = this.#api.follow(this.id, { recipient: local }, e => { stream?.event(e); wake(); });
+    const off = this.#api.follow(this.id, { recipient: local, onLag: stream?.lag }, e => { stream?.event(e); wake(); });
     try {
       const receipt = await this.send(input, "now", options) as InputReceipt & { handled?: boolean };
       const id = receipt.inputId;
@@ -149,6 +150,7 @@ export class Session {
     let result: PromptResult | undefined;
     let failure: unknown;
     let overflow = false;
+    let cursor: string | null = null;
     let admission: string | undefined;
     let turn: string | undefined;
     const run = this.#run(input, options, {
@@ -158,9 +160,10 @@ export class Session {
         wake();
       },
       admitted(id) { admission = id; wake(); },
+      lag() { overflow = true; wake(); },
     }).then(r => { result = r; }, e => { failure = e; }).finally(() => { settled = true; wake(); });
     while (!settled || queue.length) {
-      if (overflow) throw new AgentError("lost", "Prompt event reader fell behind");
+      if (overflow) throw new AgentError("lost", "Prompt event reader fell behind", { fromEntry: cursor });
       if (settled) turn ??= result?.turnId;
       if (admission && !turn) turn = this.#api.history(this.id, { all: true })
         .find(e => e.kind === "input" && inputIdOf(e) === admission)?.turnId;
@@ -168,6 +171,8 @@ export class Session {
         for (const e of queue.splice(0)) {
           if (e.turnId !== turn && !((e.type === "entry" || e.type === "entry.added") && e.data?.turnId === turn)) continue;
           const event = eventOf(e);
+          if (overflow) throw new AgentError("lost", "Prompt event reader fell behind", { fromEntry: cursor });
+          if (event?.type === "entry") cursor = event.data.id;
           if (event && event.type !== "turnEnded") yield event;
         }
       } else if (settled) break;
@@ -183,21 +188,20 @@ export class Session {
     };
   }
 
-  async *events(fromEntry?: string): AsyncIterable<Event> {
+  async *events(fromEntry?: string | null): AsyncIterable<Event> {
     this.#check();
     const entries = this.#api.history(this.id, { all: true });
-    const index = fromEntry === undefined ? -1 : entries.findIndex(e => e.id === fromEntry);
-    if (fromEntry !== undefined && index < 0) throw new AgentError("not_found", "Unknown entry cursor");
+    const index = fromEntry == null ? -1 : entries.findIndex(e => e.id === fromEntry);
+    if (fromEntry != null && index < 0) throw new AgentError("not_found", "Unknown entry cursor");
     let wake = () => {};
     const queue: AgentEvent[] = [];
     let dropped = false;
-    let cursor = fromEntry;
+    let cursor: string | null = null;
     const lag = () => { dropped = true; wake(); };
     // Snapshot the committed watermark and subscribe synchronously. Gate replay
     // on demand so a long history alone cannot make a new subscriber lag.
     const off = this.#api.follow(this.id, { recipient: local, onLag: lag }, e => {
       if (queue.length >= 1024) {
-        if (e.type === "model.output" || e.type === "tool.progress") return;
         lag();
         off();
       } else queue.push(e);
@@ -209,7 +213,7 @@ export class Session {
       if (dropped || this.#owner.interruption.aborted) throw new AgentError("lost", "Session event stream disconnected", { fromEntry: cursor });
     };
     try {
-      if (index >= 0 && (entries[index].erased || !await this.#api.gateOutput(this.id, local, "entry", entries[index]))) {
+      if (index >= 0 && !await this.#api.gateOutput(this.id, local, "entry", entries[index])) {
         throw new AgentError("not_found", "Unknown entry cursor");
       }
       for (const entry of entries.slice(index + 1)) {
@@ -262,6 +266,11 @@ export class Session {
     this.#check();
     if (typeof key !== "string" || !key) throw new AgentError("invalid_params", "A setting key is required");
     await checked(() => this.#api.setSetting(this.id, key, structuredClone(value), local), "invalid_params");
+  }
+  async erase(entryIds: string[]): Promise<import("@modular-agent/harness").ErasureReport> {
+    this.#check();
+    if (this.#api.declaration(this.id).erasure !== true) throw new AgentError("not_supported", "This store does not support erasure");
+    return checked(() => this.#api.erase(this.id, entryIds, local));
   }
   async cancel(): Promise<{ inputId: string; content: Content }[]> {
     this.#check();

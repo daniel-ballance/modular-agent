@@ -7,14 +7,17 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createInterface } from "node:readline";
+import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { client, methods, ndJsonStream, PROTOCOL_VERSION, type SessionNotification } from "@agentclientprotocol/sdk";
-import { createAgent, fileHistory, httpHistory, memoryHistory, serveHistory } from "@modular-agent/core";
-import { testAgent } from "@modular-agent/core/testing";
+import { createAgent, fileHistory, httpHistory, memoryHistory, serveHistory, tool } from "@modular-agent/core";
+import { restart, testAgent } from "@modular-agent/core/testing";
 import { openai } from "@modular-agent/openai";
 import { anthropic } from "@modular-agent/anthropic";
+import { fixture } from "../src/index.js";
 
 test("guide 03 loads the tide from a fixture program", async () => {
   const node = process.execPath;
@@ -118,6 +121,75 @@ test("ACP serves an SDK agent on stdio", { timeout: 5_000 }, async t => {
   await done;
 });
 
+test("ACP resume returns while recovered work waits for the client's answer", { timeout: 10_000 }, async t => {
+  const project = await mkdtemp(join(tmpdir(), "ma-acp-recover-"));
+  const dataDir = join(project, "state");
+  t.after(() => rm(project, { recursive: true, force: true }));
+  let started!: () => void;
+  const ready = new Promise<void>(r => { started = r; });
+  const hold = tool({ name: "hold", description: "Wait until interrupted", input: { type: "object" }, async run(_, cx) {
+    started();
+    await delay(30_000, undefined, { signal: cx.cancelled });
+  } });
+  const first = await testAgent({ project, dataDir, durability: "durable", tools: [hold], plugins: [fixture("confirm")], script: [{ toolCalls: [{ name: "hold", input: {} }] }] });
+  t.after(() => first.close());
+  const session = await first.session();
+  const interrupted = assert.rejects(session.prompt("Before crash"), { code: "lost" });
+  await ready;
+  await (await restart(first)).close();
+  await interrupted;
+
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../src/acp-agent.js", import.meta.url)), dataDir],
+    { cwd: project, stdio: ["pipe", "pipe", "inherit"] });
+  const closed = once(child, "close");
+  t.after(async () => { child.kill(); await closed; });
+  const updates: SessionNotification[] = [];
+  const app = client({ name: "sdk-client" }).onNotification(methods.client.session.update, ({ params }) => { updates.push(params); });
+  const cx = app.connect(ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>)).agent;
+  await cx.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+  const sessionId = session.id;
+  await cx.request(methods.agent.session.resume, { sessionId, cwd: project, mcpServers: [] });
+  const ext = cx.request.bind(cx) as (method: string, params: object) => Promise<unknown>;
+  let question: { id: string; question: string; answerable: boolean } | undefined;
+  for (let i = 0; i < 100 && !question; i++) {
+    const { requests } = await ext("_modular-agent/requests", { sessionId }) as { requests: NonNullable<typeof question>[] };
+    question = requests[0];
+    if (!question) await delay(20);
+  }
+  assert.equal(question?.question, "Recover?");
+  assert.equal(question.answerable, true);
+  await ext("_modular-agent/answer", { sessionId, requestId: question.id, value: "yes" });
+  const reply = await cx.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "Continue" }] });
+  assert.equal(reply.stopReason, "end_turn");
+  assert.ok(updates.some(({ update }) => update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" && update.content.text === "Fresh turn."));
+  child.stdin.end();
+  await closed;
+});
+
+test("setup-discovered in-process registration answers initialize with not_supported", { timeout: 5_000 }, async t => {
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { definePlugin, serve, tool } from "@modular-agent/core";
+    try {
+      await serve(definePlugin({ name: "configured", setup(r) {
+        if (r.config().enabled) r.tool(tool({ name: "local", description: "Local", input: { type: "object" }, inProcessOnly: true, run() {} }));
+      } }));
+    } catch { process.exitCode = 1; }
+  `], { stdio: ["pipe", "pipe", "inherit"] });
+  const closed = once(child, "close");
+  t.after(async () => { child.kill(); await closed; });
+  const lines = createInterface({ input: child.stdout });
+  const reply = once(lines, "line");
+  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "plugin/initialize", params: {
+    binding: "modular-agent-plugin/1", data: "modular-agent-data/1", project: process.cwd(), home: tmpdir(), config: { enabled: true },
+  } }) + "\n");
+  const [line] = await reply;
+  assert.deepEqual(JSON.parse(line), { jsonrpc: "2.0", id: 1, error: {
+    code: -32000, message: "configured: cannot serve tool local", data: { code: "not_supported" },
+  } });
+  child.stdin.end();
+  assert.deepEqual(await closed, [1, null]);
+});
+
 test("a kept session reopens over the history HTTP binding", { timeout: 10_000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), "ma-http-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -145,8 +217,8 @@ for (const placement of ["file", "memory", "relay"] as const) {
     const tokenFile = join(dir, "token");
     await writeFile(tokenFile, randomBytes(32).toString("hex") + "\n", { mode: 0o600 });
     const options = { address: "127.0.0.1:0", tokenFile };
-    const store = placement === "file" ? fileHistory(join(dir, "archive")) : memoryHistory();
-    const direct = await serveHistory(store, options);
+    const store = placement === "memory" ? memoryHistory() : fileHistory(join(dir, "archive"));
+    const direct = await serveHistory(store, { ...options, testOnly: placement === "memory" });
     let relay: Awaited<ReturnType<typeof serveHistory>> | undefined;
     t.after(async () => { await relay?.close(); await direct.close(); await rm(dir, { recursive: true, force: true }); });
     if (placement === "relay") relay = await serveHistory(httpHistory(direct.url, tokenFile), options);
@@ -167,7 +239,8 @@ test("serving a memory history handle exposes its existing records, without bypa
   const a = await testAgent({ history, script: [{ text: "From local history" }] });
   const local = await a.session();
   await local.prompt("First");
-  const service = await serveHistory(history, { address: "127.0.0.1:0", tokenFile });
+  await assert.rejects(serveHistory(history, { address: "127.0.0.1:0", tokenFile }), { code: "not_supported", message: /MemoryHistory/ });
+  const service = await serveHistory(history, { address: "127.0.0.1:0", tokenFile, testOnly: true });
   t.after(async () => { await a.close(); await service.close(); await rm(dir, { recursive: true, force: true }); });
   const reader = await testAgent({ history: httpHistory(service.url, tokenFile), script: [] });
   t.after(() => reader.close());

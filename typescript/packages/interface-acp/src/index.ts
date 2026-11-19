@@ -546,7 +546,7 @@ export class AcpInterface implements InterfaceCapability {
 			queuedJobReportsAfterRestart: d.queuedJobReportsAfterRestart,
 			movingWithUnfinishedWork: d.movingWithUnfinishedWork,
 			mixedActorInput: d.mixedActorInput,
-			settingsDuringTurn: "nextTurn",
+			settingsDuringTurn: d.settingsDuringTurn ?? "nextTurn",
 			erasureDuringTurn: d.erasureDuringTurn,
 			commandContainment: d.commandContainment,
 			...(d.confinesFiles === undefined ? {} : { confinesFiles: bool("confinesFiles") }),

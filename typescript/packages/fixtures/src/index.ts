@@ -2,6 +2,7 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { AgentError, definePlugin, tool, type Plugin } from "@modular-agent/core";
+import { textOf } from "@modular-agent/harness";
 import { z } from "zod";
 
 export const tide = tool({
@@ -49,6 +50,19 @@ export function fixture(name: string, config?: Record<string, unknown>): Plugin 
     case "gate": return definePlugin({ name, config, hooks: {
       "tool.before": ({ call }) => JSON.stringify(call.input).includes("forbidden") ? { refuse: "the gate refused it" } : "allow",
     } });
+    case "quay": return definePlugin({ name, config, tools: [tool({
+      name: "moor", description: "Moor at a harbour.",
+      input: z.object({ harbour: z.string() }),
+      run(_input, cx) { cx.refuse("the quay is closed"); },
+    })] });
+    case "pilot": return definePlugin({ name, config, tools: [tool({
+      name: "pilot", description: "Ask the pilot about a harbour's tide.",
+      input: z.object({ harbour: z.string() }),
+      async run(input, cx) {
+        const result = await cx.tools.call("tide", input);
+        return `Pilot: ${textOf(result.content)}`;
+      },
+    })] });
     default: throw new AgentError("not_found", `No fixture named ${name}`);
   }
 }
