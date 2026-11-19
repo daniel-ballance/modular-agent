@@ -3,8 +3,9 @@ use crate::{
     core::{CorePlugin, MemoryHistory},
     error::{Code, Error, Result},
     events::{Hub, HubPlugin, LOCAL, Question, QuestionHandler},
+    plugin::{InProcess, Plugin},
     session::Session,
-    tool::{Answer, Tool, ToolsPlugin},
+    tool::{Answer, Tool},
 };
 use agent_api as base;
 use agent_harness::Harness;
@@ -56,6 +57,35 @@ impl Provider {
     }
 }
 
+/// A plugin program the agent starts and speaks to over the plugin binding.
+#[derive(Clone, Debug, Default)]
+pub struct ProcessPlugin {
+    /// An argument vector, never a shell line. The program starts with a minimal
+    /// environment, so give an interpreter's full path.
+    pub command: Vec<String>,
+    /// Variables to set for the program, on top of the minimal environment.
+    pub env: std::collections::BTreeMap<String, String>,
+    /// The plugin's settings, sent when it starts.
+    pub config: Value,
+}
+
+impl ProcessPlugin {
+    pub fn new<S: Into<String>>(command: impl IntoIterator<Item = S>) -> Self {
+        ProcessPlugin {
+            command: command.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        }
+    }
+    pub fn config(mut self, config: Value) -> Self {
+        self.config = config;
+        self
+    }
+    pub fn env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(name.into(), value.into());
+        self
+    }
+}
+
 /// An agent: parts put together, and the sessions they serve.
 #[derive(Clone)]
 pub struct Agent {
@@ -80,7 +110,10 @@ pub struct AgentBuilder {
     durability: Durability,
     providers: Vec<Provider>,
     tools: Vec<Tool>,
-    plugins: Vec<Arc<dyn base::Plugin>>,
+    plugins: Vec<Plugin>,
+    base_plugins: Vec<Arc<dyn base::Plugin>>,
+    process_plugins: Vec<ProcessPlugin>,
+    plugin_host: Option<bool>,
     model: Option<String>,
     settings: serde_json::Map<String, Value>,
     approval: Option<Approval>,
@@ -159,8 +192,26 @@ impl AgentBuilder {
         self.providers.push(provider);
         self
     }
+    /// A tool, wrapped in a plugin named after it.
     pub fn tool(mut self, tool: Tool) -> Self {
         self.tools.push(tool);
+        self
+    }
+    /// A plugin, in the agent's process.
+    pub fn plugin(mut self, plugin: Plugin) -> Self {
+        self.plugins.push(plugin);
+        self
+    }
+    /// A plugin program, loaded after the agent's own plugins. Giving one makes the
+    /// agent a plugin host.
+    pub fn process_plugin(mut self, plugin: ProcessPlugin) -> Self {
+        self.process_plugins.push(plugin);
+        self
+    }
+    /// Whether the agent hosts plugin programs. A plugin host also starts the programs
+    /// named in `MODULAR_AGENT_PLUGINS`. Default: only when process plugins are given.
+    pub fn plugin_host(mut self, host: bool) -> Self {
+        self.plugin_host = Some(host);
         self
     }
     /// The model new sessions use, as `provider/id`.
@@ -191,7 +242,7 @@ impl AgentBuilder {
     /// hooks and other parts are added.
     #[doc(hidden)]
     pub fn base_plugin(mut self, plugin: Arc<dyn base::Plugin>) -> Self {
-        self.plugins.push(plugin);
+        self.base_plugins.push(plugin);
         self
     }
 
@@ -258,24 +309,68 @@ impl AgentBuilder {
             Arc::new(feature_context::ContextPlugin),
             Arc::new(feature_commands::CommandsPlugin),
         ]);
-        for tool in self.tools {
-            plugins.push(Arc::new(ToolsPlugin {
-                name: tool.name().to_string(),
-                tools: vec![tool],
-            }));
-        }
-        plugins.extend(self.plugins);
+        plugins.extend(self.base_plugins);
         plugins.push(Arc::new(HubPlugin(hub.clone())));
+        let mut own: Vec<(Arc<dyn base::Plugin>, Vec<String>)> =
+            plugins.into_iter().map(|p| (p, vec![])).collect();
+        for tool in self.tools {
+            let plugin = Plugin::new(tool.name().to_string()).tool(tool);
+            own.push((Arc::new(InProcess::new(&plugin)?), vec![]));
+        }
+        for plugin in &self.plugins {
+            own.push((Arc::new(InProcess::new(plugin)?), plugin.replaces.clone()));
+        }
 
         let harness = Harness::for_project(project.clone());
-        for plugin in plugins {
+        for (plugin, replaces) in own {
             let name = plugin.name().to_string();
-            harness.load(plugin).await.map_err(|e| {
+            let loaded = if replaces.is_empty() {
+                harness.load(plugin).await
+            } else {
+                harness.load_replacing(plugin, &replaces).await
+            };
+            loaded.map_err(|e| {
                 Error::new(
                     Code::InvalidComposition,
                     format!("plugin {name} could not load: {e:#}"),
                 )
             })?;
+        }
+        let mut launches: Vec<plugin_stdio::Launch> = self
+            .process_plugins
+            .into_iter()
+            .map(|p| plugin_stdio::Launch {
+                command: p.command,
+                env: p.env,
+                config: if p.config.is_null() {
+                    json!({})
+                } else {
+                    p.config
+                },
+            })
+            .collect();
+        if self.plugin_host.unwrap_or(!launches.is_empty())
+            && let Ok(value) = std::env::var("MODULAR_AGENT_PLUGINS")
+        {
+            let named: Vec<plugin_stdio::Launch> = serde_json::from_str(&value).map_err(|e| {
+                Error::new(
+                    Code::InvalidComposition,
+                    format!("MODULAR_AGENT_PLUGINS is malformed: {e}"),
+                )
+            })?;
+            launches.extend(named);
+        }
+        for (index, launch) in launches.into_iter().enumerate() {
+            let command = launch.command.join(" ");
+            let home = state.join("plugins").join(index.to_string());
+            if let Err(e) = plugin_stdio::load(&harness, launch, &project, &home, index).await {
+                // An agent never runs without a part it was configured to have.
+                let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                return Err(Error::new(
+                    Code::InvalidComposition,
+                    format!("plugin program {command} did not start: {e:#}"),
+                ));
+            }
         }
         hub.harness.set(Arc::downgrade(&harness)).ok();
 

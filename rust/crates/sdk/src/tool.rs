@@ -15,7 +15,7 @@ type RunFn =
 #[derive(Clone)]
 pub struct Tool {
     pub(crate) definition: base::ToolDefinition,
-    run: RunFn,
+    pub(crate) run: RunFn,
 }
 
 /// The definition of a tool, before its function is given.
@@ -167,7 +167,7 @@ impl ToolStatus {
             base::ToolStatus::Unknown | base::ToolStatus::Waiting => ToolStatus::OutcomeUnknown,
         }
     }
-    fn to_base(self) -> base::ToolStatus {
+    pub(crate) fn to_base(self) -> base::ToolStatus {
         match self {
             ToolStatus::Completed => base::ToolStatus::Completed,
             ToolStatus::Failed => base::ToolStatus::Failed,
@@ -193,10 +193,24 @@ impl ToolStatus {
 /// What a running call can ask of the agent (docs/sdk/api.md#contexts).
 #[derive(Clone)]
 pub struct ToolContext {
-    api: base::Api,
-    scope: base::Scope,
-    call: base::ToolCall,
-    cancelled: CancellationToken,
+    pub(crate) backend: Backend,
+    pub(crate) session_id: String,
+    pub(crate) actor_id: String,
+    pub(crate) call_id: String,
+    pub(crate) cancelled: CancellationToken,
+}
+
+/// Where the agent is: in this process, or across the plugin binding.
+#[derive(Clone)]
+pub(crate) enum Backend {
+    Local {
+        api: base::Api,
+        scope: base::Scope,
+    },
+    Remote {
+        peer: Arc<plugin_stdio::rpc::Peer>,
+        parent: Value,
+    },
 }
 
 /// A question a tool asks.
@@ -234,13 +248,13 @@ pub enum Answer {
 
 impl ToolContext {
     pub fn session_id(&self) -> &str {
-        &self.scope.session
+        &self.session_id
     }
     pub fn actor_id(&self) -> &str {
-        &self.scope.actor
+        &self.actor_id
     }
     pub fn call_id(&self) -> &str {
-        &self.call.id
+        &self.call_id
     }
     /// Fires when the call is cancelled.
     pub fn cancelled(&self) -> &CancellationToken {
@@ -252,91 +266,108 @@ impl ToolContext {
     }
     /// Ask an actor and wait for the answer.
     pub async fn ask(&self, ask: Ask) -> Result<Answer> {
-        let mut question = base::Question::new(self.scope.clone(), ask.kind, &ask.text);
-        question.options = ask.options;
-        let requests = base::requests(self.api.as_ref())?;
-        match requests
-            .ask(self.api.clone(), question, self.cancelled.clone())
-            .await?
-        {
-            base::RequestReply::Answer(a) if a.declined => Ok(Answer::Declined { reason: None }),
-            base::RequestReply::Answer(a) => Ok(match a.value {
-                Value::String(s) if s == "allow" => Answer::Allow,
-                Value::String(s) => Answer::Value(s),
-                other => Answer::Value(other.to_string()),
-            }),
-            base::RequestReply::Declined => Ok(Answer::Declined { reason: None }),
-            base::RequestReply::Waiting => Err(Error::new(
-                Code::NotSupported,
-                "leaving a call open past its turn is not supported yet",
-            )),
+        match &self.backend {
+            Backend::Local { api, scope } => {
+                let mut question = base::Question::new(scope.clone(), ask.kind, &ask.text);
+                question.options = ask.options;
+                let requests = base::requests(api.as_ref())?;
+                match requests
+                    .ask(api.clone(), question, self.cancelled.clone())
+                    .await?
+                {
+                    base::RequestReply::Answer(a) if a.declined => {
+                        Ok(Answer::Declined { reason: None })
+                    }
+                    base::RequestReply::Answer(a) => Ok(match a.value {
+                        Value::String(s) if s == "allow" => Answer::Allow,
+                        Value::String(s) => Answer::Value(s),
+                        other => Answer::Value(other.to_string()),
+                    }),
+                    base::RequestReply::Declined => Ok(Answer::Declined { reason: None }),
+                    base::RequestReply::Waiting => Err(not_open()),
+                }
+            }
+            Backend::Remote { peer, parent } => {
+                let kind = match ask.kind {
+                    base::RequestKind::Approval => "approval",
+                    base::RequestKind::Choice => "choice",
+                    base::RequestKind::Text => "text",
+                    base::RequestKind::Secret => "secret",
+                };
+                let mut request = json!({"kind": kind, "question": ask.text});
+                if !ask.options.is_empty() {
+                    request["options"] = json!(ask.options);
+                }
+                let answer = peer
+                    .call(
+                        "host/ask",
+                        json!({"parentRequestId": parent, "request": request}),
+                        None,
+                        self.cancelled.clone(),
+                    )
+                    .await
+                    .map_err(crate::serve::from_fault)?;
+                if answer["pending"] == true {
+                    return Err(not_open());
+                }
+                if answer["declined"] == true {
+                    return Ok(Answer::Declined {
+                        reason: answer["reason"].as_str().map(str::to_string),
+                    });
+                }
+                Ok(match answer["value"].as_str() {
+                    Some("allow") if kind == "approval" => Answer::Allow,
+                    Some(v) => Answer::Value(v.to_string()),
+                    None => {
+                        Answer::Value(answer["stored"].as_str().unwrap_or_default().to_string())
+                    }
+                })
+            }
         }
     }
 }
 
-/// The tools given to an agent, as one of the base's tool sources.
-pub(crate) struct ToolsPlugin {
-    pub name: String,
-    pub tools: Vec<Tool>,
+fn not_open() -> Error {
+    Error::new(
+        Code::NotSupported,
+        "leaving a call open past its turn is not supported yet",
+    )
 }
 
-impl base::Plugin for ToolsPlugin {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn install(&self, r: &mut base::Registrar<'_>) -> base::Result<()> {
-        r.provide::<dyn base::ToolSource>(
-            &format!("tools.{}", self.name),
-            Arc::new(Source(self.tools.clone())),
-        )
-    }
+/// How a call ended, before the agent adds the call's id. A refusal's text is the bare
+/// reason; each side words it once.
+pub(crate) struct Settled {
+    pub status: ToolStatus,
+    pub text: String,
+    pub value: Option<Value>,
 }
 
-struct Source(Vec<Tool>);
-
-#[async_trait::async_trait]
-impl base::ToolSource for Source {
-    fn tools(&self, _: &base::SessionData) -> Vec<base::ToolDefinition> {
-        self.0.iter().map(|t| t.definition.clone()).collect()
-    }
-    async fn run(
-        &self,
-        api: base::Api,
-        scope: base::Scope,
-        call: base::ToolCall,
-        cancel: CancellationToken,
-    ) -> base::ToolResult {
-        let Some(tool) = self.0.iter().find(|t| t.definition.name == call.name) else {
-            return base::ToolResult::new(
-                &call,
-                base::ToolStatus::Failed,
-                format!("no tool named {}", call.name),
-            );
-        };
-        let cx = ToolContext {
-            api,
-            scope,
-            call: call.clone(),
-            cancelled: cancel.clone(),
-        };
-        let run = (tool.run)(call.input.clone(), cx);
-        let outcome = tokio::select! {
-            biased;
-            outcome = run => outcome,
-            _ = cancel.cancelled() => {
-                return base::ToolResult::new(&call, base::ToolStatus::Cancelled, "The call was cancelled.");
-            }
-        };
-        match outcome {
-            Ok(output) => {
-                let mut result = base::ToolResult::new(&call, output.status.to_base(), output.text);
-                result.value = output.value;
-                result
-            }
-            Err(e) if e.refusal => {
-                base::ToolResult::new(&call, base::ToolStatus::Refused, e.message())
-            }
-            Err(e) => base::ToolResult::new(&call, base::ToolStatus::Failed, e.message()),
+/// Run a tool's function with a context, wherever the agent is.
+pub(crate) async fn execute(tool: &Tool, input: Value, cx: ToolContext) -> Settled {
+    let cancel = cx.cancelled.clone();
+    let run = (tool.run)(input, cx);
+    let outcome = tokio::select! {
+        biased;
+        outcome = run => outcome,
+        _ = cancel.cancelled() => {
+            return Settled { status: ToolStatus::Cancelled, text: "The call was cancelled.".into(), value: None };
         }
+    };
+    match outcome {
+        Ok(output) => Settled {
+            status: output.status,
+            text: output.text,
+            value: output.value,
+        },
+        Err(e) if e.refusal => Settled {
+            status: ToolStatus::Refused,
+            text: e.message().to_string(),
+            value: None,
+        },
+        Err(e) => Settled {
+            status: ToolStatus::Failed,
+            text: e.message().to_string(),
+            value: None,
+        },
     }
 }

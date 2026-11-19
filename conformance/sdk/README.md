@@ -6,7 +6,9 @@ These are drafts written with [SDK specification 0.1](../../docs/sdk/README.md).
 
 | Runner | In process | Served |
 |---|---|---|
-| Rust, [`rust/crates/sdk-scenarios`](../../rust/crates/sdk-scenarios/src/lib.rs) | 7/7 | not yet |
+| Rust, [`rust/crates/sdk-scenarios`](../../rust/crates/sdk-scenarios/src/lib.rs) | 7/7 | 7/7 served by Rust; other SDKs not yet |
+
+The Rust fixture program is `modular-agent-fixtures` in the same crate. It serves one fixture, named as its argument, and takes the counter's `path` from its config.
 
 | Scenario | Checks |
 |---|---|

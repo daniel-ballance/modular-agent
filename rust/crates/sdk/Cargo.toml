@@ -27,6 +27,7 @@ feature-model = { path = "../feature-model" }
 feature-prompt = { path = "../feature-prompt" }
 feature-questions = { path = "../feature-questions" }
 history-fs = { path = "../history-fs" }
+plugin-stdio = { path = "../plugin-stdio" }
 runtime-durable = { path = "../runtime-durable" }
 runtime-transient = { path = "../runtime-transient" }
 

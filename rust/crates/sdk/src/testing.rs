@@ -211,9 +211,16 @@ impl TestAgentBuilder {
             }
         })
     }
-    #[doc(hidden)]
-    pub fn base_plugin(mut self, plugin: Arc<dyn base::Plugin>) -> Self {
-        self.builder = self.builder.base_plugin(plugin);
+    pub fn plugin(mut self, plugin: crate::Plugin) -> Self {
+        self.builder = self.builder.plugin(plugin);
+        self
+    }
+    pub fn plugin_host(mut self, host: bool) -> Self {
+        self.builder = self.builder.plugin_host(host);
+        self
+    }
+    pub fn process_plugin(mut self, plugin: crate::ProcessPlugin) -> Self {
+        self.builder = self.builder.process_plugin(plugin);
         self
     }
     pub async fn build(self) -> Result<Agent> {
@@ -241,30 +248,37 @@ impl TestAgentBuilder {
 }
 
 /// The fixture plugins every SDK implements identically (docs/sdk/testing.md#the-fixture-plugins).
+/// Each is an ordinary plugin, so the same code runs in process and served.
 pub mod fixtures {
     use super::*;
     use crate::{
         error::Error,
+        plugin::{Gate, Plugin},
         tool::{Ask, ToolContext},
     };
     use schemars::JsonSchema;
     use serde::Deserialize;
     use std::path::Path;
 
-    /// What a fixture adds to an agent.
-    pub enum Fixture {
-        Tool(Tool),
-        #[doc(hidden)]
-        Base(Arc<dyn base::Plugin>),
-    }
-
-    /// The fixture of that name. `counter` keeps its count in the file at `counter_path`.
-    pub fn fixture(name: &str, counter_path: &Path) -> Option<Fixture> {
+    /// The fixture of that name. `counter` reads its count file from its config `path`.
+    pub fn fixture(name: &str) -> Option<Plugin> {
         Some(match name {
-            "tide" => Fixture::Tool(tide()),
-            "counter" => Fixture::Tool(counter(counter_path.to_path_buf())),
-            "confirm" => Fixture::Tool(confirm()),
-            "gate" => Fixture::Base(Arc::new(Gate)),
+            "tide" => Plugin::new("tide").tool(tide()),
+            "confirm" => Plugin::new("confirm").tool(confirm()),
+            "gate" => Plugin::new("gate").on_tool_before(|before| async move {
+                Ok(if before.input.to_string().contains("forbidden") {
+                    Gate::Refuse("the gate refused it".into())
+                } else {
+                    Gate::Allow
+                })
+            }),
+            "counter" => Plugin::new("counter").setup(|r| {
+                let path = r.config()["path"].as_str().ok_or_else(|| {
+                    Error::new(crate::Code::InvalidParams, "counter needs a config path")
+                })?;
+                r.tool(counter(PathBuf::from(path)));
+                Ok(())
+            }),
             _ => return None,
         })
     }
@@ -337,32 +351,5 @@ pub mod fixtures {
                 )
             },
         )
-    }
-
-    /// `gate`: refuses any call whose input, as JSON text, contains `forbidden`.
-    struct Gate;
-    impl base::Plugin for Gate {
-        fn name(&self) -> &str {
-            "gate"
-        }
-        fn install(&self, r: &mut base::Registrar<'_>) -> base::Result<()> {
-            r.on(
-                "runtime.before.tool",
-                base::Order::Normal,
-                base::handler(|_, _, value| {
-                    Box::pin(async move {
-                        if value["call"]["input"].to_string().contains("forbidden") {
-                            Ok(base::HookResult {
-                                refused: Some("the gate refused it".into()),
-                                ..Default::default()
-                            })
-                        } else {
-                            Ok(base::answer(value))
-                        }
-                    })
-                }),
-            );
-            Ok(())
-        }
     }
 }

@@ -1,7 +1,6 @@
 //! A runner for the shared SDK scenarios (docs/sdk/testing.md#the-shared-scenarios).
-//! In-process placement only, for now.
 use modular_agent::{
-    Agent, Answer, Approval, Durability,
+    Agent, Answer, Approval, Durability, ProcessPlugin,
     testing::{fixtures, test_agent},
 };
 use serde_json::Value;
@@ -13,9 +12,46 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Where the fixture plugins run.
+#[derive(Clone, Debug)]
+pub enum Placement {
+    InProcess,
+    /// Served by an SDK's fixture program, by the command that starts it with a fixture name.
+    Process {
+        sdk: String,
+        command: Vec<String>,
+    },
+}
+
+impl Placement {
+    pub fn name(&self) -> String {
+        match self {
+            Placement::InProcess => "inProcess".into(),
+            Placement::Process { sdk, .. } => format!("process:{sdk}"),
+        }
+    }
+    /// As command-line arguments, for the crash helper.
+    pub fn to_args(&self) -> Vec<String> {
+        match self {
+            Placement::InProcess => vec!["inProcess".into()],
+            Placement::Process { sdk, command } => [vec![sdk.clone()], command.clone()].concat(),
+        }
+    }
+    pub fn from_args(args: &[String]) -> Self {
+        match args[0].as_str() {
+            "inProcess" => Placement::InProcess,
+            sdk => Placement::Process {
+                sdk: sdk.into(),
+                command: args[1..].to_vec(),
+            },
+        }
+    }
+}
+
 /// Where one run of one scenario keeps its files. It survives a crash.
 pub struct Run {
     pub dir: PathBuf,
+    pub placement: Placement,
 }
 
 impl Run {
@@ -59,12 +95,19 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<Agent> 
             Some("durable") => Durability::Durable,
             _ => Durability::Ephemeral,
         });
+    let config = serde_json::json!({"path": run.counter()});
     for name in spec["plugins"].as_array().into_iter().flatten() {
         let name = name.as_str().unwrap();
-        builder = match fixtures::fixture(name, &run.counter()) {
-            Some(fixtures::Fixture::Tool(tool)) => builder.tool(tool),
-            Some(fixtures::Fixture::Base(plugin)) => builder.base_plugin(plugin),
-            None => panic!("no fixture named {name}"),
+        builder = match &run.placement {
+            Placement::InProcess => builder.plugin(
+                fixtures::fixture(name)
+                    .unwrap_or_else(|| panic!("no fixture named {name}"))
+                    .config(config.clone()),
+            ),
+            Placement::Process { command, .. } => builder.process_plugin(
+                ProcessPlugin::new(command.iter().cloned().chain([name.to_string()]))
+                    .config(config.clone()),
+            ),
         };
     }
     if let Some(policy) = spec["approval"].as_str() {
@@ -90,9 +133,21 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<Agent> 
     builder.build().await
 }
 
+/// Whether a scenario applies to a placement.
+pub fn applies(scenario: &Value, placement: &Placement) -> bool {
+    match scenario["placements"].as_array() {
+        None => true,
+        Some(list) => list.iter().any(|p| {
+            p == "inProcess" && matches!(placement, Placement::InProcess)
+                || p.as_str() == Some(&placement.name())
+                || p == "process" && matches!(placement, Placement::Process { .. })
+        }),
+    }
+}
+
 /// Run a scenario. Returns every failed expectation, or none.
 /// `crash_agent` is the `scenario-agent` binary, for steps that crash.
-pub async fn run(path: &Path, crash_agent: &Path) -> Vec<String> {
+pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<String> {
     let scenario = load(path);
     let name = scenario["scenario"].as_str().unwrap_or("?").to_string();
     let tmp = tempfile::Builder::new()
@@ -101,11 +156,12 @@ pub async fn run(path: &Path, crash_agent: &Path) -> Vec<String> {
         .unwrap();
     let run = Run {
         dir: tmp.path().to_path_buf(),
+        placement: placement.clone(),
     };
+    let label = placement.name();
     let mut failures = vec![];
-    let mut fail = |step: usize, what: String| {
-        failures.push(format!("{name} (inProcess) step {step}: {what}"))
-    };
+    let mut fail =
+        |step: usize, what: String| failures.push(format!("{name} ({label}) step {step}: {what}"));
 
     let mut current: Option<(Agent, modular_agent::Session)> = None;
     let mut session_id = None;
@@ -289,6 +345,7 @@ fn crash_run(
         .arg(path)
         .arg(&run.dir)
         .arg(step.to_string())
+        .args(run.placement.to_args())
         .stdout(Stdio::piped())
         .process_group(0)
         .spawn()

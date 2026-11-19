@@ -37,7 +37,7 @@ Each SDK provides constructors for the parts it ships: `transientRuntime()`, `du
 
 Each option that names a part is shorthand for a plugin that provides it. `providers`, `tools`, `environment` and the rest are added before `plugins`, in the order of this table, so an explicit plugin can [replace](#replacing-a-part) one of them.
 
-`createAgent` raises `invalid_composition` for a combination the [durability](placement.md#durability) rules forbid, a missing `dataDir`, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. A plugin or process plugin that fails to start fails the whole agent: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
+`createAgent` raises `invalid_composition` for a combination the [durability](placement.md#durability) rules forbid, a missing `dataDir`, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. A plugin or process plugin that fails to start, including a program that cannot be run or exits before registering, fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
 
 ## The agent
 
@@ -193,10 +193,11 @@ A **Plugin** has:
 |---|---|
 | `name` | unique in the agent; stable, because history records it |
 | `replaces` | items of its own that replace an earlier plugin's, as `runtime`, `working-environment`, `provider:<id>`, `tool:<name>` or `command:<name>` |
+| `config` | the plugin's settings when it runs in the agent's process; `{}` if none |
 | `setup(registrar)` | registers what the plugin provides, once, at load |
 | `stop()` | optional; releases what it holds |
 
-`setup` receives a **Registrar** and registers items with it. It runs once, before any session opens; it does no work for a session.
+`setup` receives a **Registrar** and registers items with it. It runs once, before any session opens; it does no work for a session. `registrar.config()` is the plugin's settings: its `config` in process, or the `config` the agent sends in `plugin/initialize` when the plugin is served. A served plugin's program starts before its settings arrive, so anything that depends on them is registered in `setup`, not when the plugin value is built.
 
 | Registrar operation | Registers | Servable |
 |---|---|---|

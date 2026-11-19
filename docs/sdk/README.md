@@ -1,6 +1,6 @@
 # The SDK specification
 
-**Status: draft 0.1.** Rust builds it first, then TypeScript, Go and Python ([ADR 0024](../adr/0024-five-layers.md#choices)). The [Rust SDK](../../rust/crates/sdk/README.md) has its first slice: building an agent, sessions and prompts, typed tools, questions, durability and the testing kit. It passes all seven shared scenarios in process and the Rust examples of guides 01 and 02.
+**Status: draft 0.1.** Rust builds it first, then TypeScript, Go and Python ([ADR 0024](../adr/0024-five-layers.md#choices)). The [Rust SDK](../../rust/crates/sdk/README.md) has its first slices: building an agent, sessions and prompts, typed tools, questions, durability, the testing kit, plugins with tools and `tool.before`, `serve`, and process plugins. It passes all seven shared scenarios with the fixtures in process and served by its own fixture program, and the Rust examples of guides 01 and 02.
 
 This is layer 2 of the [five layers](../adr/0024-five-layers.md). The [specification](../conformance.md#the-documents) says what an agent and its parts must do and what crosses the wire. It deliberately says nothing about the API a developer writes against. This document set does. It describes one SDK, expressed in four languages, so that someone who has built an agent in one language can build one in another without learning a new model.
 

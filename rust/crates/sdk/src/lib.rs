@@ -18,12 +18,16 @@ mod agent;
 mod core;
 mod error;
 mod events;
+mod plugin;
+mod serve;
 mod session;
 pub mod testing;
 mod tool;
 
-pub use agent::{Agent, AgentBuilder, Approval, Durability, Provider};
+pub use agent::{Agent, AgentBuilder, Approval, Durability, ProcessPlugin, Provider};
 pub use error::{Code, Error, Result};
 pub use events::{Event, Question, QuestionKind};
+pub use plugin::{Gate, Plugin, Registrar, ToolBefore};
+pub use serve::serve;
 pub use session::{Disposition, EventStream, Outcome, PromptResult, Session, ToolResult};
 pub use tool::{Answer, Ask, Tool, ToolBuilder, ToolContext, ToolOutput, ToolStatus};

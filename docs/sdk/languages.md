@@ -33,7 +33,9 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 
 - The core crate is `modular-agent`, imported as `modular_agent`. It requires Tokio.
 - A tool is built with `Tool::new(name, description).run(|input: T, cx| async move { … })`. Hints are builder methods: `.read_only()`, `.safe_to_repeat()`.
-- Plugins implement the `Plugin` trait, or are built with `Plugin::new(name)` and chained registrations.
+- A plugin is built with `Plugin::new(name)` and chained registrations: `.tool(tool)`, `.on_tool_before(handler)`, `.replaces(item)`, `.config(settings)`, and `.setup(|r| …)` for items that depend on settings.
+- Each hook point is its own typed method, `on_tool_before` rather than `on("tool.before", …)`, so the payload and answer types are checked at compile time. A gate answers `Gate::Allow` or `Gate::Refuse(reason)`; returning an error is a refusal.
+- A plugin program is `#[tokio::main] async fn main() { modular_agent::serve(plugin).await }`.
 - Public errors are `modular_agent::Error`, not `anyhow::Error`. Plugin code can return any error that converts into it.
 - An operation with options has a plain form and a `_with` form: `session()` and `session_with(SessionOptions { … })`.
 - A tool refuses with `return Err(cx.refuse("reason"))`: the call ends `refused`, where any other error ends it `failed`.
