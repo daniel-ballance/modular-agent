@@ -314,7 +314,11 @@ impl base::ToolSource for Source {
         let settled = execute(tool, call.input.clone(), cx).await;
         // ToolResult::new words a refusal itself.
         let mut result = base::ToolResult::new(&call, settled.status.to_base(), settled.text);
-        result.value = settled.value;
+        // Preserve the distinction between an omitted value and JSON null, and
+        // keep developer-owned objects opaque even if they contain `_pluginWire`.
+        result.value = settled
+            .value
+            .map(|value| json!({"_pluginWire":{"value":value}}));
         result
     }
 }

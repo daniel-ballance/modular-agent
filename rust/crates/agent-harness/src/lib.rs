@@ -247,6 +247,13 @@ impl Harness {
         }
         Ok(id)
     }
+    /// Test-only crash seam. The caller has already dropped or stopped every worker.
+    /// Release writer leases without orderly shutdown, cancellation or settlement.
+    #[doc(hidden)]
+    pub fn abandon_sessions_for_test(&self) {
+        self.sessions.lock().unwrap().clear();
+    }
+
     pub async fn open(&self, id: &str) -> Result<()> {
         let _erasure = self
             .erasure

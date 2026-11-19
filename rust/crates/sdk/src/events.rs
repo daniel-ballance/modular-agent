@@ -47,6 +47,8 @@ pub enum Event {
         outcome: String,
         text: String,
     },
+    /// A committed history entry, in the shared format.
+    Entry { session_id: String, entry: Value },
     /// An event the SDK does not type yet, by the base build's own name.
     Other {
         session_id: String,
@@ -64,6 +66,7 @@ impl Event {
             | Event::ToolResult { session_id, .. }
             | Event::QuestionOpened { session_id, .. }
             | Event::TurnEnded { session_id, .. }
+            | Event::Entry { session_id, .. }
             | Event::Other { session_id, .. } => session_id,
         }
     }
@@ -169,14 +172,22 @@ pub(crate) struct Hub {
     pub events: broadcast::Sender<(Option<String>, Event)>,
     pub on_question: Option<QuestionHandler>,
     pub harness: OnceLock<Weak<Harness>>,
+    crash: tokio_util::sync::CancellationToken,
+    workers: tokio_util::task::TaskTracker,
 }
 
 impl Hub {
-    pub fn new(on_question: Option<QuestionHandler>) -> Arc<Self> {
+    pub fn new(
+        on_question: Option<QuestionHandler>,
+        crash: tokio_util::sync::CancellationToken,
+        workers: tokio_util::task::TaskTracker,
+    ) -> Arc<Self> {
         Arc::new(Hub {
             events: broadcast::channel(4096).0,
             on_question,
             harness: OnceLock::new(),
+            crash,
+            workers,
         })
     }
 }
@@ -184,7 +195,30 @@ impl Hub {
 impl base::EventSink for Hub {
     fn send(&self, event: base::Event) {
         let turn = event.scope.turn.clone();
-        let event = Event::from_base(&event);
+        let event = if event.kind == "history.entry" {
+            let Some(h) = self.harness.get().and_then(Weak::upgrade) else {
+                return;
+            };
+            let Ok(entry) = serde_json::from_value::<base::Entry>(event.content) else {
+                return;
+            };
+            if entry.writer == "rust.derived" {
+                return;
+            }
+            use base::AgentApi;
+            let Ok(data) = h.snapshot(&event.scope.session) else {
+                return;
+            };
+            let Ok(entry) = base::portable::entry(&entry, &data) else {
+                return;
+            };
+            Event::Entry {
+                session_id: event.scope.session,
+                entry,
+            }
+        } else {
+            Event::from_base(&event)
+        };
         if let (
             Event::QuestionOpened {
                 session_id,
@@ -199,7 +233,9 @@ impl base::EventSink for Hub {
         ) {
             let (handler, session, question) =
                 (handler.clone(), session_id.clone(), question.clone());
-            tokio::spawn(async move {
+            let crash = self.crash.clone();
+            self.workers.spawn(async move {
+                tokio::select! { biased; _ = crash.cancelled() => (), _ = async move {
                 let id = question.id.clone();
                 let (value, declined) = match handler(question).await {
                     Answer::Allow => (json!("allow"), false),
@@ -212,6 +248,7 @@ impl base::EventSink for Hub {
                         .answer(api.clone(), &session, LOCAL, &id, value, declined)
                         .await;
                 }
+                } => () }
             });
         }
         let _ = self.events.send((turn, event));

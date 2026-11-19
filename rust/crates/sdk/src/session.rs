@@ -8,7 +8,7 @@ use crate::{
 use agent_api as base;
 use base::AgentApi;
 use futures_util::Stream;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// A stream of events. Use it with `StreamExt::next`.
@@ -204,6 +204,69 @@ impl Session {
         }
     }
 
+    /// Replay committed entries after a cursor (or from the beginning), then follow live events.
+    /// If the reader falls behind, the stream ends with `lost` and `data.fromEntry`.
+    pub fn events(&self, from_entry: Option<&str>) -> Result<EventStream> {
+        // Subscribe first so commits during snapshot/replay are never missed.
+        let events = self.inner.hub.events.subscribe();
+        let data = self.snapshot()?;
+        let mut cursor = from_entry.map(str::to_owned);
+        let at = if let Some(id) = from_entry {
+            data.entries
+                .iter()
+                .position(|e| e.id == id && e.writer != "rust.derived")
+                .ok_or_else(|| Error::new(Code::NotFound, "unknown event cursor"))?
+                + 1
+        } else {
+            0
+        };
+        let scope = base::Scope::session(&self.id);
+        base::require(self.inner.harness.as_ref(), &scope, "watch")?;
+        let existing = data
+            .entries
+            .iter()
+            .map(|e| e.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let rows = data.entries[at..]
+            .iter()
+            .filter(|e| e.writer != "rust.derived")
+            .map(|e| base::portable::entry(e, &data))
+            .collect::<base::Result<Vec<_>>>()?;
+        let me = self.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut events = events;
+            for row in rows {
+                if let Some(view) = me.inner.harness.output(&scope, base::Output {
+                    recipient: "interface.sdk".into(), value: json!({"entry":row}), stream: None, end: true,
+                }).await? {
+                    cursor = row["id"].as_str().map(str::to_owned);
+                    yield Event::Entry { session_id: me.id.clone(), entry: view["entry"].clone() };
+                }
+            }
+            loop {
+                match events.recv().await {
+                    Ok((_, event)) if event.session_id() == me.id => {
+                        base::require(me.inner.harness.as_ref(), &scope, "watch")?;
+                        if let Event::Entry { entry, .. } = &event {
+                            let Some(id) = entry["id"].as_str() else { continue };
+                            if existing.contains(id) { continue; }
+                            cursor = Some(id.into());
+                        }
+                        let ended = matches!(&event, Event::Other { kind, .. } if kind == "session.end");
+                        yield event;
+                        if ended { break; }
+                    }
+                    Ok(_) => (),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        Err(Error::new(Code::Lost, "event reader fell behind; resume with events(from_entry)")
+                            .with_data(json!({"fromEntry":cursor})))?;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }))
+    }
+
     /// The events of the turn this input starts, ending with its `TurnEnded`.
     pub async fn prompt_stream(&self, input: impl Into<String>) -> Result<EventStream> {
         self.prompt_stream_with(input, PromptOptions::default())
@@ -347,10 +410,16 @@ impl Session {
 
     fn drive(&self) -> tokio::task::JoinHandle<Result<()>> {
         let me = self.clone();
-        tokio::spawn(async move {
-            let _lock = me.driver.run.lock().await;
-            while me.inner.harness.run_next(&me.id).await?.is_some() {}
-            Ok(())
+        self.inner.workers.spawn(async move {
+            tokio::select! {
+                biased;
+                _ = me.inner.crash.cancelled() => Err(Error::new(Code::Lost, "the agent was restarted")),
+                result = async {
+                    let _lock = me.driver.run.lock().await;
+                    while me.inner.harness.run_next(&me.id).await?.is_some() {}
+                    Ok(())
+                } => result,
+            }
         })
     }
 
