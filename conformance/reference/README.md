@@ -25,12 +25,15 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `continue` | `-c` reopens the folder's last session with its history |
 | `durable-crash` | After `kill -9` during a command in code, the turn carries on and nothing runs twice |
 | `transient-crash` | With `--runtime transient`, the turn fails and nothing runs twice |
+| `declaration` | `ma --declaration` prints the description's declaration as one JSON object |
+| `prompt-tail` | The prompt ends with `<cwd>` and then `<date>` |
+| `json-events` | `--json` prints SDK-shaped events, ending with `turnEnded` |
 | `models` | `ma models` lists the scripted model |
 | `version` | `ma --version` names the implementation's language |
 
 ## Results
 
-All four implementations, with `MODULAR_AGENT_REF_REQUIRE=all`:
+All four implementations, with `MODULAR_AGENT_REF_REQUIRE=all`, before the last three checks were added:
 
 | Implementation | Reference checks | ACP kit with crash checks |
 |---|---|---|

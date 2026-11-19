@@ -137,6 +137,47 @@ const checks = [
     ],
   },
   {
+    name: "declaration",
+    about: "ma --declaration prints the declaration the standard configuration publishes, as one JSON object.",
+    script: [],
+    runs: [{ args: ["--declaration"], expect: { exit: 0, json: (d, ok) => {
+      const want = {
+        inputDuringTurn: true, continuesAfterRestart: true, waitingThroughRestart: true, questionsOutlastTurns: true,
+        lateAnswersStartTurns: true, startsTurnsUnasked: "jobReports", queuedInputAfterRestart: "handedBack",
+        queuedJobReportsAfterRestart: "run", settingsDuringTurn: "refused", erasureDuringTurn: "refused",
+        movingWithUnfinishedWork: "refused", mixedActorInput: "refused", rewinding: true, forking: true, erasure: true,
+        portableSessions: true, nestedToolCalls: true, inputKeys: true, commandContainment: "strong", confinesFiles: false,
+        severalActors: false, sessionLimits: false, tenants: false, holdsOutput: false, outputBypassesAgent: false,
+        cancellingTurnCancelsJobs: false, pluginsDuringSession: false, keepsStateAtProvider: false,
+        runsToolsAtProvider: false, liveSessions: false,
+      };
+      for (const [k, v] of Object.entries(want)) ok(d?.[k] === v, `${k} is ${JSON.stringify(v)}`, d?.[k]);
+      ok(d?.projectRoot === undefined, "projectRoot is omitted", d?.projectRoot);
+    } } }],
+  },
+  {
+    name: "prompt-tail",
+    about: "The prompt ends with the working folder in <cwd> and the local date in <date>.",
+    script: [{ text: "ok" }],
+    runs: [{ args: ["-p", "Hi."], expect: { exit: 0 } }],
+    log: (log, ok, t) => {
+      const s = log[0]?.system ?? "";
+      const cwd = s.lastIndexOf("<cwd>"), date = s.lastIndexOf("<date>");
+      ok(cwd >= 0 && s.slice(cwd).includes(t.project), "a <cwd> section names the working folder", s.slice(-300));
+      ok(date > cwd && /<date>\s*\d{4}-\d{2}-\d{2}/.test(s.slice(date)), "a <date> section with YYYY-MM-DD follows it", s.slice(-200));
+    },
+  },
+  {
+    name: "json-events",
+    about: "--json prints one SDK-shaped event per line, ending the turn with turnEnded.",
+    script: [{ text: "Hello." }],
+    runs: [{ args: ["--json", "-p", "Hi."], expect: { exit: 0, jsonLines: (events, ok) => {
+      ok(events.length > 0 && events.every((e) => typeof e.type === "string" && "time" in e && "data" in e), "every line has type, time and data", events.slice(0, 3));
+      ok(events.some((e) => e.type === "turnEnded"), "a turnEnded event is printed", events.map((e) => e.type));
+      ok(events.some((e) => e.type === "text" && JSON.stringify(e.data).includes("Hello.")), "the model's text arrives as text events", events.map((e) => e.type));
+    } } }],
+  },
+  {
     name: "models",
     about: "ma models lists the scripted model.",
     script: [],
@@ -206,6 +247,8 @@ async function runCheck(command, check) {
     if (e.stdout !== undefined) ok(out === e.stdout, `${where}: stdout ${JSON.stringify(e.stdout)}`, out.slice(-300));
     if (e.stdoutContains) ok(out.includes(e.stdoutContains), `${where}: stdout contains ${e.stdoutContains}`, out.slice(-300));
     if (e.stdoutMatches) ok(e.stdoutMatches.test(out), `${where}: stdout matches ${e.stdoutMatches}`, out.slice(-300));
+    if (e.json) { let v; try { v = JSON.parse(out); } catch { ok(false, `${where}: stdout is one JSON object`, out.slice(0, 300)); } if (v !== undefined) e.json(v, (c, w, g) => ok(c, `${where}: ${w}`, g)); }
+    if (e.jsonLines) { let v; try { v = out.split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { ok(false, `${where}: every stdout line is JSON`, out.slice(0, 300)); } if (v) e.jsonLines(v, (c, w, g) => ok(c, `${where}: ${w}`, g)); }
     for (const [path, want] of Object.entries(e.files ?? {})) {
       const full = join(dir, path), exists = existsSync(full), got = exists ? readFileSync(full, "utf8") : undefined;
       if (want?.absent) ok(!exists, `${where}: ${path} does not exist`, got);

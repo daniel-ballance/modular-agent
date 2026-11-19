@@ -39,7 +39,7 @@ ma sessions [--all]          list saved sessions
 | `-v`, `--verbose` | also show each call the code makes and what commands print |
 | `--json` | print each event as one JSON object per line, in the SDK's event shape: `type`, `time`, the ids that apply (`sessionId`, `turnId`, `stepId`, `toolCallId`) and `data` |
 | `--history` | print the session's history, in the shared format |
-| `--declaration` | print what this agent declares it supports |
+| `--declaration` | print the declaration (below) as one JSON object |
 | `--acp` | serve ACP on stdio, for an editor or host. Any project the client names is served, each with its own trust; the declaration names no `projectRoot`. |
 | `-h`, `--help`; `-V`, `--version` | help; the version, which names the implementation's language |
 
