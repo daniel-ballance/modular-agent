@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 
 	"github.com/OWNER/modular-agent/go/api"
@@ -131,11 +130,14 @@ func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.
 		if err := ctx.Err(); err != nil {
 			return "", appError(err, CancelledCode)
 		}
-		name := strings.ToUpper(strings.ReplaceAll(ref.Provider, "-", "_")) + "_API_KEY"
-		if key := os.Getenv(name); key != "" {
-			return key, nil
+		key, err := (environmentCredentials{}).Get(ctx, ref.Provider)
+		if err != nil {
+			return "", err
 		}
-		return "", &Error{Code: NotFound, Message: "provider credential unavailable"}
+		if key == "" {
+			return "", &Error{Code: NotFound, Message: "provider credential unavailable"}
+		}
+		return key, nil
 	}, piece: func(p Part) {
 		if ctx.Err() == nil {
 			if c := portable.ReadContent(Content{p}); len(c) > 0 {

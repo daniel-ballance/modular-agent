@@ -44,7 +44,11 @@ func New(opts ...Option) modular.Provider {
 			if err != nil {
 				var m *api.ModelError
 				if errors.As(err, &m) {
-					return modular.AssistantMessage{}, &modular.ModelError{Kind: modular.ModelErrorKind(m.Kind), Message: m.Message}
+					kind := modular.ModelErrorKind(m.Kind)
+					if m.Kind == "context_too_large" {
+						kind = modular.ContextTooLarge
+					}
+					return modular.AssistantMessage{}, &modular.ModelError{Kind: kind, Message: m.Message}
 				}
 				return modular.AssistantMessage{}, err
 			}

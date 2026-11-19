@@ -184,7 +184,9 @@ func (t *ToolContext) Progress(content Content) error {
 	if t.ctx.Err() != nil {
 		return appError(t.ctx.Err(), CancelledCode)
 	}
-	t.progress(content.Text())
+	if !api.ToolProgress(t.ctx, portable.ReadContent(content)) {
+		t.progress(content.Text())
+	}
 	return nil
 }
 func (t *ToolContext) Log(message string) {

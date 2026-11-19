@@ -85,7 +85,12 @@ func (s *server) event(e api.Event) {
 		u = &v
 	case "tool.progress":
 		s.mu.Lock()
-		st.progress[e.Call] += api.Decode[string](e.Data)
+		var content api.Content
+		if json.Unmarshal(e.Data, &content) == nil {
+			st.progress[e.Call] += content.Text()
+		} else {
+			st.progress[e.Call] += api.Decode[string](e.Data)
+		}
 		value := st.progress[e.Call]
 		s.mu.Unlock()
 		v := acp.UpdateToolCall(acp.ToolCallId(e.Call), acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(value))}))

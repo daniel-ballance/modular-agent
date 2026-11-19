@@ -132,7 +132,11 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 		r.cmd.Dir = project
 		r.cmd.Stderr = os.Stderr
 		env := map[string]string{}
-		for _, key := range []string{"PATH", "LANG", "LC_ALL", "TZ", "TMPDIR"} {
+		minimal := []string{"PATH"}
+		if legacyCommandArgs {
+			minimal = append(minimal, "LANG", "LC_ALL", "TZ", "TMPDIR")
+		}
+		for _, key := range minimal {
 			if value, ok := os.LookupEnv(key); ok {
 				env[key] = value
 			}
@@ -407,8 +411,9 @@ func (r *remote) notification(ctx context.Context, method string, raw json.RawMe
 			w.runtime.report(ctx, v)
 		}
 	case "tools/progress":
-		if w.progress != nil {
-			w.progress(contentIn(v["content"]).Text())
+		content := contentIn(v["content"])
+		if !api.ToolProgress(ctx, content) && w.progress != nil {
+			w.progress(content.Text())
 		}
 	case "env/output":
 		if fn, _ := ctx.Value(progressKey{}).(func(string)); fn != nil {

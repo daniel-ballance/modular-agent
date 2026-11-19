@@ -122,6 +122,12 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		if err := s.joinHostLocked(*host); err != nil {
 			return "", err
 		}
+	} else if !forking && c.h.localActor != "local-user" {
+		// The portable store reconstructs the actor from records, not the snapshot.
+		local := api.Actor{ID: s.data.Actor, Kind: "user", Rights: slices.Clone(api.Rights)}
+		if err := s.joinHostLocked(local); err != nil {
+			return "", err
+		}
 	}
 	if _, err = s.recordLocked(api.Entry{Kind: "plugins.set", Data: api.JSON(s.data.Plugins)}, "harness", true); err != nil {
 		return "", err
@@ -1111,7 +1117,8 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	}
 	ctx = api.WithExecution(api.AsActor(ctx, in.Actor), api.Execution{Session: snap.ID, Turn: turnID})
 	ctx = api.WithJobContributors(ctx, in.Actor, in.ViaActor, in.ReleasedBy)
-	prepared, err := h.API().Invoke(ctx, "turn.prepare", api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content})
+	before := api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content}
+	prepared, err := h.API().Invoke(ctx, "turn.prepare", before)
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 			if in.ID != "" && resume == nil {
@@ -1121,6 +1128,13 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 				}
 			}
 			return api.Outcome{Status: "cancelled", Error: ctx.Err().Error()}
+		}
+		if h.handBackOnOpen {
+			h.mu.RLock()
+			owner := h.caps["runtime"].owner
+			h.mu.RUnlock()
+			ports := &turnPorts{c: &client{h: h, owner: owner}, s: s, id: turnID, actor: in.Actor, input: in}
+			return unavailableTurn(ctx, ports, selectionView.Settings, before, nil, resume, err)
 		}
 		return api.Outcome{Status: "failed", Error: err.Error()}
 	}
@@ -1623,6 +1637,13 @@ func (p *turnPorts) RunTool(ctx context.Context, call api.Call) (result api.Tool
 				if err := p.CheckWriter(); err != nil {
 					return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
 				}
+				ctx = api.WithToolProgress(ctx, func(content api.Content) {
+					data := api.JSON(content)
+					if len(content) == 1 && content[0].Type == "text" {
+						data = api.JSON(content[0].Text)
+					}
+					p.Emit(ctx, api.Event{Kind: "tool.progress", Call: call.ID, Step: call.Step, Data: data})
+				})
 				return source.Run(ctx, snap, call, func(text string) { p.Emit(ctx, api.Event{Kind: "tool.progress", Call: call.ID, Data: api.JSON(text)}) })
 			}
 		}

@@ -120,6 +120,22 @@ type openError struct{}
 
 func (*openError) Error() string { return "question remains open" }
 
+type toolProgressKey struct{}
+
+func WithToolProgress(ctx context.Context, emit func(Content)) context.Context {
+	return context.WithValue(ctx, toolProgressKey{}, emit)
+}
+
+// ToolProgress delivers typed progress when the caller supports it.
+func ToolProgress(ctx context.Context, content Content) bool {
+	emit, _ := ctx.Value(toolProgressKey{}).(func(Content))
+	if emit == nil {
+		return false
+	}
+	emit(content)
+	return true
+}
+
 type executionKey struct{}
 type questionOrderKey struct{}
 type questionOrder struct {

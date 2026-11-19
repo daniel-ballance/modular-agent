@@ -3,6 +3,7 @@ package modular
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -119,6 +120,15 @@ func (q *questionRouter) detach(id string) {
 		delete(q.sessions, id)
 	}
 }
+func answerQuestion(ctx context.Context, handler QuestionHandler, q Question) (a Answer, err error) {
+	defer func() {
+		if recover() != nil {
+			err = fmt.Errorf("question handler panicked")
+		}
+	}()
+	return handler(ctx, q)
+}
+
 func (q *questionRouter) event(e api.Event) {
 	if e.Kind != "question.open" {
 		return
@@ -154,7 +164,7 @@ func (q *questionRouter) event(e api.Event) {
 			ctx, cancel = context.WithDeadline(ctx, deadline)
 			defer cancel()
 		}
-		ans, err := s.handler(ctx, question)
+		ans, err := answerQuestion(ctx, s.handler, question)
 		if err != nil {
 			ans = Decline(err.Error())
 		}

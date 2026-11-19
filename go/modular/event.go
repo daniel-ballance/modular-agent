@@ -62,6 +62,12 @@ func sdkEvent(e api.Event) Event {
 		data = api.JSON(portable.Call(api.Decode[api.Call](e.Data)))
 	case "tool.end":
 		data = api.JSON(portable.Result(api.Decode[api.ToolResult](e.Data)))
+	case "tool.progress":
+		var content api.Content
+		if json.Unmarshal(e.Data, &content) != nil {
+			content = api.Text(api.Decode[string](e.Data))
+		}
+		data = api.JSON(map[string]any{"content": portable.Content(content)})
 	}
 	if h.Type == "" {
 		if !strings.HasPrefix(e.Kind, "plugin.") {

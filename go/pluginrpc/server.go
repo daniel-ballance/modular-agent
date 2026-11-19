@@ -237,8 +237,12 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 			return nil, fault("invalid_request", "sessionId is required")
 		}
 		ctx = api.WithExecution(ctx, api.Execution{Session: str(v, "sessionId"), Call: call})
+		progress := func(content api.Content) {
+			_ = s.peer.Send("tools/progress", object{"parentRequestId": id, "content": contentOut(content)})
+		}
+		ctx = api.WithToolProgress(ctx, progress)
 		r := source.Run(ctx, api.Session{ID: str(v, "sessionId"), Project: str(v, "project")}, call, func(chunk string) {
-			_ = s.peer.Send("tools/progress", object{"parentRequestId": id, "content": contentOut(api.Text(chunk))})
+			progress(api.Text(chunk))
 		})
 		if r.Status == "open" {
 			return object{"pending": "waiting for an answer"}, nil
