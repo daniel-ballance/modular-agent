@@ -41,6 +41,20 @@ export function interruptedCalls(history: HistoryEntry[], turnId: string): Inter
 	return [...calls.values()];
 }
 
+/** Committed calls left open by this turn, in their original call order. */
+export function pendingToolCalls(branch: HistoryEntry[], turnId: string, kept = branch): string[] {
+	const terminal = new Set(kept.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
+	const pending = new Set(branch.flatMap((e) => e.kind === "toolPending" && e.turnId === turnId &&
+		!e.erased && e.toolCallId && !terminal.has(e.toolCallId) ? [e.toolCallId] : []));
+	if (!pending.size) return [];
+	const ordered: string[] = [];
+	for (const e of branch) {
+		if (e.kind !== "response" || e.message?.role !== "assistant") continue;
+		for (const part of e.message.content) if (isToolCall(part) && pending.delete(part.id)) ordered.push(part.id);
+	}
+	return [...ordered, ...pending];
+}
+
 /** Assemble the branch projection without changing the kept record. */
 export function modelView(entries: HistoryEntry[], _turnId?: string): ModelMessage[] {
 	const pending = new Set(entries.flatMap((e) => {

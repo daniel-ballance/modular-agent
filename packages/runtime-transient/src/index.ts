@@ -5,6 +5,7 @@ import {
 	type InterruptedTurn,
 	type ModelError,
 	type ModelRequest,
+	type Outcome,
 	type Plugin,
 	type Runtime,
 	type RuntimeHost,
@@ -13,15 +14,28 @@ import {
 	type ToolResult,
 	type TurnInput,
 	type TurnOutcome,
+	type Usage,
 	addUsage,
 	isPending,
 	isToolCall,
+	pendingToolCalls,
 	text,
 	textOf,
 	zeroUsage,
 } from "@modular-agent/harness";
 
 interface Prepared { call: ToolCall; refused?: string; pending?: string; result?: ToolResult }
+
+export interface TurnProgress {
+	entries: string[];
+	usage: Usage;
+	steps: number;
+	/** Ordered by offer, not by the order in which parallel calls reply. */
+	calls: Map<string, boolean>;
+}
+
+interface TurnExit { outcome: Outcome; text?: string }
+const hasOpenCalls = (progress: TurnProgress) => [...progress.calls.values()].some(Boolean);
 
 export interface TransientRuntimeOptions {
 	/** Default step limit when the session sets none. */
@@ -41,35 +55,52 @@ export class TransientRuntime implements Runtime {
 	constructor(protected options: TransientRuntimeOptions = {}) {}
 
 	runTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal): Promise<TurnOutcome> {
-		return this.withHooks(input, host, () => this.loop(input, host, signal), true, signal);
+		return this.withHooks(input, host, signal, (progress) => this.loop(input, host, signal, progress));
 	}
 
-	protected async withHooks(input: TurnInput, host: RuntimeHost, run: () => Promise<TurnOutcome>, starting = true, signal?: AbortSignal): Promise<TurnOutcome> {
-		let outcome: TurnOutcome;
+	private async withHooks(input: TurnInput, host: RuntimeHost, signal: AbortSignal, run: (progress: TurnProgress) => Promise<TurnExit>, starting = true): Promise<TurnOutcome> {
+		const progress: TurnProgress = { entries: [], usage: zeroUsage(), steps: 0, calls: new Map() };
+		let exit: TurnExit;
 		try {
 			if (starting) await host.hook("turn.start", { sessionId: input.sessionId, turnId: input.turnId });
-			outcome = await run();
+			exit = await run(progress);
 		} catch (error) {
-			// A cancelled turn ends as cancelled, whatever errors the cancelling caused, such as a host answering `cancelled`.
-			outcome = signal?.aborted
-				? { outcome: { kind: "cancelled" }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() }
-				: { outcome: { kind: "failed", error: error instanceof Error ? error.message : String(error) }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
+			exit = { outcome: { kind: "failed", error: error instanceof Error ? error.message : String(error) } };
 		}
-		if (signal?.aborted && outcome.outcome.kind !== "completed") outcome = { ...outcome, outcome: { kind: "cancelled" } };
-		// The shared shape (docs/bindings/plugin.md): outcome as on a turnEnd entry, and the result beside it.
-		await host.hook("turn.end", { sessionId: input.sessionId, turnId: input.turnId, outcome: outcome.outcome, result: outcome.result });
-		return outcome;
+		const outcome: Outcome = signal.aborted ? { kind: "cancelled" } : exit.outcome;
+		const openToolCalls = outcome.kind === "cancelled" ? [] : [...progress.calls].filter(([, pending]) => pending).map(([id]) => id);
+		const result = { ...(exit.text === undefined ? {} : { text: exit.text }), openToolCalls };
+		await host.hook("turn.end", { sessionId: input.sessionId, turnId: input.turnId, outcome, result });
+		return { outcome, result, entries: progress.entries, usage: progress.usage };
 	}
 
 	/** A transient Runtime ends a turn whose process stopped. The host settles abandoned calls. */
 	resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
-		return this.withHooks(input, host, () => this.recover(input, host, signal, interrupted), false, signal);
+		return this.withHooks(input, host, signal, async (progress) => {
+			const history = await host.history();
+			const kept = await host.history({ all: true });
+			const pending = new Set(pendingToolCalls(history, interrupted.turnId, kept));
+			const retrying = new Set(interrupted.calls.map((c) => c.id));
+			for (const e of history) {
+				if (e.kind !== "response" || e.message?.role !== "assistant") continue;
+				for (const part of e.message.content) if (isToolCall(part) && (pending.has(part.id) || retrying.has(part.id))) {
+					progress.calls.set(part.id, pending.has(part.id));
+				}
+			}
+			for (const id of pending) progress.calls.set(id, true);
+			const turn = history.filter((e) => e.turnId === interrupted.turnId);
+			const auxiliary = new Set(turn.filter((e) => e.kind === "modelRequest" && (e.data as { auxiliary?: boolean })?.auxiliary).map((e) => e.stepId));
+			const responses = turn.filter((e) => e.kind === "response" && !auxiliary.has(e.stepId));
+			progress.usage = responses.reduce((sum, e) => addUsage(sum, e.message?.role === "assistant" ? e.message.usage : e.usage), zeroUsage());
+			progress.steps = responses.length;
+			return this.recover(input, host, signal, interrupted, progress, turn, responses);
+		}, false);
 	}
 
-	protected async recover(_input: TurnInput, host: RuntimeHost, _signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
+	protected async recover(_input: TurnInput, host: RuntimeHost, _signal: AbortSignal, interrupted: InterruptedTurn, _progress: TurnProgress, turn: HistoryEntry[], _responses: HistoryEntry[]): Promise<TurnExit> {
 		if (interrupted.calls.length) throw new Error("The host did not settle interrupted calls");
-		const after = await this.resumedGate(host, interrupted, await host.history());
-		return { outcome: { kind: "failed", error: after?.refuse ?? "The process stopped during the turn" }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
+		const after = await this.resumedGate(host, interrupted, turn);
+		return { outcome: { kind: "failed", error: after?.refuse ?? "The process stopped during the turn" } };
 	}
 
 	protected async resumedGate(host: RuntimeHost, interrupted: InterruptedTurn, history: HistoryEntry[]) {
@@ -84,43 +115,36 @@ export class TransientRuntime implements Runtime {
 
 	/** Run calls left open past an earlier turn, which now have their answers, then carry on. */
 	continueOpenCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
-		return this.withHooks(input, host, () => this.continueCalls(input, host, signal, calls), true, signal);
+		return this.withHooks(input, host, signal, async (progress) => {
+			await this.runPending(host, calls, signal, progress);
+			if (hasOpenCalls(progress)) return { outcome: { kind: "completed" } };
+			return this.loop(input, host, signal, progress);
+		});
 	}
 
-	private async continueCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
-		const entries: string[] = [];
-		const stillOpen = await this.runPending(host, calls, signal, entries, () => true);
-		if (stillOpen.length) return { outcome: { kind: "completed" }, result: { openToolCalls: stillOpen }, entries, usage: zeroUsage() };
-		return this.loop(input, host, signal, entries);
-	}
-
-	/** Run pending calls through the usual checks. Returns the ids of calls that are still open. */
-	protected async runPending(host: RuntimeHost, calls: InterruptedTurn["calls"], signal: AbortSignal, entries: string[], mayRun: (c: InterruptedTurn["calls"][number]) => boolean | Promise<boolean>): Promise<string[]> {
-		const open: string[] = [];
+	/** Run inherited calls through the usual checks. */
+	protected async runPending(host: RuntimeHost, calls: InterruptedTurn["calls"], signal: AbortSignal, progress: TurnProgress): Promise<void> {
 		for (const c of calls) {
-			if (!(await mayRun(c))) throw new Error("The host passed an ineligible interrupted call");
 			if (signal.aborted) break;
 			const stepId = c.stepId ?? await host.newId();
 			const part = { type: "toolCall" as const, id: c.id, name: c.name, arguments: c.input };
 			const recorded = await this.runCall(host, part, stepId, signal);
-			if (recorded) entries.push(recorded.id);
-			else open.push(c.id);
+			this.noteCall(progress, c.id, recorded);
 		}
-		return open;
+	}
+
+	private noteCall(progress: TurnProgress, id: string, recorded: HistoryEntry | undefined): void {
+		progress.calls.set(id, !recorded);
+		if (recorded) progress.entries.push(recorded.id);
 	}
 
 	/** The step loop. It rebuilds the model context from the history on every step, so it can start mid-turn. */
-	protected async loop(input: TurnInput, host: RuntimeHost, signal: AbortSignal, entries: string[] = [], progress = { usage: zeroUsage(), steps: 0 }): Promise<TurnOutcome> {
+	protected async loop(input: TurnInput, host: RuntimeHost, signal: AbortSignal, progress: TurnProgress): Promise<TurnExit> {
 		const maxSteps = input.settings.maxSteps ?? this.options.maxSteps ?? 100;
 		const maxRetries = this.options.maxRetries ?? 3;
-		let { usage, steps } = progress;
+		const { entries } = progress;
 		let retries = 0;
-		const done = (outcome: TurnOutcome["outcome"], last?: AssistantMessage): TurnOutcome => ({
-			outcome,
-			result: { text: last ? textOf(last.content) : undefined, openToolCalls: [] },
-			entries,
-			usage,
-		});
+		const done = (outcome: Outcome, last?: AssistantMessage): TurnExit => ({ outcome, text: last ? textOf(last.content) : undefined });
 		let last: AssistantMessage | undefined;
 		let replacement: ModelRequest | undefined;
 		let compacted = false;
@@ -129,13 +153,13 @@ export class TransientRuntime implements Runtime {
 			if (signal.aborted) return done({ kind: "cancelled" }, last);
 			for (const e of await host.takeSteering()) entries.push(e.id);
 
-			if (steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, last);
+			if (progress.steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, last);
 			const stepId = await host.newId();
 			host.report("step.started", {}, { stepId });
 			let request: ModelRequest;
 			let message: AssistantMessage;
 			try {
-				request = replacement ?? await host.prepareStep({ stepId, usage });
+				request = replacement ?? await host.prepareStep({ stepId, usage: progress.usage });
 				replacement = undefined;
 				message = await input.model.request(request, {
 					signal, sessionId: input.sessionId, stepId,
@@ -148,10 +172,10 @@ export class TransientRuntime implements Runtime {
 				if (signal.aborted) return done({ kind: "cancelled" }, last);
 				throw error;
 			}
-			steps++;
-			usage = addUsage(usage, message.usage);
 			last = message;
 			entries.push((await host.record({ kind: "response", writer: "runtime", modelVisible: true, stepId, message })).id);
+			progress.steps++;
+			progress.usage = addUsage(progress.usage, message.usage);
 
 			if (message.stop === "aborted" || signal.aborted) {
 				await this.settleUnanswered(host, message, stepId, "cancelled", entries);
@@ -175,20 +199,26 @@ export class TransientRuntime implements Runtime {
 
 			retries = 0;
 			const calls = message.content.filter(isToolCall);
-			const open: string[] = [];
+			for (const c of calls) progress.calls.set(c.id, false);
 			// Record each result as soon as it is ready. The host orders the model view.
 			const definitions = await Promise.all(calls.map((c) => host.definition(c.name)));
 			const together = calls.length > 1 && definitions.every((d) => d?.parallel === true);
 			if (together) {
 				const prepared: Prepared[] = [];
-				for (const part of calls) prepared.push(await this.preflight(host, part, stepId));
-				await Promise.all(prepared.map(async (p) => {
+				for (const part of calls) {
+					const p = await this.preflight(host, part, stepId);
+					if (p.pending) progress.calls.set(part.id, true);
+					prepared.push(p);
+				}
+				// A sibling can still commit a pending disposition after another callback fails.
+				const results = await Promise.allSettled(prepared.map(async (p) => {
 					const ran = p.refused !== undefined || p.pending ? undefined : await host.runToolCall(p.call, signal);
 					const recorded = await this.complete(host, p, stepId, ran);
-					if (recorded) entries.push(recorded.id);
-					else open.push(p.call.id);
+					this.noteCall(progress, p.call.id, recorded);
 				}));
 				if (signal.aborted) return done({ kind: "cancelled" }, message);
+				const failed = results.find((r) => r.status === "rejected");
+				if (failed) throw failed.reason;
 			} else {
 				for (let i = 0; i < calls.length; i++) {
 					const part = calls[i];
@@ -197,8 +227,7 @@ export class TransientRuntime implements Runtime {
 						return done({ kind: "cancelled" }, message);
 					}
 					const recorded = await this.runCall(host, part, stepId, signal);
-					if (recorded) entries.push(recorded.id);
-					else open.push(part.id);
+					this.noteCall(progress, part.id, recorded);
 				}
 			}
 			host.report("step.ended", { usage: message.usage }, { stepId });
@@ -206,11 +235,11 @@ export class TransientRuntime implements Runtime {
 			const after = await host.hook<GateResult<unknown>>("step.after", { stepId, response: message });
 			if (after?.refused !== undefined) return done({ kind: "failed", error: after.refused }, message);
 			if (signal.aborted) return done({ kind: "cancelled" }, message);
-			if (open.length) {
+			if (hasOpenCalls(progress)) {
 				if (this.supports.inputDuringTurn) for (const e of await host.takeSteering(true)) entries.push(e.id);
-				return { ...done({ kind: "completed" }, message), result: { text: textOf(message.content), openToolCalls: calls.filter((c) => open.includes(c.id)).map((c) => c.id) } };
+				return done({ kind: "completed" }, message);
 			}
-			if (steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, message);
+			if (progress.steps >= maxSteps) return done({ kind: "limit", limit: "steps" }, message);
 
 			if (calls.length === 0) {
 				const taken = this.supports.inputDuringTurn ? await host.takeSteering(true) : [];

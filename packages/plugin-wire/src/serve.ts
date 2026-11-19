@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
-import { interruptedCalls, restoreAnsweredStep } from "@modular-agent/harness";
+import { interruptedCalls, pendingToolCalls, restoreAnsweredStep } from "@modular-agent/harness";
 import type {
 	Answer,
 	AssistantMessage,
@@ -50,7 +50,7 @@ async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: 
 	catch { throw invalid(); }
 	if (!isDeepStrictEqual(lastStep, interrupted.lastStep)) throw invalid();
 	const settled = new Set(kept.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
-	const pending = new Set(branch.filter((e) => e.kind === "toolPending" && e.turnId === input.turnId).map((e) => e.toolCallId));
+	const pending = new Set(pendingToolCalls(branch, input.turnId, kept));
 	const expected = interruptedCalls(branch, input.turnId).filter((c) => !settled.has(c.id) && !pending.has(c.id));
 	if (expected.length !== interrupted.calls.length || expected.some((c, i) => {
 		const sent = interrupted.calls[i];
