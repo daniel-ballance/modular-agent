@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
 	"os"
 	"path/filepath"
 	"slices"
@@ -387,6 +388,9 @@ func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Sess
 	snap, err := c.Snapshot(id)
 	if err != nil {
 		return snap, err
+	}
+	for i, entry := range snap.Entries {
+		snap.Entries[i] = portable.PublicEntry(entry)
 	}
 	event := api.Event{Kind: "history.view", Session: id, Data: api.JSON(snap)}
 	if gateRemote {
