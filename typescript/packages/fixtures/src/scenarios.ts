@@ -15,7 +15,11 @@ const files = (dir: string) => readdirSync(dir).filter(f => f.endsWith(".json"))
 const load = <T>(path: string): T => JSON.parse(readFileSync(path, "utf8"));
 export const scenarioFiles = () => files(join(repo, "conformance/sdk/scenarios"));
 export type Placement = { name: string; command?: string[] };
-export function placements(required = process.env.MODULAR_AGENT_SDK_REQUIRE): Placement[] {
+export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Placement[] {
+  // `all`, or a comma-separated list of SDKs (docs/sdk/testing.md#finding-the-fixture-programs).
+  const names = (require ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  const all = names.includes("all");
+  const required = new Set(names.filter(n => n !== "all"));
   const out: Placement[] = [{ name: "inProcess" }];
   const available = new Set<string>();
   for (const file of files(join(repo, "conformance/sdk/fixtures"))) {
@@ -23,14 +27,14 @@ export function placements(required = process.env.MODULAR_AGENT_SDK_REQUIRE): Pl
     const argv = command.map(a => a.replaceAll("{repo}", repo));
     if (command.some((a, i) => a.startsWith("{repo}") && !existsSync(argv[i]))) {
       const note = `${sdk} not built; build with: ${build}`;
-      if (required === "all" || required === sdk || sdk === "typescript") throw new Error(note);
+      if (all || required.has(sdk) || sdk === "typescript") throw new Error(note);
       console.error(note);
       continue;
     }
     available.add(sdk);
     out.push({ name: `process:${sdk}`, command: argv });
   }
-  if (required && required !== "all" && !available.has(required)) throw new Error(`Required fixture program ${required} is not registered`);
+  for (const sdk of required) if (!available.has(sdk)) throw new Error(`Required fixture program ${sdk} is not registered`);
   return out;
 }
 

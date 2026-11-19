@@ -152,8 +152,16 @@ func TestShared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	required := os.Getenv("MODULAR_AGENT_SDK_REQUIRE")
-	found := false
+	// MODULAR_AGENT_SDK_REQUIRE is `all` or a comma-separated list of SDKs (docs/sdk/testing.md).
+	requireAll := false
+	required := map[string]bool{}
+	for _, name := range strings.Split(os.Getenv("MODULAR_AGENT_SDK_REQUIRE"), ",") {
+		if name = strings.TrimSpace(name); name == "all" {
+			requireAll = true
+		} else if name != "" {
+			required[name] = false
+		}
+	}
 	// The runner always builds its own registered program, including when it was not built in advance.
 	own := filepath.Join(root, "go/.bin/modular-agent-fixtures")
 	cmd := exec.Command("go", "build", "-o", own, "./modular/cmd/fixtures")
@@ -170,8 +178,8 @@ func TestShared(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if f.SDK == required {
-			found = true
+		if _, ok := required[f.SDK]; ok {
+			required[f.SDK] = true
 		}
 		p := placement{SDK: f.SDK}
 		var missing []string
@@ -188,7 +196,7 @@ func TestShared(t *testing.T) {
 			t.Fatalf("%s: command is empty", path)
 		}
 		if len(missing) > 0 {
-			if required == "all" || required == f.SDK {
+			if _, ok := required[f.SDK]; requireAll || ok {
 				t.Errorf("%s not built (%v); build with: %s", f.SDK, missing, f.Build)
 			} else {
 				t.Logf("skip %s (not built); build with: %s", p.name(), f.Build)
@@ -197,8 +205,10 @@ func TestShared(t *testing.T) {
 		}
 		placements = append(placements, p)
 	}
-	if required != "" && required != "all" && !found {
-		t.Errorf("required SDK %q has no fixture registry", required)
+	for name, listed := range required {
+		if !listed {
+			t.Errorf("required SDK %q has no fixture registry", name)
+		}
 	}
 	for _, path := range files {
 		s, err := load[scenario](path)
