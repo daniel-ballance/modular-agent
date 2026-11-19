@@ -1,0 +1,13 @@
+{
+  "name": "@modular-agent/fixtures",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./dist/src/index.js",
+  "bin": {
+    "modular-agent-fixtures": "./dist/src/bin.js"
+  },
+  "dependencies": {
+    "@modular-agent/core": "*",
+    "zod": "^4.6.7"
+  }
+}
