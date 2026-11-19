@@ -9,7 +9,12 @@ import (
 	acp "github.com/caelis-labs/acp-go-sdk"
 )
 
-func (s *server) declaration(id string) map[string]any { return Declaration(s.a, s.project, id) }
+func (s *server) declaration(id string) map[string]any {
+	if s.declared != nil {
+		return s.declared()
+	}
+	return Declaration(s.a, s.project, id)
+}
 
 // Declaration is shared by the ACP and stdio plugin bindings.
 func Declaration(a api.API, project, id string) map[string]any {
@@ -58,7 +63,7 @@ func Declaration(a api.API, project, id string) map[string]any {
 		"portableSessions": true, "inputKeys": true, "questionsOutlastTurns": true, "lateAnswersStartTurns": true, "startsTurnsUnasked": "jobReports",
 		"queuedInputAfterRestart": "run", "movingWithUnfinishedWork": "refused",
 		"mixedActorInput": "refused", "settingsDuringTurn": "nextTurn", "erasureDuringTurn": "refused",
-		"commandContainment": containment,
+		"commandContainment": containment, "nestedToolCalls": true,
 	}
 }
 func modelValue(m api.Model) string {

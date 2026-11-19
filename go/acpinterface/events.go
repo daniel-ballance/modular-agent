@@ -78,7 +78,7 @@ func (s *server) event(e api.Event) {
 		s.mu.Unlock()
 	case "tool.requested":
 		c := api.Decode[api.Call](e.Data)
-		v := acp.StartToolCall(acp.ToolCallId(c.ID), c.Name, acp.WithStartName(c.Name), acp.WithStartRawInput(json.RawMessage(c.Input)))
+		v := startCall(c)
 		u = &v
 	case "tool.started":
 		v := acp.UpdateToolCall(acp.ToolCallId(e.Call), acp.WithUpdateStatus(acp.ToolCallStatusInProgress))
@@ -154,7 +154,7 @@ func (s *server) replayEntry(ctx context.Context, id string, e api.Entry) {
 		}
 	case "tool.call":
 		c := api.Decode[api.Call](e.Data)
-		_ = s.update(ctx, id, acp.StartToolCall(acp.ToolCallId(c.ID), c.Name, acp.WithStartName(c.Name), acp.WithStartRawInput(json.RawMessage(c.Input))))
+		_ = s.update(ctx, id, startCall(c))
 	case "tool.result":
 		r := api.Decode[api.ToolResult](e.Data)
 		status := acp.ToolCallStatusCompleted
@@ -163,6 +163,13 @@ func (s *server) replayEntry(ctx context.Context, id string, e api.Entry) {
 		}
 		_ = s.update(ctx, id, acp.UpdateToolCall(acp.ToolCallId(r.Call), acp.WithUpdateStatus(status), acp.WithUpdateRawOutput(r), acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(r.Content.Text()))})))
 	}
+}
+func startCall(c api.Call) acp.SessionUpdate {
+	v := acp.StartToolCall(acp.ToolCallId(c.ID), c.Name, acp.WithStartName(c.Name), acp.WithStartRawInput(json.RawMessage(c.Input)))
+	if c.ParentCall != "" {
+		v.ToolCall.Meta = map[string]json.RawMessage{Namespace: api.JSON(map[string]string{"parentToolCallId": c.ParentCall})}
+	}
+	return v
 }
 func represented(snap api.Session, event api.Event) bool {
 	for _, e := range snap.Branch() {

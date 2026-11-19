@@ -152,6 +152,7 @@ func run(ctx context.Context, args []string, input io.ReadCloser, stdout, stderr
 	conformance := os.Getenv("MODULAR_AGENT_CONFORMANCE") == "1"
 	if conformance {
 		options.Provider, options.Model = conformancemodel.Plugin(), conformancemodel.ID
+		options.Conformance = true
 	} else if *gatewayURL != "" {
 		if *script != "" {
 			return fmt.Errorf("choose a model gateway or an offline script, not both")

@@ -8,6 +8,8 @@ import (
 	"github.com/OWNER/modular-agent/go/acpinterface"
 	"github.com/OWNER/modular-agent/go/api"
 	"github.com/OWNER/modular-agent/go/harness"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,9 +22,10 @@ import (
 )
 
 type Spec struct {
-	Command []string          `json:"command"`
-	Env     map[string]string `json:"env"`
-	Config  object            `json:"config"`
+	Serve   func(context.Context, io.ReadCloser, io.Writer) error `json:"-"`
+	Command []string                                              `json:"command"`
+	Env     map[string]string                                     `json:"env"`
+	Config  object                                                `json:"config"`
 }
 type host struct {
 	h                 *harness.Harness
@@ -102,7 +105,7 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 		return nil
 	}
 	for _, spec := range specs {
-		if len(spec.Command) == 0 || spec.Command[0] == "" {
+		if spec.Serve == nil && (len(spec.Command) == 0 || spec.Command[0] == "") {
 			return errors.New("plugin command is empty")
 		}
 	}
@@ -128,46 +131,28 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 			return err
 		}
 		r := &remote{host: bridge, exited: make(chan struct{}), sources: map[string]*remoteSource{}}
-		r.cmd = exec.Command(spec.Command[0], spec.Command[1:]...)
-		r.cmd.Dir = project
-		r.cmd.Stderr = os.Stderr
-		env := map[string]string{}
-		minimal := []string{"PATH"}
-		if legacyCommandArgs {
-			minimal = append(minimal, "LANG", "LC_ALL", "TZ", "TMPDIR")
-		}
-		for _, key := range minimal {
-			if value, ok := os.LookupEnv(key); ok {
-				env[key] = value
-			}
-		}
-		for k, v := range spec.Env {
-			env[k] = v
-		}
-		r.cmd.Env = []string{}
-		for k, v := range env {
-			r.cmd.Env = append(r.cmd.Env, k+"="+v)
-		}
-		in, err := r.cmd.StdinPipe()
-		if err != nil {
+		if spec.Serve != nil {
+			hostConn, pluginConn := net.Pipe()
+			r.stdin = hostConn
+			r.peer = NewPeer(hostConn, hostConn)
+			go func() {
+				defer close(r.exited)
+				defer pluginConn.Close()
+				_ = spec.Serve(context.Background(), pluginConn, pluginConn)
+			}()
+		} else if err := r.startProcess(spec, project, legacyCommandArgs); err != nil {
 			return err
 		}
-		out, err := r.cmd.StdoutPipe()
-		if err != nil {
-			in.Close()
-			return err
-		}
-		r.stdin = in
-		if err = r.cmd.Start(); err != nil {
-			in.Close()
-			out.Close()
-			return err
-		}
-		r.peer = NewPeer(out, in)
 		r.peer.Handle = r.callback
 		r.peer.notify = r.notification
 		r.peer.OnClose = func() { r.active.Store(false); _ = r.Close() }
-		go func() { _ = r.peer.Run(); _ = r.cmd.Wait(); close(r.exited) }()
+		go func() {
+			_ = r.peer.Run()
+			if r.cmd != nil {
+				_ = r.cmd.Wait()
+				close(r.exited)
+			}
+		}()
 		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": spec.Config}
 		if spec.Config == nil {
 			init["config"] = object{}
@@ -196,6 +181,45 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 	}
 	return nil
 }
+func (r *remote) startProcess(spec Spec, project string, legacyCommandArgs bool) error {
+	r.cmd = exec.Command(spec.Command[0], spec.Command[1:]...)
+	r.cmd.Dir = project
+	r.cmd.Stderr = os.Stderr
+	env := map[string]string{}
+	minimal := []string{"PATH"}
+	if legacyCommandArgs {
+		minimal = append(minimal, "LANG", "LC_ALL", "TZ", "TMPDIR")
+	}
+	for _, key := range minimal {
+		if value, ok := os.LookupEnv(key); ok {
+			env[key] = value
+		}
+	}
+	for k, v := range spec.Env {
+		env[k] = v
+	}
+	r.cmd.Env = []string{}
+	for k, v := range env {
+		r.cmd.Env = append(r.cmd.Env, k+"="+v)
+	}
+	in, err := r.cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	out, err := r.cmd.StdoutPipe()
+	if err != nil {
+		in.Close()
+		return err
+	}
+	r.stdin = in
+	if err = r.cmd.Start(); err != nil {
+		in.Close()
+		out.Close()
+		return err
+	}
+	r.peer = NewPeer(out, in)
+	return nil
+}
 func (r *remote) Close() error {
 	r.shutdown("stop", "")
 	return nil
@@ -220,7 +244,9 @@ func (r *remote) shutdown(reason, detail string) {
 		select {
 		case <-r.exited:
 		case <-timer.C:
-			_ = r.cmd.Process.Kill()
+			if r.cmd != nil {
+				_ = r.cmd.Process.Kill()
+			}
 			r.peer.Close()
 			<-r.exited
 		}
@@ -438,7 +464,7 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 	if method != "host/problem" && method != "host/credentials/read" && method != "host/hook" &&
 		method != "host/declaration" && method != "host/session" && method != "host/history" &&
 		method != "host/emit" && method != "host/ask" && !isEnvironmentMethod(method, "host/") &&
-		!strings.HasPrefix(method, "host/runtime/") {
+		!strings.HasPrefix(method, "host/runtime/") && method != "host/tools/list" && method != "host/tools/call" {
 		return nil, unknownMethod(method)
 	}
 	if !r.active.Load() {
@@ -457,7 +483,7 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 		if hasParent || hasSession {
 			return nil, fault("invalid_request", "request is not about a session or parent")
 		}
-	case "host/ask", "host/hook", "host/env/read", "host/env/write", "host/env/exists", "host/env/exec":
+	case "host/ask", "host/hook", "host/env/read", "host/env/write", "host/env/exists", "host/env/exec", "host/env/list", "host/tools/list", "host/tools/call":
 		if !hasParent {
 			return nil, fault("invalid_request", "parent request is required")
 		}
@@ -514,6 +540,34 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 		if session != "" && !r.host.a.Authorize(session, w.actor, "watch") {
 			return nil, fault("invalid_request", "parent actor cannot access session")
 		}
+	}
+	if method == "host/tools/list" || method == "host/tools/call" {
+		if w.call.ID == "" {
+			return nil, fault("invalid_request", "tool invocation is required")
+		}
+		tools := api.InvocationTools(ctx)
+		if tools == nil {
+			return nil, fault("not_supported", "host does not run nested calls")
+		}
+		if method == "host/tools/list" {
+			list, err := tools.List(ctx)
+			if err != nil {
+				return nil, fault("invalid_request", err.Error())
+			}
+			wire := make([]object, 0, len(list))
+			for _, t := range list {
+				wire = append(wire, toolOut(t))
+			}
+			return object{"tools": wire}, nil
+		}
+		if str(v, "name") == "" || !has(v, "input") {
+			return nil, fault("invalid_request", "name and input are required")
+		}
+		result, err := tools.Call(ctx, str(v, "name"), mustJSON(v["input"]))
+		if err != nil {
+			return nil, err
+		}
+		return resultOut(result), nil
 	}
 	if method == "host/hook" {
 		if w.provider == "" || (str(v, "hook") != "provider.request" && str(v, "hook") != "provider.response") {

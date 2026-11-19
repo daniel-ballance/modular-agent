@@ -49,7 +49,20 @@ type PromptResult struct {
 func (r PromptResult) ToolResults() []ToolResult { return slices.Clone(r.results) }
 
 type PromptOption func(*promptOptions)
-type promptOptions struct{ key string }
+type promptOptions struct {
+	key    string
+	schema json.RawMessage
+}
+
+// WithResult requests a final JSON value checked against a JSON Schema.
+func WithResult(schema any) PromptOption {
+	return func(p *promptOptions) {
+		p.schema, _ = json.Marshal(schema)
+		if len(p.schema) == 0 {
+			p.schema = json.RawMessage("null")
+		}
+	}
+}
 
 func WithInputKey(key string) PromptOption { return func(p *promptOptions) { p.key = key } }
 
@@ -92,7 +105,15 @@ func (s *Session) Send(ctx context.Context, input any, timing Timing, opts ...Pr
 	if _, err := s.agent.a.Snapshot(s.id); err != nil {
 		return InputReceipt{}, appError(err, NotOpen)
 	}
-	r, err := s.agent.a.Submit(s.ctx(ctx), s.id, api.Input{When: string(timing), Key: p.key, Content: content})
+	if len(p.schema) != 0 {
+		if timing != Now {
+			return InputReceipt{}, &Error{Code: InvalidParams, Message: "structured result requires timing now"}
+		}
+		if _, err := api.ResolveSchema(p.schema); err != nil {
+			return InputReceipt{}, appError(err, InvalidParams)
+		}
+	}
+	r, err := s.agent.a.Submit(s.ctx(ctx), s.id, api.Input{When: string(timing), Key: p.key, Content: content, ResultSchema: p.schema})
 	if errors.Is(err, api.ErrInputConflict) {
 		return InputReceipt{}, appError(err, Conflict)
 	}

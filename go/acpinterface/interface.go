@@ -51,6 +51,7 @@ type attachment struct {
 	polled     map[questionRecipient]bool
 }
 type server struct {
+	declared     func() map[string]any
 	a            api.API
 	project      string
 	actor        string
@@ -70,6 +71,11 @@ type server struct {
 // Serve owns the connection streams. EOF interrupts, rather than explicitly
 // closing, sessions so the selected Runtime retains its recovery semantics.
 func (i *Interface) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) error {
+	return i.ServeWithDeclaration(ctx, in, out, nil)
+}
+
+// ServeWithDeclaration serves this composition's public capability declaration.
+func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any) error {
 	who := actor
 	if id, set := os.LookupEnv("MODULAR_AGENT_ACTOR"); set {
 		if id == "" || !utf8.ValidString(id) {
@@ -96,7 +102,7 @@ func (i *Interface) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) 
 			represented[id] = true
 		}
 	}
-	s := &server{a: i.a, project: project, actor: who, ctx: ctx, represents: represented, sessions: map[string]*attachment{}}
+	s := &server{declared: declared, a: i.a, project: project, actor: who, ctx: ctx, represents: represented, sessions: map[string]*attachment{}}
 	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, in, acp.ConnectionOptions{MaxFrameSize: (64 << 20) + 2})
 	if err != nil {
 		return err

@@ -92,6 +92,24 @@ func Agent(t testing.TB, opts ...modular.Option) *modular.Agent {
 	return a
 }
 
+// OverWire selects the same plugin, loaded over the plugin RPC binding.
+func OverWire(plugin modular.Plugin) modular.Option { return modular.WithWirePlugin(plugin) }
+
+// Restart simulates process interruption and rebuilds the agent over its store.
+func Restart(t testing.TB, agent *modular.Agent) *modular.Agent {
+	t.Helper()
+	fresh, err := agent.RestartForTest(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := fresh.Close(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	return fresh
+}
+
 func Answers(list ...modular.Answer) modular.QuestionHandler {
 	var mu sync.Mutex
 	i := 0

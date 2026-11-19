@@ -244,7 +244,7 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 			var intent api.Entry
 			modelTools := []api.Tool{}
 			for _, tool := range t.Tools {
-				if api.CanCall(tool, "model") {
+				if api.OffersModelTool(t.Settings, tool) {
 					modelTools = append(modelTools, tool)
 				}
 			}

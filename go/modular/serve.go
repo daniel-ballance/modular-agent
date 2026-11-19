@@ -12,6 +12,16 @@ import (
 	"github.com/OWNER/modular-agent/go/portable"
 )
 
+type wirePlugin struct {
+	plugin Plugin
+	config map[string]any
+}
+
+// WithWirePlugin loads a plugin through the actual plugin binding over an in-memory pipe.
+func WithWirePlugin(plugin Plugin) Option {
+	return func(o *options) error { o.wire = append(o.wire, wirePlugin{plugin, plugin.Config}); return nil }
+}
+
 func Serve(ctx context.Context, plugin Plugin) error {
 	return serve(ctx, plugin, os.Stdin, os.Stdout)
 }
