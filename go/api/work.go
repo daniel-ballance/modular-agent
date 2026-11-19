@@ -98,6 +98,7 @@ type ExternalJobs interface {
 var (
 	ErrJobNotFound      = errors.New("job not found")
 	ErrJobReportRefused = errors.New("job report refused")
+	ErrUnknownModel     = errors.New("model is not offered")
 	ErrJobCommitLost    = errors.New("job commit unconfirmed")
 	ErrJobCleanupLost   = errors.New("job cleanup unconfirmed")
 )

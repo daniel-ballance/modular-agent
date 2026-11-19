@@ -387,6 +387,7 @@ type Selection interface {
 type RuntimeDeclaration struct {
 	Durable, Steering, Parallel bool
 	WaitingThroughRestart       bool
+	NestedToolCalls             bool
 }
 type Runtime interface {
 	Declaration() RuntimeDeclaration

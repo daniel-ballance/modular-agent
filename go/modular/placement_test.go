@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/local"
 	"github.com/OWNER/modular-agent/go/pluginrpc"
 )
 
@@ -28,10 +29,14 @@ func TestCompositionAndPluginHost(t *testing.T) {
 		opts []Option
 	}{
 		{"host reads environment", []Option{WithPluginHost(true)}},
-		{"missing program", []Option{WithPluginHost(false), WithProcessPlugin(ProcessPlugin{Command: []string{"/no/such/plugin"}})}},
-		{"program exits before registering", []Option{WithPluginHost(false), WithProcessPlugin(ProcessPlugin{Command: []string{"/bin/true"}})}},
+		{"explicit processes require host", []Option{WithPluginHost(false), WithProcessPlugin(ProcessPlugin{Command: []string{"/bin/true"}})}},
+		{"missing program", []Option{WithProcessPlugin(ProcessPlugin{Command: []string{"/no/such/plugin"}})}},
+		{"program exits before registering", []Option{WithProcessPlugin(ProcessPlugin{Command: []string{"/bin/true"}})}},
 		{"kept needs data directory", []Option{WithDurability(Kept)}},
 		{"durable needs data directory", []Option{WithDurability(Durable)}},
+		{"kept cannot use memory", []Option{WithDurability(Kept), WithDataDir(t.TempDir()), WithHistory(MemoryHistory())}},
+		{"durable cannot use memory", []Option{WithDurability(Durable), WithDataDir(t.TempDir()), WithHistory(MemoryHistory())}},
+		{"kept local bookkeeping needs data directory even with a persistent store", []Option{WithDurability(Kept), WithHistory(FileHistory(t.TempDir()))}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -101,7 +106,7 @@ func TestServedRefusalAndFlag(t *testing.T) {
 	}
 }
 
-func TestLocalFilesRejectSymlinkEscape(t *testing.T) {
+func TestLocalFileDeclaration(t *testing.T) {
 	project, other := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(other, "private"), []byte("outside"), 0600); err != nil {
 		t.Fatal(err)
@@ -115,7 +120,13 @@ func TestLocalFilesRejectSymlinkEscape(t *testing.T) {
 	}
 	defer a.Close(t.Context())
 	env, _ := a.a.Get("working-environment")
-	if data, err := env.(api.WorkingEnvironment).Read(t.Context(), project, "escape/private"); err == nil {
-		t.Fatalf("outside read returned %q", data)
+	if data, err := env.(api.WorkingEnvironment).Read(t.Context(), project, "escape/private"); err != nil || string(data) != "outside" {
+		t.Fatalf("default local environment read %q: %v", data, err)
+	}
+	if a.Declaration()["confinesFiles"] != false {
+		t.Fatalf("default local environment claimed confinement: %v", a.Declaration())
+	}
+	if _, err := New(t.Context(), WithEnvironment(local.NewAt(t.TempDir()))); err == nil {
+		t.Fatal("explicit bookkeeping environment accepted without dataDir")
 	}
 }

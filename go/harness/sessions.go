@@ -879,6 +879,10 @@ func recordedOutcome(snap api.Session) api.Outcome {
 	}
 	return out
 }
+
+// SettingsDuringTurn describes the effect of supported model and approval settings.
+func (c *client) SettingsDuringTurn() string { return "nextTurn" }
+
 func (c *client) SetSettings(ctx context.Context, id string, settings api.Settings) error {
 	if !c.Authorize(id, api.Acting(ctx), "settings") {
 		return errors.New("settings refused")
@@ -1442,7 +1446,7 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 		result := changed.(api.ResultCheck)
 		if len(p.input.ResultSchema) != 0 && result.Continue == "" {
 			if err := api.ValidateResult(p.input.ResultSchema, &result); err != nil {
-				return nil, err
+				result.Continue = err.Error()
 			}
 			changed = result
 		}

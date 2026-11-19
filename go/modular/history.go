@@ -16,21 +16,24 @@ import (
 type HistoryStore struct {
 	make       func() (api.Store, error)
 	persistent bool
+	erasure    bool
 	serviceDir string
 	fileDir    string
 }
 
 func MemoryHistory() HistoryStore {
-	store := &memoryStore{data: make(map[string][]byte), held: make(map[string]bool)}
-	return HistoryStore{make: func() (api.Store, error) { return store, nil }}
+	return memoryHistory(&memoryStore{data: make(map[string][]byte), held: make(map[string]bool)})
+}
+func memoryHistory(store *memoryStore) HistoryStore {
+	return HistoryStore{erasure: true, make: func() (api.Store, error) { return store, nil }}
 }
 func FileHistory(dir string) HistoryStore {
-	return HistoryStore{persistent: true, fileDir: dir, make: func() (api.Store, error) { return history.New(dir) }}
+	return HistoryStore{persistent: true, erasure: true, fileDir: dir, make: func() (api.Store, error) { return history.New(dir) }}
 }
 
 // HTTPHistory uses a modular-agent-history/1 service as a HistoryStore.
 func HTTPHistory(url, tokenFile string) HistoryStore {
-	return HistoryStore{persistent: true, make: func() (api.Store, error) {
+	return HistoryStore{persistent: true, erasure: true, make: func() (api.Store, error) {
 		token, err := historyhttp.TokenFile(tokenFile)
 		if err != nil {
 			return nil, err
@@ -51,6 +54,8 @@ func HistoryServiceFiles(dir string) HistoryStore { return HistoryStore{serviceD
 type HistoryOptions struct {
 	Address   string
 	TokenFile string
+	// AllowVolatileForTests explicitly permits serving MemoryHistory.
+	AllowVolatileForTests bool
 }
 
 func ServeHistory(ctx context.Context, store HistoryStore, options HistoryOptions) error {
@@ -62,6 +67,13 @@ func ServeHistory(ctx context.Context, store HistoryStore, options HistoryOption
 	return serveHistory(ctx, store, options, listener)
 }
 func serveHistory(ctx context.Context, store HistoryStore, options HistoryOptions, listener net.Listener) error {
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || !addr.IP.IsLoopback() {
+		return &Error{Code: InvalidParams, Message: "plaintext history requires a loopback listener"}
+	}
+	if store.serviceDir == "" && store.make == nil {
+		return &Error{Code: NotSupported, Message: "no eligible history store selected"}
+	}
 	token, err := historyhttp.TokenFile(options.TokenFile)
 	if err != nil {
 		return appError(err, InvalidParams)
@@ -80,12 +92,15 @@ func serveHistory(ctx context.Context, store HistoryStore, options HistoryOption
 				handler = client.Relay(token)
 			} else if store.fileDir != "" {
 				disk, err = historyhttp.NewFileStoreServer(backing, store.fileDir, 3*time.Second)
-			} else {
+			} else if _, ok := backing.(*memoryStore); ok {
+				if !options.AllowVolatileForTests {
+					return &Error{Code: NotSupported, Message: "MemoryHistory is not durable and can only be served for tests"}
+				}
 				disk = historyhttp.NewStoreServer(backing, 3*time.Second)
+			} else {
+				return &Error{Code: NotSupported, Message: "selected history store cannot be served"}
 			}
 		}
-	default:
-		err = errors.New("missing history store")
 	}
 	if err != nil {
 		return appError(err, InvalidComposition)

@@ -70,6 +70,15 @@ func NewWithLocalActor(actor string) *Harness {
 // HandBackQueuedOnOpen selects the embedded SDK's recovery policy before loading plugins.
 func (h *Harness) HandBackQueuedOnOpen() { h.handBackOnOpen = true }
 
+// QueuedRecoveryPolicy reports the policy actually used to install recovered work.
+// The harness handles queued jobs and ordinary queued input alike.
+func (h *Harness) QueuedRecoveryPolicy() (inputs, jobReports string) {
+	if h.handBackOnOpen {
+		return "handedBack", "handedBack"
+	}
+	return "run", "run"
+}
+
 func (h *Harness) API() api.API     { return &client{h: h, owner: "harness"} }
 func (c *client) validLocked() bool { _, ok := c.h.plugins[c.owner]; return c.owner == "harness" || ok }
 func (h *Harness) Load(p api.Plugin) error {

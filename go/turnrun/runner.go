@@ -24,7 +24,7 @@ type BoundPorts interface {
 }
 
 func (r *Runner) Declaration() api.RuntimeDeclaration {
-	return api.RuntimeDeclaration{Durable: r.Durable, Steering: true, Parallel: true, WaitingThroughRestart: r.Durable}
+	return api.RuntimeDeclaration{Durable: r.Durable, Steering: true, Parallel: true, WaitingThroughRestart: r.Durable, NestedToolCalls: true}
 }
 
 type Start = api.TurnStart
@@ -303,7 +303,9 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 					}
 				}
 				response, err = t.Access.Generate(modelCtx, sc.Request, func(p api.Part) { t.IO.Emit(ctx, api.Event{Kind: "model.delta", Step: step, Data: api.JSON(p)}) })
-				if err == nil {
+				// A wire Provider can return a typed error alongside an actual
+				// failed message. Record that answer just as for a local Provider.
+				if err == nil || (response.Stop == "failed" && len(response.Wire) != 0) {
 					break
 				}
 				t.IO.Emit(ctx, api.Event{Kind: "model.stream.end", Step: step, Data: api.JSON("failed")})
