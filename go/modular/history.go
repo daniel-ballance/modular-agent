@@ -17,15 +17,15 @@ type HistoryStore struct {
 	make       func() (api.Store, error)
 	persistent bool
 	serviceDir string
+	fileDir    string
 }
 
 func MemoryHistory() HistoryStore {
-	return HistoryStore{make: func() (api.Store, error) {
-		return &memoryStore{data: make(map[string][]byte), held: make(map[string]bool)}, nil
-	}}
+	store := &memoryStore{data: make(map[string][]byte), held: make(map[string]bool)}
+	return HistoryStore{make: func() (api.Store, error) { return store, nil }}
 }
 func FileHistory(dir string) HistoryStore {
-	return HistoryStore{persistent: true, make: func() (api.Store, error) { return history.New(dir) }}
+	return HistoryStore{persistent: true, fileDir: dir, make: func() (api.Store, error) { return history.New(dir) }}
 }
 
 // HTTPHistory uses a modular-agent-history/1 service as a HistoryStore.
@@ -54,9 +54,6 @@ type HistoryOptions struct {
 }
 
 func ServeHistory(ctx context.Context, store HistoryStore, options HistoryOptions) error {
-	if store.serviceDir == "" {
-		return &Error{Code: NotSupported, Message: "the Go history server requires HistoryServiceFiles"}
-	}
 	listener, err := net.Listen("tcp", options.Address)
 	if err != nil {
 		return appError(err, InvalidParams)
@@ -69,12 +66,35 @@ func serveHistory(ctx context.Context, store HistoryStore, options HistoryOption
 	if err != nil {
 		return appError(err, InvalidParams)
 	}
-	disk, err := historyhttp.New(store.serviceDir, 3*time.Second)
+	var handler http.Handler
+	var disk *historyhttp.Server
+	switch {
+	case store.serviceDir != "":
+		disk, err = historyhttp.New(store.serviceDir, 3*time.Second)
+	case store.make != nil:
+		var backing api.Store
+		backing, err = store.make()
+		if err == nil {
+			if client, ok := backing.(*historyhttp.Client); ok {
+				defer client.Close()
+				handler = client.Relay(token)
+			} else if store.fileDir != "" {
+				disk, err = historyhttp.NewFileStoreServer(backing, store.fileDir, 3*time.Second)
+			} else {
+				disk = historyhttp.NewStoreServer(backing, 3*time.Second)
+			}
+		}
+	default:
+		err = errors.New("missing history store")
+	}
 	if err != nil {
 		return appError(err, InvalidComposition)
 	}
-	defer disk.Close()
-	server := &http.Server{Handler: disk.Handler(token), ReadHeaderTimeout: 5 * time.Second}
+	if disk != nil {
+		defer disk.Close()
+		handler = disk.Handler(token)
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	stop := context.AfterFunc(ctx, func() { _ = server.Close() })
 	defer stop()
 	err = server.Serve(listener)

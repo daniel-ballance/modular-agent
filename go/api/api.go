@@ -51,26 +51,28 @@ func (c Content) Text() string {
 }
 
 type Call struct {
-	Wire      json.RawMessage `json:"wire,omitempty"`
-	Step      string          `json:"step,omitempty"`
-	Reference string          `json:"reference,omitempty"`
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Input     json.RawMessage `json:"input"`
-	Origin    string          `json:"origin,omitempty"`
-	Actor     string          `json:"actor,omitempty"`
+	ParentCall string          `json:"parentCallId,omitempty"`
+	Wire       json.RawMessage `json:"wire,omitempty"`
+	Step       string          `json:"step,omitempty"`
+	Reference  string          `json:"reference,omitempty"`
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	Input      json.RawMessage `json:"input"`
+	Origin     string          `json:"origin,omitempty"`
+	Actor      string          `json:"actor,omitempty"`
 }
 type ToolResult struct {
-	NotDispatched bool            `json:"-"` // result reports a local preflight failure, not execution
-	Wire          json.RawMessage `json:"wire,omitempty"`
-	Name          string          `json:"name,omitempty"`
-	Structured    json.RawMessage `json:"structured,omitempty"`
-	Data          json.RawMessage `json:"data,omitempty"`
-	Copies        []string        `json:"copies,omitempty"`
-	Reference     string          `json:"reference,omitempty"`
-	Call          string          `json:"call"`
-	Status        string          `json:"status"`
-	Content       Content         `json:"content"`
+	ProcessingError error           `json:"-"`
+	NotDispatched   bool            `json:"-"` // result reports a local preflight failure, not execution
+	Wire            json.RawMessage `json:"wire,omitempty"`
+	Name            string          `json:"name,omitempty"`
+	Structured      json.RawMessage `json:"structured,omitempty"`
+	Data            json.RawMessage `json:"data,omitempty"`
+	Copies          []string        `json:"copies,omitempty"`
+	Reference       string          `json:"reference,omitempty"`
+	Call            string          `json:"call"`
+	Status          string          `json:"status"`
+	Content         Content         `json:"content"`
 }
 type Tool struct {
 	UsesWorkingEnvironment bool            `json:"-"` // set by the host adapter, not a wire hint
@@ -118,14 +120,16 @@ type Entry struct {
 	Data               json.RawMessage `json:"data,omitempty"`
 }
 type Settings struct {
-	Approval     string `json:"approval,omitempty"`
-	Model        string `json:"model"`
-	Thinking     string `json:"thinking"`
-	MaxSteps     int    `json:"max_steps"`
-	MaxOutput    int    `json:"max_output"`
-	ContextLimit int    `json:"context_limit"`
+	ModelTools   *[]string `json:"modelTools"`
+	Approval     string    `json:"approval,omitempty"`
+	Model        string    `json:"model"`
+	Thinking     string    `json:"thinking"`
+	MaxSteps     int       `json:"max_steps"`
+	MaxOutput    int       `json:"max_output"`
+	ContextLimit int       `json:"context_limit"`
 }
 type Session struct {
+	HistoryMeta json.RawMessage  `json:"historyMeta,omitempty"`
 	Tenant      string           `json:"tenant,omitempty"`
 	Limit       *[]string        `json:"limit,omitempty"` // absent means uncapped
 	Actors      map[string]Actor `json:"actors,omitempty"`
@@ -187,6 +191,7 @@ func (s Session) Branch() []Entry {
 }
 
 type Input struct {
+	ResultSchema         json.RawMessage `json:"resultSchema,omitempty"`
 	ID, Key, Actor, When string
 	Answer               string   `json:",omitempty"`
 	ReleasedBy           string   `json:",omitempty"`
@@ -457,6 +462,7 @@ type Failure struct {
 	Retry   bool
 }
 type ToolCheck struct {
+	InputChanged  bool
 	Session, Turn string
 	Open          bool
 	Validate      func(Call) error

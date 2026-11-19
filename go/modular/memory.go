@@ -82,6 +82,36 @@ func (m *memoryStore) List(project string) ([]api.Session, error) {
 	}
 	return out, nil
 }
-func (m *memoryStore) Erase([]string) error {
-	return &Error{Code: NotSupported, Message: "memory erasure is not supported"}
+func (l *lease) SaveErasure(s api.Session) error { return l.Save(s) }
+
+func (m *memoryStore) Erase(ids []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	selected := map[string]bool{}
+	for _, id := range ids {
+		selected[id] = true
+	}
+	staged := map[string][]byte{}
+	for id, data := range m.data {
+		var s api.Session
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		for n, e := range s.Entries {
+			if !selected[e.ID] || e.IsErased() {
+				continue
+			}
+			if e.AuthorityRecord() {
+				return &Error{Code: Forbidden, Message: "cannot erase authority record"}
+			}
+			s.Entries[n] = e.Redacted()
+		}
+		encoded, err := json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		staged[id] = encoded
+	}
+	m.data = staged
+	return nil
 }

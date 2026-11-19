@@ -259,7 +259,7 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 		return object{"callId": c.ID, "pending": "waiting for an answer"}, nil
 	}
 	out, err := w.settleTool(ctx, c, result)
-	return resultOut(out), err
+	return resultOut(out), errors.Join(err, result.ProcessingError)
 }
 
 // settleTool is the sole terminal transition. Hook outputs may refine the

@@ -49,7 +49,20 @@ type PromptResult struct {
 func (r PromptResult) ToolResults() []ToolResult { return slices.Clone(r.results) }
 
 type PromptOption func(*promptOptions)
-type promptOptions struct{ key string }
+type promptOptions struct {
+	key    string
+	schema json.RawMessage
+}
+
+// WithResult requests a final JSON value checked against a JSON Schema.
+func WithResult(schema any) PromptOption {
+	return func(p *promptOptions) {
+		p.schema, _ = json.Marshal(schema)
+		if len(p.schema) == 0 {
+			p.schema = json.RawMessage("null")
+		}
+	}
+}
 
 func WithInputKey(key string) PromptOption { return func(p *promptOptions) { p.key = key } }
 
@@ -92,7 +105,15 @@ func (s *Session) Send(ctx context.Context, input any, timing Timing, opts ...Pr
 	if _, err := s.agent.a.Snapshot(s.id); err != nil {
 		return InputReceipt{}, appError(err, NotOpen)
 	}
-	r, err := s.agent.a.Submit(s.ctx(ctx), s.id, api.Input{When: string(timing), Key: p.key, Content: content})
+	if len(p.schema) != 0 {
+		if timing != Now {
+			return InputReceipt{}, &Error{Code: InvalidParams, Message: "structured result requires timing now"}
+		}
+		if _, err := api.ResolveSchema(p.schema); err != nil {
+			return InputReceipt{}, appError(err, InvalidParams)
+		}
+	}
+	r, err := s.agent.a.Submit(s.ctx(ctx), s.id, api.Input{When: string(timing), Key: p.key, Content: content, ResultSchema: p.schema})
 	if errors.Is(err, api.ErrInputConflict) {
 		return InputReceipt{}, appError(err, Conflict)
 	}
@@ -150,6 +171,7 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 	// Some admission/settlement records in the base do not yet have a live event.
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
+	cursor := ""
 	for {
 		if yield == nil || r.Duplicate {
 			snap, err := s.view(ctx)
@@ -167,7 +189,7 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 		case <-ctx.Done():
 			return PromptResult{}, appError(ctx.Err(), CancelledCode)
 		case <-overflow:
-			return PromptResult{}, &Error{Code: Lost, Message: "prompt stream fell behind; read history to resume"}
+			return PromptResult{}, &Error{Code: Lost, Message: "prompt stream fell behind", Data: map[string]any{"fromEntry": cursor}}
 		case <-wake:
 		case <-tick.C:
 			if yield != nil {
@@ -191,6 +213,9 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 				continue
 			}
 			e := sdkEvent(raw)
+			if raw.Kind == "history.added" {
+				cursor = api.Decode[api.Entry](raw.Data).ID
+			}
 			if e != nil && !yield(e, nil) {
 				return PromptResult{}, nil
 			}
@@ -361,6 +386,11 @@ func (s *Session) Settings(ctx context.Context) (Settings, error) {
 	}
 	b := snap.Settings
 	out := Settings{"reasoning": b.Thinking, "approval": api.ApprovalWire(b.Approval), "maxSteps": b.MaxSteps, "maxOutput": b.MaxOutput}
+	if b.ModelTools == nil {
+		out["modelTools"] = nil
+	} else {
+		out["modelTools"] = slices.Clone(*b.ModelTools)
+	}
 	for _, m := range s.agent.Models() {
 		if m.ModelRef.String() == b.Model {
 			out["model"] = m.ModelRef

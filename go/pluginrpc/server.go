@@ -241,6 +241,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 			_ = s.peer.Send("tools/progress", object{"parentRequestId": id, "content": contentOut(content)})
 		}
 		ctx = api.WithToolProgress(ctx, progress)
+		ctx = api.WithNestedTools(ctx, servedTools{s: s, ctx: ctx})
 		r := source.Run(ctx, api.Session{ID: str(v, "sessionId"), Project: str(v, "project")}, call, func(chunk string) {
 			progress(api.Text(chunk))
 		})
@@ -336,14 +337,25 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 			msg = object{"role": "assistant", "content": []any{}, "stop": "failed", "error": object{"kind": "refused", "message": prepared["refused"]}}
 		} else {
 			ctx = api.WithExecution(ctx, api.Execution{Session: str(v, "sessionId")})
-			response, err := access.Generate(ctx, requestIn(asObject(prepared["request"])), func(part api.Part) {
+			request := requestIn(asObject(prepared["request"]))
+			request.Thinking = api.LowerReasoning(request.Thinking, access.Model().Thinking)
+			response, err := access.Generate(ctx, request, func(part api.Part) {
+				if ctx.Err() != nil {
+					return
+				}
 				_ = s.peer.Send("provider/event", object{"parentRequestId": id, "event": object{"type": part.Type, "delta": part.Text}})
 			})
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || Code(err) == "cancelled" {
+				return nil, fault("cancelled", "Provider request cancelled")
+			}
 			msg = responseOut(response)
 			if err != nil {
 				msg["stop"] = "failed"
 				msg["error"] = errorOut(err)
 			}
+		}
+		if ctx.Err() != nil {
+			return nil, fault("cancelled", "Provider request cancelled")
 		}
 		if err = s.peer.Call(ctx, "host/hook", object{"parentRequestId": id, "hook": "provider.response", "payload": providerResponsePayload(payload, msg)}, nil); err != nil {
 			return nil, err
@@ -389,7 +401,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 	return nil, unknownMethod(method)
 }
 func isEnvironmentMethod(method, prefix string) bool {
-	return method == prefix+"env/read" || method == prefix+"env/write" || method == prefix+"env/exists" || method == prefix+"env/exec"
+	return method == prefix+"env/read" || method == prefix+"env/write" || method == prefix+"env/exists" || method == prefix+"env/exec" || method == prefix+"env/list"
 }
 
 func endEnvironmentSession(ctx context.Context, env api.WorkingEnvironment, session string) error {
@@ -425,6 +437,31 @@ func environmentRequest(ctx context.Context, env api.WorkingEnvironment, method 
 			return nil, fault("invalid_request", "invalid base64")
 		}
 		return object{}, env.Write(ctx, cwd, path, b)
+	case "env/list":
+		lister, ok := env.(api.DirectoryLister)
+		if !ok {
+			return nil, fault("not_supported", "environment does not list directories")
+		}
+		if path == "" {
+			return nil, fault("invalid_request", "path is required")
+		}
+		entries, err := lister.ListDir(ctx, cwd, path)
+		if err != nil {
+			switch {
+			case Code(err) != "":
+				return nil, err
+			case errors.Is(err, fs.ErrNotExist):
+				return nil, fault("not_found", err.Error())
+			case errors.Is(err, fs.ErrInvalid), errors.Is(err, fs.ErrPermission):
+				return nil, fault("invalid_request", err.Error())
+			default:
+				return nil, err
+			}
+		}
+		if entries == nil {
+			entries = []api.DirEntry{}
+		}
+		return object{"entries": entries}, nil
 	case "env/exists":
 		if e, ok := env.(interface {
 			Exists(context.Context, string, string) (bool, error)
@@ -500,6 +537,14 @@ func (e *remoteEnvironment) request(ctx context.Context, method string, v object
 		v["parentRequestId"] = RequestID(ctx)
 	}
 	return e.peer.Call(ctx, e.prefix+method, v, out)
+}
+func (e *remoteEnvironment) ListDir(ctx context.Context, cwd, path string) ([]api.DirEntry, error) {
+	var response struct{ Entries []api.DirEntry }
+	err := e.request(ctx, "env/list", object{"cwd": cwd, "path": path}, &response)
+	if Code(err) == "method_not_found" || Code(err) == "not_supported" {
+		err = api.ErrListUnsupported
+	}
+	return response.Entries, err
 }
 func (e *remoteEnvironment) Exists(ctx context.Context, cwd, path string) (bool, error) {
 	var v struct {
@@ -610,7 +655,7 @@ func ConformanceServer() *Server {
 				reg.Tools = append(reg.Tools, toolOut(t))
 			}
 			s.Registration.ToolSources = append(s.Registration.ToolSources, reg)
-			s.Registration.Replaces = append(s.Registration.Replaces, "tool:bash", "tool:read")
+			s.Registration.Replaces = append(s.Registration.Replaces, "tool:bash", "tool:read", "tool:nest")
 		}
 		if chosen["environment"] {
 			s.Environment = local.NewAt(filepath.Join(str(init, "home"), "commands"))
@@ -652,6 +697,9 @@ type onlyTools struct {
 }
 
 func (s *onlyTools) Run(ctx context.Context, session api.Session, call api.Call, progress func(string)) api.ToolResult {
+	if call.Name == "nest" {
+		return Nest(ctx, call)
+	}
 	if call.Name != "bash" {
 		return s.ToolSource.Run(ctx, session, call, progress)
 	}
@@ -682,7 +730,7 @@ func (s *onlyTools) Run(ctx context.Context, session api.Session, call api.Call,
 }
 
 func (s *onlyTools) Tools(session api.Session) []api.Tool {
-	var out []api.Tool
+	out := []api.Tool{NestDefinition()}
 	for _, t := range s.ToolSource.Tools(session) {
 		if t.Name == "bash" || t.Name == "read" {
 			out = append(out, t)

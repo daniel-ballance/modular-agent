@@ -69,6 +69,7 @@ func settingsOut(s api.Settings) object {
 	v := object{"reasoning": s.Thinking, "maxSteps": s.MaxSteps, "maxOutput": s.MaxOutput}
 	set(v, "model", ref(s.Model, ""), s.Model != "")
 	set(v, "approval", api.ApprovalWire(s.Approval), s.Approval != "")
+	set(v, "modelTools", s.ModelTools, s.ModelTools != nil)
 	set(v, "go.contextLimit", s.ContextLimit, s.ContextLimit != 0)
 	return v
 }
@@ -91,6 +92,15 @@ func applySettings(s *api.Settings, v object) {
 			}
 		case "approval":
 			s.Approval = api.ApprovalInternal(str(v, k))
+		case "modelTools":
+			if x == nil {
+				s.ModelTools = nil
+			} else {
+				var names []string
+				if json.Unmarshal(api.JSON(x), &names) == nil {
+					s.ModelTools = &names
+				}
+			}
 		case "go.contextLimit":
 			s.ContextLimit = number(v, k)
 		}
@@ -165,6 +175,7 @@ func Entry(e api.Entry) map[string]any {
 		delete(d, "inputId")
 		d["when"], d["content"] = in.When, contentOut(in.Content)
 		set(d, "taken", in.Taken, in.Taken != "")
+		set(d, "go.resultSchema", in.ResultSchema, len(in.ResultSchema) != 0)
 		set(d, "parked", in.Parked, in.Parked != nil)
 		if in.Job != "" && len(e.Wire) == 0 {
 			d["authorizers"] = []object{{"sessionId": e.Session, "jobId": in.Job}}
@@ -357,7 +368,10 @@ func Entry(e api.Entry) map[string]any {
 		}
 	case "setting":
 		if _, ok := d["key"]; !ok {
-			d["key"], d["value"] = "settings", settingsOut(api.Decode[api.Settings](e.Data))
+			settings := api.Decode[api.Settings](e.Data)
+			values := settingsOut(settings)
+			values["modelTools"] = settings.ModelTools
+			d["key"], d["value"] = "settings", values
 		}
 	case "actor.set":
 		a := asObject(d["actor"])
@@ -450,6 +464,9 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 			in.Parked = &b
 		}
 		in.Taken = str(d, "taken")
+		if has(d, "go.resultSchema") {
+			in.ResultSchema = api.JSON(d["go.resultSchema"])
+		}
 		in.JobRights = api.Decode[[]string](api.JSON(d["rights"]))
 		if str(v, "kind") == "input.accepted" {
 			in = api.Decode[api.Input](api.JSON(v["data"]))

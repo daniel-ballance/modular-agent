@@ -377,6 +377,23 @@ func (m *Manager) DeclineUnanswered(q api.Question, reason string) {
 	_ = m.decline(q, reason)
 }
 
+// CloseCall makes any remaining questions for a terminal nested call unanswerable.
+func (m *Manager) CloseCall(session, call string) error {
+	list, err := m.List(session)
+	if err != nil {
+		return err
+	}
+	for _, q := range list {
+		if q.Call == call && q.Answerable {
+			err = m.decline(q, "noLongerAnswerable")
+			var declined *api.QuestionDeclined
+			if err != nil && !errors.As(err, &declined) {
+				return err
+			}
+		}
+	}
+	return nil
+}
 func (m *Manager) decline(q api.Question, reason string) error {
 	m.mu.Lock()
 	s, err := m.a.Snapshot(q.Session)

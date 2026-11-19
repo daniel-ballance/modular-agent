@@ -30,6 +30,7 @@ import (
 )
 
 type Options struct {
+	Conformance            bool
 	History, Global, Model string
 	DataDir                string
 	Store, Environment     api.Plugin
@@ -69,6 +70,9 @@ func New(opt Options) (*harness.Harness, error) {
 		provider, modelselect.Plugin(),
 		environment, tools.Plugin(), runtime, contextview.Plugin(), systemprompt.Plugin(),
 		commands.Plugin(), questions.Plugin(), approval.Plugin(), jobs.Plugin(), subagents.Plugin(opt.DurableSubagents, opt.MaxSubagentDepth), guardrail.Plugin(opt.Secrets), mcptools.Plugin(nil, opt.Project), terminal.Plugin(), acpinterface.Plugin(opt.Project),
+	}
+	if opt.Conformance {
+		plugins = append(plugins, pluginrpc.NestFixture())
 	}
 	for _, plugin := range plugins {
 		if plugin.Name == "" {

@@ -220,6 +220,10 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = lease.Close()
 		return err
 	}
+	if err = c.recoverNested(s); err != nil {
+		_ = c.StopSession(id)
+		return err
+	}
 	s.mu.Lock()
 	err = c.repairJobReportsLocked(s)
 	snap = clone(s.data)
@@ -890,6 +894,7 @@ func (c *client) SetSettings(ctx context.Context, id string, settings api.Settin
 		// turn retains its recorded settings, including across recovery.
 		before, after := s.data.Settings, settings
 		before.Model, before.Thinking, before.Approval = after.Model, after.Thinking, after.Approval
+		before.ModelTools = after.ModelTools
 		if before != after {
 			return errors.New("non-model settings change applies between turns only")
 		}
@@ -1402,6 +1407,18 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 			return nil, err
 		}
 		check = changed.(api.ToolCheck)
+		if check.Call.ParentCall != "" && check.InputChanged && !check.Open && check.Refused == "" {
+			check.InputChanged, check.Validate = false, nil
+			ctx = api.WithExecution(ctx, api.Execution{Session: p.s.id, Turn: p.id, Call: check.Call, ToolSource: p.toolRegistration(check.Call.Name)})
+			changed, err = p.c.Invoke(ctx, name, check)
+			if err != nil {
+				return nil, err
+			}
+			check = changed.(api.ToolCheck)
+			if check.InputChanged {
+				return nil, errors.New("tool gate changed input on its second pass")
+			}
+		}
 		validate := check.Validate
 		check.Validate = func(call api.Call) error {
 			if validate != nil {
@@ -1423,6 +1440,12 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 	switch name {
 	case "runtime.result":
 		result := changed.(api.ResultCheck)
+		if len(p.input.ResultSchema) != 0 && result.Continue == "" {
+			if err := api.ValidateResult(p.input.ResultSchema, &result); err != nil {
+				return nil, err
+			}
+			changed = result
+		}
 		if result.Continue != "" {
 			if _, err := p.Record(ctx, api.Entry{Kind: "resultFeedback", Visible: true, Data: api.JSON(result.Continue)}); err != nil {
 				return nil, err
@@ -1430,6 +1453,9 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 		}
 	case "runtime.step.before":
 		step := changed.(api.StepContext)
+		if len(p.input.ResultSchema) != 0 {
+			step.Request.System += "\nReturn the final answer as a single JSON value matching this schema (no Markdown): " + string(p.input.ResultSchema)
+		}
 		snap, err := p.Snapshot()
 		if err != nil {
 			return nil, err
@@ -1461,7 +1487,12 @@ func (p *turnPorts) CheckWriter() error {
 
 // ToolRegistration resolves the currently registered source and definition.
 // The source may refresh, so do not hold either Harness lock while reading it.
-func (p *turnPorts) ToolRegistration(name string) (plugin, source string, definition api.Tool, found bool) {
+func (p *turnPorts) ToolRegistration(name string) (string, string, api.Tool, bool) {
+	plugin, source, definition, _, _, found := p.resolveTool(name)
+	return plugin, source, definition, found
+}
+
+func (p *turnPorts) resolveTool(name string) (plugin, source string, definition api.Tool, executor api.ToolSource, snap api.Session, found bool) {
 	snap, err := p.Snapshot()
 	if err != nil {
 		return
@@ -1481,13 +1512,13 @@ func (p *turnPorts) ToolRegistration(name string) (plugin, source string, defini
 				continue
 			}
 			if found {
-				return "", "", api.Tool{}, false
+				return "", "", api.Tool{}, nil, snap, false
 			}
 			plugin, source = r.owner, strings.TrimPrefix(id, "tools.")
 			if identity, ok := s.(interface{ ToolSourceIdentity() (string, string) }); ok {
 				plugin, source = identity.ToolSourceIdentity()
 			}
-			definition, found = tool, true
+			definition, executor, found = tool, s, true
 		}
 	}
 	return
@@ -1514,7 +1545,7 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 			e.OpenWorld = &p.tools[idx].External
 		}
 	}
-	if e.Kind == "turn.start" || (e.Kind == "tool.started" && p.id == "") {
+	if e.Kind == "turn.start" || (e.Kind == "tool.started" && p.id == "" && api.Decode[api.Call](e.Data).ParentCall == "") {
 		var err error
 		if e.Point, err = p.savePoint(ctx); err != nil {
 			return e, err
@@ -1618,35 +1649,17 @@ func (p *turnPorts) HasSteering() bool {
 	defer p.s.mu.Unlock()
 	return slices.ContainsFunc(p.s.queue, func(in api.Input) bool { return in.When == "steer" })
 }
-func (p *turnPorts) RunTool(ctx context.Context, call api.Call) (result api.ToolResult) {
-	result = api.ToolResult{Call: call.ID, Status: "failed", NotDispatched: true, Content: api.Text("unknown tool: " + call.Name)}
-	defer func() {
-		if v := recover(); v != nil {
-			result = api.ToolResult{Call: call.ID, Status: "unknown", Content: api.Text(fmt.Sprintf("Call did not finish (tool panic: %v). Check outside state before relying on it.", v))}
-		}
-	}()
-	snap, err := p.Snapshot()
+func (p *turnPorts) RunTool(ctx context.Context, call api.Call) api.ToolResult {
+	plugin, id, def, source, snap, found := p.resolveTool(call.Name)
+	if !found || !api.CanCall(def, call.Origin) || !p.canRunTools(call.Actor) {
+		return api.ToolResult{Call: call.ID, Status: "refused", NotDispatched: true}
+	}
+	if ctx.Err() != nil || p.CheckWriter() != nil {
+		return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
+	}
+	result, err := p.executeTool(ctx, source, snap, call, api.ToolRegistration{Plugin: plugin, ToolSource: id}, 0)
 	if err != nil {
-		result.Content = api.Text(err.Error())
-		return
+		result.ProcessingError = err
 	}
-	for _, v := range p.c.All("tools.") {
-		source := v.(api.ToolSource)
-		for _, tool := range source.Tools(snap) {
-			if tool.Name == call.Name {
-				if err := p.CheckWriter(); err != nil {
-					return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
-				}
-				ctx = api.WithToolProgress(ctx, func(content api.Content) {
-					data := api.JSON(content)
-					if len(content) == 1 && content[0].Type == "text" {
-						data = api.JSON(content[0].Text)
-					}
-					p.Emit(ctx, api.Event{Kind: "tool.progress", Call: call.ID, Step: call.Step, Data: data})
-				})
-				return source.Run(ctx, snap, call, func(text string) { p.Emit(ctx, api.Event{Kind: "tool.progress", Call: call.ID, Data: api.JSON(text)}) })
-			}
-		}
-	}
-	return
+	return result
 }

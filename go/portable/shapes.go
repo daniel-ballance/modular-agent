@@ -147,6 +147,7 @@ func callOut(c api.Call) object {
 	v["name"] = c.Name
 	v["input"] = c.Input
 	v["startedBy"] = c.Origin
+	set(v, "parentCallId", c.ParentCall, c.ParentCall != "")
 	if c.Step != "" {
 		v["stepId"] = c.Step
 	}
@@ -156,7 +157,7 @@ func callOut(c api.Call) object {
 	return v
 }
 func callIn(v object) api.Call {
-	return api.Call{Step: str(v, "stepId"), ID: str(v, "id"), Name: str(v, "name"), Input: api.JSON(v["input"]), Origin: str(v, "startedBy"), Actor: str(v, "actorId"), Wire: api.JSON(v)}
+	return api.Call{ParentCall: str(v, "parentCallId"), Step: str(v, "stepId"), ID: str(v, "id"), Name: str(v, "name"), Input: api.JSON(v["input"]), Origin: str(v, "startedBy"), Actor: str(v, "actorId"), Wire: api.JSON(v)}
 }
 func statusOut(s string) string {
 	switch s {

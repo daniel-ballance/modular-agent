@@ -59,12 +59,22 @@ type options struct {
 	plugins                 []Plugin
 	tools                   []Tool
 	process                 []ProcessPlugin
+	wire                    []wirePlugin
+	environment             Environment
 	host                    *bool
 	settings                Settings
 	approval                Approval
 	handler                 QuestionHandler
 	history                 HistoryStore
 }
+type Environment = api.WorkingEnvironment
+type DirEntry = api.DirEntry
+type ExecResult = api.ExecResult
+
+func WithEnvironment(env Environment) Option {
+	return func(o *options) error { o.environment = env; return nil }
+}
+
 type Option func(*options) error
 
 func WithProject(p string) Option { return func(o *options) error { o.project = p; return nil } }
@@ -126,12 +136,14 @@ type Agent struct {
 	scratch    string
 	persistent bool
 	closed     atomic.Bool
+	restarting atomic.Bool
 	lifecycle  sync.Mutex
 	settingsMu sync.Mutex
 	pluginHost bool
 	q          *questionRouter
 	closeOnce  sync.Once
 	closeErr   error
+	restart    func(context.Context) (*Agent, error)
 }
 type sessionDefaults struct{ settings *api.Settings }
 
@@ -189,6 +201,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		host = *o.host
 	}
 	var specs []pluginrpc.Spec
+	for _, w := range o.wire {
+		specs = append(specs, pluginrpc.Spec{Config: w.config, Serve: func(ctx context.Context, in io.ReadCloser, out io.Writer) error { return serve(ctx, w.plugin, in, out) }})
+	}
 	for _, p := range o.process {
 		specs = append(specs, pluginrpc.Spec{Command: p.Command, Env: p.Env, Config: p.Config})
 	}
@@ -239,10 +254,14 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if closer, ok := hs.(io.Closer); ok {
 		historyPlugin.Close = closer.Close
 	}
+	environment := local.ConfinedPluginAt(filepath.Join(state, "commands"), state)
+	if o.environment != nil {
+		environment = api.Plugin{Name: "environment", Setup: func(a api.API) error { return a.Provide("working-environment", o.environment) }, Close: o.environment.Close}
+	}
 	core := []api.Plugin{historyPlugin,
 		{Name: "configuration", Setup: func(a api.API) error { return a.Provide("configuration", sessionDefaults{&defaults}) }},
 		{Name: "sdk-credentials", Setup: func(a api.API) error { return a.Provide("credentials", environmentCredentials{}) }},
-		configuration.BoundProject(project), local.ConfinedPluginAt(filepath.Join(state, "commands"), state), runtime,
+		configuration.BoundProject(project), environment, runtime,
 		modelselect.Plugin(), contextview.Plugin(), commands.Plugin(), questions.Plugin(), mcptools.Plugin(nil, project), acpinterface.Plugin(project)}
 	if o.approval != "" {
 		core = append(core, approval.Plugin())
@@ -263,6 +282,14 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	own = append(own, o.plugins...)
 	for _, p := range own {
+		if stop := p.Stop; stop != nil {
+			p.Stop = func() error {
+				if a.restarting.Load() {
+					return nil
+				}
+				return stop()
+			}
+		}
 		if err := loadPlugin(h, p); err != nil {
 			var e *Error
 			if errors.As(err, &e) && e.Code == NotSupported {
@@ -292,6 +319,13 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		if !valid {
 			return nil, &Error{Code: InvalidComposition, Message: fmt.Sprintf("model %q is not offered", defaults.Model)}
 		}
+	}
+	if len(specs) == 0 {
+		options := append([]Option{}, opts...)
+		if _, ok := hs.(*memoryStore); ok {
+			options = append(options, WithHistory(HistoryStore{make: func() (api.Store, error) { return hs, nil }}))
+		}
+		a.restart = func(ctx context.Context) (*Agent, error) { return New(ctx, options...) }
 	}
 	success = true
 	return a, nil
@@ -361,7 +395,6 @@ func (a *Agent) OpenSession(ctx context.Context, id string) (*Session, error) {
 }
 func (a *Agent) Declaration() Declaration {
 	d := acpinterface.Declaration(a.a, a.project, "")
-	d["nestedToolCalls"] = false
 	d["portableSessions"] = a.persistent
 	d["queuedInputAfterRestart"] = "handedBack"
 	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = false, false
@@ -397,7 +430,7 @@ func (a *Agent) serveACP(ctx context.Context, in io.ReadCloser, out io.Writer) e
 	if err != nil {
 		return appError(err, NotSupported)
 	}
-	return appError(v.(*acpinterface.Interface).Serve(ctx, in, out), Lost)
+	return appError(v.(*acpinterface.Interface).ServeWithDeclaration(ctx, in, out, func() map[string]any { return a.Declaration() }), Lost)
 }
 
 func decodeInto(v any, p any) error {
@@ -419,6 +452,20 @@ func applySetting(s *api.Settings, k string, v any) error {
 		var ref ModelRef
 		if decodeInto(v, &ref) == nil && ref.Provider != "" && ref.ID != "" {
 			s.Model = ref.String()
+			return nil
+		}
+	case "modelTools":
+		if v == nil {
+			s.ModelTools = nil
+			return nil
+		}
+		var names []string
+		if decodeInto(v, &names) == nil {
+			if names == nil {
+				s.ModelTools = nil
+			} else {
+				s.ModelTools = &names
+			}
 			return nil
 		}
 	case "reasoning":

@@ -1,0 +1,62 @@
+package modular
+
+import (
+	"context"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"testing"
+	"time"
+)
+
+func TestServeHistoryKit(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("history kit requires Node.js")
+	}
+	kit := filepath.Join("..", "..", "conformance", "history", "run.mjs")
+	regex := regexp.MustCompile(`(?m)^([0-9]+)/([0-9]+) checks passed\s*$`)
+	for _, placement := range []string{"memory", "files", "relay"} {
+		t.Run(placement, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), 40*time.Second)
+			defer cancel()
+			token := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(token, []byte("offline-history-conformance"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			start := func(store HistoryStore) string {
+				l, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				done := make(chan error, 1)
+				child, stop := context.WithCancel(ctx)
+				go func() { done <- serveHistory(child, store, HistoryOptions{TokenFile: token}, l); _ = l.Close() }()
+				t.Cleanup(func() {
+					stop()
+					if err := <-done; err != nil {
+						t.Error(err)
+					}
+				})
+				return "http://" + l.Addr().String()
+			}
+			store := MemoryHistory()
+			switch placement {
+			case "files":
+				store = FileHistory(t.TempDir())
+			case "relay":
+				store = HTTPHistory(start(store), token)
+			}
+			url := start(store)
+			out, err := exec.CommandContext(ctx, node, kit, url, token).CombinedOutput()
+			m := regex.FindSubmatch(out)
+			if err != nil || len(m) != 3 || string(m[1]) != string(m[2]) {
+				t.Fatalf("history kit: %v\n%s", err, out)
+			}
+			t.Logf("%s", m[0])
+		})
+	}
+}

@@ -126,6 +126,7 @@ type ToolOutput struct {
 	Value   any        `json:"value,omitempty"`
 }
 type ToolContext struct {
+	Tools                      ToolCalls
 	SessionID, ActorID, CallID string
 	ctx                        context.Context
 	settled                    atomic.Bool
@@ -212,6 +213,7 @@ func (s *toolSource) Tools(api.Session) []api.Tool {
 }
 func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call, progress func(string)) api.ToolResult {
 	tc := &ToolContext{SessionID: session.ID, ActorID: call.Actor, CallID: call.ID, ctx: ctx, progress: progress}
+	tc.Tools = ToolCalls{tc: tc, port: api.InvocationTools(ctx)}
 	defer tc.settled.Store(true)
 	tc.ask = func(ctx context.Context, q Question, wait time.Duration) (Answer, error) {
 		if s.server != nil {

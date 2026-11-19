@@ -88,7 +88,7 @@ func (w *runtimeWork) prepare(ctx context.Context, step string, usage api.Usage)
 	t := w.turn
 	tools := []api.Tool{}
 	for _, d := range t.Tools {
-		if api.CanCall(d, "model") {
+		if api.OffersModelTool(t.Settings, d) {
 			tools = append(tools, d)
 		}
 	}
@@ -115,7 +115,7 @@ func (w *runtimeWork) offer(req object) ([]string, error) {
 	for _, tool := range objects(req["tools"]) {
 		name := str(tool, "name")
 		def, ok := w.definition(name)
-		if !ok || !api.CanCall(def, "model") || !sameJSON(toolOut(def), tool) {
+		if !ok || !api.OffersModelTool(w.turn.Settings, def) || !sameJSON(toolOut(def), tool) {
 			return nil, fault("invalid_request", "request expanded or changed a tool definition")
 		}
 		names = append(names, name)

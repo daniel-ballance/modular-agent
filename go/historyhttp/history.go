@@ -68,13 +68,17 @@ type held struct {
 }
 
 type Server struct {
-	mu        sync.Mutex
-	dir       string
-	ttl       time.Duration
-	holdUntil time.Time
-	held      map[string]held
-	count     int
-	lock      *os.File
+	mu          sync.Mutex
+	dir         string
+	ttl         time.Duration
+	holdUntil   time.Time
+	held        map[string]held
+	count       int
+	lock        *os.File
+	store       api.Store
+	storeLeases map[string]api.Lease
+	timers      map[string]*time.Timer
+	closed      bool
 }
 
 func New(dir string, ttl time.Duration) (*Server, error) {
@@ -141,6 +145,18 @@ const maxDuration = time.Duration(1<<63 - 1)
 func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.store != nil {
+		s.closed = true
+		var err error
+		for id := range s.storeLeases {
+			err = errors.Join(err, s.closeStoreLease(id))
+		}
+		if s.lock != nil {
+			err = errors.Join(err, s.lock.Close())
+			s.lock = nil
+		}
+		return err
+	}
 	if s.lock == nil {
 		return nil
 	}
@@ -155,6 +171,9 @@ func (s *Server) path(id string) string {
 }
 func (s *Server) load(id string) (document, error) {
 	var d document
+	if s.store != nil {
+		return s.loadStore(id)
+	}
 	b, err := os.ReadFile(s.path(id))
 	if err != nil {
 		return d, err
@@ -218,7 +237,14 @@ func heldFailure(w http.ResponseWriter, remaining time.Duration) {
 	respond(w, 409, map[string]any{"error": "writer exclusion in effect", "code": "held", "retryAfterMs": max(ms, 1)})
 }
 
-func (s *Server) save(w http.ResponseWriter, d document) bool {
+func (s *Server) save(w http.ResponseWriter, d document, erasing bool) bool {
+	if s.store != nil {
+		if err := s.saveStore(d, erasing); err != nil {
+			unavailable(w)
+			return false
+		}
+		return true
+	}
 	err := atomicFile(s.dir, s.path(d.Session.ID), raw(d))
 	if errors.Is(err, uncertainCommit) {
 		_ = s.lock.Close()
@@ -251,7 +277,7 @@ func (s *Server) Handler(token string) http.Handler {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if s.lock == nil {
+		if s.closed || (s.lock == nil && s.store == nil) {
 			unavailable(w)
 			return
 		}
@@ -479,10 +505,19 @@ func (s *Server) serve(w http.ResponseWriter, q request) {
 	}
 	h, active := s.held[q.id]
 	if active && !time.Now().Before(h.until) {
+		_ = s.closeStoreLease(q.id)
 		delete(s.held, q.id)
 		active = false
 	}
-	current := func() bool { return active && h.token == q.lease && time.Now().Before(h.until) }
+	current := func() bool {
+		if !active || h.token != q.lease || !time.Now().Before(h.until) {
+			return false
+		}
+		if l, ok := s.storeLeases[q.id].(interface{ CheckWriter() error }); ok {
+			return l.CheckWriter() == nil
+		}
+		return true
+	}
 	switch q.op {
 	case "lease":
 		if remaining := time.Until(s.holdUntil); remaining > 0 {
@@ -495,12 +530,25 @@ func (s *Server) serve(w http.ResponseWriter, q request) {
 				return
 			}
 		} else {
+			if s.store != nil {
+				l, err := s.store.Acquire(q.id)
+				if err != nil {
+					heldFailure(w, s.ttl)
+					return
+				}
+				s.storeLeases[q.id] = l
+			}
 			h = held{owner: q.owner, token: api.ID(), until: time.Now().Add(s.ttl)}
 			s.held[q.id] = h
+			s.expireStoreLease(q.id, h)
 		}
 		respond(w, 200, map[string]any{"lease": h.token, "ttlMs": s.ttl.Milliseconds()})
 	case "release":
 		if current() {
+			if err := s.closeStoreLease(q.id); err != nil {
+				unavailable(w)
+				return
+			}
 			delete(s.held, q.id)
 		}
 		respond(w, 200, fields{})
@@ -511,6 +559,7 @@ func (s *Server) serve(w http.ResponseWriter, q request) {
 		}
 		h.until = time.Now().Add(s.ttl)
 		s.held[q.id] = h
+		s.expireStoreLease(q.id, h)
 		respond(w, 200, map[string]any{"ttlMs": s.ttl.Milliseconds()})
 	case "entries":
 		if !current() {
@@ -553,7 +602,7 @@ func (s *Server) put(w http.ResponseWriter, session Session, old document, err e
 			failure(w, 413, "request_too_large", "metadata cannot fit a page")
 			return
 		}
-		if !s.save(w, document{Session: session, Entries: []json.RawMessage{}}) {
+		if !s.save(w, document{Session: session, Entries: []json.RawMessage{}}, false) {
 			return
 		}
 		s.count++
@@ -592,7 +641,7 @@ func (s *Server) append(w http.ResponseWriter, d document, entries []json.RawMes
 		lost(w)
 		return
 	}
-	if kept > 0 && !s.save(w, d) {
+	if kept > 0 && !s.save(w, d, false) {
 		return
 	}
 	respond(w, 200, map[string]int{"kept": kept})
@@ -623,13 +672,34 @@ func (s *Server) erase(w http.ResponseWriter, d document, ids []string, current 
 		lost(w)
 		return
 	}
-	if changed && !s.save(w, d) {
+	if changed && !s.save(w, d, true) {
 		return
 	}
 	respond(w, 200, map[string]any{"erased": erased})
 }
 
 func (s *Server) list(w http.ResponseWriter, q request) {
+	if s.store != nil {
+		all, err := s.store.List(q.project)
+		if err != nil {
+			unavailable(w)
+			return
+		}
+		sessions := []Session{}
+		for _, snap := range all {
+			if len(snap.Entries) == 0 || q.filtered && snap.Project != q.project {
+				continue
+			}
+			meta, err := storeMetadata(snap)
+			if err != nil {
+				unavailable(w)
+				return
+			}
+			sessions = append(sessions, meta)
+		}
+		listPage(w, q, sessions)
+		return
+	}
 	files, err := filepath.Glob(filepath.Join(s.dir, "*.json"))
 	if err != nil {
 		unavailable(w)
@@ -647,6 +717,9 @@ func (s *Server) list(w http.ResponseWriter, q request) {
 			sessions = append(sessions, d.Session)
 		}
 	}
+	listPage(w, q, sessions)
+}
+func listPage(w http.ResponseWriter, q request, sessions []Session) {
 	sort.Slice(sessions, func(i, j int) bool {
 		if sessions[i].Created == sessions[j].Created {
 			return sessions[i].ID < sessions[j].ID
