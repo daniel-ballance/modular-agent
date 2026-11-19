@@ -179,7 +179,7 @@ export interface PluginApi {
 	jobs(sessionId: string): (Omit<Job, "state"> & { state: "running" | "unfinished" | "cleanupUnconfirmed" })[];
 	cancelJob(sessionId: string, jobId: string): Promise<void>;
 	// following along
-	follow(sessionId: string, options: FollowOptions, listener: (event: AgentEvent) => unknown): () => void;
+	follow(sessionId: string, options: FollowOptions, listener: (event: AgentEvent) => unknown): (() => void) & { idle(): Promise<void> };
 	flushOutput(sessionId: string, recipient: string): Promise<void>;
 	gateOutput<T>(sessionId: string, recipient: string, type: string, data: T): Promise<T | undefined>;
 	declaration(sessionId?: string): Declaration;
@@ -511,13 +511,13 @@ export class Harness {
 
 	private pluginFollowers: Follower[] = [];
 
-	private follow(s: Session, options: FollowOptions, listener: (event: AgentEvent) => unknown): () => void {
+	private follow(s: Session, options: FollowOptions, listener: (event: AgentEvent) => unknown): (() => void) & { idle(): Promise<void> } {
 		const follower = new Follower(this.hooks, options.recipient, options.raw ?? false, listener, (e) => this.problem("harness", "follow", e));
 		// History first, from the requested point, then live events.
 		const from = options.fromEntry ?? s.order.length;
 		for (const id of s.order.slice(from)) follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: s.entries.get(id) });
 		s.followers.add(follower);
-		return () => s.followers.delete(follower);
+		return Object.assign(() => { s.followers.delete(follower); }, { idle: () => follower.idle() });
 	}
 
 	// ---------- commands ----------
@@ -1723,6 +1723,7 @@ export class Harness {
 		if (state && !state.tools.some((t) => t.name === call.name)) return { callId: call.id, status: "refused", content: [text("Tool was not offered to this turn")] };
 		// The "tools" right: every actor the work belongs to must let tools run for it (docs/bindings/data.md#actors).
 		const owners = state ? [...state.actors] : call.actorId ? [call.actorId] : [];
+		call = { ...call, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs) };
 		const allowed = () => (!state || owners.length > 0 || state.jobs.size > 0) && this.workRights(s, owners, state?.jobs).includes("tools");
 		const refused = () => ({ callId: call.id, status: "refused" as const, content: [text(`No "tools" right: ${owners.join(", ")}`)] });
 		if (!allowed()) return refused();

@@ -1,3 +1,6 @@
+export { overWire } from "./serve.js";
+import { memoryEnvironment } from "./environment.js";
+export { memoryEnvironment, MemoryEnvironment } from "./environment.js";
 import { createAgent, type AgentOptions } from "./agent.js";
 import type { Answer, Content, ModelError, QuestionHandler, Usage } from "./data.js";
 import { AgentError } from "./errors.js";
@@ -40,7 +43,7 @@ export function scriptedProvider(script: readonly ScriptStep[]): Provider {
   };
 }
 export function testAgent({ script, ...options }: AgentOptions & { script: readonly ScriptStep[] }) {
-  return createAgent({ ...options, providers: [scriptedProvider(script), ...options.providers ?? []],
+  return createAgent({ environment: memoryEnvironment(), ...options, providers: [scriptedProvider(script), ...options.providers ?? []],
     model: options.model ?? "scripted/script" });
 }
 

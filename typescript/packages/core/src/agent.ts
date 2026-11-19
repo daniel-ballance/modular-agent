@@ -13,7 +13,9 @@ import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type Plugin } from "./plugin.js";
 import { type Provider } from "./provider.js";
 import type { Tool } from "./tool.js";
+import { asWorkingEnvironment, type MemoryEnvironment } from "./environment.js";
 import { MemoryHistory } from "./history.js";
+import { wirePlugin } from "./serve.js";
 import { makeSession, type Session } from "./session.js";
 import type { Declaration, ModelInfo, ModelRef, Question, QuestionHandler, Settings, ToolCall } from "./data.js";
 
@@ -34,6 +36,7 @@ export interface AgentOptions {
   approval?: Approval;
   onQuestion?: QuestionHandler;
   history?: MemoryHistory | FileHistory;
+  environment?: MemoryEnvironment;
 }
 export interface SessionOptions { settings?: Settings }
 export interface SessionInfo { id: string; project: string; created: number }
@@ -103,7 +106,11 @@ export class Agent {
         api.provide("history-store", store);
       } };
       await agent.#load(core);
-      await agent.#load(localEnvironment({ cwd: project, confineFiles: true }));
+      if (options.environment) {
+        const env = asWorkingEnvironment(options.environment);
+        // The public memory environment is rooted at its virtual root, not the host project.
+        await agent.#load({ name: "memory", setup: api => api.provide("working-environment", { ...env, cwd: project }) });
+      } else await agent.#load(localEnvironment({ cwd: project, confineFiles: true }));
       await agent.#load(durability === "durable" ? durableRuntime() : transientRuntime());
       await agent.#load(agent.#localInterface());
       if (options.approval !== undefined) await agent.#load(approval({ policy: options.approval }));
@@ -138,6 +145,8 @@ export class Agent {
   }
   async #plugin(plugin: Plugin) {
     if (!plugin.name || this.#h.plugins().includes(plugin.name)) throw new Error(`Invalid or duplicate plugin ${plugin.name}`);
+    const wire = wirePlugin(plugin, this.#h);
+    if (wire) { await this.#loadExternal(await wire); return; }
     let loaded = false;
     try {
       const { items, base } = await collect(plugin, plugin.config ?? {});
@@ -158,7 +167,10 @@ export class Agent {
       if (!spec.command?.length || spec.command.some(a => typeof a !== "string" || !a || a.includes("\0"))) {
         throw new Error("Process plugin needs a nonempty command vector");
       }
-      const ext = await startExternalPlugin(spec, this.#h);
+      await this.#loadExternal(await startExternalPlugin(spec, this.#h));
+    }
+  }
+  async #loadExternal(ext: Awaited<ReturnType<typeof startExternalPlugin>>) {
       try {
         const refusal = ext.refusal(this.#h, this.#external);
         if (refusal) throw new Error(refusal);
@@ -172,7 +184,6 @@ export class Agent {
         if (!this.#h.plugins().includes(ext.plugin.name)) await ext.stop("refused", messageOf(error));
         throw error;
       }
-    }
   }
   #localInterface(): BasePlugin {
     return { name: "sdk.local", setup: api => {
@@ -216,7 +227,8 @@ export class Agent {
         this.#check();
         const at = entry ?? this.#api.session(id).position;
         if (!at || !this.#api.history(id, { all: true }).some(e => e.id === at)) throw new AgentError("not_found", "No entry to fork");
-        return checked(async () => this.#session(await this.#api.forkSession(id, at)), "busy");
+        const fork = await checked(() => this.#api.forkSession(id, at), "busy");
+        return this.openSession(fork);
       },
       close: async () => {
         await checked(() => this.#api.closeSession(id, local.id));

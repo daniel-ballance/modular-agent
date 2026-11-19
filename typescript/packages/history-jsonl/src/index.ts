@@ -57,7 +57,7 @@ export class JsonlHistoryStore implements HistoryStore {
 				}
 			}
 		}
-		throw new Error(`Session ${id} not found`);
+		throw Object.assign(new Error(`Session ${id} not found`), { code: "not_found" });
 	}
 
 	async create(meta: StoredSession): Promise<void> {
@@ -84,7 +84,7 @@ export class JsonlHistoryStore implements HistoryStore {
 		const lock = `${this.find(id)}.lock`;
 		if (existsSync(lock)) {
 			const pid = Number(readFileSync(lock, "utf8"));
-			if (!pid || alive(pid)) throw new Error(`Session ${id} is already open for writing by process ${pid}`);
+			if (!pid || alive(pid)) throw Object.assign(new Error(`Session ${id} is already open for writing by process ${pid}`), { code: "held", data: { retryAfterMs: 100 } });
 			rmSync(lock, { force: true });
 		}
 		writeFileSync(lock, String(process.pid), { flag: "wx" });

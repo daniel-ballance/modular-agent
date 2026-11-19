@@ -1,13 +1,20 @@
 import { text, type ToolContext as BaseContext, type ToolSource } from "@modular-agent/harness";
 import type { Answer, Content, Input, QuestionDraft, ToolDefinition, ToolStatus } from "./data.js";
-import { AgentError, messageOf } from "./errors.js";
+import { AgentError, checked, messageOf, sdkError } from "./errors.js";
 import { schema, type Infer, type Schema } from "./schema.js";
 
+export interface ToolEnvironment {
+  read(path: string): Promise<Buffer>;
+  exists(path: string): Promise<boolean>;
+  write(path: string, data: string | Uint8Array): Promise<void>;
+  exec(command: string, options?: { timeoutMs?: number; onOutput?(chunk: string): void }): Promise<{ exitCode: number | null; output: string; timedOut: boolean }>;
+}
 export interface ToolContext {
   sessionId: string;
   actorId?: string;
   callId: string;
   cancelled: AbortSignal;
+  environment: ToolEnvironment;
   refuse(reason: string): never;
   ask(question: QuestionDraft, wait?: { wait: number; then: "leaveOpen" }): Promise<Answer>;
   progress(content: Input): void;
@@ -61,14 +68,20 @@ export class Tool {
         const run: (input: never, context: ToolContext) => unknown = options.run;
         const value = await run(await input.parse(raw) as never, context);
         context.cancelled.throwIfAborted();
-        const out: Settled = typeof value === "string" ? { status: "completed", content: [text(value)] }
+        const out: Settled = typeof value === "string" && !output ? { status: "completed", content: [text(value)] }
           : value && typeof value === "object" && Array.isArray((value as ToolOutput).content)
             ? { ...(value as ToolOutput), status: (value as ToolOutput).status ?? "completed" }
-            : { status: "completed", content: [], value };
+            : Array.isArray(value) && value.every(p => p && typeof p.type === "string")
+              ? { status: "completed", content: value }
+              : { status: "completed", content: value === undefined ? [] : [text(JSON.stringify(value))], value };
         if (!["completed", "failed", "refused", "outcomeUnknown", "cancelled"].includes(out.status)) {
           throw new AgentError("invalid_request", "Invalid tool status");
         }
+        if (!out.content.every(p => p && typeof p.type === "string")) throw new AgentError("invalid_request", "Invalid tool result content");
         if (out.status === "completed" && output) await output.parse(out.value);
+        if (out.status !== "completed" && !out.content.length) out.content = [text({
+          failed: "Tool failed", refused: "Tool refused", cancelled: "Cancelled", outcomeUnknown: "The tool outcome is unknown",
+        }[out.status as "failed" | "refused" | "cancelled" | "outcomeUnknown"])];
         if (out.value !== undefined) {
           // Use the same JSON value locally that a served tool sends.
           const encoded = JSON.stringify(out.value);
@@ -103,7 +116,18 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
         if (!live) throw new AgentError("invalid_request", "Tool context has settled");
         if (base.signal.aborted) throw new AgentError("cancelled", "Tool was cancelled");
       };
+      const environment = () => {
+        check();
+        if (!base.environment) throw new AgentError("not_supported", "No working environment");
+        return base.environment;
+      };
       const context: ToolContext = {
+        environment: {
+          read: path => checked(() => environment().readFile(path)),
+          exists: path => checked(() => environment().exists(path)),
+          write: (path, data) => checked(() => environment().writeFile(path, typeof data === "string" ? data : Buffer.from(data))),
+          exec: (command, opts) => checked(() => environment().exec(command, { ...opts, signal: base.signal })),
+        },
         sessionId: base.sessionId, actorId: call.actorId, callId: call.id, cancelled: base.signal,
         refuse(reason) { check(); throw new Refusal(reason); },
         progress(input) { check(); base.progress(asContent(input)); },
@@ -131,7 +155,6 @@ async function ask(base: BaseContext, question: QuestionDraft): Promise<Answer> 
     if (a.declined) return { declined: true, reason: a.reason };
     return question.kind === "approval" && a.value === "allow" ? "allow" : { value: a.value ?? "" };
   } catch (error) {
-    const { sdkError } = await import("./errors.js");
     throw sdkError(error, "invalid_request");
   }
 }

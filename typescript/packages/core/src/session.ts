@@ -53,7 +53,7 @@ function eventOf(e: AgentEvent): Event | undefined {
     const { type, ...piece } = data;
     return { ...scope, type, data: piece };
   }
-  if (type === "entry") return { ...scope, type, data };
+  if (type === "entry" || type === "entry.added") return { ...scope, type: "entry", data };
   if (type === "turn.ended" && turnId) return { ...scope, type: "turnEnded", data: { turnId, outcome: data.outcome, result: data.result } };
   if (names[type]) return { ...scope, type: names[type], data };
   if (!["model.streamEnd", "tool.ended"].includes(type) && type.includes(".")) return { ...scope, type: type as `${string}.${string}`, data };
@@ -124,7 +124,7 @@ export class Session {
         const entries = await this.history();
         const turn = entries.find(e => e.kind === "input" && inputIdOf(e) === id)?.turnId;
         const end = turn && entries.find(e => e.kind === "turnEnd" && e.turnId === turn && !e.erased);
-        if (end) return readTurn(entries, end);
+        if (end) { await off.idle(); return readTurn(entries, end); }
         if (entries.some(e => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(id))) return noTurn(id, "handedBack");
         if (!this.#api.session(this.id).busy && this.#api.history(this.id, { all: true }).length === entries.length) {
           throw new AgentError("lost", "Input did not settle");
@@ -162,7 +162,7 @@ export class Session {
         .find(e => e.kind === "input" && inputIdOf(e) === admission)?.turnId;
       if (turn) {
         for (const e of queue.splice(0)) {
-          if (e.turnId !== turn && !(e.type === "entry" && e.data?.turnId === turn)) continue;
+          if (e.turnId !== turn && !((e.type === "entry" || e.type === "entry.added") && e.data?.turnId === turn)) continue;
           const event = eventOf(e);
           if (event && event.type !== "turnEnded") yield event;
         }
