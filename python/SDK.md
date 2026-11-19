@@ -50,6 +50,12 @@ The runner accepts optional scenario file paths. It checks all registered fixtur
 
 Pydantic generates the schemas. The SDK declares two dependencies the base already installs: `jsonschema` enforces the wire schema before conversion, and `httpx2` streams the API-key Providers' HTTP responses. Mypy is a development dependency. It runs in strict mode on the SDK; imports from the untyped base form the private adapter boundary.
 
+### Standard file tools and MCP
+
+`modular_agent.files.file_tools(output_directory)` is the official plugin for `read`, `exec`, `edit`, `write`, `find`, and `list`. Register the plugin in `create_agent(plugins=[...])`. `Tool.from_schema` registers a callable with an existing JSON Schema. `ToolContext.environment` gives scoped methods to read or write bytes, list a directory and run a command in the working environment. These callbacks are currently available in process only.
+
+`create_agent(mcp_servers=[...])` enables the official MCP client for stdio and Streamable HTTP tool servers. `project_mcp` can supply a trusted project's configured servers on session attachment. The resolver must check trust before returning any project-configured programs. `project_settings` supplies new-session defaults for an ACP client's canonical project. `local_process_groups=True` opts into process-group containment on platforms where cgroup v2 is unavailable; the default local environment still requires strong containment for command execution.
+
 ## What is checked
 
 - **Shared scenarios:** 49/55 passed with the Python runner: 11/11 in process, 11/11 served by Python, 9/11 each served by Go, Rust and TypeScript. All 35 original-matrix runs passed. The six failures are the missing `quay` and `pilot` fixtures in the other programs. Both runners kill the agent's process group and wait for it to stop in the crash scenarios.

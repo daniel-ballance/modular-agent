@@ -2,7 +2,7 @@
 
 The Python SDK distribution is `modular-agent`, imported as `modular_agent`. Use `create_agent` to build an async embedded agent or `modular_agent.testing.test_agent` for an offline test. See [the SDK README](SDK.md) for the implemented API, fixture matrix and known gaps.
 
-The SDK wraps the clean-room Python build, which implements [production edition 3](../docs/adr/0021-production-edition.md): the Harness, the transient and durable Runtimes, ACP, the plugin binding and local and HTTP history. The base CLI still runs as `modular-agent` and its composition lives in `ma_cli`. This directory does not contain a reference implementation.
+The SDK wraps the clean-room Python build, which implements [production edition 3](../docs/adr/0021-production-edition.md): the Harness, the transient and durable Runtimes, ACP, the plugin binding and local and HTTP history. The base CLI still runs as `modular-agent` and its composition lives in `ma_cli`. The separate [`ma` package](packages/ma/README.md) is the Python standard configuration, built on the SDK.
 
 The base build's notes are in [docs/clean-room](docs/clean-room/README.md). Paths in those notes are relative to the old repository root. `conformance` links to this repository's kits.
 
