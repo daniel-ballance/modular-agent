@@ -1,0 +1,46 @@
+{
+  "model": "gpt-6-luna",
+  "provider": "OpenAI Responses API",
+  "mode": "stateless",
+  "session": "fc66373a-f585-497f-b35c-7e7e4a8faae0",
+  "separate_agent_processes": 2,
+  "first": {
+    "result": {
+      "error": null,
+      "outcome": "completed",
+      "steps": 2,
+      "text": "The launch label is **alder-orbit-73**, and the number of seats is **29**.",
+      "usage": {
+        "cached_tokens": 0,
+        "input_tokens": 492,
+        "output_tokens": 44
+      }
+    },
+    "tools": [
+      {
+        "id": "call_4quVApywZjjhrym5V80wkpMK",
+        "input": {
+          "path": "fact.txt"
+        },
+        "name": "read",
+        "started_by": "model"
+      }
+    ]
+  },
+  "source_file_removed_before_continuation": true,
+  "second": {
+    "result": {
+      "error": null,
+      "outcome": "completed",
+      "steps": 1,
+      "text": "The launch label was **alder-orbit-73**, and twice the number of seats is **58**.",
+      "usage": {
+        "cached_tokens": 0,
+        "input_tokens": 321,
+        "output_tokens": 27
+      }
+    },
+    "tools": []
+  },
+  "checked_at": "2026-11-17T02:14:08.456502+00:00"
+}

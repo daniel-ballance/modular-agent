@@ -1,0 +1,131 @@
+{
+  "checked_at": "2026-11-17T03:55:21.846347+00:00",
+  "model": "gpt-6-luna",
+  "provider": "OpenAI Responses API",
+  "provider_mode": "stateless",
+  "runtime": "durable",
+  "subagents": "durable",
+  "agent_processes": 1,
+  "parent_session": "0711948f-0757-4e3d-8562-8295e3975159",
+  "child_session": "5dfd5d5f-4913-43f8-8107-bf341b5123e9",
+  "child_received_only_its_task": true,
+  "parent_calls": [
+    {
+      "id": "call_NLO0ozGhA8UAE0U0GTfrnicb",
+      "input": {
+        "background": true,
+        "task": "Use bash exactly once to run: printf 'silver-meadow-31\\n' > subagent-receipt.txt\nThen end with a short report saying you wrote subagent-receipt.txt using bash and that its content is silver-meadow-31. Do not use any other tools."
+      },
+      "name": "delegate",
+      "started_by": "model"
+    }
+  ],
+  "child_calls": [
+    {
+      "id": "call_4cff69ee67464960927186c5274581a9",
+      "input": {
+        "command": "printf 'silver-meadow-31\\n' > subagent-receipt.txt"
+      },
+      "name": "bash",
+      "started_by": "model"
+    }
+  ],
+  "receipt": "silver-meadow-31\n",
+  "job": {
+    "authority": [
+      "answer",
+      "approve",
+      "cancel",
+      "erase",
+      "grant",
+      "input",
+      "jobs",
+      "settings",
+      "tools",
+      "watch"
+    ],
+    "detail": {
+      "child": "5dfd5d5f-4913-43f8-8107-bf341b5123e9",
+      "task": "Use bash exactly once to run: printf 'silver-meadow-31\\n' > subagent-receipt.txt\nThen end with a short report saying you wrote subagent-receipt.txt using bash and that its content is silver-meadow-31. Do not use any other tools."
+    },
+    "id": "65d6847b-55a6-4e4e-b3ff-2e32f51338bb",
+    "kind": "subagent",
+    "owner": "subagents",
+    "report": true,
+    "result": {
+      "error": null,
+      "open_calls": [],
+      "outcome": "completed",
+      "steps": 2,
+      "text": "I wrote `subagent-receipt.txt` using bash; its content is `silver-meadow-31`.",
+      "usage": {
+        "cached_tokens": 0,
+        "input_tokens": 1032,
+        "output_tokens": 61
+      }
+    },
+    "scope": {
+      "actor": "user",
+      "call": "call_NLO0ozGhA8UAE0U0GTfrnicb",
+      "job": "65d6847b-55a6-4e4e-b3ff-2e32f51338bb",
+      "session": "0711948f-0757-4e3d-8562-8295e3975159",
+      "step": "cdc29437-883e-41da-aec9-28f374383a41",
+      "turn": "da294c25-4b82-41c5-bc11-6d4025888c3f"
+    },
+    "state": "completed"
+  },
+  "parent_turns": [
+    {
+      "scope": {
+        "session": "0711948f-0757-4e3d-8562-8295e3975159",
+        "actor": "user",
+        "turn": "da294c25-4b82-41c5-bc11-6d4025888c3f",
+        "step": null,
+        "call": null,
+        "job": null
+      },
+      "result": {
+        "error": null,
+        "open_calls": [],
+        "outcome": "completed",
+        "steps": 2,
+        "text": "Background work started.",
+        "usage": {
+          "cached_tokens": 0,
+          "input_tokens": 1343,
+          "output_tokens": 100
+        }
+      }
+    },
+    {
+      "scope": {
+        "session": "0711948f-0757-4e3d-8562-8295e3975159",
+        "actor": "job:65d6847b-55a6-4e4e-b3ff-2e32f51338bb",
+        "turn": "f9d6bbe7-1fb4-43c3-aca2-26d26ea6ac27",
+        "step": null,
+        "call": null,
+        "job": "65d6847b-55a6-4e4e-b3ff-2e32f51338bb"
+      },
+      "result": {
+        "error": null,
+        "open_calls": [],
+        "outcome": "completed",
+        "steps": 1,
+        "text": "The subagent wrote `subagent-receipt.txt` using bash; its content is `silver-meadow-31`.",
+        "usage": {
+          "cached_tokens": 0,
+          "input_tokens": 823,
+          "output_tokens": 29
+        }
+      }
+    }
+  ],
+  "report_started_new_parent_turn": true,
+  "model_requests": 5,
+  "usage": {
+    "input_tokens": 3198,
+    "output_tokens": 190,
+    "cached_tokens": 0
+  },
+  "events_include_job_end": true
+}

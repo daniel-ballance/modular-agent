@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+agent-api = { path = "crates/agent-api" }
+agent-harness = { path = "crates/agent-harness" }
+async-trait = "0.1"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+fs2 = "0.4"
+libc = "0.2"
+reqwest = { version = "0.13.5", features = ["json", "stream"] }
+futures-util = "0.3"

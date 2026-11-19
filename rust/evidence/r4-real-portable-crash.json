@@ -1,0 +1,14 @@
+{
+  "model": "gpt-6-luna",
+  "session": "f84f10fc-9107-47d4-b3f2-51593d544f1e",
+  "turn": "0275a738-0d98-468f-bb4a-0de1221d29fb",
+  "killedAgentPid": 2300291,
+  "bashPid": 2300329,
+  "reopenedAgentPid": 2300332,
+  "reopenSeconds": 16.61,
+  "bashResult": "outcomeUnknown",
+  "outcome": {
+    "kind": "completed"
+  },
+  "answer": "indigo-acorn-47. The command was interrupted before finishing, so its outside effects are unknown."
+}

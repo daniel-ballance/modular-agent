@@ -1,0 +1,41 @@
+{
+  "model": "gpt-6-luna",
+  "provider_mode": "stateful",
+  "runtime": "durable",
+  "unix_time": 1794894166,
+  "private_code_recorded_in_evidence": false,
+  "first_answer": "ACK",
+  "continued_recall_matched_generated_code": true,
+  "after_erasure_answer": "UNKNOWN",
+  "requests": [
+    {
+      "continued": false,
+      "input_items": 1,
+      "full_items": 1
+    },
+    {
+      "continued": true,
+      "input_items": 1,
+      "full_items": 4
+    },
+    {
+      "continued": false,
+      "input_items": 2,
+      "full_items": 2
+    }
+  ],
+  "usage": {
+    "input_tokens": 356,
+    "output_tokens": 82,
+    "cached_tokens": 0
+  },
+  "erased_entries": 10,
+  "known_remote_responses_deleted_at_erasure": 2,
+  "out_of_reach": [
+    "output already delivered to recipients",
+    "OpenAI service-side logs and retention outside the response deletion API"
+  ],
+  "local_history_contains_erased_code": false,
+  "remote_cleanup_completed": true,
+  "status": "passed"
+}

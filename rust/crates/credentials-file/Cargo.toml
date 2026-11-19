@@ -1,0 +1,9 @@
+[package]
+name = "credentials-file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-api.workspace = true
+anyhow.workspace = true

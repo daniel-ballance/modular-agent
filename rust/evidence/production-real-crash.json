@@ -1,0 +1,62 @@
+{
+  "checked_at": "2026-11-18T18:59:10.677949+00:00",
+  "model": "gpt-6-luna",
+  "provider": "OpenAI Responses API",
+  "provider_mode": "stateless",
+  "runtime": "durable",
+  "agent_processes": 2,
+  "session": "218f4503-aabd-498a-b3ed-427919bb0f05",
+  "turn": "7905906a-e4dd-4813-9957-b1aa98ec6c48",
+  "kill": {
+    "command": "kill -9 AGENT_PID",
+    "agent_pid": 386515,
+    "bash_pid": 387681,
+    "bash_was_running": true,
+    "bash_stopped_after_sigkill": true
+  },
+  "reopened_without_new_input": true,
+  "same_turn_start_count": 1,
+  "original_bash_not_repeated": true,
+  "unknown_result": {
+    "status": "outcomeUnknown"
+  },
+  "tools": [
+    {
+      "id": "call_uIOp61pEWBOinKuKk5srIVap",
+      "name": "bash",
+      "input": {
+        "command": "printf 'copper-river-83\\n' > receipt.txt; printf '%s\\n' \"$$\" > bash.pid; printf 'M2_BASH_READY\\n'; sleep 60"
+      },
+      "startedBy": "model",
+      "actorId": "user",
+      "stepId": "68d4d9b4-91f5-4d1b-beea-e580447a4411"
+    },
+    {
+      "id": "call_aZF4VXsp01USpbSswcmpHQ32",
+      "name": "read",
+      "input": {
+        "path": "receipt.txt"
+      },
+      "startedBy": "model",
+      "actorId": "user",
+      "stepId": "f9d4339f-5135-4fa7-a74c-98ec26543f73"
+    }
+  ],
+  "result": {
+    "outcome": {
+      "kind": "completed"
+    },
+    "result": {
+      "text": "The receipt contains `copper-river-83`; this turn recovered from interruption.",
+      "openToolCalls": []
+    },
+    "usage": {
+      "input": 1867,
+      "output": 97,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "cost": 0.0
+    }
+  },
+  "model_requests": 3
+}
