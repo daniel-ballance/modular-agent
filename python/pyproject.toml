@@ -74,9 +74,10 @@ ma-subagents = { workspace = true }
 ma-durable-subagents = { workspace = true }
 ma-mcp = { workspace = true }
 ma-acp = { workspace = true }
+modular-agent-standard = { workspace = true }
 
 [dependency-groups]
-dev = ["mypy>=1.17", "pytest>=9.2.0", "pytest-asyncio>=1.5.0", "ruff>=0.17.5"]
+dev = ["mypy>=1.17", "pytest>=9.2.0", "pytest-asyncio>=1.5.0", "ruff>=0.17.5", "modular-agent-standard==0.1.0"]
 
 [tool.mypy]
 strict = true
@@ -120,7 +121,6 @@ follow_imports = "skip"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-pythonpath = ["packages/ma"]
 
 [tool.ruff]
 target-version = "py313"

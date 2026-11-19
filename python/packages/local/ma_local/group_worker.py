@@ -20,7 +20,9 @@ def main():
         start_new_session=True,
     )
     try:
-        while child.poll() is None:
+        # Keep the unreaped leader's PID reserved until killpg has finished.
+        # Reaping it first could let an unrelated process reuse the group id.
+        while not os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
             if select.select([lifetime], [], [], 0.02)[0]:
                 break
     finally:

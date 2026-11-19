@@ -319,14 +319,20 @@ def file_tools(spill: Path) -> Plugin:
             text += note + "]"
         if not text:
             text = "(no output)"
-        if code:
+        if result.get("timed_out"):
+            assert timeout is not None
+            value["timed_out"] = True
+            text += f"\n\nCommand timed out after {timeout:g} seconds"
+        elif code:
             text += (
                 f"\n\nCommand exited with code {code}"
                 if cast(int, code) > 0
                 else "\n\nCommand was ended by a signal"
             )
         return ToolOutput(
-            [{"type": "text", "text": text}], "failed" if code else "completed", value
+            [{"type": "text", "text": text}],
+            "failed" if code or result.get("timed_out") else "completed",
+            value,
         )
 
     def path(purpose: str) -> JsonObject:

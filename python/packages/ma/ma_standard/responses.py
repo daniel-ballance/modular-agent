@@ -67,7 +67,7 @@ class Model:
         return cls(model, context, maximum, cast(dict[str, str], effort or {}))
 
 
-def _input_rows(vendor: Vendor, request: JsonObject) -> list[JsonObject]:
+def _input_rows(request: JsonObject) -> list[JsonObject]:
     rows: list[JsonObject] = []
     for message in _rows(request.get("messages")):
         role = message.get("role")
@@ -80,27 +80,19 @@ def _input_rows(vendor: Vendor, request: JsonObject) -> list[JsonObject]:
         ]
         if role == "assistant":
             calls = [p for p in parts if p.get("type") == "toolCall"]
-            opaque = _obj(message.get("opaque"))
-            if opaque.get("provider") == vendor and isinstance(opaque.get("output"), list):
-                ids = iter(calls)
-                for row in _rows(opaque["output"]):
-                    if row.get("type") == "function_call" and (call := next(ids, None)):
-                        row = {**row, "call_id": call["id"]}
-                    rows.append(row)
-            else:
-                if text:
-                    rows.append({"role": "assistant", "content": text})
-                for call in calls:
-                    rows.append(
-                        {
-                            "type": "function_call",
-                            "call_id": call["id"],
-                            "name": call["name"],
-                            "arguments": json.dumps(
-                                call.get("arguments", {}), ensure_ascii=False, separators=(",", ":")
-                            ),
-                        }
-                    )
+            if text:
+                rows.append({"role": "assistant", "content": text})
+            for call in calls:
+                rows.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call["id"],
+                        "name": call["name"],
+                        "arguments": json.dumps(
+                            call.get("arguments", {}), ensure_ascii=False, separators=(",", ":")
+                        ),
+                    }
+                )
         elif role == "toolResult":
             rows.append(
                 {"type": "function_call_output", "call_id": message["toolCallId"], "output": text}
@@ -118,7 +110,7 @@ def _input_rows(vendor: Vendor, request: JsonObject) -> list[JsonObject]:
 
 
 def request_body(vendor: Vendor, model: Model, request: JsonObject, session: str) -> JsonObject:
-    messages = _input_rows(vendor, request)
+    messages = _input_rows(request)
     tools: list[Json] = [
         {
             "type": "function",
@@ -163,7 +155,7 @@ def request_body(vendor: Vendor, model: Model, request: JsonObject, session: str
     return body
 
 
-def response_body(vendor: Vendor, raw: JsonObject) -> JsonObject:
+def response_body(raw: JsonObject) -> JsonObject:
     if not isinstance(raw.get("output"), list):
         raise ValueError("the model response has no output")
     parts: list[JsonObject] = []
@@ -209,7 +201,6 @@ def response_body(vendor: Vendor, raw: JsonObject) -> JsonObject:
         "role": "assistant",
         "stop": stop,
         "content": list(parts),
-        "opaque": {"provider": vendor, "output": list(output)},
         "usage": {
             "input": usage.get("input_tokens", 0),
             "output": usage.get("output_tokens", 0),
@@ -388,7 +379,7 @@ class Responses:
                             )
                         if not completed.get("output") and items:
                             completed["output"] = items
-                        return response_body(vendor, completed)
+                        return response_body(completed)
                 except HTTPError as exc:
                     raise ModelFailure(
                         {"kind": "temporary", "message": f"could not reach {LABELS[vendor]}: {exc}"}

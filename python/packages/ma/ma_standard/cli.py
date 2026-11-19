@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -14,11 +13,14 @@ from typing import cast
 from modular_agent import (
     Agent,
     AgentError,
+    Answer,
     Durability,
     Event,
     JsonObject,
     Provider,
     ProviderContext,
+    Question,
+    QuestionContext,
     Session,
     ModelRef,
     OutcomeKind,
@@ -107,25 +109,62 @@ def _json(value: object) -> None:
 
 
 def _event(event: Event, args: argparse.Namespace, *, line: bool = False) -> None:
+    data = event.data.fields
     if args.json:
-        _json(asdict(event))
+        _json(
+            {
+                "type": event.type,
+                "time": event.time,
+                "sessionId": event.session_id,
+                **{
+                    key: value
+                    for key, value in (
+                        ("turnId", event.turn_id),
+                        ("stepId", event.step_id),
+                        ("toolCallId", event.call_id),
+                    )
+                    if value is not None
+                },
+                "data": data,
+            }
+        )
     elif event.type == "text" and line and event.data.delta:
         print(event.data.delta, end="", flush=True)
-    elif args.verbose and event.type in {"toolCall", "toolStarted", "toolOutput", "toolResult"}:
-        print(f"{event.type}: {event.data}", file=sys.stderr, flush=True)
+    elif event.type == "toolStarted" and (args.verbose or not data.get("parentCallId")):
+        name = data.get("name", "tool")
+        arguments = data.get("input")
+        if (
+            name == "codemode"
+            and isinstance(arguments, dict)
+            and isinstance(code := arguments.get("code"), str)
+        ):
+            print(
+                "codemode\n" + "\n".join(f"  | {s}" for s in code.splitlines()),
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
+            print(
+                f"{name}({json.dumps(arguments, ensure_ascii=False)[:200]})",
+                file=sys.stderr,
+                flush=True,
+            )
+    elif args.verbose and event.type in {"toolOutput", "toolResult"}:
+        print(f"{event.type}: {data}", file=sys.stderr, flush=True)
 
 
 async def _print_turn(session: Session, args: argparse.Namespace) -> int:
-    if args.json or args.verbose:
-        async for event in session.prompt_stream(args.prompt):
-            _event(event, args)
-        result = await session.last_turn()
-    else:
-        result = await session.prompt(args.prompt)
+    saw_turn = False
+    async for event in session.prompt_stream(args.prompt):
+        saw_turn |= event.type == "turnEnded"
+        _event(event, args)
+    if not saw_turn:
+        return 1
+    result = await session.last_turn()
     if result is None or result.outcome is None:
         return 0 if result and result.disposition == "handled" else 1
     if not args.json:
-        if result.text:
+        if result.outcome.kind is OutcomeKind.COMPLETED or result.text:
             print(result.text)
         if result.outcome.error:
             print(result.outcome.error, file=sys.stderr)
@@ -135,6 +174,25 @@ async def _print_turn(session: Session, args: argparse.Namespace) -> int:
 async def _line(session: Session, args: argparse.Namespace) -> int:
     loop = asyncio.get_running_loop()
     active = False
+    pending: dict[str, asyncio.Future[Answer]] = {}
+    eof = False
+
+    async def question(q: Question, context: QuestionContext) -> Answer:
+        if eof or q.kind == "secret":
+            return Answer("decline")
+        reply: asyncio.Future[Answer] = loop.create_future()
+        pending[q.id] = reply
+        print(
+            f"Question {q.id}: {q.question} {q.options}\nUse /answer REQUEST_ID VALUE",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            return await reply
+        finally:
+            pending.pop(q.id, None)
+
+    await session.on_question(question)
 
     async def events() -> None:
         nonlocal active
@@ -156,14 +214,29 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
         while True:
             line = await asyncio.to_thread(sys.stdin.readline)
             if not line:
-                if active:
-                    await cancel()
+                eof = True
+                for outstanding in pending.values():
+                    if not outstanding.done():
+                        outstanding.set_result(Answer("decline"))
+                await session.wait_idle()
+                await asyncio.sleep(0)
                 break
             line = line.strip()
             if not line:
                 continue
+            if line == "/quit":
+                break
             if line == "/cancel":
                 await cancel()
+            elif line.startswith("/answer "):
+                id, _, value = line.removeprefix("/answer ").partition(" ")
+                reply = pending.get(id)
+                if reply is None or reply.done() or not value:
+                    print("Use /answer REQUEST_ID VALUE for an open question", file=sys.stderr)
+                else:
+                    reply.set_result(
+                        Answer("decline") if value == "decline" else Answer("value", value)
+                    )
             elif line.startswith("/after "):
                 await session.send(line.removeprefix("/after "), "after")
             elif line.startswith("/") and not line.startswith("/skill:"):
@@ -203,15 +276,54 @@ def _claude_status() -> str:
     )
 
 
+def _signed_in_model(paths: Paths) -> str | None:
+    auth = AuthFile(paths.config / "auth.json")
+    if auth.login("openai-codex"):
+        return "openai-codex/gpt-6.1-sol"
+    if auth.login("xai"):
+        return "xai/grok-4.7"
+    if claude_launch() and _claude_status().startswith("signed in"):
+        return "claude/claude-sonnet-5-5"
+    return None
+
+
 async def _agent(
-    paths: Paths, project: Path, args: argparse.Namespace, *, catalog_only: bool = False
+    paths: Paths,
+    project: Path,
+    args: argparse.Namespace,
+    *,
+    saved_model: str | None = None,
+    history_only: bool = False,
 ) -> Agent:
+    durability: Durability = "durable" if args.runtime == "durable" else "kept"
+    url, token = (
+        os.environ.get("MODULAR_AGENT_HISTORY_URL"),
+        os.environ.get("MODULAR_AGENT_HISTORY_TOKEN_FILE"),
+    )
+    if bool(url) != bool(token):
+        raise ValueError("set both MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE")
+    history = http_history(url, token) if url and token else file_history(paths.state / "sessions")
+    if history_only:
+        return await create_agent(
+            project=project,
+            data_dir=paths.state,
+            history=history,
+            durability=durability,
+            local_process_groups=True,
+        )
     script = os.environ.get("MODULAR_AGENT_SCRIPT")
     testing = args.acp and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1"
     settings = paths.settings(project)
     providers: list[Provider] = []
     processes = None
-    model = args.model or cast(str | None, settings.pop("model", None))
+    configured_model = settings.pop("model", None)
+    if configured_model is not None and not isinstance(configured_model, str):
+        raise ValueError("model must be PROVIDER/ID")
+    model = (
+        None
+        if args.command == "models"
+        else args.model or saved_model or (configured_model if not args.acp else None)
+    )
     if script:
         script_data = json.loads(Path(script).read_text(encoding="utf-8"))
         if not isinstance(script_data, list) or any(not isinstance(s, dict) for s in script_data):
@@ -239,19 +351,12 @@ async def _agent(
             or args.acp
             or args.command in {"models", "sessions"}
         ):
-            if auth.login("openai-codex"):
-                model = "openai-codex/gpt-6.1-sol"
-            elif auth.login("xai"):
-                model = "xai/grok-4.7"
-            elif claude_launch() and _claude_status().startswith("signed in"):
-                model = "claude/claude-sonnet-5-5"
-            else:
+            model = _signed_in_model(paths)
+            if model is None:
                 raise ValueError(
                     "no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`."
                 )
-        if (
-            args.command == "models" or args.acp or (model and model.startswith("claude/"))
-        ) and not catalog_only:
+        if args.command == "models" or args.acp or (model and model.startswith("claude/")):
             sidecar = claude_launch()
             if model and model.startswith("claude/") and sidecar is None:
                 raise ValueError(
@@ -277,12 +382,22 @@ async def _agent(
                     (level for level in reversed(levels[: asked + 1]) if level in info["thinking"]),
                     "off",
                 )
-    durability: Durability = "durable" if args.runtime == "durable" else "kept"
-    url, token = (
-        os.environ.get("MODULAR_AGENT_HISTORY_URL"),
-        os.environ.get("MODULAR_AGENT_HISTORY_TOKEN_FILE"),
-    )
-    history = http_history(url, token) if url and token else file_history(paths.state / "sessions")
+    inspecting = args.command == "models" or args.declaration
+
+    def acp_settings(cwd: Path) -> JsonObject:
+        defaults = paths.settings(cwd)
+        if script:
+            defaults.update(model="scripted/script", thinking="off")
+        else:
+            if not testing and args.model is None and not defaults.get("model"):
+                if signed_in := _signed_in_model(paths):
+                    defaults["model"] = signed_in
+            if args.model:
+                defaults["model"] = args.model
+            if args.thinking:
+                defaults["thinking"] = args.thinking
+        return defaults
+
     return await create_agent(
         project=project,
         data_dir=paths.state,
@@ -290,17 +405,16 @@ async def _agent(
         durability=durability,
         local_process_groups=True,
         providers=providers,
-        tools=[] if catalog_only else [code_tool()],
-        plugins=[]
-        if catalog_only
-        else [file_tools(paths.state / "output"), prompt_plugin(paths.config, project)],
-        model=None if catalog_only else model,
+        tools=[code_tool()],
+        plugins=[file_tools(paths.state / "output"), prompt_plugin(paths.config, project)],
+        model=model,
         settings=settings,
         process_plugins=processes,
         plugin_host=True,
-        commands=not catalog_only,
+        commands=True,
         conformance=testing,
-        mcp_servers=[] if catalog_only else paths.mcp(project),
+        project_mcp=None if inspecting else paths.mcp,
+        project_settings=acp_settings if args.acp and not testing else None,
     )
 
 
@@ -339,25 +453,27 @@ async def _run(args: argparse.Namespace) -> int:
                 else f"{server['name']:<20} stdio  {server['command']} {' '.join(cast(list[str], server.get('args', [])))}"
             )
         return 0
+    saved_model: str | None = None
     if args.command == "sessions" or args.resume or args.session:
-        async with await _agent(paths, project, args, catalog_only=True) as preflight:
-            sessions = await preflight.sessions()
-        matching = [s for s in sessions if s["project"] == str(project)]
-        if args.command == "sessions":
-            for saved_session in sessions if args.all else matching:
-                print(f"{saved_session['id']}  {saved_session['project']}")
-            return 0
-        if args.session is None:
-            if not matching:
-                raise ValueError("this folder has no saved session to continue")
-            args.session = max(
-                matching, key=lambda s: cast(int, s.get("updated_at", s.get("updated", 0)))
-            )["id"]
-        saved = next((s for s in sessions if s["id"] == args.session), None)
-        if saved is None:
-            raise ValueError("Unknown session")
-        project = Path(cast(str, saved["project"]))
-    async with await _agent(paths, project, args) as agent:
+        async with await _agent(paths, project, args, history_only=True) as preflight:
+            if args.session is None:
+                sessions = await preflight.sessions()
+                matching = [s for s in sessions if s["project"] == str(project)]
+                if args.command == "sessions":
+                    for saved_session in sessions if args.all else matching:
+                        print(f"{saved_session['id']}  {saved_session['project']}")
+                    return 0
+                if not matching:
+                    raise ValueError("this folder has no saved session to continue")
+                args.session = max(
+                    reversed(matching), key=lambda s: int(cast(int | str, s.get("lastActivity", 0)))
+                )["id"]
+            saved = await preflight.session_info(args.session)
+            project = Path(cast(str, saved["project"]))
+            old = cast(JsonObject, saved["settings"]).get("model")
+            if isinstance(old, dict):
+                saved_model = f"{old['provider']}/{old['id']}"
+    async with await _agent(paths, project, args, saved_model=saved_model) as agent:
         if args.acp:
             await agent.serve_acp()
             return 0

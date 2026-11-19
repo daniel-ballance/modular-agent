@@ -1,0 +1,407 @@
+"""Offline verification of ma's product-specific behavior and public SDK boundary."""
+
+import ast
+import asyncio
+import base64
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+import hashlib
+import json
+from pathlib import Path
+import re
+import stat
+from urllib.parse import parse_qs, urlsplit
+
+from httpx2 import AsyncClient
+import pytest
+
+from modular_agent import ModelRef, ProviderContext
+from modular_agent.files import file_tools
+from modular_agent.testing import memory_environment, test_agent as offline_agent
+from ma_standard import oauth, prompt, responses
+from ma_standard.auth import ApiKey, AuthFile, OAuth
+from ma_standard.code import code_tool
+from ma_standard.config import Paths
+
+ROOT = Path(__file__).resolve().parents[2]
+PACKAGE = ROOT / "python/packages/ma/ma_standard"
+
+
+def test_public_sdk_only() -> None:
+    public = {"modular_agent", "modular_agent.files", "modular_agent.testing"}
+    for file in PACKAGE.glob("*.py"):
+        for node in ast.walk(ast.parse(file.read_text())):
+            names = (
+                [node.module or ""]
+                if isinstance(node, ast.ImportFrom) and node.level == 0
+                else [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else []
+            )
+            for name in names:
+                assert not name.startswith("ma_")
+                assert not name.startswith("modular_agent") or name in public
+            if isinstance(node, ast.ImportFrom) and node.module in public:
+                assert all(not alias.name.startswith("_") for alias in node.names)
+
+
+async def test_rust_auth_fixture(tmp_path: Path) -> None:
+    # serde_json::to_vec_pretty over AuthFile Contents: struct fields keep
+    # declaration order, BTreeMap keys sort, and there is no final newline.
+    fixture = b"""{
+  "logins": {
+    "openai-codex": {
+      "type": "oauth",
+      "access": "test-access",
+      "refresh": "test-refresh",
+      "expires": 1,
+      "account": "test-account"
+    },
+    "xai": {
+      "type": "api_key",
+      "key": "test-key"
+    }
+  },
+  "answers": {
+    "example": "test-answer"
+  }
+}"""
+    path = tmp_path / "auth.json"
+    path.write_bytes(fixture)
+    auth = AuthFile(path)
+    assert auth.login("openai-codex") == OAuth("test-access", "test-refresh", 1, "test-account")
+    assert auth.login("xai") == ApiKey("test-key")
+    await auth.set_login("xai", ApiKey("test-key"))
+    assert path.read_bytes() == fixture
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.with_suffix(".lock").stat().st_mode) == 0o600
+
+
+def _jwt() -> str:
+    claims = {"https://api.openai.com/auth": {"chatgpt_account_id": "loopback-account"}}
+    return (
+        "fake."
+        + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+        + ".fake"
+    )
+
+
+type Request = tuple[str, dict[str, str], bytes]
+type Reply = tuple[int, str, str]
+
+
+def _reply(value: object, status: int = 200) -> Reply:
+    return status, "application/json", json.dumps(value)
+
+
+@asynccontextmanager
+async def _http(handler: Callable[[Request], Reply]) -> AsyncIterator[str]:
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = (await reader.readuntil(b"\r\n\r\n")).decode().splitlines()
+            headers = {
+                k.lower(): v.strip() for k, v in (line.split(":", 1) for line in head[1:] if line)
+            }
+            body = await reader.readexactly(int(headers.get("content-length", "0")))
+            code, media, text = handler((head[0].split()[1], headers, body))
+            data = text.encode()
+            writer.write(
+                f"HTTP/1.1 {code} Test\r\nContent-Type: {media}\r\nContent-Length: {len(data)}\r\nConnection: close\r\n\r\n".encode()
+                + data
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async with await asyncio.start_server(serve, "127.0.0.1", 0) as server:
+        yield f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("vendor", ["openai-codex", "xai"])
+async def test_device_sign_in(vendor: oauth.Vendor, monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[Request] = []
+    access = _jwt() if vendor == "openai-codex" else "fake-access"
+    token = {"access_token": access, "refresh_token": "fake-refresh", "expires_in": 3600}
+
+    def route(request: Request) -> Reply:
+        recorded.append(request)
+        match request[0]:
+            case "/api/accounts/deviceauth/usercode":
+                return _reply({"device_auth_id": "device", "user_code": "CODE", "interval": "1"})
+            case "/api/accounts/deviceauth/token":
+                return _reply({"authorization_code": "code", "code_verifier": "verifier"})
+            case "/oauth2/device/code":
+                return _reply(
+                    {
+                        "device_code": "device",
+                        "user_code": "CODE",
+                        "verification_uri": "https://example.test/verify",
+                        "interval": 1,
+                    }
+                )
+            case "/oauth/token" | "/oauth2/token":
+                return _reply(token)
+        return _reply({}, 404)
+
+    shown = []
+    async with _http(route) as url:
+        monkeypatch.setattr(oauth, "CODEX" if vendor == "openai-codex" else "XAI", url)
+        login = await oauth.sign_in(
+            vendor, True, lambda address, code: shown.append((address, code))
+        )
+    assert shown[0][1] == "CODE"
+    assert login.secret == access and not login.expired
+    assert login.account == ("loopback-account" if vendor == "openai-codex" else None)
+    exchange = parse_qs(recorded[-1][2].decode())
+    assert exchange["client_id"] == [oauth.CLIENTS[vendor]]
+    if vendor == "openai-codex":
+        assert json.loads(recorded[0][2]) == {"client_id": oauth.CLIENTS[vendor]}
+        assert exchange["code_verifier"] == ["verifier"]
+    else:
+        assert parse_qs(recorded[0][2].decode())["referrer"] == ["pi"]
+        assert exchange["device_code"] == ["device"]
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("wrong_state", [False, True])
+async def test_browser_sign_in(wrong_state: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    posted: list[Request] = []
+    shown: dict[str, list[str]] = {}
+    callbacks: list[asyncio.Task[int]] = []
+
+    def route(request: Request) -> Reply:
+        posted.append(request)
+        return _reply({"access_token": _jwt(), "refresh_token": "fake-rotate"})
+
+    async with _http(route) as url, AsyncClient(trust_env=False) as client:
+        monkeypatch.setattr(oauth, "CODEX", url)
+
+        async def browser_callback() -> int:
+            redirect = urlsplit(shown["redirect_uri"][0])
+            reply = await client.get(
+                f"http://127.0.0.1:{redirect.port}{redirect.path}",
+                params={
+                    "code": "local-code",
+                    "state": "wrong" if wrong_state else shown["state"][0],
+                },
+            )
+            return reply.status_code
+
+        def show(address: str, code: str | None) -> None:
+            assert code is None
+            shown.update(parse_qs(urlsplit(address).query))
+            callbacks.append(asyncio.create_task(browser_callback()))
+
+        if wrong_state:
+            with pytest.raises(ValueError, match="wrong state"):
+                await oauth._browser(client, show, port=0)
+            assert not posted and await callbacks[0] == 400
+            return
+        login = await oauth._browser(client, show, port=0)
+        assert await callbacks[0] == 200
+    assert login.account == "loopback-account"
+    fields = parse_qs(posted[0][2].decode())
+    digest = hashlib.sha256(fields["code_verifier"][0].encode()).digest()
+    assert shown["code_challenge"] == [base64.urlsafe_b64encode(digest).decode().rstrip("=")]
+    assert fields["code"] == ["local-code"]
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("vendor", ["openai-codex", "xai"])
+async def test_responses_refresh_retry_and_stream(
+    vendor: oauth.Vendor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[Request] = []
+    actual = _jwt() if vendor == "openai-codex" else "fresh"
+    vendors_model = "gpt-6.1-sol" if vendor == "openai-codex" else "grok-4.7"
+    auth = AuthFile(tmp_path / "auth.json")
+    await auth.set_login(
+        vendor, OAuth("rejected", "old-refresh", 9_999_999_999_999, "stale-account")
+    )
+    emitted = []
+
+    async def sink(event: dict[str, object]) -> None:
+        emitted.append(event)
+
+    def route(request: Request) -> Reply:
+        requests.append(request)
+        path, headers, _ = request
+        if path.endswith("/token"):
+            return _reply({"access_token": actual, "refresh_token": "rotated"})
+        if headers["authorization"] == "Bearer rejected":
+            return _reply({"error": {"code": "token_expired"}}, 401)
+        events = [
+            {"type": "response.output_text.delta", "delta": "hello"},
+            {
+                "type": "response.output_item.done",
+                "item": {"type": "message", "content": [{"type": "output_text", "text": "hello"}]},
+            },
+            {
+                "type": "response.completed",
+                "response": {"output": [], "usage": {"input_tokens": 9, "output_tokens": 2}},
+            },
+        ]
+        return (
+            200,
+            "text/event-stream",
+            "".join(f"data: {json.dumps(event)}\n\n" for event in events),
+        )
+
+    async with _http(route) as url:
+        monkeypatch.setattr(oauth, "CODEX" if vendor == "openai-codex" else "XAI", url)
+        monkeypatch.setitem(responses.ENDPOINTS, vendor, url + "/responses")
+        provider = responses.Responses(vendor, auth, tmp_path / "models.json")
+        await asyncio.gather(
+            *[
+                provider.request(
+                    ModelRef(vendor, vendors_model),
+                    {
+                        "systemPrompt": "instructions",
+                        "settings": {"reasoning": "high", "output_limit": 25},
+                        "messages": [
+                            {"role": "user", "content": [{"type": "text", "text": "greet"}]}
+                        ],
+                        "tools": [],
+                    },
+                    ProviderContext("session-abc", "user", sink, lambda: None),
+                )
+                for _ in range(2)
+            ]
+        )
+    token_requests = [body for path, _, body in requests if path.endswith("/token")]
+    assert len(token_requests) == 1 and parse_qs(token_requests[0].decode())["refresh_token"] == [
+        "old-refresh"
+    ]
+    assert isinstance(login := auth.login(vendor), OAuth) and login.refresh == "rotated"
+    assert len(emitted) == 2 and emitted[0]["event"] == {"type": "text", "delta": "hello"}
+    _, headers, body = requests[-1]
+    request = json.loads(body)
+    assert request["include"] == ["reasoning.encrypted_content"]
+    assert headers["authorization"] == "Bearer " + actual
+    if vendor == "openai-codex":
+        assert request["instructions"] == "instructions" and "max_output_tokens" not in request
+        assert headers["chatgpt-account-id"] == "loopback-account" and headers["originator"] == "pi"
+        assert headers["session-id"] == headers["x-client-request-id"] == "session-abc"
+    else:
+        assert request["input"][0] == {"role": "system", "content": "instructions"}
+        assert request["max_output_tokens"] == 25
+
+
+@pytest.mark.parametrize(
+    ("code", "limits", "status", "contains"),
+    [
+        (
+            "print(tools.read('in')); print(search_tools('read contents')[0]['name']); describe_tool('read')['name']",
+            {},
+            "completed",
+            "example\nread\nread",
+        ),
+        (
+            "try:\n    tools.read('missing')\nexcept RuntimeError as e:\n    print(str(e))",
+            {},
+            "completed",
+            "read() failed",
+        ),
+        ("tools.read()", {}, "failed", "missing argument path"),
+        (
+            "tools.read('in'); tools.read('in')",
+            {"calls": 1},
+            "failed",
+            "more than 1 function calls",
+        ),
+        ("print('x' * 1000)", {"printed": 30}, "failed", "1001 bytes > 30 bytes"),
+        ("while True:\n    pass", {"compute": 0.1}, "failed", "limit"),
+        ("def f():\n    return 1 + f()\nf()", {"recursion": 15}, "failed", "recursion"),
+        (
+            "from pathlib import Path\nPath('/etc/passwd').read_text()",
+            {},
+            "failed",
+            "no direct access",
+        ),
+        ("print('x' * 60000)", {}, "completed", "Output cut:"),
+    ],
+)
+async def test_monty(tmp_path: Path, code: str, limits: dict, status: str, contains: str) -> None:
+    async with offline_agent(
+        project=tmp_path,
+        environment=memory_environment({"in": "example"}),
+        tools=[code_tool(**limits)],
+        plugins=[file_tools(tmp_path)],
+        script=[{"toolCalls": [{"name": "codemode", "input": {"code": code}}]}, {"text": "ok"}],
+    ) as agent:
+        result = await (await agent.session()).prompt("use code")
+    [tool] = result.tool_results()
+    assert tool.status == status, tool.text()
+    assert contains.lower() in tool.text().lower()
+
+
+async def test_prompt_and_skills_against_rust(tmp_path: Path) -> None:
+    config, outer = tmp_path / "config", tmp_path / "outer"
+    cwd = outer / "inner"
+    for path, text in {
+        config / "AGENTS.md": "global",
+        outer / "CLAUDE.md": "outer",
+        cwd / "AGENTS.md": "inner",
+        cwd / "CLAUDE.md": "not included",
+        cwd
+        / ".agents/skills/working/SKILL.md": "---\nname: working\ndescription: >\n  Do one\n  thing & finish\n---\nyes!\n",
+        cwd
+        / ".modular-agent/skills/working/SKILL.md": "---\nname: working\ndescription: shadow\n---\nx",
+        config
+        / "skills/hidden/SKILL.md": "---\nname: hidden\ndescription: manual only\ndisable-model-invocation: true\n---\nz",
+    }.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    skills, problems = prompt.discover(config, cwd)
+    assert len(skills) == 2 and len(problems) == 1 and "already defined" in problems[0]
+    assert "\n\nyes!\n</skill>\n\nwith args" in (
+        prompt.expand(skills, "/skill:working with args") or ""
+    )
+    async with offline_agent(
+        project=cwd,
+        tools=[code_tool()],
+        plugins=[file_tools(tmp_path), prompt.prompt_plugin(config, cwd)],
+        script=[{"text": "ok"}],
+    ) as agent:
+        session = await agent.session()
+        await session.prompt("hello")
+        entries = await session.history()
+    request = next(e["data"]["request"] for e in entries if e["kind"] == "modelRequest")
+    system = request["systemPrompt"]
+    rust = (ROOT / "rust/crates/standard/src/prompt.rs").read_text()
+    preamble, rules = [
+        re.search(rf'const {name}: &str = "(.*?)";', rust, re.S)[1]
+        for name in ("PREAMBLE", "RULES")
+    ]
+    assert system.startswith(preamble + "\n\n" + rules)
+    fragments = [
+        "<project_context>",
+        "global",
+        "outer",
+        "inner",
+        "<skills>",
+        "Do one thing &amp; finish",
+        "# Functions in codemode",
+        "<cwd>",
+        "<date>",
+    ]
+    assert sorted(fragments, key=system.index) == fragments
+    assert "not included" not in system and "manual only" not in system
+
+
+def test_config_trust_and_mcp_expansion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = Paths(tmp_path / "config", tmp_path / "state")
+    config.config.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("FIXTURE_NAME", "echo")
+    (project / ".mcp.json").write_text(
+        '{"mcpServers":{"local":{"command":"${FIXTURE_NAME}","args":["test"]}}}'
+    )
+    assert config.mcp(project) == []
+    config.trust(project)
+    [server] = config.mcp(project)
+    assert server["command"] == "echo" and server["cwd"] == str(project)
+    assert json.loads(config.ledger.read_text()) == {str(project): True}

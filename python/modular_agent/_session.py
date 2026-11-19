@@ -394,6 +394,11 @@ class Session:
                 result.append(visible)
         return result
 
+    async def wait_idle(self) -> None:
+        """Wait for the running turn and any inputs queued behind it."""
+        await self._state()
+        await self._agent._call("runtime", "wait", session=self.id, actor="user")
+
     async def cancel(self) -> list[InputReceipt]:
         state = await self._state()
         before = {e["id"] for e in state["entries"]}
@@ -449,7 +454,13 @@ class Session:
         if name not in await self.commands():
             raise AgentError(ErrorCode.NOT_FOUND, f"Unknown command: {name}")
         response = await self._native("command", text=line)
-        return cast(str | None, response.get("output"))
+        if isinstance(response, dict) and isinstance(output := response.get("output"), str):
+            return output
+        if response:
+            import json
+
+            return json.dumps(response, ensure_ascii=False, indent=2)
+        return None
 
     async def close(self) -> None:
         if not self._closed:

@@ -117,11 +117,19 @@ class History(Plugin):
         if not self.db.exists():
             return []
         with self._connect() as db:
-            rows = db.execute("SELECT id,project,meta FROM sessions").fetchall()
+            rows = db.execute(
+                "SELECT id, project, meta, (SELECT record FROM entries "
+                "WHERE session = sessions.id ORDER BY rowid DESC LIMIT 1) FROM sessions"
+            ).fetchall()
             project = str(Path(d["project"]).resolve()) if d.get("project") else None
             return [
-                {"id": sid, "project": p, "position": json.loads(meta)["position"]}
-                for sid, p, meta in rows
+                {
+                    "id": sid,
+                    "project": p,
+                    "position": json.loads(meta)["position"],
+                    "lastActivity": json.loads(last or "{}").get("time", 0),
+                }
+                for sid, p, meta, last in rows
                 if project is None or p == project
             ]
 

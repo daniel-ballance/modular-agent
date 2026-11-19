@@ -55,7 +55,9 @@ def _server(name: str, spec: Json, project: Path) -> JsonObject | None:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise ValueError("invalid MCP server name")
     kind = spec.get("type", "http" if "url" in spec else "stdio")
-    if kind in ("http", "streamable-http") and isinstance(url := spec.get("url"), str):
+    if kind in ("http", "streamable-http", "streamableHttp") and isinstance(
+        url := spec.get("url"), str
+    ):
         url = _expand(url)
         if not url.startswith(("http://", "https://")):
             raise ValueError("MCP HTTP server needs an http(s) URL")
@@ -115,17 +117,23 @@ class Paths:
     def settings(self, project: Path) -> JsonObject:
         settings: JsonObject = {
             "thinking": "medium",
-            "step_limit": 500,
-            "output_limit": 32000,
+            "maxSteps": 500,
+            "maxOutput": 32000,
             "modelTools": ["codemode"],
         }
+        names = {"model_tools": "modelTools", "step_limit": "maxSteps", "output_limit": "maxOutput"}
         for layer in (
             read_object(self.config / "settings.json"),
             read_object(project / ".modular-agent.json"),
         ):
             for key, value in layer.items():
-                if key not in {"plugins", "plugin_settings", "mcp_servers", "trusted"}:
-                    settings["modelTools" if key == "model_tools" else key] = value
+                if not key.startswith("_") and key not in {
+                    "plugins",
+                    "plugin_settings",
+                    "mcp_servers",
+                    "trusted",
+                }:
+                    settings[names.get(key, key)] = value
         return settings
 
     def mcp(self, project: Path) -> list[JsonObject]:
