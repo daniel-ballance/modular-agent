@@ -88,6 +88,7 @@ struct State {
     sessions: Mutex<BTreeMap<String, Arc<Session>>>,
     rewind_blocks: Mutex<BTreeMap<PathBuf, String>>,
     setup: tokio::sync::Mutex<()>,
+    opening: Mutex<std::collections::BTreeSet<String>>,
 }
 impl State {
     fn session(&self, p: &Value) -> Result<Arc<Session>> {
@@ -657,6 +658,7 @@ pub async fn run(factory: Arc<dyn Factory>) -> Result<()> {
         sessions: Mutex::default(),
         rewind_blocks: Mutex::default(),
         setup: tokio::sync::Mutex::new(()),
+        opening: Mutex::default(),
     });
     let requests = state.clone();
     let notifications = state.clone();

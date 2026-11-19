@@ -12,7 +12,7 @@ struct Wire {
 impl Wire {
     async fn launch(project: &std::path::Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_sdk-acp-test-agent"))
-            .arg(project.join("state"))
+            .arg(project.with_file_name("state"))
             .current_dir(project)
             .env_remove("MODULAR_AGENT_PLUGINS")
             .stdin(Stdio::piped())
@@ -73,7 +73,9 @@ impl Wire {
 async fn acp_reopen_does_not_wait_for_an_interrupted_turn() {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         let project = tempfile::tempdir().unwrap();
-        let cwd = project.path().canonicalize().unwrap();
+        let cwd = project.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let cwd = cwd.canonicalize().unwrap();
         let mut first = Wire::launch(&cwd).await;
         let session = first
             .call(2, "session/new", json!({"cwd":cwd,"mcpServers":[]}))
@@ -114,6 +116,14 @@ async fn acp_reopen_does_not_wait_for_an_interrupted_turn() {
                 {"inputId":queued["inputId"],"content":[{"type":"text","text":"old queued input"}]}
             ])
         );
+        let again = reopened
+            .call(
+                7,
+                "session/resume",
+                json!({"sessionId":sid,"cwd":cwd,"mcpServers":[]}),
+            )
+            .await;
+        assert!(again["_meta"]["modular-agent"]["handedBack"].is_null());
         let history = reopened
             .call(3, "_modular-agent/history", json!({"sessionId":sid}))
             .await;
