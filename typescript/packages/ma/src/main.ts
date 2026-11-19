@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 import { realpath, stat } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAgent, fileHistory, httpHistory, type Agent, type ProcessPlugin, type Settings } from "@modular-agent/core";
+import { createAgent, httpHistory, type Agent, type ProcessPlugin, type Settings } from "@modular-agent/core";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
 import { standardMcpTools } from "@modular-agent/tools-mcp/sdk";
-import { paths, settingsFor, skillsFor, standardSettings, mcpServers, trusted, type Paths } from "./configuration.js";
+import { paths, settingsFor, skillsFor, standardSettings, mcpServers, optionalJson, trusted, type Paths } from "./configuration.js";
 import { standardPrompt } from "./prompt.js";
 import { codemode } from "./codemode.js";
 import { loadScript } from "./script.js";
 import { line, print } from "./terminal.js";
 import { HELP } from "./help.js";
+import { AuthFile, expired } from "./auth.js";
+import { labels, oauth, vendors, type Step, type Vendor } from "./oauth.js";
+import { responses } from "./responses.js";
 
 function parse(argv: string[]) {
   const opts: { command?: string; project: string; runtime: "durable" | "transient"; session?: string; prompt?: string;
@@ -54,7 +58,7 @@ function parse(argv: string[]) {
   }
   return opts;
 }
-export async function claudeLaunch(p: Paths): Promise<ProcessPlugin | undefined> {
+async function claudeLaunch(p: Paths): Promise<ProcessPlugin | undefined> {
   const candidates = [process.env.MODULAR_AGENT_CLAUDE_SIDECAR, fileURLToPath(new URL("../../../../sidecars/claude/dist/main.js", import.meta.url)),
     join(p.home, ".local/share/modular-agent/sidecars/claude/dist/main.js")];
   for (const candidate of candidates) if (candidate && (await stat(candidate).catch(() => undefined))?.isFile()) {
@@ -67,8 +71,56 @@ const noModel = "no model is available. Sign in with `ma login openai-codex`, `m
 const modelRef = (v: unknown): string | undefined => typeof v === "string" ? v :
   v && typeof v === "object" && "provider" in v && "id" in v ? `${v.provider}/${v.id}` : undefined;
 
+function claudeSignedIn() {
+  return spawnSync("claude", ["auth", "status"], { stdio: "ignore", timeout: 10_000 });
+}
+function show(step: Step) {
+  if (step.kind === "note") { console.error(step.message); return; }
+  console.error(step.kind === "open" ? `Open this address in a browser to sign in:\n\n  ${step.address}\n` :
+    `Open this address in a browser:\n\n  ${step.address}\n\nand enter the code: ${step.code}\n`);
+  if (step.address.startsWith("https://") && process.env.MA_NO_BROWSER === undefined) {
+    const child = spawn(process.platform === "darwin" ? "open" : "xdg-open", [step.address], { stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+  }
+  console.error("Waiting for the sign-in to finish...");
+}
+async function authCommand(argv: string[], p: Paths, auth: AuthFile) {
+  const [cmd, provider, ...rest] = argv;
+  const isVendor = (name: string): name is Vendor => (vendors as readonly string[]).includes(name);
+  if (cmd === "auth") {
+    for (const vendor of vendors) {
+      const login = await auth.login(vendor);
+      console.log(`${vendor.padEnd(13)} ${labels[vendor].padEnd(22)} ${!login ? "not signed in" : expired(login) ? "signed in (token will refresh on next use)" : "signed in"}`);
+    }
+    const claude = claudeSignedIn();
+    console.log(`${"claude".padEnd(13)} ${"Claude subscription".padEnd(22)} ${claude.error ? "Claude Code is not installed" : claude.status === 0 ? "signed in through Claude Code" : "not signed in (run `ma login claude`)"}`);
+    if (!await claudeLaunch(p)) console.log("              the Claude sidecar is not installed (build typescript/sidecars/claude)");
+    return 0;
+  }
+  if (!provider) throw new Error(cmd === "login" ? "which provider? openai-codex, xai or claude" : "which provider?");
+  const bad = rest.find((a, i) => cmd !== "login" || a !== "--device" || i > 0);
+  if (bad) throw new Error(`unknown argument ${bad}`);
+  if (provider === "claude") {
+    if (cmd === "logout") throw new Error("Claude Code holds that sign-in; run `claude auth logout`");
+    console.error("Claude signs in through Claude Code. Running `claude auth login`.");
+    const result = spawnSync("claude", ["auth", "login"], { stdio: "inherit" });
+    if (result.error) throw new Error(`could not run claude: ${result.error.message}. Install Claude Code, then run \`claude auth login\`.`);
+    if (result.status !== 0) throw new Error("claude auth login did not complete");
+    return 0;
+  }
+  if (!isVendor(provider)) throw new Error(`unknown provider ${provider}${cmd === "login" ? "; use openai-codex, xai or claude" : ""}`);
+  if (cmd === "logout") { await auth.setLogin(provider); console.error(`Signed out of ${labels[provider]}.`); }
+  else {
+    await auth.setLogin(provider, await oauth().login(provider, rest[0] === "--device", show));
+    console.error(`Signed in to ${labels[provider]} (${provider}).`);
+  }
+  return 0;
+}
 async function main(argv: string[]) {
-  const opts = parse(argv), p = paths();
+  const p = paths(), auth = new AuthFile(p.config);
+  if (["login", "logout", "auth"].includes(argv[0])) return authCommand(argv, p, auth);
+  const opts = parse(argv);
   if (opts.help) { console.log(HELP); return 0; }
   if (opts.version) { console.log("ma 0.1.0 (typescript)"); return 0; }
   if (opts.acp && (opts.prompt !== undefined || opts.session || opts.trust || opts.resume)) throw new Error("with --acp the client creates sessions and grants trust");
@@ -85,7 +137,7 @@ async function main(argv: string[]) {
     return 0;
   }
   const conformance = opts.acp && process.env.MODULAR_AGENT_CONFORMANCE === "1";
-  const history = process.env.MODULAR_AGENT_HISTORY_URL ? httpHistory(process.env.MODULAR_AGENT_HISTORY_URL, process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "") : conformance ? undefined : fileHistory(join(p.state, "sessions"));
+  const history = process.env.MODULAR_AGENT_HISTORY_URL ? httpHistory(process.env.MODULAR_AGENT_HISTORY_URL, process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "") : undefined;
   const base = { durability: opts.runtime === "durable" ? "durable" as const : "kept" as const, history, dataDir: p.state };
   const script = await loadScript(process.env.MODULAR_AGENT_SCRIPT, process.env.MODULAR_AGENT_SCRIPT_LOG);
   let savedModel: string | undefined;
@@ -109,18 +161,26 @@ async function main(argv: string[]) {
     } finally { await index.close(); }
   }
   const settings = { ...standardSettings(await settingsFor(p, project)), ...opts.settings };
-  const model = script ? "scripted/script" : conformance ? "conformance/echo" : modelRef(opts.settings.model) ?? savedModel ?? modelRef(settings.model);
+  let model = script ? "scripted/script" : conformance ? "conformance/echo" : modelRef(opts.settings.model) ?? savedModel ?? modelRef(settings.model);
   if (conformance) settings.modelTools = null;
   delete settings.model;
   const inspecting = opts.history || opts.declaration || opts.command === "models";
-  const claude = !script && !conformance && (opts.acp || opts.command === "models" || model?.startsWith("claude/")) ? await claudeLaunch(p) : undefined;
+  const launch = !script && !conformance ? await claudeLaunch(p) : undefined;
+  if (!model && !inspecting) {
+    if (await auth.login("openai-codex")) model = "openai-codex/gpt-6.1-sol";
+    else if (await auth.login("xai")) model = "xai/grok-4.7";
+    else if (launch && claudeSignedIn().status === 0) model = "claude/claude-sonnet-5-5";
+    else if (!opts.acp) throw new Error(noModel);
+  }
+  const claude = model?.startsWith("claude/") || opts.acp || opts.command === "models" ? launch : undefined;
   if (model?.startsWith("claude/") && !claude) throw new Error("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR");
-  if (!model && !inspecting && !opts.acp) throw new Error(noModel);
+  const overrides = script || conformance ? {} : await optionalJson(join(p.config, "models.json"));
+  const providers = script ? [script] : conformance ? [] : vendors.map(v => responses(v, auth, overrides));
   const projectTrust = await trusted(p, project, opts.trust);
   const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p)];
   const servers = opts.declaration || opts.command === "models" ? {} : await mcpServers(p, project, projectTrust);
   if (Object.keys(servers).length) plugins.push(standardMcpTools({ project, servers }));
-  const agent = await createAgent({ ...base, project, settings, model: opts.command === "models" ? undefined : model, providers: script ? [script] : [], plugins,
+  const agent = await createAgent({ ...base, project, settings, model: opts.command === "models" ? undefined : model, providers, plugins,
     compaction: !conformance, conformance, pluginHost: opts.acp || !!claude, ...(claude ? { processPlugins: [claude] } : {}) });
   try { return await run(agent); } finally { await agent.close(); }
 
