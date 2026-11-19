@@ -91,8 +91,8 @@ async fn m3_process_helper() {
     };
     let fake = Arc::new(FakePlugin::new(scripts));
     let events = Arc::new(Events::default());
-    let h = modular_agent::compose(
-        modular_agent::Options {
+    let h = agent_base::compose(
+        agent_base::Options {
             history: root.join("sessions"),
             global_config: root.join("settings"),
             key_file: root.join("NO-KEY"),

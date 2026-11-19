@@ -2,7 +2,11 @@
 
 Scenarios every SDK runs against itself and against the other SDKs' fixture plugins. The format, the fixture plugins and how a runner places them are in [Testing](../../docs/sdk/testing.md#the-shared-scenarios).
 
-These are drafts written with [SDK specification 0.1](../../docs/sdk/README.md). No runner exists yet; the Rust SDK writes the first. A scenario that turns out to be wrong is fixed here first, then in the SDKs.
+These are drafts written with [SDK specification 0.1](../../docs/sdk/README.md). A scenario that turns out to be wrong is fixed here first, then in the SDKs.
+
+| Runner | In process | Served |
+|---|---|---|
+| Rust, [`rust/crates/sdk-scenarios`](../../rust/crates/sdk-scenarios/src/lib.rs) | 7/7 | not yet |
 
 | Scenario | Checks |
 |---|---|

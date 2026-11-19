@@ -59,14 +59,14 @@ async fn main() -> Result<()> {
     std::fs::create_dir(&project)?;
     let home = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME missing"))?);
     let audit = Arc::new(Audit::default());
-    let h = modular_agent::compose(
-        modular_agent::Options {
+    let h = agent_base::compose(
+        agent_base::Options {
             history: root.path().join("sessions"),
             global_config: root.path().join("no-global-settings"),
             key_file: home.join(".config/modular-agent-experiment/openai.key"),
             secrets: vec![],
         },
-        modular_agent::real_provider(root.path().join("openai"), provider_openai::Mode::Stateful),
+        agent_base::real_provider(root.path().join("openai"), provider_openai::Mode::Stateful),
         Arc::new(interface_terminal::TerminalPlugin {
             sink: audit.clone(),
         }),

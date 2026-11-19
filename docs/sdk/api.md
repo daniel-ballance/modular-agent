@@ -104,7 +104,7 @@ The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check th
 | `events(fromEntry?)` | every event in the session this actor may see, from the start or a cursor, then live |
 | `close()` | closes the session; cancels its work as [Jobs](../contracts.md#jobs) says |
 
-`input` is a string or Content. `options` carries `key`, for safe retries ([input admission](../contracts.md#input)), and `actor`, to act as an actor other than `local`.
+`input` is a string or Content. `options` carries `key`, for safe retries ([input admission](../contracts.md#input)), and `actor`, to act as an actor other than the local one.
 
 `prompt` admits its input with timing `now`, as ACP's `session/prompt` does ([Input admission](../bindings/acp.md#input-admission)). When the session is idle, the input starts a turn. When a turn is running, the input queues a new turn and `prompt` waits for that one, not the running one. Only `send(input, "steer")`, where the agent declares `inputDuringTurn`, puts input into a running turn.
 
@@ -168,11 +168,11 @@ An Answer is `allow` (approval), a value (choice, text, link), a secret value (s
 
 The handler can be set on `createAgent` for every session or on one session with `session.onQuestion`, which takes precedence for that session. `session.questions()` lists open questions and `session.answer(questionId, answer)` answers one later, for apps that show questions in their own UI.
 
-While a handler is registered, the `local` actor is present to answer. With none, [approvals are refused](concepts.md#the-local-actor).
+While a handler is registered, the local actor is present to answer. With none, [approvals are refused](concepts.md#the-local-actor).
 
 ## Actors and rights
 
-An embedded agent has the `local` actor. An app that serves several people adds actors:
+An embedded agent has the local actor, `user`. An app that serves several people adds actors:
 
 | Operation | |
 |---|---|

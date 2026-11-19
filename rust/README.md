@@ -1,9 +1,12 @@
 # Modular Agent in Rust
 
-A working agent built on [production edition 3](../docs/adr/0021-production-edition.md) of the specification. It has two layers:
+A working agent built on [production edition 3](../docs/adr/0021-production-edition.md) of the specification. It has three parts:
 
 - **The base.** The Harness, the transient and durable Runtimes, ACP, the plugin host, history stores and the fixtures. This is the clean-room Rust build from the experiment (`modular-agent-rs` at `bc59845`), copied in unchanged and then extended. Its own notes are in [docs/clean-room](docs/clean-room/). Its binary is `modular-agent`, and it still passes every kit.
 - **The standard configuration.** A coding agent in Pi's shape, made only of plugins on that base. Its binary is `ma`. [ADR 0022](../docs/adr/0022-standard-configuration.md) records the decisions.
+- **The SDK.** [`crates/sdk`](crates/sdk/README.md), the crate `modular-agent`: the Rust SDK of the [SDK specification](../docs/sdk/README.md), built on the base. Its shared-scenario runner is `crates/sdk-scenarios`.
+
+The base's binary crate is now `crates/agent-base`, package `agent-base`, so that the SDK can have the name `modular-agent`. The binary is still `modular-agent`; the clean-room notes use the old package name.
 
 ## The standard configuration
 

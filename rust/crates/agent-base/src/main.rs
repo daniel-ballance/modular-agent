@@ -1,6 +1,6 @@
 use agent_api::*;
+use agent_base::{Options, compose_project};
 use interface_terminal::{Mode, TerminalOptions, TerminalPlugin, TerminalSink};
-use modular_agent::{Options, compose_project};
 use std::{path::PathBuf, sync::Arc};
 fn take(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
     args.next().ok_or_else(|| anyhow!("{flag} needs a value"))
@@ -41,7 +41,7 @@ async fn start() -> Result<()> {
     let mut trust_project = false;
     let mut fake = None;
     let mut subagents = None;
-    let mut runtime = modular_agent::default_runtime();
+    let mut runtime = agent_base::default_runtime();
     let mut provider_mode = if cfg!(feature = "stateful-provider-default") {
         provider_openai::Mode::Stateful
     } else {
@@ -122,9 +122,9 @@ async fn start() -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
         terminal.settings["model"] = json!("fake");
-        modular_agent::fake_provider(scripts)
+        agent_base::fake_provider(scripts)
     } else {
-        modular_agent::real_provider(options.history.with_file_name("openai"), provider_mode)
+        agent_base::real_provider(options.history.with_file_name("openai"), provider_mode)
     };
     if acp_mode {
         ensure!(
@@ -135,7 +135,7 @@ async fn start() -> Result<()> {
             subagents.is_none(),
             "configure ACP subagents in plugin settings"
         );
-        return interface_acp::run(Arc::new(modular_agent::acp::Factory {
+        return interface_acp::run(Arc::new(agent_base::acp::Factory {
             options,
             provider,
             runtime,

@@ -36,6 +36,8 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Plugins implement the `Plugin` trait, or are built with `Plugin::new(name)` and chained registrations.
 - Public errors are `modular_agent::Error`, not `anyhow::Error`. Plugin code can return any error that converts into it.
 - An operation with options has a plain form and a `_with` form: `session()` and `session_with(SessionOptions { … })`.
+- A tool refuses with `return Err(cx.refuse("reason"))`: the call ends `refused`, where any other error ends it `failed`.
+- Streams are the boxed `EventStream`, so `StreamExt::next` works on them without pinning. An unboxed `impl Stream` made the guide's own loop fail to compile.
 - Data types own their data and implement `Serialize`, `Deserialize`, `Clone` and `Debug`.
 - Minimum Rust version: the one pinned in `rust/mise.toml`. Edition 2024.
 

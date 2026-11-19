@@ -262,8 +262,8 @@ async fn composition(
         .with_test_endpoint(&server.endpoint)
         .unwrap();
     let events = Arc::new(super::Events::default());
-    let h = modular_agent::compose(
-        modular_agent::Options {
+    let h = agent_base::compose(
+        agent_base::Options {
             history: root.join("sessions"),
             global_config: root.join("settings"),
             key_file: root.join("key"),

@@ -17,18 +17,18 @@ async fn configured_plugins_load_with_options_only_after_project_trust() -> Resu
         if trusted {
             config_files::FilesConfiguration::new(config.clone()).trust(project.path())?;
         }
-        let h = modular_agent::compose_project(
-            modular_agent::Options {
+        let h = agent_base::compose_project(
+            agent_base::Options {
                 history: root.path().join("sessions"),
                 global_config: config.clone(),
                 key_file: root.path().join("NO-KEY"),
                 secrets: vec![],
             },
-            modular_agent::fake_provider(vec![]),
+            agent_base::fake_provider(vec![]),
             Arc::new(interface_terminal::TerminalPlugin {
                 sink: Arc::new(Sink),
             }),
-            modular_agent::default_runtime(),
+            agent_base::default_runtime(),
             project.path(),
         )
         .await?;

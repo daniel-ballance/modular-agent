@@ -42,7 +42,7 @@ An agent built with nothing but a Provider behaves like this:
 | Choice | Default | Why |
 |---|---|---|
 | Project | The process's current directory | Where a developer expects a tool to look |
-| Durability | `ephemeral`: history in memory, transient Runtime | A library should not write to disk unasked. See [Durability](placement.md#durability). |
+| Durability | `ephemeral`: history in memory, transient Runtime | A library should not keep anything unasked. Command bookkeeping that the local environment needs goes in a scratch folder removed with the agent. See [Durability](placement.md#durability). |
 | Working environment | Local, rooted at the project. It refuses file paths that resolve outside the project and declares process-group containment for commands. | Every tool context has one; the declaration is honest about what it does not confine |
 | Credential store | Environment variables, by the names each Provider documents | `OPENAI_API_KEY` works without setup |
 | Approval | No approval plugin | The app chose its tools. Naming a policy loads the plugin and records that policy ([Approval policy](../contracts.md#approval-policy)). |
@@ -55,7 +55,7 @@ An agent built with nothing but a Provider behaves like this:
 
 Every session in an embedded agent has one actor the app speaks for:
 
-- its id is `local` and its kind is `user`;
+- its id is `user` and its kind is `user`, the id the experiment's builds already used for the local person;
 - it holds every right the deployment allows;
 - it is present whenever the app has a question handler registered.
 

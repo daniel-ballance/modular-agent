@@ -1,8 +1,12 @@
 [package]
-name = "modular-agent"
+name = "agent-base"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[[bin]]
+name = "modular-agent"
+path = "src/main.rs"
 
 [features]
 durable-default = []

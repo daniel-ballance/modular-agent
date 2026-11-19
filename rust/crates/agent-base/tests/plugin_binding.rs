@@ -55,8 +55,8 @@ impl Rig {
         let events = Arc::new(Events::default());
         let provider = Arc::new(provider_fake::FakePlugin::new(scripts));
         let probe = provider.probe.clone();
-        let h = modular_agent::vanilla(
-            modular_agent::Options {
+        let h = agent_base::vanilla(
+            agent_base::Options {
                 history: root.path().join("sessions"),
                 global_config: root.path().join("settings.json"),
                 key_file: root.path().join("no-key"),

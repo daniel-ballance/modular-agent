@@ -1,0 +1,35 @@
+[package]
+name = "modular-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build agents from interchangeable parts. The Rust SDK, following docs/sdk."
+
+[dependencies]
+agent-api.workspace = true
+agent-harness.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+schemars = "1.2"
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+environment-local = { path = "../environment-local" }
+feature-approval = { path = "../feature-approval" }
+feature-commands = { path = "../feature-commands" }
+feature-context = { path = "../feature-context" }
+feature-jobs = { path = "../feature-jobs" }
+feature-model = { path = "../feature-model" }
+feature-prompt = { path = "../feature-prompt" }
+feature-questions = { path = "../feature-questions" }
+history-fs = { path = "../history-fs" }
+runtime-durable = { path = "../runtime-durable" }
+runtime-transient = { path = "../runtime-transient" }
+
+[dev-dependencies]
+schemars = "1.2"
+serde.workspace = true

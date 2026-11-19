@@ -1,0 +1,15 @@
+[package]
+name = "sdk-scenarios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Runs conformance/sdk/scenarios against the Rust SDK"
+
+[dependencies]
+modular-agent = { path = "../sdk" }
+futures-util.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

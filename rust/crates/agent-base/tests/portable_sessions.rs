@@ -141,8 +141,8 @@ async fn reopen(served: bool) {
         provider_fake::Script::response(ModelResponse::text("carried on")),
         provider_fake::Script::response(ModelResponse::text("next")),
     ]));
-    let h = modular_agent::compose(
-        modular_agent::Options {
+    let h = agent_base::compose(
+        agent_base::Options {
             history: root,
             global_config: state.path().join("no-config"),
             key_file: state.path().join("no-key"),
