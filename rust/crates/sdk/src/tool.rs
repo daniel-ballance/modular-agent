@@ -16,6 +16,7 @@ type RunFn =
 pub struct Tool {
     pub(crate) definition: base::ToolDefinition,
     pub(crate) run: RunFn,
+    pub(crate) in_process_only: bool,
 }
 
 /// The definition of a tool, before its function is given.
@@ -27,6 +28,7 @@ pub struct ToolBuilder {
     open_world: bool,
     safe_to_repeat: bool,
     parallel: bool,
+    in_process_only: bool,
 }
 
 impl Tool {
@@ -42,6 +44,7 @@ impl Tool {
             open_world: true,
             safe_to_repeat: false,
             parallel: false,
+            in_process_only: false,
         }
     }
     pub fn name(&self) -> &str {
@@ -76,6 +79,11 @@ impl ToolBuilder {
         self.parallel = true;
         self
     }
+    /// Mark a tool that uses a context operation unavailable over the plugin binding.
+    pub fn in_process_only(mut self) -> Self {
+        self.in_process_only = true;
+        self
+    }
     /// Give the function. `I` is the input: its JSON Schema is the tool's `parameters`.
     pub fn run<I, O, F, Fut>(self, f: F) -> Tool
     where
@@ -106,6 +114,7 @@ impl ToolBuilder {
         let f = Arc::new(f);
         Tool {
             definition,
+            in_process_only: self.in_process_only,
             run: Arc::new(move |input, cx| {
                 let f = f.clone();
                 Box::pin(async move {
@@ -198,6 +207,7 @@ pub struct ToolContext {
     pub(crate) actor_id: String,
     pub(crate) call_id: String,
     pub(crate) cancelled: CancellationToken,
+    pub(crate) settled: CancellationToken,
 }
 
 /// Where the agent is: in this process, or across the plugin binding.
@@ -227,6 +237,13 @@ impl Ask {
             kind: base::RequestKind::Choice,
             text: question.into(),
             options: options.iter().map(|o| o.to_string()).collect(),
+        }
+    }
+    pub fn approval(question: impl Into<String>) -> Self {
+        Ask {
+            kind: base::RequestKind::Approval,
+            text: question.into(),
+            options: vec![],
         }
     }
     pub fn text(question: impl Into<String>) -> Self {
@@ -264,12 +281,70 @@ impl ToolContext {
     pub fn refuse(&self, reason: impl Into<String>) -> Error {
         Error::refusal(reason)
     }
+    pub(crate) fn check(&self) -> Result<()> {
+        if self.settled.is_cancelled() {
+            Err(Error::new(
+                Code::InvalidRequest,
+                "the tool call has settled",
+            ))
+        } else if self.cancelled.is_cancelled() {
+            Err(Error::new(Code::Cancelled, "the tool call was cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Operator diagnostics. Never part of the tool result or model context.
+    pub fn log(&self, message: impl std::fmt::Display) {
+        eprintln!("tool {}: {message}", self.call_id);
+    }
+
+    /// Publish live text progress, not a result or history record.
+    pub async fn progress(&self, text: impl Into<String>) -> Result<()> {
+        self.check()?;
+        let text = text.into();
+        match &self.backend {
+            Backend::Local { api, scope } => {
+                api.emit(base::Event::new(scope, "tool.progress", json!(text)))
+                    .await?
+            }
+            Backend::Remote { peer, parent } => peer.notify(
+                "tools/progress",
+                json!({
+                    "parentRequestId": parent, "content": [{"type":"text","text":text}],
+                }),
+            ),
+        }
+        Ok(())
+    }
+
+    /// List tools available to a nested call, or make one through its own gates.
+    pub fn tools(&self) -> NestedTools<'_> {
+        NestedTools(self)
+    }
+
     /// Ask an actor and wait for the answer.
     pub async fn ask(&self, ask: Ask) -> Result<Answer> {
+        self.check()?;
+        let approval = ask.kind == base::RequestKind::Approval;
         match &self.backend {
             Backend::Local { api, scope } => {
                 let mut question = base::Question::new(scope.clone(), ask.kind, &ask.text);
                 question.options = ask.options;
+                if approval {
+                    let data = api.snapshot(&scope.session)?;
+                    if let Some(call) = data
+                        .entries
+                        .iter()
+                        .rev()
+                        .find(|e| e.kind == "tool.call" && e.scope.call == scope.call)
+                        .and_then(|e| {
+                            serde_json::from_value::<base::ToolCall>(e.content.clone()?).ok()
+                        })
+                    {
+                        question.extra["approvalCall"] = base::wire::call(&call, scope);
+                    }
+                }
                 let requests = base::requests(api.as_ref())?;
                 match requests
                     .ask(api.clone(), question, self.cancelled.clone())
@@ -279,7 +354,7 @@ impl ToolContext {
                         Ok(Answer::Declined { reason: None })
                     }
                     base::RequestReply::Answer(a) => Ok(match a.value {
-                        Value::String(s) if s == "allow" => Answer::Allow,
+                        Value::String(s) if approval && s == "allow" => Answer::Allow,
                         Value::String(s) => Answer::Value(s),
                         other => Answer::Value(other.to_string()),
                     }),
@@ -327,6 +402,77 @@ impl ToolContext {
     }
 }
 
+/// Call-scoped access to other tools. The core limits nesting to four levels.
+pub struct NestedTools<'a>(&'a ToolContext);
+
+impl NestedTools<'_> {
+    pub async fn list(&self) -> Result<Vec<Value>> {
+        let cx = self.0;
+        cx.check()?;
+        match &cx.backend {
+            Backend::Local { api, scope } => {
+                let data = api.snapshot(&scope.session)?;
+                Ok(base::nested_tool_definitions(api.as_ref(), &data)?
+                    .iter()
+                    .map(base::wire::definition)
+                    .collect())
+            }
+            Backend::Remote { peer, parent } => {
+                let reply = peer
+                    .call(
+                        "host/tools/list",
+                        json!({"parentRequestId":parent}),
+                        None,
+                        cx.cancelled.clone(),
+                    )
+                    .await
+                    .map_err(crate::serve::from_fault)?;
+                serde_json::from_value(reply["tools"].clone()).map_err(Error::from)
+            }
+        }
+    }
+
+    pub async fn call(&self, name: &str, input: Value) -> Result<crate::ToolResult> {
+        let cx = self.0;
+        cx.check()?;
+        if name.is_empty() || !input.is_object() {
+            return Err(Error::new(
+                Code::InvalidRequest,
+                "nested calls need a tool name and an input object",
+            ));
+        }
+        let result = match &cx.backend {
+            Backend::Local { api, scope } => {
+                let data = api.snapshot(&scope.session)?;
+                let runtime = base::session_runtime(api.as_ref(), &data)?;
+                let result = runtime
+                    .nested_tool(
+                        api.clone(),
+                        scope.clone(),
+                        base::ToolCall::new(name, input),
+                        cx.cancelled.clone(),
+                    )
+                    .await?;
+                base::wire::result(&result)
+            }
+            Backend::Remote { peer, parent } => peer
+                .call(
+                    "host/tools/call",
+                    json!({
+                        "parentRequestId":parent, "name":name, "input":input,
+                    }),
+                    None,
+                    cx.cancelled.clone(),
+                )
+                .await
+                .map_err(crate::serve::from_fault)?,
+        };
+        let id = result["callId"].as_str().unwrap_or_default().to_owned();
+        let native = base::wire::parse_result(result, &id)?;
+        Ok(crate::ToolResult::from_base(name.into(), native))
+    }
+}
+
 fn not_open() -> Error {
     Error::new(
         Code::NotSupported,
@@ -345,18 +491,26 @@ pub(crate) struct Settled {
 /// Run a tool's function with a context, wherever the agent is.
 pub(crate) async fn execute(tool: &Tool, input: Value, cx: ToolContext) -> Settled {
     let cancel = cx.cancelled.clone();
+    let _settled = cx.settled.clone().drop_guard();
     let run = (tool.run)(input, cx);
     let outcome = tokio::select! {
         biased;
-        outcome = run => outcome,
         _ = cancel.cancelled() => {
             return Settled { status: ToolStatus::Cancelled, text: "The call was cancelled.".into(), value: None };
         }
+        outcome = run => outcome,
     };
     match outcome {
         Ok(output) => Settled {
-            status: output.status,
-            text: output.text,
+            status: match output.status {
+                ToolStatus::NotStarted | ToolStatus::Cancelled => ToolStatus::Failed,
+                other => other,
+            },
+            text: if output.text.is_empty() && output.status != ToolStatus::Completed {
+                format!("The tool reported {}.", output.status.as_str())
+            } else {
+                output.text
+            },
             value: output.value,
         },
         Err(e) if e.refusal => Settled {

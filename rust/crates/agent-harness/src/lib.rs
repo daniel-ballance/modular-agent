@@ -974,6 +974,7 @@ impl Harness {
             turn: Some(id()),
             ..Scope::session(session)
         };
+        let admitted_input = input.id.clone();
         let result = self
             .prepare_and_run(&scope, input, cancel.clone(), resume)
             .await;
@@ -1001,13 +1002,16 @@ impl Harness {
                     .iter()
                     .any(|e| e.kind == "turn.end" && e.scope.turn == scope.turn)
                 {
-                    self.append(&scope, "harness", Draft::new("turn.end", false, json!(r)))?;
+                    let mut end = json!(r);
+                    end["inputId"] = json!(admitted_input);
+                    self.append(&scope, "harness", Draft::new("turn.end", false, end))?;
                 }
                 r
             }
         };
-        self.emit(Event::new(&scope, "turn.result", json!(result)))
-            .await?;
+        let mut event = json!(result);
+        event["inputId"] = json!(admitted_input);
+        self.emit(Event::new(&scope, "turn.result", event)).await?;
         let view = self
             .output(
                 &scope,

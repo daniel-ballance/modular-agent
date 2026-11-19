@@ -23,6 +23,12 @@ pub enum Event {
         name: String,
         input: Value,
     },
+    /// Live text progress from a tool.
+    ToolOutput {
+        session_id: String,
+        call_id: String,
+        text: String,
+    },
     /// A call's settled result (`toolResult`).
     ToolResult {
         session_id: String,
@@ -54,6 +60,7 @@ impl Event {
         match self {
             Event::Text { session_id, .. }
             | Event::ToolCall { session_id, .. }
+            | Event::ToolOutput { session_id, .. }
             | Event::ToolResult { session_id, .. }
             | Event::QuestionOpened { session_id, .. }
             | Event::TurnEnded { session_id, .. }
@@ -72,6 +79,11 @@ impl Event {
                 call_id: e.content["id"].as_str().unwrap_or_default().into(),
                 name: e.content["name"].as_str().unwrap_or_default().into(),
                 input: e.content["input"].clone(),
+            },
+            "tool.progress" => Event::ToolOutput {
+                session_id,
+                call_id: e.scope.call.clone().unwrap_or_default(),
+                text: e.content.as_str().unwrap_or_default().into(),
             },
             "tool.ended" => match serde_json::from_value::<base::ToolResult>(e.content.clone()) {
                 Ok(r) => Event::ToolResult {
@@ -154,7 +166,7 @@ pub(crate) type QuestionHandler = Arc<dyn Fn(Question) -> BoxFuture<'static, Ans
 
 /// The SDK's Interface: it hears every event and answers questions for the app.
 pub(crate) struct Hub {
-    pub events: broadcast::Sender<Event>,
+    pub events: broadcast::Sender<(Option<String>, Event)>,
     pub on_question: Option<QuestionHandler>,
     pub harness: OnceLock<Weak<Harness>>,
 }
@@ -171,6 +183,7 @@ impl Hub {
 
 impl base::EventSink for Hub {
     fn send(&self, event: base::Event) {
+        let turn = event.scope.turn.clone();
         let event = Event::from_base(&event);
         if let (
             Event::QuestionOpened {
@@ -201,7 +214,7 @@ impl base::EventSink for Hub {
                 }
             });
         }
-        let _ = self.events.send(event);
+        let _ = self.events.send((turn, event));
     }
 }
 

@@ -97,6 +97,9 @@ pub(crate) struct Inner {
     pub hub: Arc<Hub>,
     pub project: PathBuf,
     pub session_settings: Value,
+    pub drivers: std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Weak<crate::session::Driver>>,
+    >,
     pub _scratch: Option<tempfile::TempDir>,
     pub kept: std::sync::Mutex<Vec<tempfile::TempDir>>,
 }
@@ -111,7 +114,6 @@ pub struct AgentBuilder {
     providers: Vec<Provider>,
     tools: Vec<Tool>,
     plugins: Vec<Plugin>,
-    base_plugins: Vec<Arc<dyn base::Plugin>>,
     process_plugins: Vec<ProcessPlugin>,
     plugin_host: Option<bool>,
     model: Option<String>,
@@ -151,7 +153,7 @@ impl Agent {
         Ok(Session::new(self.inner.clone(), id.to_string()))
     }
 
-    fn attach(&self, id: &str) -> Result<()> {
+    pub(crate) fn attach(&self, id: &str) -> Result<()> {
         if self.inner.hub.on_question.is_some() {
             base::requests(self.inner.harness.as_ref())?.presence(id, LOCAL, true);
         }
@@ -238,14 +240,6 @@ impl AgentBuilder {
         self.on_question = Some(Arc::new(move |q| Box::pin(handler(q))));
         self
     }
-    /// A plugin of the base build. Until the SDK's own plugin API exists, this is how
-    /// hooks and other parts are added.
-    #[doc(hidden)]
-    pub fn base_plugin(mut self, plugin: Arc<dyn base::Plugin>) -> Self {
-        self.base_plugins.push(plugin);
-        self
-    }
-
     /// Load every part and check the composition. Nothing runs until this succeeds.
     pub async fn build(self) -> Result<Agent> {
         let project = match self.project {
@@ -278,7 +272,7 @@ impl AgentBuilder {
             Durability::Ephemeral => Arc::new(MemoryHistory::default()),
             _ => Arc::new(history_fs::FileHistory::new(&state.join("sessions"))?),
         };
-        let mut defaults = Value::Object(self.settings);
+        let mut defaults = base::portable::settings_from_wire(&Value::Object(self.settings));
         if let Some(policy) = self.approval {
             defaults["approval"] = json!(policy.native());
         }
@@ -309,7 +303,6 @@ impl AgentBuilder {
             Arc::new(feature_context::ContextPlugin),
             Arc::new(feature_commands::CommandsPlugin),
         ]);
-        plugins.extend(self.base_plugins);
         plugins.push(Arc::new(HubPlugin(hub.clone())));
         let mut own: Vec<(Arc<dyn base::Plugin>, Vec<String>)> =
             plugins.into_iter().map(|p| (p, vec![])).collect();
@@ -396,6 +389,7 @@ impl AgentBuilder {
                 hub,
                 project,
                 session_settings,
+                drivers: Default::default(),
                 _scratch: scratch,
                 kept: Default::default(),
             }),

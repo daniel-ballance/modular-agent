@@ -18,6 +18,7 @@ mod agent;
 mod core;
 mod error;
 mod events;
+mod hooks;
 mod plugin;
 mod serve;
 mod session;
@@ -27,7 +28,11 @@ mod tool;
 pub use agent::{Agent, AgentBuilder, Approval, Durability, ProcessPlugin, Provider};
 pub use error::{Code, Error, Result};
 pub use events::{Event, Question, QuestionKind};
-pub use plugin::{Gate, Plugin, Registrar, ToolBefore};
+pub use hooks::*;
+pub use plugin::{Command, CommandContext, Plugin, Registrar};
 pub use serve::serve;
-pub use session::{Disposition, EventStream, Outcome, PromptResult, Session, ToolResult};
-pub use tool::{Answer, Ask, Tool, ToolBuilder, ToolContext, ToolOutput, ToolStatus};
+pub use session::{
+    Disposition, EventStream, HandedBack, InputReceipt, Outcome, PromptResult, Session, Timing,
+    ToolResult,
+};
+pub use tool::{Answer, Ask, NestedTools, Tool, ToolBuilder, ToolContext, ToolOutput, ToolStatus};

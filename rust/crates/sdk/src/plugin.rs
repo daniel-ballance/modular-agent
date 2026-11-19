@@ -1,26 +1,26 @@
-//! Plugins: a named bundle of tools and hooks (docs/sdk/api.md#plugins).
-//!
-//! Everything a plugin can register here can cross the plugin binding, so every plugin
-//! built with this API is servable.
+//! Plugins: a named bundle of registrations (docs/sdk/api.md#plugins).
 use crate::{
-    error::Result,
+    Code, Error, HookRule, Result,
+    hooks::Hook,
     tool::{Backend, Tool, ToolContext, execute},
 };
 use agent_api as base;
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use std::{future::Future, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 type Setup = Arc<dyn Fn(&mut Registrar) -> Result<()> + Send + Sync>;
-pub(crate) type ToolBeforeHandler =
-    Arc<dyn Fn(ToolBefore) -> BoxFuture<'static, Result<Gate>> + Send + Sync>;
+type CommandHandler =
+    Arc<dyn Fn(String, CommandContext) -> BoxFuture<'static, Result<Option<String>>> + Send + Sync>;
 
-/// A named bundle of tools and hooks, added to an agent or served in its own process.
+/// A named bundle of parts, added to an agent or served over the plugin binding.
 #[derive(Clone)]
 pub struct Plugin {
     pub(crate) name: String,
     pub(crate) replaces: Vec<String>,
     pub(crate) config: Value,
+    pub(crate) local_items: Vec<String>,
     setups: Vec<Setup>,
 }
 
@@ -28,69 +28,97 @@ pub struct Plugin {
 pub struct Registrar {
     config: Value,
     pub(crate) tools: Vec<Tool>,
-    pub(crate) tool_before: Vec<ToolBeforeHandler>,
+    pub(crate) hooks: Vec<Hook>,
+    pub(crate) commands: Vec<Command>,
+    defined: Vec<(String, HookRule)>,
 }
 
-/// The payload of `tool.before`: the call about to run.
+#[derive(Clone)]
+pub struct Command {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) local: bool,
+    pub(crate) run: CommandHandler,
+}
+
 #[derive(Clone, Debug)]
-pub struct ToolBefore {
+pub struct CommandContext {
     pub session_id: String,
-    pub call_id: String,
-    pub name: String,
-    pub input: Value,
+    pub actor_id: String,
+    pub cancelled: CancellationToken,
 }
-
-/// A gate's answer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Gate {
-    Allow,
-    Refuse(String),
+impl CommandContext {
+    pub fn log(&self, message: impl std::fmt::Display) {
+        eprintln!("command in session {}: {message}", self.session_id);
+    }
+}
+impl Command {
+    pub fn new<F, Fut>(name: impl Into<String>, description: impl Into<String>, handler: F) -> Self
+    where
+        F: Fn(String, CommandContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<String>>> + Send + 'static,
+    {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            local: false,
+            run: Arc::new(move |args, cx| Box::pin(handler(args, cx))),
+        }
+    }
+    pub fn in_process_only(mut self) -> Self {
+        self.local = true;
+        self
+    }
 }
 
 impl Plugin {
-    /// A plugin with a name that is unique in the agent and stable, because history
-    /// records it.
     pub fn new(name: impl Into<String>) -> Self {
-        Plugin {
+        Self {
             name: name.into(),
             replaces: vec![],
             config: json!({}),
+            local_items: vec![],
             setups: vec![],
         }
     }
     pub fn name(&self) -> &str {
         &self.name
     }
-    /// An item of this plugin that replaces an earlier plugin's: `runtime`,
-    /// `working-environment`, `provider:<id>`, `tool:<name>` or `command:<name>`.
     pub fn replaces(mut self, item: impl Into<String>) -> Self {
         self.replaces.push(item.into());
         self
     }
-    /// The plugin's settings when it runs in the agent's process. A served plugin gets
-    /// its settings from the agent that loads it instead.
     pub fn config(mut self, config: Value) -> Self {
         self.config = config;
         self
     }
-    pub fn tool(self, tool: Tool) -> Self {
+    pub fn tool(mut self, tool: Tool) -> Self {
+        if tool.in_process_only {
+            self.local_items.push(format!("tool:{}", tool.name()));
+        }
         self.setup(move |r| {
             r.tool(tool.clone());
             Ok(())
         })
     }
-    pub fn on_tool_before<F, Fut>(self, handler: F) -> Self
-    where
-        F: Fn(ToolBefore) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Gate>> + Send + 'static,
-    {
-        let handler: ToolBeforeHandler = Arc::new(move |b| Box::pin(handler(b)));
+    pub fn command(mut self, command: Command) -> Self {
+        if command.local {
+            self.local_items.push(format!("command:{}", command.name));
+        }
         self.setup(move |r| {
-            r.tool_before.push(handler.clone());
+            r.command(command.clone());
             Ok(())
         })
     }
-    /// Register items that depend on the plugin's settings.
+    /// Define a hook point owned by this plugin. It cannot cross the binding.
+    pub fn define_hook(mut self, name: impl Into<String>, rule: HookRule) -> Self {
+        let name = name.into();
+        self.local_items.push(format!("hook:{name}"));
+        self.setup(move |r| {
+            r.define_hook(&name, rule);
+            Ok(())
+        })
+    }
     pub fn setup<F>(mut self, setup: F) -> Self
     where
         F: Fn(&mut Registrar) -> Result<()> + Send + Sync + 'static,
@@ -102,7 +130,9 @@ impl Plugin {
         let mut r = Registrar {
             config: config.clone(),
             tools: vec![],
-            tool_before: vec![],
+            hooks: vec![],
+            commands: vec![],
+            defined: vec![],
         };
         for setup in &self.setups {
             setup(&mut r)?;
@@ -112,24 +142,36 @@ impl Plugin {
 }
 
 impl Registrar {
-    /// The plugin's settings, `{}` if none.
     pub fn config(&self) -> &Value {
         &self.config
     }
     pub fn tool(&mut self, tool: Tool) {
         self.tools.push(tool);
     }
-    pub fn on_tool_before<F, Fut>(&mut self, handler: F)
-    where
-        F: Fn(ToolBefore) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Gate>> + Send + 'static,
-    {
-        self.tool_before
-            .push(Arc::new(move |b| Box::pin(handler(b))));
+    pub fn command(&mut self, command: Command) {
+        self.commands.push(command);
+    }
+    pub fn define_hook(&mut self, name: impl Into<String>, rule: HookRule) {
+        self.defined.push((name.into(), rule));
+    }
+    pub(crate) fn check_servable(&self) -> Result<()> {
+        if let Some(t) = self.tools.iter().find(|t| t.in_process_only) {
+            return Err(cannot_serve(&format!("tool:{}", t.name())));
+        }
+        if let Some(c) = self.commands.iter().find(|c| c.local) {
+            return Err(cannot_serve(&format!("command:{}", c.name)));
+        }
+        if let Some((name, _)) = self.defined.first() {
+            return Err(cannot_serve(&format!("hook:{name}")));
+        }
+        Ok(())
     }
 }
 
-/// A plugin in the agent's process, as one of the base's plugins.
+pub(crate) fn cannot_serve(item: &str) -> Error {
+    Error::new(Code::NotSupported, format!("{item} is in-process only"))
+}
+
 pub(crate) struct InProcess {
     pub name: String,
     pub registered: Registrar,
@@ -139,7 +181,12 @@ impl InProcess {
     pub fn new(plugin: &Plugin) -> Result<Self> {
         Ok(InProcess {
             name: plugin.name.clone(),
-            registered: plugin.register(&plugin.config)?,
+            registered: plugin.register(&plugin.config).map_err(|e| {
+                Error::new(
+                    Code::InvalidComposition,
+                    format!("plugin {} setup failed: {e}", plugin.name),
+                )
+            })?,
         })
     }
 }
@@ -155,40 +202,57 @@ impl base::Plugin for InProcess {
                 Arc::new(Source(self.registered.tools.clone())),
             )?;
         }
-        for handler in &self.registered.tool_before {
-            let handler = handler.clone();
+        for (name, rule) in &self.registered.defined {
+            r.define(name, rule.native())?;
+        }
+        for hook in &self.registered.hooks {
+            let handle = hook.handle.clone();
+            let point = hook.point;
             r.on(
-                "runtime.before.tool",
-                base::Order::Normal,
-                base::handler(move |_, scope, value| {
-                    let handler = handler.clone();
+                plugin_stdio::hook_name(point).expect("known hook"),
+                hook.order.native(),
+                base::handler(move |api, scope, original| {
+                    let handle = handle.clone();
                     Box::pin(async move {
-                        let before = ToolBefore {
-                            session_id: scope.session.clone(),
-                            call_id: value["call"]["id"].as_str().unwrap_or_default().into(),
-                            name: value["call"]["name"].as_str().unwrap_or_default().into(),
-                            input: value["call"]["input"].clone(),
-                        };
-                        // A failed gate is a refusal (contracts.md#hook-execution).
-                        let refusal = match handler(before).await {
-                            Ok(Gate::Allow) => None,
-                            Ok(Gate::Refuse(reason)) => Some(reason),
-                            Err(e) => {
-                                Some(format!("a tool.before handler failed: {}", e.message()))
-                            }
-                        };
-                        Ok(match refusal {
-                            None => base::answer(value),
-                            Some(reason) => base::HookResult {
-                                refused: Some(reason),
-                                ..Default::default()
-                            },
-                        })
+                        let payload = plugin_stdio::hook_payload(point, &scope, &original, &api)?;
+                        let reply = handle(payload)
+                            .await
+                            .map_err(|e| base::anyhow!("{}", e.message()))?;
+                        plugin_stdio::hook_result(point, &scope, original, reply)
                     })
                 }),
             );
         }
+        for command in &self.registered.commands {
+            let run = command.run.clone();
+            r.command(
+                &command.name,
+                base::handler(move |api, scope, args| {
+                    let run = run.clone();
+                    Box::pin(async move {
+                        let cancelled = api.cancellation(&scope.session)?;
+                        let text = run(
+                            args["args"].as_str().unwrap_or_default().into(),
+                            CommandContext {
+                                session_id: scope.session,
+                                actor_id: scope.actor,
+                                cancelled,
+                            },
+                        )
+                        .await?;
+                        Ok(base::answer(command_reply(text)))
+                    })
+                }),
+            )?;
+        }
         Ok(())
+    }
+}
+
+pub(crate) fn command_reply(text: Option<String>) -> Value {
+    match text {
+        Some(text) => json!({"content":[{"type":"text","text":text}]}),
+        None => json!({}),
     }
 }
 
@@ -219,6 +283,7 @@ impl base::ToolSource for Source {
             call_id: call.id.clone(),
             backend: Backend::Local { api, scope },
             cancelled: cancel,
+            settled: Default::default(),
         };
         let settled = execute(tool, call.input.clone(), cx).await;
         // ToolResult::new words a refusal itself.

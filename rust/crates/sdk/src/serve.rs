@@ -1,7 +1,7 @@
 //! Serving a plugin over the plugin binding on stdio (docs/sdk/placement.md).
 use crate::{
     error::{Code, Error, Result},
-    plugin::{Gate, Plugin, Registrar, ToolBefore},
+    plugin::{CommandContext, Plugin, Registrar, cannot_serve, command_reply},
     tool::{Backend, ToolContext, ToolStatus, execute},
 };
 use agent_api as base;
@@ -16,21 +16,29 @@ const SOURCE: &str = "tools";
 /// Serve a plugin on stdin and stdout until the agent closes the connection. A plugin
 /// program writes nothing else to stdout.
 pub async fn serve(plugin: Plugin) -> Result<()> {
-    let endpoint = Arc::new(Served {
-        plugin,
-        registered: Mutex::default(),
-    });
-    let peer = Peer::start(tokio::io::stdin(), tokio::io::stdout(), endpoint);
+    if let Some(item) = plugin.local_items.first() {
+        return Err(cannot_serve(item));
+    }
+    let endpoint = Served::new(plugin);
+    let peer = Peer::start(tokio::io::stdin(), tokio::io::stdout(), endpoint.clone());
     peer.finished.cancelled().await;
-    Ok(())
+    endpoint.startup.lock().unwrap().take().map_or(Ok(()), Err)
 }
 
-struct Served {
+pub(crate) struct Served {
     plugin: Plugin,
     registered: Mutex<Option<Arc<Registrar>>>,
+    startup: Mutex<Option<Error>>,
 }
 
 impl Served {
+    pub(crate) fn new(plugin: Plugin) -> Arc<Self> {
+        Arc::new(Self {
+            plugin,
+            registered: Mutex::default(),
+            startup: Mutex::default(),
+        })
+    }
     fn registered(&self) -> std::result::Result<Arc<Registrar>, Fault> {
         self.registered
             .lock()
@@ -45,10 +53,22 @@ fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
     if !r.tools.is_empty() {
         v["toolSources"] = json!([{"id": SOURCE, "tools": tools(r), "perSession": false}]);
     }
-    if !r.tool_before.is_empty() {
+    if !r.hooks.is_empty() {
         v["hooks"] = json!(
-            (0..r.tool_before.len())
-                .map(|i| json!({"hook": "tool.before", "handlerId": i + 1}))
+            r.hooks
+                .iter()
+                .enumerate()
+                .map(|(i, hook)| {
+                    json!({"hook":hook.point,"handlerId":i + 1,"order":hook.order.name()})
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+    if !r.commands.is_empty() {
+        v["commands"] = json!(
+            r.commands
+                .iter()
+                .map(|c| json!({"name":c.name,"description":c.description}))
                 .collect::<Vec<_>>()
         );
     }
@@ -74,7 +94,8 @@ impl Endpoint for Served {
                 if p["binding"] != BINDING || p["data"] != "modular-agent-data/1" {
                     return Err(Fault::new("not_supported", "unsupported binding"));
                 }
-                if self.registered.lock().unwrap().is_some() {
+                let mut registered = self.registered.lock().unwrap();
+                if registered.is_some() {
                     return Err(Fault::new("invalid_request", "already initialized"));
                 }
                 let config = if p["config"].is_object() {
@@ -86,8 +107,13 @@ impl Endpoint for Served {
                     .plugin
                     .register(&config)
                     .map_err(|e| Fault::new("invalid_request", e.message()))?;
+                if let Err(e) = r.check_servable() {
+                    let fault = Fault::new(e.code().as_str(), e.message());
+                    *self.startup.lock().unwrap() = Some(e);
+                    return Err(fault);
+                }
                 let v = registration(&self.plugin.name, &self.plugin.replaces, &r);
-                *self.registered.lock().unwrap() = Some(Arc::new(r));
+                *registered = Some(Arc::new(r));
                 Ok(v)
             }
             "plugin/shutdown" => Ok(json!({})),
@@ -113,6 +139,7 @@ impl Endpoint for Served {
                     call_id: call["id"].as_str().unwrap_or_default().into(),
                     backend: Backend::Remote { peer, parent: id },
                     cancelled: cancel.clone(),
+                    settled: Default::default(),
                 };
                 let settled = execute(tool, call["input"].clone(), cx).await;
                 if settled.status == ToolStatus::Cancelled && cancel.is_cancelled() {
@@ -136,26 +163,37 @@ impl Endpoint for Served {
                 let r = self.registered()?;
                 let handler = p["handlerId"]
                     .as_u64()
-                    .filter(|_| p["hook"] == "tool.before")
-                    .and_then(|i| r.tool_before.get((i as usize).checked_sub(1)?))
+                    .and_then(|i| r.hooks.get((i as usize).checked_sub(1)?))
+                    .filter(|handler| p["hook"] == handler.point)
                     .ok_or_else(|| Fault::new("unknown_handler", "unknown handler"))?;
-                let payload = &p["payload"];
-                let before = ToolBefore {
-                    session_id: payload["sessionId"].as_str().unwrap_or_default().into(),
-                    call_id: payload["call"]["id"].as_str().unwrap_or_default().into(),
-                    name: payload["call"]["name"].as_str().unwrap_or_default().into(),
-                    input: payload["call"]["input"].clone(),
+                (handler.handle)(p["payload"].clone())
+                    .await
+                    .map_err(to_fault)
+            }
+            "command/run" => {
+                let r = self.registered()?;
+                let command = r
+                    .commands
+                    .iter()
+                    .find(|c| p["name"] == c.name)
+                    .ok_or_else(|| Fault::new("not_found", "unknown command"))?;
+                let cx = CommandContext {
+                    session_id: p["sessionId"].as_str().unwrap_or_default().into(),
+                    actor_id: p["actorId"].as_str().unwrap_or_default().into(),
+                    cancelled: cancel,
                 };
-                match handler(before).await {
-                    Ok(Gate::Allow) => Ok(Value::Null),
-                    Ok(Gate::Refuse(reason)) => Ok(json!({"refuse": reason})),
-                    // The host treats a failed gate as a refusal.
-                    Err(e) => Err(Fault::new(e.code().as_str(), e.message())),
-                }
+                let text = (command.run)(p["args"].as_str().unwrap_or_default().into(), cx)
+                    .await
+                    .map_err(to_fault)?;
+                Ok(command_reply(text))
             }
             _ => Err(Fault::unknown(method)),
         }
     }
+}
+
+fn to_fault(e: Error) -> Fault {
+    Fault::new(e.code().as_str(), e.message())
 }
 
 /// A binding error, as an SDK error with the same code.
@@ -167,6 +205,7 @@ pub(crate) fn from_fault(f: Fault) -> Error {
         "cancelled" => Code::Cancelled,
         "not_supported" => Code::NotSupported,
         "result_too_large" => Code::ResultTooLarge,
+        "message_too_large" => Code::MessageTooLarge,
         "turn_limit" => Code::TurnLimit,
         "lost" => Code::Lost,
         _ => Code::Internal,

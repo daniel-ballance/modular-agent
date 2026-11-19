@@ -1164,7 +1164,7 @@ impl WorkingEnvironment for Environment {
         })
     }
 }
-pub(crate) fn hook_name(name: &str) -> Option<&'static str> {
+pub fn hook_name(name: &str) -> Option<&'static str> {
     Some(match name {
         "plugin.load" => "plugin.load",
         "output" => "output.stream",
@@ -1244,12 +1244,12 @@ impl Handler for RemoteHandler {
                 eprintln!("plugin observer {} failed: {e}", self.hook);
                 return Ok(HookResult::default());
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(anyhow!(e.message)),
         };
         hook_result(&self.hook, &scope, value, reply)
     }
 }
-fn hook_payload(hook: &str, s: &Scope, v: &Value, api: &Api) -> Result<Value> {
+pub fn hook_payload(hook: &str, s: &Scope, v: &Value, api: &Api) -> Result<Value> {
     if hook == "output" {
         return Ok(v.clone());
     }
@@ -1257,7 +1257,7 @@ fn hook_payload(hook: &str, s: &Scope, v: &Value, api: &Api) -> Result<Value> {
     match hook {
         "plugin.load" => {
             p["name"] = v["plugin"].clone();
-            p["origin"] = json!("subprocess");
+            p["origin"] = v.get("origin").cloned().unwrap_or(json!("subprocess"));
             p["project"] = v["project"].clone();
         }
         "input" => {
@@ -1334,7 +1334,7 @@ fn hook_payload(hook: &str, s: &Scope, v: &Value, api: &Api) -> Result<Value> {
     }
     Ok(p)
 }
-fn hook_result(hook: &str, s: &Scope, mut original: Value, reply: Value) -> Result<HookResult> {
+pub fn hook_result(hook: &str, s: &Scope, mut original: Value, reply: Value) -> Result<HookResult> {
     if reply.is_null() {
         return Ok(HookResult::default());
     }
@@ -1363,6 +1363,11 @@ fn hook_result(hook: &str, s: &Scope, mut original: Value, reply: Value) -> Resu
             }
         }
         "turn.before" => Ok(answer(reply)),
+        "turn.result" => {
+            // A refusal at this point is feedback; an absent answer accepts.
+            ensure!(reply["accept"] == true, "invalid turn.result answer");
+            Ok(HookResult::default())
+        }
         "step.before" => {
             let v = &reply["value"];
             original["request"] = json!(wire::parse_request(&v["request"], &s.session)?);

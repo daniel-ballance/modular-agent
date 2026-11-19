@@ -252,8 +252,8 @@ impl TestAgentBuilder {
 pub mod fixtures {
     use super::*;
     use crate::{
+        Gate, Plugin,
         error::Error,
-        plugin::{Gate, Plugin},
         tool::{Ask, ToolContext},
     };
     use schemars::JsonSchema;
