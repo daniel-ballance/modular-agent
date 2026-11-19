@@ -1,0 +1,43 @@
+[package]
+name = "standard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The standard configuration of the Modular Agent: a coding agent with Pi's feature set."
+
+[[bin]]
+name = "ma"
+path = "src/main.rs"
+
+[dependencies]
+agent-api.workspace = true
+agent-harness.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+plugin-stdio = { path = "../plugin-stdio" }
+history-fs = { path = "../history-fs" }
+history-http = { path = "../history-http" }
+runtime-transient = { path = "../runtime-transient" }
+runtime-durable = { path = "../runtime-durable" }
+environment-local = { path = "../environment-local" }
+config-files = { path = "../config-files" }
+credentials-auth = { path = "../credentials-auth" }
+feature-jobs = { path = "../feature-jobs" }
+feature-questions = { path = "../feature-questions" }
+feature-context = { path = "../feature-context" }
+feature-model = { path = "../feature-model" }
+feature-commands = { path = "../feature-commands" }
+interface-terminal = { path = "../interface-terminal" }
+interface-acp = { path = "../interface-acp" }
+tools-mcp = { path = "../tools-mcp" }
+tools-files = { path = "../tools-files" }
+tools-code = { path = "../tools-code" }
+provider-responses = { path = "../provider-responses" }
+provider-fake = { path = "../provider-fake" }
+
+[dev-dependencies]
+tempfile.workspace = true
