@@ -274,21 +274,24 @@ class Questions(Plugin):
         sid = d["session"]
         q = await self._open(d)
         if q is None:
-            return {"value": "declined"}
+            return {"value": "declined", "declined": True, "reason": "refused"}
         if q.get("answer"):
             return q["answer"]
         if q["kind"] == "approval" and not any(
             [await self._eligible(sid, q, a) for a in self.connected.get(sid, set())]
         ):
             await self._accept(sid, q, q["actor"], "declined", "refused")
-            return {"value": "declined"}
+            return {"value": "declined", "declined": True, "reason": "refused"}
         signal = self.signals.setdefault((sid, q["id"]), asyncio.Event())
         try:
             async with asyncio.timeout(d.get("timeout")):
                 while True:
                     current = (await self._state(sid)).get(q["id"])
                     if not current or current.get("closed"):
-                        return {"value": "declined"}
+                        reason = (
+                            (current or {}).get("closed", {}).get("reason", "noLongerAnswerable")
+                        )
+                        return {"value": "declined", "declined": True, "reason": reason}
                     if current.get("answer"):
                         return current["answer"]
                     await signal.wait()
@@ -297,7 +300,12 @@ class Questions(Plugin):
             if d.get("park", True):
                 return {"open": True, "request": q["id"]}
             await self._accept(sid, q, q["actor"], "declined", "timeLimit")
-            return {"value": "declined", "reason": "timeLimit", "request": q["id"]}
+            return {
+                "value": "declined",
+                "declined": True,
+                "reason": "timeLimit",
+                "request": q["id"],
+            }
 
     async def valid_answer(self, d, emit):
         q = (await self._state(d["session"])).get(d["request"])
@@ -311,6 +319,12 @@ class Questions(Plugin):
     async def validate(self, d, emit):
         q = (await self._state(d["session"])).get(d["request"])
         if not q:
+            session = await self.api.session("get", session=d["session"])
+            if any(
+                e["kind"] == "question_open" and e["data"]["id"] == d["request"]
+                for e in session["entries"]
+            ):
+                raise AgentError("Question is closed or not on the current branch", "conflict")
             raise AgentError("Unknown question", "not_found")
         if q.get("answer") or q.get("closed") or q.get("selected"):
             raise AgentError("Question is closed or no longer answerable", "conflict")

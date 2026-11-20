@@ -152,8 +152,8 @@ async def test_secret_missing_store_and_store_failure_do_not_expose_value(agent,
     def fail(*args, **kwargs):
         raise OSError(secret)
 
-    monkeypatch.setattr("ma_credentials.os.open", fail)
-    with pytest.raises(AgentError, match="could not be stored") as exc:
+    monkeypatch.setattr("ma_credentials.staging.os.open", fail)
+    with pytest.raises(AgentError, match="could not be staged") as exc:
         await ui.call(
             "credentials",
             "answer",
