@@ -66,7 +66,14 @@ class Provider:
             d,
             emit,
         )
-        r = {**r, "model": {"provider": self.id, "id": model}}
+        # Preserve an omitted optional model unless replay of opaque data needs
+        # trusted provenance. Never use the Provider's claimed identity for it.
+        if (
+            "model" in r
+            or "providerData" in r
+            or any(p.get("type") == "reasoning" and "providerData" in p for p in r["content"])
+        ):
+            r = {**r, "model": {"provider": self.id, "id": model}}
         if d.get("auxiliary_step"):
             await self.plugin.api.session(
                 "append",
