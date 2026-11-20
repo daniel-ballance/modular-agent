@@ -340,7 +340,7 @@ export interface InterfaceCapability {
 	id: string;
 	actorId: string;
 	/** Whether this Interface declares its actor present for the session. */
-	present?(sessionId: string): boolean;
+	present?(sessionId: string, request?: InputRequest): boolean;
 	/** Other actors whose presence this connection declares. */
 	presentActors?(sessionId: string): string[];
 	/** Told about input requests this Interface's actor may see. */
@@ -375,6 +375,7 @@ export interface InputRequest {
 export type InputRequestDraft = Omit<InputRequest, "id" | "sessionId" | "askedBy" | "answerers" | "turnId"> & { answerers?: string[] };
 export interface Answer {
 	requestId: string;
+	delegatedBy?: string;
 	value?: string;
 	declined?: boolean;
 	actorId: string;

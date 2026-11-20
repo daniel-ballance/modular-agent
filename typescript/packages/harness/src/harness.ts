@@ -167,6 +167,7 @@ export interface PluginApi {
 	// actors
 	ask(sessionId: string, request: InputRequestDraft): Promise<Answer>;
 	answer(sessionId: string, answer: Answer): { accepted: boolean; reason?: string };
+	submitAnswer(sessionId: string, answer: Answer): Promise<{ accepted: boolean; reason?: string }>;
 	openRequests(sessionId: string): InputRequest[];
 	// jobs
 	/** Start a job. It is recorded in the history, with the plugin's own detail. */
@@ -192,11 +193,11 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean }
+export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; tenants?: Record<string, Tenant> | null }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
-interface Tenant { rights: Authority[]; tokens?: number }
+export interface Tenant { rights: Authority[]; tokens?: number }
 interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens: { budget: number; used: number } | null }
 interface TurnState extends TurnSnapshot { endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
@@ -212,7 +213,7 @@ export class Harness {
 	private loaded: { plugin: Plugin; api: PluginApi }[] = [];
 	private sessions = new Map<string, Session>();
 	private opening = new Set<string>();
-	private readonly tenants = readTenants(process.env.MODULAR_AGENT_TENANTS);
+	private readonly tenants: Map<string, Tenant>;
 	private listeners: { plugin: string; raw: boolean; fn: (e: AgentEvent) => void }[] = [];
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
@@ -229,6 +230,7 @@ export class Harness {
 	readonly problems: { plugin: string; where: string; error: string }[] = [];
 
 	constructor(options: HarnessOptions) {
+		this.tenants = readTenants(options.tenants === undefined ? process.env.MODULAR_AGENT_TENANTS : JSON.stringify(options.tenants ?? {}));
 		this.project = options.project;
 		this.home = options.home;
 		this.now = options.now ?? Date.now;
@@ -406,6 +408,7 @@ export class Harness {
 			callTool: (sessionId, call) => this.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
 			ask: (sessionId, request) => this.ask(this.session(sessionId), request, pluginName),
 			answer: (sessionId, answer) => this.answer(this.session(sessionId), answer),
+			submitAnswer: async (sessionId, answer) => this.answer(this.session(sessionId), answer),
 			openRequests: (sessionId) => {
 				const s = this.session(sessionId);
 				return [...[...s.requests.values()].map((r) => r.request), ...this.waitingRequests(s)];
@@ -569,7 +572,7 @@ export class Harness {
 		const sourceId = options.forkFrom?.sessionId ?? options.parentSessionId;
 		const ancestor = sourceId ? this.sessions.get(sourceId) ?? await this.loadInto(sourceId) : undefined;
 		const tenant = ancestor?.tenant ?? options.tenant;
-		if (tenant !== undefined && !this.tenants.has(tenant)) throw new Error(`Unknown tenant ${tenant}`);
+		if (tenant !== undefined && !this.tenants.has(tenant)) throw Object.assign(new Error(`Unknown tenant ${tenant}`), { code: "invalid_params" });
 		const cwd = options.settings?.cwd;
 		const meta: StoredSession = { id: this.newId(), created: this.now(), project: ancestor?.meta.project ?? (typeof cwd === "string" ? cwd : this.project), forkedFrom: options.forkFrom, parentSessionId: options.parentSessionId };
 		const s = new Session(meta, !store);
@@ -1082,7 +1085,7 @@ export class Harness {
 	private async join(s: Session, actor: Actor, grantedBy: string, writer: string): Promise<void> {
 		this.requireAuthority(s, grantedBy, "grant");
 		const beyond = actor.authority.filter((a) => !ALL_AUTHORITY.includes(a) || !this.rightsOf(s, grantedBy).includes(a));
-		if (beyond.length) throw new Error(`${grantedBy} can't grant ${beyond.join(", ")}`);
+		if (beyond.length) throw Object.assign(new Error(`${grantedBy} can't grant ${beyond.join(", ")}`), { code: "forbidden" });
 		await this.commit(s, [actorJoined(actor, writer, grantedBy)]);
 		this.emit(s.id, "session.joined", { actor }, writer, { actorId: actor.id });
 		this.closeUnanswerable(s);
@@ -1090,8 +1093,9 @@ export class Harness {
 
 	private requireAuthority(s: Session, actorId: string, authority: Authority): void {
 		const actor = s.actors.get(actorId);
-		if (!actor) throw new Error(`Actor ${actorId} is not part of this session`);
-		if (!this.rightsOf(s, actorId).includes(authority)) throw new Error(`Actor ${actorId} may not ${authority}`);
+		if (!actor || !this.rightsOf(s, actorId).includes(authority)) {
+			throw Object.assign(new Error(`Actor ${actorId} may not ${authority}`), { code: "forbidden" });
+		}
 	}
 
 	private withinLimits(s: Session, right: Authority): boolean {
@@ -1138,7 +1142,7 @@ export class Harness {
 		return this.admit(s, async () => {
 			this.requireAuthority(s, actorId, "administer");
 			const effective = (s.actors.get(actorId)?.authority ?? []).filter((r) => s.tenant === undefined || this.tenants.get(s.tenant)?.rights.includes(r));
-			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw new Error("A limit cannot give a right the administrator lacks");
+			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw Object.assign(new Error("A limit cannot give a right the administrator lacks"), { code: "forbidden" });
 			await this.commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
 			this.closeUnanswerable(s);
 		});
@@ -2075,8 +2079,8 @@ export class Harness {
 		return this.useAll<InterfaceCapability>("interface");
 	}
 
-	private presentActors(s: Session): string[] {
-		return [...new Set(this.interfaces().filter((i) => i.present?.(s.id) !== false)
+	private presentActors(s: Session, request?: InputRequest): string[] {
+		return [...new Set(this.interfaces().filter((i) => i.present?.(s.id, request) !== false)
 			.flatMap((i) => [i.actorId, ...(i.presentActors?.(s.id) ?? [])]))].filter((id) => s.actors.has(id));
 	}
 
@@ -2090,7 +2094,7 @@ export class Harness {
 	/** Questions recorded on the current branch that have no answer and were not closed. */
 	private closeUnanswerable(s: Session): void {
 		for (const { request, resolve } of s.requests.values()) {
-			if (!this.presentActors(s).some((id) => this.mayAnswer(s, request, id))) {
+			if (!this.presentActors(s, request).some((id) => this.mayAnswer(s, request, id))) {
 				resolve({ requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable" });
 			}
 		}
@@ -2178,7 +2182,7 @@ export class Harness {
 		if (!reopened) {
 			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, data: { request: { ...request, answerable: viewers.length > 0 }, ...approval } }]);
 		}
-		if (!this.presentActors(s).some((id) => this.mayAnswer(s, request, id))) {
+		if (!this.presentActors(s, request).some((id) => this.mayAnswer(s, request, id))) {
 			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId, toolCallId: request.toolCallId,
 				data: { requestId: request.id, declined: true, actorId: "harness", reason: request.kind === "approval" ? "refused" : "noLongerAnswerable" } }]);
 			return { requestId: request.id, declined: true, actorId: "harness", reason: "No one present can answer" };
@@ -2225,7 +2229,7 @@ export class Harness {
 	}
 
 	private viewersFor(s: Session, request: InputRequest): InterfaceCapability[] {
-		return this.interfaces().filter((i) => i.present?.(s.id) !== false && (this.actorRights(s, i.actorId).includes("watch") || this.mayAnswer(s, request, i.actorId)));
+		return this.interfaces().filter((i) => i.present?.(s.id, request) !== false && (this.actorRights(s, i.actorId).includes("watch") || this.mayAnswer(s, request, i.actorId)));
 	}
 
 	/** Questions on the current branch that were left open past their turn and have no answer yet. */
