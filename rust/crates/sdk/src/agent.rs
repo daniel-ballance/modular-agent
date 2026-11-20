@@ -301,6 +301,14 @@ impl Agent {
         Ok(models)
     }
 
+    /// Watch an in-process Provider's catalog. Re-read `models()` after a notification.
+    pub fn model_changes(&self, provider: &str) -> Result<tokio::sync::watch::Receiver<u64>> {
+        let h = self.inner.harness.as_ref();
+        let provider = base::capability::<dyn base::Provider>(h, &format!("provider.{provider}"))
+            .map_err(|_| Error::new(Code::NotFound, "unknown Provider"))?;
+        provider.catalog_changes().ok_or_else(|| Error::new(Code::NotSupported, "this Provider has no catalog notifier"))
+    }
+
     /// Keep a folder alive as long as the agent.
     pub(crate) fn keep(&self, dir: tempfile::TempDir) {
         self.inner.kept.lock().unwrap().push(dir);

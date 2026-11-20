@@ -1,4 +1,6 @@
 use futures_util::StreamExt;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use modular_agent::{CatalogNotifier, Plugin};
 use modular_agent::{
     Agent, AssistantMessage, Code, CredentialStore, Error, ModelError, ModelErrorKind, ModelInfo,
     ModelRef, ModelRequest, Piece, Provider, ProviderContext, ProviderSupport, Result,

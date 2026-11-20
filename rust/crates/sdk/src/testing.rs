@@ -165,6 +165,7 @@ pub fn test_agent() -> TestAgentBuilder {
     TestAgentBuilder {
         builder: Agent::builder(),
         script: Value::Array(vec![]),
+        model: None,
         project: None,
         environment: memory_environment(),
     }
@@ -174,11 +175,16 @@ pub fn test_agent() -> TestAgentBuilder {
 pub struct TestAgentBuilder {
     builder: AgentBuilder,
     script: Value,
+    model: Option<String>,
     project: Option<PathBuf>,
     environment: MemoryEnvironment,
 }
 
 impl TestAgentBuilder {
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
     pub fn script(mut self, script: Value) -> Self {
         self.script = script;
         self
@@ -223,6 +229,10 @@ impl TestAgentBuilder {
     pub fn answers(self, queue: Answers) -> Self {
         self.on_question(move |question| std::future::ready(queue.answer(question)))
     }
+    pub fn credentials(mut self, store: impl crate::CredentialStore) -> Self {
+        self.builder = self.builder.credentials(store);
+        self
+    }
     pub fn plugin(mut self, plugin: crate::Plugin) -> Self {
         self.builder = self.builder.plugin(plugin);
         self
@@ -258,7 +268,7 @@ impl TestAgentBuilder {
             .builder
             .environment(self.environment)
             .provider(scripted_provider(self.script))
-            .model(SCRIPTED_MODEL)
+            .model(self.model.as_deref().unwrap_or(SCRIPTED_MODEL))
             .project(project)
             .build()
             .await?;

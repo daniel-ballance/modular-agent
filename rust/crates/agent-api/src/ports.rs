@@ -346,6 +346,7 @@ pub trait Provider: Send + Sync {
         Ok(vec![])
     }
     fn catalog(&self) -> Vec<ModelInfo>;
+    fn catalog_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> { None }
     fn bind(&self, model: &str) -> Result<Arc<dyn ModelAccess>>;
 }
 #[async_trait]
