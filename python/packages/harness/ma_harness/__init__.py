@@ -793,8 +793,10 @@ class Harness(Authority):
         }
         if project is not None and "environment" in self.capabilities:
             name, environment = self.capabilities["environment"]
-            if name in parts and (keeps_points := getattr(environment, "keeps_points", None)):
-                parts[name] = {**parts[name], "rewind": keeps_points(project)}
+            # Remote services synthesize RPC methods via __getattr__; only a real
+            # local method can override the static wire declaration here.
+            if name in parts and (keeps_points := getattr(type(environment), "keeps_points", None)):
+                parts[name] = {**parts[name], "rewind": keeps_points(environment, project)}
         return parts
 
     async def handle(self, op, d, emit):
