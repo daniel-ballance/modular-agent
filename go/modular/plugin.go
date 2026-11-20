@@ -226,7 +226,7 @@ func (r *Registrar) OnSessionPrepare(fn func(context.Context, SessionPrepare) er
 
 // OnSessionEnd releases resources on session close or interruption.
 func (r *Registrar) OnSessionEnd(fn func(context.Context, string) error, opts ...HookOption) error {
-	return r.on(hookRegistration{point: "session.end", only: true, handle: func(ctx context.Context, p pluginrpc.Object) (any, error) {
+	return r.on(hookRegistration{point: "session.end", handle: func(ctx context.Context, p pluginrpc.Object) (any, error) {
 		return nil, fn(ctx, p["sessionId"].(string))
 	}}, opts)
 }
@@ -329,7 +329,13 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 			}
 		}
 		for _, p := range r.providers {
-			if err := a.Provide("provider."+p.ID, providerAdapter{p}); err != nil {
+			if err := a.Provide("provider."+p.ID, providerAdapter{p: p, read: func(ctx context.Context, id string) (string, error) {
+				v, err := a.Get("credentials")
+				if err != nil {
+					return "", err
+				}
+				return v.(api.Credentials).Get(ctx, id)
+			}}); err != nil {
 				return err
 			}
 		}

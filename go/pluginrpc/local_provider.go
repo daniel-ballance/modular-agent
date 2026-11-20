@@ -14,6 +14,7 @@ type localProvider struct {
 	id   string
 }
 
+func (p *localProvider) Available() bool { return providerAvailable(p.Provider) }
 func (p *localProvider) Access(id string) (api.ModelAccess, error) {
 	access, err := p.Provider.Access(id)
 	if err != nil {

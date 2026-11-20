@@ -70,7 +70,7 @@ func serve(ctx context.Context, plugin Plugin, in io.ReadCloser, out io.Writer) 
 		}
 		server.Providers = map[string]api.Provider{}
 		for _, p := range r.providers {
-			provider := providerAdapter{p}
+			provider := providerAdapter{p: p, read: server.ProviderCredential}
 			pr := pluginrpc.ProviderRegistration{ID: p.ID}
 			pr.Supports.KeepsState = p.Supports.KeepsState
 			for _, model := range provider.Catalog() {

@@ -9,6 +9,7 @@ import (
 )
 
 var ErrTenantTokens = errors.New("tenantTokens limit")
+var ErrAuthority = errors.New("authority refused")
 var ErrTenantForbidden = errors.New("tenant access forbidden")
 
 var ErrSettingsBusy = errors.New("settings cannot change during a turn")
@@ -34,6 +35,13 @@ func SessionSettings(ctx context.Context) (Settings, bool) {
 	settings, ok := ctx.Value(sessionSettingsKey{}).(Settings)
 	return settings, ok
 }
+
+type actingViaKey struct{}
+
+func WithActingVia(ctx context.Context, actor string) context.Context {
+	return context.WithValue(ctx, actingViaKey{}, actor)
+}
+func ActingVia(ctx context.Context) string { a, _ := ctx.Value(actingViaKey{}).(string); return a }
 
 type actorKey struct{}
 
@@ -76,6 +84,25 @@ type Questions interface {
 	List(string) ([]Question, error)
 	Connect(string, string) func()
 }
+type SecretReceipt struct {
+	Session, Request, Name, Actor, ID string
+}
+type SecretDecision string
+
+const (
+	SecretActivated  SecretDecision = "activated"
+	SecretSuperseded SecretDecision = "superseded"
+	SecretDiscarded  SecretDecision = "discarded"
+)
+
+type StagedCredentials interface {
+	Credentials
+	Stage(ctx context.Context, session, request, name, actor, value string) (SecretReceipt, error)
+	LookupStaged(ctx context.Context, session, request string) (SecretReceipt, bool, error)
+	Activate(context.Context, SecretReceipt) (SecretDecision, error)
+	Discard(ctx context.Context, session, request string) error
+}
+
 type SecretDestination interface{ CanStore(string) bool }
 type SecretWriter interface {
 	Put(context.Context, string, string) error

@@ -149,10 +149,10 @@ func TestSecretDestinationRefusedBeforeAskAndWriteErrorsDoNotLeak(t *testing.T) 
 				q := v.(api.Questions)
 				events := ""
 				a.Subscribe(func(e api.Event) { events += string(api.JSON(e)) })
-				_, err = q.Ask(context.Background(), api.Question{Session: id, Key: "secret", Kind: "secret", Prompt: "Token?", Credential: "deploy", Wait: time.Millisecond, Defer: true})
+				answer, err := q.Ask(context.Background(), api.Question{Session: id, Key: "secret", Kind: "secret", Prompt: "Token?", Credential: "deploy", Wait: time.Millisecond, Defer: true})
 				list, _ := q.List(id)
 				if !bad {
-					if err == nil || len(list) != 0 {
+					if err != nil || !answer.Declined || len(list) != 0 {
 						t.Fatal("unavailable destination was asked", err, list)
 					}
 					return

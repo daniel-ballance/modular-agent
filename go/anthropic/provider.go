@@ -29,6 +29,7 @@ type Provider struct {
 	a          api.API
 	credential func(context.Context) (string, error)
 	endpoint   string
+	model      string
 	http       *http.Client
 }
 
@@ -39,7 +40,7 @@ func newProvider(endpoint string, client *http.Client) *Provider {
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("Provider redirects refused") }}
 	}
-	return &Provider{endpoint: endpoint, http: client}
+	return &Provider{endpoint: endpoint, http: client, model: ModelID}
 }
 
 // NewAccess reuses the Messages API transport in an embedded Provider.
@@ -47,6 +48,15 @@ func NewAccess(endpoint string, client *http.Client, getCredential func(context.
 	p := newProvider(endpoint, client)
 	p.credential = getCredential
 	return &access{p}
+}
+
+// NewModelAccess makes the SDK's explicit single-model override.
+func NewModelAccess(model, endpoint string, client *http.Client, credential func(context.Context) (string, error)) api.ModelAccess {
+	a := NewAccess(endpoint, client, credential).(*access)
+	if model != "" {
+		a.p.model = model
+	}
+	return a
 }
 
 func Plugin(endpoint string, client *http.Client) api.Plugin {
@@ -63,7 +73,7 @@ func Plugin(endpoint string, client *http.Client) api.Plugin {
 	}}
 }
 func (p *Provider) Catalog() []api.Model {
-	return []api.Model{{ID: ModelID, Provider: "anthropic", Context: 1000000, Output: 128000, Thinking: []string{"off", "low", "medium", "high"}}}
+	return []api.Model{{ID: p.model, Provider: "anthropic", Context: 1000000, Output: 128000, Thinking: []string{"off", "low", "medium", "high"}}}
 }
 func (p *Provider) Access(id string) (api.ModelAccess, error) {
 	if id != ModelID {
@@ -101,7 +111,7 @@ func (a *access) Generate(ctx context.Context, r api.Request, emit func(api.Part
 	if err != nil {
 		return api.Response{}, err
 	}
-	body := map[string]any{"model": ModelID, "stream": true, "max_tokens": r.MaxOutput, "messages": messages, "thinking": thinking, "output_config": map[string]any{"effort": effort}}
+	body := map[string]any{"model": p.model, "stream": true, "max_tokens": r.MaxOutput, "messages": messages, "thinking": thinking, "output_config": map[string]any{"effort": effort}}
 	if r.System != "" {
 		body["system"] = r.System
 	}

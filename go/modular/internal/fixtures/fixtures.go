@@ -58,6 +58,16 @@ func Plugin(name string) (modular.Plugin, error) {
 				return answer.Value, err
 			}))
 		}
+	case "note":
+		p.Setup = func(r *modular.Registrar) error {
+			return r.Tool(modular.NewTool("note", "Ask for a note.", func(ctx context.Context, in confirmInput, tc *modular.ToolContext) (string, error) {
+				a, err := tc.Ask(ctx, modular.Question{Kind: "text", Question: in.Question})
+				if a.Declined {
+					return "declined", err
+				}
+				return "value: " + a.Value, err
+			}))
+		}
 	case "gate":
 		p.Setup = func(r *modular.Registrar) error {
 			return r.OnToolBefore(func(_ context.Context, in modular.ToolBefore) (modular.Gate, error) {
