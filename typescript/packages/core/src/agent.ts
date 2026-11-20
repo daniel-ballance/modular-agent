@@ -8,7 +8,7 @@ import { contextCompaction } from "@modular-agent/context-compaction";
 import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
-import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
+import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, ACP_PROTOCOL, listenWebSocket, receiveMessages, type ListenOptions, type ServiceServer, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
 import { acpInterface } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
@@ -65,8 +65,15 @@ export interface ServeAcpOptions {
   projectMcp?(project: string): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
   showApproval?: boolean;
 }
+export interface AcpActorToken {
+  tokenFile: string;
+  actor: Actor;
+  tenants?: readonly (string | null)[];
+  projects?: readonly string[];
+}
+export interface ServeAcpServiceOptions extends ServeAcpOptions, ListenOptions { actors: readonly AcpActorToken[] }
 export interface SessionSummary { id: string; project: string; updated: number; model?: ModelRef; title?: string }
-export interface SessionInfo { id: string; project: string; created: number; updated: number; settings: Settings }
+export interface SessionInfo { id: string; project: string; created: number; updated: number; settings: Settings; tenant?: string }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
 
 let fileArchive: (store: FileHistory) => HistoryArchive;
@@ -129,6 +136,7 @@ export class Agent {
   #close?: Promise<void>;
   #hostEnabled = false;
   #acp = false;
+  #stopAcp?: () => Promise<void>;
   #project: string;
   #conformance = false;
   #approval = false;
@@ -442,7 +450,8 @@ export class Agent {
         const change = entry.data as { key: string; value: unknown };
         settings[change.key] = change.value;
       }
-      return { ...meta, updated: entries.at(-1)?.time ?? meta.created, settings };
+      const tenant = (entries.find(e => e.kind === "tenant" && !e.erased)?.data as { tenant?: string } | undefined)?.tenant;
+      return { ...meta, updated: entries.at(-1)?.time ?? meta.created, settings, ...(tenant === undefined ? {} : { tenant }) };
     });
   }
   /** Refresh served catalogs; /1 has a query, not a catalog-change notification. */
@@ -475,28 +484,52 @@ export class Agent {
       startsTurnsUnasked: base.startsTurnsUnasked === "never" ? "never" : "jobReports",
     };
   }
-  async serveAcp(options: ServeAcpOptions = {}): Promise<void> {
+  serveAcp(options?: ServeAcpOptions & { listen?: never }): Promise<void>;
+  serveAcp(options: ServeAcpServiceOptions): Promise<ServiceServer>;
+  async serveAcp(options: (ServeAcpOptions & { listen?: never }) | ServeAcpServiceOptions = {}): Promise<void | ServiceServer> {
     this.#check();
     if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
     this.#acp = true;
     const agents = new Map<string, Promise<Agent>>();
-    const sessions = new Map<string, Agent>();
     const attachments = new Map<PluginApi, ReturnType<typeof standardMcpTools>>();
     const installMcp = async (agent: Agent) => {
       const mcp = standardMcpTools({ servers: async project => await options.projectMcp?.(project) ?? {} });
       await agent.#plugin(mcp);
       attachments.set(agent.#api, mcp);
     };
-    try {
+    const disposeProjects = async () => {
+      await Promise.allSettled([...agents.values()].map(async pending => {
+        const agent = await pending;
+        if (agent !== this) await agent.close();
+      }));
+    };
+    const prepareConnection = (scope?: { actor: Actor; allowTenant(tenant: string | null): boolean; allowProject(project: string): boolean }) => {
+      const sessions = new Map<string, Agent>();
+      const attached = new Map<PluginApi, { detach(): void; agent: Agent }>();
+      let disconnected = false;
+      const attach = (agent: Agent) => {
+        if (disconnected) throw new AgentError("lost", "The ACP connection ended");
+        if (attached.has(agent.#api)) return;
+        const remove = agent.#h.connectInterface(binding.acp);
+        const off = binding.acp.attach(agent.#api, agent === this);
+        attached.set(agent.#api, { agent, detach() { off(); remove(); } });
+      };
       const binding = acpInterface({
-        actorId: options.actorId ?? process.env.MODULAR_AGENT_ACTOR,
+        ...(scope ? {
+          actor: { id: scope.actor.id, kind: scope.actor.kind, authority: scope.actor.rights },
+          allowTenant: scope.allowTenant,
+          allowSession: async (id, project) => scope.allowProject(project) && scope.allowTenant((await this.sessionInfo(id)).tenant ?? null),
+        } : { actorId: options.actorId ?? process.env.MODULAR_AGENT_ACTOR }),
         showApproval: options.showApproval ?? this.#approval,
         declaration: id => (id && sessions.get(id) || this).declaration(),
         projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,
+        associate: (id, api) => { sessions.set(id, attached.get(api)?.agent ?? this); },
         project: async (cwd, id) => {
           const project = await checked(() => realpath(cwd), "invalid_params");
           if (!(await stat(project)).isDirectory()) throw new AgentError("invalid_params", "Project must be a directory");
-          const saved = id && !sessions.has(id) ? await this.sessionInfo(id) : undefined;
+          if (scope && !scope.allowProject(project)) throw new AgentError("forbidden", "Project is outside the actor's scope");
+          const saved = id ? await this.sessionInfo(id) : undefined;
+          if (saved && scope && !scope.allowTenant(saved.tenant ?? null)) throw new AgentError("forbidden", "Tenant is outside the actor's scope");
           if (saved && saved.project !== project || !options.compose && project !== this.#project) {
             throw new AgentError("invalid_params", "Session belongs to a different project");
           }
@@ -513,10 +546,6 @@ export class Agent {
                   if (agent.#project !== project || agent.#open.size || agent.#acp) throw new AgentError("invalid_composition", "Factory must return a fresh agent for this project");
                   agent.#acp = true;
                   await installMcp(agent);
-                  await agent.#load({ name: binding.name, setup(api) {
-                    binding.acp.attach(api, false);
-                    api.provide("interface", binding.acp);
-                  } });
                   return agent;
                 } catch (error) { await agent.close(); throw error; }
               })();
@@ -526,6 +555,7 @@ export class Agent {
             selected = await pending;
           }
           selected ??= this;
+          attach(selected);
           if (id) sessions.set(id, selected);
           return { api: selected.#api, cwd: project };
         },
@@ -536,20 +566,53 @@ export class Agent {
           await attachments.get(api)?.attach(id, project, servers);
         },
       });
+      attach(this);
+      return { binding, detach: () => {
+        disconnected = true;
+        for (const part of attached.values()) part.detach();
+        attached.clear();
+        sessions.clear();
+      } };
+    };
+    let serving = false;
+    try {
       await installMcp(this);
-      await this.#load(binding);
-      await binding.acp.serveStdio();
+      if (options.listen === undefined) {
+        const { binding, detach } = prepareConnection();
+        try { await binding.acp.serveStdio(); } finally { detach(); }
+        return;
+      }
+      const actors = await Promise.all(options.actors.map(async ({ tokenFile, actor, tenants, projects }) => {
+        if (!actor.id || !["host", "user", "agent", "program"].includes(actor.kind) || !actor.rights.every(r => ALL_AUTHORITY.includes(r))) {
+          throw new AgentError("invalid_params", "Invalid ACP actor");
+        }
+        const allowedTenants = tenants && new Set(tenants);
+        const allowedProjects = projects && new Set(await Promise.all(projects.map(project => realpath(project))));
+        return { tokenFile, value: { actor: structuredClone(actor),
+          allowTenant: (tenant: string | null) => !allowedTenants || allowedTenants.has(tenant),
+          allowProject: (project: string) => !allowedProjects || allowedProjects.has(project) } };
+      }));
+      const server = await listenWebSocket(options, ACP_PROTOCOL, actors, async (ws, scope) => {
+        const { binding, detach } = prepareConnection(scope);
+        try {
+          await binding.acp.serveMessages({
+            receive: receive => receiveMessages(ws, receive),
+            closed: close => { ws.once("close", close); ws.once("error", close); },
+            send: text => new Promise((resolve, reject) => ws.send(text, error => error ? reject(error) : resolve())),
+          });
+        } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
+      });
+      this.#stopAcp = async () => { await server.close(); await disposeProjects(); };
+      serving = true;
+      return { url: server.url, close: () => this.close() };
     } catch (error) { throw new AgentError("invalid_composition", messageOf(error), undefined, error); }
     finally {
-      await Promise.allSettled([...agents.values()].map(async pending => {
-        const agent = await pending;
-        if (agent !== this) await agent.close();
-      }));
-      await this.close();
+      if (!serving) { await disposeProjects(); await this.close(); }
     }
   }
   close(): Promise<void> {
     return this.#close ??= (async () => {
+      await this.#stopAcp?.();
       await Promise.allSettled(this.#opening.values());
       for (const s of [...this.#open.values()]) await s.close().catch(() => {});
       for (const part of this.#startedInterfaces.reverse()) await Promise.resolve().then(() => part.stop?.()).catch(() => {});

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { definePlugin, serve, tool } from "@modular-agent/core";
 import { testAgent } from "@modular-agent/core/testing";
+import { ACP_PROTOCOL, connectWebSocket } from "@modular-agent/plugin-wire";
 
 async function token(t: TestContext) {
   const dir = await mkdtemp(join(tmpdir(), "sdk-websocket-"));
@@ -48,6 +49,47 @@ test("SDK loads in-process, stdio, explicit service and environment services in 
     else process.env.MODULAR_AGENT_PLUGINS = prior;
     await Promise.all([first.close(), second.close()]);
   }
+});
+
+test("ACP service selects each connection's actor and enforces token scope", async t => {
+  const { dir, tokenFile } = await token(t);
+  const other = await token(t);
+  const agent = await testAgent({ project: dir, script: [{ text: "Hi" }], tenants: { team: { rights: ["watch", "input"] } } });
+  const service = await agent.serveAcp({ listen: "127.0.0.1:0", actors: [
+    { tokenFile, actor: { id: "team-viewer", kind: "program", rights: ["watch"] }, tenants: ["team"], projects: [dir] },
+    { tokenFile: other.tokenFile, actor: { id: "visitor", kind: "user", rights: ["watch", "input"] }, tenants: [null] },
+  ] });
+  try {
+    const a = await connectWebSocket(service.url, tokenFile, ACP_PROTOCOL, 5000);
+    const b = await connectWebSocket(service.url, other.tokenFile, ACP_PROTOCOL, 5000);
+    let id = 1;
+    const request = (socket: typeof a, method: string, params: unknown = {}) => new Promise<any>((resolve, reject) => {
+      const requestId = id++;
+      const listener = (bytes: Buffer) => {
+        const response = JSON.parse(bytes.toString());
+        if (response.id !== requestId) return;
+        socket.off("message", listener);
+        if (response.error) reject(response.error.data ?? response.error);
+        else resolve(response.result);
+      };
+      socket.on("message", listener);
+      socket.send(JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params }));
+    });
+    const init = { protocolVersion: 1, _meta: { "modular-agent": { actor: { id: "not-trusted" } } } };
+    assert.deepEqual((await request(a, "initialize", init))._meta["modular-agent"].actor, { id: "team-viewer", kind: "program", rights: ["watch"] });
+    assert.equal((await request(b, "initialize", init))._meta["modular-agent"].actor.id, "visitor");
+    assert.deepEqual(await request(a, "$/ping"), {});
+    await assert.rejects(request(a, "session/new", { cwd: dir, mcpServers: [] }), { code: "forbidden" });
+    const team = { mcpServers: [], _meta: { "modular-agent": { tenant: "team" } } };
+    await assert.rejects(request(a, "session/new", { ...team, cwd: other.dir }), { code: "forbidden" });
+    const { sessionId } = await request(a, "session/new", { ...team, cwd: dir });
+    await assert.rejects(request(a, "session/prompt", { sessionId, prompt: [{ type: "text", text: "No" }] }), { code: "forbidden" });
+    await assert.rejects(request(b, "session/load", { sessionId, cwd: dir, mcpServers: [] }), { code: "forbidden" });
+    assert.deepEqual((await request(b, "session/list")).sessions, []);
+    const own = await request(b, "session/new", { cwd: dir, mcpServers: [] });
+    assert.notEqual(own.sessionId, sessionId);
+    assert.equal((await request(b, "session/prompt", { sessionId: own.sessionId, prompt: [{ type: "text", text: "Yes" }] })).stopReason, "end_turn");
+  } finally { await service.close(); }
 });
 
 test("loss of a plugin service settles its dispatched tool once as outcomeUnknown", async t => {

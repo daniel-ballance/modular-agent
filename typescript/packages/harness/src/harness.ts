@@ -141,7 +141,7 @@ export interface PluginApi {
 	/** Sessions in this project, another project, or every project (null). */
 	listSessions(project?: string | null): Promise<StoredSession[]>;
 	forkSession(sessionId: string, entryId: string): Promise<string>;
-	closeSession(sessionId: string, actorId?: string, delegatedBy?: string): Promise<void>;
+	closeSession(sessionId: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void>;
 	session(sessionId: string): { id: string; project: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
 	// input and turns
 	input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }>;
@@ -383,7 +383,7 @@ export class Harness {
 			presenceChanged: (id) => { const s = this.sessions.get(id); if (s) this.closeUnanswerable(s); },
 			listSessions: async (project) => (await this.use<HistoryStore>("history-store")?.list(project === null ? undefined : { project: project ?? this.project })) ?? [],
 			forkSession: (sessionId, entryId) => this.forkSession(sessionId, entryId),
-			closeSession: (id, actorId, delegatedBy) => this.closeSession(id, actorId, delegatedBy),
+			closeSession: (id, actorId, delegatedBy, authority) => this.closeSession(id, actorId, delegatedBy, authority),
 			session: (id) => {
 				const s = this.session(id);
 				return { id: s.id, project: s.meta.project, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
@@ -837,13 +837,13 @@ export class Harness {
 		this.sessions.delete(id);
 	}
 
-	async closeSession(id: string, actorId?: string, delegatedBy?: string): Promise<void> {
+	async closeSession(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void> {
 		const s = this.sessions.get(id);
 		if (!s) return;
 		await this.admit(s, async () => {
 			if (s.closing || s.reopening) throw Object.assign(new Error("Session is busy"), { code: "busy" });
 			const needsCancel = !!s.running || this.runningJobs(s).length > 0;
-			if ([actorId, delegatedBy].some(id => id !== undefined &&
+			if ((needsCancel && authority && !authority.includes("cancel")) || [actorId, delegatedBy].some(id => id !== undefined &&
 				(!s.actors.has(id) || (needsCancel && !this.rightsOf(s, id).includes("cancel"))))) {
 				throw Object.assign(new Error("Actor may not close this session"), { code: "forbidden" });
 			}
@@ -2114,8 +2114,16 @@ export class Harness {
 
 	// ---------- asking actors ----------
 
+	private connections = new Set<InterfaceCapability>();
+
+	/** Attach a connection without adding a persistent plugin registration. */
+	connectInterface(part: InterfaceCapability): () => void {
+		this.connections.add(part);
+		return () => { this.connections.delete(part); };
+	}
+
 	private interfaces(): InterfaceCapability[] {
-		return this.useAll<InterfaceCapability>("interface");
+		return [...this.useAll<InterfaceCapability>("interface"), ...this.connections];
 	}
 
 	private presentActors(s: Session, request?: InputRequest): string[] {
