@@ -98,6 +98,9 @@ export function fromAcp(blocks: acp.ContentBlock[]): ContentPart[] {
 /** The "mcp-servers" capability, as the tools-mcp plugin provides it. */
 export type AcpMcpServer = { command: string; args?: string[]; env?: Record<string, string> } | { url: string; headers?: Record<string, string> };
 interface McpServers { attach(sessionId: string, servers: Record<string, AcpMcpServer>, cwd?: string): Promise<string[]> }
+export function localAcpActor(id = "acp-user"): Actor & { kind: "host" } {
+	return { id, kind: "host", authority: [...ALL_AUTHORITY] };
+}
 export interface AcpOptions {
 	actorId?: string;
 	actor?: Actor;
@@ -158,7 +161,7 @@ export class AcpInterface implements InterfaceCapability {
 	presentActors(sessionId: string): string[] { return [...(this.sessions.get(sessionId)?.present ?? [])]; }
 
 	private actor(): Actor {
-		return this.options.actor ?? { id: this.actorId, kind: "host", authority: ALL_AUTHORITY };
+		return this.options.actor ?? localAcpActor(this.actorId);
 	}
 
 	// ---------- requests from the client ----------

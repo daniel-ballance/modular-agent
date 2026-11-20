@@ -1,4 +1,4 @@
-export { Agent, createAgent, fileHistory, memoryHistory, httpHistory, serveHistory, FileHistory, HttpHistory } from "./agent.js";
+export { Agent, createAgent, defaultAcpActor, fileHistory, memoryHistory, httpHistory, serveHistory, FileHistory, HttpHistory } from "./agent.js";
 export { MemoryHistory } from "./history.js";
 export type { AgentOptions, Approval, Durability, ProcessPlugin, ServicePlugin, SessionInfo, SessionSummary, SessionOptions, ServeAcpOptions, ServeAcpServiceOptions, AcpActorToken } from "./agent.js";
 export { durableRuntime, transientRuntime, localEnvironment, environmentCredentials, fileCredentials } from "./parts.js";

@@ -9,7 +9,7 @@ import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, ACP_PROTOCOL, listenWebSocket, receiveMessages, type ListenOptions, type ServiceServer, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
-import { acpInterface } from "@modular-agent/interface-acp";
+import { acpInterface, localAcpActor } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
@@ -64,6 +64,10 @@ export interface ServeAcpOptions {
   projectSettings?(project: string): Settings | Promise<Settings>;
   projectMcp?(project: string): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
   showApproval?: boolean;
+}
+export function defaultAcpActor(): Actor {
+  const { id, kind, authority } = localAcpActor();
+  return { id, kind, rights: authority };
 }
 export interface AcpActorToken {
   tokenFile: string;
