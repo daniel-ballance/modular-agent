@@ -102,6 +102,7 @@ pub enum QuestionKind {
     Approval,
     Choice,
     Text,
+    Link,
     Secret,
 }
 
@@ -113,6 +114,9 @@ pub struct Question {
     pub kind: QuestionKind,
     pub question: String,
     pub options: Vec<String>,
+    pub details: Option<Value>,
+    pub deadline: Option<u64>,
+    pub credential: Option<String>,
     /// For an approval: the exact call, as shared data's ToolCall.
     pub call: Option<Value>,
 }
@@ -125,11 +129,15 @@ impl Question {
             kind: match q.kind {
                 base::RequestKind::Approval => QuestionKind::Approval,
                 base::RequestKind::Choice => QuestionKind::Choice,
+                base::RequestKind::Text if q.extra["kind"] == "link" => QuestionKind::Link,
                 base::RequestKind::Text => QuestionKind::Text,
                 base::RequestKind::Secret => QuestionKind::Secret,
             },
             question: q.text.clone(),
             options: q.options.clone(),
+            details: q.extra.get("details").cloned(),
+            deadline: q.extra["deadline"].as_u64(),
+            credential: q.credential.clone(),
             call: q.extra.get("approvalCall").cloned(),
         }
     }
@@ -267,15 +275,22 @@ pub(crate) async fn answer(
     if !q.answerable {
         return Err(Error::new(Code::Conflict, "question is closed"));
     }
-    let (value, declined) = match reply {
-        Answer::Allow if q.kind == base::RequestKind::Approval => (json!("allow"), false),
+    let requests = base::requests(api.as_ref())?;
+    if !requests.eligible(api.as_ref(), q, session, actor) {
+        return Err(Error::new(Code::Forbidden, "actor may not answer"));
+    }
+    let value = match reply {
+        Answer::Allow if q.kind == base::RequestKind::Approval => json!("allow"),
         Answer::Value(v)
             if q.kind == base::RequestKind::Text
                 || q.kind == base::RequestKind::Choice && q.options.contains(&v) =>
         {
-            (json!(v), false)
+            json!(v)
         }
-        Answer::Declined { .. } => (Value::Null, true),
+        Answer::Secret(v) if q.kind == base::RequestKind::Secret => json!(v),
+        Answer::Declined { reason } => {
+            return Ok(requests.decline(api, session, actor, &q.id, reason).await?);
+        }
         _ => {
             return Err(Error::new(
                 Code::InvalidParams,
@@ -283,8 +298,8 @@ pub(crate) async fn answer(
             ));
         }
     };
-    base::requests(api.as_ref())?
-        .answer(api, session, actor, &q.id, value, declined)
+    requests
+        .answer(api, session, actor, &q.id, value, false)
         .await?;
     Ok(())
 }

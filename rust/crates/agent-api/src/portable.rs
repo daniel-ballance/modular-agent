@@ -20,6 +20,7 @@ fn kind(native: &str) -> String {
         "turn.start" => "turnStart",
         "turn.end" => "turnEnd",
         "request.open" => "inputRequest",
+        "request.secretAccepted" => "secretAnswerAccepted",
         "request.answer" | "request.closed" | "request.invalidated" => "inputAnswer",
         "actor.grant" | "actor.identity" => "actorJoined",
         "actor.left" => "actorLeft",
@@ -500,6 +501,10 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             v.as_object_mut().unwrap().remove("actorId");
             json!({"requestId":c["request"],"declined":true,"reason":c["reason"].as_str().unwrap_or("noLongerAnswerable"),"rust.closure":e.kind})
         }
+        "request.secretAccepted" => {
+            v["requestId"] = c["requestId"].clone();
+            json!({"requestId":c["requestId"],"actorId":c["actorId"],"answerSession":c["answerSession"]})
+        }
         "request.answer" => {
             let a: Answer = serde_json::from_value(c.clone())?;
             v["requestId"] = json!(a.request);
@@ -507,6 +512,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
                 json!({"requestId":a.request,"actorId":a.actor,"rust.answerSession":a.session});
             if a.declined {
                 answer["declined"] = json!(true);
+                if let Some(reason) = a.reason {
+                    answer["reason"] = json!(reason);
+                }
             } else if let Some(name) = a.value.get("credential") {
                 answer["stored"] = name.clone();
             } else if !a.value.is_null() {
@@ -879,6 +887,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     json!({"request":d["requestId"],"reason":d["reason"]}),
                 )
             }
+            "secretAnswerAccepted" => ("request.secretAccepted", d.clone()),
             "inputAnswer" => (
                 "request.answer",
                 json!(Answer {
@@ -888,7 +897,8 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     value: optional(d, "stored")
                         .map(|name| json!({"credential":name}))
                         .unwrap_or_else(|| d["value"].clone()),
-                    declined: d["declined"] == true
+                    declined: d["declined"] == true,
+                    reason: d["reason"].as_str().map(str::to_owned)
                 }),
             ),
             "position" | "erasure" | "tenant" | "limit" => (k, d.clone()),

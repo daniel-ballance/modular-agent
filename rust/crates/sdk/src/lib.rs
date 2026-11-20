@@ -36,7 +36,10 @@ pub use agent::{Agent, AgentBuilder, Approval, Durability, ProcessPlugin, Sessio
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
 pub use configuration::FilesConfiguration;
-pub use credentials::CredentialStore;
+pub use credentials::{
+    Activation, CredentialStore, SecretJournal, SecretRequest, StagingReceipt,
+    environment_credentials, file_credentials,
+};
 pub use error::{Code, Error, Result};
 pub use events::{Event, Question, QuestionKind};
 pub use history::{

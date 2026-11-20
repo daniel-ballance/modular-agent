@@ -418,6 +418,7 @@ pub mod fixtures {
                     match cx.ask(Ask::choice(input.question, &["yes", "no"])).await? {
                         Answer::Value(v) => v,
                         Answer::Allow => "allow".into(),
+                        Answer::Secret(_) => unreachable!("a choice has no secret value"),
                         Answer::Declined { .. } => "declined".into(),
                     },
                 )

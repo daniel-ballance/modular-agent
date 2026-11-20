@@ -174,6 +174,8 @@ pub struct Answer {
     pub session: String,
     pub value: Value,
     pub declined: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub enum RequestReply {
@@ -226,6 +228,20 @@ pub trait InputRequests: Send + Sync {
         value: Value,
         declined: bool,
     ) -> Result<()>;
+    async fn decline(
+        &self,
+        api: Api,
+        session: &str,
+        actor: &str,
+        request: &str,
+        _reason: Option<String>,
+    ) -> Result<()> {
+        self.answer(api, session, actor, request, Value::Null, true)
+            .await
+    }
+    fn recover(&self, _api: &dyn AgentApi, _session: &str) -> Result<()> {
+        Ok(())
+    }
     fn visible(&self, api: &dyn AgentApi, session: &str, actor: &str) -> Result<Vec<Question>>;
     fn eligible(&self, api: &dyn AgentApi, question: &Question, session: &str, actor: &str)
     -> bool;

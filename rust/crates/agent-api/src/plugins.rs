@@ -293,6 +293,10 @@ impl Registry {
             .value
             .clone())
     }
+    pub fn has_credential_claim(&self, name: &str) -> bool {
+        self.credentials.contains_key(name)
+    }
+
     pub fn capability_names(&self, prefix: &str) -> Vec<String> {
         self.capabilities
             .keys()
@@ -354,6 +358,10 @@ impl Registry {
                         stopped: true,
                         ..answer(value)
                     });
+                }
+                Err(e) if rule == Rule::Observe && point.name != "session.prepare" => {
+                    eprintln!("{} observer {} failed: {e:#}", point.name, h.owner);
+                    continue;
                 }
                 Err(e) => return Err(e),
             };
