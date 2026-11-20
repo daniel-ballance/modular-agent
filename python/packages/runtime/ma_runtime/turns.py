@@ -556,8 +556,9 @@ class Turns:
                 request["close_attempt"] = {"id": outstanding["id"], "step": outstanding["step"]}
             wire_provider = access["provider"].get("wire_provider")
             if not wire_provider:
+                request = await self.api.session("prepare_model_request", **request)
                 model = self._model_record(access)
-                final = request["_shared_request"] if exact_replay else request_out(request)
+                final = request.get("_shared_request") or request_out(request)
                 await self._record(
                     sid,
                     turn,
@@ -584,51 +585,57 @@ class Turns:
 
             try:
                 response = await self.api.call(access["target"], "generate", request, stream)
-                break
             except AgentError as exc:
                 if wire_provider and not any(e["id"] == attempt for e in await self._entries(sid)):
                     raise
-                failure = await self._record(
-                    sid,
-                    turn,
-                    "response",
-                    step=step,
-                    copies=[attempt],
-                    data={"stop": "failed", "error": {"kind": "other", "message": str(exc)}},
-                )
-                await self._record(
-                    sid, turn, "model_error", step=step, data={"code": exc.code, "error": str(exc)}
-                )
-                action = await self.api.hook(
-                    "model.failed",
-                    {
-                        "session": sid,
-                        "turn": turn,
-                        "step": step,
-                        "access": access,
-                        "request": request,
-                        "code": exc.code,
-                        "error": str(exc),
-                    },
-                )
-                decision = await self._step_after(sid, turn, failure)
-                if decision.get("refused"):
-                    raise AgentError(decision.get("reason", "Step refused"), "refused")
-                if (
-                    not action
-                    or not action.get("retry")
-                    or retries >= settings.get("max_retries", 1)
-                ):
-                    raise
-                changed_request = action.get("request")
-                exact_replay = False
-                retries += 1
-                next_step = await self._retry_step(sid, turn, step, settings)
+                error = {"kind": "other", "message": str(exc)}
+                code = exc.code
+                response = {"stop": "failed", "error": error}
+            else:
+                if response.get("stop") != "failed":
+                    break
+                error = response.get("error") or {"kind": "other", "message": "Model failed"}
+                code = {"contextTooLarge": "context_too_large"}.get(error["kind"], error["kind"])
             finally:
                 await self.api.event(
                     "model_output", session=sid, turn=turn, step=step, text="", final=True
                 )
-            step = next_step
+            failure = await self._record(
+                sid,
+                turn,
+                "response",
+                step=step,
+                copies=[attempt],
+                content=response.get("content", []),
+                data={k: v for k, v in response.items() if k != "content"},
+            )
+            await self._record(
+                sid, turn, "model_error", step=step, data={"code": code, "error": error["message"]}
+            )
+            action = await self.api.hook(
+                "model.failed",
+                {
+                    "session": sid,
+                    "turn": turn,
+                    "step": step,
+                    "access": access,
+                    "request": request,
+                    "code": code,
+                    "error": error["message"],
+                    "model_error": error,
+                },
+            )
+            decision = await self._step_after(sid, turn, failure)
+            if decision.get("refused"):
+                raise AgentError(decision.get("reason", "Step refused"), "refused")
+            if not action or not action.get("retry") or retries >= settings.get("max_retries", 1):
+                raise AgentError(error["message"], code)
+            changed_request = action.get("request")
+            if changed_request:
+                changed_request.pop("_provider_scope", None)
+            exact_replay = False
+            retries += 1
+            step = await self._retry_step(sid, turn, step, settings)
         calls = response.get("calls", [])
         ids = [c["id"] for c in calls]
         existing = {e["call"] for e in await self._entries(sid) if e["kind"] == "tool_call"}

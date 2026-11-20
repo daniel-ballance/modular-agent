@@ -32,7 +32,7 @@ from ma_local.containment import delegated_root
 from ma_fake.conformance import Echo, Nest
 from ma_commands import Commands
 from ma_mcp import MCP
-from ma_plugin.host import External, load_plugins
+from ma_plugin.host import External, configure_binding_hooks, load_plugins, wrap_native_providers
 from ma_questions import Questions
 from ma_runtime import Runtime
 from ma_selection import Selection
@@ -806,6 +806,7 @@ def create_agent(
                 "job_reports_start_turns": job_reports_start_turns,
             }
             await h.load(jobs)
+            configure_binding_hooks(h)
             h.on("embedding", "result.ready", _structured_result, "last")
             if conformance:
                 await h.load(Echo())
@@ -911,6 +912,7 @@ def create_agent(
                     return kind(harness, spec, project, home, index)
 
                 await load_plugins(h, specs, folder, root, external_factory=factory)
+            wrap_native_providers(h)
             runtime_owner = h.capabilities["runtime"][0]
             continues = bool(h.plugins[runtime_owner].declarations.get("durable"))
             # Offline ACP fixtures exercise both Runtime kinds with persistent

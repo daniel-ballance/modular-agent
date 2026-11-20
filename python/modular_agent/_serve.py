@@ -200,6 +200,16 @@ async def _serve(
                 }
             return cast(Json, reply)
 
+        async def history(cursor: str | None) -> JsonObject:
+            try:
+                page = await server.peer.request(
+                    "host/history",
+                    {"parentRequestId": key, **({"after": cursor} if cursor else {})},
+                )
+            except WireError as exc:
+                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+            return cast(JsonObject, page)
+
         context = ToolContext(
             p["sessionId"],
             call.get("actorId", "user"),
@@ -208,6 +218,7 @@ async def _serve(
             progress,
             nested,
             environment,
+            history,
         )
         try:
             return await t._run(call["input"], context)

@@ -807,6 +807,11 @@ class Harness(Authority):
         return parts
 
     async def handle(self, op, d, emit):
+        if op == "prepare_model_request":
+            _, provider = self.capabilities[d["access"]["target"]]
+            if prepare := getattr(type(provider), "prepare_request", None):
+                return await prepare(provider, d)
+            return d
         if op == "credential_names":
             selection = self.capabilities.get("selection")
             return sorted(selection[1].providers) if selection else []

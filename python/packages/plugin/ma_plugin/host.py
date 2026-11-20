@@ -112,7 +112,7 @@ class NativeProvider:
     def __getattr__(self, name):
         return getattr(self.service, name)
 
-    async def generate(self, d, emit):
+    async def prepare_request(self, d):
         model = {"provider": self.target, "id": d["access"]["id"].removeprefix(self.target + "/")}
         original = d["_shared_request"] if d.get("exact_replay") else request_out(d)
         payload = {
@@ -127,12 +127,23 @@ class NativeProvider:
         else:
             changed = await self.h.fire("@harness", "provider.request", payload)
             request = restore_provider_messages(changed["request"], original, self.target)
-        response = await self.service.generate(request_in(request, d), emit)
+        offered = {t["name"]: t for t in original["tools"]}
+        if any(offered.get(t["name"]) != t for t in request["tools"]):
+            raise AgentError("Provider request expanded the tool offer", "invalid_request")
+        return {
+            **request_in(request, d),
+            "_provider_scope": {k: payload[k] for k in ("sessionId", "provider", "model")},
+        }
+
+    async def generate(self, d, emit):
+        if "_provider_scope" not in d:
+            d = await self.prepare_request(d)
+        response = await self.service.generate(d, emit)
         await self.h.fire(
             "@harness",
             "provider.response",
             {
-                **{k: changed[k] for k in ("sessionId", "provider", "model")},
+                **d["_provider_scope"],
                 "message": provider_projection(response_out(response)),
             },
         )
@@ -1094,12 +1105,9 @@ class ToolSource:
         return result_in(result, d["call"]["id"])
 
 
-async def load_plugins(harness, specs, project, home, *, external_factory=External):
-    """Initialize in order, preflight collisions, then retract local registrations."""
-    harness.external_tool_names = {
-        t["name"]: ("local", t.get("target", "files"))
-        for t in await harness.api().call("tools", "definitions")
-    }
+def configure_binding_hooks(harness):
+    if "binding.turn.result" in harness.hooks:
+        return
     for hook, rule in (("provider.request", "transform"), ("provider.response", "observe")):
         if hook not in harness.hooks:
             harness.define_hook("@harness", hook, rule)
@@ -1114,9 +1122,22 @@ async def load_plugins(harness, specs, project, home, *, external_factory=Extern
         return None
 
     harness.on("@harness", "result.ready", result_gate, "normal")
+
+
+def wrap_native_providers(harness):
     for target, (owner, service) in list(harness.capabilities.items()):
-        if harness.plugins[owner].role == "provider":
+        if harness.plugins[owner].role == "provider" and not isinstance(service, NativeProvider):
             harness.capabilities[target] = (owner, NativeProvider(harness, target, service))
+
+
+async def load_plugins(harness, specs, project, home, *, external_factory=External):
+    """Initialize in order, preflight collisions, then retract local registrations."""
+    configure_binding_hooks(harness)
+    harness.external_tool_names = {
+        t["name"]: ("local", t.get("target", "files"))
+        for t in await harness.api().call("tools", "definitions")
+    }
+    wrap_native_providers(harness)
     for index, spec in enumerate(specs):
         if (
             not isinstance(spec, dict)
