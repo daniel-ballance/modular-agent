@@ -36,6 +36,12 @@ class Local(Plugin):
     def keeps_points(self, project):
         return not isinstance(self.points, GitPoints) or self.points.keeps_points(project)
 
+    async def _points(self, operation, *args):
+        # Git points run git; keep it off the event loop. Copy points are unchanged.
+        if isinstance(self.points, GitPoints):
+            return await asyncio.to_thread(operation, *args)
+        return operation(*args)
+
     async def start(self, api):
         await super().start(api)
         await recover(self.root)
@@ -45,17 +51,21 @@ class Local(Plugin):
 
     async def save(self, d, emit):
         s = await self.api.session("get", session=d["session"])
-        return self.points.save(d["session"], d.get("cwd") or s["project"])
+        return await self._points(self.points.save, d["session"], d.get("cwd") or s["project"])
 
     async def check_point(self, d, emit):
         s = await self.api.session("get", session=d["session"])
         return {
-            "exists": self.points.exists(d["session"], d.get("cwd") or s["project"], d["point"])
+            "exists": await self._points(
+                self.points.exists, d["session"], d.get("cwd") or s["project"], d["point"]
+            )
         }
 
     async def restore(self, d, emit):
         s = await self.api.session("get", session=d["session"])
-        return self.points.restore(d["session"], d.get("cwd") or s["project"], d["point"])
+        return await self._points(
+            self.points.restore, d["session"], d.get("cwd") or s["project"], d["point"]
+        )
 
     async def _path(self, d):
         s = await self.api.session("get", session=d["session"])
