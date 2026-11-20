@@ -2,6 +2,7 @@ export { Agent, createAgent, fileHistory, memoryHistory, httpHistory, serveHisto
 export { MemoryHistory } from "./history.js";
 export type { AgentOptions, Approval, Durability, ProcessPlugin, SessionInfo, SessionSummary, SessionOptions, ServeAcpOptions } from "./agent.js";
 export { durableRuntime, transientRuntime, localEnvironment, environmentCredentials, fileCredentials } from "./parts.js";
+export { advanceSecretSlot, secretStaging, withCredentialLock } from "@modular-agent/harness";
 export type * from "./parts.js";
 export { Session } from "./session.js";
 export type { Event, PromptOptions, PromptResult, ToolResult } from "./session.js";
