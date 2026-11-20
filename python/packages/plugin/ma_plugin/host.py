@@ -44,6 +44,10 @@ class Provider:
     def model(self, wire):
         model = model_in(wire, self.registration.get("supports", {}))
         model["provider"]["wire_provider"] = True
+        model["provider"]["requests_safe_to_repeat"] = bool(
+            self.registration.get("supports", {}).get("safeToRepeat")
+        )
+        model["provider"]["explicit_repeat_promise"] = True
         return model
 
     async def generate(self, d, emit):
@@ -709,7 +713,7 @@ class External(Plugin):
                 raise
             return {
                 "credential": result
-                if isinstance(result, dict)
+                if isinstance(result, dict) or result is None
                 else {"type": "apiKey", "key": result}
             }
         if method == "host/problem":
@@ -775,7 +779,7 @@ class External(Plugin):
                         "turn_limit",
                         details={"limit": "tenantTokens"},
                     )
-                repeatable = not d["access"]["provider"].get("stateful")
+                repeatable = bool(d["access"]["provider"].get("requests_safe_to_repeat"))
                 fields = model_request_fields(
                     scope["model"], final, repeatable, auxiliary=bool(d.get("auxiliary_step"))
                 )
@@ -961,8 +965,6 @@ class External(Plugin):
                 args["timeout"] = draft["timeLimitMs"] / 1000
             if draft.get("credential"):
                 args["name"] = draft["credential"]
-            if args["kind"] == "link":
-                args["kind"] = "text"
             r = await self.api.call("questions", "ask", args)
             if r.get("open") and draft["kind"] != "approval":
                 parent["pending_questions"][ask_order] = r["request"]
@@ -973,7 +975,7 @@ class External(Plugin):
                     {"pending": True}
                     if r.get("open")
                     else {"declined": True, **({"reason": r["reason"]} if r.get("reason") else {})}
-                    if r.get("value") == "declined"
+                    if r.get("declined", r.get("value") == "declined")
                     else {"stored": r["value"]["credential"]}
                     if isinstance(r.get("value"), dict) and "credential" in r["value"]
                     else {"value": r.get("value")}

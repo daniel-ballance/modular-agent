@@ -203,12 +203,16 @@ class Authority:
             raise AgentError("Use the checked Runtime or session API", "forbidden")
         if operation != "leave":
             self.require(s, actor, permission)
+            if represented_by := data.get("acting_for"):
+                self.require(s, represented_by, permission)
 
     async def leave(self, d):
         s = self._session(d)
         actor, subject = d.get("actor", s["actor"]), d["subject"]
         if actor != subject:
             self.require(s, actor, "grant")
+            if represented_by := d.get("acting_for"):
+                self.require(s, represented_by, "grant")
         if subject not in s["actors"]:
             raise AgentError("Unknown actor", "forbidden")
         return await self.handle(
@@ -222,7 +226,8 @@ class Authority:
         actor = d.get("actor", s["actor"])
         self.require(s, actor, "grant")
         authority = set(d["authority"])
-        if not authority <= self.permissions(s, actor):
+        ceiling = self.permissions(s, d["acting_for"]) if d.get("acting_for") else None
+        if not (authority & PERMISSIONS) <= self.permissions(s, actor, ceiling):
             raise AgentError("Cannot grant more authority than the grantor has", "forbidden")
         prior = s["actors"].get(d["subject"])
         kind = d.get("kind", "user")

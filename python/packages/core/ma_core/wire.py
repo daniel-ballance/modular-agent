@@ -299,6 +299,7 @@ KINDS = {
     "turn_start": "turnStart",
     "turn_end": "turnEnd",
     "question_open": "inputRequest",
+    "secret_answer_accepted": "secretAnswerAccepted",
     "question_answer": "inputAnswer",
     "question_closed": "inputAnswer",
     "authority": "actorJoined",
@@ -508,21 +509,28 @@ def entry_out(e):
                 "whenTimeLimit": "leaveOpen" if d.get("park") else "decline",
             },
         }
+    elif kind == "secretAnswerAccepted":
+        r["requestId"] = d["request"]
+        r["actorId"] = d["actor"]
+        r.pop("data", None)
     elif kind == "inputAnswer":
         value = d.get("value")
         r["requestId"] = d["request"]
         r.pop("actorId", None)
         r["data"] = {"requestId": d["request"]}
+        declined = d.get("declined", value == "declined")
         system_closed = e["kind"] == "question_closed" or (
-            value == "declined"
+            declined
             and d.get("reason")
             in {"timeLimit", "cancelled", "noLongerAnswerable", "refused", "superseded"}
         )
         if not system_closed:
             r["data"]["actorId"] = d.get("actor", e.get("actor", "user"))
+            if d.get("actingFor"):
+                r["data"]["actingFor"] = d["actingFor"]
         if isinstance(value, dict) and "credential" in value:
             r["data"]["stored"] = value["credential"]
-        elif value == "declined" or e["kind"] == "question_closed":
+        elif declined or e["kind"] == "question_closed":
             r["data"]["declined"] = True
             if d.get("reason") or e["kind"] == "question_closed":
                 r["data"]["reason"] = d.get("reason", "noLongerAnswerable")
@@ -719,6 +727,8 @@ def entry_in(e, sid, default_actor="user"):
             "timeout": q["timeLimitMs"] / 1000 if q.get("timeLimitMs") is not None else None,
             "park": q.get("whenTimeLimit") == "leaveOpen",
         }
+    elif kind == "secretAnswerAccepted":
+        result["data"] = {"request": e["requestId"], "actor": e["actorId"]}
     elif kind == "inputAnswer":
         value = (
             {"credential": d["stored"]}
@@ -736,5 +746,6 @@ def entry_in(e, sid, default_actor="user"):
             "request": d["requestId"],
             "actor": d.get("actorId", result["actor"]),
             "value": value,
+            "declined": d.get("declined", False),
         }
     return result

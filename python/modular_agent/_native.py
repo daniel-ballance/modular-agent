@@ -137,7 +137,7 @@ async def _reply(handler: QuestionHandler, q: Question) -> Answer:
 
 def _read_answer(result: dict[str, Any], kind: str) -> Answer:
     value = result.get("value")
-    if result.get("declined") or value == "declined" or value is None:
+    if result.get("declined", False) or value is None:
         return Answer("decline", reason=result.get("reason"))
     if kind == "secret" and isinstance(value, dict) and isinstance(value.get("credential"), str):
         return Answer("value", value["credential"])
@@ -246,7 +246,7 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                     "key": f"call:{call['id']}:{index}",
                     "timeout": wait,
                     "park": leave_open,
-                    "kind": "text" if question["kind"] == "link" else question["kind"],
+                    "kind": question["kind"],
                     "name": question.get("credential"),
                 }
                 if question["kind"] == "approval":

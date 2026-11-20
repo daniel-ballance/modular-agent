@@ -126,6 +126,8 @@ async def restart(agent: Agent) -> Agent:
 
 
 class _Options(TypedDict, total=False):
+    several_actors: bool
+    session_limits: bool
     data_dir: str | PathLike[str] | None
     durability: Durability
     environment: MemoryEnvironment

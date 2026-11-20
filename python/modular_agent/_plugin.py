@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
+from ._provider import Provider
 from ._tool import Tool, ToolEnvironment
 from ._types import AgentError, ErrorCode, Json, JsonObject
 
@@ -64,6 +65,7 @@ class Registrar:
     def __init__(self, config: JsonObject) -> None:
         self._config = config
         self._tools: dict[str, Tool] = {}
+        self._providers: dict[str, Provider] = {}
         self._hooks: list[_Hook] = []
         self._commands: dict[str, _Command] = {}
 
@@ -76,6 +78,13 @@ class Registrar:
                 ErrorCode.INVALID_COMPOSITION, f"Invalid tool registration: {tool.name}"
             )
         self._tools[tool.name] = tool
+
+    def provider(self, provider: Provider) -> None:
+        if not provider.id or provider.id in self._providers:
+            raise AgentError(
+                ErrorCode.INVALID_COMPOSITION, f"Invalid Provider registration: {provider.id}"
+            )
+        self._providers[provider.id] = provider
 
     def on(
         self,
@@ -150,6 +159,7 @@ class Plugin:
         items = {
             *(f"tool:{n}" for n in registrar._tools),
             *(f"command:{n}" for n in registrar._commands),
+            *(f"provider:{n}" for n in registrar._providers),
         }
         if len(set(self.replaces)) != len(self.replaces) or set(self.replaces) - items:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid replacements in {self.name}")

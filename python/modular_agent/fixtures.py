@@ -29,6 +29,13 @@ async def confirm(question: str, cx: ToolContext) -> str:
 
 
 @tool
+async def note(question: str, cx: ToolContext) -> str:
+    """Ask a free-text question."""
+    answer = await cx.ask({"kind": "text", "question": question})
+    return f"value: {answer.value}" if answer.kind == "value" else "declined"
+
+
+@tool
 async def moor(harbour: str, cx: ToolContext) -> str:
     """Moor at a harbour."""
     raise cx.refuse("the quay is closed")
@@ -85,6 +92,8 @@ def fixture(name: str, *, config: JsonObject | None = None) -> Plugin:
             return Plugin(name, tools=[tide])
         case "confirm":
             return Plugin(name, tools=[confirm])
+        case "note":
+            return Plugin(name, tools=[note])
         case "counter":
             return Plugin(name, setup=_counter, config=config)
         case "quay":
