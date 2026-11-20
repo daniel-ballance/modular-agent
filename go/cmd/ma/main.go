@@ -44,7 +44,9 @@ Options:
   --json                print every event as a JSON line
   --history             print the session's history
   --declaration         print what this agent declares it supports
-  --acp                 serve the Agent Client Protocol on stdio, for an editor or host
+  --acp                 serve the Agent Client Protocol for an editor or host
+  --listen ADDR --token-file FILE
+                        with --acp, listen on a loopback WebSocket instead of stdio
   -h, --help            print help
   -V, --version         print the version
 
@@ -57,6 +59,7 @@ Files: settings.json, mcp.json, models.json, AGENTS.md and skills/ in
 
 type options struct {
 	command, provider, project, session, model, thinking                            string
+	listen, tokenFile                                                               string
 	prompt                                                                          *string
 	loadClaude                                                                      bool
 	device, resume, all, trust, transient, verbose, json, history, declaration, acp bool
@@ -139,6 +142,16 @@ func parse(args []string) (o options, err error) {
 			o.declaration = true
 		case "--acp":
 			o.acp = true
+		case "--listen":
+			o.listen, err = take()
+			if err == nil && o.listen == "" {
+				err = errors.New("--listen needs a nonempty address")
+			}
+		case "--token-file":
+			o.tokenFile, err = take()
+			if err == nil && o.tokenFile == "" {
+				err = errors.New("--token-file needs a nonempty path")
+			}
 		case "--all":
 			o.all = true
 		case "--device":
@@ -158,6 +171,9 @@ func parse(args []string) (o options, err error) {
 	}
 	if o.acp && (o.prompt != nil || o.session != "" || o.resume || o.trust || o.command != "") {
 		return o, errors.New("with --acp the client creates sessions and grants trust")
+	}
+	if (o.listen != "" || o.tokenFile != "") && (!o.acp || o.listen == "" || o.tokenFile == "") {
+		return o, errors.New("--listen ADDR and --token-file FILE must be used together with --acp")
 	}
 	return o, nil
 }
@@ -311,8 +327,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 	}
 	defer a.Close(context.Background())
 	if o.acp {
-		return a.ServeACP(ctx, modular.ServeACPOptions{
-			Input: in, Output: out,
+		acpOptions := modular.ServeACPOptions{
 			Compose: func(ctx context.Context, project string) (*modular.Agent, error) {
 				projectOptions := o
 				projectOptions.project = project
@@ -353,7 +368,23 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 				return d.mcp(project, stderr), nil
 			},
 			WarnMCP: func(err error) { fmt.Fprintln(stderr, err) },
-		})
+		}
+		if o.listen == "" {
+			acpOptions.Input, acpOptions.Output = in, out
+			return a.ServeACP(ctx, acpOptions)
+		}
+		acpOptions.Listen = o.listen
+		acpOptions.Actors = []modular.ACPActor{{TokenFile: o.tokenFile, Actor: modular.LocalACPActor()}}
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-interrupts:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		return a.ServeACP(ctx, acpOptions)
 	}
 	if o.declaration {
 		return writeJSON(out, a.Declaration(), true)
