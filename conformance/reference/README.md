@@ -33,15 +33,15 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 
 ## Results
 
-After the second pass, with `MODULAR_AGENT_REF_REQUIRE=all`. The ACP kit ran against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`:
+With `MODULAR_AGENT_REF_REQUIRE=all`. The ACP kit ran against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`:
 
 | Implementation | Reference checks | ACP kit |
 |---|---|---|
-| Rust | 15/15 | 184/184 |
-| TypeScript | 15/15 | 184/184 |
-| Go | 15/15 | 184/184 |
-| Python | 15/15 | 158/162: it cannot yet host a Runtime served from another process, so four probes fail and 26 checks behind them do not run |
+| Rust | 15/15 | 188/188 |
+| TypeScript | 15/15 | 188/188 |
+| Go | 15/15 | 188/188 |
+| Python | 15/15 | 188/188 |
 
-Rust, TypeScript and Go run the identical set of 184 checks.
+All four run the identical set of 188 ACP checks, including the four that check an undeclared feature is refused, so they present the same agent over ACP.
 
 The ACP kit is the other half: each implementation must also pass `node conformance/acp/run.mjs -- ma --acp` with `MODULAR_AGENT_CONFORMANCE=1`.
