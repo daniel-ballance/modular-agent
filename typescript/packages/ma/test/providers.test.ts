@@ -11,7 +11,7 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createAgent } from "@modular-agent/core";
 import { AuthFile } from "../src/auth.js";
-import { oauth } from "../src/oauth.js";
+import { oauth, pastedCode } from "../src/oauth.js";
 import { responses } from "../src/responses.js";
 
 const run = promisify(execFile);
@@ -90,6 +90,53 @@ test("ChatGPT browser sign-in verifies state and exchanges PKCE over loopback", 
   });
   await assert.rejects(denied, /wrong state/);
   assert.equal(await callback, 400);
+});
+
+test("ChatGPT sign-in finishes by pasting when the callback port is busy", { timeout: 4000 }, async t => {
+  const redirect = "http://localhost:1455/auth/callback";
+  const base = await fixture(t, (req, res, body) => {
+    assert.equal(req.url, "/token");
+    const form = new URLSearchParams(body);
+    assert.equal(form.get("code"), "pasted-code");
+    assert.equal(form.get("redirect_uri"), redirect);
+    send(res, token());
+  });
+  // The token fake holds the callback port; no local callback can complete this login.
+  const service = oauth({ endpoints: { codexToken: `${base}/token`, codexAuthorize: `${base}/authorize` }, port: Number(new URL(base).port) });
+  const notes: string[] = [];
+  let state: string | null = null;
+  const login = await service.login("openai-codex", false, step => {
+    if (step.kind === "note") { notes.push(step.message); return; }
+    assert.equal(step.kind, "open-and-paste");
+    const query = new URL(step.address).searchParams;
+    state = query.get("state");
+    assert.ok(state);
+    assert.equal(query.get("originator"), "pi");
+    assert.equal(query.get("redirect_uri"), redirect);
+  }, receive => {
+    receive("");
+    receive(`${redirect}?code=stale&state=other`);
+    receive(`${redirect}?code=pasted-code&scope=x&state=${state}`);
+    return () => {};
+  });
+  assert.equal(login.account, "test-account");
+  assert.equal(login.refresh, "refresh");
+  assert.equal(notes.length, 2);
+  assert.match(notes[0], /Port 1455 is in use/);
+  assert.match(notes[1], /different sign-in.*Paste it again/);
+});
+
+test("pasted ChatGPT codes are read from each accepted form", () => {
+  const read = (input: string) => pastedCode(input, "st");
+  assert.equal(read("http://localhost:1455/auth/callback?code=c1&state=st"), "c1");
+  assert.equal(read("  code=a%2Fb+c&state=st  "), "a/b c");
+  assert.equal(read("c3#st"), "c3");
+  assert.equal(read("c4"), "c4");
+  assert.equal(read("   "), undefined);
+  assert.throws(() => read("http://localhost:1455/auth/callback?code=c&state=other"), /different sign-in/);
+  assert.throws(() => read("code=c&state="), /different sign-in/);
+  assert.throws(() => read("http://localhost:1455/auth/callback?error=access_denied&state=st"), /not completed/);
+  assert.throws(() => read("http://localhost:1455/auth/callback?state=st"), /no code/);
 });
 
 test("ChatGPT device sign-in waits for authorization and exchanges the device verifier", async t => {

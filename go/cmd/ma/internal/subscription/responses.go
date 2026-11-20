@@ -106,7 +106,7 @@ func provider(v Vendor, models []Model, auth AuthFile, endpoint string, client *
 				}
 				req.Header.Set("ChatGPT-Account-Id", id)
 				req.Header.Set("OpenAI-Beta", "responses=experimental")
-				req.Header.Set("Originator", "pi")
+				req.Header.Set("Originator", CLIENT_IDENTITY)
 				req.Header.Set("Session-Id", r.SessionID)
 				req.Header.Set("X-Client-Request-Id", r.SessionID)
 			}

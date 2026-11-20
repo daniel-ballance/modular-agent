@@ -90,7 +90,7 @@ func TestDeviceSignIn(t *testing.T) {
 			c.xaiToken, c.codexPoll = server.URL+"/poll", server.URL+"/poll"
 			c.codexToken = server.URL + "/token"
 			var shown Step
-			l, err := c.signIn(t.Context(), v, true, func(s Step) { shown = s })
+			l, err := c.signIn(t.Context(), v, true, nil, func(s Step) { shown = s })
 			if err != nil || shown.Code != "CODE" || l.Refresh != "refresh" || l.Expired() {
 				t.Fatalf("unexpected sign-in: %v, %v, %+v", l, err, shown)
 			}
@@ -101,6 +101,76 @@ func TestDeviceSignIn(t *testing.T) {
 				t.Fatal("wrong xAI result")
 			}
 		})
+	}
+}
+
+func TestBrowserSignInFromPasteWhenPortIsBusy(t *testing.T) {
+	token := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token" {
+			t.Error("unexpected request", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = r.ParseForm()
+		if r.Form.Get("code") != "pasted-code" || r.Form.Get("redirect_uri") != "http://localhost:1455/auth/callback" {
+			t.Error("wrong pasted code or redirect URI")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": jwt(), "refresh_token": "refresh"})
+	}))
+	defer token.Close()
+	c := oauthDefaults()
+	c.client = token.Client()
+	c.listen = token.Listener.Addr().String() // No callback listener can bind this port.
+	c.authorize, c.codexToken, c.codexDevice = token.URL+"/authorize", token.URL+"/token", token.URL+"/unexpected"
+	c.wait = time.Second
+	pasted := make(chan string, 3)
+	var notes []string
+	l, err := c.signIn(t.Context(), Codex, false, pasted, func(step Step) {
+		if step.Note != "" {
+			notes = append(notes, step.Note)
+			return
+		}
+		if !step.OpenAndPaste {
+			t.Fatal("expected the paste prompt")
+		}
+		u, err := url.Parse(step.Address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := u.Query()
+		if q.Get("originator") != "pi" || q.Get("state") == "" {
+			t.Fatal("missing client identity or state")
+		}
+		pasted <- ""
+		pasted <- c.redirect + "?code=stale&state=other"
+		pasted <- c.redirect + "?code=pasted-code&scope=x&state=" + q.Get("state")
+	})
+	if err != nil || l.Account == nil || *l.Account != "acct-fixture" || l.Refresh != "refresh" {
+		t.Fatalf("browser login: %v, %v", l, err)
+	}
+	if len(notes) != 2 || !strings.Contains(notes[0], "Port 1455 is in use") ||
+		!strings.Contains(notes[1], "different sign-in") || !strings.Contains(notes[1], "Paste it again") {
+		t.Fatalf("unexpected notes: %v", notes)
+	}
+}
+
+func TestPastedCodeForms(t *testing.T) {
+	for _, tc := range []struct{ input, code, problem string }{
+		{"http://localhost:1455/auth/callback?code=c1&state=st", "c1", ""},
+		{"  code=a%2Fb+c&state=st  ", "a/b c", ""},
+		{"c3#st", "c3", ""},
+		{"c4", "c4", ""},
+		{"   ", "", ""},
+		{"http://localhost:1455/auth/callback?code=c&state=other", "", "different sign-in"},
+		{"code=c&state=", "", "different sign-in"},
+		{"http://localhost:1455/auth/callback?error=access_denied&state=st", "", "not completed"},
+		{"http://localhost:1455/auth/callback?state=st", "", "no code"},
+	} {
+		code, err := pastedCode(tc.input, "st")
+		if code != tc.code || (tc.problem == "" && err != nil) ||
+			(tc.problem != "" && (err == nil || !strings.Contains(err.Error(), tc.problem))) {
+			t.Errorf("paste %q: got (%q, %v), want (%q, %q)", tc.input, code, err, tc.code, tc.problem)
+		}
 	}
 }
 
@@ -126,7 +196,7 @@ func TestBrowserSignInWithPKCE(t *testing.T) {
 	c.authorize = token.URL + "/authorize"
 	c.codexToken = token.URL
 	c.wait = time.Second
-	l, err := c.browser(t.Context(), listener, func(step Step) {
+	l, err := c.browser(t.Context(), listener, nil, func(step Step) {
 		u, err := url.Parse(step.Address)
 		if err != nil {
 			t.Error(err)

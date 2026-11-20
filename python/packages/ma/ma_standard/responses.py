@@ -18,7 +18,7 @@ from modular_agent import (
 
 from .auth import AuthFile, OAuth
 from .config import read_object
-from .oauth import LABELS, Vendor, account, refresh
+from .oauth import CLIENT_IDENTITY, LABELS, Vendor, account, refresh
 
 ENDPOINTS: dict[Vendor, str] = {
     "openai-codex": "https://chatgpt.com/backend-api/codex/responses",
@@ -308,7 +308,7 @@ class Responses:
                                 )
                                 or account(login.secret),
                                 "OpenAI-Beta": "responses=experimental",
-                                "originator": "pi",
+                                "originator": CLIENT_IDENTITY,
                                 "session-id": session,
                                 "x-client-request-id": session,
                             }

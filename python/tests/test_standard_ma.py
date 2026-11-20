@@ -151,13 +151,11 @@ async def test_device_sign_in(vendor: oauth.Vendor, monkeypatch: pytest.MonkeyPa
                 return _reply(token)
         return _reply({}, 404)
 
-    shown = []
+    shown: list[oauth.Step] = []
     async with _http(route) as url:
         monkeypatch.setattr(oauth, "CODEX" if vendor == "openai-codex" else "XAI", url)
-        login = await oauth.sign_in(
-            vendor, True, lambda address, code: shown.append((address, code))
-        )
-    assert shown[0][1] == "CODE"
+        login = await oauth.sign_in(vendor, True, shown.append)
+    assert shown[0].code == "CODE"
     assert login.secret == access and not login.expired
     assert login.account == ("loopback-account" if vendor == "openai-codex" else None)
     exchange = parse_qs(recorded[-1][2].decode())
@@ -195,9 +193,9 @@ async def test_browser_sign_in(wrong_state: bool, monkeypatch: pytest.MonkeyPatc
             )
             return reply.status_code
 
-        def show(address: str, code: str | None) -> None:
-            assert code is None
-            shown.update(parse_qs(urlsplit(address).query))
+        def show(step: oauth.Step) -> None:
+            assert step.code is None and step.note is None and not step.open_and_paste
+            shown.update(parse_qs(urlsplit(step.address).query))
             callbacks.append(asyncio.create_task(browser_callback()))
 
         if wrong_state:
@@ -212,6 +210,66 @@ async def test_browser_sign_in(wrong_state: bool, monkeypatch: pytest.MonkeyPatc
     digest = hashlib.sha256(fields["code_verifier"][0].encode()).digest()
     assert shown["code_challenge"] == [base64.urlsafe_b64encode(digest).decode().rstrip("=")]
     assert fields["code"] == ["local-code"]
+
+
+@pytest.mark.loopback
+async def test_browser_sign_in_from_paste_when_port_is_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[Request] = []
+    notes: list[str] = []
+    shown: dict[str, list[str]] = {}
+
+    def route(request: Request) -> Reply:
+        posted.append(request)
+        return _reply({"access_token": _jwt(), "refresh_token": "fake-rotate"})
+
+    def show(step: oauth.Step) -> None:
+        if step.note:
+            notes.append(step.note)
+        else:
+            assert step.open_and_paste
+            shown.update(parse_qs(urlsplit(step.address).query))
+
+    async def pasted() -> AsyncIterator[str]:
+        yield ""
+        yield "http://localhost:1455/auth/callback?code=stale&state=other"
+        yield f"http://localhost:1455/auth/callback?code=pasted-code&scope=x&state={shown['state'][0]}"
+
+    async with _http(route) as url, AsyncClient(trust_env=False) as client:
+        monkeypatch.setattr(oauth, "CODEX", url)
+        # The token fake is already bound on that port.
+        async with asyncio.timeout(4):
+            login = await oauth._browser(
+                client, show, port=urlsplit(url).port or 0, pasted=pasted()
+            )
+
+    assert login.account == "loopback-account" and login.refresh == "fake-rotate"
+    assert shown["originator"] == ["pi"]
+    assert len(posted) == 1 and posted[0][0] == "/oauth/token"
+    fields = parse_qs(posted[0][2].decode())
+    assert fields["code"] == ["pasted-code"]
+    assert fields["redirect_uri"] == ["http://localhost:1455/auth/callback"]
+    assert len(notes) == 2
+    assert "Port 1455 is in use" in notes[0]
+    assert "different sign-in" in notes[1] and "Paste it again." in notes[1]
+
+
+def test_pasted_code_forms() -> None:
+    read = oauth.pasted_code
+    assert read("http://localhost:1455/auth/callback?code=c1&state=st", "st") == "c1"
+    assert read("  code=a%2Fb+c&state=st  ", "st") == "a/b c"
+    assert read("c3#st", "st") == "c3"
+    assert read("c4", "st") == "c4"
+    assert read("   ", "st") is None
+    with pytest.raises(ValueError, match="different sign-in"):
+        read("http://localhost:1455/auth/callback?code=c&state=other", "st")
+    with pytest.raises(ValueError, match="different sign-in"):
+        read("code=c&state=", "st")
+    with pytest.raises(ValueError, match="not completed"):
+        read("http://localhost:1455/auth/callback?error=access_denied&state=st", "st")
+    with pytest.raises(ValueError, match="no code"):
+        read("http://localhost:1455/auth/callback?state=st", "st")
 
 
 async def test_secret_answer_is_written_to_shared_auth_not_history(tmp_path: Path) -> None:
