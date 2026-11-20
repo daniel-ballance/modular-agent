@@ -36,6 +36,18 @@ func SessionSettings(ctx context.Context) (Settings, bool) {
 	return settings, ok
 }
 
+type reopeningKey struct{}
+
+// WithReopenedSession identifies a session.start hook dispatched on reopen.
+func WithReopenedSession(ctx context.Context) context.Context {
+	return context.WithValue(ctx, reopeningKey{}, true)
+}
+
+func IsReopenedSession(ctx context.Context) bool {
+	v, _ := ctx.Value(reopeningKey{}).(bool)
+	return v
+}
+
 type actingViaKey struct{}
 
 func WithActingVia(ctx context.Context, actor string) context.Context {
@@ -68,6 +80,7 @@ type Question struct {
 	ID, Key, Session, Turn, Step, Call, Actor, Kind, Prompt, Credential string
 	Options, Allowed, Path                                              []string
 	Wait                                                                time.Duration
+	Deadline                                                            *time.Time `json:",omitempty"`
 	Defer                                                               bool
 	Answerable                                                          bool
 }

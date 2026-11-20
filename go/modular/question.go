@@ -141,7 +141,7 @@ func answerQuestion(ctx context.Context, handler QuestionHandler, q Question) (a
 }
 
 func sdkQuestion(raw api.Question) Question {
-	q := Question{ID: raw.ID, SessionID: raw.Session, Kind: raw.Kind, Question: raw.Prompt, Details: raw.Details, Options: raw.Options, Credential: raw.Credential}
+	q := Question{ID: raw.ID, SessionID: raw.Session, Kind: raw.Kind, Question: raw.Prompt, Details: raw.Details, Options: raw.Options, Credential: raw.Credential, Deadline: raw.Deadline}
 	if raw.ApprovalCall != nil {
 		var c ToolCall
 		_ = decodeInto(portable.Call(*raw.ApprovalCall), &c)
@@ -167,11 +167,9 @@ func (q *questionRouter) event(e api.Event) {
 		defer func() { q.mu.Lock(); delete(s.responding, raw.ID); q.mu.Unlock() }()
 		ctx := api.AsActor(s.ctx, localActor)
 		question := sdkQuestion(raw)
-		if raw.Wait > 0 && !raw.Defer {
-			deadline := time.Now().Add(raw.Wait)
-			question.Deadline = &deadline
+		if raw.Deadline != nil && !raw.Defer {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithDeadline(ctx, deadline)
+			ctx, cancel = context.WithDeadline(ctx, *raw.Deadline)
 			defer cancel()
 		}
 		ans, err := answerQuestion(ctx, s.handler, question)

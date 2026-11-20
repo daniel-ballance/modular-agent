@@ -260,7 +260,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = c.StopSession(id)
 		return err
 	}
-	_, err = c.h.API().Invoke(ctx, "session.start", clone(snap))
+	_, err = c.h.API().Invoke(api.WithReopenedSession(ctx), "session.start", clone(snap))
 	if err != nil {
 		_ = c.CloseSession(id)
 		return err

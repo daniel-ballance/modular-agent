@@ -398,6 +398,11 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err := h.Load(commands.Plugin()); err != nil {
 		return nil, appError(err, InvalidComposition)
 	}
+	if len(specs) == 0 {
+		if err := pluginrpc.WrapLocalProviders(h); err != nil {
+			return nil, appError(err, InvalidComposition)
+		}
+	}
 	if err := pluginrpc.Load(ctx, h, project, state, specs); err != nil {
 		if ctx.Err() != nil {
 			return nil, appError(ctx.Err(), CancelledCode)
@@ -409,7 +414,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		return nil, appError(err, InvalidComposition)
 	}
 	continues := selectedRuntime.(Runtime).Declaration().Durable
-	if continues && o.durability != Durable || !continues && o.durability == Durable {
+	// The conformance harness deliberately probes a non-recovering served
+	// Runtime on a durable host. Ordinary SDK compositions must agree.
+	if continues && o.durability != Durable || !o.conformance && !continues && o.durability == Durable {
 		return nil, &Error{Code: InvalidComposition, Message: "selected Runtime does not match the durability mode"}
 	}
 	models := a.Models()

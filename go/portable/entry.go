@@ -299,7 +299,7 @@ func Entry(e api.Entry) map[string]any {
 		}
 		set(r, "options", q.Options, len(q.Options) > 0)
 		set(r, "details", q.Details, len(q.Details) > 0)
-		set(r, "timeLimitMs", q.Wait.Milliseconds(), q.Wait != 0)
+		set(r, "timeLimitMs", max(1, q.Wait.Milliseconds()), q.Wait > 0)
 		if q.Defer {
 			r["whenTimeLimit"] = "leaveOpen"
 		}
@@ -307,7 +307,7 @@ func Entry(e api.Entry) map[string]any {
 		set(r, "go.path", q.Path, len(q.Path) > 0)
 		set(r, "askedBy", q.Actor, q.Actor != "")
 		if q.Wait > 0 {
-			r["deadlineAt"] = e.Time.UnixMilli() + q.Wait.Milliseconds()
+			r["deadlineAt"] = e.Time.UnixMilli() + max(1, q.Wait.Milliseconds())
 		}
 		set(v, "requestId", q.ID, q.ID != "")
 		if q.ApprovalCall != nil {

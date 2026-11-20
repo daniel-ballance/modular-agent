@@ -109,6 +109,7 @@ func states(s api.Session) map[string]*state {
 			if q.Question.Session != s.ID {
 				continue
 			}
+			q.Question.Deadline = questionDeadline(e.Time, q.Question.Wait)
 			out[q.Question.ID] = &state{q: q}
 		case "question.secret":
 			if st := out[api.Decode[string](e.Data)]; st != nil {
@@ -149,6 +150,18 @@ func (m *Manager) closeSettled(id, turn, call string) {
 	}
 }
 
+func questionDeadline(at time.Time, wait time.Duration) *time.Time {
+	if wait <= 0 {
+		return nil
+	}
+	deadline := time.UnixMilli(at.UnixMilli() + max(1, wait.Milliseconds())).UTC()
+	return &deadline
+}
+
+func expired(q api.Question) bool {
+	return q.Deadline != nil && !q.Defer && !time.Now().Before(*q.Deadline)
+}
+
 func (m *Manager) valid(q api.Question, a api.Answer) bool {
 	right := "answer"
 	if q.Kind == "approval" {
@@ -172,14 +185,14 @@ func (m *Manager) List(id string) ([]api.Question, error) {
 	var out []api.Question
 	for _, st := range states(s) {
 		q := st.q.Question
-		q.Answerable = !st.closed && st.answer == nil && st.selected == ""
+		q.Answerable = !st.closed && st.answer == nil && st.selected == "" && !expired(q)
 		out = append(out, q)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 func signature(q api.Question) string {
-	return fmt.Sprintf("%x", sha256.Sum256(api.JSON([]any{q.Call, q.Actor, q.Kind, q.Prompt, q.Options, q.Allowed, q.Credential, q.Details})))
+	return fmt.Sprintf("%x", sha256.Sum256(api.JSON([]any{q.Call, q.Actor, q.Kind, q.Prompt, q.Options, q.Allowed, q.Credential, q.Details, q.Wait, q.Defer})))
 }
 func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 	if q.Session == "" {
@@ -269,7 +282,7 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 			}
 		}
 		if found.answer == nil && !found.closed {
-			q.ID = found.q.Question.ID
+			q.ID, q.Deadline = found.q.Question.ID, found.q.Question.Deadline
 		} else {
 			q.ID = ""
 		}
@@ -291,10 +304,12 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 		if st.ForwardRequest != "" {
 			copies = append(copies, st.ForwardRequest)
 		}
-		if _, err = m.a.Record(ctx, q.Session, api.Entry{Copies: copies, ID: q.ID, Kind: "question.open", Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: q.Actor, Data: api.JSON(st)}); err != nil {
+		entry, err := m.a.Record(ctx, q.Session, api.Entry{Copies: copies, ID: q.ID, Kind: "question.open", Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: q.Actor, Data: api.JSON(st)})
+		if err != nil {
 			m.mu.Unlock()
 			return api.Answer{}, err
 		}
+		q.Deadline = questionDeadline(entry.Time, q.Wait)
 	}
 	m.mu.Unlock()
 	m.a.Emit(ctx, api.Event{Kind: "question.open", Session: q.Session, Turn: q.Turn, Call: q.Call, Data: api.JSON(q)})
@@ -318,8 +333,8 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 		}
 	}
 	var deadline <-chan time.Time
-	if q.Wait > 0 {
-		timer := time.NewTimer(q.Wait)
+	if q.Deadline != nil {
+		timer := time.NewTimer(time.Until(*q.Deadline))
 		defer timer.Stop()
 		deadline = timer.C
 	}
@@ -477,6 +492,11 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 		return api.ErrQuestionNotFound
 	}
 	q := st.q.Question
+	if expired(q) {
+		m.mu.Unlock()
+		_ = m.decline(q, "timeLimit")
+		return api.ErrQuestionNotFound
+	}
 	if !m.valid(q, a) {
 		m.mu.Unlock()
 		return api.ErrAnswerAuthority
@@ -498,6 +518,10 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 		if store, ok := v.(api.StagedCredentials); ok {
 			if e := m.selectSecret(ctx, store, q, a); e != nil {
 				m.mu.Unlock()
+				if errors.Is(e, errDeadline) {
+					_ = m.decline(q, "timeLimit")
+					return api.ErrQuestionNotFound
+				}
 				return e
 			}
 			decision, e := m.activateSecret(ctx, store, q, a.Actor)

@@ -23,7 +23,7 @@ func TestDeveloperProviderPlacements(t *testing.T) {
 			defer cancel()
 			var changed modular.CatalogChanges
 			var ready, updated atomic.Bool
-			var requests atomic.Int32
+			var requests, before, after atomic.Int32
 			p := modular.Provider{ID: "developer", CatalogChanges: &changed, Available: ready.Load, Models: func() []modular.ModelInfo {
 				name := "one"
 				if updated.Load() {
@@ -38,8 +38,8 @@ func TestDeveloperProviderPlacements(t *testing.T) {
 				if m.ID != "two" {
 					t.Errorf("wrong current model: %v", m)
 				}
-				if r.SessionID == "" {
-					t.Error("missing session scope")
+				if r.SessionID == "" || r.SystemPrompt != "Developer Provider hook." {
+					t.Error("missing session scope or provider.request transform")
 				}
 				c.Piece("text", "Hello.")
 				return modular.AssistantMessage{Content: modular.Text("Hello."), Stop: "finished"}, nil
@@ -48,7 +48,22 @@ func TestDeveloperProviderPlacements(t *testing.T) {
 			if place == "served" {
 				opt = modulartest.OverWire(modular.Plugin{Name: "developer", Setup: func(r *modular.Registrar) error { return r.Provider(p) }})
 			}
-			a, err := modular.New(ctx, opt, modular.WithProject(t.TempDir()), modular.WithCredentials(fixtureCredentials{}))
+			hooks := modular.Plugin{Name: "provider-observer", Setup: func(r *modular.Registrar) error {
+				if err := r.OnProviderRequest(func(_ context.Context, p modular.ProviderRequest) (*modular.ModelRequest, error) {
+					before.Add(1)
+					p.Request.SystemPrompt = "Developer Provider hook."
+					return &p.Request, nil
+				}); err != nil {
+					return err
+				}
+				return r.OnProviderResponse(func(_ context.Context, p modular.ProviderResponse) error {
+					if p.Message.Content.Text() == "Hello." {
+						after.Add(1)
+					}
+					return nil
+				})
+			}}
+			a, err := modular.New(ctx, opt, modular.WithPlugin(hooks), modular.WithProject(t.TempDir()), modular.WithCredentials(fixtureCredentials{}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -79,8 +94,8 @@ func TestDeveloperProviderPlacements(t *testing.T) {
 					text += x.Delta
 				}
 			}
-			if text != "Hello." || requests.Load() != 1 {
-				t.Fatalf("unexpected Provider settlement: %q, %d requests", text, requests.Load())
+			if text != "Hello." || requests.Load() != 1 || before.Load() == 0 || after.Load() != 1 {
+				t.Fatalf("unexpected Provider settlement: %q, %d requests, %d before and %d after", text, requests.Load(), before.Load(), after.Load())
 			}
 		})
 	}

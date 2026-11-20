@@ -13,10 +13,15 @@ func (m *Manager) secretStore() api.StagedCredentials {
 	return store
 }
 
+var errDeadline = errors.New("question deadline passed")
+
 func (m *Manager) selectSecret(ctx context.Context, store api.StagedCredentials, q api.Question, a api.Answer) error {
 	receipt, err := store.Stage(ctx, q.Session, q.ID, q.Credential, a.Actor, a.Value)
 	if err != nil {
 		return errors.New("secret staging failed")
+	}
+	if expired(q) {
+		return errDeadline
 	}
 	if receipt.ID == "" || receipt.Session != q.Session || receipt.Request != q.ID || receipt.Name != q.Credential || receipt.Actor != a.Actor || !m.valid(q, a) {
 		return api.ErrAnswerAuthority
