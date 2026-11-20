@@ -6,18 +6,18 @@ Two choices are made when an agent is put together, never in a plugin's code: wh
 
 | Part | In the agent's process | In its own process | As a service |
 |---|---|---|---|
-| Tools and tool sources | yes | yes | needs a binding |
-| Providers | yes | yes, request and response only | needs a binding |
-| Hook handlers | yes | yes, for the [points the wire carries](api.md#hooks) | needs a binding |
-| Commands | yes | yes | needs a binding |
-| Working environment | yes | yes | needs a binding |
-| Runtime | yes | yes | needs a binding |
+| Tools and tool sources | yes | yes | yes |
+| Providers | yes | yes, request and response only | yes, request and response only |
+| Hook handlers | yes | yes, for the [points the wire carries](api.md#hooks) | yes, the same points |
+| Commands | yes | yes | yes |
+| Working environment | yes | yes | yes, where the service sees the same project path |
+| Runtime | yes | yes | yes |
 | History store | yes | no | yes, the [history service](../bindings/history-http.md) |
 | Credential store, configuration | yes | no | no |
 | Interfaces | yes | no | no |
-| The whole agent | embedded in an app | driven over [ACP](../bindings/acp.md) on stdio | needs a binding |
+| The whole agent | embedded in an app | driven over [ACP](../bindings/acp.md) on stdio | driven over ACP on a WebSocket |
 
-"In its own process" means the [plugin binding](../bindings/plugin.md): the agent starts the plugin as a child process and speaks JSON-RPC over its stdio. The two sides can be in different languages.
+"In its own process" means the [plugin binding](../bindings/plugin.md): the agent starts the plugin as a child process and speaks JSON-RPC over its stdio. "As a service" means the same binding over the [WebSocket transport](../bindings/websocket.md): the plugin listens, and the agent connects to it. In both, the two sides can be in different languages.
 
 ## A part in the agent's process
 
@@ -40,19 +40,25 @@ If a plugin's process is lost while the agent runs, the agent treats the part as
 
 ## Services
 
-The history store is the only part with a service binding today:
+A plugin moves to a service without changing its code, as it moves to its own process. The same plugin value is served three ways: in the agent's process, as a program on stdio, or as a service on a WebSocket ([WebSocket transport](../bindings/websocket.md)).
+
+1. **Serve it.** `serve(plugin, { listen, tokenFile, tls? })` listens on `listen`, an address such as `127.0.0.1:7401`, and serves each authenticated connection as a separate plugin instance. `tokenFile` holds the token clients must present. Without `tls: { certFile, keyFile }` it refuses any address that is not loopback. `serve(plugin)` with no options keeps serving on stdio.
+2. **Load it.** The agent names the service in `servicePlugins`: `{ url, tokenFile, config? }`, with a `ws:` or `wss:` URL. Giving one makes the agent a plugin host, as `processPlugins` does; it loads its own plugins, then `processPlugins`, then `servicePlugins`, then `MODULAR_AGENT_PLUGINS`, which may name services too. A service it cannot reach, or whose registration is refused, fails `createAgent` with `invalid_composition`.
+
+When the connection drops, the agent treats the part as [lost](../contracts.md#parts-that-are-lost), as it does when a plugin process exits. A served working environment stops the commands that connection started.
+
+The history store has its own service binding:
 
 - `serveHistory(store, { address, tokenFile })` serves a history store as the [history service](../bindings/history-http.md), if the store can keep the binding's promises: opaque JSON records committed durably, exact batch and tombstone behavior, and writer leases. It refuses any other store with `not_supported`, naming it, rather than substituting another backend. A volatile memory store cannot be served as a conforming history service, since the binding requires entries to survive a restart; a build may offer a test-only in-memory service that is labelled as not conforming. A file store may serve from a separate namespace of opaque records rather than its native sessions; the SDK documents which, and whether existing native sessions can be opened through the service. Plain HTTP is served only on loopback.
 - `httpHistory(url, tokenFile)` is a history store that uses one.
 
 Agents in any language that share a history service and the same actor ids can reopen and continue each other's [portable sessions](../bindings/data.md#portable-sessions).
 
-The other parts have no service binding yet. [ADR 0015](../adr/0015-parts-as-services.md) ran a working environment and a model gateway as services with private APIs, and they worked, but private APIs are not a placement the SDK can promise in four languages. The SDK offers service placement for a part only once the specification has a binding for it. That is a change to layer 1, made first.
-
 ## The whole agent
 
 - **Embedded.** The app holds the Agent and calls it.
 - **Over ACP.** `agent.serveAcp()` serves the agent on stdio. Any ACP client can drive it: an editor, T3 Code, or another agent. The ACP Interface authenticates the connection's actor ([ACP Authorization](../bindings/acp.md#authorization)).
+- **As a service.** `agent.serveAcp({ listen, actors, tls? })` serves ACP on a WebSocket. `actors` lists, for each token file, the actor its connections act as: `{ tokenFile, actor: { id, kind, rights }, tenants?, projects? }`. A connection presenting no listed token is refused. The token, not anything the client sends, decides the actor ([WebSocket transport](../bindings/websocket.md#an-agent-service)).
 
 ## Durability
 

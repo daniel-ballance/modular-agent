@@ -31,3 +31,4 @@ The records keep the original decisions and evidence. [Contracts](../contracts.m
 | [0025](0025-sdk-specification.md) | The SDK specification 0.1: the Agent, servable plugins, authority with the work, one durability option, shared scenarios | Accepted by [0027](0027-sdk-0-1-and-edition-4.md) | [SDK specification](../sdk/README.md) |
 | [0026](0026-one-reference-product.md) | One reference product, the standard configuration, implemented in all four languages | Accepted | [Standard configuration](../reference/standard-configuration.md) |
 | [0027](0027-sdk-0-1-and-edition-4.md) | SDK specification 0.1 accepted; edition 4 replaces edition 3 as the edition to pin | Accepted | [Conformance](../conformance.md#versioning), [SDK specification](../sdk/README.md) |
+| [0028](0028-websocket-transport.md) | Parts and agents as services: the plugin and ACP bindings over one WebSocket transport | Accepted | [WebSocket transport](../bindings/websocket.md) |

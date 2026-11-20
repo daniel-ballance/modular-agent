@@ -30,6 +30,7 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `settings` | default settings for new sessions, by [setting key](../bindings/data.md#setting-keys) | none |
 | `approval` | `off`, `ask`, `all` or `never` | absent: no approval plugin. Any value loads the approval plugin and records that policy for new sessions; `off` means the plugin is loaded and its check does not ask ([Approval policy](../contracts.md#approval-policy)). |
 | `onQuestion` | a question handler | none; see [Questions](#questions) |
+| `servicePlugins` | `{ url, tokenFile, config? }` | none; plugin services over the [WebSocket transport](../bindings/websocket.md); see [Placement](placement.md#services) |
 | `pluginHost` | boolean | false, or true when `processPlugins` is given. A plugin host also reads `MODULAR_AGENT_PLUGINS`; see [Placement](placement.md#a-plugin-in-another-process). |
 | `severalActors` | boolean | false. When true, the agent declares `severalActors`, and `session.join`, `leave`, `as` and proposed input work. When false they raise `not_supported` for any actor but the local one, as the [ACP binding](../bindings/acp.md#several-actors) requires. |
 | `sessionLimits` | boolean | false. When true, the agent declares `sessionLimits` and `session.setLimit` works; otherwise it raises `not_supported`. |
@@ -53,7 +54,7 @@ Each option that names a part is shorthand for a plugin that provides it. `provi
 | `sessionInfo(id)` | one stored session's project, settings, creation time and last activity, without opening it or starting recovery |
 | `declaration()` | what this agent supports, as a [Declaration](../contracts.md#declaration) |
 | `models()` | the models its Providers offer, as ModelInfo |
-| `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md) on stdio until the client disconnects. Options: `compose(project)`, a factory that builds an Agent for each canonical project the client names, so one process can serve several projects with their own trust; without it, an agent bound to one project refuses other project paths. `projectSettings(project)` supplies new-session defaults for that project, and `projectMcp(project)` its configured MCP servers once its trust is checked. |
+| `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md) on stdio until the client disconnects, or, with `listen`, on a WebSocket until closed ([Placement](placement.md#the-whole-agent)). Options: `compose(project)`, a factory that builds an Agent for each canonical project the client names, so one process can serve several projects with their own trust; without it, an agent bound to one project refuses other project paths. `projectSettings(project)` supplies new-session defaults for that project, and `projectMcp(project)` its configured MCP servers once its trust is checked. |
 | `close()` | closes open sessions, stops plugins in reverse load order and releases what it holds |
 
 An Agent is safe to use from several tasks at once. Sessions are independent of each other.

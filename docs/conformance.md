@@ -59,6 +59,7 @@ A component claiming a role MUST follow the rules for that side of the connectio
 | [ACP](bindings/acp.md) | Client host | No standalone client kit |
 | [Plugin](bindings/plugin.md) | Plugin | Plugin kit for its registered roles |
 | [Plugin](bindings/plugin.md) | Host | Plugin-host probes driven through the ACP kit where applicable |
+| [WebSocket transport](bindings/websocket.md) | Plugin service, agent service | The plugin and ACP kits in their `--connect` modes |
 | [History HTTP](bindings/history-http.md) | Service | History kit |
 | [History HTTP](bindings/history-http.md) | Client | History-backed agent checks in the ACP kit where applicable; no standalone client kit |
 
