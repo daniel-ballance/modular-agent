@@ -1,6 +1,6 @@
 # modular-agent: the Python SDK
 
-The Python SDK implements the embedded and ACP slices of [SDK draft 0.1](../docs/sdk/README.md) over the Python build, including the edition-4 draft's nested-call binding. Applications import `modular_agent`; they do not need to import the Harness or its plugins. The `modular-agent` console script and `python -m modular_agent` still run the base CLI. Its composition is now in `ma_cli`.
+Applications import `modular_agent`; they do not need to import the Harness or its plugins. This SDK targets [SDK 0.1](../docs/sdk/README.md) and edition 4. The `modular-agent` console script and `python -m modular_agent` still run the base CLI; `ma` runs the standard configuration.
 
 ```python
 from modular_agent import run
@@ -10,8 +10,7 @@ from modular_agent.testing import test_agent
 async def main() -> None:
     async with test_agent(script=[{"text": "Hello."}]) as agent:
         session = await agent.session()
-        result = await session.prompt("Say hello.")
-        print(result.text)
+        print((await session.prompt("Say hello.")).text)
 
 
 run(main())
@@ -19,111 +18,65 @@ run(main())
 
 ## Run the checks
 
-From `python/`:
+Set `TMPDIR=$HOME/.cache/ma-std-tmp` and create that directory first. From the repository root:
 
 ```sh
-# The existing ACP kit needs its Node client.
-(cd ../conformance/acp && npm ci --offline)
-uv sync --python 3.13
-uv run --offline pytest -q --runtime transient
-uv run --offline pytest -q --runtime durable
-uv run --offline pytest -q --runtime transient --binding process
-uv run --offline pytest -q --runtime durable --binding process
-uv run --offline ruff check .
-uv run --offline ruff format --check .
-uv run --offline mypy
+(cd conformance/acp && npm ci)
+(cd python && uv sync --python 3.13)
+(cd python && uv run --offline pytest -q --runtime transient)
+(cd python && uv run --offline pytest -q --runtime durable)
+(cd python && uv run --offline pytest -q --runtime transient --binding process)
+(cd python && uv run --offline pytest -q --runtime durable --binding process)
+(cd python && uv run --offline ruff check . && uv run --offline ruff format --check . && uv run --offline mypy)
+node conformance/reference/run.mjs --agent python
+MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/python/.venv/bin/ma" --acp
 ```
 
-For the cross-language runs, from the repository root:
+Build each fixture using its command in [`conformance/sdk/fixtures/`](../conformance/sdk/fixtures/). Then run `(cd python && MODULAR_AGENT_SDK_REQUIRE=all uv run --offline python -m modular_agent._scenarios)`. Omit `MODULAR_AGENT_SDK_REQUIRE` to skip unbuilt programs. Pass individual scenario paths to run a subset.
 
-```sh
-(cd rust && mise exec -- cargo build -p sdk-scenarios --bin modular-agent-fixtures)
-(cd go && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures)
-(cd typescript && npm ci && npm run build)
-(cd python && MODULAR_AGENT_SDK_REQUIRE=python uv run --offline python -m modular_agent._scenarios)
-mkdir -p "$HOME/.cache/ma-std-tmp"
-(cd rust && TMPDIR="$HOME/.cache/ma-std-tmp" MODULAR_AGENT_SDK_REQUIRE=python \
-  mise exec -- cargo test -p sdk-scenarios --test shared -- --nocapture)
-```
-
-The runner accepts optional scenario file paths. It checks all registered fixture programs that have been built. A configured but unbuilt fixture is a failure when its SDK is named in `MODULAR_AGENT_SDK_REQUIRE` or that variable is `all`.
-
-Pydantic generates the schemas. The SDK declares two dependencies the base already installs: `jsonschema` enforces the wire schema before conversion, and `httpx2` streams the API-key Providers' HTTP responses. Mypy is a development dependency. It runs in strict mode on the SDK; imports from the untyped base form the private adapter boundary.
-
-### Standard file tools and MCP
-
-Register official parts in `create_agent(plugins=[...])`: `modular_agent.files.file_tools(output_directory)` supplies the six standard file and command tools; `modular_agent.mcp.mcp(servers)` connects stdio or Streamable HTTP tool servers; `modular_agent.compaction.compaction()` supplies the compaction policy and `/compact` (also the default). `Tool.from_schema` registers a callable with existing JSON Schema. `ToolContext.environment` has scoped `read`, `write`, `list` and `exec` methods, including for served tools. `local_process_groups=True` permits a process-group fallback if cgroup v2 is unavailable; the default local environment requires strong containment for commands.
-
-`agent.sessions(project=...)` and `agent.session_info(id)` inspect saved sessions without taking their writer leases. `session.wait_idle()` waits for admitted work; `session.call_tool(name, input)` dispatches through the Runtime as the local actor. `session.prepare` runs in process before `session.start` and before recovery; the in-process `turn.before` snapshot carries the canonical project and callable tool definitions.
-
-`agent.serve_acp(compose=..., project_settings=..., project_mcp=...)` can compose Agents for canonical projects. `compose_reopen(project, id)` can choose a different composition based on the saved session before recovery. Without `compose`, ACP accepts only the Agent’s configured project. Returned Agents must share the serving Agent’s persistent history. The `project_mcp` resolver must check trust before returning project-configured programs.
-
-The SDK binds opaque `providerData` to the producing Provider, hides it from recipient projections and replays it only to that Provider. `create_agent(credentials=CredentialStore(...))` can wire secret questions to an app's store; crash-atomic secret staging is not implemented.
+The two [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_live.py` are skipped by default and skip separately if their Provider's environment key is absent. Run them by hand before a release with `MODULAR_AGENT_LIVE=1`. The offline suite does not need real credentials.
 
 ## What is checked
 
-- **Shared scenarios:** 55/55 with the Python runner: 11 in process and 11 each served by Python, Go, Rust and TypeScript. The crash scenarios kill the agent's process group before reopening the session.
-- **Rust runner:** 43 scenario passes, including all 28 original scenarios across the four served placements and 10/11 total served by Python. Rust executes the Python `pilot` successfully, but this checkout's Rust SDK reports both the parent's and child's results in `PromptResult.toolResults`. Six other served failures lack the new fixtures. The Rust in-process run passed its first six scenarios, then panicked on missing `pilot` and did not run its last four.
-- **ACP:** 116/116 checks in each of transient and durable, normal and process binding, including 11 nested-call checks. The split-plugin variant passed 121/121 checks for each Runtime. Pytest also runs the crash and job variants.
-- **Plugin:** 146/146 checks, including `nest` and directory listing. One earlier run of the background-process checks was timing-sensitive.
-- **History service:** 42/42 checks with `--restart-ttl` from 6 seconds to 1 second, covering record survival and old-lease exclusion. `serve_history(file_history(directory), address=("127.0.0.1", 39071), token_file=token)` uses a dedicated SQLite database; do not point the kit at real data. No model services or real credentials were used.
-- **Base and SDK:** 336 cases per configuration (including nine new SDK cases). Full runs: transient normal 336 passed; durable normal 335 passed, one process-bootstrap cancellation timeout; transient process 334 passed, one foreign-job timeout and one tool-ordering failure; durable process 334 passed, one process-bootstrap cancellation timeout and one tool-ordering failure. The registration check responsible for the ordering failure was moved to the Harness and all three ordering cases then passed in both process configurations. Targeted reruns including the bootstrap test passed 13/13 for durable; the transient foreign-job case still timed out (12/13 passed). Ruff lint and format passed; strict mypy checked 18 source files.
+- **Shared scenarios:** 28/28 in process and served by Python. The original eleven passed 55/55 with all programs required. The complete matrix passed 67/70: the Go, Rust and TypeScript fixture programs built from this checkout do not yet register `note`.
+- **Reference `ma`:** 17/17. The stderr regression checks the actual dispatched `codemode` call, not `tool(null)`.
+- **ACP kit against `ma`:** 188/188 with crash, probe and job checks. The standard declaration keeps several actors, limits and tenants off.
+- **Secret crash recovery:** three actual SIGKILL cutoffs: after staging, after committing the selection, and after activation. A separate test checks idempotence and generations.
+- **Python suites:** 405 passed and 2 live checks skipped in each of the four configurations: transient and durable, both with normal and process binding. Ruff lint, Ruff format (172 files), strict mypy (30 files) and the repository link check passed.
 
 ## Built so far
 
-| Milestone | State |
+| Area | State |
 |---|---|
-| 1. Compose an Agent | Awaitable or async context manager; project, data directory, three durability modes, model, settings, optional approval, and process and local plugins. History overrides for the shipped stores and a memory environment override. General Runtime and credentials constructors are not exposed. |
-| 2. Session and turn | Create, reopen, prompt, stream, last turn, history, send, cancel, settings, fork, close. `prompt(..., result=schema)` checks a final JSON value, with feedback and retry. `events(from_entry)` replays kept entries and follows live events, with `lost` and the last delivered entry cursor on lag. |
-| 3. Local actor | `user`; question handler presence, including per-session override; no-handler approval refuses. ACP supplies its own presence. |
-| 4. Tools | Type hints or one Pydantic model; schema, exact hints, structured results, cancellation, refusal, questions, progress, log and nested tools. No leave-open questions from SDK tools. The general environment and history context members are not exposed. |
-| 5. Errors | `AgentError.code` is an `ErrorCode`; translates known native codes. Untyped base failures can still map to `internal`. |
-| 6. Plugins | Setup/config, tools, commands, item replacement, `input`, session start/end, turn before/start/end, step after, tool before/after. General part registration and the remaining hooks are not exposed. |
-| 7. Serve | Base stdio transport, same tool result mapper locally and on the wire, questions via `host/ask`, supported hooks and commands, and refusal of flagged items. |
-| 8. Process plugins | Uses the base host, including preflight collisions and startup errors. Environment opt-in is explicit or implied by `process_plugins`. |
-| 9. Testing | Scripted Provider, `test_agent`, `answers(...).assert_done()`, six fixtures, fixture program and shared runner. `test_agent` defaults to a memory environment and temporary project. `over_wire` runs a plugin over a socket pair through the real binding. `restart` interrupts tracked work and rebuilds on the same store, with no graceful plugin stops; it does not simulate detached work or child-process cleanup. |
-| 10. Guides | Four offline tests from guides 01–03 (examples needing a real model are not run). |
-| 11. Providers | Developer Provider protocol and API-key OpenAI Responses and Anthropic Messages request/response adapters, including SSE text and tool calls. Provider registration in the SDK's `serve` and provider-owned state handling beyond discard are not included. |
-| 12. Nested calls | `cx.tools.list()` and `cx.tools.call(name, input)` in process and over stdio. Four levels including the outer call. Children are committed separately, not sent to the model, and settled without redispatch on recovery. `modelTools` narrows only the model's offer. A Runtime hosted over the public plugin binding does not declare nesting. |
-| 13. Declaration and ACP | Reports selected-part capabilities. `serve_acp` reuses the base Interface; load/resume installs recovery without waiting for execution. A nested call's first ACP update carries its parent ID. |
-| 14. HTTP history | `http_history(url, token_file)` selects the client. `serve_history` serves opaque records in a dedicated SQLite database under the file store directory; does not import existing native history. Memory and client-backed stores are ineligible. Serves numeric loopback only; no retention, replication or TLS termination. |
+| Composition | Awaitable or async context manager; local, memory and file/HTTP-backed parts, three durability modes, explicit `transient_runtime()` and `durable_runtime()`, Provider and tool options, local and stdio plugins. `local_environment(root)` uses `root` as the project when none is given; if both are given they must match. |
+| Session and turn | Create, reopen, prompt, stream, last turn, history, send, cancel, settings, fork and close. Structured results are checked with feedback and retry. `events(from_entry)` replays kept entries and follows live events, with `lost` and the last delivered entry cursor on lag. |
+| Authority | `several_actors`, `session_limits` and `tenants` opt in. `session(actors=..., tenant=...)`, `join`, `leave`, `as_actor`, and `set_limit` use recorded grants and current effective rights. ACP authenticates its own actors. |
+| Questions | `on_question` can override the agent-wide handler. `questions()` lists only open questions and reports per-recipient `answerable`; `answer` submits by ID. Without a handler an untimed non-approval can wait for an eligible offline actor, while an approval still needs a present eligible answerer. A text `declined` and a tagged decline are distinct. `late_answers_start_turns=True` enables a timed non-approval to leave a call open. |
+| Secrets | `environment_credentials()` is read-only. `file_credentials(path)` provides durable `stage`, `lookup_staged`, `activate` and `discard`; `ma` uses it for `auth.json` and keeps active values under `answers`. Recovery discards unselected staging and completes a committed selection before resuming work. |
+| Tools | Input from type hints, one Pydantic model, or `Tool.from_schema`; exact hints, structured results, cancellation, refusal, questions, progress, log, history pages, environment and nested calls. Nesting is four levels including the outer call. The public wire Runtime placement does not declare nesting. |
+| Plugins, hooks and Providers | Setup/config, tools, commands, Providers and hooks. Developer Providers can check readiness with `available()` and invalidate an embedded catalog with `ProviderCatalog.changed()`. The stdio host polls the current catalog and availability and forwards model pieces, both Provider hook callbacks and the scoped Provider credential. Includes API-key OpenAI Responses and Anthropic Messages adapters. |
+| Testing and guides | Scripted Provider, memory environment, `test_agent`, `answers(...).assert_done()`, `over_wire` and `restart`. Seven shared fixture plugins, a fixture program and a runner. Offline tests cover guides 01–09. `restart` interrupts tracked work without graceful plugin stops; it does not simulate detached work or child-process cleanup. |
+| HTTP history | `http_history(url, token_file)` selects the client. `serve_history(file_history(directory), address=(host, port), token_file=path)` blocks and serves an opaque-record SQLite database; it does not import existing native history. Memory and client-backed stores are ineligible. Plain HTTP is numeric loopback only. |
 
-## Where the base and the specification differ
+The six standard file tools come from `modular_agent.files.file_tools(output_directory)`. `modular_agent.mcp.mcp(servers)` connects stdio or Streamable HTTP tool servers. Register these in `plugins`. Local paths are not confined. At command dispatch, the default local environment requires delegated cgroup v2; `local_process_groups=True` opts in to a weaker fallback.
 
-| Difference | Handling |
-|---|---|
-| The base CLI writes history and installs approval by default. | SDK composition does not call the CLI build. It uses memory history for ephemeral agents and installs approval only when requested. |
-| Native tool and approval shapes use private status, hint and policy names. | Adapter uses the base's shared-wire converters. A Python refusal is the reason text in both placements; the Rust base's prefix is not needed by Python. |
-| The base treats stateless Providers as repeatable by default. | A developer Provider in the SDK follows its explicit `safe_to_repeat` promise. The SDK Runtimes also refuse to repeat interrupted tools without a separately confirmed environment repeat guarantee. |
-| Base durable Runtime restarts queued inputs. | The SDK's built-in durable Runtime hands back inputs not yet taken, then recovers the interrupted turn. |
-| Local paths are not confined and commands require delegated cgroup v2. | Report unconfined files and strong command containment: an unavailable cgroup makes commands fail rather than fall back to weaker cleanup. The memory environment has confined files and declares no command containment. |
-| Base refuses settings changes during a turn and represents text decline internally as `"declined"`. | The SDK advertises `settingsDuringTurn: refused`; a text or choice answer of exactly `declined` still collides with the native sentinel. |
-| Base's in-process and private-process Runtimes support nested execution; public wire Runtime placement does not. | Declare `nestedToolCalls` only with the checked dispatch path. Public wire **tools** can nest when that path is present. |
+`agent.sessions(project=...)` and `agent.session_info(id)` inspect saved sessions without acquiring writer leases. `agent.serve_acp(compose=..., compose_reopen=..., project_settings=..., project_mcp=...)` can select compositions by canonical project and saved session ID. Compositions that reopen sessions share the serving Agent's persistent history, and the MCP resolver must check project trust before returning configured programs.
+
+## Remaining Python implementation gaps
+
+- There is no general public registration adapter for custom Runtime, environment, changing tool source, job owner, configuration, Interface or plugin-defined hooks. The shipped Runtime choices are not custom Runtime implementations. SDK `serve` does not expose WebSocket placement or the base's public Runtime/environment serving implementations. These need typed public adapters and placement parity tests; the base binding alone does not supply them.
+- Hook handlers receive shared dictionaries, not typed payload and context objects. Some local-only hook points and answers are not exposed, including `session.join`, `session.leave`, `provider.piece`, and returning `pending(question)` from `tool.before`. Tool questions use the separate `ToolContext.ask` path. Named tool credentials, command questions, and general job contexts are not exposed.
+- Embedded APIs for moving, erasing and releasing or withdrawing proposed input are not yet exposed. The ACP Interface has these operations independently of the SDK methods. Provider-owned state beyond optional discard is not exposed.
 
 ## Findings for the SDK specification
 
-1. **Resolved in round 2.** **[`api.md`, Building an agent](../docs/sdk/api.md#building-an-agent) and [`placement.md`, Durability](../docs/sdk/placement.md#durability): persistent store without `dataDir`.** The milestone asks for `invalid_composition` without `dataDir`; Placement permits another persistent store. The command environment also needs somewhere to find its cleanup journal after a restart. Proposed replacement: “`kept` and `durable` require `dataDir` for local recovery bookkeeping, even when an explicit persistent history store keeps the entries elsewhere. A composition with no local durable bookkeeping MAY omit `dataDir` if all its persistent parts have storage elsewhere.”
-2. **Resolved in round 2.** **[`api.md`, The declaration](../docs/sdk/api.md#the-declaration): some values are capabilities, not constants.** The base has strong containment, refuses setting changes during turns, and does not support nested calls. Memory erasure is outside this milestone. Proposed table values: “`commandContainment`: the active environment's containment”; “`settingsDuringTurn`: `nextTurn` or `refused`, as declared by the Runtime and host”; “`nestedToolCalls`: true only if the host and Runtime both support nested calls in the chosen placement”; “`erasure`: true only if the active history store implements erasure.”
-3. **Specification resolved in round 2; Python still has the native decline sentinel.** **[`api.md`, Contexts and Questions](../docs/sdk/api.md#contexts): time unit and decline.** Python uses `wait` in seconds, while the binding uses integer milliseconds; `declined` is also valid text. Proposed text: “Python `wait` is a finite, nonnegative number of seconds; for the wire the SDK converts it to integer milliseconds. A decline is a tagged answer, not a reserved string value. A text answer of `declined` remains a value.” The latter needs a native question-record change in Python.
-4. **Resolved in round 2.** **[`api.md`, Hooks](../docs/sdk/api.md#hooks): step termination and transform shape.** The binding calls `step.after` a gate; refusal ends the turn, and `tool.after` transforms the full wire payload. Proposed text: “`step.after`'s `end(reason)` is the binding gate refusal and ends the turn with a failed outcome. A `tool.after` `change({ content?, value? })` is serialized as a full wire transform with the enclosing scope, call and all other result fields unchanged.”
-5. **Resolved in round 2.** **[`testing.md`, The testing kit](../docs/sdk/testing.md#the-testing-kit): unexpected answers.** `answers` raises when exhausted, but the normal question policy catches handler exceptions as declines, so this alone cannot fail a test. Proposed text: “`answers(list)` raises if exhausted; the agent treats that question as declined. To assert that no extra questions were asked, use the helper's assertion at the end of the test.” The assertion helper is not yet exposed.
-6. **Resolved in round 2.** **[`testing.md`, The model script](../docs/sdk/testing.md#the-model-script): counting failed or compacted model messages.** Indexing counts the messages actually offered in the request; it is not the number of prior attempts. Proposed text: “Only messages present in the final ModelRequest count. Failed attempts omitted from context and responses dropped by compaction do not advance the index. Use a literal script without compaction to check successive answers.”
-7. **Resolved in round 2.** **[`guides/01`, Ask a question](../docs/sdk/guides/01-first-agent.md#ask-a-question): the illustrative model must be offered.** Python validates `model` against the Provider's configured catalog at startup. Proposed replacement in the Python example: `async with create_agent(providers=[openai(models=["gpt-6-luna"])], model="openai/gpt-6-luna") as agent:`. Treat the model id as a placeholder, not a claim of availability.
-8. **Resolved in round 2.** **[`guides/03`, Load it into an agent](../docs/sdk/guides/03-tool-in-another-process.md#load-it-into-an-agent): no Python load example.** The serve example runs verbatim, but the three load examples omit Python. Proposed example: `agent = await create_agent(providers=[openai()], process_plugins=[ProcessPlugin(["/srv/tides/.venv/bin/python", "/srv/tides/tides.py"])])` (import `ProcessPlugin` from `modular_agent`).
+Proposed replacement text, not edits to the shared docs:
 
-9. **Resolved in round 2.** **[`languages.md`, Python](../docs/sdk/languages.md#python): distinguish object attributes from wire records.** The SDK uses snake case for Python objects and preserves the shared field names in raw history, hooks and Provider request/response dictionaries. Proposed text: “Python attributes and keyword arguments use `snake_case`. A dictionary explicitly representing shared wire data uses the shared names; passing or returning it does not rename its keys.”
-
-10. **[`placement.md`, Services](../docs/sdk/placement.md#services): native storage versus the opaque record backend.** Proposed addition after the eligibility sentence: “A file-store constructor may select a dedicated opaque-record namespace for `serveHistory`. `serveHistory` does not imply that an existing native store can be exported live. Document which namespace the server uses and whether it can open existing native sessions.” This avoids confusing co-located files with shared lease state.
-
-### Findings from guides 05 and 09
-
-- **[API — Sessions and turns](../docs/sdk/api.md#sessions-and-turns):** Add: “`lastTurn()` returns the latest settled turn as a PromptResult, or no value if none exists; it does not admit input. In Python, `await session.last_turn()` returns `PromptResult | None`.”
-- **[API — The agent](../docs/sdk/api.md#the-agent) and [Actors and rights](../docs/sdk/api.md#actors-and-rights):** For the Python guide, replace the session-options and actor-selection instructions with: “`await agent.session(settings=...)` accepts settings, not `actors` or `tenant`. The embedded actor is `user`; the SDK does not expose actor-selection session methods. ACP authenticates its own actor.”
-- **[Placement — Services](../docs/sdk/placement.md#services):** Use these Python arguments: “`serve_history(file_history(directory), address=(host, port), token_file=path)` blocks; run it in a service process. `http_history(url, token_file)` creates the client store.”
-11. **[API / Providers](../docs/sdk/api.md#providers) and [Plugins](../docs/sdk/api.md#plugins): Python readiness and serving.** Replace the Python Provider descriptions with: “`models()` returns the full catalog. The Provider protocol exposes neither `available()` nor a `changed()` notifier. `request` receives shared JSON and returns an AssistantMessage as shared JSON; the SDK's `serve` cannot register a Provider.”
-
-12. **[API / The agent](../docs/sdk/api.md#the-agent), ACP factory and plugin host.** Replace the Python ACP options description with: “Build with `plugin_host=True` and no embedded question handler. `serve_acp(compose=..., compose_reopen=..., project_settings=..., project_mcp=...)` accepts async composition by canonical project `Path`, optionally with a separate factory for reopening by session id. The settings and trusted MCP configuration callbacks are synchronous. Composed Agents that reopen sessions share the serving Agent's persistent history store.”
-11. **[API / Questions](../docs/sdk/api.md#questions): embedded question listing.** The current `Session.questions()` adapter keeps closed records and drops the native `answerable` flag. For the Python example use: “Use the ID from the handler to select the newly opened question from `await session.questions()`. The current list includes closed questions, so do not use it alone to tell whether a question is still open. Send the UI reply with `await session.answer(question.id, answer)` while the handler is still waiting.”
-12. **[API / Hooks](../docs/sdk/api.md#hooks): Python reply shapes.** For Python use: “Register with `r.on(point, handler, order='normal')`. The handler receives a shared-name dictionary, not a typed payload and separate context. Return `{'change': {'input': new_input}}` from `tool.before`, `{'change': {'content': content}}` from `tool.after`, `{'add': {'system': text}}` from `turn.before` or `{'end': reason}` from `step.after`. The Python SDK exposes a subset of the hook table.”
-
-Proposed shared scenarios: **queued-input-after-crash** (a held tool from the first input; queue a second input, crash, reopen and verify the second is handed back); **decline-is-not-text** (ask a text question twice, answer once with the string `declined` and once with a tagged decline, and check distinct tool results in every placement); **tool-refusal-parity** (run a fixture tool that calls `refuse`, and compare its status and reason in every placement).
+1. **[API — Sessions and turns](../docs/sdk/api.md#sessions-and-turns):** add a row: “`lastTurn()` returns the latest settled turn as a PromptResult, or no value if none exists; it does not admit input.”
+2. **[Languages — Python](../docs/sdk/languages.md#python):** add: “`session.as(actorId)` is `session.as_actor(actor_id)` in Python because `as` is reserved.” The actor options are available through `await agent.session(actors=..., tenant=...)`, not through an ACP client identity parameter.
+3. **[API — Building an agent](../docs/sdk/api.md#building-an-agent):** replace the two `credentials` rows with one: “`credentials` | a credential store | environment variables. A writable store such as `fileCredentials(path)` implements the staging operations for secret questions.”
+4. **[Guide 04 — Ask for a choice](../docs/sdk/guides/04-questions-and-approvals.md#ask-for-a-choice-and-answer-from-your-ui):** replace the Python caveat with: “Python's `await session.questions()` lists open questions. An app can start the turn with `send`, show those questions, and call `await session.answer(id, reply)` without keeping a handler pending. A handler is still needed to make the embedded actor present for approval.”
+5. **[Guide 06 — Write a Provider](../docs/sdk/guides/06-write-a-provider.md):** replace the Python readiness and serving caveats with: “Python Providers may implement `available()` and inherit `ProviderCatalog` to call `changed()` after changing their catalog. Register a request/response Provider with `r.provider(provider)` and serve the plugin with `serve(plugin)`. Use `cx.credential()` in either placement; the served adapter obtains it through `host/credentials/read`.”
+6. **[Guide 07 — Register the hooks](../docs/sdk/guides/07-hooks.md#register-the-hooks):** in the Python example, retain the exact reply shapes: “`r.on(point, handler, order='normal')` receives a shared dictionary. A `tool.before` rewrite is `{'change': {'input': new_input}}`, a `tool.after` rewrite is `{'change': {'content': content}}`, a prompt contribution is `{'add': {'system': text}}`, and a `step.after` refusal is `{'end': reason}`.” Typed hook contexts remain an implementation gap, not a different contract.
+7. **[API — The agent](../docs/sdk/api.md#the-agent):** add: “Python's `serve_acp` additionally accepts `compose_reopen(project, id)` to choose the composition for a stored session. The async factories receive a canonical `Path`. The settings and trusted MCP configuration callbacks are synchronous; a composition that opens saved sessions shares the serving Agent's history.”
+8. **[Placement — Services](../docs/sdk/placement.md#services):** the separate opaque-record namespace is now documented. In Python the example's exact call is `serve_history(file_history(directory), address=(host, port), token_file=path)` in the service process and `http_history(url, token_file)` in the client.
