@@ -556,13 +556,14 @@ export class AcpInterface implements InterfaceCapability {
 
 	/** This agent's declaration, with the binding's keys and values. */
 	private bindingDeclaration(sessionId?: string): Record<string, unknown> {
-		const d = (this.options.declaration?.(sessionId) ?? (sessionId ? this.apiFor(sessionId) : this.api).declaration(sessionId)) as Record<string, unknown>;
+		const scoped = (sessionId ? this.apiFor(sessionId) : this.api).declaration(sessionId);
+		const d = (this.options.declaration?.(sessionId) ?? scoped) as Record<string, unknown>;
 		const bool = (k: string) => d[k] === true;
 		return {
 			inputDuringTurn: bool("inputDuringTurn"),
 			waitingThroughRestart: bool("waitingThroughRestart"),
 			continuesAfterRestart: bool("continuesAfterRestart"),
-			rewinding: bool("rewinding"),
+			rewinding: scoped.rewinding === true,
 			forking: bool("forking"),
 			keepsStateAtProvider: bool("keepsStateAtProvider"),
 			runsToolsAtProvider: bool("runsToolsAtProvider"),

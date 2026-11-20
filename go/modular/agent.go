@@ -303,7 +303,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	var environment api.Plugin
 	if o.environment == nil {
-		environment = local.PluginAt(filepath.Join(state, "commands"), state)
+		environment = local.GitPluginAt(filepath.Join(state, "commands"), state)
 	} else {
 		environment = api.Plugin{Name: "environment", Setup: func(a api.API) error { return a.Provide("working-environment", o.environment) }, Close: o.environment.Close}
 	}

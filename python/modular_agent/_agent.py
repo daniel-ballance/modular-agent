@@ -247,9 +247,10 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         value = agent.declaration()
         if sid:
             selected = await super().declaration(sid)
-            for key in ("keepsStateAtProvider", "runsToolsAtProvider", "liveSessions"):
+            for key in ("keepsStateAtProvider", "runsToolsAtProvider", "liveSessions", "rewinding"):
                 value[key] = selected[key]
-        return {**value, "plugins": agent._h.declarations()}
+            return {**value, "plugins": selected["plugins"]}
+        return {**value, "plugins": agent._h.declarations(str(agent._project))}
 
     async def close_projects(self) -> None:
         for agent in reversed(list(self._apis)):
@@ -470,7 +471,7 @@ class Agent:
     def declaration(self) -> JsonObject:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
-        parts = self._h.declarations()
+        parts = self._h.declarations(str(self._project))
         value = _declaration(parts)
         runtime = parts[self._h.capabilities["runtime"][0]]
         environment = parts[self._h.capabilities["environment"][0]]
@@ -705,12 +706,12 @@ def create_agent(
                 store_root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 store = History(store_root)
             await h.load(store)
-            local = Local(root)
+            local = Local(root, point_store="git")
             if environment is None and local_process_groups:
                 try:
                     delegated_root()
                 except Exception:
-                    local = ProcessGroupLocal(root)
+                    local = ProcessGroupLocal(root, point_store="git")
             await h.load(environment or local)
             dispatcher = _SdkTools()
             dispatcher.conformance = conformance

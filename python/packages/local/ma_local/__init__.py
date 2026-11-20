@@ -11,6 +11,7 @@ from pathlib import Path
 from ma_core import AgentError, Plugin, identity
 
 from .containment import cleanup, delegated_root, journal, owner_identity, recover
+from .git_points import GitPoints
 from .points import Points
 
 
@@ -27,10 +28,13 @@ class Local(Plugin):
         "platform": "Linux cgroup v2 with delegated subtree",
     }
 
-    def __init__(self, root=None):
+    def __init__(self, root=None, *, point_store="copy"):
         self.root = Path(root or Path.home() / ".local/state/modular-agent-py") / "commands"
         self.commands = {}
-        self.points = Points(self.root)
+        self.points = GitPoints(self.root.parent) if point_store == "git" else Points(self.root)
+
+    def keeps_points(self, project):
+        return not isinstance(self.points, GitPoints) or self.points.keeps_points(project)
 
     async def start(self, api):
         await super().start(api)
@@ -228,12 +232,16 @@ class Local(Plugin):
             return {"text": b"".join(pieces).decode(errors="replace"), **result}
 
     async def _close(self, d):
-        self.points.close(d["session"])
+        if isinstance(self.points, Points):
+            self.points.close(d["session"])
         for item in self.commands.pop(d["session"], []):
             await self._stop_command(item)
 
     async def stop(self):
-        for sid in set(self.commands) | {item[0] for item in self.points.saved.values()}:
+        sessions = set(self.commands)
+        if isinstance(self.points, Points):
+            sessions.update(item[0] for item in self.points.saved.values())
+        for sid in sessions:
             await self._close({"session": sid})
 
 

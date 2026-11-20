@@ -17,6 +17,14 @@ import (
 
 func (e *Environment) SupportsPoints() bool { return e.initErr == nil }
 
+func (e *Environment) KeepsPoints(project string) bool {
+	if !e.SupportsPoints() || !e.gitPoints {
+		return e.SupportsPoints()
+	}
+	_, err := e.gitPointRepo(context.Background(), project)
+	return err == nil
+}
+
 func (e *Environment) pointProject(cwd string) (string, map[string]bool, error) {
 	project, err := filepath.EvalSymlinks(cwd)
 	if err == nil {
@@ -85,6 +93,13 @@ func (e *Environment) SavePoint(ctx context.Context, cwd string) (string, error)
 	if !e.SupportsPoints() {
 		return "", e.initErr
 	}
+	if e.gitPoints {
+		repo, err := e.gitPointRepo(ctx, cwd)
+		if err != nil {
+			return "", err
+		}
+		return repo.save(ctx, api.Executing(ctx).Session)
+	}
 	project, skip, err := e.pointProject(cwd)
 	if err != nil {
 		return "", err
@@ -121,6 +136,17 @@ func (e *Environment) CheckPoint(ctx context.Context, cwd, point string) error {
 	e.pointsMu.Lock()
 	defer e.pointsMu.Unlock()
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if e.gitPoints {
+		repo, err := e.gitPointRepo(ctx, cwd)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fs.ErrNotExist
+		}
+		_, err = repo.find(ctx, api.Executing(ctx).Session, point)
 		return err
 	}
 	project, _, err := e.pointProject(cwd)
@@ -165,6 +191,16 @@ func (e *Environment) checkPoint(ctx context.Context, project, point string) err
 func (e *Environment) RestorePoint(ctx context.Context, cwd, point string) error {
 	e.pointsMu.Lock()
 	defer e.pointsMu.Unlock()
+	if e.gitPoints {
+		repo, err := e.gitPointRepo(ctx, cwd)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fs.ErrNotExist
+		}
+		return repo.restore(ctx, api.Executing(ctx).Session, point)
+	}
 	project, skip, err := e.pointProject(cwd)
 	if err != nil {
 		return err

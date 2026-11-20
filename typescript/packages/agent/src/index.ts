@@ -50,7 +50,7 @@ export function vanillaPlugins(options: AgentOptions = {}): Plugin[] {
 		configuration({ plugins: { "credentials-file": options.usePiAuth ? { usePiAuth: true } : {} }, ...(options.settings ?? {}) }),
 		fileCredentials(),
 		...(options.ephemeral ? [] : [jsonlHistory()]),
-		localEnvironment(),
+		localEnvironment({ points: "copy" }),
 		piAiProviders({ models: options.models }),
 		transientRuntime(),
 		fileTools(),

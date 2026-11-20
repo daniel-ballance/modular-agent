@@ -17,3 +17,13 @@ func Points(env WorkingEnvironment) (EnvironmentPoints, bool) {
 	points, ok := env.(EnvironmentPoints)
 	return points, ok && points.SupportsPoints()
 }
+
+// PointsFor reports whether the environment can keep points for this project.
+// Environments without a project-specific policy use their static declaration.
+func PointsFor(env WorkingEnvironment, project string) (EnvironmentPoints, bool) {
+	points, ok := Points(env)
+	if scoped, hasPolicy := env.(interface{ KeepsPoints(string) bool }); ok && hasPolicy {
+		ok = scoped.KeepsPoints(project)
+	}
+	return points, ok
+}

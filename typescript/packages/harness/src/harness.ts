@@ -926,7 +926,7 @@ export class Harness {
 			try {
 				if (options.rewind) {
 					const env = await this.environmentFor(s);
-					if (!env?.points || !env.restore || !env.save || !env.hasPoint) throw new Error("This environment cannot rewind");
+					if (!env || !(env.keepsPoints?.(this.projectOf(s)) ?? env.points) || !env.restore || !env.save || !env.hasPoint) throw new Error("This environment cannot rewind");
 					const branch = s.branch();
 					const at = branch.findIndex((e) => e.id === entryId);
 					if (at < 0) throw new Error("Rewind needs an entry on the current branch");
@@ -965,7 +965,7 @@ export class Harness {
 	private async completeRewind(s: Session, to: string | null, previous: string | null, restore: { point: string; undo: string }, undoing: boolean): Promise<void> {
 		const move = (target: string | null, intent?: typeof restore) => this.commit(s, [{ kind: "position", writer: "harness", modelVisible: false, data: { to: target, ...(intent ? { restore: intent } : {}) } }]);
 		const env = await this.environmentFor(s);
-		if (!env?.restore || !env.hasPoint) { s.suspended = true; throw new Error("Rewind environment unavailable"); }
+		if (!env?.restore || !env.hasPoint || !(env.keepsPoints?.(this.projectOf(s)) ?? env.points)) { s.suspended = true; throw new Error("Rewind environment unavailable"); }
 		const verify = async (point: string) => {
 			try {
 				if (!await env.hasPoint!(point)) throw new Error("Cannot verify ownership of rewind point");
@@ -1382,7 +1382,7 @@ export class Harness {
 			limited = await this.tenantBudgetReached(s);
 			if (!limited && !signal.aborted) {
 				const env = await this.environmentFor(s);
-				if (env?.points && env.save) point = await env.save();
+				if (env?.save && (env.keepsPoints?.(this.projectOf(s)) ?? env.points)) point = await env.save();
 				contributions = await this.hooks.collect("turn.before", { sessionId: s.id, turnId, input: queued.content });
 			}
 		} catch (error) { failure = String(error); }
@@ -1822,7 +1822,7 @@ export class Harness {
 		if (!allowed()) return refused();
 		const env = await this.environmentFor(s);
 		const safeToRepeat = found.definition.hints?.safeToRepeat === true && env?.containment === "strong";
-		const point = !nested && !turnId && env?.points && env.save ? await env.save() : undefined;
+		const point = !nested && !turnId && env?.save && (env.keepsPoints?.(this.projectOf(s)) ?? env.points) ? await env.save() : undefined;
 		const eligible = (current: ReturnType<Harness["findTool"]>) => allowed() && !s.erasing && !s.suspended &&
 			sameRegistration(current, found) && (!nested || nested.approval === s.settings.approval);
 		if (!eligible(this.findTool(s, call.name))) return refused();
@@ -2471,7 +2471,7 @@ export class Harness {
 			inputDuringTurn: runtime?.supports.inputDuringTurn === true,
 			waitingThroughRestart: runtime?.supports.waitingThroughRestart === true && !!store && !s?.ephemeral,
 			continuesAfterRestart: runtime?.supports.continuesAfterRestart === true,
-			rewinding: this.use<WorkingEnvironment>("working-environment")?.points === true,
+			rewinding: env?.keepsPoints?.(s ? this.projectOf(s) : this.project) ?? env?.points === true,
 			forking: !!store,
 			keepsStateAtProvider: provider?.supports.keepsState === true,
 			runsToolsAtProvider: provider?.supports.runsTools === true,

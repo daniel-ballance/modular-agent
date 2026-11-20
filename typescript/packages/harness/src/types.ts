@@ -285,6 +285,8 @@ export interface WorkingEnvironment {
 	/** This part needs a state directory that survives agent restart. */
 	requiresDataDir?: boolean;
 	points?: boolean;
+	/** Whether points are available in a specific project; defaults to points. */
+	keepsPoints?(project: string): boolean;
 	save?(): Promise<string>;
 	/** Check a point without touching project files, if the environment can. */
 	hasPoint?(point: string): Promise<boolean>;

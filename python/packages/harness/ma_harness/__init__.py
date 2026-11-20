@@ -778,11 +778,11 @@ class Harness(Authority):
                 # A failed output gate or recipient can never expose ungated output.
                 continue
 
-    def declarations(self):
+    def declarations(self, project=None):
         active = {
             self.capabilities[k][0] for k in ("runtime", "environment") if k in self.capabilities
         }
-        return {
+        parts = {
             name: p.declarations
             for name, p in sorted(self.plugins.items(), key=lambda pair: pair[0] not in active)
             if name in active
@@ -791,6 +791,13 @@ class Harness(Authority):
                 "parallel_tools" in p.declarations or "stops_commands_on_crash" in p.declarations
             )
         }
+        if project is not None and "environment" in self.capabilities:
+            name, environment = self.capabilities["environment"]
+            # Remote services synthesize RPC methods via __getattr__; only a real
+            # local method can override the static wire declaration here.
+            if name in parts and (keeps_points := getattr(type(environment), "keeps_points", None)):
+                parts[name] = {**parts[name], "rewind": keeps_points(environment, project)}
+        return parts
 
     async def handle(self, op, d, emit):
         if op == "writer_lost":
@@ -1025,7 +1032,7 @@ class Harness(Authority):
             if s.get("busy"):
                 raise AgentError("Cannot move during a turn", "busy")
             if d.get("rewind"):
-                if not any(p.get("rewind") for p in self.declarations().values()):
+                if not any(p.get("rewind") for p in self.declarations(s["project"]).values()):
                     raise AgentError("Working environment does not support rewind", "not_supported")
                 if any(
                     x["id"] != sid and x["project"] == s["project"] for x in self.sessions.values()
@@ -1371,5 +1378,5 @@ class Harness(Authority):
             del self.sessions[sid]
             return {}
         if op == "declaration":
-            return self.declarations()
+            return self.declarations(s["project"])
         raise AgentError("Unknown session operation: " + op)

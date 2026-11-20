@@ -12,16 +12,16 @@ import (
 
 var errRewindUnresolved = errors.New("project has an unresolved rewind; reopen the rewinding session to recover")
 
-func (c *client) environmentPoints() (api.EnvironmentPoints, bool) {
+func (c *client) environmentPoints(project string) (api.EnvironmentPoints, bool) {
 	env, err := c.Get("working-environment")
 	if err != nil {
 		return nil, false
 	}
-	return api.Points(env.(api.WorkingEnvironment))
+	return api.PointsFor(env.(api.WorkingEnvironment), project)
 }
 
 func (p *turnPorts) savePoint(ctx context.Context) (string, error) {
-	points, ok := p.c.environmentPoints()
+	points, ok := p.c.environmentPoints(p.s.project)
 	if !ok {
 		return "", nil
 	}
@@ -115,7 +115,7 @@ func (c *client) clearRewind(s *session) {
 }
 
 func (c *client) rewindLocked(ctx context.Context, s *session, target string, later []api.Entry, outside *[]string) error {
-	points, ok := c.environmentPoints()
+	points, ok := c.environmentPoints(s.project)
 	if !ok {
 		return errors.New("rewind refused: working environment does not support saved points")
 	}
@@ -305,7 +305,7 @@ func (c *client) recoverRewind(ctx context.Context, s *session) error {
 	if c.otherProjectSession(s) {
 		return errors.New("rewind recovery refused: another session uses the project")
 	}
-	points, ok := c.environmentPoints()
+	points, ok := c.environmentPoints(s.project)
 	if !ok {
 		return errors.New("rewind recovery: working environment does not support saved points")
 	}
