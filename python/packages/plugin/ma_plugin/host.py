@@ -89,12 +89,6 @@ class Provider:
                 content=response_in(r)["content"],
                 data=response_in(r),
             )
-        if r["stop"] == "failed":
-            error = r.get("error") or {"kind": "other", "message": "Model failed"}
-            raise AgentError(
-                error["message"],
-                {"contextTooLarge": "context_too_large"}.get(error["kind"], error["kind"]),
-            )
         return response_in(r)
 
     async def discard(self, d, emit):
@@ -388,7 +382,8 @@ class External(Plugin):
     async def invalidate(self, d):
         if d.get("reason") != "erasure":
             for provider in self.registration.get("providers", []):
-                await Provider(self, provider).discard(d, silent)
+                if provider.get("supports", {}).get("keepsState"):
+                    await Provider(self, provider).discard(d, silent)
 
     async def cancel_job(self, d, emit):
         await self.request("jobs/cancel", {"jobId": d["job"]}, d)
