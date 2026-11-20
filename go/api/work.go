@@ -104,9 +104,6 @@ type StagedCredentials interface {
 }
 
 type SecretDestination interface{ CanStore(string) bool }
-type SecretWriter interface {
-	Put(context.Context, string, string) error
-}
 type Job struct {
 	ID, Key, Session, Turn, Call, Actor, Owner, Kind, State string
 	StartEntry                                              string

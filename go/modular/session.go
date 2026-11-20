@@ -25,7 +25,7 @@ func (s *Session) ctx(ctx context.Context) context.Context {
 	if s.actorID() != localActor {
 		return api.WithActingVia(ctx, localActor)
 	}
-	return ctx
+	return api.WithActingVia(ctx, "")
 }
 
 type Disposition string
@@ -533,9 +533,6 @@ func (s *Session) RunCommand(ctx context.Context, line string) (string, error) {
 	}
 	if !slices.Contains(commands, fields[0]) {
 		return "", &Error{Code: NotFound, Message: "command is not registered"}
-	}
-	if s.actorID() != localActor {
-		return "", &Error{Code: NotSupported, Message: "commands do not carry delegated authority"}
 	}
 	text, err := s.agent.a.Command(s.ctx(ctx), s.id, line)
 	return text, appError(err, Lost)

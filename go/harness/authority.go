@@ -26,7 +26,7 @@ func (c *client) Authorize(id, who, right string) bool {
 }
 
 func (c *client) authorized(snap api.Session, who, right string) bool {
-	if snap.Limit != nil && !slices.Contains(*snap.Limit, right) {
+	if snap.Limit != nil && right != "administer" && !slices.Contains(*snap.Limit, right) {
 		return false
 	}
 	if snap.Tenant != "" {
@@ -63,11 +63,11 @@ func (c *client) Grant(ctx context.Context, id string, actor api.Actor) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !c.authorizedBy(s.data, ctx, "grant") || actor.ID == "" {
-		return errors.New("authority grant refused")
+		return api.ErrAuthority
 	}
 	for _, r := range actor.Rights {
 		if slices.Contains(api.Rights, r) && !c.authorizedBy(s.data, ctx, r) {
-			return errors.New("authority cannot widen")
+			return api.ErrAuthority
 		}
 	}
 	return s.joinActorLocked(who, actor, c.owner)

@@ -64,16 +64,20 @@ func (s *Stages) Activate(answers map[string]string, receipt api.SecretReceipt) 
 	if s.Generations[name] != v.Generation || present != (v.Baseline != nil) || (present && current != *v.Baseline) {
 		v.Decision = api.SecretSuperseded
 	} else {
-		if s.Generations == nil {
-			s.Generations = make(map[string]uint64)
-		}
-		s.Generations[name]++
+		s.advance(name)
 		answers[name] = v.Value
 		v.Decision = api.SecretActivated
 	}
 	v.Value, v.Baseline = "", nil
 	s.set(receipt.Session, receipt.Request, v)
 	return v.Decision, nil
+}
+
+func (s *Stages) advance(name string) {
+	if s.Generations == nil {
+		s.Generations = make(map[string]uint64)
+	}
+	s.Generations[name]++
 }
 
 func (s *Stages) Discard(session, request string) {

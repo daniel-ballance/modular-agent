@@ -381,9 +381,9 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 		return "", err
 	}
 	s.mu.Lock()
-	if !c.authorized(s.data, api.Acting(ctx), "input") {
+	if !c.authorizedBy(s.data, ctx, "input") {
 		s.mu.Unlock()
-		return "", errors.New("command authority refused")
+		return "", api.ErrAuthority
 	}
 	if s.rewindBlocked {
 		s.mu.Unlock()

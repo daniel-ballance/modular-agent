@@ -470,9 +470,17 @@ func (a *Agent) Session(ctx context.Context, options ...SessionOptions) (*Sessio
 		return nil, &Error{Code: InvalidRequest, Message: "model is not offered"}
 	}
 	var initial []api.Actor
+	seen := make(map[string]bool)
 	for _, actor := range opt.Actors {
 		if err := validActor(actor); err != nil {
 			return nil, err
+		}
+		if seen[actor.ID] {
+			return nil, &Error{Code: InvalidParams, Message: "duplicate initial actor"}
+		}
+		seen[actor.ID] = true
+		if actor.ID == localActor && !slices.Contains(actor.Rights, "input") {
+			return nil, &Error{Code: Forbidden, Message: "the local actor requires input to create a session"}
 		}
 		initial = append(initial, copyActor(actor))
 	}

@@ -11,12 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 )
 
 type File struct {
 	Path string
-	mu   sync.Mutex
 }
 
 func (f *File) CanStore(name string) bool { return f.Path != "" && name != "" && name != "anthropic" }
@@ -32,11 +30,14 @@ func (f *File) Get(ctx context.Context, name string) (string, error) {
 		return "", err
 	}
 	if name != "anthropic" {
-		f.mu.Lock()
-		defer f.mu.Unlock()
 		if f.Path == "" {
 			return "", errors.New("credential store unavailable")
 		}
+		value, err := f.answers().Get(ctx, name)
+		if err != nil || value != "" {
+			return value, err
+		}
+		// A previous build kept named answers as separate private files.
 		b, err := os.ReadFile(f.secretPath(name))
 		if err != nil {
 			return "", errors.New("credential not found")

@@ -3,49 +3,45 @@ package credentials
 import (
 	"context"
 	"errors"
-	"os"
+	"path/filepath"
+
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
+func (f *File) answers() Store { return JSONStore(filepath.Join(f.Path+".d", "answers.json")) }
+
 func (f *File) Put(ctx context.Context, name, value string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if name == "" || name == "anthropic" || f.Path == "" {
+	if !f.CanStore(name) {
 		return errors.New("credential destination unavailable or reserved")
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	dir := f.Path + ".d"
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return errors.New("credential store unavailable")
+	return f.answers().Update(ctx, func(s *Stages, answers map[string]string) (bool, error) {
+		s.advance(name)
+		answers[name] = value
+		return true, nil
+	})
+}
+
+func (f *File) Stage(ctx context.Context, session, request, name, actor, value string) (api.SecretReceipt, error) {
+	if !f.CanStore(name) {
+		return api.SecretReceipt{}, errors.New("credential destination unavailable or reserved")
 	}
-	file, err := os.CreateTemp(dir, ".secret-")
-	if err != nil {
-		return errors.New("credential store unavailable")
+	return f.answers().Stage(ctx, session, request, name, actor, value)
+}
+func (f *File) LookupStaged(ctx context.Context, session, request string) (api.SecretReceipt, bool, error) {
+	if f.Path == "" {
+		return api.SecretReceipt{}, false, nil
 	}
-	defer os.Remove(file.Name())
-	_, err = file.WriteString(value)
-	if err == nil {
-		err = file.Sync()
+	return f.answers().LookupStaged(ctx, session, request)
+}
+func (f *File) Activate(ctx context.Context, receipt api.SecretReceipt) (api.SecretDecision, error) {
+	if !f.CanStore(receipt.Name) {
+		return "", errors.New("credential destination unavailable or reserved")
 	}
-	closeErr := file.Close()
-	if err == nil {
-		err = closeErr
+	return f.answers().Activate(ctx, receipt)
+}
+func (f *File) Discard(ctx context.Context, session, request string) error {
+	if f.Path == "" {
+		return nil
 	}
-	if err == nil {
-		err = os.Rename(file.Name(), f.secretPath(name))
-	}
-	if err == nil {
-		d, e := os.Open(dir)
-		if e == nil {
-			err = d.Sync()
-			_ = d.Close()
-		} else {
-			err = e
-		}
-	}
-	if err != nil {
-		return errors.New("credential write failed")
-	}
-	return nil
+	return f.answers().Discard(ctx, session, request)
 }

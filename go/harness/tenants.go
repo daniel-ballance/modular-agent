@@ -70,12 +70,9 @@ func (c *client) Limit(ctx context.Context, id string, rights []string) error {
 		check = api.Rights
 	}
 	for _, r := range check {
-		if !c.authorizedBy(uncapped, ctx, r) {
+		if slices.Contains(api.Rights, r) && !c.authorizedBy(uncapped, ctx, r) {
 			return api.ErrAuthority
 		}
-	}
-	if rights != nil && !slices.Contains(rights, "administer") {
-		rights = append(slices.Clone(rights), "administer")
 	}
 	next := s.data
 	next.Limit = nil

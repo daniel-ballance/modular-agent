@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 
+	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 )
@@ -52,6 +53,8 @@ func appError(err error, fallback Code) error {
 		return sdk
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		fallback = CancelledCode
+	case errors.Is(err, api.ErrAuthority), errors.Is(err, api.ErrTenantForbidden):
+		fallback = Forbidden
 	case errors.Is(err, fs.ErrNotExist):
 		fallback = NotFound
 	case errors.As(err, &remote) && remote.Code != "":

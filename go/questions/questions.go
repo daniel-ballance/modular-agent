@@ -172,7 +172,7 @@ func (m *Manager) List(id string) ([]api.Question, error) {
 	var out []api.Question
 	for _, st := range states(s) {
 		q := st.q.Question
-		q.Answerable = !st.closed && st.answer == nil
+		q.Answerable = !st.closed && st.answer == nil && st.selected == ""
 		out = append(out, q)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -204,16 +204,14 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 	}
 	if q.Kind == "secret" {
 		v, e := m.a.Get("credentials")
-		if e != nil || q.Credential == "" || q.Credential == "anthropic" {
+		if e != nil || q.Credential == "" {
 			return api.Answer{Declined: true, Reason: "secret destination unavailable"}, nil
 		}
 		if _, err := m.a.Get("provider." + q.Credential); err == nil {
 			return api.Answer{Declined: true, Reason: "secret destination unavailable"}, nil
 		}
 		if _, staged := v.(api.StagedCredentials); !staged {
-			if _, legacy := v.(api.SecretWriter); !legacy {
-				return api.Answer{Declined: true, Reason: "credential store is read-only"}, nil
-			}
+			return api.Answer{Declined: true, Reason: "credential store is read-only"}, nil
 		}
 		if d, ok := v.(api.SecretDestination); ok && !d.CanStore(q.Credential) {
 			return api.Answer{Declined: true, Reason: "secret destination unavailable"}, nil
@@ -513,16 +511,8 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 				a.Value, a.Stored = q.Credential, q.Credential
 			}
 		} else {
-			w, ok := v.(api.SecretWriter)
-			if !ok {
-				m.mu.Unlock()
-				return errors.New("credential store read-only")
-			}
-			if e = w.Put(ctx, q.Credential, a.Value); e != nil {
-				m.mu.Unlock()
-				return errors.New("secret was not stored")
-			}
-			a.Value, a.Stored = q.Credential, q.Credential
+			m.mu.Unlock()
+			return errors.New("credential store read-only")
 		}
 	}
 	if a.Declined {

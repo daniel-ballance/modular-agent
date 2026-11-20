@@ -126,9 +126,16 @@ func TestActorCommandsCannotBorrowOwnerAuthority(t *testing.T) {
 type badStore struct{}
 
 func (badStore) Get(context.Context, string) (string, error) { return "", errors.New("missing") }
-func (badStore) Put(_ context.Context, _, value string) error {
-	return fmt.Errorf("do not expose %s", value)
+func (badStore) Stage(_ context.Context, _, _, _, _, value string) (api.SecretReceipt, error) {
+	return api.SecretReceipt{}, fmt.Errorf("do not expose %s", value)
 }
+func (badStore) LookupStaged(context.Context, string, string) (api.SecretReceipt, bool, error) {
+	return api.SecretReceipt{}, false, nil
+}
+func (badStore) Activate(context.Context, api.SecretReceipt) (api.SecretDecision, error) {
+	return "", errors.New("unexpected activation")
+}
+func (badStore) Discard(context.Context, string, string) error { return nil }
 func TestSecretDestinationRefusedBeforeAskAndWriteErrorsDoNotLeak(t *testing.T) {
 	runtimetest.Each(t, func(t *testing.T) {
 		for _, bad := range []bool{false, true} {

@@ -70,6 +70,9 @@ func (s *Session) As(actorID string) (*Session, error) {
 	if actorID != localActor && !s.agent.severalActors {
 		return nil, &Error{Code: NotSupported, Message: "several actors disabled"}
 	}
+	if s.actorID() != localActor && actorID != s.actorID() {
+		return nil, &Error{Code: Forbidden, Message: "an actor view cannot change its identity"}
+	}
 	snap, err := s.agent.a.Snapshot(s.id)
 	if err != nil {
 		return nil, appError(err, NotOpen)
