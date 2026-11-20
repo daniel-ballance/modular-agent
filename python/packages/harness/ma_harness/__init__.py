@@ -13,7 +13,7 @@ from .output import gate
 class Harness(Authority):
     MAX_TOOL_DEPTH = 4
 
-    def __init__(self, admin=None, tenant=None, process_plugins=None):
+    def __init__(self, admin=None, tenant=None, process_plugins=None, *, tenants=None):
         import os
 
         placement = (
@@ -24,7 +24,11 @@ class Harness(Authority):
         )
         self.admin = set(PERMISSIONS if admin is None else admin)
         self.tenant = set(PERMISSIONS if tenant is None else tenant)
-        self.tenants = read_tenants(os.getenv("MODULAR_AGENT_TENANTS", "{}"))
+        self.tenants = (
+            read_tenants(os.getenv("MODULAR_AGENT_TENANTS", "{}"))
+            if tenants is None
+            else read_tenants(__import__("json").dumps(tenants))
+        )
         self.plugins = {}
         self.capabilities = {}
         self.hooks = {}
@@ -597,8 +601,11 @@ class Harness(Authority):
         # An entry may attribute an effect to a historical actor who has left.
         s = self._session(d, check_actor=False)
         sid = s["id"]
-        if d["kind"] in {"question_answer", "question_closed"} and any(
-            entry["kind"] in {"question_answer", "question_closed"}
+        if d["kind"] in {"question_answer", "question_closed", "secret_answer_accepted"} and any(
+            (
+                entry["kind"] in {"question_answer", "question_closed"}
+                or (entry["kind"] == "secret_answer_accepted" and not d["data"].get("activation"))
+            )
             and entry["data"]["request"] == d["data"]["request"]
             for entry in s["entries"]
         ):
@@ -800,6 +807,9 @@ class Harness(Authority):
         return parts
 
     async def handle(self, op, d, emit):
+        if op == "credential_names":
+            selection = self.capabilities.get("selection")
+            return sorted(selection[1].providers) if selection else []
         if op == "writer_lost":
             sid = d["session"]
             if sid in self.sessions:
@@ -980,6 +990,14 @@ class Harness(Authority):
             tokens = (await self.tenant_info(s))["tokens"]
             return tokens is not None and tokens["used"] >= tokens["budget"]
         if op == "limit":
+            actor = d.get("actor", s["actor"])
+            requested = PERMISSIONS if d["rights"] is None else set(d["rights"]) & PERMISSIONS
+            unbounded = {**s, "limit": None}
+            ceiling = self.permissions(unbounded, actor)
+            if represented_by := d.get("acting_for"):
+                ceiling &= self.permissions(unbounded, represented_by)
+            if "administer" not in ceiling or not requested <= ceiling:
+                raise AgentError("Session limit exceeds administrator rights", "forbidden")
             return await self.handle(
                 "append",
                 {

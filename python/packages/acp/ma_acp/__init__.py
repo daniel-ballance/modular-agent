@@ -1213,7 +1213,9 @@ class ACP(Plugin):
                         "actor": params.get("actorId", self.actor),
                         "authority": await self.api.session("authority", **base),
                         "request": params["requestId"],
-                        "value": "declined" if params.get("declined") else params.get("value"),
+                        "value": params.get("value"),
+                        "declined": params.get("declined", False),
+                        "reason": params.get("reason"),
                     },
                 )
             except AgentError as exc:

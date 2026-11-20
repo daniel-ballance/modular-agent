@@ -1,44 +1,50 @@
-"""Bridge a credential store to the question and Provider lifecycles."""
+"""Credential stores and the authorized secret-answer path."""
 
+import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ma_core import AgentError, Plugin
-from ma_credentials import Credentials
+from ma_core import AgentError
+from ma_credentials import StagedCredentials
+from ma_credentials.staging import StagedFile
 
 
 @dataclass(frozen=True)
 class CredentialStore:
-    """Read a named secret and persist an accepted answer, without returning its value."""
+    """Read credentials. Secret answers require all four staging operations."""
 
     read: Callable[[str], str | None]
-    write_answer: Callable[[str, str], Awaitable[None]]
+    stage: Callable[[str, str, str, str, str], Awaitable[dict[str, str]]] | None = None
+    lookup_staged: Callable[[str, str], Awaitable[dict[str, str] | None]] | None = None
+    activate: Callable[[str, str], Awaitable[str]] | None = None
+    discard: Callable[[str, str], Awaitable[None]] | None = None
 
 
-class _CredentialAdapter(Credentials):  # type: ignore[misc]  # Untyped base adapter.
+def environment_credentials() -> CredentialStore:
+    return CredentialStore(lambda name: os.getenv(name.upper().replace("-", "_") + "_API_KEY"))
+
+
+def file_credentials(path: str | os.PathLike[str]) -> CredentialStore:
+    """Read and stage named answers in an owner-only JSON file."""
+    file = StagedFile(path)
+    return CredentialStore(file.read, file.stage, file.lookup_staged, file.activate, file.discard)
+
+
+class _CredentialAdapter(StagedCredentials):  # type: ignore[misc]  # Untyped base adapter.
     def __init__(self, store: CredentialStore) -> None:
-        import asyncio
-
         self.store = store
         self.intake = asyncio.Lock()
-
-    async def start(self, api: Any) -> None:
-        await Plugin.start(self, api)
-        api.provide("credentials", self)
-
-    async def answer(self, d: dict[str, Any], emit: Any) -> Any:
-        async with self.intake:
-            identity = {k: d[k] for k in ("session", "request", "actor")}
-            q = await self.api.call("questions", "validate", identity)
-            name, value = q.get("name"), d.get("value")
-            if q["kind"] != "secret" or not isinstance(name, str) or not isinstance(value, str):
-                raise AgentError("Invalid secret intake", "invalid_request")
-            try:
-                await self.store.write_answer(name, value)
-            except Exception:
-                raise AgentError("Credential could not be stored", "credentials") from None
-            return await self.api.call("questions", "record_secret", {**identity, "name": name})
+        self.declarations = {
+            "stores_secrets": all(
+                op is not None
+                for op in (store.stage, store.lookup_staged, store.activate, store.discard)
+            )
+        }
 
     async def get(self, d: dict[str, Any], emit: Any) -> str | None:
-        return self.store.read(d["name"])
+        try:
+            return self.store.read(d["name"])
+        except Exception:
+            raise AgentError("Credential could not be read", "credentials") from None

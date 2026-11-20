@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Awaitable, Callable, Coroutine, Generator, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Generator, Mapping, Sequence
 from contextvars import ContextVar, Token
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -38,7 +38,7 @@ from ma_selection import Selection
 
 from .compaction import _CompactionPlugin
 from .mcp import _McpPlugin
-from ._credentials import CredentialStore, _CredentialAdapter
+from ._credentials import CredentialStore, _CredentialAdapter, environment_credentials
 from ._environment import MemoryEnvironment
 from ._history import HistoryStore
 from ._native import (
@@ -55,6 +55,7 @@ from ._serve import _MemoryExternal, _OverWire
 from ._session import Session, _events
 from ._tool import Tool
 from ._types import (
+    Actor,
     AgentError,
     Answer,
     Approval,
@@ -63,6 +64,7 @@ from ._types import (
     JsonObject,
     ModelRef,
     QuestionHandler,
+    Tenant,
 )
 
 
@@ -282,7 +284,10 @@ class Agent:
         self._plugin_host = False
         self._conformance = False
         self._late_answers = False
-        self._credentials: CredentialStore | None = None
+        self._several_actors = False
+        self._session_limits = False
+        self._tenants = False
+        self._credentials: CredentialStore = environment_credentials()
         self._restart: Callable[[], Awaitable[Agent]] | None = None
         self._memory_store: _MemoryHistory | None = None
 
@@ -290,6 +295,8 @@ class Agent:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         try:
+            if "actor" in data and operation != "append":
+                await self._h.authorize("@harness", operation, data)
             return await self._api.session(operation, **data)
         except Exception as exc:
             raise _error(exc) from exc
@@ -298,6 +305,8 @@ class Agent:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         try:
+            if "actor" in data:
+                await self._h.authorize(target, operation, data)
             return await self._api.call(target, operation, data)
         except Exception as exc:
             raise _error(exc) from exc
@@ -325,7 +334,9 @@ class Agent:
             "questions", "connect" if handler else "disconnect", session=sid, actor="user"
         )
 
-    async def _answer(self, sid: str, question_id: str, answer: Answer) -> None:
+    async def _answer(
+        self, sid: str, question_id: str, answer: Answer, actor: str = "user"
+    ) -> None:
         value = (
             "allow"
             if answer.kind == "allow"
@@ -333,17 +344,30 @@ class Agent:
             if answer.kind == "value"
             else "declined"
         )
-        if answer.kind == "value" and self._credentials is not None:
-            question = await self._call(
-                "questions", "validate", session=sid, actor="user", request=question_id
-            )
+        acting = {"acting_for": "user"} if actor != "user" else {}
+        if answer.kind == "value" and self._credentials.stage is not None:
+            try:
+                question = await self._h.call(
+                    "embedding",
+                    "questions",
+                    "validate",
+                    {"session": sid, "actor": actor, "request": question_id, **acting},
+                )
+            except Exception as exc:
+                raise _error(exc) from exc
             if question["kind"] == "secret":
                 try:
                     await self._h.call(
                         "embedding",
                         "credentials",
                         "answer",
-                        {"session": sid, "actor": "user", "request": question_id, "value": value},
+                        {
+                            "session": sid,
+                            "actor": actor,
+                            "request": question_id,
+                            "value": value,
+                            **acting,
+                        },
                     )
                 except Exception as exc:
                     raise _error(exc) from None
@@ -352,9 +376,11 @@ class Agent:
             "questions",
             "answer",
             session=sid,
-            actor="user",
+            actor=actor,
             request=question_id,
             value=value,
+            declined=answer.kind == "decline",
+            **acting,
             reason=answer.reason,
         )
 
@@ -392,10 +418,29 @@ class Agent:
 
             self._question_tasks[key] = asyncio.create_task(answer())
 
-    async def session(self, *, settings: JsonObject | None = None) -> Session:
+    async def session(
+        self,
+        *,
+        settings: JsonObject | None = None,
+        tenant: str | None = None,
+        actors: Sequence[Actor] = (),
+    ) -> Session:
+        if tenant is not None and not self._tenants:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Tenants are not enabled")
+        if actors and not self._several_actors:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Several actors are not enabled")
         async with self._lock:
             defaults = {**self._settings, **settings_in(settings or {})}
-            data = await self._session("create", project=str(self._project), settings=defaults)
+            data = await self._session(
+                "create", project=str(self._project), settings=defaults, tenant=tenant
+            )
+            session = self._attach(data["id"])
+            try:
+                for actor in actors:
+                    await session.join(actor)
+            except BaseException:
+                await session.close()
+                raise
             # Persist empty sessions too; lazy setup writes the actor and settings with this entry.
             await self._session(
                 "append",
@@ -482,9 +527,9 @@ class Agent:
                 value["waitingThroughRestart"] and self._late_answers and "questions" in parts
             ),
             mixedActorInput="refused",
-            severalActors=False,
-            sessionLimits=False,
-            tenants=False,
+            severalActors=self._several_actors,
+            sessionLimits=self._session_limits,
+            tenants=self._tenants,
             questionsOutlastTurns=bool(
                 self._late_answers and runtime.get("open_calls") and "questions" in parts
             ),
@@ -652,6 +697,9 @@ def create_agent(
     local_process_groups: bool = False,
     commands: bool = False,
     conformance: bool = False,
+    several_actors: bool = False,
+    session_limits: bool = False,
+    tenants: Mapping[str, Tenant] | None = None,
     job_reports_start_turns: bool = False,
     late_answers_start_turns: bool = False,
 ) -> AgentStart:
@@ -683,7 +731,7 @@ def create_agent(
                 ErrorCode.INVALID_COMPOSITION, "process_plugins requires a plugin host"
             )
         scratch = TemporaryDirectory(prefix="modular-agent-")
-        h = Harness(process_plugins=())
+        h = Harness(process_plugins=(), tenants=tenants or {})
         h.lazy_setup = True
         try:
             root = Path(data_dir).resolve() if data_dir is not None else Path(scratch.name)
@@ -718,6 +766,9 @@ def create_agent(
             await h.load(dispatcher)
             agent._conformance = conformance
             agent._late_answers = late_answers_start_turns
+            agent._several_actors = several_actors
+            agent._session_limits = session_limits
+            agent._tenants = tenants is not None
             await h.load(
                 _SdkDurable(job_reports_start_turns)
                 if durability == "durable"
@@ -733,17 +784,19 @@ def create_agent(
             if conformance:
                 await h.load(Echo())
                 await h.load(Nest())
-            await h.load(Questions() if conformance else _Questions())
-            if credentials is not None:
-                agent._credentials = credentials
-                await h.load(_CredentialAdapter(credentials))
+            questions = Questions() if conformance else _Questions()
+            questions.wait_for_unconnected = not conformance
+            await h.load(questions)
+            agent._credentials = credentials or environment_credentials()
+            await h.load(_CredentialAdapter(agent._credentials))
             h.on("embedding", "session.start", agent._present, "first")
             h.follow("embedding", "user", agent._event)
             for provider in providers:
                 await h.load(_ProviderAdapter(provider, credentials))
-            await h.load(
-                Selection([p.id for p in providers] + (["conformance"] if conformance else []))
+            selection = Selection(
+                [p.id for p in providers] + (["conformance"] if conformance else [])
             )
+            await h.load(selection)
             compaction_parts = [p for p in plugins if isinstance(p, _CompactionPlugin)]
             mcp_parts = [p for p in plugins if isinstance(p, _McpPlugin)]
             if len(compaction_parts) > 1 or len(mcp_parts) > 1:
@@ -779,6 +832,17 @@ def create_agent(
                             raise AgentError(
                                 ErrorCode.NOT_SUPPORTED, f"Unsupported hook: {hook.point}"
                             )
+                    for provider in registrar._providers.values():
+                        prior_provider = h.capabilities.get(provider.id)
+                        if prior_provider is not None:
+                            if (
+                                f"provider:{provider.id}" not in plugin.replaces
+                                or prior_provider[1].role != "provider"
+                            ):
+                                raise ValueError(f"Duplicate Provider: {provider.id}")
+                            await h.unload(prior_provider[0])
+                        await h.load(_ProviderAdapter(provider, agent._credentials))
+                        await selection.add_provider({"provider": provider.id}, None)
                     for tool_name in registrar._tools:
                         if (prior := registered_tools.get(tool_name)) is not None:
                             if f"tool:{tool_name}" not in plugin.replaces:

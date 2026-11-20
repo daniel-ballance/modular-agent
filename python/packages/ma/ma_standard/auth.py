@@ -104,7 +104,7 @@ class AuthFile:
         async with self._locked():
             logins, answers = self._read()
             answers[name] = value
-            self._write(logins, answers)
+            self._write(logins, answers, changed_answer=name)
 
     @asynccontextmanager
     async def _locked(self) -> AsyncIterator[None]:
@@ -121,7 +121,22 @@ class AuthFile:
         finally:
             os.close(lock)
 
-    def _write(self, logins: dict[str, Login], answers: dict[str, str]) -> None:
+    def _write(
+        self,
+        logins: dict[str, Login],
+        answers: dict[str, str],
+        *,
+        changed_answer: str | None = None,
+    ) -> None:
+        doc = read_object(self.path)
+        if changed_answer is not None:
+            generations = doc.setdefault("generations", {})
+            if not isinstance(generations, dict):
+                raise ValueError("Invalid credential generations")
+            generation = generations.get(changed_answer, 0)
+            if not isinstance(generation, int):
+                raise ValueError("Invalid credential generation")
+            generations[changed_answer] = generation + 1
         temp: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -136,6 +151,7 @@ class AuthFile:
                 os.fchmod(f.fileno(), 0o600)
                 json.dump(
                     {
+                        **doc,
                         "logins": {name: logins[name].wire() for name in sorted(logins)},
                         "answers": dict(sorted(answers.items())),
                     },

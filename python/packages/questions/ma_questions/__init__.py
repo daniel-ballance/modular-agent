@@ -40,6 +40,7 @@ class Questions(Plugin):
     def __init__(self):
         self.connected = {}
         self.signals = {}
+        self.wait_for_unconnected = False
 
     async def start(self, api):
         await super().start(api)
@@ -70,7 +71,10 @@ class Questions(Plugin):
             if (
                 not q.get("answer")
                 and not q.get("closed")
-                and (q["kind"] == "approval" or q.get("timeout") is None)
+                and (
+                    q["kind"] == "approval"
+                    or (q.get("timeout") is None and not self.wait_for_unconnected)
+                )
             ):
                 if not any(
                     [await self._eligible(sid, q, a) for a in self.connected.get(sid, set())]
@@ -86,10 +90,13 @@ class Questions(Plugin):
             if e["kind"] == "question_open"
         }
         for e in es:
-            if e["kind"] in {"question_answer", "question_closed"}:
-                q = requests.get(e["data"]["request"])
-                if q:
-                    q["answer" if e["kind"] == "question_answer" else "closed"] = e["data"]
+            state = {
+                "question_answer": "answer",
+                "question_closed": "closed",
+                "secret_answer_accepted": "selected",
+            }.get(e["kind"])
+            if state and (q := requests.get(e["data"]["request"])):
+                q[state] = e["data"]
         return requests
 
     async def _eligible(self, sid, q, actor, ceiling=None):
@@ -106,6 +113,7 @@ class Questions(Plugin):
                 **q,
                 "answerable": "answer" not in q
                 and "closed" not in q
+                and "selected" not in q
                 and (
                     not d.get("recipientView")
                     or "actor" not in d
@@ -168,7 +176,7 @@ class Questions(Plugin):
         s = await self.api.session("get", session=sid)
         actor = d.get("actor", s["actor"])
         kind = d.get("kind", "text")
-        if kind not in {"approval", "choice", "text", "secret"}:
+        if kind not in {"approval", "choice", "text", "link", "secret"}:
             raise AgentError("Unknown question kind")
         if kind == "choice" and not d.get("options"):
             raise AgentError("A choice needs options")
@@ -177,6 +185,7 @@ class Questions(Plugin):
             if (
                 not d.get("name")
                 or d["name"] == "claude_login"
+                or d["name"] in await self.api.session("credential_names")
                 or not any(p.get("stores_secrets") for p in declarations.values())
             ):
                 return None
@@ -188,6 +197,7 @@ class Questions(Plugin):
             "options": ["allow", "refuse"] if kind == "approval" else d.get("options", []),
             "name": d.get("name"),
             "binding": d.get("binding"),
+            **({"details": d["details"]} if d.get("details") is not None else {}),
             **{k: d[k] for k in ("approval_call", "approval_registration") if k in d},
         }
         signature = json.dumps(details, sort_keys=True)
@@ -246,8 +256,9 @@ class Questions(Plugin):
             if parent is None:
                 await self._accept(sid, q, actor, "declined")
             elif parent.get("answer"):
-                await self._accept(sid, q, actor, parent["answer"]["value"])
-        elif kind == "approval" or d.get("timeout") is None:
+                answer = parent["answer"]
+                await self._accept(sid, q, actor, answer["value"], declined=answer.get("declined"))
+        elif kind == "approval" or (d.get("timeout") is None and not self.wait_for_unconnected):
             present = self.connected.get(sid, set())
             if not any([await self._eligible(sid, q, a) for a in present]):
                 await self._accept(
@@ -299,9 +310,16 @@ class Questions(Plugin):
 
     async def validate(self, d, emit):
         q = (await self._state(d["session"])).get(d["request"])
-        if not q or q.get("answer") or q.get("closed"):
-            raise AgentError("Question is closed or no longer answerable", "refused")
-        if not await self._eligible(d["session"], q, d["actor"], d.get("authority")):
+        if not q:
+            raise AgentError("Unknown question", "not_found")
+        if q.get("answer") or q.get("closed") or q.get("selected"):
+            raise AgentError("Question is closed or no longer answerable", "conflict")
+        ceiling = d.get("authority")
+        if acting := d.get("acting_for"):
+            ceiling = await self.api.session(
+                "authority", session=d["session"], actor=acting, ceiling=ceiling
+            )
+        if not await self._eligible(d["session"], q, d["actor"], ceiling):
             raise AgentError(
                 "Actor may see this question but lacks authority to answer it", "forbidden"
             )
@@ -309,37 +327,91 @@ class Questions(Plugin):
 
     async def answer(self, d, emit):
         q = await self.validate(d, emit)
-        if q["kind"] == "secret" and d.get("value") != "declined":
+        declined = d.get("declined", d.get("value") in (None, "declined"))
+        if q["kind"] == "secret" and not declined:
             raise AgentError("Secret answers must go directly to the credential store", "forbidden")
-        value = d.get("value") if d.get("value") is not None else "declined"
+        value = "declined" if declined else d.get("value")
         if not isinstance(value, str) or (
-            q["kind"] in {"approval", "choice"} and value not in [*q["options"], "declined"]
+            not declined and q["kind"] in {"approval", "choice"} and value not in q["options"]
         ):
-            raise AgentError("Answer is not one of the offered options")
-        accepted = await self._accept(d["session"], q, d["actor"], value, d.get("reason"))
+            raise AgentError("Answer is not one of the offered options", "invalid_request")
+        accepted = await self._accept(
+            d["session"],
+            q,
+            d["actor"],
+            value,
+            d.get("reason"),
+            declined=declined,
+            acting_for=d.get("acting_for"),
+        )
         if accepted is False:
             raise AgentError("Question is closed or no longer answerable", "refused")
         return {"accepted": True}
 
-    async def record_secret(self, d, emit):
+    async def select_secret(self, d, emit):
         if d.get("_caller_role") != "credential_store":
             raise AgentError("Only the credential store can confirm secret intake", "forbidden")
         q = await self.validate(d, emit)
         if q["kind"] != "secret" or q["name"] != d["name"]:
-            raise AgentError("Credential name does not match")
-        if not await self._accept(d["session"], q, d["actor"], {"credential": d["name"]}):
-            raise AgentError("Question is closed or no longer answerable", "refused")
-        return {"accepted": True, "credential": d["name"]}
+            raise AgentError("Credential name does not match", "invalid_request")
+        await self._record(
+            d["session"],
+            "secret_answer_accepted",
+            {
+                "request": q["id"],
+                "actor": d["actor"],
+                **{k: q[k] for k in ("call", "turn", "step") if q.get(k)},
+            },
+            d["actor"],
+        )
 
-    async def _accept(self, sid, q, actor, value, reason=None):
+    async def record_secret(self, d, emit):
+        if d.get("_caller_role") != "credential_store":
+            raise AgentError("Only the credential store can confirm secret intake", "forbidden")
+        sid = d["session"]
+        q = (await self._state(sid)).get(d["request"])
+        if not q or not q.get("selected"):
+            raise AgentError("Secret intake was not selected", "conflict")
+        superseded = d["decision"] == "superseded"
+        if not await self._accept(
+            sid,
+            q,
+            q["selected"]["actor"],
+            "declined" if superseded else {"credential": q["name"]},
+            "superseded" if superseded else None,
+            activation=True,
+        ):
+            raise AgentError("Question is closed or no longer answerable", "conflict")
+        return {"accepted": not superseded, **({"credential": q["name"]} if not superseded else {})}
+
+    async def discard_secret(self, d, emit):
+        if d.get("_caller_role") != "credential_store":
+            raise AgentError("Only the credential store can confirm secret intake", "forbidden")
+        q = (await self._state(d["session"])).get(d["request"])
+        if q and not q.get("selected"):
+            await self._close_question(d["session"], q)
+
+    async def _accept(
+        self, sid, q, actor, value, reason=None, *, declined=None, activation=False, acting_for=None
+    ):
         if q["kind"] == "approval" and value == "refuse":
-            value = "declined"
+            value, declined = "declined", True
+        if declined is None:
+            declined = value == "declined"
         current = (await self._state(sid)).get(q["id"])
-        if not current or current.get("answer") or current.get("closed"):
+        if (
+            not current
+            or current.get("answer")
+            or current.get("closed")
+            or (current.get("selected") and not activation)
+        ):
             return False
         answer = {
             "request": q["id"],
             "value": value,
+            "declined": declined,
+            **({"activation": True} if activation else {}),
+            **({"actingFor": acting_for} if acting_for else {}),
             "actor": actor,
             **({"reason": reason} if reason else {}),
             **{k: q[k] for k in ("call", "turn", "step") if q.get(k)},
@@ -360,8 +432,8 @@ class Questions(Plugin):
                 cq = None  # Its parent answer is durable; intake syncs it on reopen.
             if cq and not cq.get("answer") and not cq.get("closed"):
                 if not await self._eligible(child["session"], cq, cq["actor"]):
-                    value = "declined"
-                await self._accept(child["session"], cq, cq["actor"], value)
+                    value, declined = "declined", True
+                await self._accept(child["session"], cq, cq["actor"], value, declined=declined)
         if q.get("call"):
             await self.api.call("runtime", "wake", {"session": sid})
         return True
@@ -400,12 +472,13 @@ class Questions(Plugin):
             if proxy.get("child") != {"session": sid, "request": q["id"]}:
                 continue
             if proxy.get("answer"):
-                value = proxy["answer"]["value"]
+                answer = proxy["answer"]
+                value, declined = answer["value"], answer.get("declined")
                 if not await self._eligible(
                     parent, proxy, proxy["answer"]["actor"]
                 ) or not await self._eligible(sid, q, q["actor"]):
-                    value = "declined"
-                await self._accept(sid, q, q["actor"], value)
+                    value, declined = "declined", True
+                await self._accept(sid, q, q["actor"], value, declined=declined)
             elif proxy.get("closed"):
                 await self._close_question(sid, q)
             return

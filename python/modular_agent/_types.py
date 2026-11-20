@@ -194,6 +194,17 @@ def _answer(value: AnswerInput) -> Answer:
     return Answer("allow" if value == "allow" else "decline")
 
 
+class Actor(TypedDict):
+    id: str
+    kind: Literal["user", "host", "agent", "program"]
+    rights: list[str]
+
+
+class Tenant(TypedDict):
+    rights: list[str]
+    tokens: NotRequired[int | float]
+
+
 @dataclass(frozen=True)
 class ModelRef:
     provider: str

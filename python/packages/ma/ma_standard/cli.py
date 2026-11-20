@@ -16,7 +16,7 @@ from modular_agent import (
     Agent,
     AgentError,
     Answer,
-    CredentialStore,
+    file_credentials,
     Durability,
     Event,
     JsonObject,
@@ -427,7 +427,7 @@ async def _agent(
         durability=durability,
         local_process_groups=True,
         providers=providers,
-        credentials=CredentialStore(auth.answer, auth.set_answer),
+        credentials=file_credentials(auth.path),
         tools=[code_tool()],
         plugins=[
             file_tools(paths.state / "output"),
