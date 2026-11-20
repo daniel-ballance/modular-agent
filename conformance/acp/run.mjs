@@ -404,6 +404,32 @@ await attempt("failed turn", async () => {
 	}
 });
 
+// ACP: The declaration; Several actors. The connection can offer methods
+// that this session doesn't support. Parked-report methods are exempt.
+if (["severalActors", "sessionLimits", "tenants"].some((feature) => decl[feature] === false)) {
+	await attempt("disabled extensions", async () => {
+		// An unexpected success must not leave pending work or change rights in
+		// the session used by the other checks.
+		const s = await within(15000, agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] }), "open disabled extensions fixture");
+		sessionsUsed.push(s.sessionId);
+		try {
+			for (const [feature, method, params] of [
+				["severalActors", "input", { when: "propose", content: "unsupported proposal", key: randomUUID() }],
+				["severalActors", "join", { actor: { id: `kit-disabled-${randomUUID()}`, kind: "user", rights: ["watch"] } }],
+				["sessionLimits", "limit", { rights: null }],
+				["tenants", "tenant", {}],
+			]) {
+				if (meta(s)?.declaration?.[feature] !== false) continue;
+				const label = `disabled ${feature}: ${method} fails not_supported`;
+				await attempt(label, async () => {
+					const reply = await within(15000, agent.ctx.request(`_${NS}/${method}`, { sessionId: s.sessionId, ...params }).catch((e) => e), label);
+					check(label, reply?.code === -32602 && reply?.data?.code === "not_supported", JSON.stringify(reply));
+				});
+			}
+		} finally { await closeSession(agent, s.sessionId); }
+	});
+}
+
 if (decl.severalActors) {
 	await attempt("several actors", async () => {
 		const ask = (name, params) => agent.ctx.request(`_${NS}/${name}`, { sessionId, ...params });
