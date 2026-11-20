@@ -11,7 +11,11 @@ import (
 
 func (s *server) declaration(id string) map[string]any {
 	if s.declared != nil {
-		return s.declared()
+		d := s.declared()
+		if id != "" {
+			d["rewinding"] = sessionRewinding(s.a, s.project, id)
+		}
+		return d
 	}
 	return Declaration(s.a, s.project, id)
 }
@@ -22,14 +26,14 @@ func Declaration(a api.API, project, id string) map[string]any {
 	if v, err := a.Get("runtime"); err == nil {
 		runtime = v.(api.Runtime).Declaration()
 	}
-	holds, strong, rewind := false, false, false
+	holds, strong := false, false
+	rewind := sessionRewinding(a, project, id)
 	if v, err := a.Get("output-policy"); err == nil {
 		holds = v.(bool)
 	}
 	if v, err := a.Get("working-environment"); err == nil {
 		env := v.(api.WorkingEnvironment)
 		strong = env.StopsOnCrash()
-		_, rewind = api.Points(env)
 	}
 	if output, ok := a.(interface{ HoldsOutput() bool }); ok {
 		holds = holds || output.HoldsOutput()
@@ -66,6 +70,20 @@ func Declaration(a api.API, project, id string) map[string]any {
 		"commandContainment": containment, "nestedToolCalls": true,
 	}
 }
+func sessionRewinding(a api.API, project, id string) bool {
+	if id != "" {
+		if snap, err := a.Snapshot(id); err == nil {
+			project = snap.Project
+		}
+	}
+	v, err := a.Get("working-environment")
+	if err != nil {
+		return false
+	}
+	_, ok := api.PointsFor(v.(api.WorkingEnvironment), project)
+	return ok
+}
+
 func modelValue(m api.Model) string {
 	if strings.Contains(m.ID, "/") {
 		return m.ID

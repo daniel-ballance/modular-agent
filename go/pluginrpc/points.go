@@ -11,7 +11,7 @@ import (
 )
 
 func pointRequest(ctx context.Context, env api.WorkingEnvironment, project, method string, v object) (any, error) {
-	points, ok := api.Points(env)
+	points, ok := api.PointsFor(env, project)
 	if !ok {
 		return nil, fault("not_supported", "working environment does not support points")
 	}

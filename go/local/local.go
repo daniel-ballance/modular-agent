@@ -23,6 +23,7 @@ type Environment struct {
 	closed    bool
 	active    sync.WaitGroup
 	pointsMu  sync.Mutex
+	gitPoints bool
 	stateDirs []string
 	confined  bool
 }
@@ -42,6 +43,11 @@ func NewAt(root string, stateDirs ...string) *Environment {
 	e.initErr = e.cleanup()
 	return e
 }
+func NewGitAt(root string, stateDirs ...string) *Environment {
+	e := NewAt(root, stateDirs...)
+	e.gitPoints = true
+	return e
+}
 func (e *Environment) StopsOnCrash() bool { return e.initErr == nil }
 
 func (e *Environment) Containment() string {
@@ -53,6 +59,10 @@ func (e *Environment) Containment() string {
 func Plugin() api.Plugin { return PluginAt(defaultRoot()) }
 func PluginAt(root string, stateDirs ...string) api.Plugin {
 	return environmentPlugin(NewAt(root, stateDirs...))
+}
+
+func GitPluginAt(root string, stateDirs ...string) api.Plugin {
+	return environmentPlugin(NewGitAt(root, stateDirs...))
 }
 
 // ConfinedPluginAt keeps file operations within the session project.
