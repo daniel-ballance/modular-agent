@@ -4,6 +4,7 @@ import type { Agent } from "./agent.js";
 import { AgentError } from "./errors.js";
 import { toolSource, type Tool } from "./tool.js";
 import { adaptProvider, type Provider } from "./provider.js";
+import { sdkJob, type JobOwner, type JobRecovery, type JobStarter } from "./jobs.js";
 import type {
   Actor, AssistantMessage, Content, HistoryEntry, ModelError, ModelRef, ModelRequest, Outcome, Settings,
   ToolCall, ToolDefinition, ToolStatus, TurnResult,
@@ -48,11 +49,13 @@ export interface CallContext {
   cancelled: AbortSignal;
   /** In-process access to the current session's project and tool catalog. */
   session?(): { project: string; tools: ToolDefinition[] };
+  /** Available to the job owner during session.start. */
+  jobs?: JobRecovery;
   log(message: string): void;
   history(cursor?: string): Promise<{ entries: HistoryEntry[]; next?: string }>;
   emit(type: string, data: unknown): void;
 }
-export interface CommandContext extends CallContext { sessionId: string; actorId: string }
+export interface CommandContext extends Omit<CallContext, "jobs"> { sessionId: string; actorId: string; jobs: JobStarter }
 export type HookHandler<P extends HookPoint> =
   (payload: Readonly<Hooks[P][0]>, context: CallContext) => Awaitable<Hooks[P][1] | void>;
 export type CommandHandler = (args: string, context: CommandContext) => Awaitable<string | void>;
@@ -68,6 +71,7 @@ export interface Registrar {
   configuration(source: Configuration): void;
   interface(part: AgentInterface): void;
   provider(provider: Provider): void;
+  jobs(owner: JobOwner): void;
   on<P extends HookPoint>(point: P, handler: HookHandler<P>, order?: HookOrder,
     options?: { inProcessOnly?: boolean }): void;
   command(name: string, description: string, handler: CommandHandler,
@@ -149,6 +153,7 @@ export interface Work {
   signal?: AbortSignal;
   history?: CallContext["history"];
   emit?: CallContext["emit"];
+  startJob?(kind: string, detail: unknown, key?: string): Promise<import("@modular-agent/harness").JobHandle>;
 }
 
 function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" | "turnId" | "stepId" | "callId">, work?: Work, inProcessOnly = false) {
@@ -184,7 +189,7 @@ function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" 
       else api.emit(ids.sessionId, type, structuredClone(data));
     },
   };
-  return { cx, finish: () => { live = false; } };
+  return { cx, assert, finish: () => { live = false; } };
 }
 
 const inProcessPoints = new Set<HookPoint>(["session.prepare", "session.join", "session.leave", "provider.piece"]);
@@ -196,6 +201,22 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
   const items = new Set<string>();
   const registrations: ((api: PluginApi) => unknown)[] = [];
   let settingUp = true;
+  let jobOwner: JobOwner | undefined;
+  const resumedJobs = new Set<string>();
+  const jobRecovery = (api: PluginApi, sessionId: string, assert: () => void): JobRecovery => ({
+    async unfinished() {
+      assert();
+      const jobs = await api.unfinishedJobs(sessionId);
+      return jobs.map(({ job, key, detail }) => structuredClone({ id: job.id, kind: job.kind, actorId: job.actorId, key, detail }));
+    },
+    async resume(job) {
+      assert();
+      if (resumedJobs.has(job.id)) throw new AgentError("invalid_request", "Job was already resumed");
+      resumedJobs.add(job.id);
+      try { return sdkJob(await api.resumeJob(sessionId, job.id)); }
+      catch (error) { resumedJobs.delete(job.id); throw error; }
+    },
+  });
   const check = () => {
     if (!settingUp) throw new AgentError("invalid_request", "Registrar has settled");
   };
@@ -256,6 +277,11 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
         if (value && typeof value === "object" && "key" in value && typeof value.key === "string") return value.key;
       })));
     },
+    jobs(owner) {
+      check();
+      if (jobOwner) throw new AgentError("invalid_composition", "Plugin registers two job owners");
+      jobOwner = owner;
+    },
     on(point, handler, order, options) {
       check();
       if (served && (options?.inProcessOnly || inProcessPoints.has(point) || !points.has(point))) unavailable(`hook ${point}`);
@@ -263,10 +289,11 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
       if (order !== undefined && !["first", "normal", "last"].includes(order)) throw new AgentError("invalid_composition", "Unknown hook order");
       registrations.push(api => api.on(point, async (payload: Hooks[typeof point][0], work?: Work) => {
         const p = payload as Observe & { actorId?: string; stepId?: string; call?: ToolCall };
-        const { cx, finish } = context(api, {
+        const { cx, finish, assert } = context(api, {
           sessionId: p.sessionId, actorId: p.actorId ?? p.call?.actorId,
           turnId: p.turnId, stepId: p.stepId ?? p.call?.stepId, callId: p.call?.id,
         }, work, options?.inProcessOnly);
+        if (point === "session.start" && jobOwner) cx.jobs = jobRecovery(api, p.sessionId, assert);
         try {
           const snapshot = structuredClone(payload);
           if (!served && point === "turn.before" && p.sessionId) Object.assign(snapshot, {
@@ -306,8 +333,16 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
       if (served && (options?.usesModel || options?.inProcessOnly)) unavailable(`command ${name}`);
       if (options?.usesModel) throw new AgentError("not_supported", `Model-using command ${name}`);
       registrations.push(api => api.registerCommand(name, { description, async run(args, ids) {
-        const { cx, finish } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId }, ids as Work, options?.inProcessOnly);
-        try { return await handler(args, cx as CommandContext); }
+        const { cx, finish, assert } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId }, ids as Work, options?.inProcessOnly);
+        const jobs: JobStarter = { async start(kind, detail, key) {
+          assert();
+          const handle = served
+            ? await (ids as Work).startJob!(kind, detail, key)
+            : api.startJob(ids.sessionId, { kind, detail: structuredClone(detail), key, actorId: ids.actorId });
+          await handle.ready;
+          return sdkJob(handle);
+        } };
+        try { return await handler(args, { ...cx, sessionId: ids.sessionId, actorId: ids.actorId, jobs }); }
         finally { finish(); }
       } }));
     },
@@ -337,6 +372,21 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
   const base: BasePlugin = { name: plugin.name, stop: plugin.stop?.bind(plugin), setup(api) {
     if (tools.length) api.provide("tool-source", toolSource(plugin.name, tools));
     for (const register of registrations) register(api);
+    if (jobOwner) {
+      const owner = jobOwner;
+      api.onJobCancel(async id => {
+        const found = await api.findJob(id);
+        if (!found) throw new AgentError("invalid_request", `No job ${id} of this plugin`);
+        const job = (await jobRecovery(api, found.sessionId, () => {}).unfinished()).find(job => job.id === id);
+        if (!job) throw new AgentError("invalid_request", `Job ${id} is not unfinished`);
+        await owner.cancel(job, { job: sdkJob(await api.resumeJob(found.sessionId, id, true)) });
+      });
+      api.on("session.start", async ({ sessionId, resumed }: { sessionId: string; resumed: boolean }) => {
+        if (!resumed || !owner.resume) return;
+        const recovery = jobRecovery(api, sessionId, () => {});
+        for (const job of await recovery.unfinished()) await owner.resume(job, { job: await recovery.resume(job) });
+      }, "first");
+    }
   } };
   return { items, base, interfaces };
 }

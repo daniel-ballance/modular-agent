@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
-import { interruptedCalls, lowerReasoning, pendingToolCalls, restoreAnsweredStep } from "@modular-agent/harness";
+import { interruptedCalls, lowerReasoning, pendingToolCalls, restoreAnsweredStep, zeroUsage } from "@modular-agent/harness";
 import type {
 	Answer,
 	AssistantMessage,
@@ -79,6 +79,37 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	const handlers = new Map<number, { hook: string; handler: (payload: any, work?: unknown) => unknown; order: HandlerOrder }>();
 	const commands = new Map<string, { description: string; run: (args: string, ctx: any) => unknown }>();
 	const stops: (() => unknown)[] = [];
+	type JobHandle = import("@modular-agent/harness").JobHandle;
+	type PendingJob = ReturnType<PluginApi["unfinishedJobs"]>[number];
+	const jobs = new Map<string, PendingJob>();
+	let cancelJob: ((id: string) => Promise<void> | void) | undefined;
+	const jobHandle = (id: string, started = true): JobHandle => ({
+		id, started, ready: Promise.resolve(),
+		progress(content) {
+			peer.notify("host/jobs/progress", { jobId: id, content: toWire(typeof content === "string" ? [{ type: "text", text: content }] : content) });
+		},
+		async finish(kind, result, opts) {
+			await peer.request("host/jobs/end", { jobId: id, outcome: { kind, error: opts?.error },
+				result: toWire(typeof result === "string" ? [{ type: "text", text: result }] : result), report: opts?.report ?? false });
+			jobs.delete(id);
+		},
+		onCancel: unavailable("Per-job cancellation registration"),
+	});
+	const startJob = (parentRequestId: number | string, signal: AbortSignal, sessionId: string, actorId?: string) =>
+		async (kind: string, detail: unknown, key?: string) => {
+			const { jobId, started } = await peer.request<{ jobId: string; started: boolean }>("host/jobs/start", {
+				parentRequestId, kind, detail: toWire(detail) ?? null, key,
+			}, signal);
+			if (started) jobs.set(jobId, { job: { id: jobId, kind, sessionId, actorId, plugin: options.name, state: "running",
+				usage: zeroUsage() }, key, detail });
+			return jobHandle(jobId, started);
+		};
+	peer.handle("jobs/cancel", async p => {
+		if (!cancelJob || !jobs.has(p.jobId)) throw new WireError("invalid_request", "No active job of this plugin");
+		await cancelJob(p.jobId);
+		if (jobs.has(p.jobId)) throw new WireError("lost", "Job cancellation did not end the job");
+		return {};
+	});
 	let nextHandler = 1;
 	let initialized = false;
 
@@ -157,9 +188,24 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			reportProblem: (where: string, error: unknown) => peer.notify("host/problem", { where, message: error instanceof Error ? error.message : String(error) }),
 			emit: (sessionId: string, type: string, data?: unknown) => peer.notify("host/emit", { sessionId, type, data: toWire(data) }),
 			onEvent: () => () => undefined,
+			onJobCancel: (handler: typeof cancelJob) => { cancelJob = handler; },
+			findJob: (id: string) => jobs.get(id)?.job,
+			unfinishedJobs: async (sessionId: string) => {
+				const reply = await peer.request<{ jobs: { jobId: string; kind: string; actorId?: string; key?: string; detail: unknown }[] }>("host/jobs/unfinished", { sessionId });
+				return reply.jobs.map(({ jobId, kind, actorId, key, detail }): PendingJob => {
+					const record: PendingJob = { job: { id: jobId, kind, actorId, sessionId, plugin: plugin.name,
+						state: "running", usage: zeroUsage() }, key, detail: fromWire(detail) };
+					jobs.set(jobId, record);
+					return record;
+				});
+			},
+			resumeJob: async (_sessionId: string, id: string, cancelling?: boolean) => {
+				if (!cancelling) await peer.request("host/jobs/resume", { jobId: id });
+				return jobHandle(id);
+			},
 			registerCommand: (name: string, command: { description: string; run: (args: string, ctx: any) => unknown }) => commands.set(name, command),
 		};
-		for (const name of ["presentActors", "releaseInput", "recoveredInput", "commands", "runCommand", "startSession", "openSession", "join", "leave", "listSessions", "forkSession", "closeSession", "session", "input", "withdraw", "cancel", "waitForIdle", "moveTo", "setSetting", "history", "gatedHistory", "append", "transaction", "erase", "tools", "callTool", "ask", "answer", "openRequests", "startJob", "unfinishedJobs", "resumeJob", "jobs", "cancelJob", "follow", "declaration", "modelAccess"]) {
+		for (const name of ["presentActors", "releaseInput", "recoveredInput", "commands", "runCommand", "startSession", "openSession", "join", "leave", "listSessions", "forkSession", "closeSession", "session", "input", "withdraw", "cancel", "waitForIdle", "moveTo", "setSetting", "history", "gatedHistory", "append", "transaction", "erase", "tools", "callTool", "ask", "answer", "openRequests", "startJob", "jobs", "cancelJob", "follow", "declaration", "modelAccess"]) {
 			api[name] = unavailable(`${name}()`);
 		}
 		return api as unknown as PluginApi;
@@ -244,6 +290,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 			sessionId: String(p.sessionId),
 			signal: ctx.signal,
 			call,
+			jobs: { start: startJob(ctx.id, ctx.signal, p.sessionId, call.actorId) },
 			progress: (content) => peer.notify("tools/progress", { parentRequestId: ctx.id, content: toWire(content) }),
 			environment: hostEnvironment(ctx.id, String(p.project), String(p.sessionId)),
 			tools: {
@@ -330,7 +377,7 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	peer.handle("command/run", async (p, ctx) => {
 		const c = commands.get(String(p.name));
 		if (!c) throw new WireError("invalid_request", `No command ${p.name}`);
-		const output = await currentParent.run(ctx.id, () => c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId, ...work(ctx, p.sessionId) }));
+		const output = await currentParent.run(ctx.id, () => c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId, ...work(ctx, p.sessionId), startJob: startJob(ctx.id, ctx.signal, p.sessionId, p.actorId) }));
 		return typeof output === "string" ? { output } : {};
 	});
 

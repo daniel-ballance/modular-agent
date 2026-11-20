@@ -182,7 +182,7 @@ export interface PluginApi {
 	/** Jobs this plugin started that the history shows as never ended, for example because the process stopped. */
 	unfinishedJobs(sessionId: string): KeptJob[];
 	/** Take over a recorded, unfinished job of this plugin's after a restart. */
-	resumeJob(sessionId: string, jobId: string): JobHandle;
+	resumeJob(sessionId: string, jobId: string, cancelling?: boolean): JobHandle;
 	jobs(sessionId: string): (Omit<Job, "state"> & { state: "running" | "unfinished" | "cleanupUnconfirmed" })[];
 	cancelJob(sessionId: string, jobId: string): Promise<void>;
 	// following along
@@ -1894,6 +1894,12 @@ export class Harness {
 				sessionId: s.id,
 				signal,
 				call,
+				jobs: { start: async (kind, detail, key) => {
+					check();
+					const job = this.startJob(s, { kind, detail, key, actors: owners, toolCallId: call.id }, found.plugin);
+					await job.ready;
+					return job;
+				} },
 				progress: (content) => {
 					for (const part of content) this.emit(s.id, "tool.progress", { content: [part] }, found.source.id, { turnId, toolCallId: call.id });
 				},
@@ -2487,8 +2493,8 @@ export class Harness {
 		if (!actorId || !rights.includes("jobs")) throw new Error('Job requires the "jobs" right');
 		const { key, detail } = options;
 		if (key !== undefined) {
-			const active = [...s.jobs.values()].find((r) => r.key === key);
-			const id = active?.job.id ?? s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "jobStarted" && (e.data as { key?: string } | undefined)?.key === key)?.jobId;
+			const active = [...s.jobs.values()].find((r) => r.key === key && r.job.plugin === plugin);
+			const id = active?.job.id ?? s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "jobStarted" && e.writer === plugin && !s.copied.has(e.id) && (e.data as { key?: string } | undefined)?.key === key)?.jobId;
 			if (id) return { id, started: false, ready: active?.handle.ready ?? Promise.resolve(), finish: async () => {}, progress: () => {}, onCancel: () => {} };
 		}
 		const startEntryId = this.newId();

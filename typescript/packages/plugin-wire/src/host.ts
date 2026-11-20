@@ -149,6 +149,7 @@ interface Parent {
 	actors?: string[];
 	jobs?: string[];
 	runtime?: boolean;
+	command?: boolean;
 	provider?: ProviderAttempt;
 	sessionId?: string;
 	tool?: ToolContext;
@@ -343,7 +344,8 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			};
 			peer.handle("host/jobs/start", async (p) => {
 				const parent = parentOf(p);
-				if (!parent.sessionId || !parent.actors?.length || parent.signal?.aborted ||
+				if (parent.signal?.aborted) throw new WireError("cancelled", "The parent was cancelled");
+				if ((!parent.tool && !parent.command) || !parent.sessionId || !parent.actors?.length ||
 					typeof p.kind !== "string" || (p.key !== undefined && typeof p.key !== "string")) throw new WireError("invalid_request", "Job needs an authorized parent and kind");
 				try {
 					const handle = api.startJob(parent.sessionId, { kind: p.kind, key: p.key, detail: p.detail, actors: parent.actors, jobs: parent.jobs, toolCallId: parent.tool?.call.id });
@@ -435,7 +437,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			for (const c of reg.commands ?? []) {
 				api.registerCommand(c.name, {
 					description: c.description,
-					run: async (args, ctx) => (await track(peer.request<{ output?: string }>("command/run", { name: c.name, args, sessionId: ctx.sessionId, actorId: ctx.actorId }), { sessionId: ctx.sessionId, actors: [ctx.actorId] }))?.output,
+					run: async (args, ctx) => (await track(peer.request<{ output?: string }>("command/run", { name: c.name, args, sessionId: ctx.sessionId, actorId: ctx.actorId }), { sessionId: ctx.sessionId, actors: [ctx.actorId], command: true }))?.output,
 				});
 			}
 		},

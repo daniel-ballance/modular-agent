@@ -2,6 +2,7 @@ import { text, type ToolContext as BaseContext, type ToolSource } from "@modular
 import type { Content, Input, QuestionDraft, QuestionReply, ToolDefinition, ToolStatus } from "./data.js";
 import { AgentError, checked, messageOf, sdkError } from "./errors.js";
 import { schema, type Infer, type Schema } from "./schema.js";
+import { sdkJob, type JobStarter } from "./jobs.js";
 
 export interface ToolEnvironment {
   read(path: string): Promise<Buffer>;
@@ -16,6 +17,7 @@ export interface ToolContext {
   callId: string;
   cancelled: AbortSignal;
   environment: ToolEnvironment;
+  jobs: JobStarter;
   tools: {
     list(): Promise<ToolDefinition[]>;
     call(name: string, input: Record<string, unknown>): Promise<import("@modular-agent/harness").ToolResult>;
@@ -135,6 +137,11 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
         return base.environment;
       };
       const context: ToolContext = {
+        jobs: { start: (kind, detail, key) => checked(async () => {
+          check();
+          if (!base.jobs) throw new AgentError("not_supported", "The host cannot start jobs");
+          return sdkJob(await base.jobs.start(kind, structuredClone(detail), key));
+        }, "invalid_request") },
         environment: {
           read: path => checked(() => environment().readFile(path)),
           exists: path => checked(() => environment().exists(path)),
