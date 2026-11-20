@@ -454,6 +454,22 @@ async def test_monty(tmp_path: Path, code: str, limits: dict, status: str, conta
     assert contains.lower() in tool.text().lower()
 
 
+async def test_codemode_prints_started_call_on_stderr(tmp_path: Path, capsys) -> None:
+    from argparse import Namespace
+
+    from ma_standard.cli import _event
+
+    code = "n = 1\nprint(n)"
+    async with offline_agent(
+        project=tmp_path,
+        tools=[code_tool()],
+        script=[{"toolCalls": [{"name": "codemode", "input": {"code": code}}]}, {"text": "ok"}],
+    ) as agent:
+        async for event in (await agent.session()).prompt_stream("use code"):
+            _event(event, Namespace(json=False, verbose=False), line=False)
+    assert capsys.readouterr().err == "codemode\n  | n = 1\n  | print(n)\n"
+
+
 async def test_codemode_lookups_do_not_spend_nested_calls(tmp_path: Path) -> None:
     script = [
         {

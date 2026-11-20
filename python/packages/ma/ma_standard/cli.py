@@ -135,9 +135,12 @@ def _event(event: Event, args: argparse.Namespace, *, line: bool = False) -> Non
         )
     elif event.type == "text" and line and event.data.delta:
         print(event.data.delta, end="", flush=True)
-    elif event.type == "toolStarted" and (args.verbose or not data.get("parentCallId")):
-        name = data.get("name", "tool")
-        arguments = data.get("input")
+    elif event.type == "toolStarted":
+        call = data.get("call")
+        if not isinstance(call, dict) or (call.get("parentCallId") and not args.verbose):
+            return
+        name = call.get("name", "tool")
+        arguments = call.get("input")
         if (
             name == "codemode"
             and isinstance(arguments, dict)
