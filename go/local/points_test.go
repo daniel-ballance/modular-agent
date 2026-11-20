@@ -3,8 +3,8 @@ package local_test
 import (
 	"context"
 	"errors"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/local"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/local"
 	"io/fs"
 	"os"
 	"path/filepath"

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 	"os"
 	"path/filepath"
 )

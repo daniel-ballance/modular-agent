@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OWNER/modular-agent/go/cmd/ma/internal/codemode"
-	"github.com/OWNER/modular-agent/go/cmd/ma/internal/subscription"
-	"github.com/OWNER/modular-agent/go/modular"
-	"github.com/OWNER/modular-agent/go/modular/files"
-	"github.com/OWNER/modular-agent/go/modular/mcp"
-	"github.com/OWNER/modular-agent/go/modular/modulartest"
+	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/codemode"
+	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/subscription"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/files"
+	"github.com/daniel-ballance/modular-agent/go/modular/mcp"
+	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
 )
 
 func (d layout) auth() subscription.AuthFile {

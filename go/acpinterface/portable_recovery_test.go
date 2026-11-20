@@ -2,11 +2,11 @@ package acpinterface_test
 
 import (
 	"encoding/json"
-	"github.com/OWNER/modular-agent/go/conformancemodel"
-	"github.com/OWNER/modular-agent/go/durable"
-	"github.com/OWNER/modular-agent/go/historyhttp"
-	"github.com/OWNER/modular-agent/go/servicehttp"
-	"github.com/OWNER/modular-agent/go/vanilla"
+	"github.com/daniel-ballance/modular-agent/go/conformancemodel"
+	"github.com/daniel-ballance/modular-agent/go/durable"
+	"github.com/daniel-ballance/modular-agent/go/historyhttp"
+	"github.com/daniel-ballance/modular-agent/go/servicehttp"
+	"github.com/daniel-ballance/modular-agent/go/vanilla"
 	"net/http/httptest"
 	"os"
 	"path/filepath"

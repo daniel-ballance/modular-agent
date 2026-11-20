@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/OWNER/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 	monty "github.com/ewhauser/gomonty"
 )
 

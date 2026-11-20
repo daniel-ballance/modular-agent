@@ -49,8 +49,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/OWNER/modular-agent/go/modular"
-	"github.com/OWNER/modular-agent/go/modular/openai"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/openai"
 )
 
 func main() {

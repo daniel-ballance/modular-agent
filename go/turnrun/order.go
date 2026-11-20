@@ -1,7 +1,7 @@
 package turnrun
 
 import (
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 	"slices"
 )
 

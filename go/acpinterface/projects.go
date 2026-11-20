@@ -8,9 +8,9 @@ import (
 
 	acp "github.com/caelis-labs/acp-go-sdk"
 
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/configuration"
-	"github.com/OWNER/modular-agent/go/mcptools"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/configuration"
+	"github.com/daniel-ballance/modular-agent/go/mcptools"
 )
 
 // Projects supplies composition and resources for ACP projects.

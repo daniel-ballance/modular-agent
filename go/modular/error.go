@@ -5,8 +5,8 @@ import (
 	"errors"
 	"io/fs"
 
-	"github.com/OWNER/modular-agent/go/pluginrpc"
-	"github.com/OWNER/modular-agent/go/servicehttp"
+	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
+	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 )
 
 type Code string

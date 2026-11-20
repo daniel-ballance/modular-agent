@@ -2,7 +2,7 @@ package main_test
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/internal/runtimetest"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"os"
 	"os/exec"
 	"path/filepath"

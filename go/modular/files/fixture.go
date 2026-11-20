@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/OWNER/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 // FixtureBash is the ACP conformance command tool. Use only with isolated state.

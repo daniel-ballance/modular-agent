@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/OWNER/modular-agent/go/modular"
-	tools "github.com/OWNER/modular-agent/go/modular/mcp"
-	"github.com/OWNER/modular-agent/go/modular/modulartest"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	tools "github.com/daniel-ballance/modular-agent/go/modular/mcp"
+	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

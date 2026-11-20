@@ -2,9 +2,9 @@ package local_test
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/internal/proctest"
-	"github.com/OWNER/modular-agent/go/local"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/proctest"
+	"github.com/daniel-ballance/modular-agent/go/local"
 	"syscall"
 	"testing"
 	"time"

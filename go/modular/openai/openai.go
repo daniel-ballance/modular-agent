@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OWNER/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 const defaultEndpoint = "https://api.openai.com/v1/responses"

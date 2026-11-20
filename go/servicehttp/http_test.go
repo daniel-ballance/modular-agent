@@ -2,7 +2,7 @@ package servicehttp_test
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/servicehttp"
+	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"

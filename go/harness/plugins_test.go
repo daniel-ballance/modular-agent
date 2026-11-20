@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/harness"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/harness"
 )
 
 func TestPluginCapabilitiesHooksAndReplacement(t *testing.T) {

@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 
-	base "github.com/OWNER/modular-agent/go/anthropic"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/modular"
-	"github.com/OWNER/modular-agent/go/portable"
+	base "github.com/daniel-ballance/modular-agent/go/anthropic"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 type Option func(*options)

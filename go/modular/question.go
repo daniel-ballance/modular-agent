@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/portable"
-	"github.com/OWNER/modular-agent/go/questions"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
+	"github.com/daniel-ballance/modular-agent/go/questions"
 )
 
 type Question struct {

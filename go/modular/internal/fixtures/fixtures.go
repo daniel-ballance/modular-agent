@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/OWNER/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 type tideInput struct {

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/OWNER/modular-agent/go/modular"
-	"github.com/OWNER/modular-agent/go/modular/files"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/files"
 )
 
 func TestPromptCatalogThreshold(t *testing.T) {

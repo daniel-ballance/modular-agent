@@ -3,9 +3,9 @@ package conformancemodel_test
 import (
 	"context"
 	"errors"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/conformancemodel"
-	"github.com/OWNER/modular-agent/go/harness"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/conformancemodel"
+	"github.com/daniel-ballance/modular-agent/go/harness"
 	"strings"
 	"testing"
 )

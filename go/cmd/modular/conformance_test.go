@@ -2,9 +2,9 @@ package main_test
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/historyhttp"
-	"github.com/OWNER/modular-agent/go/internal/runtimetest"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/historyhttp"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"net/http/httptest"
 	"os"
 	"os/exec"

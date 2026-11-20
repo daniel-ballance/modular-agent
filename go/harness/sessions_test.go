@@ -2,9 +2,9 @@ package harness_test
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/harness"
-	"github.com/OWNER/modular-agent/go/history"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/harness"
+	"github.com/daniel-ballance/modular-agent/go/history"
 	"path/filepath"
 	"testing"
 )

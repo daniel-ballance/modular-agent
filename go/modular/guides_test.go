@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/OWNER/modular-agent/go/modular"
-	"github.com/OWNER/modular-agent/go/modular/modulartest"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
 )
 
 func TestSaysHello(t *testing.T) {

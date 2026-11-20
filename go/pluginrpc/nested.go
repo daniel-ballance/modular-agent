@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 type servedTools struct {

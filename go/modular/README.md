@@ -14,7 +14,7 @@ if err != nil || turn.Text != "Hello." {
 }
 ```
 
-Import `github.com/OWNER/modular-agent/go/modular/modulartest` for tests and `github.com/OWNER/modular-agent/go/modular` for applications. The only direct dependency newly used by the SDK is `github.com/google/jsonschema-go`, already in the base's module graph and named in the SDK specification. It generates and validates tool schemas.
+Import `github.com/daniel-ballance/modular-agent/go/modular/modulartest` for tests and `github.com/daniel-ballance/modular-agent/go/modular` for applications. The only direct dependency newly used by the SDK is `github.com/google/jsonschema-go`, already in the base's module graph and named in the SDK specification. It generates and validates tool schemas.
 
 ## Official file and MCP tools
 

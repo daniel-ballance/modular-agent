@@ -14,7 +14,7 @@ Notes on other systems, gathered to inform the [architecture](../architecture.md
 | [PiG](pig-reference.md) | Pi ported to Go, hosting extensions in Go, Rust, Python and Node over one subprocess wire; how it keeps four SDKs consistent |
 | [T3 Code](t3-code-reference.md) | A layer above whole agents: how it drives Pi, and how agents delegate to and message each other |
 | [Protocol landscape](protocol-landscape-2026-11.md) | MCP, MCP Apps, AG-UI, A2A, ACP, A2UI and OpenTelemetry |
-| [ChatGPT conversation](chatgpt-conversation.md), [transcript](chatgpt-transcript.md) | Where the project started, and what we kept, changed or dropped |
+| [ChatGPT conversation](chatgpt-conversation.md) | Where the project started, and what we kept, changed or dropped |
 
 ## How each agent fills our parts
 

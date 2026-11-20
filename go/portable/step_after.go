@@ -3,7 +3,7 @@ package portable
 import (
 	"bytes"
 	"fmt"
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 const StepAfterKind = "modular-agent.stepAfter"

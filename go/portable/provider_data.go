@@ -2,7 +2,7 @@ package portable
 
 import (
 	"encoding/json"
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 // PublicContent removes opaque reasoning data without changing readable text or unknown parts.

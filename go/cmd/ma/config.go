@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/OWNER/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 type layout struct{ config, state, home string }

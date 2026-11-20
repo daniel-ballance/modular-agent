@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/history"
-	"github.com/OWNER/modular-agent/go/historyhttp"
-	"github.com/OWNER/modular-agent/go/servicehttp"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/history"
+	"github.com/daniel-ballance/modular-agent/go/historyhttp"
+	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 )
 
 type HistoryStore struct {

@@ -2,7 +2,7 @@ package harness
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 // Resolve child checkpoints before any Runtime sees the interrupted turn.

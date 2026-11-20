@@ -13,8 +13,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/OWNER/modular-agent/go/cmd/ma/internal/subscription"
-	"github.com/OWNER/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/subscription"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 const help = `ma, the standard Modular Agent

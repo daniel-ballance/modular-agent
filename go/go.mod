@@ -1,4 +1,4 @@
-module github.com/OWNER/modular-agent/go
+module github.com/daniel-ballance/modular-agent/go
 
 go 1.27.4
 

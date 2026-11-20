@@ -7,7 +7,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 const interrupted = "Call did not finish; its outcome is unknown. Check outside state before relying on it. Do not assume its effects did or did not happen."

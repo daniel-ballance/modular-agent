@@ -2,8 +2,8 @@ package harness
 
 import (
 	"encoding/json"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/portable"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 	"testing"
 )
 

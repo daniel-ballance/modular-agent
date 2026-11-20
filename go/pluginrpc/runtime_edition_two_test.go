@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/fake"
-	"github.com/OWNER/modular-agent/go/portable"
-	"github.com/OWNER/modular-agent/go/resultcheck"
-	"github.com/OWNER/modular-agent/go/vanilla"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/fake"
+	"github.com/daniel-ballance/modular-agent/go/portable"
+	"github.com/daniel-ballance/modular-agent/go/resultcheck"
+	"github.com/daniel-ballance/modular-agent/go/vanilla"
 )
 
 func TestHostedResultFeedbackIsCommittedAndProjectedOnce(t *testing.T) {

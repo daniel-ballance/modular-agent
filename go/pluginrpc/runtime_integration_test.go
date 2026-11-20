@@ -2,8 +2,8 @@ package pluginrpc_test
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/vanilla"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/vanilla"
 	"testing"
 	"time"
 )

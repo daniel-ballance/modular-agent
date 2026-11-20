@@ -3,7 +3,7 @@ package pluginrpc
 import (
 	"context"
 	"errors"
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 // Local Providers get the same standard hook payloads as external Providers.

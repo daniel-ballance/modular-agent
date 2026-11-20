@@ -3,7 +3,7 @@ package history_test
 import (
 	"bufio"
 	"fmt"
-	"github.com/OWNER/modular-agent/go/history"
+	"github.com/daniel-ballance/modular-agent/go/history"
 	"os"
 	"os/exec"
 	"testing"

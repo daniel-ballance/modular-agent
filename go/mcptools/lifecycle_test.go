@@ -1,7 +1,7 @@
 package mcptools_test
 
 import (
-	"github.com/OWNER/modular-agent/go/mcptools"
+	"github.com/daniel-ballance/modular-agent/go/mcptools"
 	"strings"
 	"testing"
 )

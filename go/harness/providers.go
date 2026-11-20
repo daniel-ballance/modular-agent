@@ -2,7 +2,7 @@ package harness
 
 import (
 	"errors"
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 	"strings"
 )
 

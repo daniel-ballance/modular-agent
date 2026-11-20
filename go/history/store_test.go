@@ -2,8 +2,8 @@ package history_test
 
 import (
 	"errors"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/history"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/history"
 	"os"
 	"os/exec"
 	"path/filepath"

@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/local"
-	"github.com/OWNER/modular-agent/go/pluginrpc"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/local"
+	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 )
 
 func TestCompositionAndPluginHost(t *testing.T) {

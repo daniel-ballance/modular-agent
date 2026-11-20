@@ -2,7 +2,7 @@
 // lists current and also serves ACP's per-session MCP attachments.
 package mcp
 
-import "github.com/OWNER/modular-agent/go/modular"
+import "github.com/daniel-ballance/modular-agent/go/modular"
 
 type Server = modular.MCPServer
 

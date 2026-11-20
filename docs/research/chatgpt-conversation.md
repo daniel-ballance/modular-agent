@@ -1,6 +1,6 @@
 # Origin: the ChatGPT conversation
 
-This project continues a ChatGPT conversation titled "Break Down Py Coding Agent". The full text is in [chatgpt-transcript.md](chatgpt-transcript.md). "Py" in the title is a transcription of "Pi".
+This project continues a ChatGPT conversation titled "Break Down Py Coding Agent". "Py" in the title is a transcription of "Pi".
 
 ## How it developed
 

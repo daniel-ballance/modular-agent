@@ -18,12 +18,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/history"
-	"github.com/OWNER/modular-agent/go/modular"
-	"github.com/OWNER/modular-agent/go/modular/internal/fixtures"
-	"github.com/OWNER/modular-agent/go/modular/modulartest"
-	"github.com/OWNER/modular-agent/go/portable"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/history"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/internal/fixtures"
+	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 type scenario struct {

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/OWNER/modular-agent/go/modular"
-	"github.com/OWNER/modular-agent/go/modular/anthropic"
-	"github.com/OWNER/modular-agent/go/modular/modulartest"
-	"github.com/OWNER/modular-agent/go/modular/openai"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/anthropic"
+	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
+	"github.com/daniel-ballance/modular-agent/go/modular/openai"
 )
 
 func TestProvidersOffline(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"io/fs"
 	"sync"
 
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 type memoryStore struct {

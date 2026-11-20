@@ -2,12 +2,12 @@ package subagents_test
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/credentials"
-	"github.com/OWNER/modular-agent/go/fake"
-	"github.com/OWNER/modular-agent/go/harness"
-	"github.com/OWNER/modular-agent/go/internal/runtimetest"
-	"github.com/OWNER/modular-agent/go/vanilla"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/credentials"
+	"github.com/daniel-ballance/modular-agent/go/fake"
+	"github.com/daniel-ballance/modular-agent/go/harness"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
+	"github.com/daniel-ballance/modular-agent/go/vanilla"
 	"os"
 	"path/filepath"
 	"strings"

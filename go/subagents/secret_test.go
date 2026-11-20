@@ -2,8 +2,8 @@ package subagents_test
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/internal/runtimetest"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"strings"
 	"sync"
 	"testing"

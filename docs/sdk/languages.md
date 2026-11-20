@@ -55,7 +55,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 
 ## Go
 
-- The module is `github.com/OWNER/modular-agent/go` until the repository is published; import `github.com/OWNER/modular-agent/go/modular` and construct an agent with `modular.New(ctx, …)`.
+- The module is `github.com/daniel-ballance/modular-agent/go` until the repository is published; import `github.com/daniel-ballance/modular-agent/go/modular` and construct an agent with `modular.New(ctx, …)`.
 - Every operation that can wait takes a `context.Context` first. Cancellation is the context's.
 - A tool is `modular.NewTool(name, description, func(ctx context.Context, in T, tc *modular.ToolContext) (Out, error), opts…)`, with type parameters for input and output.
 - A plugin is a `modular.Plugin` value with `Name`, `Replaces` and `Setup func(*modular.Registrar) error`.
@@ -84,6 +84,6 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 | Testing kit | module `modular_agent::testing` | `@modular-agent/core/testing` | package `modular/modulartest` | module `modular_agent.testing` |
 | Fixture program | binary `modular-agent-fixtures` | `bin` of `@modular-agent/fixtures` | command `modular/cmd/fixtures` | `python -m modular_agent.fixtures` |
 
-These names are provisional until the first release reserves them on each registry. The Go module path depends on where the repository is published.
+The packages are not published to registries; build them from the repository (see the top-level README). The Go module path is `github.com/daniel-ballance/modular-agent/go`.
 
 Official plugin names are the same in every language: `openai`, `anthropic`, `files`, `mcp`, `acp`, `approval`, `questions`, `compaction`, `model-selection`, `subagents`, `guardrails`, `history-http`.

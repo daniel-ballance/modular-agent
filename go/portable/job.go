@@ -1,6 +1,6 @@
 package portable
 
-import "github.com/OWNER/modular-agent/go/api"
+import "github.com/daniel-ballance/modular-agent/go/api"
 
 func jobOut(e api.Entry, data object) {
 	j := api.Decode[api.Job](e.Data)

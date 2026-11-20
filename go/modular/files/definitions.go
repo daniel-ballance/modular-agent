@@ -3,7 +3,7 @@ package files
 import (
 	"context"
 	"encoding/json"
-	"github.com/OWNER/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 func define[Out any](name, description, properties, required string, readOnly bool, run func(context.Context, input, *modular.ToolContext) (Out, error)) modular.Tool {

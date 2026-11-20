@@ -3,8 +3,8 @@ package pluginrpc
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/portable"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 	"math/big"
 	"strings"
 )

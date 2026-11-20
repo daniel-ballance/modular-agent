@@ -3,9 +3,9 @@ package questions_test
 import (
 	"context"
 	"errors"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/harness"
-	"github.com/OWNER/modular-agent/go/questions"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/harness"
+	"github.com/daniel-ballance/modular-agent/go/questions"
 	"slices"
 	"testing"
 	"time"

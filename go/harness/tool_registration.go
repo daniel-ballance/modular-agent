@@ -1,6 +1,6 @@
 package harness
 
-import "github.com/OWNER/modular-agent/go/api"
+import "github.com/daniel-ballance/modular-agent/go/api"
 
 func (p *turnPorts) toolRegistration(name string) *api.ToolRegistration {
 	plugin, source, _, ok := p.ToolRegistration(name)

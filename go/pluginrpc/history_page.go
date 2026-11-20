@@ -2,7 +2,7 @@ package pluginrpc
 
 import (
 	"encoding/json"
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 const maxHistoryPage = 4 * 1024 * 1024

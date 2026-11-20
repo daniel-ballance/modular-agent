@@ -2,7 +2,7 @@ package portable
 
 import (
 	"encoding/json"
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 func ReadErased(raw json.RawMessage) bool {

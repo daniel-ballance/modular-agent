@@ -2,8 +2,8 @@ package pluginrpc
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/turnrun"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/turnrun"
 )
 
 // RunCall applies the host's call pipeline. Out-of-turn calls never make a

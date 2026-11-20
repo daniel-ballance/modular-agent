@@ -3,7 +3,7 @@ package resultcheck
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 // Plugin accepts an empty reason, or records the reason as the next model input.

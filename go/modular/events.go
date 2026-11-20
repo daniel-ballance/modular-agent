@@ -4,7 +4,7 @@ import (
 	"context"
 	"iter"
 
-	"github.com/OWNER/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 // Events replays committed entries after an optional cursor, then follows the

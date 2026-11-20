@@ -3,8 +3,8 @@ package jobs
 import (
 	"context"
 	"errors"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/portable"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 func (m *Manager) StartExternal(ctx context.Context, j api.Job) (api.Job, bool, error) {

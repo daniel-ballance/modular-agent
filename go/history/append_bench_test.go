@@ -2,8 +2,8 @@ package history_test
 
 import (
 	"fmt"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/history"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/history"
 	"strings"
 	"testing"
 )

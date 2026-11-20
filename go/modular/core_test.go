@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OWNER/modular-agent/go/modular"
-	"github.com/OWNER/modular-agent/go/modular/modulartest"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
 )
 
 func TestPromptQueuesAndCancelHandsBack(t *testing.T) {

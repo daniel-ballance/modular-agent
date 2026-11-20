@@ -1,6 +1,7 @@
 {
   "name": "@modular-agent/ma",
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "ma": "dist/src/main.js"

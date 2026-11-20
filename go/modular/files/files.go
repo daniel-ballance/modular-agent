@@ -17,8 +17,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/OWNER/modular-agent/go/modular"
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 type input struct {

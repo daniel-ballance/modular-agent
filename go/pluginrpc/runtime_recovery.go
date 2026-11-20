@@ -2,8 +2,8 @@ package pluginrpc
 
 import (
 	"context"
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/portable"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 // restoreInterrupted finishes host-owned bookkeeping before giving the Runtime

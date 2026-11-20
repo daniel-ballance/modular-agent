@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/OWNER/modular-agent/go/modular"
-	"github.com/OWNER/modular-agent/go/modular/internal/fixtures"
+	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/internal/fixtures"
 )
 
 func main() {

@@ -8,8 +8,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/OWNER/modular-agent/go/api"
-	"github.com/OWNER/modular-agent/go/portable"
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 // MaxNestedDepth counts edges below a model or UI call.
