@@ -32,7 +32,17 @@ async def crash_and_reopen(tmp_path, runtime, variant, action, reopen):
     p = await driver(home, tmp_path, runtime, variant, action)
     q = None
     try:
-        await until(lambda: (tmp_path / "checkpoint").exists() or p.returncode is not None)
+        try:
+            await until(lambda: (tmp_path / "checkpoint").exists() or p.returncode is not None)
+        except TimeoutError:
+            # It normally takes about 0.3 s (under 1.5 s with every core busy). Keep what the driver
+            # said so an unexplained stall can be diagnosed rather than retried.
+            p.kill()
+            out, err = await p.communicate()
+            raise AssertionError(
+                f"driver never reached the checkpoint ({action})\n"
+                f"stdout: {out.decode()[-2000:]}\nstderr: {err.decode()[-4000:]}"
+            ) from None
         assert p.returncode is None, (await p.communicate())[1].decode()
         p.kill()
         await p.wait()
