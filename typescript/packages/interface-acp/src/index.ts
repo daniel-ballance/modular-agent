@@ -334,7 +334,18 @@ export class AcpInterface implements InterfaceCapability {
 		};
 		const extension = (name: string, run: (ctx: { params: Record<string, any> }) => unknown) => {
 			const method = `_${NS}/${name}`;
-			this.app.onRequest(method, any, async (ctx) => (name === "requests" || name === "history") ? run(ctx) : this.gateReply(open(ctx.params.sessionId), method, await run(ctx)));
+			this.app.onRequest(method, any, async (ctx) => {
+				const sessionId = open(ctx.params.sessionId);
+				const { actorId, when } = ctx.params;
+				const represented = typeof actorId === "string" && actorId !== this.actorId;
+				// Proposals, release and withdraw also serve parked job reports.
+				const feature = name === "limit" ? "sessionLimits" : name === "tenant" ? "tenants" :
+					["actors", "join", "leave"].includes(name) ||
+					name === "input" && (when === "propose" || represented) ||
+					name === "answer" && represented ? "severalActors" : undefined;
+				if (feature && this.bindingDeclaration(sessionId)[feature] !== true) throw bindingError("not_supported");
+				return (name === "requests" || name === "history") ? run(ctx) : this.gateReply(sessionId, method, await run(ctx));
+			});
 		};
 		extension("history", async ({ params }) => {
 			const sessionId = open(params.sessionId);

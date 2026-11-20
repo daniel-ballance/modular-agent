@@ -24,7 +24,7 @@ Build the [Claude sidecar](../../../typescript/sidecars/claude/README.md) with N
 ## What is checked
 
 - **Reference:** 15/15, including the declaration, crash recovery, the prompt tail and SDK-shaped JSON events.
-- **ACP:** 87/87 default, 94/94 with `--crash-checks`, 111/111 with `--crash-checks --job-checks`. With `--probe-checks` added, 158/162 passed, including all six late-question checks. The four failures are optional remote Runtime probes (see Known gaps). These runs use the standard declaration; actor, tenant and session-limit cases are not enabled.
+- **ACP:** `ma` passes 115/115 with `--crash-checks --job-checks`. With `--probe-checks` added, `ma` passes 162/166 (all four new refusal checks pass; four pre-existing remote Runtime probes still fail) and the base passes 213/214 (the pre-existing Provider response extra-member probe still fails). The base declares all three features true, so it runs the positive rather than the refusal checks.
 - **Python ma and SDK revisions:** 29/29 focused tests, including loopback browser and device sign-in, concurrent token refresh, encrypted reasoning replay and isolation on Provider switch, the shared `auth.json` format, Monty limits, project trust and multi-project ACP, SDK environment callbacks in process and over the wire, and late answers. No real sign-in, credentials or model calls were used.
 - **SDK scenarios:** 55/55: 11 in process and 11 each through the built Python, Rust, Go and TypeScript fixture programs.
 - **Python suites:** 365/365 in each of the four runs: transient and durable, with the local binding and with the process binding.
@@ -58,7 +58,11 @@ See the [SDK README](../../SDK.md) for fixture build commands. Process-binding t
 
 ## Findings for docs/reference and docs/sdk
 
-Suggested text. No shared documents were changed.
+The base ACP Interface forwarded proposed input, actor joins, limit changes and tenant queries to the underlying APIs despite the SDK's session declaration. The bound handlers now use that declaration to return `not_supported`. They still allow `proposals`, `release` and `withdraw` for parked job reports. This change does not touch served Runtime composition or the Provider callback.
+
+Suggested text. No shared specification documents were changed.
+
+- **Reference, Checks** — replace the ACP-kit bullet with: “the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;”
 
 - **Reference, What it declares** — replace the `commandContainment` value cell with: “`strong` when the local environment can stop every descendant of a command; `processGroup` when only the command's process group is contained.” Linux alone does not guarantee delegated cgroup access.
 - **Reference, Tools** — replace the first sandbox rule with: “Arguments go by keyword or position. Positional arguments follow the JSON Schema's `required` array, then the remaining property names in lexicographic order. Passing `None` omits an argument.” Rust sorts optional names. The revised text reads as declaration order, which Python preserves, but JSON objects do not define a portable member order.

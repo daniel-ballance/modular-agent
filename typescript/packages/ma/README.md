@@ -45,7 +45,7 @@ MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-
 ```
 
 - Reference checks: **15/15**, including declaration, JSON events, prompt tail and both crash-recovery modes.
-- ACP against `ma`: **87/87** default, **94/94** with crash checks, and **184/184** with crash, probe and job checks together. The last run includes late answers and job take-up after a crash. The default run exercises fewer checks than the previous SDK declaration, which advertised several actors, tenants and output holding.
+- ACP with crash, probe and job checks together: **188/188** against `ma` and **214/214** against the base build. The expanded run includes late answers and job take-up after a crash.
 - TypeScript workspace: **186/186** in both the normal and `MA_REMOTE` placements, including **19/19** `ma` tests. Each workspace run includes **22/22** shared SDK scenarios across embedded and TypeScript process fixtures (the built fixture in this checkout). The `ma` tests cover Rust-format credentials, lock exclusion during refresh, loopback sign-in and Responses requests, codemode limits, file tools, prompt order, skills, stdio and HTTP MCP, per-project ACP settings and trust, terminal queueing and SDK-only imports.
 - Claude sidecar: **44/44**. No real sign-ins, credentials or models were used.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
@@ -60,9 +60,11 @@ MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-
 
 Proposed replacement text; the shared documents are unchanged in this branch.
 
+**ACP declarations.** The base Interface called the session API for proposals, actor joins, limits and tenant queries regardless of the SDK's session declaration. Its extension dispatcher now returns `not_supported` for disabled operations, while leaving `proposals`, `release` and `withdraw` available for parked job reports. The base declares all three features true and still passes the positive checks.
+
 **Reference — Checks.** Replace the ACP-kit bullet with:
 
-> the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp`, with the default options and with `--crash-checks --probe-checks --job-checks` to exercise recovered turns, late answers and job take-up;
+> the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;
 
 **SDK — ACP factory.** Replace the `compose(project)` option sentence with:
 

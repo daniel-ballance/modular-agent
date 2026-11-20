@@ -47,7 +47,7 @@ MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-
 ```
 
 - **Reference checks:** 15/15. No changes to the runner.
-- **ACP:** 87/87 default, 94/94 with `--crash-checks`, and 184/184 with `--crash-checks --probe-checks --job-checks`, including late answers and job reports after recovery.
+- **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 against `ma` and 214/214 against the base build, including late answers and job reports after recovery.
 - **Shared SDK scenarios:** 55/55 with the Go, Python, Rust and TypeScript fixture programs built.
 - **Go regressions:** 19 focused tests and 19 subtests cover the Rust auth format, simultaneous refresh, loopback sign-in and Responses requests, Provider data isolation, in-process late answers, the standard 500-call Monty budget and exceptions, prompt order and wording, skills, project trust and multi-project ACP, file tools, MCP and the SDK import boundary. The reference runner separately exercises stdio MCP and real process loss with a scripted Provider.
 - **Go SDK and base:** the full run passed 36 packages (252 top-level tests and 499 subtests); 15 packages have no tests. `cmd/modular` took about 5½ minutes, so use the default package timeout. The race run passed 14 tested packages (156 top-level tests and 316 subtests). The later in-process late-answer regression passed separately under `-race`. Build and vet pass, and `gofmt -l .` is empty.
@@ -62,7 +62,12 @@ MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-
 
 ## Findings for docs/reference and docs/sdk
 
+The base ACP server published the SDK's declaration but went straight to Harness operations for proposed input, joining another actor, changing the session limit and querying the tenant. It now checks the session declaration first and returns `not_supported` where appropriate, leaving `proposals`, `release` and `withdraw` usable for parked job reports. The base declares all three features true and still passes the positive checks.
+
 Proposed replacement text, without changing the shared documents from this worktree:
+
+**`docs/reference/standard-configuration.md`, Checks.** Replace the ACP-kit bullet with:
+> the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;
 
 1. **`docs/reference/standard-configuration.md`, Tools.** Replace the argument sentence with:
    > Pass arguments by keyword or position: required fields in schema order, then optional fields by name. A single dict supplies named arguments unless the first parameter takes an object. `None` omits an argument.

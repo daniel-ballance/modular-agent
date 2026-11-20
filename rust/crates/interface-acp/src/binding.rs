@@ -441,9 +441,34 @@ fn input_timing_for_release(
         input_taken(api.is_running(session), timing)
     }
 }
-pub(crate) async fn extension(session: Arc<Session>, method: &str, p: &Value) -> Result<Value> {
+pub(crate) async fn extension(
+    factory: &dyn Factory,
+    session: Arc<Session>,
+    method: &str,
+    p: &Value,
+) -> Result<Value> {
     let scope = actor_scope(&session.id);
     let connection_actor = connection_actor();
+    // Proposals, release and withdraw also serve parked job reports.
+    let feature = match method {
+        "actors" | "join" | "leave" => Some("severalActors"),
+        "input" if p["when"] == "propose" => Some("severalActors"),
+        "input" | "answer"
+            if p["actorId"]
+                .as_str()
+                .is_some_and(|id| id != connection_actor.as_str()) =>
+        {
+            Some("severalActors")
+        }
+        "limit" => Some("sessionLimits"),
+        "tenant" => Some("tenants"),
+        _ => None,
+    };
+    if let Some(feature) = feature
+        && factory.session_declaration(session.api.as_ref(), &session.id)?[feature] != true
+    {
+        return Err(request_error("not_supported", "feature is disabled in this session").into());
+    }
     let actor = if matches!(method, "input" | "answer") {
         let actor = p
             .get("actorId")

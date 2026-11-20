@@ -76,6 +76,28 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 	if err != nil {
 		return nil, err
 	}
+	// Proposals, release and withdraw also serve parked job reports.
+	feature := ""
+	represented := p.ActorID != "" && p.ActorID != st.actor
+	switch method {
+	case "_modular-agent/actors", "_modular-agent/join", "_modular-agent/leave":
+		feature = "severalActors"
+	case "_modular-agent/input":
+		if p.When == "propose" || represented {
+			feature = "severalActors"
+		}
+	case "_modular-agent/requests", "_modular-agent/answer":
+		if represented {
+			feature = "severalActors"
+		}
+	case "_modular-agent/limit":
+		feature = "sessionLimits"
+	case "_modular-agent/tenant":
+		feature = "tenants"
+	}
+	if feature != "" && s.declaration(p.SessionID)[feature] != true {
+		return nil, acpError("not_supported")
+	}
 	ctx = api.AsActor(ctx, st.actor)
 	switch method {
 	case "_modular-agent/input":
