@@ -247,6 +247,9 @@ export interface Provider {
 	readonly prepareOnWire?: boolean;
 	supports: Declaration;
 	models(): ModelInfo[];
+	onChange?(handler: () => void): () => void;
+	/** A served Provider may refresh its cached catalog using provider/models. */
+	refreshModels?(): Promise<void>;
 	/** Whether this Provider can be used now, for example because it has credentials. */
 	available?(): Promise<boolean>;
 	/** Make one model request. Never rejects for a model failure: the message says why. */

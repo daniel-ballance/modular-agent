@@ -12,7 +12,7 @@ export function anthropic({ baseUrl }: AnthropicOptions = {}): Provider {
   return {
     id: "anthropic", models: () => structuredClone(models),
     supports: { keepsState: false, safeToRepeat: true },
-    available: () => !!process.env.ANTHROPIC_API_KEY,
+    available: async cx => !!(await cx.credential()),
     async request(model, request, cx) {
       if (model.provider !== "anthropic" || !models.some(m => m.id === model.id)) throw new AgentError("invalid_request", "Model is not offered");
       const key = await cx.credential();

@@ -438,6 +438,17 @@ export class Agent {
       return { ...meta, updated: entries.at(-1)?.time ?? meta.created, settings };
     });
   }
+  /** Refresh served catalogs; /1 has a query, not a catalog-change notification. */
+  async refreshModels(): Promise<ModelInfo[]> {
+    this.#check();
+    await checked(() => Promise.all(this.#h.useAll<BaseProvider>("provider").map(p => p.refreshModels?.())));
+    return this.models();
+  }
+  onModelsChanged(handler: () => void): () => void {
+    this.#check();
+    const off = this.#h.useAll<BaseProvider>("provider").flatMap(p => p.onChange ? [p.onChange(handler)] : []);
+    return () => { for (const remove of off) remove(); };
+  }
   models(): ModelInfo[] {
     this.#check();
     return structuredClone(this.#h.useAll<BaseProvider>("provider").flatMap(p => p.models()));

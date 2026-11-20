@@ -1245,8 +1245,9 @@ export class Harness {
 
 	private async acceptInput(s: Session, q: QueuedInput): Promise<InputReceipt> {
 		if (s.closed || s.closing || s.suspended || s.erasing || s.moving) throw new Error("Session cannot take input right now");
-		if (this.rejectUnknownModel && q.startedBy.kind === "actor" && q.when !== "propose" && s.settings.model != null && !this.modelAccess(s)) {
-			throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
+		if (this.rejectUnknownModel && q.startedBy.kind === "actor" && q.when !== "propose" && s.settings.model != null) {
+			await this.providerFor(s)?.refreshModels?.();
+			if (!this.modelAccess(s)) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
 		}
 		const steer = q.when === "steer" && this.runtime()?.supports.inputDuringTurn === true && !s.running?.steeringClosed;
 		const taken = q.when === "propose" ? "proposed" : !s.isBusy() && !s.reopening && !s.followUps.length ? "now" : steer && !s.reopening ? "inTurn" : "after";
@@ -1760,7 +1761,13 @@ export class Harness {
 			model: info,
 			supports: provider.supports,
 			prepareOnWire: provider.prepareOnWire,
-			request: (request, options) => provider.request(ref, request, { ...options, sessionId: s.id }),
+			request: async (request, options) => {
+				const available = provider.prepareOnWire ? true : await provider.available?.().catch(() => false);
+				options.signal.throwIfAborted();
+				if (available === false) return { role: "assistant", stop: "failed", content: [],
+					error: { kind: "credentials", message: "Provider is not available" } };
+				return provider.request(ref, request, { ...options, sessionId: s.id });
+			},
 		};
 	}
 

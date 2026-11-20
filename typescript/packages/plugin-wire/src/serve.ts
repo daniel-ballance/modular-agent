@@ -215,7 +215,9 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		request.settings = { ...request.settings, reasoning: lowerReasoning(request.settings?.reasoning, modelInfo) };
 		let message: unknown;
 		try {
-			message = toWire(await currentParent.run(ctx.id, () => impl.request(p.model, request, {
+			message = toWire(await currentParent.run(ctx.id, async () => (await impl.available?.()) === false ?
+				{ role: "assistant", stop: "failed", content: [], error: { kind: "credentials", message: "Provider is not available" } }
+				: impl.request(p.model, request, {
 				signal: ctx.signal,
 				sessionId: p.sessionId,
 				requestPrepared: true,

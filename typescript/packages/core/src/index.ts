@@ -14,6 +14,6 @@ export type { JSONSchema, Schema, StandardSchema } from "./schema.js";
 export { definePlugin } from "./plugin.js";
 export type { AgentInterface, ToolCatalog, CallContext, CommandContext, CommandHandler, HookPoint, HookHandler, HookOrder, Plugin, Registrar } from "./plugin.js";
 export type * from "./data.js";
-export { ModelFailure } from "./provider.js";
+export { defineProvider, ModelFailure } from "./provider.js";
 export type { Provider, ProviderContext } from "./provider.js";
 export { serve } from "./serve.js";
