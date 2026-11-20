@@ -51,7 +51,7 @@ step "kits: npm ci (conformance/acp, conformance/tools)" bash -c "cd conformance
 # ---------- builds ----------
 want rust && step "rust: build ma and fixture program" bash -c "cd rust && mise exec -- cargo build -q -p standard --bin ma && mise exec -- cargo build -q -p agent-base && mise exec -- cargo build -q -p sdk-scenarios --bin modular-agent-fixtures"
 want typescript && step "typescript: npm ci and build" bash -c "cd typescript && npm ci --silent && npm run -s build"
-want go && step "go: build ma and fixture program" bash -c "cd go && mkdir -p .bin && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures"
+want go && step "go: build ma and fixture program" bash -c "cd go && mkdir -p .bin && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures"
 want python && step "python: uv sync" bash -c "cd python && uv sync --python 3.13 -q"
 
 # ---------- lint and formatting ----------
@@ -71,7 +71,6 @@ else
   want typescript && step "typescript: tests" bash -c "cd typescript && npm test"
   want typescript && step "typescript: tests with remote parts" bash -c "cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test"
   want typescript && step "typescript: Claude sidecar tests" bash -c "cd typescript/sidecars/claude && npm ci --silent && npm test"
-  want rust && step "kits over WebSocket: Rust plugin and ma" scripts/websocket-kits.sh
   want go && step "go: all tests" bash -c "cd go && mise exec -- go test -count=1 ./..."
   want go && step "go: race detector on SDK and ma" bash -c "cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/..."
   for runtime in transient durable; do
@@ -93,6 +92,7 @@ if $all; then
     for language in rust typescript go python; do
       command=$(node -e "const a=require('./conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")
       step "ACP kit: $language ma (crash, probe, job checks)" bash -c "cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- $command --acp"
+      step "kits over WebSocket: $language plugin and ma" scripts/websocket-kits.sh "$language"
     done
   fi
   unset MODULAR_AGENT_SDK_REQUIRE MODULAR_AGENT_REF_REQUIRE

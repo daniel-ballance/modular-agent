@@ -1,34 +1,50 @@
 #!/usr/bin/env bash
-# The plugin and ACP kits in --connect mode, through the loopback test bridge
-# (conformance/tools/ws-bridge.mjs), against the Rust fixture plugin and Rust ma.
-# Needs: rust/target/debug/modular-agent and rust/target/debug/ma built, and
-# npm ci in conformance/acp and conformance/tools. Called by scripts/check.sh.
+# The plugin and ACP kits in --connect mode against one language's own WebSocket servers:
+# its conformance plugin served with --listen (with each Runtime tier as a separate service),
+# and `ma --acp --listen`, which the ACP kit starts, kills and restarts itself.
+#
+#   scripts/websocket-kits.sh rust|typescript|go|python
+#
+# Needs that language built as scripts/check.sh builds it, and npm ci in conformance/acp.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+language="${1:?usage: websocket-kits.sh rust|typescript|go|python}"
+case "$language" in
+  rust) plugin=("$repo/rust/target/debug/modular-agent" --serve-plugin) ;;
+  typescript) plugin=(node "$repo/typescript/packages/plugin-wire/dist/src/serve-cli.js") ;;
+  go) plugin=("$repo/go/.bin/modular" --serve-plugin) ;;
+  python) plugin=("$repo/python/.venv/bin/python" -m ma_plugin.serve) ;;
+  *) echo "unknown language: $language" >&2; exit 2 ;;
+esac
+ma=$(node -e "const a=require('$repo/conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")
+
 export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
 work="$(mktemp -d "$TMPDIR/ws-kits-XXXXXX")"
 pids=()
 cleanup() { [ ${#pids[@]} -gt 0 ] && kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null; rm -rf "$work"; }
 trap cleanup EXIT
-
 (umask 077 && openssl rand -hex 32 >"$work/token")
-port() { node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})'; }
-bridge="$repo/conformance/tools/ws-bridge.mjs"
-plugin="$repo/rust/target/debug/modular-agent --serve-plugin"
 
-# Plugin kit: the full plugin, and each Runtime tier on its own service.
-p1=$(port); p2=$(port); p3=$(port)
-node "$bridge" --binding plugin --listen "ws://127.0.0.1:$p1/" --token-file "$work/token" -- $plugin >"$work/b1.log" 2>&1 & pids+=($!)
-MODULAR_AGENT_PLUGIN_PARTS=runtime node "$bridge" --binding plugin --listen "ws://127.0.0.1:$p2/" --token-file "$work/token" -- $plugin >"$work/b2.log" 2>&1 & pids+=($!)
-MODULAR_AGENT_PLUGIN_PARTS=durable-runtime node "$bridge" --binding plugin --listen "ws://127.0.0.1:$p3/" --token-file "$work/token" -- $plugin >"$work/b3.log" 2>&1 & pids+=($!)
-for p in $p1 $p2 $p3; do
-  for _ in $(seq 100); do (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && break; sleep 0.1; done
-done
-(cd "$repo/conformance/plugin" && node run.mjs --connect "ws://127.0.0.1:$p1/" --token-file "$work/token" \
-  --runtime-url "ws://127.0.0.1:$p2/" --durable-runtime-url "ws://127.0.0.1:$p3/")
+# Start one plugin service on a free port; print its URL once it accepts connections.
+service() { # parts (or ""), name
+  local out="$work/$2.url"
+  if [ -n "$1" ]; then
+    MODULAR_AGENT_PLUGIN_PARTS="$1" "${plugin[@]}" --listen 127.0.0.1:0 --token-file "$work/token" >"$out" 2>"$work/$2.log" &
+  else
+    "${plugin[@]}" --listen 127.0.0.1:0 --token-file "$work/token" >"$out" 2>"$work/$2.log" &
+  fi
+  pids+=($!)
+  for _ in $(seq 300); do [ -s "$out" ] && break; sleep 0.1; done
+  [ -s "$out" ] || { echo "the $2 service did not report its URL" >&2; cat "$work/$2.log" >&2; exit 1; }
+  head -1 "$out"
+}
+full=$(service "" full); runtime=$(service runtime runtime); durable=$(service durable-runtime durable)
 
-# ACP kit: the kit starts, kills and restarts the bridged service itself.
+(cd "$repo/conformance/plugin" && node run.mjs --connect "$full" --token-file "$work/token" \
+  --runtime-url "$runtime" --durable-runtime-url "$durable")
+
+port=$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
 (cd "$repo/conformance/acp" && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks \
-  --connect "ws://127.0.0.1:$(port)/" --token-file "$work/token" \
-  --service-command "node $bridge --binding acp -- $repo/rust/target/debug/ma --acp")
+  --connect "ws://127.0.0.1:$port/" --token-file "$work/token" \
+  --service-command "$ma --acp --listen \"\$MODULAR_AGENT_CONFORMANCE_URL\" --token-file \"\$MODULAR_AGENT_CONFORMANCE_TOKEN_FILE\"")
