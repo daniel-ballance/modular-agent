@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Awaitable, Callable, Coroutine, Generator, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Generator, Mapping, Sequence
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import TracebackType
@@ -31,15 +32,15 @@ from ma_local.containment import delegated_root
 from ma_fake.conformance import Echo, Nest
 from ma_commands import Commands
 from ma_mcp import MCP
-from ma_plugin.host import External, load_plugins
+from ma_plugin.host import External, configure_binding_hooks, load_plugins, wrap_native_providers
 from ma_questions import Questions
 from ma_runtime import Runtime
 from ma_selection import Selection
 
 from .compaction import _CompactionPlugin
 from .mcp import _McpPlugin
-from ._credentials import CredentialStore, _CredentialAdapter
-from ._environment import MemoryEnvironment
+from ._credentials import CredentialStore, _CredentialAdapter, environment_credentials
+from ._environment import LocalEnvironment, MemoryEnvironment
 from ._history import HistoryStore
 from ._native import (
     _LocalPlugin,
@@ -55,6 +56,7 @@ from ._serve import _MemoryExternal, _OverWire
 from ._session import Session, _events
 from ._tool import Tool
 from ._types import (
+    Actor,
     AgentError,
     Answer,
     Approval,
@@ -63,6 +65,7 @@ from ._types import (
     JsonObject,
     ModelRef,
     QuestionHandler,
+    Tenant,
 )
 
 
@@ -97,6 +100,21 @@ async def _structured_result(d: dict[str, Any]) -> JsonObject | None:
 class _Questions(Questions):  # type: ignore[misc]  # Untyped base adapter.
     async def definitions(self, d: JsonObject) -> list[JsonObject]:
         return []
+
+
+@dataclass(frozen=True)
+class RuntimeChoice:
+    continues_after_restart: bool
+
+
+def transient_runtime() -> RuntimeChoice:
+    """Choose the SDK Runtime that does not resume interrupted turns."""
+    return RuntimeChoice(False)
+
+
+def durable_runtime() -> RuntimeChoice:
+    """Choose the SDK Runtime that resumes interrupted turns with persistent history."""
+    return RuntimeChoice(True)
 
 
 class _SdkRuntime(Runtime):  # type: ignore[misc]  # Untyped base adapter.
@@ -282,7 +300,10 @@ class Agent:
         self._plugin_host = False
         self._conformance = False
         self._late_answers = False
-        self._credentials: CredentialStore | None = None
+        self._several_actors = False
+        self._session_limits = False
+        self._tenants = False
+        self._credentials: CredentialStore = environment_credentials()
         self._restart: Callable[[], Awaitable[Agent]] | None = None
         self._memory_store: _MemoryHistory | None = None
 
@@ -290,6 +311,8 @@ class Agent:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         try:
+            if "actor" in data and operation != "append":
+                await self._h.authorize("@harness", operation, data)
             return await self._api.session(operation, **data)
         except Exception as exc:
             raise _error(exc) from exc
@@ -298,6 +321,8 @@ class Agent:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         try:
+            if "actor" in data:
+                await self._h.authorize(target, operation, data)
             return await self._api.call(target, operation, data)
         except Exception as exc:
             raise _error(exc) from exc
@@ -325,7 +350,9 @@ class Agent:
             "questions", "connect" if handler else "disconnect", session=sid, actor="user"
         )
 
-    async def _answer(self, sid: str, question_id: str, answer: Answer) -> None:
+    async def _answer(
+        self, sid: str, question_id: str, answer: Answer, actor: str = "user"
+    ) -> None:
         value = (
             "allow"
             if answer.kind == "allow"
@@ -333,17 +360,30 @@ class Agent:
             if answer.kind == "value"
             else "declined"
         )
-        if answer.kind == "value" and self._credentials is not None:
-            question = await self._call(
-                "questions", "validate", session=sid, actor="user", request=question_id
-            )
+        acting = {"acting_for": "user"} if actor != "user" else {}
+        if answer.kind == "value" and self._credentials.stage is not None:
+            try:
+                question = await self._h.call(
+                    "embedding",
+                    "questions",
+                    "validate",
+                    {"session": sid, "actor": actor, "request": question_id, **acting},
+                )
+            except Exception as exc:
+                raise _error(exc) from exc
             if question["kind"] == "secret":
                 try:
                     await self._h.call(
                         "embedding",
                         "credentials",
                         "answer",
-                        {"session": sid, "actor": "user", "request": question_id, "value": value},
+                        {
+                            "session": sid,
+                            "actor": actor,
+                            "request": question_id,
+                            "value": value,
+                            **acting,
+                        },
                     )
                 except Exception as exc:
                     raise _error(exc) from None
@@ -352,9 +392,11 @@ class Agent:
             "questions",
             "answer",
             session=sid,
-            actor="user",
+            actor=actor,
             request=question_id,
             value=value,
+            declined=answer.kind == "decline",
+            **acting,
             reason=answer.reason,
         )
 
@@ -392,10 +434,29 @@ class Agent:
 
             self._question_tasks[key] = asyncio.create_task(answer())
 
-    async def session(self, *, settings: JsonObject | None = None) -> Session:
+    async def session(
+        self,
+        *,
+        settings: JsonObject | None = None,
+        tenant: str | None = None,
+        actors: Sequence[Actor] = (),
+    ) -> Session:
+        if tenant is not None and not self._tenants:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Tenants are not enabled")
+        if actors and not self._several_actors:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Several actors are not enabled")
         async with self._lock:
             defaults = {**self._settings, **settings_in(settings or {})}
-            data = await self._session("create", project=str(self._project), settings=defaults)
+            data = await self._session(
+                "create", project=str(self._project), settings=defaults, tenant=tenant
+            )
+            session = self._attach(data["id"])
+            try:
+                for actor in actors:
+                    await session.join(actor)
+            except BaseException:
+                await session.close()
+                raise
             # Persist empty sessions too; lazy setup writes the actor and settings with this entry.
             await self._session(
                 "append",
@@ -482,9 +543,9 @@ class Agent:
                 value["waitingThroughRestart"] and self._late_answers and "questions" in parts
             ),
             mixedActorInput="refused",
-            severalActors=False,
-            sessionLimits=False,
-            tenants=False,
+            severalActors=self._several_actors,
+            sessionLimits=self._session_limits,
+            tenants=self._tenants,
             questionsOutlastTurns=bool(
                 self._late_answers and runtime.get("open_calls") and "questions" in parts
             ),
@@ -638,7 +699,8 @@ def create_agent(
     data_dir: str | os.PathLike[str] | None = None,
     durability: Durability = "ephemeral",
     history: HistoryStore | None = None,
-    environment: MemoryEnvironment | None = None,
+    runtime: RuntimeChoice | None = None,
+    environment: MemoryEnvironment | LocalEnvironment | None = None,
     credentials: CredentialStore | None = None,
     providers: Sequence[Provider] = (),
     tools: Sequence[Tool] = (),
@@ -652,6 +714,9 @@ def create_agent(
     local_process_groups: bool = False,
     commands: bool = False,
     conformance: bool = False,
+    several_actors: bool = False,
+    session_limits: bool = False,
+    tenants: Mapping[str, Tenant] | None = None,
     job_reports_start_turns: bool = False,
     late_answers_start_turns: bool = False,
 ) -> AgentStart:
@@ -672,10 +737,12 @@ def create_agent(
                 raise AgentError(
                     ErrorCode.INVALID_COMPOSITION, "Kept history needs a persistent store"
                 )
-            if environment is None:
+            if not isinstance(environment, MemoryEnvironment):
                 raise AgentError(
                     ErrorCode.INVALID_COMPOSITION, "Local environment recovery needs data_dir"
                 )
+        if runtime is not None and runtime.continues_after_restart != (durability == "durable"):
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Runtime does not match durability")
         if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "History does not match durability")
         if plugin_host is False and process_plugins is not None:
@@ -683,11 +750,18 @@ def create_agent(
                 ErrorCode.INVALID_COMPOSITION, "process_plugins requires a plugin host"
             )
         scratch = TemporaryDirectory(prefix="modular-agent-")
-        h = Harness(process_plugins=())
+        h = Harness(process_plugins=(), tenants=tenants or {})
         h.lazy_setup = True
         try:
             root = Path(data_dir).resolve() if data_dir is not None else Path(scratch.name)
-            folder = Path(project or Path.cwd()).resolve(strict=True)
+            environment_root = (
+                environment.root if isinstance(environment, LocalEnvironment) else None
+            )
+            folder = Path(project or environment_root or Path.cwd()).resolve(strict=True)
+            if environment_root is not None and environment_root.resolve() != folder:
+                raise AgentError(
+                    ErrorCode.INVALID_COMPOSITION, "Local environment root must match project"
+                )
             if not folder.is_dir():
                 raise ValueError("Project must be a directory")
             defaults = {"thinking": "off", **settings_in(settings or {})}
@@ -707,17 +781,20 @@ def create_agent(
                 store = History(store_root)
             await h.load(store)
             local = Local(root, point_store="git")
-            if environment is None and local_process_groups:
+            if not isinstance(environment, MemoryEnvironment) and local_process_groups:
                 try:
                     delegated_root()
                 except Exception:
                     local = ProcessGroupLocal(root, point_store="git")
-            await h.load(environment or local)
+            await h.load(environment if isinstance(environment, MemoryEnvironment) else local)
             dispatcher = _SdkTools()
             dispatcher.conformance = conformance
             await h.load(dispatcher)
             agent._conformance = conformance
             agent._late_answers = late_answers_start_turns
+            agent._several_actors = several_actors
+            agent._session_limits = session_limits
+            agent._tenants = tenants is not None
             await h.load(
                 _SdkDurable(job_reports_start_turns)
                 if durability == "durable"
@@ -729,21 +806,24 @@ def create_agent(
                 "job_reports_start_turns": job_reports_start_turns,
             }
             await h.load(jobs)
+            configure_binding_hooks(h)
             h.on("embedding", "result.ready", _structured_result, "last")
             if conformance:
                 await h.load(Echo())
                 await h.load(Nest())
-            await h.load(Questions() if conformance else _Questions())
-            if credentials is not None:
-                agent._credentials = credentials
-                await h.load(_CredentialAdapter(credentials))
+            questions = Questions() if conformance else _Questions()
+            questions.wait_for_unconnected = not conformance
+            await h.load(questions)
+            agent._credentials = credentials or environment_credentials()
+            await h.load(_CredentialAdapter(agent._credentials))
             h.on("embedding", "session.start", agent._present, "first")
             h.follow("embedding", "user", agent._event)
             for provider in providers:
                 await h.load(_ProviderAdapter(provider, credentials))
-            await h.load(
-                Selection([p.id for p in providers] + (["conformance"] if conformance else []))
+            selection = Selection(
+                [p.id for p in providers] + (["conformance"] if conformance else [])
             )
+            await h.load(selection)
             compaction_parts = [p for p in plugins if isinstance(p, _CompactionPlugin)]
             mcp_parts = [p for p in plugins if isinstance(p, _McpPlugin)]
             if len(compaction_parts) > 1 or len(mcp_parts) > 1:
@@ -779,6 +859,17 @@ def create_agent(
                             raise AgentError(
                                 ErrorCode.NOT_SUPPORTED, f"Unsupported hook: {hook.point}"
                             )
+                    for provider in registrar._providers.values():
+                        prior_provider = h.capabilities.get(provider.id)
+                        if prior_provider is not None:
+                            if (
+                                f"provider:{provider.id}" not in plugin.replaces
+                                or prior_provider[1].role != "provider"
+                            ):
+                                raise ValueError(f"Duplicate Provider: {provider.id}")
+                            await h.unload(prior_provider[0])
+                        await h.load(_ProviderAdapter(provider, agent._credentials))
+                        await selection.add_provider({"provider": provider.id}, None)
                     for tool_name in registrar._tools:
                         if (prior := registered_tools.get(tool_name)) is not None:
                             if f"tool:{tool_name}" not in plugin.replaces:
@@ -821,6 +912,7 @@ def create_agent(
                     return kind(harness, spec, project, home, index)
 
                 await load_plugins(h, specs, folder, root, external_factory=factory)
+            wrap_native_providers(h)
             runtime_owner = h.capabilities["runtime"][0]
             continues = bool(h.plugins[runtime_owner].declarations.get("durable"))
             # Offline ACP fixtures exercise both Runtime kinds with persistent

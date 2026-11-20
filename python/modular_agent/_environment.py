@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
-from pathlib import PurePosixPath
+from dataclasses import dataclass
+from os import PathLike
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ma_core import AgentError as _NativeError
@@ -15,6 +17,16 @@ from ._types import JsonObject
 
 
 type ExecHandler = Callable[[str], JsonObject | Awaitable[JsonObject]]
+
+
+@dataclass(frozen=True)
+class LocalEnvironment:
+    root: Path | None = None
+
+
+def local_environment(root: str | PathLike[str] | None = None) -> LocalEnvironment:
+    """Select the local environment, rooted at the project unless specified."""
+    return LocalEnvironment(Path(root) if root is not None else None)
 
 
 class MemoryEnvironment(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.

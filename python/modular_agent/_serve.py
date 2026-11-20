@@ -21,8 +21,9 @@ from ._plugin import (
     _handle_command,
     _handle_hook,
 )
+from ._provider import Provider, ProviderContext, _available, _models, _request
 from ._tool import LeftOpen, ToolContext
-from ._types import AgentError, Answer, Content, ErrorCode, Json, JsonObject, QuestionSpec
+from ._types import AgentError, Answer, Content, ErrorCode, Json, JsonObject, ModelRef, QuestionSpec
 
 
 async def _serve(
@@ -35,6 +36,7 @@ async def _serve(
     stopped = False
     active: set[asyncio.Task[Any]] = set()
     environment_output: dict[str, Callable[[Content], Awaitable[None]]] = {}
+    provider_locks: dict[tuple[str, str], asyncio.Lock] = {}
     registration: dict[str, Any] = {
         "binding": BINDING,
         "name": plugin.name,
@@ -74,6 +76,18 @@ async def _serve(
         registration["hooks"] = [
             {"hook": h.point, "handlerId": n, "order": h.order}
             for n, h in enumerate(registrar._hooks, 1)
+        ]
+        registration["providers"] = [
+            {
+                "id": p.id,
+                "models": _models(p),
+                "supports": {
+                    "keepsState": p.supports.keeps_state,
+                    "runsTools": False,
+                    "safeToRepeat": p.supports.safe_to_repeat,
+                },
+            }
+            for p in registrar._providers.values()
         ]
         registration["commands"] = [
             {"name": c.name, "description": c.description} for c in registrar._commands.values()
@@ -186,6 +200,16 @@ async def _serve(
                 }
             return cast(Json, reply)
 
+        async def history(cursor: str | None) -> JsonObject:
+            try:
+                page = await server.peer.request(
+                    "host/history",
+                    {"parentRequestId": key, **({"after": cursor} if cursor else {})},
+                )
+            except WireError as exc:
+                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+            return cast(JsonObject, page)
+
         context = ToolContext(
             p["sessionId"],
             call.get("actorId", "user"),
@@ -194,6 +218,7 @@ async def _serve(
             progress,
             nested,
             environment,
+            history,
         )
         try:
             return await t._run(call["input"], context)
@@ -204,6 +229,79 @@ async def _serve(
                 "status": "cancelled",
                 "content": [{"type": "text", "text": "Tool call cancelled"}],
             }
+
+    def provider_for(p: dict[str, Any]) -> Provider:
+        provider = registered()._providers.get(p["provider"])
+        if provider is None:
+            raise WireError("Unknown Provider", "invalid_request")
+        return provider
+
+    async def models(p: dict[str, Any], key: str | int) -> dict[str, Any]:
+        return {"models": _models(provider_for(p))}
+
+    async def available(p: dict[str, Any], key: str | int) -> JsonObject:
+        return {"available": await _available(provider_for(p))}
+
+    async def request_model(p: dict[str, Any], key: str | int) -> JsonObject:
+        provider = provider_for(p)
+        ref = p["model"]
+        info = next((m for m in _models(provider) if m["id"] == ref["id"]), None)
+        if info is None or ref["provider"] != provider.id:
+            raise WireError("Unknown model", "invalid_request")
+        sid = p.get("sessionId")
+        if provider.supports.keeps_state and not sid:
+            raise WireError("Stateful Provider requires a session", "invalid_request")
+        scope = {"sessionId": sid, "provider": provider.id, "model": ref}
+
+        async def infer() -> JsonObject:
+            hook = await server.peer.request(
+                "host/hook",
+                {
+                    "parentRequestId": key,
+                    "hook": "provider.request",
+                    "payload": {**scope, "request": p["request"]},
+                },
+            )
+            answer = await server.peer.request("host/credentials/read", {"provider": provider.id})
+            raw = answer.get("credential")
+            credential = (
+                raw.get("key") if isinstance(raw, dict) and raw.get("type") == "apiKey" else None
+            )
+
+            async def piece(event: JsonObject) -> None:
+                await server.peer.notify("provider/event", {"parentRequestId": key, **event})
+
+            cx = ProviderContext(sid, None, piece, lambda: credential)
+            reply = await _request(
+                provider,
+                ModelRef(provider.id, ref["id"]),
+                info,
+                hook["request"],
+                cx,
+            )
+            await server.peer.request(
+                "host/hook",
+                {
+                    "parentRequestId": key,
+                    "hook": "provider.response",
+                    "payload": {**scope, "message": reply},
+                },
+            )
+            return reply
+
+        if provider.supports.keeps_state and isinstance(sid, str):
+            async with provider_locks.setdefault((provider.id, sid), asyncio.Lock()):
+                return await infer()
+        return await infer()
+
+    async def discard(p: dict[str, Any], key: str | int) -> JsonObject:
+        provider = provider_for(p)
+        handler = getattr(provider, "discard_state", None)
+        if handler is None or p.get("erase"):
+            raise WireError("Provider does not support this discard", "not_supported")
+        async with provider_locks.setdefault((provider.id, p["sessionId"]), asyncio.Lock()):
+            await handler(p["sessionId"])
+        return {}
 
     async def handle_hook(p: dict[str, Any], key: str | int) -> JsonObject | None:
         registrations = registered()._hooks
@@ -266,6 +364,10 @@ async def _serve(
         "tools/call": call_tool,
         "hook/handle": handle_hook,
         "command/run": run_command,
+        "provider/models": models,
+        "provider/available": available,
+        "provider/request": request_model,
+        "provider/discard": discard,
     }
     server = Server(registration, methods, initialize, stop)
     if streams is None:

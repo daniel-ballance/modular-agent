@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import AsyncIterator, Callable, Sequence
+from copy import copy
+from typing import TYPE_CHECKING, Any, Self, cast
 from uuid import uuid4
 
 from ma_core.wire import entry_out, result_out, settings_in, settings_out, turn_end_out, usage_out
 
 from ._types import (
+    Actor,
     AgentError,
     AnswerInput,
     Disposition,
@@ -60,6 +62,8 @@ _RECORD_EVENTS = {
     "tool_started": "toolStarted",
     "tool_result": "toolResult",
     "setting": "settingChanged",
+    "authority": "actorJoined",
+    "actor_left": "actorLeft",
 }
 
 
@@ -193,17 +197,65 @@ class Session:
         self._changed = asyncio.Event()
         self._streams: set[_Stream] = set()
         self._closed = False
+        self._root = self
+        self._actor = "user"
 
-    async def _native(self, op: str, **data: Any) -> Any:
-        if self._closed:
+    def _actor_id(self, actor: str) -> str:
+        if not isinstance(actor, str) or not actor:
+            raise AgentError(ErrorCode.INVALID_PARAMS, "Expected a nonempty actor id")
+        if not self._agent._several_actors and actor != "user":
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Several actors are not enabled")
+        return actor
+
+    def as_actor(self, actor_id: str) -> Self:
+        """Use the named actor's current rights on the same session."""
+        view = copy(self)
+        view._actor = self._actor_id(actor_id)
+        return view
+
+    async def join(self, actor: Actor, granted_by: str | None = None) -> None:
+        if not self._agent._several_actors:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Several actors are not enabled")
+        subject = self._actor_id(actor["id"])
+        if actor["kind"] not in {"user", "host", "agent", "program"}:
+            raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid actor kind")
+        await self._native(
+            "grant",
+            acting=self._actor if granted_by is None else self._actor_id(granted_by),
+            subject=subject,
+            kind=actor["kind"],
+            authority=actor["rights"],
+        )
+
+    async def leave(self, actor_id: str) -> None:
+        if not self._agent._several_actors:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Several actors are not enabled")
+        await self._native("leave", subject=self._actor_id(actor_id))
+
+    async def set_limit(self, rights: Sequence[str] | None = None) -> None:
+        if not self._agent._session_limits:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Session limits are not enabled")
+        await self._native("limit", rights=None if rights is None else list(rights))
+
+    async def _native(self, op: str, *, acting: str | None = None, **data: Any) -> Any:
+        if self._root._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Session is not open")
-        return await self._agent._session(op, session=self.id, actor="user", **data)
+        actor = self._actor if acting is None else acting
+        return await self._agent._session(
+            op, session=self.id, actor=actor, **self._acting(actor), **data
+        )
+
+    @staticmethod
+    def _acting(actor: str) -> dict[str, str]:
+        return {} if actor == "user" else {"acting_for": "user"}
 
     async def _state(self) -> dict[str, Any]:
         return cast(dict[str, Any], await self._native("get"))
 
-    async def send(self, input: Input, timing: Timing, *, key: str | None = None) -> InputReceipt:
-        return await self._send(input, timing, key=key)
+    async def send(
+        self, input: Input, timing: Timing, *, key: str | None = None, actor: str | None = None
+    ) -> InputReceipt:
+        return await (self if actor is None else self.as_actor(actor))._send(input, timing, key=key)
 
     async def _send(
         self,
@@ -221,8 +273,10 @@ class Session:
                 Draft202012Validator.check_schema(result)
             except SchemaError as exc:
                 raise AgentError(ErrorCode.INVALID_PARAMS, exc.message) from exc
-        if self._closed:
+        if self._root._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Session is not open")
+        if timing == "propose" and not self._agent._several_actors:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Proposed input is not enabled")
         if timing not in {"now", "steer", "after", "propose"}:
             raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid input timing")
         if key is not None and (not isinstance(key, str) or not key):
@@ -238,7 +292,8 @@ class Session:
             "runtime",
             "submit",
             session=self.id,
-            actor="user",
+            actor=self._actor,
+            **self._acting(self._actor),
             when=timing,
             content=_content(input),
             key=key,
@@ -258,7 +313,7 @@ class Session:
             return PromptResult(receipt.input_id, receipt.disposition)
         while True:
             self._changed.clear()
-            state = await self._state()
+            state = await self._agent._session("get", session=self.id)
             records = state["entries"]
             turn_id = next(
                 (
@@ -283,15 +338,29 @@ class Session:
             await self._changed.wait()
 
     async def prompt(
-        self, input: Input, *, key: str | None = None, result: JsonObject | None = None
+        self,
+        input: Input,
+        *,
+        key: str | None = None,
+        result: JsonObject | None = None,
+        actor: str | None = None,
     ) -> PromptResult:
-        return await self._result(await self._send(input, "now", key=key, result=result))
+        session = self if actor is None else self.as_actor(actor)
+        return await session._result(await session._send(input, "now", key=key, result=result))
 
     async def prompt_stream(
-        self, input: Input, *, key: str | None = None, result: JsonObject | None = None
+        self,
+        input: Input,
+        *,
+        key: str | None = None,
+        result: JsonObject | None = None,
+        actor: str | None = None,
     ) -> AsyncIterator[Event]:
-        stream = _Stream()
-        self._streams.add(stream)
+        if actor is not None:
+            async for event in self.as_actor(actor).prompt_stream(input, key=key, result=result):
+                yield event
+            return
+        stream, unsubscribe = await self._subscribe()
         try:
             receipt = await self._send(input, "now", key=key, result=result)
             if receipt.disposition is not None:
@@ -331,11 +400,32 @@ class Session:
                     if event.type == "turnEnded":
                         return
         finally:
-            self._streams.discard(stream)
+            unsubscribe()
+
+    async def _subscribe(self) -> tuple[_Stream, Callable[[], None]]:
+        await self._state()
+        stream = _Stream()
+        if self._actor == "user":
+            self._streams.add(stream)
+            return stream, lambda: self._streams.discard(stream)
+
+        async def receive(data: dict[str, Any]) -> None:
+            if data.get("session") != self.id:
+                return
+            for event in _events(data):
+                stream.push(event)
+
+        follower = ("embedding", self._actor, receive)
+        self._agent._h.follow(*follower)
+
+        def unsubscribe() -> None:
+            if follower in self._agent._h.followers:
+                self._agent._h.followers.remove(follower)
+
+        return stream, unsubscribe
 
     async def events(self, from_entry: str | None = None) -> AsyncIterator[Event]:
-        stream = _Stream()
-        self._streams.add(stream)
+        stream, unsubscribe = await self._subscribe()
         try:
             snapshot = (await self._state())["entries"]
             entry_ids = {e["id"] for e in snapshot}
@@ -348,7 +438,11 @@ class Session:
                     replay = raw["id"] == from_entry
                     continue
                 entry = await self._agent._session(
-                    "view", session=self.id, recipient="user", type="entry", value=entry_out(raw)
+                    "view",
+                    session=self.id,
+                    recipient=self._actor,
+                    type="entry",
+                    value=entry_out(raw),
                 )
                 if entry is not None:
                     event = Event(
@@ -362,7 +456,7 @@ class Session:
                     )
                     stream.delivered(event)
                     yield event
-            while not self._closed:
+            while not self._root._closed:
                 event = await stream.next()
                 if (
                     isinstance(entry := event.data.fields.get("entry"), dict)
@@ -374,7 +468,7 @@ class Session:
                 if event.type == "sessionEnded":
                     return
         finally:
-            self._streams.discard(stream)
+            unsubscribe()
 
     async def last_turn(self) -> PromptResult | None:
         records = await self._native("branch")
@@ -388,7 +482,7 @@ class Session:
         result = []
         for entry in state["entries"]:
             visible = await self._agent._session(
-                "view", session=self.id, recipient="user", type="entry", value=entry_out(entry)
+                "view", session=self.id, recipient=self._actor, type="entry", value=entry_out(entry)
             )
             if visible is not None:
                 result.append(visible)
@@ -397,12 +491,16 @@ class Session:
     async def wait_idle(self) -> None:
         """Wait for the running turn and any inputs queued behind it."""
         await self._state()
-        await self._agent._call("runtime", "wait", session=self.id, actor="user")
+        await self._agent._call(
+            "runtime", "wait", session=self.id, actor=self._actor, **self._acting(self._actor)
+        )
 
     async def cancel(self) -> list[InputReceipt]:
         state = await self._state()
         before = {e["id"] for e in state["entries"]}
-        await self._agent._call("runtime", "cancel", session=self.id, actor="user")
+        await self._agent._call(
+            "runtime", "cancel", session=self.id, actor=self._actor, **self._acting(self._actor)
+        )
         return [
             InputReceipt(e["data"]["input"], "now", disposition=Disposition.HANDED_BACK)
             for e in (await self._state())["entries"]
@@ -426,36 +524,63 @@ class Session:
         ):
             raise AgentError(ErrorCode.NOT_FOUND, "Fork entry is not on the current branch")
         result = await self._native("fork", **({"point": entry_id} if entry_id is not None else {}))
-        return self._agent._attach(result["id"])
+        return self._agent._attach(result["id"]).as_actor(self._actor)
 
     async def on_question(self, handler: QuestionHandler | None) -> None:
+        if self._actor != "user":
+            raise AgentError(ErrorCode.FORBIDDEN, "Question handlers represent the local actor")
         await self._state()
         await self._agent._set_handler(self.id, handler)
 
     async def answer(self, question_id: str, answer: AnswerInput) -> None:
-        await self._state()
-        await self._agent._answer(self.id, question_id, _answer(answer))
+        if self._root._closed:
+            raise AgentError(ErrorCode.NOT_OPEN, "Session is not open")
+        await self._agent._answer(self.id, question_id, _answer(answer), self._actor)
 
     async def questions(self) -> list[Question]:
         await self._state()
         from ._native import _question
 
-        return [
-            _question(self.id, q)
-            for q in await self._agent._call("questions", "list", session=self.id, actor="user")
-        ]
+        questions = await self._agent._call(
+            "questions",
+            "list",
+            session=self.id,
+            actor=self._actor,
+            openOnly=True,
+            recipientView=True,
+            **self._acting(self._actor),
+        )
+        result = []
+        for q in questions:
+            visible = await self._agent._session(
+                "view",
+                session=self.id,
+                recipient=self._actor,
+                type="reply",
+                method="questions",
+                value=q,
+            )
+            if visible is not None:
+                result.append(_question(self.id, visible))
+        return result
 
     async def call_tool(self, name: str, input: JsonObject) -> ToolResult:
         """Call a tool as the local actor through the Runtime's gates."""
-        if self._closed:
+        if self._root._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Session is not open")
         result = await self._agent._call(
-            "runtime", "run_tool", session=self.id, actor="user", name=name, input=input
+            "runtime",
+            "run_tool",
+            session=self.id,
+            actor=self._actor,
+            **self._acting(self._actor),
+            name=name,
+            input=input,
         )
         public = await self._agent._session(
             "view",
             session=self.id,
-            recipient="user",
+            recipient=self._actor,
             value=result_out(result),
             type="reply",
             method="callTool",
@@ -488,8 +613,8 @@ class Session:
         return None
 
     async def close(self) -> None:
-        if not self._closed:
+        if not self._root._closed:
             await self._native("close")
-            self._closed = True
+            self._root._closed = True
             self._changed.set()
             self._agent._detached(self.id)

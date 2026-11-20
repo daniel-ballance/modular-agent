@@ -3,10 +3,21 @@
 from ._agent import (
     Agent as Agent,
     AgentStart as AgentStart,
+    RuntimeChoice as RuntimeChoice,
     create_agent as create_agent,
+    durable_runtime as durable_runtime,
     run as run,
+    transient_runtime as transient_runtime,
 )
-from ._credentials import CredentialStore as CredentialStore
+from ._credentials import (
+    CredentialStore as CredentialStore,
+    environment_credentials as environment_credentials,
+    file_credentials as file_credentials,
+)
+from ._environment import (
+    LocalEnvironment as LocalEnvironment,
+    local_environment as local_environment,
+)
 from ._history import (
     HistoryStore as HistoryStore,
     file_history as file_history,
@@ -25,6 +36,7 @@ from ._provider import (
     ModelFailure as ModelFailure,
     ModelInfo as ModelInfo,
     Provider as Provider,
+    ProviderCatalog as ProviderCatalog,
     ProviderContext as ProviderContext,
     ProviderSupports as ProviderSupports,
 )
@@ -38,6 +50,7 @@ from ._tool import (
     tool as tool,
 )
 from ._types import (
+    Actor as Actor,
     AgentError as AgentError,
     Answer as Answer,
     Approval as Approval,
@@ -57,6 +70,7 @@ from ._types import (
     Question as Question,
     QuestionContext as QuestionContext,
     QuestionSpec as QuestionSpec,
+    Tenant as Tenant,
     Timing as Timing,
     ToolResult as ToolResult,
     ToolStatus as ToolStatus,

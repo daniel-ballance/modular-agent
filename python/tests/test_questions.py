@@ -168,8 +168,10 @@ async def test_keyed_answers_reuse_only_on_current_branch_and_current_authority(
     original = await task
     assert await a.call("questions", "ask", args) == original
     await a.session("grant", session=sid, subject="approver", authority=["watch"])
-    # The old allow must not be reused. A fresh question is opened and times out.
-    again = await a.call("questions", "ask", {**args, "timeout": 0})
+    # Neither the old allow nor its key is valid for a new deadline policy.
+    with pytest.raises(AgentError, match="Question key reused"):
+        await a.call("questions", "ask", {**args, "timeout": 0})
+    again = await a.call("questions", "ask", {**args, "key": "fresh", "timeout": 0})
     assert again.get("open") and again["request"] != q["id"]
     await a.session("move", session=sid, point=None)
     assert await a.call("questions", "list", {"session": sid}) == []

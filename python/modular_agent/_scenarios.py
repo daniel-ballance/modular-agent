@@ -67,6 +67,7 @@ async def _agent(scenario: dict[str, Any], directory: Path, command: list[str]) 
         durability=options.get("durability", "ephemeral"),
         approval=options.get("approval"),
         settings=options.get("settings"),
+        several_actors=options.get("severalActors", False),
         plugins=plugins,
         process_plugins=processes if command else None,
         on_question=answers(options["answers"]) if "answers" in options else None,
@@ -76,7 +77,7 @@ async def _agent(scenario: dict[str, Any], directory: Path, command: list[str]) 
 async def _crash_child(path: Path, directory: Path, index: int, command: list[str]) -> None:
     scenario = _load(path)
     async with await _agent(scenario, directory, command) as agent:
-        session = await agent.session()
+        session = await agent.session(actors=scenario["agent"].get("actors", []))
         print(session.id, flush=True)
         async for event in session.prompt_stream(scenario["steps"][index]["prompt"]):
             if event.type == "entry":
@@ -179,13 +180,33 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                             session_id = await _crash(
                                 path, directory, n, step["crashWhen"], command
                             )
-                        elif "prompt" in step:
+                        elif any(field in step for field in ("prompt", "send", "answer", "wait")):
                             if agent is None:
                                 agent = await _agent(scenario, directory, command)
-                                session = await agent.session()
+                                session = await agent.session(
+                                    actors=scenario["agent"].get("actors", [])
+                                )
                                 session_id = session.id
                             assert session is not None
-                            result = await session.prompt(step["prompt"])
+                            acting = session.as_actor(step["as"]) if "as" in step else session
+                            if "prompt" in step:
+                                result = await acting.prompt(step["prompt"])
+                            elif "send" in step:
+                                await acting.send(step["send"], step.get("timing", "now"))
+                            elif "answer" in step:
+                                try:
+                                    async with asyncio.timeout(10):
+                                        while len(open_questions := await acting.questions()) != 1:
+                                            await asyncio.sleep(0.005)
+                                except TimeoutError:
+                                    compare(
+                                        "open questions count", 1, len(await acting.questions())
+                                    )
+                                    break
+                                await acting.answer(open_questions[0].id, step["answer"])
+                            else:
+                                await acting.wait_idle()
+                                result = await acting.last_turn()
                         elif step.get("reopen"):
                             if agent is not None:
                                 await agent.close()

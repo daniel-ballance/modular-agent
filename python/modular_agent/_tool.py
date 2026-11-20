@@ -127,6 +127,7 @@ class ToolContext:
         progress: Callable[[Content], Awaitable[None]],
         nested: Callable[[str, JsonObject], Awaitable[Json]],
         environment: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
+        history: Callable[[str | None], Awaitable[JsonObject]] | None = None,
     ) -> None:
         self.session_id = session_id
         self.actor_id = actor_id
@@ -135,6 +136,7 @@ class ToolContext:
         self._ask = ask
         self._progress = progress
         self._nested = nested
+        self._history = history
         self.environment = ToolEnvironment(self._check, environment)
         self.tools = _NestedTools(self)
         self._question_index = 0
@@ -167,6 +169,13 @@ class ToolContext:
             )
         self._question_index += 1
         return await self._ask(question, self._question_index, wait, then == "leaveOpen")
+
+    async def history(self, cursor: str | None = None) -> JsonObject:
+        """Read a page of the plugin's raw session record, after cursor if supplied."""
+        self._check()
+        if self._history is None:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "History is not available in this context")
+        return await self._history(cursor)
 
     async def progress(self, content: Input) -> None:
         self._check()

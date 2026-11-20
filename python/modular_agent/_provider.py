@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
@@ -68,6 +69,15 @@ class ProviderContext:
         await self._emit({"event": event})
 
 
+class ProviderCatalog:
+    """Optional mixin for Providers that signal catalog changes to embedded hosts."""
+
+    _catalog_revision = 0
+
+    def changed(self) -> None:
+        self._catalog_revision += 1
+
+
 class Provider(Protocol):
     id: str
     supports: ProviderSupports
@@ -79,6 +89,51 @@ class Provider(Protocol):
     ) -> JsonObject: ...
 
 
+async def _available(provider: Provider) -> bool:
+    available = getattr(provider, "available", None)
+    if available is None:
+        return True
+    value = available()
+    return bool(await value if inspect.isawaitable(value) else value)
+
+
+def _models(provider: Provider) -> list[ModelInfo]:
+    models = list(provider.models())
+    if any(m["provider"] != provider.id or not m["id"] for m in models) or len(
+        {m["id"] for m in models}
+    ) != len(models):
+        raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid catalog for {provider.id}")
+    return models
+
+
+async def _request(
+    provider: Provider,
+    model: ModelRef,
+    info: ModelInfo,
+    request: JsonObject,
+    cx: ProviderContext,
+) -> JsonObject:
+    error: JsonObject
+    try:
+        settings = request.get("settings", {})
+        if isinstance(settings, dict):
+            requested = settings.get("reasoning", "off")
+            level = lower_reasoning(requested, info.get("thinking") or ["off"])
+            if requested != level:
+                request = {**request, "settings": {**settings, "reasoning": level}}
+        return await provider.request(model, request, cx)
+    except ModelFailure as exc:
+        error = {"kind": exc.error["kind"], "message": exc.error["message"]}
+    except asyncio.CancelledError:
+        cx.cancelled.set()
+        raise
+    except Exception as exc:
+        error = {"kind": "other", "message": str(exc) or type(exc).__name__}
+    finally:
+        cx._active = False
+    return {"role": "assistant", "stop": "failed", "content": [], "error": error}
+
+
 class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapter.
     role = "provider"
 
@@ -86,6 +141,7 @@ class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapt
         self.provider = provider
         self.credentials = credentials
         self.name = provider.id
+        self._cached: tuple[int, list[ModelInfo]] | None = None
         self.declarations = {
             "stateful": provider.supports.keeps_state,
             "requests_safe_to_repeat": provider.supports.safe_to_repeat,
@@ -96,11 +152,18 @@ class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapt
         api.provide(self.name, self)
 
     async def catalog(self, d: JsonObject, emit: Any) -> list[JsonObject]:
-        models = self.provider.models()
-        if any(m["provider"] != self.name or not m["id"] for m in models) or len(
-            {m["id"] for m in models}
-        ) != len(models):
-            raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid catalog for {self.name}")
+        if not await _available(self.provider):
+            return []
+        revision = (
+            self.provider._catalog_revision if isinstance(self.provider, ProviderCatalog) else None
+        )
+        if revision is None:
+            models = _models(self.provider)
+        elif self._cached is None or self._cached[0] != revision:
+            models = _models(self.provider)
+            self._cached = (revision, models)
+        else:
+            models = self._cached[1]
         supports = self.provider.supports
         result = []
         for model in models:
@@ -133,33 +196,8 @@ class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapt
                 else os.getenv(self.name.upper().replace("-", "_") + "_API_KEY")
             ),
         )
-        try:
-            request = request_for_provider(d.get("_shared_request") or request_out(d), self.name)
-            settings = request.get("settings", {})
-            requested = settings.get("reasoning", "off")
-            level = lower_reasoning(requested, info.get("thinking") or ["off"])
-            if requested != level:
-                request = {**request, "settings": {**settings, "reasoning": level}}
-            reply = await self.provider.request(model, request, cx)
-        except ModelFailure as exc:
-            reply = {
-                "role": "assistant",
-                "stop": "failed",
-                "content": [],
-                "error": {"kind": exc.error["kind"], "message": exc.error["message"]},
-            }
-        except asyncio.CancelledError:
-            cx.cancelled.set()
-            raise
-        except Exception as exc:
-            reply = {
-                "role": "assistant",
-                "stop": "failed",
-                "content": [],
-                "error": {"kind": "other", "message": str(exc) or type(exc).__name__},
-            }
-        finally:
-            cx._active = False
+        request = request_for_provider(d.get("_shared_request") or request_out(d), self.name)
+        reply = await _request(self.provider, model, info, request, cx)
         response = response_in({**reply, "model": {"provider": self.name, "id": model.id}})
         # Vendor ids can repeat across sessions/turns. Bind them to the recorded attempt.
         for call in response.get("calls", []):

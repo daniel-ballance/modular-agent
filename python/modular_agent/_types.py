@@ -151,6 +151,7 @@ class QuestionSpec(TypedDict):
     credential: NotRequired[str]
     options: NotRequired[list[str]]
     details: NotRequired[Json]
+    answerers: NotRequired[list[str]]
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,7 @@ class Question:
     details: Json = None
     call: Json = None
     deadline: Json = None
+    answerable: bool = True
 
 
 @dataclass(frozen=True)
@@ -192,6 +194,17 @@ def _answer(value: AnswerInput) -> Answer:
     if isinstance(value, dict):
         return Answer("value", value["value"])
     return Answer("allow" if value == "allow" else "decline")
+
+
+class Actor(TypedDict):
+    id: str
+    kind: Literal["user", "host", "agent", "program"]
+    rights: list[str]
+
+
+class Tenant(TypedDict):
+    rights: list[str]
+    tokens: NotRequired[int | float]
 
 
 @dataclass(frozen=True)

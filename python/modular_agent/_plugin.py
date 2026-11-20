@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
+from ._provider import Provider
 from ._tool import Tool, ToolEnvironment
 from ._types import AgentError, ErrorCode, Json, JsonObject
 
@@ -64,6 +65,7 @@ class Registrar:
     def __init__(self, config: JsonObject) -> None:
         self._config = config
         self._tools: dict[str, Tool] = {}
+        self._providers: dict[str, Provider] = {}
         self._hooks: list[_Hook] = []
         self._commands: dict[str, _Command] = {}
 
@@ -76,6 +78,13 @@ class Registrar:
                 ErrorCode.INVALID_COMPOSITION, f"Invalid tool registration: {tool.name}"
             )
         self._tools[tool.name] = tool
+
+    def provider(self, provider: Provider) -> None:
+        if not provider.id or provider.id in self._providers:
+            raise AgentError(
+                ErrorCode.INVALID_COMPOSITION, f"Invalid Provider registration: {provider.id}"
+            )
+        self._providers[provider.id] = provider
 
     def on(
         self,
@@ -150,6 +159,7 @@ class Plugin:
         items = {
             *(f"tool:{n}" for n in registrar._tools),
             *(f"command:{n}" for n in registrar._commands),
+            *(f"provider:{n}" for n in registrar._providers),
         }
         if len(set(self.replaces)) != len(self.replaces) or set(self.replaces) - items:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid replacements in {self.name}")
@@ -164,6 +174,22 @@ class Plugin:
 def _hook_reply(point: str, answer: JsonObject | None) -> JsonObject | None:
     if answer is None or not answer or answer == {"allow": True} or answer == {"continue": True}:
         return None
+    if point == "output":
+        if answer.get("block") is True:
+            return {"block": True}
+        if isinstance(events := answer.get("redact"), list):
+            return {"events": events}
+    if point == "model.failed":
+        if answer.get("stop") is True:
+            return {"retry": False}
+        if answer.get("retry") is True:
+            return {"retry": True}
+        if isinstance(retry := answer.get("retry"), dict):
+            return {"retry": True, "request": retry}
+    if point == "turn.result" and answer == {"accept": True}:
+        return None
+    if point in {"plugin.load", "turn.result"} and isinstance(answer.get("refuse"), str):
+        return answer
     if point == "step.after" and isinstance(answer.get("end"), str):
         return {"refuse": answer["end"]}
     if point == "turn.before" and isinstance(add := answer.get("add"), dict):
@@ -172,9 +198,15 @@ def _hook_reply(point: str, answer: JsonObject | None) -> JsonObject | None:
         return answer
     if point == "input" and answer == {"handle": True}:
         return answer
-    if point in {"input", "tool.before", "tool.after"} and isinstance(answer.get("change"), dict):
+    if point in {
+        "input",
+        "tool.before",
+        "tool.after",
+        "step.before",
+        "provider.request",
+    } and isinstance(answer.get("change"), dict):
         return answer
-    if point in {"turn.end", "turn.start", "session.start", "session.end"}:
+    if point in _OBSERVERS:
         return None
     raise AgentError(ErrorCode.INVALID_REQUEST, f"Invalid answer at {point}")
 
@@ -194,6 +226,20 @@ async def _handle_hook(hook: _Hook, payload: JsonObject) -> JsonObject | None:
         call = payload.get("call")
         if hook.point == "tool.before" and isinstance(call, dict) and set(change) == {"input"}:
             return {"change": {"call": {**call, "input": change["input"]}}}
+        if hook.point in {"step.before", "provider.request"}:
+            prior_request = payload.get("request")
+            proposed = change.get("request", change)
+            if isinstance(prior_request, dict) and isinstance(proposed, dict):
+                request = {**prior_request, **proposed}
+                offered = prior_request.get("tools") or []
+                tools = request.get("tools")
+                if (
+                    not isinstance(offered, list)
+                    or not isinstance(tools, list)
+                    or any(item not in offered for item in tools)
+                ):
+                    raise AgentError(ErrorCode.INVALID_REQUEST, "Cannot widen the tool offer")
+                return {"value": {**payload, "request": request}}
         prior = payload.get("result")
         if (
             hook.point == "tool.after"
@@ -216,6 +262,13 @@ async def _handle_command(command: _Command, args: str, context: CommandContext)
 
 _SUPPORTED_HOOKS = {
     "input",
+    "plugin.load",
+    "step.before",
+    "model.failed",
+    "turn.result",
+    "provider.request",
+    "provider.response",
+    "output",
     "session.prepare",
     "session.start",
     "session.end",
@@ -226,4 +279,11 @@ _SUPPORTED_HOOKS = {
     "tool.before",
     "tool.after",
 }
-_OBSERVERS = {"session.prepare", "session.start", "session.end", "turn.start", "turn.end"}
+_OBSERVERS = {
+    "session.prepare",
+    "session.start",
+    "session.end",
+    "turn.start",
+    "turn.end",
+    "provider.response",
+}

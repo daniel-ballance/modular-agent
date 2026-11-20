@@ -16,7 +16,7 @@ from modular_agent import (
     Agent,
     AgentError,
     Answer,
-    CredentialStore,
+    file_credentials,
     Durability,
     Event,
     JsonObject,
@@ -135,9 +135,12 @@ def _event(event: Event, args: argparse.Namespace, *, line: bool = False) -> Non
         )
     elif event.type == "text" and line and event.data.delta:
         print(event.data.delta, end="", flush=True)
-    elif event.type == "toolStarted" and (args.verbose or not data.get("parentCallId")):
-        name = data.get("name", "tool")
-        arguments = data.get("input")
+    elif event.type == "toolStarted":
+        call = data.get("call")
+        if not isinstance(call, dict) or (call.get("parentCallId") and not args.verbose):
+            return
+        name = call.get("name", "tool")
+        arguments = call.get("input")
         if (
             name == "codemode"
             and isinstance(arguments, dict)
@@ -427,7 +430,7 @@ async def _agent(
         durability=durability,
         local_process_groups=True,
         providers=providers,
-        credentials=CredentialStore(auth.answer, auth.set_answer),
+        credentials=file_credentials(auth.path),
         tools=[code_tool()],
         plugins=[
             file_tools(paths.state / "output"),

@@ -73,7 +73,7 @@ async def payload(plugin, hook, d):
             p["result"] = result_out(d["result"])
     elif hook == "model.failed":
         p["request"] = request_out(d["request"])
-        p["error"] = {
+        p["error"] = d.get("model_error") or {
             "kind": "contextTooLarge" if d.get("code") == "context_too_large" else "other",
             "message": d["error"],
         }

@@ -99,6 +99,10 @@ class Runtime(Turns, Plugin):
         authority = await self.api.session(
             "authority", session=sid, actor=actor, ceiling=d.get("authority")
         )
+        if acting := d.get("acting_for"):
+            authority = await self.api.session(
+                "authority", session=sid, actor=acting, ceiling=authority
+            )
         permission = "propose" if d.get("when") == "propose" else "input"
         if permission not in authority:
             raise AgentError("Actor lacks authority: " + permission, "forbidden")
@@ -479,7 +483,12 @@ class Runtime(Turns, Plugin):
         s = await self.api.session("get", session=sid)
         actor = d.get("actor", s["actor"])
         authority = await self.api.session("authority", session=sid, actor=actor)
+        if acting := d.get("acting_for"):
+            authority = await self.api.session(
+                "authority", session=sid, actor=acting, ceiling=authority
+            )
         c = {
+            **({"acting_for": acting} if acting else {}),
             "id": d.get("id", identity()),
             "name": d["name"],
             "input": d["input"],

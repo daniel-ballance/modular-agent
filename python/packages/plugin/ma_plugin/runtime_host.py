@@ -732,6 +732,8 @@ class TurnHost:
             d.update(exact_replay=True, close_attempt={"id": replay["id"], "step": replay["step"]})
         wire_provider = self.access["provider"].get("wire_provider")
         if not wire_provider:
+            d = await self.api.session("prepare_model_request", **d)
+            request = d.get("_shared_request", request)
             model = self.runtime._model_record(self.access)
             await self.append(
                 "model_started",

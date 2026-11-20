@@ -124,6 +124,7 @@ def _question(sid: str, q: dict[str, Any]) -> Question:
         q.get("details"),
         q.get("approval_call"),
         q.get("deadline"),
+        q.get("answerable", True),
     )
 
 
@@ -137,7 +138,7 @@ async def _reply(handler: QuestionHandler, q: Question) -> Answer:
 
 def _read_answer(result: dict[str, Any], kind: str) -> Answer:
     value = result.get("value")
-    if result.get("declined") or value == "declined" or value is None:
+    if result.get("declined", False) or value is None:
         return Answer("decline", reason=result.get("reason"))
     if kind == "secret" and isinstance(value, dict) and isinstance(value.get("credential"), str):
         return Answer("value", value["credential"])
@@ -246,8 +247,9 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                     "key": f"call:{call['id']}:{index}",
                     "timeout": wait,
                     "park": leave_open,
-                    "kind": "text" if question["kind"] == "link" else question["kind"],
+                    "kind": question["kind"],
                     "name": question.get("credential"),
+                    **({"responders": question["answerers"]} if "answerers" in question else {}),
                 }
                 if question["kind"] == "approval":
                     params["approval_call"] = {"name": call["name"], "input": call["input"]}
@@ -285,7 +287,26 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
             except Exception as exc:
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
 
-        context = ToolContext(sid, call["actor"], call["id"], ask, progress, nested, environment)
+        async def history(cursor: str | None) -> JsonObject:
+            from ma_core.wire import entry_out, provider_projection
+
+            records = await self.api.session("branch", session=sid)
+            if cursor is not None:
+                for i, record in enumerate(records):
+                    if record["id"] == cursor:
+                        records = records[i + 1 :]
+                        break
+                else:
+                    raise AgentError(ErrorCode.INVALID_REQUEST, "Unknown history cursor")
+            page = [provider_projection(entry_out(e)) for e in records[:500]]
+            return {
+                "entries": page,
+                **({"next": records[499]["id"]} if len(records) > 500 else {}),
+            }
+
+        context = ToolContext(
+            sid, call["actor"], call["id"], ask, progress, nested, environment, history
+        )
         try:
             result = await self.registrar._tools[call["name"]]._run(call["input"], context)
         except LeftOpen as exc:

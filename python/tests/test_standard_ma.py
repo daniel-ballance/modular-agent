@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 from httpx2 import AsyncClient
 import pytest
 
-from modular_agent import Answer, CredentialStore, ModelRef, ProviderContext, Tool, create_agent
+from modular_agent import Answer, ModelRef, ProviderContext, Tool, create_agent, file_credentials
 from modular_agent.files import file_tools
 from modular_agent.testing import memory_environment, scripted_provider, test_agent as offline_agent
 from ma_standard import oauth, prompt, responses
@@ -289,17 +289,16 @@ async def test_secret_answer_is_written_to_shared_auth_not_history(tmp_path: Pat
         tools=[tool],
         providers=[provider],
         on_question=lambda question, _: Answer("value", "test-secret"),
-        credentials=CredentialStore(auth.answer, auth.set_answer),
+        credentials=file_credentials(auth.path),
     ) as agent:
         session = await agent.session()
         result = await asyncio.wait_for(session.prompt("ask"), 5)
         assert result.text == "done"
         assert result.tool_results()[0].text() == "signing-key"
         assert "test-secret" not in json.dumps(await session.history())
-    assert json.loads(auth.path.read_text()) == {
-        "logins": {"xai": {"type": "api_key", "key": "test-key"}},
-        "answers": {"signing-key": "test-secret"},
-    }
+    document = json.loads(auth.path.read_text())
+    assert document["logins"] == {"xai": {"type": "api_key", "key": "test-key"}}
+    assert document["answers"] == {"signing-key": "test-secret"}
     assert stat.S_IMODE(auth.path.stat().st_mode) == 0o600
 
 
@@ -453,6 +452,22 @@ async def test_monty(tmp_path: Path, code: str, limits: dict, status: str, conta
     [tool] = result.tool_results()
     assert tool.status == status, tool.text()
     assert contains.lower() in tool.text().lower()
+
+
+async def test_codemode_prints_started_call_on_stderr(tmp_path: Path, capsys) -> None:
+    from argparse import Namespace
+
+    from ma_standard.cli import _event
+
+    code = "n = 1\nprint(n)"
+    async with offline_agent(
+        project=tmp_path,
+        tools=[code_tool()],
+        script=[{"toolCalls": [{"name": "codemode", "input": {"code": code}}]}, {"text": "ok"}],
+    ) as agent:
+        async for event in (await agent.session()).prompt_stream("use code"):
+            _event(event, Namespace(json=False, verbose=False), line=False)
+    assert capsys.readouterr().err == "codemode\n  | n = 1\n  | print(n)\n"
 
 
 async def test_codemode_lookups_do_not_spend_nested_calls(tmp_path: Path) -> None:
