@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/wswire"
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 )
@@ -24,10 +25,54 @@ func WithWirePlugin(plugin Plugin) Option {
 	return func(o *options) error { o.wire = append(o.wire, wirePlugin{plugin, plugin.Config}); return nil }
 }
 
+// Serve runs the stdio plugin binding until the streams disconnect.
 func Serve(ctx context.Context, plugin Plugin) error {
-	return serve(ctx, plugin, os.Stdin, os.Stdout)
+	err := serve(ctx, plugin, os.Stdin, os.Stdout)
+	if ctx.Err() != nil {
+		return appError(ctx.Err(), CancelledCode)
+	}
+	return err
 }
+
+// TLSOptions names a PEM certificate and private key for a WebSocket service.
+type TLSOptions = wswire.TLSOptions
+
+// Service is a listening WebSocket server. Close stops accepting and waits
+// for the connection instances to stop. URL includes the bound port.
+type Service = wswire.Server
+
+type ServeOptions struct {
+	Listen, TokenFile string
+	TLS               *TLSOptions
+}
+
+// ServeService listens for plugin connections. Setup runs separately for every
+// initialization; connection-local state belongs inside Setup, not its closure.
+func ServeService(ctx context.Context, plugin Plugin, options ServeOptions) (*Service, error) {
+	return ServeServiceFactory(ctx, func() Plugin { return plugin }, options)
+}
+
+// ServeServiceFactory also gives the plugin's Setup and Stop closures their
+// own instance, for plugins that share state between those two functions.
+func ServeServiceFactory(ctx context.Context, factory func() Plugin, options ServeOptions) (*Service, error) {
+	if factory == nil {
+		return nil, &Error{Code: InvalidParams, Message: "plugin factory required"}
+	}
+	token, err := wswire.ReadToken(options.TokenFile)
+	if err != nil {
+		return nil, appError(err, InvalidParams)
+	}
+	service, err := wswire.Listen(ctx, options.Listen, options.TLS, wswire.Plugin, map[string]struct{}{token: {}}, func(ctx context.Context, conn *wswire.Conn, _ struct{}) {
+		_ = servePlugin(factory(), func(s *pluginrpc.Server) error { return s.ServeServiceConnection(ctx, conn) })
+	})
+	return service, appError(err, InvalidParams)
+}
+
 func serve(ctx context.Context, plugin Plugin, in io.ReadCloser, out io.Writer) error {
+	return servePlugin(plugin, func(s *pluginrpc.Server) error { return s.Serve(ctx, in, out) })
+}
+
+func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 	if plugin.Name == "" {
 		return &Error{Code: InvalidComposition, Message: "plugin name is empty"}
 	}
@@ -129,7 +174,7 @@ func serve(ctx context.Context, plugin Plugin, in io.ReadCloser, out io.Writer) 
 		server.Registration = reg
 		return nil
 	}
-	err := server.Serve(ctx, in, out)
+	err := run(server)
 	startup.Lock()
 	closed = true
 	startup.Unlock()
@@ -138,9 +183,6 @@ func serve(ctx context.Context, plugin Plugin, in io.ReadCloser, out io.Writer) 
 	}
 	if startupErr != nil {
 		return startupErr
-	}
-	if ctx.Err() != nil {
-		return appError(ctx.Err(), CancelledCode)
 	}
 	return appError(err, Lost)
 }

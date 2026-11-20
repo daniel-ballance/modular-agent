@@ -34,8 +34,30 @@ func main() {
 	}
 }
 func run(ctx context.Context, args []string, input io.ReadCloser, stdout, stderr io.Writer) error {
-	if len(args) == 1 && args[0] == "--serve-plugin" {
-		return pluginrpc.ConformanceServer().Serve(ctx, input, stdout)
+	if len(args) > 0 && args[0] == "--serve-plugin" {
+		if len(args) == 1 {
+			return pluginrpc.ConformanceServer().Serve(ctx, input, stdout)
+		}
+		flags := flag.NewFlagSet("modular --serve-plugin", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		listen := flags.String("listen", "", "WebSocket listen address")
+		token := flags.String("token-file", "", "bearer token file")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 || *listen == "" || *token == "" {
+			return fmt.Errorf("usage: modular --serve-plugin [--listen ADDR --token-file FILE]")
+		}
+		service, err := pluginrpc.ListenConformancePlugin(ctx, *listen, *token)
+		if err != nil {
+			return err
+		}
+		defer service.Close()
+		if _, err := fmt.Fprintln(stdout, service.URL); err != nil {
+			return err
+		}
+		<-service.Done()
+		return service.Close()
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

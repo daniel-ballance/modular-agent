@@ -56,7 +56,7 @@ func receiptValue(receipt api.Receipt) map[string]any {
 }
 
 func (s *server) actors(ctx context.Context, id, who string) (any, error) {
-	if !s.a.Authorize(id, who, "watch") {
+	if !s.authorize(id, who, "watch") {
 		return nil, invalidActorRequest(errors.New("watch refused"))
 	}
 	snap, err := s.a.View(ctx, id)

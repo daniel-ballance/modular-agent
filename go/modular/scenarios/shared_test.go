@@ -69,21 +69,26 @@ type expectation struct {
 type placement struct {
 	SDK     string
 	Command []string
+	Service bool
 }
 
 func (p placement) name() string {
 	if p.SDK == "" {
 		return "inProcess"
 	}
+	if p.Service {
+		return "service:" + p.SDK
+	}
 	return "process:" + p.SDK
 }
 func (p placement) applies(s scenario) bool {
-	return len(s.Placements) == 0 || slices.Contains(s.Placements, p.name()) || p.SDK != "" && slices.Contains(s.Placements, "process")
+	return len(s.Placements) == 0 || slices.Contains(s.Placements, p.name()) || p.SDK != "" && (p.Service && slices.Contains(s.Placements, "service") || !p.Service && slices.Contains(s.Placements, "process"))
 }
 
 type run struct {
 	dir       string
 	placement placement
+	services  []modular.ServicePlugin
 }
 
 func (r run) countPath() string { return filepath.Join(r.dir, "count") }
@@ -109,8 +114,10 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 	}
 	opts := []modular.Option{modulartest.Script(string(s.Model)), modular.WithProject(project), modular.WithDataDir(r.dataDir()), modular.WithDurability(durability), modular.WithSettings(s.Agent.Settings), modular.WithSeveralActors(s.Agent.SeveralActors)}
 	config := map[string]any{"path": r.countPath()}
-	for _, name := range s.Agent.Plugins {
-		if r.placement.SDK == "" {
+	for i, name := range s.Agent.Plugins {
+		if r.placement.Service {
+			opts = append(opts, modular.WithServicePlugin(r.services[i]))
+		} else if r.placement.SDK == "" {
 			p, err := fixtures.Plugin(name)
 			if err != nil {
 				return nil, err
@@ -216,6 +223,10 @@ func TestShared(t *testing.T) {
 		t.Fatalf("build Go fixture: %v\n%s", err, b)
 	}
 	placements := []placement{{}}
+	var services []placement
+	// During the parallel transport rollout, use "go" to run only Go services
+	// while still requiring all four built process fixtures.
+	serviceFilter := strings.Split(os.Getenv("MODULAR_AGENT_SDK_SERVICE"), ",")
 	for _, path := range regs {
 		f, err := load[struct {
 			SDK, Build string
@@ -250,7 +261,12 @@ func TestShared(t *testing.T) {
 			continue
 		}
 		placements = append(placements, p)
+		if slices.Contains(serviceFilter, "") || slices.Contains(serviceFilter, "all") || slices.Contains(serviceFilter, p.SDK) {
+			p.Service = true
+			services = append(services, p)
+		}
 	}
+	placements = append(placements, services...)
 	for name, listed := range required {
 		if !listed {
 			t.Errorf("required SDK %q has no fixture registry", name)
@@ -275,6 +291,7 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 	var s *modular.Session
 	var id string
 	var answers *modulartest.AnswerScript
+	var serviceGroups fixtureGroups
 	remember := func(script *modulartest.AnswerScript) { answers = script }
 	defer func() {
 		if answers != nil {
@@ -289,8 +306,19 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 			a = nil
 			s = nil
 		}
+		if err := serviceGroups.stop(); err != nil {
+			t.Error(err)
+		}
 	}
 	defer closeAgent()
+	startAgent := func() (*modular.Agent, error) {
+		var err error
+		r.services, err = serviceGroups.start(ctx, r, sc)
+		if err != nil {
+			return nil, err
+		}
+		return r.agent(ctx, sc, remember)
+	}
 	for i, step := range sc.Steps {
 		var result *modular.PromptResult
 		var err error
@@ -298,10 +326,10 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 		switch {
 		case step.Prompt != nil && step.CrashWhen != nil:
 			closeAgent()
-			id, err = r.crash(ctx, path, i, id, *step.CrashWhen)
+			id, err = r.crash(ctx, path, sc, i, id, *step.CrashWhen)
 		case step.Prompt != nil || step.Send != nil:
 			if a == nil {
-				a, err = r.agent(ctx, sc, remember)
+				a, err = startAgent()
 				if err == nil {
 					s, err = a.Session(ctx, modular.SessionOptions{Actors: sc.Agent.Actors})
 					if err == nil {
@@ -344,7 +372,7 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 				err = errors.New("no session to reopen")
 				break
 			}
-			a, err = r.agent(ctx, sc, remember)
+			a, err = startAgent()
 			if err == nil {
 				s, err = a.OpenSession(ctx, id)
 				if err == nil {
@@ -458,7 +486,12 @@ func TestCrashChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := run{dir: args[1], placement: placement{SDK: args[4], Command: args[5:]}}
+	r := run{dir: args[1], placement: placement{SDK: args[4], Command: args[6:], Service: args[5] != ""}}
+	if r.placement.Service {
+		if err := json.Unmarshal([]byte(args[5]), &r.services); err != nil {
+			t.Fatal(err)
+		}
+	}
 	a, err := r.agent(t.Context(), sc, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -480,14 +513,28 @@ func TestCrashChild(t *testing.T) {
 	// A fast prompt may have already committed the record the parent is watching.
 	time.Sleep(30 * time.Second)
 }
-func (r run) crash(ctx context.Context, path string, index int, id string, cond condition) (string, error) {
+func (r run) crash(ctx context.Context, path string, sc scenario, index int, id string, cond condition) (sessionID string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	args := []string{"-test.run=^TestCrashChild$", "--", path, r.dir, strconv.Itoa(index), id, r.placement.SDK}
+	var groups fixtureGroups
+	defer func() { err = errors.Join(err, groups.stop()) }()
+	var encoded string
+	if r.placement.Service {
+		config, err := groups.start(ctx, r, sc)
+		if err != nil {
+			return "", err
+		}
+		b, err := json.Marshal(config)
+		if err != nil {
+			return "", err
+		}
+		encoded = string(b)
+	}
+	args := []string{"-test.run=^TestCrashChild$", "--", path, r.dir, strconv.Itoa(index), id, r.placement.SDK, encoded}
 	cmd := exec.Command(exe, append(args, r.placement.Command...)...)
 	cmd.Env = append(os.Environ(), "MODULAR_AGENT_GO_SCENARIO_CHILD=1")
 	cmd.Stderr = os.Stderr
@@ -499,13 +546,9 @@ func (r run) crash(ctx context.Context, path string, index int, id string, cond 
 	if err = cmd.Start(); err != nil {
 		return "", err
 	}
-	pid := cmd.Process.Pid
-	defer func() {
-		if cmd.ProcessState == nil {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			_ = cmd.Wait()
-		}
-	}()
+	// Kill the agent before the services so it cannot record a graceful
+	// connection-loss settlement in the interval between kill signals.
+	groups = append(fixtureGroups{cmd}, groups...)
 	lines := make(chan string, 1)
 	go func() { line, _ := bufio.NewReader(stdout).ReadString('\n'); lines <- strings.TrimSpace(line) }()
 	select {
@@ -550,18 +593,7 @@ func (r run) crash(ctx context.Context, path string, index int, id string, cond 
 		case <-tick.C:
 		}
 	}
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-		return "", err
-	}
-	_ = cmd.Wait()
-	for groupAlive(pid) {
-		select {
-		case <-ctx.Done():
-			return "", fmt.Errorf("crashed process group did not exit: %w", ctx.Err())
-		case <-tick.C:
-		}
-	}
-	return id, nil
+	return id, groups.stop()
 }
 
 // A zombie has exited. The parent cannot reap a grandchild reparented to init.

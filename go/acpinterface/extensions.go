@@ -25,6 +25,9 @@ func uniquePairs(pairs []api.EntryPair) []api.EntryPair {
 }
 
 func (s *server) HandleExtensionMethod(ctx context.Context, method string, b json.RawMessage) (any, error) {
+	if s.principal != nil && method == "$/ping" {
+		return map[string]any{}, nil
+	}
 	var p struct {
 		SessionID string `json:"sessionId"`
 	}
@@ -75,6 +78,12 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 	st, err := s.attached(p.SessionID)
 	if err != nil {
 		return nil, err
+	}
+	if s.principal != nil {
+		snap, err := s.a.Snapshot(p.SessionID)
+		if err != nil || !s.permitsMembership(snap) {
+			return nil, acpError("forbidden")
+		}
 	}
 	// Proposals, release and withdraw also serve parked job reports.
 	feature := ""
@@ -200,7 +209,7 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		if p.ActorID != "" && p.ActorID != st.actor && !s.represents[p.ActorID] {
 			return nil, acpError("forbidden")
 		}
-		if !s.a.Authorize(p.SessionID, st.actor, "answer") && !s.a.Authorize(p.SessionID, st.actor, "approve") {
+		if !s.authorize(p.SessionID, st.actor, "answer") && !s.authorize(p.SessionID, st.actor, "approve") {
 			return nil, acpError("forbidden")
 		}
 		who := p.ActorID
@@ -235,8 +244,9 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		if p.EntryID == "" {
 			return nil, acp.NewInvalidParams(nil)
 		}
-		s.lifecycle.Lock()
-		defer s.lifecycle.Unlock()
+		lifecycle := s.sessionLifecycle()
+		lifecycle.Lock()
+		defer lifecycle.Unlock()
 		id, err := s.a.Fork(ctx, p.SessionID, p.EntryID)
 		if errors.Is(err, api.ErrResultTooLarge) {
 			return nil, acpError("result_too_large")
@@ -264,7 +274,7 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		}
 		return map[string]any{}, nil
 	case "_modular-agent/erase":
-		if !s.a.Authorize(p.SessionID, st.actor, "erase") {
+		if !s.authorize(p.SessionID, st.actor, "erase") {
 			return nil, acpError("forbidden")
 		}
 		source, err := s.a.Snapshot(p.SessionID)
@@ -295,7 +305,7 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		}
 		return map[string]any{"erased": uniquePairs(report.ErasedPairs), "pending": uniquePairs(report.PendingPairs), "outOfReach": append([]string{"output already delivered", "working-environment effects"}, report.OutOfReach...)}, nil
 	case "_modular-agent/jobs":
-		if !s.a.Authorize(p.SessionID, st.actor, "watch") {
+		if !s.authorize(p.SessionID, st.actor, "watch") {
 			return nil, acpError("forbidden")
 		}
 		v, err := s.a.Get("jobs")
@@ -318,7 +328,7 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		if err != nil {
 			return nil, err
 		}
-		if !s.a.Authorize(p.SessionID, st.actor, "cancel") {
+		if !s.authorize(p.SessionID, st.actor, "cancel") {
 			return nil, acpError("forbidden")
 		}
 		err = v.(api.Jobs).Cancel(ctx, p.SessionID, p.JobID)

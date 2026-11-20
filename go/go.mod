@@ -7,6 +7,7 @@ require (
 	github.com/caelis-labs/acp-go-sdk v1.7.0
 	github.com/ewhauser/gomonty v0.0.14
 	github.com/google/jsonschema-go v0.4.3
+	github.com/gorilla/websocket v1.5.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	golang.org/x/sys v0.42.0
 )

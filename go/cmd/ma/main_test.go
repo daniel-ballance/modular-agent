@@ -45,6 +45,23 @@ func isolated(t *testing.T) (layout, string, string) {
 	t.Setenv("MODULAR_AGENT_PLUGINS", "")
 	return d, project, log
 }
+func TestACPListenOptions(t *testing.T) {
+	for _, args := range [][]string{
+		{"--listen", "127.0.0.1:0", "--token-file", "token"},
+		{"--acp", "--listen", "127.0.0.1:0"},
+		{"--acp", "--token-file", "token"},
+		{"--acp", "--listen=", "--token-file", "token"},
+	} {
+		if _, err := parse(args); err == nil {
+			t.Errorf("accepted %v", args)
+		}
+	}
+	o, err := parse([]string{"--acp", "--listen", "ws://127.0.0.1:0/acp", "--token-file", "token"})
+	if err != nil || !o.acp || o.listen != "ws://127.0.0.1:0/acp" || o.tokenFile != "token" {
+		t.Fatalf("options = %+v, %v", o, err)
+	}
+}
+
 func TestTerminalSessionSurvivesProcessComposition(t *testing.T) {
 	d, project, log := isolated(t)
 	execute := func(args ...string) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/wswire"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"slices"
 	"time"
@@ -17,7 +18,7 @@ func (s *server) update(ctx context.Context, id string, u acp.SessionUpdate) err
 func (s *server) outputRecipient(e api.Event) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if st := s.sessions[e.Session]; st != nil && !s.closed && s.a.Authorize(e.Session, st.actor, "watch") {
+	if st := s.sessions[e.Session]; st != nil && !s.closed && s.authorize(e.Session, st.actor, "watch") {
 		return st.actor
 	}
 	return ""
@@ -25,7 +26,7 @@ func (s *server) outputRecipient(e api.Event) string {
 func (s *server) event(e api.Event) {
 	s.mu.Lock()
 	st := s.sessions[e.Session]
-	if st == nil || s.closed || !s.a.Authorize(e.Session, st.actor, "watch") {
+	if st == nil || s.closed || !s.authorize(e.Session, st.actor, "watch") {
 		s.mu.Unlock()
 		return
 	}
@@ -206,6 +207,15 @@ func requestQuestion[T any](wait, connection context.Context, peer *acp.AgentSid
 	var zero T
 	if err := wait.Err(); err != nil {
 		return zero, err
+	}
+	// Check with the longest numeric ID before preparing a request, so an
+	// oversized question is withheld without failing the writer connection.
+	frame, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": -9007199254740991, "method": method, "params": params})
+	if err != nil {
+		return zero, err
+	}
+	if len(frame) > wswire.MaxFrame {
+		return zero, api.ErrOutputWithheld
 	}
 	request, err := acp.PrepareAgentRequest[T](peer, method, params)
 	if err != nil {

@@ -14,7 +14,7 @@ if err != nil || turn.Text != "Hello." {
 }
 ```
 
-Import `github.com/daniel-ballance/modular-agent/go/modular/modulartest` for tests and `github.com/daniel-ballance/modular-agent/go/modular` for applications. The only direct dependency newly used by the SDK is `github.com/google/jsonschema-go`, already in the base's module graph and named in the SDK specification. It generates and validates tool schemas.
+Import `github.com/daniel-ballance/modular-agent/go/modular/modulartest` for tests and `github.com/daniel-ballance/modular-agent/go/modular` for applications. The SDK uses `github.com/google/jsonschema-go` for tool schemas and [Gorilla WebSocket v1.5.3](https://pkg.go.dev/github.com/gorilla/websocket@v1.5.3) for the network binding. The same plugin and ACP handlers serve stdio and WebSocket connections.
 
 ## Official file and MCP tools
 
@@ -34,7 +34,12 @@ From the repository root:
 ```sh
 export TMPDIR="$HOME/.cache/ma-std-tmp"
 mkdir -p "$TMPDIR"
-(cd conformance/acp && npm ci)
+npm ci --prefix conformance/tools
+npm ci --prefix conformance/acp
+# Build the four fixture programs per conformance/sdk/fixtures/*.json.
+export MODULAR_AGENT_SDK_REQUIRE=all
+# Before the other fixture programs have --listen, enable Go services only:
+# export MODULAR_AGENT_SDK_SERVICE=go
 (cd go && mise exec -- go build ./... && mise exec -- go vet ./... && test -z "$(mise exec -- gofmt -l .)")
 (cd go && mise exec -- go test -json -count=1 ./... > "$TMPDIR/go-test.json" 2>&1)
 (cd go && mise exec -- go test -race -json -count=1 ./modular/... ./cmd/ma/... > "$TMPDIR/go-race.json" 2>&1)
@@ -43,13 +48,13 @@ node conformance/reference/run.mjs --agent go
 (cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- ../../go/.bin/ma --acp)
 ```
 
-The base suites use Linux with unprivileged user, PID and mount namespaces. The scenario runner builds Go's fixture and discovers built peer programs. Build each peer with the command in its [fixture registry](../../conformance/sdk/fixtures/) and set `MODULAR_AGENT_SDK_REQUIRE=all` to require them. Until the peer note fixtures merge, the three `decline-is-not-text/process:<peer>` runs are expected to fail. To run the remaining suite with those peer builds present, use `-skip '^TestShared$/^decline-is-not-text$/^process:(python|rust|typescript)$'`; it skips only those three runs.
+The base suites use Linux with unprivileged user, PID and mount namespaces. The scenario runner builds Go's fixture and discovers built peer programs. Build each peer with its [fixture registry](../../conformance/sdk/fixtures/) command. During the parallel rollout, only the `service:<peer>` runs that need a fixture depend on the peers' `--listen` changes; `MODULAR_AGENT_SDK_SERVICE=go` limits service placements without skipping any process placement.
 
 ### What is checked
 
-- **Go build, vet and formatting:** pass. The full run passed 36 packages (275 top-level tests and 528 subtests); 15 packages had no tests. The SDK and `ma` race run passed seven packages (67 top-level tests and 141 subtests). Both runs exclude the three unavailable peer note fixtures. The full-suite log predates two credential tests, which also passed in the focused run and in the race run.
-- **Reference and bindings:** standard Go `ma`: 17/17 reference checks and 188/188 ACP kit checks including crash, probe and job checks. The base ACP checks pass 123/123 each for transient, durable and external durable; split stdio passes 121/121 each for transient and durable. Plugin binding: 144/144. SDK history kit: 39/39 each for memory, files and HTTP relay (without restart mode).
-- **Shared scenarios:** 28/28 in process and served by Go, including answer-later, tagged decline and actor rights. With every peer built and required, the original eleven pass in all five placements (55/55). The crash scenarios kill the process group, reap the direct child and wait for remaining live members before reopen.
+- **Go build, vet and formatting:** pass. The full run passed 37 packages (283 top-level tests and 545 subtests); 15 packages had no tests. The SDK and `ma` race run passed seven packages (70 top-level tests and 158 subtests). Both require all peer process fixtures and select Go for the service placement. The WebSocket framing and plugin liveness tests also pass with the race detector.
+- **Reference and bindings:** Go `ma` passed 17/17 reference checks and the ACP kit with crash, probe and job checks: **188/188 stdio, 193/193 direct WebSocket**. The Go conformance plugin passed **144/144 stdio, 151/151 direct WebSocket**, with both Runtime tiers. No bridge. The SDK history kit passes 39/39 each for memory, files and HTTP relay (without restart mode).
+- **Shared scenarios:** 84/84 (14 each in `inProcess`, `service:go`, and `process:go`, `process:python`, `process:rust` and `process:typescript`) with all peer programs built and required. For service crash scenarios the runner kills and reaps the agent and each fixture's process group before starting fresh services and reopening. Transport tests cover self-signed TLS and rejection when not trusted, authentication, framing limits and close codes, liveness, a disconnected call's settlement, and token-selected ACP identity and project scope.
 - **Questions and authority:** session handler override, open question listing, answers from the app, tenant and session ceilings, actor departure, and recording both submission identities. Secret tests force process exit after staging, after recording acceptance, and after activation. Recoveries discard unselected stages and finish selected answers. The SDK also checks private files, stale generations and idempotent activation; `ma` tests the same transactions in the `answers` section of `auth.json`.
 - **Guides and Providers:** guides 01–09 have offline coverage. The developer Provider test changes its catalog, checks readiness, streams, transforms a request, observes its response and gets a host credential in both placements. The official Providers have loopback streaming and rejected-key tests.
 - **Live Providers:** `TestLiveProviders` compiles and skips unless `MODULAR_AGENT_LIVE=1`. With opt-in it independently skips each Provider without its key. This run did not enable live checks.
@@ -62,19 +67,25 @@ The base suites use Linux with unprivileged user, PID and mount namespaces. The 
 | Sessions | `Session(ctx, ...SessionOptions)`, `OpenSession`, `Sessions`, `SessionInfo`, `Prompt`, `PromptStream`, `LastTurn`, `Send`, `Cancel`, `Settings`, `SetSetting`, `Fork`, `Commands`, `RunCommand`, `WaitIdle` and `Close`. Keyed prompts and schema-checked JSON results (including null). Events replay gated committed entries and return a cursor on lag. |
 | Actors and limits | `WithSeveralActors`, `WithSessionLimits`, `WithTenants`; settings, tenant and initial actors in `SessionOptions`; `Join`, `Leave`, `As` and `SetLimit`. The declaration reflects the options. The standard agent leaves all three off. |
 | Questions and credentials | `WithOnQuestion`, session `OnQuestion`, `Questions` (open only), `Answer`, `Value` and tagged `Decline`. Without a handler, an approval is refused; another question waits while an eligible actor can answer it. `FileCredentials` stages and atomically activates or discards secrets. Only the stored name is returned. Leave-open calls are opt-in. |
-| Tools | Struct-derived or explicit JSON Schema, dispatch and transformed-result validation, cancellation, refusal, ask, progress, log, raw history pages and custom events. Scoped environment and nested calls work in both placements. A tool marked `InProcessOnly` can read named non-Provider credentials. Nesting is limited to eight edges below the root; nested results stay in history, outside the model context and `PromptResult.ToolResults()`. |
+| Tools | Struct-derived or explicit JSON Schema, dispatch and transformed-result validation, cancellation, refusal, ask, progress, log, raw history pages and custom events. Scoped environment and nested calls work in all three placements. A tool marked `InProcessOnly` can read named non-Provider credentials. Nesting is limited to eight edges below the root; nested results stay in history, outside the model context and `PromptResult.ToolResults()`. |
 | Plugins and hooks | Static tools, Providers, commands, Runtimes and environments, with item-level replacement. `Registrar.On` exposes the standard binding hooks with shared payloads; typed helpers are available for common points. `OnSessionPrepare` is local; `OnSessionEnd` is also served. Setup-time placement failures return `not_supported`, without registering a partial plugin. |
 | Providers | `Provider.Available`, `CatalogChanges.Changed()`, `ProviderContext.Credential()` and streamed pieces. Served Providers use `provider/models`, `provider/available`, `provider/request`, `provider/event`, the two `host/hook` callbacks and `host/credentials/read`. OpenAI Responses and Anthropic Messages by API key. Model failures settle the attempt; cancellation suppresses a late response callback. |
 | Errors | `*modular.Error` with a typed `Code`. Binding and context errors retain known codes; some untyped base errors still need operation-level fallbacks. |
-| Process plugins | Explicit process specs imply plugin hosting and environment discovery unless `WithPluginHost(false)` (a composition error). A configured plugin that fails to start invalidates the composition. |
+| Process and service plugins | `WithProcessPlugin` and `WithServicePlugin` load in that order after local plugins, then mixed `MODULAR_AGENT_PLUGINS` entries in array order. Both options imply plugin hosting; `WithPluginHost(false)` or a configured plugin that cannot start or register fails composition. |
 | Testing | Scripted Provider, memory environment, `Answers`, `OverWire`, simulated `Restart` and seven shared fixture plugins. Shared scenarios check real process termination separately from the simulated restart. |
-| ACP and history | Stdio and supplied streams, multi-project composition, project settings and MCP, and the SDK declaration. Embedded reopen waits for recovery; ACP reopen does not. `ServeHistory` serves file history, service files, or an authenticated HTTP relay; memory is test-only. |
+| ACP and history | ACP over stdio, supplied streams, or WebSocket, with multi-project composition, project settings and MCP. Embedded reopen waits for recovery; ACP reopen does not. `ServeHistory` serves file history, service files, or an authenticated HTTP relay; memory is test-only. |
+
+### WebSocket services
+
+- `modular.ServeService(ctx, plugin, modular.ServeOptions{Listen: "127.0.0.1:0", TokenFile: path})` returns a `Service` with `URL`, `Done()` and `Close()`. `Setup` runs per connection; put mutable instance state inside it or use `ServeServiceFactory` if the `Stop` closure also needs that state. A service environment must see the host's canonical project and allocate its own command ledger. Configuration paths such as the counter fixture's `path` are interpreted by the plugin, not remapped by the SDK.
+- `modular.WithServicePlugin(modular.ServicePlugin{URL: svc.URL, TokenFile: path, Config: config})` dials the service using system TLS roots. Plain WebSocket dials and listeners are loopback-only. `TLSOptions{CertFile: cert, KeyFile: key}` enables WSS at the listener. Generate a bearer token with at least 128 bits of entropy and put it in an owner-only file. The operator can set `PingInterval` and `ControlDeadline` for an explicit service plugin.
+- `agent.ServeACP(ctx, modular.ServeACPOptions{Listen: addr, Actors: entries})` blocks until stopped. `agent.ListenACP` returns the `Service` as soon as it listens. Each `ACPActor` supplies `TokenFile`, `Actor`, `Projects` and `Tenants`. Omit `Projects` to allow all projects supported by the composition; omit `Tenants` to allow only sessions without a tenant. Include `""` in an explicit tenant list to permit those sessions as well. The token is the only source of network connection identity; `MODULAR_AGENT_ACTOR` applies to stdio only.
+- `ma --acp --listen ADDR --token-file FILE` serves the local ACP actor on loopback. `go/.bin/modular --serve-plugin --listen ADDR --token-file FILE` serves the conformance plugin and prints its bound URL. For the plugin kit, launch two more copies with `MODULAR_AGENT_PLUGIN_PARTS=runtime` and `durable-runtime`, and pass their URLs as `--runtime-url` and `--durable-runtime-url`.
 
 ### Remaining Go gaps
 
 - The SDK does not yet expose all base roles: a developer tool source with change notification, a job owner and resumable job handles, and registrar History, Credential Store, Configuration and Interface roles. The bundled parts and the binding endpoints are not substitutes for those developer APIs.
 - Standard binding hooks are registerable, but not every point has a typed helper and a scoped SDK hook context. In-process-only hook points and answers such as plugin-defined hooks, join/leave observers, and pending from a tool gate still need SDK adapters. The Go SDK also does not yet expose all command-context callbacks or the embedded move, erase and direct-call operations.
-- Service placement over the new WebSocket transport needs Go host and server adapters. Stdio, the in-memory plugin binding and HTTP history are available; none of them is a replacement for WebSocket service placement.
 
 ## Where the base and the specification differ
 
@@ -91,6 +102,22 @@ The base suites use Linux with unprivileged user, PID and mount namespaces. The 
 | The HTTP history server and local `history` store have distinct storage layouts. | `ServeHistory` uses either the legacy service layout or the selected SDK store itself. The SDK-store adapter holds that store's writer lease for the duration of each HTTP writer lease. |
 
 ## Findings for the SDK specification
+
+### WebSocket placement and startup
+
+In [Building an agent](../../docs/sdk/api.md#building-an-agent), replace the `pluginHost` default and its description with:
+
+> `false`, or `true` when `processPlugins` or `servicePlugins` is given. A plugin host reads `MODULAR_AGENT_PLUGINS` after both explicit lists. `pluginHost: false` contradicts either list; any failure to connect, initialize or register a configured service is `invalid_composition`.
+
+In [Finding the fixture programs](../../docs/sdk/testing.md#finding-the-fixture-programs), replace “with three more arguments after the fixture's name” with “with four more arguments after the fixture's name”.
+
+In [A plugin service](../../docs/bindings/websocket.md#a-plugin-service), clarify what `home` means to the service:
+
+> `home` is a host-side name for state, not an instruction to open a path on the service. A stateful service maps authenticated hosts and their `home` names to separate allocations in a service-owned state directory. It must not write to a path chosen by a remote host merely because it was supplied as `home`.
+
+In [Connection lifetime](../../docs/bindings/websocket.md#connection-lifetime), replace the liveness sentence with:
+
+> A plugin service client MUST send `$/ping` when a connection with pending work has been silent for an operator-configured interval, by default 30 seconds, and treat no answer within the plugin binding's control deadline as loss. ACP does not define a JSON-RPC ping or a control deadline; ACP clients may use WebSocket ping/pong frames for liveness.
 
 ### Guide 08: ACP spelling and reopen factory — [API / The agent](../../docs/sdk/api.md#the-agent)
 
