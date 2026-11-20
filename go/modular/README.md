@@ -95,6 +95,12 @@ Commands in the base suite use Linux with unprivileged user, PID and mount names
 
 ## Findings for the SDK specification
 
+### Guide 08: ACP spelling and reopen factory — [API / The agent](../../docs/sdk/api.md#the-agent)
+
+Replace the Go ACP options description with:
+
+> `ServeACP(ctx, options ...ServeACPOptions)` accepts at most one options value. `Compose(ctx, project)` supplies a separate Agent bound to the canonical project. During reopen, `ACPReopeningSession(ctx)` returns the saved id. `ProjectSettings` returns new-session defaults; `ProjectMCP` returns trusted configured servers. `Input` and `Output` can replace stdin and stdout for the connection.
+
 ### Guide 06: Provider catalog, readiness and served credentials — [API / Providers](../../docs/sdk/api.md#providers), [Contexts](../../docs/sdk/api.md#contexts)
 
 Replace the Go catalog and readiness descriptions with:
