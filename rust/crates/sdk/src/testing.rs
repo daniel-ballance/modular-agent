@@ -199,6 +199,14 @@ impl TestAgentBuilder {
         self.builder = self.builder.durability(durability);
         self
     }
+    pub fn several_actors(mut self, enabled: bool) -> Self {
+        self.builder = self.builder.several_actors(enabled);
+        self
+    }
+    pub fn setting(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.builder = self.builder.setting(key, value);
+        self
+    }
     pub fn approval(mut self, policy: Approval) -> Self {
         self.builder = self.builder.approval(policy);
         self
@@ -317,6 +325,7 @@ pub mod fixtures {
                 ))
             }
             "confirm" => Plugin::new("confirm").tool(confirm()),
+            "note" => Plugin::new("note").tool(note()),
             "gate" => Plugin::new("gate").on_tool_before(|before| async move {
                 Ok(if before.input.to_string().contains("forbidden") {
                     Gate::Refuse("the gate refused it".into())
@@ -389,6 +398,17 @@ pub mod fixtures {
     #[derive(Deserialize, JsonSchema)]
     struct ConfirmInput {
         question: String,
+    }
+
+    pub fn note() -> Tool {
+        Tool::new("note", "Ask for a note.").run(
+            |input: ConfirmInput, cx: ToolContext| async move {
+                Ok(match cx.ask(Ask::text(input.question)).await? {
+                    Answer::Value(value) => format!("value: {value}"),
+                    _ => "declined".into(),
+                })
+            },
+        )
     }
 
     pub fn confirm() -> Tool {

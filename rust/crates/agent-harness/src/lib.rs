@@ -597,12 +597,22 @@ impl Harness {
         key: Option<String>,
         shape: Value,
     ) -> Result<Receipt> {
-        schema::compile(&shape)?;
         let scope = Scope {
             actor: actor.into(),
             ..Scope::session(session)
         };
-        self.admit(&scope, text, Timing::Now, key, None, Some(shape))
+        self.submit_shaped_as(&scope, None, text, key, shape).await
+    }
+    pub async fn submit_shaped_as(
+        &self,
+        scope: &Scope,
+        sponsor: Option<&str>,
+        text: &str,
+        key: Option<String>,
+        shape: Value,
+    ) -> Result<Receipt> {
+        schema::compile(&shape)?;
+        self.admit(scope, text, Timing::Now, key, sponsor, Some(shape))
             .await
     }
     async fn admit(

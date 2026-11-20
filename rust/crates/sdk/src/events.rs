@@ -118,7 +118,7 @@ pub struct Question {
 }
 
 impl Question {
-    fn from_base(q: &base::Question) -> Self {
+    pub(crate) fn from_base(q: &base::Question) -> Self {
         Question {
             id: q.id.clone(),
             session_id: q.scope.session.clone(),
@@ -141,6 +141,7 @@ pub(crate) type QuestionHandler = Arc<dyn Fn(Question) -> BoxFuture<'static, Ans
 pub(crate) struct Hub {
     pub events: broadcast::Sender<Event>,
     pub on_question: Option<QuestionHandler>,
+    pub session_handlers: std::sync::Mutex<std::collections::HashMap<String, QuestionHandler>>,
     pub harness: OnceLock<Weak<Harness>>,
     crash: tokio_util::sync::CancellationToken,
     workers: tokio_util::task::TaskTracker,
@@ -155,6 +156,7 @@ impl Hub {
         Arc::new(Hub {
             events: broadcast::channel(4096).0,
             on_question,
+            session_handlers: Default::default(),
             harness: OnceLock::new(),
             crash,
             workers,
@@ -169,9 +171,7 @@ impl base::EventSink for Hub {
         };
         let question = (event.kind == "request.opened")
             .then(|| serde_json::from_value::<base::Question>(event.content.clone()).ok())
-            .flatten()
-            .as_ref()
-            .map(Question::from_base);
+            .flatten();
         let event = if event.kind == "history.entry" {
             let Ok(entry) = serde_json::from_value::<base::Entry>(event.content) else {
                 return;
@@ -211,28 +211,82 @@ impl base::EventSink for Hub {
             };
             event
         };
-        if let (Some(question), Some(handler)) = (question, &self.on_question) {
-            let (handler, session) = (handler.clone(), event.session_id.clone());
-            let crash = self.crash.clone();
-            self.workers.spawn(async move {
-                tokio::select! { biased; _ = crash.cancelled() => (), _ = async move {
-                let id = question.id.clone();
-                let (value, declined) = match handler(question).await {
-                    Answer::Allow => (json!("allow"), false),
-                    Answer::Value(v) => (json!(v), false),
-                    Answer::Declined { .. } => (Value::Null, true),
-                };
-                let api: base::Api = h;
-                if let Ok(requests) = base::requests(api.as_ref()) {
-                    let _ = requests
-                        .answer(api.clone(), &session, LOCAL, &id, value, declined)
-                        .await;
-                }
-                } => () }
-            });
+        if let Some(q) = question {
+            let handler = self
+                .session_handlers
+                .lock()
+                .unwrap()
+                .get(&q.scope.session)
+                .or(self.on_question.as_ref())
+                .cloned();
+            if let Some(handler) = handler {
+                let crash = self.crash.clone();
+                let mut events = self.events.subscribe();
+                self.workers.spawn(async move {
+                    let watch = async {
+                        use base::AgentApi;
+                        loop {
+                            let open = h
+                                .snapshot(&q.scope.session)
+                                .and_then(|d| base::questions(&d))
+                                .is_ok_and(|qs| qs.iter().any(|v| v.id == q.id && v.answerable));
+                            if !open {
+                                break;
+                            }
+                            if matches!(
+                                events.recv().await,
+                                Err(broadcast::error::RecvError::Closed)
+                            ) {
+                                break;
+                            }
+                        }
+                    };
+                    let answer = tokio::select! {
+                        biased;
+                        _ = crash.cancelled() => return,
+                        _ = watch => return,
+                        reply = handler(Question::from_base(&q)) => reply,
+                    };
+                    let session = q.scope.session.clone();
+                    let _ = self::answer(h, &session, LOCAL, &q, answer).await;
+                });
+            }
         }
         let _ = self.events.send(event);
     }
+}
+
+pub(crate) async fn answer(
+    api: base::Api,
+    session: &str,
+    actor: &str,
+    q: &base::Question,
+    reply: Answer,
+) -> crate::Result<()> {
+    use crate::{Code, Error};
+    if !q.answerable {
+        return Err(Error::new(Code::Conflict, "question is closed"));
+    }
+    let (value, declined) = match reply {
+        Answer::Allow if q.kind == base::RequestKind::Approval => (json!("allow"), false),
+        Answer::Value(v)
+            if q.kind == base::RequestKind::Text
+                || q.kind == base::RequestKind::Choice && q.options.contains(&v) =>
+        {
+            (json!(v), false)
+        }
+        Answer::Declined { .. } => (Value::Null, true),
+        _ => {
+            return Err(Error::new(
+                Code::InvalidParams,
+                "answer does not match question",
+            ));
+        }
+    };
+    base::requests(api.as_ref())?
+        .answer(api, session, actor, &q.id, value, declined)
+        .await?;
+    Ok(())
 }
 
 pub(crate) struct HubPlugin(pub Arc<Hub>);

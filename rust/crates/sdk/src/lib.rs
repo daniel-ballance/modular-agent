@@ -32,7 +32,7 @@ pub mod testing;
 mod tool;
 
 pub use acp::{AcpComposition, AcpOptions};
-pub use agent::{Agent, AgentBuilder, Approval, Durability, ProcessPlugin};
+pub use agent::{Agent, AgentBuilder, Approval, Durability, ProcessPlugin, SessionOptions};
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
 pub use configuration::FilesConfiguration;
@@ -48,8 +48,8 @@ pub use plugin::{Command, CommandContext, Plugin, Registrar, SessionPrepare, Too
 pub use provider::*;
 pub use serve::serve;
 pub use session::{
-    Disposition, EventStream, HandedBack, InputReceipt, Outcome, PromptOptions, PromptResult,
-    Session, Timing, ToolResult,
+    Actor, Disposition, EventStream, HandedBack, InputReceipt, Outcome, PromptOptions,
+    PromptResult, Rights, Session, Timing, ToolResult,
 };
 pub use tool::{
     Answer, Ask, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext, ToolEnvironment,

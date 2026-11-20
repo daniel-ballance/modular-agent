@@ -11,6 +11,7 @@ use crate::{
 };
 use agent_api as base;
 use agent_harness::Harness;
+use base::AgentApi as _;
 use serde_json::{Value, json};
 use std::{
     future::Future,
@@ -98,6 +99,9 @@ pub(crate) struct Inner {
     pub plugin_host: bool,
     pub acp: std::sync::OnceLock<Arc<crate::acp::Routes>>,
     pub session_settings: Value,
+    pub several_actors: bool,
+    pub session_limits: bool,
+    pub tenants: bool,
     pub drivers: std::sync::Mutex<
         std::collections::HashMap<String, std::sync::Weak<crate::session::Driver>>,
     >,
@@ -115,7 +119,9 @@ pub struct AgentBuilder {
     history: Option<History>,
     configuration: Option<crate::FilesConfiguration>,
     credentials: Option<Arc<dyn crate::CredentialStore>>,
-    tenants: Option<String>,
+    tenants: Option<Value>,
+    several_actors: bool,
+    session_limits: bool,
     pub(crate) acp_conformance: bool,
     no_default_prompt: bool,
     no_compaction: bool,
@@ -134,6 +140,14 @@ pub struct AgentBuilder {
     pub(crate) restartable: bool,
 }
 
+/// Overrides and initial membership for a new session.
+#[derive(Clone, Debug, Default)]
+pub struct SessionOptions {
+    pub settings: serde_json::Map<String, Value>,
+    pub tenant: Option<String>,
+    pub actors: Vec<crate::Actor>,
+}
+
 impl Agent {
     pub fn builder() -> AgentBuilder {
         AgentBuilder::default()
@@ -141,14 +155,54 @@ impl Agent {
 
     /// Create a session.
     pub async fn session(&self) -> Result<Session> {
+        self.session_with(SessionOptions::default()).await
+    }
+
+    pub async fn session_with(&self, options: SessionOptions) -> Result<Session> {
         self.check_crashed()?;
+        if options.tenant.is_some() && !self.inner.tenants {
+            return Err(Error::new(Code::NotSupported, "tenants are disabled"));
+        }
+        if !options.actors.is_empty() && !self.inner.several_actors {
+            return Err(Error::new(
+                Code::NotSupported,
+                "several actors are disabled",
+            ));
+        }
+        let mut settings = self.inner.session_settings.clone();
+        let patch = base::portable::settings_from_wire(&Value::Object(options.settings));
+        if patch
+            .as_object()
+            .is_some_and(|p| p.keys().any(|key| key.starts_with('_')))
+        {
+            return Err(Error::new(
+                Code::InvalidParams,
+                "internal settings cannot be changed",
+            ));
+        }
+        if let Some(model) = patch.get("model") {
+            require_model(
+                self.inner.harness.as_ref(),
+                model
+                    .as_str()
+                    .ok_or_else(|| Error::new(Code::InvalidParams, "invalid model"))?,
+            )?;
+        }
+        base::merge(&mut settings, patch);
         let id = self
             .inner
             .harness
-            .create(&self.inner.project, self.inner.session_settings.clone())
+            .create_in_tenant(&self.inner.project, settings, options.tenant.as_deref())
             .await?;
         self.attach(&id)?;
-        Ok(Session::new(self.inner.clone(), id))
+        let session = Session::new(self.inner.clone(), id);
+        for actor in options.actors {
+            if let Err(error) = session.join(actor) {
+                let _ = self.inner.harness.close(session.id()).await;
+                return Err(error);
+            }
+        }
+        Ok(session)
     }
 
     /// Reopen a kept session. Interrupted work is recovered, as the Runtime declares,
@@ -224,12 +278,9 @@ impl Agent {
     ) -> Result<Value> {
         let mut declaration = interface_acp::declaration(api, session)?;
         declaration["portableSessions"] = json!(self.inner.persistent);
-        // The SDK does not expose several actors, limits or tenants yet, so no path,
-        // including ACP conformance mode, may declare them: a test-only declaration
-        // would have the kit check a different agent from the one shipped.
-        declaration["severalActors"] = json!(false);
-        declaration["sessionLimits"] = json!(false);
-        declaration["tenants"] = json!(false);
+        declaration["severalActors"] = json!(self.inner.several_actors);
+        declaration["sessionLimits"] = json!(self.inner.session_limits);
+        declaration["tenants"] = json!(self.inner.tenants);
         declaration["mixedActorInput"] = json!("refused");
         Ok(declaration)
     }
@@ -315,8 +366,18 @@ impl AgentBuilder {
     }
 
     /// Deployment limits and rights, in the binding's tenant configuration format.
-    pub fn tenants(mut self, tenants: Option<String>) -> Self {
-        self.tenants = tenants;
+    pub fn tenants(mut self, tenants: Value) -> Self {
+        self.tenants = Some(tenants);
+        self
+    }
+
+    pub fn several_actors(mut self, enabled: bool) -> Self {
+        self.several_actors = enabled;
+        self
+    }
+
+    pub fn session_limits(mut self, enabled: bool) -> Self {
+        self.session_limits = enabled;
         self
     }
 
@@ -517,7 +578,10 @@ impl AgentBuilder {
 
         own.push((Arc::new(feature_commands::CommandsPlugin), vec![]));
         let harness = Harness::for_project(project.clone());
-        harness.configure_tenants(self.tenants.as_deref())?;
+        let tenants = self.tenants.as_ref().map(Value::to_string);
+        harness
+            .configure_tenants(tenants.as_deref())
+            .map_err(|_| Error::new(Code::InvalidParams, "invalid tenant configuration"))?;
         for (plugin, replaces) in own {
             let name = plugin.name().to_string();
             let loaded = if replaces.is_empty() {
@@ -642,6 +706,9 @@ impl AgentBuilder {
                 plugin_host,
                 acp: Default::default(),
                 session_settings,
+                several_actors: self.several_actors,
+                session_limits: self.session_limits,
+                tenants: tenants.is_some(),
                 drivers: Default::default(),
                 _scratch: scratch,
                 kept: Default::default(),

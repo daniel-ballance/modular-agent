@@ -1098,11 +1098,8 @@ impl Engine {
         }
         let entries = self.turn_entries(api, scope)?;
         result.usage = self.usage(&entries)?;
-        if let Err(error) = self.hook(api, "turn.end", scope, json!(result)).await
-            && result.outcome != Outcome::Cancelled
-        {
-            result.outcome = Outcome::Failed;
-            result.error = Some(error.to_string());
+        if let Err(error) = self.hook(api, "turn.end", scope, json!(result)).await {
+            eprintln!("turn.end observer failed: {error:#}");
         }
         self.record(
             api,
