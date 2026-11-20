@@ -72,6 +72,34 @@ class Peer:
         self.note_tasks = set()
         self.deliveries = set()
         self.reader_task = asyncio.create_task(self._read())
+        self.liveness_task = None
+
+    def start_liveness(self, interval, deadline):
+        self.liveness_task = asyncio.create_task(self._liveness(interval, deadline))
+
+    async def _liveness(self, interval, deadline):
+        loop = asyncio.get_running_loop()
+        while not self.closed.is_set():
+            self.activity.clear()
+            if not self.pending:
+                await self.activity.wait()
+                continue
+            silence = interval - (loop.time() - self.last_received)
+            if silence > 0:
+                try:
+                    async with asyncio.timeout(silence):
+                        await self.activity.wait()
+                except TimeoutError:
+                    pass
+                continue
+            try:
+                async with asyncio.timeout(deadline):
+                    await self.request("$/ping", {}, cancel_on_interrupt=False)
+            except (TimeoutError, ConnectionError, WireError):
+                # Settle pending work without waiting for a stalled close handshake.
+                self.reader_task.cancel()
+                await self.frames.close()
+                return
 
     async def send(self, message):
         if self.closed.is_set():
@@ -95,7 +123,10 @@ class Peer:
             ).encode()
         async with self.lock:
             if self.frames is not None:
-                await self.frames.send(raw)
+                try:
+                    await self.frames.send(raw)
+                except ConnectionError as exc:
+                    raise WireError(self.label + " disconnected; outcome unknown", "lost") from exc
             else:
                 self.writer.write(raw + b"\n")
                 await self.writer.drain()
@@ -103,14 +134,19 @@ class Peer:
     async def notify(self, method, params):
         await self.send({"method": method, "params": params})
 
-    async def request(self, method, params, *, key=None, return_on_cancel=False):
+    async def request(
+        self, method, params, *, key=None, return_on_cancel=False, cancel_on_interrupt=True
+    ):
         self.sequence += 1
         key = key if key is not None else "r" + str(self.sequence)
         if not rpc_id(key) or key in self.sent_ids or len(self.sent_ids) >= MAX_REQUEST_IDS:
             raise WireError("Request id unavailable", "lost")
         self.sent_ids.add(key)
         future = asyncio.get_running_loop().create_future()
+        if not self.pending:
+            self.last_received = asyncio.get_running_loop().time()
         self.pending[key] = future
+        self.activity.set()
         if asyncio.current_task() in self.note_tasks:
             self.note_requests.add(key)
         try:
@@ -118,7 +154,7 @@ class Peer:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
             self.cancelled_outbound.add(key)
-            if not self.closed.is_set():
+            if cancel_on_interrupt and not self.closed.is_set():
                 await self.notify("$/cancel", {"id": key})
                 children = [
                     task
@@ -140,6 +176,7 @@ class Peer:
             raise
         finally:
             self.pending.pop(key, None)
+            self.activity.set()
             self.answered.discard(key)
             self.cancelled_outbound.discard(key)
             self.note_requests.discard(key)
@@ -330,6 +367,7 @@ class Peer:
             pass
         finally:
             self.closed.set()
+            self.activity.set()
             for future in self.pending.values():
                 if not future.done():
                     future.set_exception(
@@ -339,6 +377,9 @@ class Peer:
                 self.cancel(key)
 
     async def close(self):
+        if self.liveness_task:
+            self.liveness_task.cancel()
+            await asyncio.gather(self.liveness_task, return_exceptions=True)
         self.reader_task.cancel()
         await asyncio.gather(self.reader_task, return_exceptions=True)
         await asyncio.gather(*list(self.running.values()), return_exceptions=True)

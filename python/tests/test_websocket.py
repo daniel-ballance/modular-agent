@@ -1,3 +1,4 @@
+import asyncio
 import json
 import secrets
 import ssl
@@ -6,9 +7,11 @@ from pathlib import Path
 
 import pytest
 from websockets.asyncio.client import connect
+from websockets.asyncio.server import serve as listen
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from modular_agent import Plugin, serve
+from modular_agent import AgentError, Plugin, create_agent, serve, tool
+from modular_agent.testing import scripted_provider
 
 pytestmark = pytest.mark.loopback
 
@@ -122,3 +125,104 @@ async def test_plugin_service_tls(token_file, tmp_path: Path):
             assert (await rpc(conn, 1, "$/ping", {}))["result"] == {}
     finally:
         await server.close()
+
+
+async def test_host_service_config_and_environment(token_file, monkeypatch):
+    received = []
+    server = await serve(
+        Plugin("sample", setup=lambda r: received.append(r.config())),
+        listen="127.0.0.1:0",
+        token_file=token_file,
+    )
+    env = {"url": server.url, "tokenFile": str(token_file), "config": {"count": 2}}
+    try:
+        monkeypatch.setenv("MODULAR_AGENT_PLUGINS", json.dumps([env]))
+        async with create_agent():
+            assert received == []
+        async with create_agent(plugin_host=True):
+            assert received == [{"count": 2}]
+        monkeypatch.setenv("MODULAR_AGENT_PLUGINS", "[]")
+        async with create_agent(
+            service_plugins=[{"url": server.url, "token_file": token_file, "config": {"count": 3}}]
+        ):
+            assert received == [{"count": 2}, {"count": 3}]
+        for specs in ([env | {"command": ["bad"]}], [env, env]):
+            monkeypatch.setenv("MODULAR_AGENT_PLUGINS", json.dumps(specs))
+            with pytest.raises(AgentError) as exc:
+                await create_agent(plugin_host=True)
+            assert exc.value.code == "invalid_composition"
+    finally:
+        await server.close()
+    with pytest.raises(AgentError) as exc:
+        await create_agent(service_plugins=[{"url": server.url, "token_file": token_file}])
+    assert exc.value.code == "invalid_composition"
+
+
+@pytest.mark.parametrize("stall", [False, True])
+async def test_service_loss_settles_dispatched_tool(token_file, stall):
+    dispatched = asyncio.Event()
+    pinged = asyncio.Event()
+
+    @tool
+    async def hold() -> str:
+        """Keep the call pending until the connection closes."""
+        dispatched.set()
+        await asyncio.Future()
+        return "unreachable"
+
+    async def silent(ws):
+        registration = {
+            "binding": INIT["binding"],
+            "name": "sample",
+            "toolSources": [{"id": "sample", "tools": [hold.definition], "perSession": False}],
+        }
+        async for raw in ws:
+            request = json.loads(raw)
+            if request["method"] == "plugin/initialize":
+                await ws.send(
+                    json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": registration})
+                )
+            elif request["method"] == "tools/call":
+                dispatched.set()
+            elif request["method"] == "$/ping":
+                pinged.set()
+
+    server = (
+        await listen(silent, "127.0.0.1", 0, subprotocols=[PROTOCOL])
+        if stall
+        else await serve(
+            Plugin("sample", tools=[hold]), listen="127.0.0.1:0", token_file=token_file
+        )
+    )
+
+    async def close():
+        if stall:
+            server.close()
+            await server.wait_closed()
+        else:
+            await server.close()
+
+    url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}" if stall else server.url
+    try:
+        async with create_agent(
+            providers=[
+                scripted_provider(
+                    [{"toolCalls": [{"name": "hold", "input": {}}]}, {"text": "done"}]
+                )
+            ],
+            service_plugins=[{"url": url, "token_file": token_file}],
+            service_ping_interval=0.05 if stall else 30,
+            service_control_timeout=0.1 if stall else 5,
+        ) as agent:
+            session = await agent.session()
+            async with asyncio.timeout(5):
+                turn = asyncio.create_task(session.prompt("call hold"))
+                await dispatched.wait()
+                if stall:
+                    await pinged.wait()
+                else:
+                    await close()
+                [result] = (await turn).tool_results()
+                assert result.status == "outcomeUnknown"
+    finally:
+        await close()

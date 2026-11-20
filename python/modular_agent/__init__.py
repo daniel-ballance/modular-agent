@@ -30,6 +30,7 @@ from ._plugin import (
     Plugin as Plugin,
     ProcessPlugin as ProcessPlugin,
     Registrar as Registrar,
+    ServicePlugin as ServicePlugin,
 )
 from ._provider import (
     ModelError as ModelError,
@@ -41,6 +42,7 @@ from ._provider import (
     ProviderSupports as ProviderSupports,
 )
 from ._serve import serve as serve
+from ma_plugin.websocket import WebSocketServer as WebSocketServer, WebSocketTLS as WebSocketTLS
 from ._session import Session as Session
 from ._tool import (
     LeftOpen as LeftOpen,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from collections.abc import Awaitable, Callable, Coroutine, Generator, Mapping, Sequence
 from contextvars import ContextVar, Token
@@ -50,7 +51,7 @@ from ._native import (
     _question,
     _reply,
 )
-from ._plugin import Plugin, ProcessPlugin, _SUPPORTED_HOOKS
+from ._plugin import Plugin, ProcessPlugin, ServicePlugin, _SUPPORTED_HOOKS
 from ._provider import ModelInfo, Provider, _ProviderAdapter
 from ._serve import _MemoryExternal, _OverWire
 from ._session import Session, _events
@@ -706,6 +707,9 @@ def create_agent(
     tools: Sequence[Tool] = (),
     plugins: Sequence[Plugin] = (),
     process_plugins: Sequence[ProcessPlugin | JsonObject] | None = None,
+    service_plugins: Sequence[ServicePlugin] | None = None,
+    service_ping_interval: float = 30.0,
+    service_control_timeout: float = 5.0,
     plugin_host: bool | None = None,
     model: str | ModelRef | None = None,
     settings: JsonObject | None = None,
@@ -745,9 +749,17 @@ def create_agent(
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Runtime does not match durability")
         if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "History does not match durability")
-        if plugin_host is False and process_plugins is not None:
+        external_placement = process_plugins is not None or service_plugins is not None
+        if plugin_host is False and external_placement:
             raise AgentError(
-                ErrorCode.INVALID_COMPOSITION, "process_plugins requires a plugin host"
+                ErrorCode.INVALID_COMPOSITION,
+                "process_plugins and service_plugins require a plugin host",
+            )
+        if any(
+            not math.isfinite(n) or n <= 0 for n in (service_ping_interval, service_control_timeout)
+        ):
+            raise AgentError(
+                ErrorCode.INVALID_COMPOSITION, "Service deadlines must be finite and positive"
             )
         scratch = TemporaryDirectory(prefix="modular-agent-")
         h = Harness(process_plugins=(), tenants=tenants or {})
@@ -768,7 +780,7 @@ def create_agent(
             if approval is not None:
                 defaults.update(settings_in({"approval": approval}))
             agent = Agent(h, folder, defaults, on_question, scratch)
-            agent._plugin_host = plugin_host is True or process_plugins is not None
+            agent._plugin_host = plugin_host is True or external_placement
             if history is not None and history._kind == "http":
                 store = HTTPHistory(history._url, history._path)
             elif durability == "ephemeral":
@@ -900,7 +912,15 @@ def create_agent(
                 env = json.loads(os.environ.get("MODULAR_AGENT_PLUGINS") or "[]")
                 if not isinstance(env, list):
                     raise ValueError("MODULAR_AGENT_PLUGINS must be an array")
-                specs.extend([*processes, *env])
+                services = [
+                    {
+                        "url": p["url"],
+                        "tokenFile": os.fspath(p["token_file"]),
+                        "config": p.get("config", {}),
+                    }
+                    for p in service_plugins or ()
+                ]
+                specs.extend([*processes, *services, *env])
             if specs:
 
                 def factory(
@@ -909,7 +929,11 @@ def create_agent(
                     kind = (
                         _MemoryExternal if isinstance(spec.get("_over_wire"), Plugin) else External
                     )
-                    return kind(harness, spec, project, home, index)
+                    plugin = kind(harness, spec, project, home, index)
+                    if "url" in spec:
+                        plugin.ping_interval = service_ping_interval
+                        plugin.control_timeout = service_control_timeout
+                    return plugin
 
                 await load_plugins(h, specs, folder, root, external_factory=factory)
             wrap_native_providers(h)

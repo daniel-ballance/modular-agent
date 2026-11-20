@@ -29,6 +29,7 @@ from ma_core.wire import (
 from .rpc import MAX_FRAME, Peer, WireError
 from .runtime_host import HostedRuntime
 from .server import BINDING, DATA
+from .websocket import connect_plugin
 
 
 class Provider:
@@ -245,14 +246,28 @@ class External(Plugin):
         self.declarations = {}
         self.api = harness.api(self.name)
 
+    ping_interval = 30.0
+    control_timeout = 5.0
+
     async def open_transport(self):
+        service = "url" in self.spec
         decision = await self.h.fire(
             "@harness",
             "plugin.load",
-            {"plugin": self.spec["command"][0], "origin": "startup-environment"},
+            {
+                "plugin": self.spec["url"] if service else self.spec["command"][0],
+                "origin": "startup-environment",
+            },
         )
         if decision.get("refused"):
             raise WireError(decision["reason"], "invalid_request")
+        if service:
+            frames = await connect_plugin(
+                self.spec["url"], self.spec["tokenFile"], timeout=self.control_timeout
+            )
+            self.peer = Peer(None, None, self.callback, self.notification, self.name, frames=frames)
+            self.peer.start_liveness(self.ping_interval, self.control_timeout)
+            return
         self.process = await asyncio.create_subprocess_exec(
             *self.spec["command"],
             cwd=self.project,
@@ -287,8 +302,9 @@ class External(Plugin):
                     "home": str(self.home),
                     "config": self.spec.get("config", {}),
                 },
+                cancel_on_interrupt=False,
             ),
-            timeout=5,
+            timeout=self.control_timeout,
         )
         if self.registration.get("binding") != BINDING or not self.registration.get("name"):
             raise WireError("Invalid registration", "invalid_request")
@@ -1062,7 +1078,7 @@ class External(Plugin):
                 task = asyncio.create_task(
                     self.peer.request("plugin/shutdown", self.shutdown_reason)
                 )
-                done, _ = await asyncio.wait({task}, timeout=5)
+                done, _ = await asyncio.wait({task}, timeout=self.control_timeout)
                 if not done:
                     # Bound shutdown without interrupting request cancellation cleanup.
                     await self.peer.close()
@@ -1139,9 +1155,21 @@ async def load_plugins(harness, specs, project, home, *, external_factory=Extern
     }
     wrap_native_providers(harness)
     for index, spec in enumerate(specs):
-        if (
-            not isinstance(spec, dict)
-            or not isinstance(spec.get("command"), list)
+        if not isinstance(spec, dict) or not isinstance(spec.get("config", {}), dict):
+            raise WireError("Plugin entry and its config must be objects", "invalid_request")
+        if "url" in spec:
+            if (
+                "command" in spec
+                or "env" in spec
+                or not isinstance(spec["url"], str)
+                or not isinstance(spec.get("tokenFile"), str)
+                or not Path(spec["tokenFile"]).is_absolute()
+            ):
+                raise WireError(
+                    "Plugin service needs a URL and absolute tokenFile", "invalid_request"
+                )
+        elif (
+            not isinstance(spec.get("command"), list)
             or not spec["command"]
             or not all(isinstance(s, str) for s in spec["command"])
         ):

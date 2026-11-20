@@ -5,7 +5,8 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from os import PathLike
+from typing import Literal, NotRequired, TypedDict
 
 from ._provider import Provider
 from ._tool import Tool, ToolEnvironment
@@ -16,6 +17,12 @@ type HookHandler = Callable[[JsonObject], JsonObject | None | Awaitable[JsonObje
 type CommandHandler = Callable[[str, CommandContext], str | None | Awaitable[str | None]]
 type Setup = Callable[[Registrar], None | Awaitable[None]]
 type Stop = Callable[[], None | Awaitable[None]]
+
+
+class ServicePlugin(TypedDict):
+    url: str
+    token_file: str | PathLike[str]
+    config: NotRequired[JsonObject]
 
 
 class CommandContext:
