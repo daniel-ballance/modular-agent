@@ -404,7 +404,13 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 					if err != nil {
 						return api.Decision{}, err
 					}
-					add := result.(TurnContribution)
+					if result == nil {
+						return api.Decision{}, nil
+					}
+					var add TurnContribution
+					if err := decodeInto(result, &add); err != nil {
+						return api.Decision{}, err
+					}
 					if add.System != "" {
 						if before.System != "" {
 							before.System += "\n"
