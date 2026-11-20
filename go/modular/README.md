@@ -95,6 +95,16 @@ Commands in the base suite use Linux with unprivileged user, PID and mount names
 
 ## Findings for the SDK specification
 
+### Embedded questions and hook registration — `docs/sdk/api.md`, Questions and Hooks
+
+For Go question examples use:
+
+> Register the agent handler with `WithOnQuestion(handler)` or override it with `session.OnQuestion(ctx, handler)`. The embedded Session does not expose `Questions` or `Answer`. Give the UI the question from the handler and return the UI's decision through that handler.
+
+For Go hook examples use:
+
+> Register with `OnToolBefore`, `OnToolAfter`, `OnTurnBefore`, `OnStepAfter` or `OnTurnEnd` and use `HookOrder` for explicit order. Use `Gate{Input: input}` to replace tool input and `StepDecision{End: reason}` to end a turn. The Go registrar does not provide a generic `On` or expose the full hook table. Both `OnSessionPrepare` and `OnSessionEnd` are in-process only in the Go SDK, although the binding carries `session.end`.
+
 ### Local environment declaration — `docs/sdk/concepts.md`, Defaults; `docs/sdk/api.md`, The declaration
 
 **Resolved in round 2.** The original defaults prescribed `processGroup` by name, but the normative declaration is about the containment the chosen environment can guarantee. The Go local command supervisor can declare `strong`. Replace the working environment default with:
