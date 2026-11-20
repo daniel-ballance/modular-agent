@@ -14,7 +14,7 @@ case "$language" in
   rust) plugin=("$repo/rust/target/debug/modular-agent" --serve-plugin) ;;
   typescript) plugin=(node "$repo/typescript/packages/plugin-wire/dist/src/serve-cli.js") ;;
   go) plugin=("$repo/go/.bin/modular" --serve-plugin) ;;
-  python) plugin=("$repo/python/.venv/bin/python" -m ma_plugin.serve) ;;
+  python) plugin=("$repo/python/.venv/bin/modular-agent-plugin") ;;
   *) echo "unknown language: $language" >&2; exit 2 ;;
 esac
 ma=$(node -e "const a=require('$repo/conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")
