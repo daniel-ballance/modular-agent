@@ -116,7 +116,7 @@ Replace the Go hook placement sentence in [Guide 07](../../docs/sdk/guides/07-ho
 
 Replace the first credentials row below `environment` with:
 
-> | `credentials` | a credential store | environment variables. A writable store (such as `fileCredentials(path)`) implements the [secret staging operations](#the-other-parts), so a `secret` question can be answered. |
+> | `credentials` | a credential store | environment variables. A writable store (such as `fileCredentials(path)`) implements the [secret staging operations](../../docs/sdk/api.md#the-other-parts), so a `secret` question can be answered. |
 
 Remove the duplicate credentials row below `tenants`.
 
