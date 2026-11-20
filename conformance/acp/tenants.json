@@ -1,0 +1,7 @@
+{
+  "kit-readonly": { "rights": ["watch", "input", "answer", "settings"] },
+  "kit-no-cancel": { "rights": ["watch", "input", "answer", "approve", "tools", "settings", "erase", "grant", "jobs", "delegate", "administer"] },
+  "kit-broke": { "rights": ["watch", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"], "tokens": 0 },
+  "kit-latch": { "rights": ["watch", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"], "tokens": 1 },
+  "kit-race": { "rights": ["watch", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"], "tokens": 1 }
+}
