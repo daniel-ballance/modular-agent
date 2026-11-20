@@ -96,7 +96,6 @@ pub(crate) struct Inner {
     pub persistent: bool,
     pub history: History,
     pub plugin_host: bool,
-    pub acp_conformance: bool,
     pub acp: std::sync::OnceLock<Arc<crate::acp::Routes>>,
     pub session_settings: Value,
     pub drivers: std::sync::Mutex<
@@ -221,16 +220,17 @@ impl Agent {
         &self,
         api: &dyn base::AgentApi,
         session: Option<&str>,
-        acp: bool,
+        _acp: bool,
     ) -> Result<Value> {
         let mut declaration = interface_acp::declaration(api, session)?;
         declaration["portableSessions"] = json!(self.inner.persistent);
-        if !acp || !self.inner.acp_conformance {
-            declaration["severalActors"] = json!(false);
-            declaration["sessionLimits"] = json!(false);
-            declaration["tenants"] = json!(false);
-            declaration["mixedActorInput"] = json!("refused");
-        }
+        // The SDK does not expose several actors, limits or tenants yet, so no path,
+        // including ACP conformance mode, may declare them: a test-only declaration
+        // would have the kit check a different agent from the one shipped.
+        declaration["severalActors"] = json!(false);
+        declaration["sessionLimits"] = json!(false);
+        declaration["tenants"] = json!(false);
+        declaration["mixedActorInput"] = json!("refused");
         Ok(declaration)
     }
 
@@ -639,7 +639,6 @@ impl AgentBuilder {
                 persistent,
                 history: saved_history,
                 plugin_host,
-                acp_conformance: self.acp_conformance,
                 acp: Default::default(),
                 session_settings,
                 drivers: Default::default(),
