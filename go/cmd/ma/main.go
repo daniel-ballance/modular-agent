@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/subscription"
 	"github.com/daniel-ballance/modular-agent/go/modular"
+	"golang.org/x/sys/unix"
 )
 
 const help = `ma, the standard Modular Agent
@@ -469,6 +471,32 @@ func (d layout) authStatus(ctx context.Context, out io.Writer) error {
 	}
 	return nil
 }
+
+// terminalLines is only used by the sign-in command. A blocked read can
+// outlive sign-in until the process exits; sends stop when sign-in ends.
+func terminalLines(ctx context.Context, in io.Reader) <-chan string {
+	file, ok := in.(*os.File)
+	if !ok {
+		return nil
+	}
+	if _, err := unix.IoctlGetWinsize(int(file.Fd()), unix.TIOCGWINSZ); err != nil {
+		return nil
+	}
+	lines := make(chan string)
+	go func() {
+		defer close(lines)
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return lines
+}
+
 func (d layout) signIn(ctx context.Context, o options, in io.Reader, out, stderr io.Writer) error {
 	if o.provider == "claude" {
 		if o.command == "logout" {
@@ -496,23 +524,43 @@ func (d layout) signIn(ctx context.Context, o options, in io.Reader, out, stderr
 		fmt.Fprintf(stderr, "Signed out of %s.\n", v.Label())
 		return nil
 	}
-	l, err := subscription.SignIn(ctx, v, o.device, func(s subscription.Step) {
+	var pasted <-chan string
+	if v == subscription.Codex && !o.device {
+		lineCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		pasted = terminalLines(lineCtx, in)
+	}
+	l, err := subscription.SignIn(ctx, v, o.device, pasted, func(s subscription.Step) {
 		if s.Note != "" {
 			fmt.Fprintln(stderr, s.Note)
 			return
 		}
-		if s.Code != "" {
+		if s.OpenAndPaste {
+			fmt.Fprintf(stderr, "Open this address in a browser, on this machine or any other:\n\n  %s\n\n", s.Address)
+		} else if s.Code != "" {
 			fmt.Fprintf(stderr, "Open this address in a browser:\n\n  %s\n\nand enter the code: %s\n\n", s.Address, s.Code)
 		} else {
 			fmt.Fprintf(stderr, "Open this address in a browser to sign in:\n\n  %s\n\n", s.Address)
 		}
-		if _, disabled := os.LookupEnv("MA_NO_BROWSER"); !disabled && strings.HasPrefix(s.Address, "https://") {
+		_, disabled := os.LookupEnv("MA_NO_BROWSER")
+		_, ssh := os.LookupEnv("SSH_CONNECTION")
+		_, sshTTY := os.LookupEnv("SSH_TTY")
+		_, display := os.LookupEnv("DISPLAY")
+		_, wayland := os.LookupEnv("WAYLAND_DISPLAY")
+		if !disabled && !ssh && !sshTTY && (display || wayland) && strings.HasPrefix(s.Address, "https://") {
 			c := exec.Command("xdg-open", s.Address)
 			if c.Start() == nil {
 				go func() { _ = c.Wait() }()
 			}
 		}
-		fmt.Fprintln(stderr, "Waiting for the sign-in to finish...")
+		if s.OpenAndPaste {
+			fmt.Fprint(stderr, "After you sign in, the browser goes to a localhost address. If the browser is on this\n"+
+				"machine, that finishes the sign-in. Otherwise the page will not load: copy the whole\n"+
+				"address from the browser's address bar and paste it here.\n\n")
+			fmt.Fprint(stderr, "Paste the address (or the code): ")
+		} else {
+			fmt.Fprintln(stderr, "Waiting for the sign-in to finish...")
+		}
 	})
 	if err != nil {
 		return err
