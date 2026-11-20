@@ -23,7 +23,10 @@ ma models
 ma -p 'Summarize the files in this folder.'
 ma -c                          # continue the last session in this folder
 ma --acp                       # ACP over stdio
+ma --acp --listen 127.0.0.1:7401 --token-file /path/to/token  # ACP over WebSocket
 ```
+
+The WebSocket listener requires a loopback address and an owner-only bearer token file. It acts as `ma`'s local ACP user, irrespective of `MODULAR_AGENT_ACTOR`.
 
 Subscription credential writes and refreshes require a `flock` command that supports locking an inherited descriptor, as provided by util-linux. Claude uses Claude Code's own sign-in. To use it, build the sidecar (`cd typescript/sidecars/claude && npm ci && npm run build` from the repository root), install Claude Code, then run `ma login claude`. An installed sidecar can instead be named with `MODULAR_AGENT_CLAUDE_SIDECAR`.
 
@@ -35,8 +38,9 @@ From the repository root:
 
 ```sh
 npm ci --prefix conformance/acp
-(cd typescript && npm ci && npm run build && npm test)
-(cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test)
+npm ci --prefix conformance/tools
+(cd typescript && npm ci && npm run build && MODULAR_AGENT_SDK_SERVICE=typescript npm test)
+(cd typescript && MODULAR_AGENT_SDK_SERVICE=typescript MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test)
 (cd typescript/sidecars/claude && npm ci && npm test)
 node conformance/reference/run.mjs --agent typescript
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
@@ -44,9 +48,9 @@ MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks -- node 
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
 ```
 
-- Reference checks: **15/15**, including declaration, JSON events, prompt tail and both crash-recovery modes.
-- ACP with crash, probe and job checks together: **188/188** against `ma` and **214/214** against the base build. The expanded run includes late answers and job take-up after a crash.
-- TypeScript workspace: **186/186** in both the normal and `MA_REMOTE` placements, including **19/19** `ma` tests. Each workspace run includes **22/22** shared SDK scenarios across embedded and TypeScript process fixtures (the built fixture in this checkout). The `ma` tests cover Rust-format credentials, lock exclusion during refresh, loopback sign-in and Responses requests, codemode limits, file tools, prompt order, skills, stdio and HTTP MCP, per-project ACP settings and trust, terminal queueing and SDK-only imports.
+- Reference checks: **17/17**, including declaration, JSON events, prompt tail and both crash-recovery modes.
+- ACP with crash, probe and job checks together: **188/188** for `ma` on stdio and **193/193** directly on WebSocket. The expanded run includes late answers and job take-up after a crash.
+- TypeScript workspace: **291/291** offline checks in both normal and `MA_REMOTE` configurations, with two live checks skipped. That includes **84/84** shared scenarios across embedded, stdio in all four SDKs, and TypeScript WebSocket placement. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
 - Claude sidecar: **44/44**. No real sign-ins, credentials or models were used.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
@@ -64,7 +68,7 @@ Proposed replacement text; the shared documents are unchanged in this branch.
 
 **Reference — Checks.** Replace the ACP-kit bullet with:
 
-> the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;
+> the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` on stdio and `MODULAR_AGENT_CONFORMANCE=1 ma --acp --listen ADDR --token-file FILE` on WebSocket, both with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;
 
 **SDK — ACP factory.** Replace the `compose(project)` option sentence with:
 

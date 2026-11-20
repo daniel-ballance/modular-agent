@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { createAgent, httpHistory, type Agent, type ProcessPlugin, type Settings } from "@modular-agent/core";
+import { createAgent, defaultAcpActor, httpHistory, type Agent, type ProcessPlugin, type Settings } from "@modular-agent/core";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
 import { standardMcpTools } from "@modular-agent/tools-mcp/sdk";
 import { paths, settingsFor, skillsFor, standardSettings, mcpServers, optionalJson, trusted, type Paths } from "./configuration.js";
@@ -20,6 +20,7 @@ import { responses } from "./responses.js";
 function parse(argv: string[]) {
   const opts: { command?: string; project: string; runtime: "durable" | "transient"; session?: string; prompt?: string;
     resume?: boolean; verbose?: boolean; json?: boolean; history?: boolean; declaration?: boolean; acp?: boolean;
+    listen?: string; tokenFile?: string;
     trust?: boolean; all?: boolean; help?: boolean; version?: boolean; settings: Settings } = { project: process.cwd(), runtime: "durable", settings: {} };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -35,6 +36,8 @@ function parse(argv: string[]) {
       case "--declaration": opts.declaration = true; break;
       case "--trust-project": opts.trust = true; break;
       case "--acp": opts.acp = true; break;
+      case "--listen": opts.listen = value(); break;
+      case "--token-file": opts.tokenFile = value(); break;
       case "--all": opts.all = true; break;
       case "--project": opts.project = value(); break;
       case "--session": opts.session = value(); break;
@@ -137,6 +140,9 @@ async function main(argv: string[]) {
   const opts = parse(argv);
   if (opts.help) { console.log(HELP); return 0; }
   if (opts.version) { console.log("ma 0.1.0 (typescript)"); return 0; }
+  if ((opts.listen !== undefined || opts.tokenFile !== undefined) && (!opts.acp || !opts.listen || !opts.tokenFile || opts.command || opts.declaration)) {
+    throw new Error("--listen and --token-file must be used together with --acp");
+  }
   if (opts.acp && (opts.prompt !== undefined || opts.session || opts.trust || opts.resume)) throw new Error("with --acp the client creates sessions and grants trust");
   let project = await realpath(opts.project);
   if (opts.command === "skills") {
@@ -210,12 +216,25 @@ async function main(argv: string[]) {
     }
     if (opts.declaration) { console.log(JSON.stringify(agent.declaration(), null, 2)); return 0; }
     if (opts.acp) {
-      await agent.serveAcp({ projectMcp, compose: (cwd, saved) => {
+      const acp = { projectMcp, compose: (cwd: string, saved?: import("@modular-agent/core").SessionInfo) => {
         if (cwd === project && (!saved || agent.models().some(m => `${m.provider}/${m.id}` === modelRef(saved.settings.model)))) {
           return Promise.resolve(agent);
         }
         return build(cwd, modelRef(saved?.settings.model));
-      } });
+      } };
+      if (opts.listen && opts.tokenFile) {
+        const server = await agent.serveAcp({ ...acp, listen: opts.listen, actors: [{ tokenFile: opts.tokenFile, actor: defaultAcpActor() }] });
+        process.stdout.write(server.url + "\n");
+        await new Promise<void>((resolve, reject) => {
+          const stop = () => {
+            process.off("SIGINT", stop);
+            process.off("SIGTERM", stop);
+            void server.close().then(resolve, reject);
+          };
+          process.once("SIGINT", stop);
+          process.once("SIGTERM", stop);
+        });
+      } else await agent.serveAcp(acp);
       return 0;
     }
     const session = opts.session ? await agent.openSession(opts.session) : await agent.session();

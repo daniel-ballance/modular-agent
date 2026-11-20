@@ -31,6 +31,7 @@ import type {
 } from "@modular-agent/harness";
 import { mapOutput } from "./output.js";
 import { fromWire, toWire } from "./translate.js";
+import { connectWebSocket, PLUGIN_PROTOCOL, receiveMessages } from "./websocket.js";
 import { DATA_BINDING, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 /** One external plugin to start, as MODULAR_AGENT_PLUGINS lists it. */
@@ -39,6 +40,16 @@ export interface ExternalPluginSpec {
 	env?: Record<string, string>;
 	config?: Record<string, unknown>;
 }
+
+/** A network plugin and optional operator-configured liveness deadlines (milliseconds). */
+export interface ServicePluginSpec {
+	url: string;
+	tokenFile: string;
+	config?: Record<string, unknown>;
+	pingIntervalMs?: number;
+	controlTimeoutMs?: number;
+}
+export type PluginSpec = ExternalPluginSpec | ServicePluginSpec;
 
 /** What a plugin registered at its handshake. */
 export interface Registration {
@@ -64,12 +75,17 @@ export interface ExternalPlugin {
 }
 
 /** Read MODULAR_AGENT_PLUGINS. */
-export function pluginSpecsFromEnv(env: NodeJS.ProcessEnv = process.env): ExternalPluginSpec[] {
+export function pluginSpecsFromEnv(env: NodeJS.ProcessEnv = process.env): PluginSpec[] {
 	const raw = env.MODULAR_AGENT_PLUGINS;
 	if (!raw) return [];
-	const list = JSON.parse(raw) as ExternalPluginSpec[];
-	if (!Array.isArray(list) || list.some((s) => !Array.isArray(s.command) || !s.command.length)) throw new Error("MODULAR_AGENT_PLUGINS must be a JSON array of { command: [...] }");
-	return list;
+	const list: unknown = JSON.parse(raw);
+	const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+	const valid = (s: unknown) => object(s) && (!("config" in s) || object(s.config)) && ("url" in s
+		? !("command" in s) && !("env" in s) && typeof s.url === "string" && typeof s.tokenFile === "string" && isAbsolute(s.tokenFile)
+		: !("tokenFile" in s) && Array.isArray(s.command) && s.command.length > 0 && s.command.every(a => typeof a === "string" && a.length > 0 && !a.includes("\0")) &&
+			(!("env" in s) || object(s.env) && Object.values(s.env).every(v => typeof v === "string")));
+	if (!Array.isArray(list) || !list.every(valid)) throw new Error("MODULAR_AGENT_PLUGINS must be a JSON array of command or service entries");
+	return list as PluginSpec[];
 }
 
 /**
@@ -98,15 +114,61 @@ export async function startExternalPlugin(spec: ExternalPluginSpec, info: { proj
 	return registerExternalPlugin(peer, info, spec.config ?? {}, stop);
 }
 
-export async function registerExternalPlugin(peer: WirePeer, info: { project: string; home: string }, config: Record<string, unknown>, stop: ExternalPlugin["stop"]): Promise<ExternalPlugin> {
-	const registration = await peer.request<Registration>("plugin/initialize", {
+/** Connect a service and register it through the same host as a child process. */
+export async function startPluginService(spec: ServicePluginSpec, info: { project: string; home: string }): Promise<ExternalPlugin> {
+	const interval = spec.pingIntervalMs ?? 30_000;
+	const control = spec.controlTimeoutMs ?? 5_000;
+	if ([interval, control].some(n => !Number.isInteger(n) || n < 1 || n > 2_147_483_647)) throw new Error("Invalid plugin service deadline");
+	const ws = await connectWebSocket(spec.url, spec.tokenFile, PLUGIN_PROTOCOL, control);
+	let silence: NodeJS.Timeout | undefined;
+	let pingOutstanding = false;
+	const arm = () => {
+		if (silence || pingOutstanding || !peer.pending || peer.closed) return;
+		silence = setTimeout(() => {
+			silence = undefined;
+			if (!peer.pending || peer.closed) return;
+			pingOutstanding = true;
+			void controlWait(peer, peer.request("$/ping", {}), control, "ping")
+				.catch(() => peer.close("Plugin service ping failed"))
+				.finally(() => { pingOutstanding = false; arm(); });
+		}, interval);
+	};
+	const peer = new WirePeer(line => { ws.send(line.slice(0, -1)); arm(); }, () => {
+		clearTimeout(silence);
+		if (ws.readyState === ws.OPEN) ws.close();
+	});
+	const ended = new Promise<void>(resolve => ws.once("close", () => { peer.close(); resolve(); }));
+	ws.on("error", () => peer.close("Plugin service WebSocket failed"));
+	receiveMessages(ws, bytes => {
+		clearTimeout(silence);
+		silence = undefined;
+		peer.message(bytes);
+		arm();
+	});
+	let stopping: Promise<void> | undefined;
+	const stop: ExternalPlugin["stop"] = (reason = "stop", detail) => stopping ??= (async () => {
+		if (!peer.closed) await controlWait(peer, peer.request("plugin/shutdown", { reason, detail }), control, "shutdown").catch(() => {});
+		peer.close();
+		const timer = setTimeout(() => ws.terminate(), control);
+		try { await ended; } finally { clearTimeout(timer); }
+	})();
+	return registerExternalPlugin(peer, info, spec.config ?? {}, stop, control);
+}
+
+async function controlWait<T>(peer: WirePeer, reply: Promise<T>, ms: number, operation: string): Promise<T> {
+	const timer = setTimeout(() => peer.close(`Plugin ${operation} deadline expired`), ms);
+	try { return await reply; } finally { clearTimeout(timer); }
+}
+
+export async function registerExternalPlugin(peer: WirePeer, info: { project: string; home: string }, config: Record<string, unknown>, stop: ExternalPlugin["stop"], controlMs = 5_000): Promise<ExternalPlugin> {
+	const registration = await controlWait(peer, peer.request<Registration>("plugin/initialize", {
 		binding: PLUGIN_BINDING,
 		data: DATA_BINDING,
 		host: { name: "modular-agent (TypeScript)", version: "0.1.0" },
 		project: info.project,
 		home: info.home,
 		config,
-	}).catch(async (error) => { await stop("refused", "Initialization failed"); throw error; });
+	}), controlMs, "initialization").catch(async (error) => { await stop("refused", "Initialization failed"); throw error; });
 	try {
 		const reg = registration;
 		if (reg?.binding !== PLUGIN_BINDING || typeof reg.name !== "string" || !reg.name) throw new Error("Invalid plugin registration");
@@ -121,6 +183,7 @@ export async function registerExternalPlugin(peer: WirePeer, info: { project: st
 		return {
 			registration, plugin: hostPlugin(peer, reg, stop), stop, items, replacements,
 			refusal(harness, externalItems) {
+				if (peer.closed) return "Plugin connection was lost during registration";
 				if (harness.plugins().includes(reg.name)) return `Plugin ${reg.name} is already loaded`;
 				if (reg.hooks?.some((h) => h.order != null && !["first", "normal", "last"].includes(h.order))) return "Unknown hook order";
 				if (new Set(items).size !== items.length) return "Registration repeats an item";

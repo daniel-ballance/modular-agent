@@ -141,7 +141,7 @@ export interface PluginApi {
 	/** Sessions in this project, another project, or every project (null). */
 	listSessions(project?: string | null): Promise<StoredSession[]>;
 	forkSession(sessionId: string, entryId: string): Promise<string>;
-	closeSession(sessionId: string, actorId?: string, delegatedBy?: string): Promise<void>;
+	closeSession(sessionId: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void>;
 	session(sessionId: string): { id: string; project: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
 	// input and turns
 	input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }>;
@@ -383,7 +383,7 @@ export class Harness {
 			presenceChanged: (id) => { const s = this.sessions.get(id); if (s) this.closeUnanswerable(s); },
 			listSessions: async (project) => (await this.use<HistoryStore>("history-store")?.list(project === null ? undefined : { project: project ?? this.project })) ?? [],
 			forkSession: (sessionId, entryId) => this.forkSession(sessionId, entryId),
-			closeSession: (id, actorId, delegatedBy) => this.closeSession(id, actorId, delegatedBy),
+			closeSession: (id, actorId, delegatedBy, authority) => this.closeSession(id, actorId, delegatedBy, authority),
 			session: (id) => {
 				const s = this.session(id);
 				return { id: s.id, project: s.meta.project, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
@@ -837,13 +837,13 @@ export class Harness {
 		this.sessions.delete(id);
 	}
 
-	async closeSession(id: string, actorId?: string, delegatedBy?: string): Promise<void> {
+	async closeSession(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void> {
 		const s = this.sessions.get(id);
 		if (!s) return;
 		await this.admit(s, async () => {
 			if (s.closing || s.reopening) throw Object.assign(new Error("Session is busy"), { code: "busy" });
 			const needsCancel = !!s.running || this.runningJobs(s).length > 0;
-			if ([actorId, delegatedBy].some(id => id !== undefined &&
+			if ((needsCancel && authority && !authority.includes("cancel")) || [actorId, delegatedBy].some(id => id !== undefined &&
 				(!s.actors.has(id) || (needsCancel && !this.rightsOf(s, id).includes("cancel"))))) {
 				throw Object.assign(new Error("Actor may not close this session"), { code: "forbidden" });
 			}
@@ -1116,8 +1116,16 @@ export class Harness {
 			(s.tenant === undefined || tenant?.rights.includes(right) === true);
 	}
 
+	private actorCeilings = new Map<string, ReadonlySet<Authority>>();
+
+	/** Operator restrictions narrow live authority without rewriting recorded grants. */
+	setActorCeilings(ceilings: ReadonlyMap<string, ReadonlySet<Authority>>): void {
+		this.actorCeilings = new Map(ceilings);
+	}
+
 	private actorRights(s: Session, actorId: string): Authority[] {
-		const allowed = (s.actors.get(actorId)?.authority ?? []).filter((right) => this.withinLimits(s, right));
+		const ceiling = this.actorCeilings.get(actorId);
+		const allowed = (s.actors.get(actorId)?.authority ?? []).filter(right => (!ceiling || ceiling.has(right)) && this.withinLimits(s, right));
 		if (!s.meta.parentSessionId) return allowed;
 		const parent = this.sessions.get(s.meta.parentSessionId);
 		const link = s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "harness.parentAuthority");
@@ -2114,8 +2122,16 @@ export class Harness {
 
 	// ---------- asking actors ----------
 
+	private connections = new Set<InterfaceCapability>();
+
+	/** Attach a connection without adding a persistent plugin registration. */
+	connectInterface(part: InterfaceCapability): () => void {
+		this.connections.add(part);
+		return () => { this.connections.delete(part); };
+	}
+
 	private interfaces(): InterfaceCapability[] {
-		return this.useAll<InterfaceCapability>("interface");
+		return [...this.useAll<InterfaceCapability>("interface"), ...this.connections];
 	}
 
 	private presentActors(s: Session, request?: InputRequest): string[] {

@@ -15,9 +15,13 @@
     "ma-plugin": "dist/src/serve-cli.js"
   },
   "dependencies": {
-    "@modular-agent/harness": "0.1.0",
     "@modular-agent/env-local": "0.1.0",
+    "@modular-agent/harness": "0.1.0",
+    "@modular-agent/runtime-durable": "0.1.0",
     "@modular-agent/runtime-transient": "0.1.0",
-    "@modular-agent/runtime-durable": "0.1.0"
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2"
   }
 }

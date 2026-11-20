@@ -1,6 +1,6 @@
 import { Readable, Writable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
-import { type AgentApp, type AgentContext, agent, methods, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
+import { type AgentApp, type AgentContext, type Stream, agent, methods, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type * as acp from "@agentclientprotocol/sdk";
 import {
 	ALL_AUTHORITY,
@@ -98,11 +98,18 @@ export function fromAcp(blocks: acp.ContentBlock[]): ContentPart[] {
 /** The "mcp-servers" capability, as the tools-mcp plugin provides it. */
 export type AcpMcpServer = { command: string; args?: string[]; env?: Record<string, string> } | { url: string; headers?: Record<string, string> };
 interface McpServers { attach(sessionId: string, servers: Record<string, AcpMcpServer>, cwd?: string): Promise<string[]> }
+export function localAcpActor(id = "acp-user"): Actor & { kind: "host" } {
+	return { id, kind: "host", authority: [...ALL_AUTHORITY] };
+}
 export interface AcpOptions {
 	actorId?: string;
+	actor?: Actor;
+	allowTenant?(tenant: string | null): boolean;
+	allowSession?(id: string, project: string): Promise<boolean>;
 	declaration?: (sessionId?: string) => Record<string, boolean | string>;
 	projectSettings?(project: string): Promise<Record<string, unknown>>;
 	project?(cwd: string, sessionId?: string): Promise<{ api: PluginApi; cwd: string }>;
+	associate?(sessionId: string, api: PluginApi): void;
 	attachMcp?(sessionId: string, project: string, servers: Record<string, AcpMcpServer>, api: PluginApi): Promise<unknown>;
 	showApproval?: boolean;
 }
@@ -123,33 +130,38 @@ export class AcpInterface implements InterfaceCapability {
 	private pending = new Map<string, AbortController>();
 
 	constructor(private readonly options: AcpOptions = {}) {
-		this.actorId = options.actorId ?? "acp-user";
+		this.actorId = options.actor?.id ?? options.actorId ?? "acp-user";
 		this.app = agent({ name: "modular-agent" });
 		this.app.onConnect((connection) => {
 			this.client = connection.client;
 			connection.signal.addEventListener("abort", () => {
 				if (this.client !== connection.client) return;
 				this.client = undefined;
-				for (const [id, state] of this.sessions) {
-					state.present.clear();
-					this.apiFor(id).presenceChanged(id);
+				const ids = [...this.sessions.keys()];
+				for (const state of this.sessions.values()) {
+					state.unfollow?.();
+					for (const waiter of state.waiters) waiter.reject(bindingError("lost"));
 				}
+				for (const pending of this.pending.values()) pending.abort();
+				this.sessions.clear();
+				for (const id of ids) { try { this.apiFor(id).presenceChanged(id); } catch { /* already closed */ } }
+				this.projects.clear();
 			}, { once: true });
 		});
 		this.register();
 	}
 
-	attach(api: PluginApi, primary = true): void {
+	attach(api: PluginApi, primary = true): () => void {
 		if (primary) this.api = api;
 		// Bookkeeping needs the raw events; what the client is sent goes through the output gate.
-		api.onEvent((e) => this.track(e), { raw: true });
+		return api.onEvent((e) => this.track(e), { raw: true });
 	}
 
 	present(sessionId: string): boolean { return !!this.client && this.sessions.has(sessionId); }
 	presentActors(sessionId: string): string[] { return [...(this.sessions.get(sessionId)?.present ?? [])]; }
 
 	private actor(): Actor {
-		return { id: this.actorId, kind: "host", authority: ALL_AUTHORITY };
+		return this.options.actor ?? localAcpActor(this.actorId);
 	}
 
 	// ---------- requests from the client ----------
@@ -174,6 +186,7 @@ export class AcpInterface implements InterfaceCapability {
 
 	private register(): void {
 		const app = this.app;
+		app.onRequest("$/ping", () => ({}), () => ({}));
 		app.onRequest(methods.agent.initialize, async ({ params }) => {
 			if (this.initialized) throw bindingError("already_initialized");
 			const ns = params._meta?.[NS];
@@ -194,7 +207,7 @@ export class AcpInterface implements InterfaceCapability {
 				agentInfo: { name: "modular-agent", title: "Modular Agent", version: "0.1.0" },
 				authMethods: [],
 				// What the agent supports, so a host never has to guess.
-				_meta: { [NS]: { binding: this.binding, declaration: this.bindingDeclaration(), extensions: EXTENSIONS, actor: { id: this.actorId, kind: "host", rights: ALL_AUTHORITY } } },
+				_meta: { [NS]: { binding: this.binding, declaration: this.bindingDeclaration(), extensions: EXTENSIONS, actor: { id: this.actorId, kind: this.actor().kind, rights: this.actor().authority } } },
 			} as const;
 			const gated = await this.gateReply("", "initialize", { ...result, authMethods: [] });
 			this.initialized = true;
@@ -204,11 +217,13 @@ export class AcpInterface implements InterfaceCapability {
 		app.onRequest(methods.agent.session.new, async ({ params }) => {
 			const tenant = (params._meta?.[NS] as { tenant?: unknown } | undefined)?.tenant;
 			if (tenant !== undefined && typeof tenant !== "string") throw RequestError.invalidParams();
+			if (this.options.allowTenant && !this.options.allowTenant(tenant ?? null)) throw bindingError("forbidden");
 			const sessionId = await this.checked(async () => {
 				const { api, cwd } = await this.options.project?.(params.cwd) ?? { api: this.api, cwd: params.cwd };
 				const overrides = await this.options.projectSettings?.(cwd);
 				return api.startSession({ tenant, settings: { ...overrides, cwd }, actor: this.actor(), prepare: async id => {
 					this.projects.set(id, api);
+					this.options.associate?.(id, api);
 					try { await this.attachMcp(api, id, params.mcpServers, params.cwd); }
 					catch (error) { this.projects.delete(id); throw error; }
 				} });
@@ -226,7 +241,10 @@ export class AcpInterface implements InterfaceCapability {
 		});
 
 		app.onRequest(methods.agent.session.list, async ({ params }) => {
-			const sessions = await this.api.listSessions(params.cwd ?? null);
+			if (this.options.actor && !this.actor().authority.includes("watch")) throw bindingError("forbidden");
+			const all = await this.api.listSessions(params.cwd ?? null);
+			const sessions = this.options.allowSession ? (await Promise.all(all.map(async s =>
+				await this.options.allowSession!(s.id, s.project) ? s : undefined))).filter(s => s !== undefined) : all;
 			return {
 				sessions: sessions
 					.map((s) => ({ sessionId: s.id, cwd: s.project, updatedAt: new Date(s.created).toISOString() })),
@@ -235,7 +253,7 @@ export class AcpInterface implements InterfaceCapability {
 
 		app.onRequest(methods.agent.session.close, async ({ params }) => {
 			if (!this.sessions.has(params.sessionId)) throw bindingError("not_open");
-			await this.checked(() => this.apiFor(params.sessionId).closeSession(params.sessionId, this.actorId));
+			await this.checked(() => this.apiFor(params.sessionId).closeSession(params.sessionId, this.actorId, undefined, this.actor().authority));
 			this.sessions.get(params.sessionId)?.unfollow?.();
 			this.sessions.delete(params.sessionId);
 			this.projects.delete(params.sessionId);
@@ -293,6 +311,7 @@ export class AcpInterface implements InterfaceCapability {
 	}
 
 	private async reopen(sessionId: string, cwd: string, servers?: acp.McpServer[]): Promise<void> {
+		if (this.options.actor && !this.actor().authority.includes("watch")) throw bindingError("forbidden");
 		const previous = this.sessions.get(sessionId);
 		if (!previous) this.sessions.set(sessionId, this.state());
 		try {
@@ -308,7 +327,8 @@ export class AcpInterface implements InterfaceCapability {
 	}
 
 	private hasRight(sessionId: string, actorId: string, right: Authority): boolean {
-		return this.apiFor(sessionId).session(sessionId).actors.some((a) => a.id === actorId && a.authority.includes(right));
+		return (actorId !== this.actorId || this.actor().authority.includes(right)) &&
+			this.apiFor(sessionId).session(sessionId).actors.some((a) => a.id === actorId && a.authority.includes(right));
 	}
 
 	private requireRight(sessionId: string, actorId: string, right: Authority): void {
@@ -488,6 +508,7 @@ export class AcpInterface implements InterfaceCapability {
 			const sessionId = open(params.sessionId);
 			const { rights } = params;
 			if (rights !== null && (!Array.isArray(rights) || !rights.every((r) => ALL_AUTHORITY.includes(r)))) throw RequestError.invalidParams();
+			this.requireRight(sessionId, this.actorId, "administer");
 			await this.checked(() => this.apiFor(sessionId).setLimit(sessionId, rights, this.actorId));
 			return {};
 		});
@@ -831,7 +852,7 @@ export class AcpInterface implements InterfaceCapability {
 
 	onInputRequest(request: InputRequest): void {
 		if (!this.sessions.has(request.sessionId) || !this.client || this.pending.has(request.id)) return;
-		if (!this.apiFor(request.sessionId).session(request.sessionId).actors.some((a) => a.id === this.actorId && a.authority.includes(request.kind === "approval" ? "approve" : "answer"))) return;
+		if (!this.hasRight(request.sessionId, this.actorId, request.kind === "approval" ? "approve" : "answer")) return;
 		// Without form support, free text and choices stay open for the binding's requests/answer extensions.
 		if ((request.kind === "text" || request.kind === "choice") && !this.clientCaps.elicitation?.form) return;
 		const abort = new AbortController();
@@ -907,6 +928,36 @@ export class AcpInterface implements InterfaceCapability {
 	/** Serve ACP over this process's stdin and stdout. */
 	serveStdio(): Promise<void> {
 		const stream = ndJsonStream(Writable.toWeb(process.stdout) as WritableStream<Uint8Array>, Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>, { maxMessageBytes: MAX_LINE_BYTES });
+		return this.serveStream(stream);
+	}
+
+	/** Serve a transport which already delivers complete, UTF-8 text messages. */
+	serveMessages(transport: { receive(callback: (bytes: Buffer) => void): void;
+		closed(callback: () => void): void; send(text: string): Promise<void> }): Promise<void> {
+		let done = false;
+		return this.serveStream({
+			readable: new ReadableStream({
+				start(controller) {
+					transport.closed(() => { if (!done) { done = true; controller.close(); } });
+					transport.receive(bytes => {
+						if (done) return;
+						let message;
+						try { message = JSON.parse(bytes.toString("utf8")); }
+						catch { void transport.send('{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}').catch(() => {}); return; }
+						if (!message || typeof message !== "object" || Array.isArray(message)) {
+							void transport.send('{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid request"}}').catch(() => {});
+							return;
+						}
+						controller.enqueue(message);
+					});
+				},
+				cancel() { done = true; },
+			}),
+			writable: new WritableStream({ write: message => transport.send(JSON.stringify(message)) }),
+		});
+	}
+
+	serveStream(stream: Stream): Promise<void> {
 		const output = stream.writable.getWriter();
 		stream.writable = new WritableStream({
 			async write(message) {

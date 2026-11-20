@@ -17,7 +17,7 @@ import { fileTools } from "@modular-agent/tools-files";
 import { pluginsFromSettings, projectTrust } from "./loading.js";
 import { remotePlugin } from "@modular-agent/plugin-rpc";
 import { historyHttp, HttpHistoryStore } from "@modular-agent/services";
-import { type ExternalPluginSpec, pluginSpecsFromEnv, startExternalPlugin } from "@modular-agent/plugin-wire";
+import { type ExternalPluginSpec, pluginSpecsFromEnv, startExternalPlugin, startPluginService } from "@modular-agent/plugin-wire";
 export { pluginsFromSettings, projectTrust } from "./loading.js";
 
 export interface AgentOptions {
@@ -86,7 +86,7 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 	const owned = new Set<string>();
 	try {
 		for (const spec of options.externalPlugins ?? pluginSpecsFromEnv()) {
-			const external = await startExternalPlugin(spec, { project, home });
+			const external = await ("url" in spec ? startPluginService(spec, { project, home }) : startExternalPlugin(spec, { project, home }));
 			try {
 				const detail = external.refusal(harness, owned);
 				if (detail) throw new Error(detail);
