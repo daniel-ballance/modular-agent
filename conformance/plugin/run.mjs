@@ -2,7 +2,7 @@
 // Conformance kit for the plugin binding, modular-agent-plugin/1 (docs/bindings/plugin.md).
 // Usage: node run.mjs [--verbose] -- <command that serves the build's conformance plugin> [args...]
 // The kit plays the host. It starts the plugin, serves the host/* callbacks from a temporary folder,
-// and checks every part of the conformance plugin. No network, no model. Exit code 0 means all passed.
+// and checks every applicable part of the conformance plugin. No external model. Exit code 0 means all passed.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync, mkdirSync } from "node:fs";
@@ -11,15 +11,22 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, rpcError } from "./peer.mjs";
+import { checkUpgrades, CONTROL_MS, PLUGIN_PROTOCOL, socketPeer, websocketOptions } from "../tools/websocket.mjs";
 
-const argv = process.argv.slice(2);
+const args = process.argv.slice(2);
+const dash = args.indexOf("--");
+const argv = dash < 0 ? args : args.slice(0, dash);
 const verbose = argv.includes("--verbose");
-const dash = argv.indexOf("--");
-if (dash < 0 || dash === argv.length - 1) {
-	console.error("Usage: node run.mjs [--verbose] -- <plugin command> [args...]");
+let network;
+try {
+	const options = websocketOptions(argv);
+	network = options && { ...options, protocol: PLUGIN_PROTOCOL };
+	if (network ? dash >= 0 : dash < 0 || dash === args.length - 1) throw new Error("choose a stdio command or a WebSocket URL");
+} catch (e) {
+	console.error(`${e.message}\nUsage: node run.mjs [--verbose] [--no-runtime] (-- <plugin command> [args...] | --connect URL --token-file FILE)`);
 	process.exit(2);
 }
-const command = argv.slice(dash + 1);
+const command = args.slice(dash + 1);
 const BINDING = "modular-agent-plugin/1";
 const work = mkdtempSync(join(tmpdir(), "ma-plugin-kit-"));
 const home = mkdtempSync(join(tmpdir(), "ma-plugin-home-"));
@@ -51,9 +58,10 @@ const alive = (pid) => {
 	}
 };
 
-/** One plugin process, and the kit as its host. */
+/** One plugin instance, and the kit as its host. */
 function start(extraEnv = {}) {
-	const child = spawn(command[0], command.slice(1), { cwd: work, stdio: ["pipe", "pipe", verbose ? "inherit" : "ignore"], env: { ...safeEnv, ...extraEnv } });
+	const child = network ? null : spawn(command[0], command.slice(1), { cwd: work, stdio: ["pipe", "pipe", verbose ? "inherit" : "ignore"], env: { ...safeEnv, ...extraEnv } });
+	const wire = network && socketPeer(network, (line, parsed) => receive(line, parsed));
 	const pending = new Map();
 	const notes = [];
 	const hostCalls = [];
@@ -63,7 +71,14 @@ function start(extraEnv = {}) {
 	let nextId = 1;
 	let seq = 0;
 	let buffer = "";
-	const send = (m) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
+	let disconnected = false, connected = !wire;
+	if (wire) void wire.ready.then(() => { connected = true; }, () => {});
+	const send = (m) => {
+		const text = JSON.stringify({ jsonrpc: "2.0", ...m });
+		if (wire) return wire.send(text, m);
+		child.stdin.write(text + "\n");
+		return true;
+	};
 	const reply = (id, result) => send({ id, result });
 	const fail = (id, code, message) => send({ id, error: rpcError(code, message) });
 	const withinWork = (path) => {
@@ -178,64 +193,78 @@ function start(extraEnv = {}) {
 				return fail(m.id, "method_not_found");
 		}
 	}
-	child.stdout.setEncoding("utf8");
-	child.stdout.on("data", (chunk) => {
-		buffer += chunk;
-		for (let i = buffer.indexOf("\n"); i >= 0; i = buffer.indexOf("\n")) {
-			const line = buffer.slice(0, i).trim();
-			buffer = buffer.slice(i + 1);
-			if (!line) continue;
-			let m;
-			try {
-				m = JSON.parse(line);
-			} catch {
-				notes.push({ method: "$/bad-line", params: { line } });
-				continue;
-			}
-			m.seq = ++seq;
-			if (m.method && m.id !== undefined) void onHostRequest(m).catch((e) => fail(m.id, codeOf(e) ?? "internal", e?.message));
-			else if (m.method) {
-				notes.push(m);
-				if (m.method === "host/runtime/report") state.rt?.reports.push(m.params);
-				if (m.method === "$/cancel") state.rt?.running.get(m.params?.id)?.();
-				if (m.method === "$/cancel") {
-					// The plugin cancelled one of its own requests to us.
-					const e = execs.get(m.params?.id);
-					e?.cancel();
-				}
-			} else if (pending.has(m.id)) {
-				const { resolve: res, reject } = pending.get(m.id);
-				pending.delete(m.id);
-				for (const e of execs.values()) if (e.parent === m.id) e.cancel();
-				cancelledParents.delete(m.id);
-				if (m.error) reject(m.error);
-				else res(m.result);
-			}
+	function receive(line, m) {
+		try {
+			m ??= JSON.parse(line);
+			if (!m || typeof m !== "object" || Array.isArray(m)) throw new Error("expected object");
+		} catch {
+			notes.push({ method: "$/bad-line", params: { line } });
+			return;
 		}
-	});
-	child.stdin.on("error", () => undefined);
-	const exited = new Promise((r) => {
+		m.seq = ++seq;
+		if (m.method && m.id !== undefined) void onHostRequest(m).catch((e) => fail(m.id, codeOf(e) ?? "internal", e?.message));
+		else if (m.method) {
+			notes.push(m);
+			if (m.method === "host/runtime/report") state.rt?.reports.push(m.params);
+			if (m.method === "$/cancel") {
+				state.rt?.running.get(m.params?.id)?.();
+				execs.get(m.params?.id)?.cancel(); // The plugin cancelled its own callback.
+			}
+		} else if (pending.has(m.id)) {
+			const { resolve: res, reject } = pending.get(m.id);
+			pending.delete(m.id);
+			for (const e of execs.values()) if (e.parent === m.id) e.cancel();
+			cancelledParents.delete(m.id);
+			if (m.error) reject(m.error);
+			else res(m.result);
+		}
+	}
+	if (child) {
+		child.stdout.setEncoding("utf8").on("data", (chunk) => {
+			buffer += chunk;
+			for (let i; (i = buffer.indexOf("\n")) >= 0;) {
+				const line = buffer.slice(0, i).trim();
+				buffer = buffer.slice(i + 1);
+				if (line) receive(line);
+			}
+		});
+		child.stdin.on("error", () => undefined);
+	}
+	const exited = wire?.closed ?? new Promise((r) => {
 		child.once("error", () => r({ code: null, signal: null }));
 		child.once("close", (code, signal) => r({ code, signal }));
 	});
+	const lost = () => rpcError("lost", "fixture plugin connection closed");
 	void exited.then(() => {
+		disconnected = true;
+		for (const cancel of state.rt?.running.values() ?? []) cancel();
 		for (const callback of execs.values()) callback.cancel();
-		for (const callback of pending.values()) callback.reject(rpcError("lost", "fixture plugin connection closed"));
+		for (const callback of pending.values()) callback.reject(lost());
 		pending.clear();
 	});
 	return {
 		child,
+		wire,
+		get disconnected() { return disconnected; },
 		state,
 		notes,
 		hostCalls,
 		exited,
 		request(method, params, ms = 15000) {
 			const id = nextId++;
-			send({ id, method, params });
 			let timer;
 			const p = new Promise((res, reject) => {
+				if (disconnected) return reject(lost());
 				pending.set(id, { resolve: res, reject, method, params });
-				timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms: ${method}`)), ms);
+				const write = () => {
+					if (!send({ id, method, params })) reject(lost());
+				};
+				if (connected) write();
+				else void wire.ready.then(write).catch(() => reject(lost()));
+				timer = setTimeout(() => {
+					if (wire && ["plugin/initialize", "plugin/shutdown", "$/ping"].includes(method)) { wire.end(); reject(lost()); }
+					else reject(new Error(`timed out after ${ms} ms: ${method}`));
+				}, wire && ["plugin/initialize", "plugin/shutdown", "$/ping"].includes(method) ? CONTROL_MS : ms);
 			});
 			p.finally(() => clearTimeout(timer)).catch(() => undefined);
 			p.id = id;
@@ -252,6 +281,11 @@ function start(extraEnv = {}) {
 			for (const e of execs.values()) if (e.parent === id) e.cancel();
 		},
 		async stop() {
+			if (wire) {
+				wire.end();
+				await Promise.race([exited, sleep(CONTROL_MS)]);
+				return;
+			}
 			child.stdin.end();
 			await Promise.race([exited, sleep(3000)]);
 			if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -460,7 +494,8 @@ const statusOf = (e) => e?.data?.status;
 const textOf = (content) => (content ?? []).filter((p) => p.type === "text").map((p) => p.text).join("");
 const initParams = { binding: BINDING, data: "modular-agent-data/1", host: { name: "conformance-kit", version: "1" }, project: work, home, config: {} };
 
-let p = start();
+if (network) await checkUpgrades(network, check, attempt);
+const p = start();
 let reg = {};
 await attempt("initialize", async () => {
 	reg = p.state.reg = await p.request("plugin/initialize", initParams);
@@ -504,7 +539,50 @@ for (const depth of [64, 65]) await attempt(`Transport: JSON nesting at ${depth}
 	}
 });
 
-// Plugin binding: Transport. This independent process takes raw frames, not the mock host's decoder.
+if (network) {
+	await attempt("WebSocket framing", async () => {
+		const answers = [];
+		const wire = socketPeer(network, (_, rpc) => answers.push(rpc));
+		const frame = (id, method, params) => ({ jsonrpc: "2.0", id, method, params });
+		const send = (rpc) => wire.send(JSON.stringify(rpc, null, 2));
+		const waitFor = async (n) => {
+			for (const until = Date.now() + CONTROL_MS; answers.length < n && Date.now() < until; ) await sleep(25);
+		};
+		try {
+			await wire.ready;
+			send(frame("init", "plugin/initialize", initParams));
+			await waitFor(1);
+			check("WebSocket framing: one text message can contain embedded newlines", answers.some((r) => r?.id === "init" && r.result?.binding === BINDING));
+			wire.send("[{}]"); wire.send("{"); send(frame(7, "$/ping", {})); send(frame("7", "$/ping", {}));
+			await waitFor(5);
+			check("framing: batch and malformed JSON get distinct error envelopes", answers.some((r) => r?.id === null && r.error?.code === -32600 && code(r.error) === "invalid_request") && answers.some((r) => r?.id === null && r.error?.code === -32700 && code(r.error) === "parse_error"));
+			check("framing: numeric and string ids do not collide", [7, "7"].every((id) => answers.some((r) => r?.id === id && equal(r.result, {}))));
+			send(frame(7, "$/ping", {}));
+			check("framing: reusing a settled request id closes the connection", await Promise.race([wire.closed.then((e) => !e.rejectedFrame), sleep(CONTROL_MS).then(() => false)]));
+		} finally { wire.end(); }
+	});
+	await attempt("WebSocket binary message", async () => {
+		const bin = start();
+		try {
+			await bin.request("plugin/initialize", initParams);
+			bin.wire.send(Uint8Array.of(0));
+			const end = await Promise.race([bin.exited, sleep(CONTROL_MS).then(() => null)]);
+			check("WebSocket: a binary message closes with 1003", end?.code === 1003, `close code ${end?.code ?? "(none)"}`);
+		} finally { await bin.stop(); }
+	});
+	console.log("SKIP  WebSocket oversized message (a real >64 MiB transfer is not a cheap default probe)");
+	await attempt("WebSocket independent plugin instances", async () => {
+		const other = start();
+		try {
+			const secondReg = await other.request("plugin/initialize", initParams);
+			const duplicate = await p.request("plugin/initialize", initParams).catch((e) => e);
+			check("WebSocket: concurrent connections each initialize and register once", !!reg?.name && secondReg.binding === BINDING && !!secondReg.name && code(duplicate) === "invalid_request");
+			await other.request("plugin/shutdown", { reason: "stop" });
+			const end = await Promise.race([other.exited, sleep(CONTROL_MS).then(() => null)]);
+			check("WebSocket: shutting down one instance leaves the other usable", end?.code === 1000 && equal(await p.request("$/ping", {}), {}));
+		} finally { await other.stop(); }
+	});
+} else // This independent process takes raw stdio frames, not the mock host's decoder.
 await attempt("framing", async () => {
 	const child = spawn(command[0], command.slice(1), { cwd: work, env: safeEnv, stdio: ["pipe", "pipe", "ignore"] });
 	child.stdin.on("error", () => undefined);
@@ -990,7 +1068,7 @@ async function runtimeChecks(part) {
 			check("runtime: transient resume dispatches no calls and leaves notStarted or outcomeUnknown", rt.toolCalls.length === 0 && statusOf(resultFor(rt, notStarted.id)[0]) === "notStarted" && statusOf(resultFor(rt, safeCall.id)[0]) === "outcomeUnknown");
 		}
 	} finally {
-		if (q.child.exitCode === null && q.child.signalCode === null && !q.child.stdin.writableEnded) {
+		if (q.wire ? !q.disconnected : q.child.exitCode === null && q.child.signalCode === null && !q.child.stdin.writableEnded) {
 			await q.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);
 			await q.stop();
 		}
@@ -998,13 +1076,52 @@ async function runtimeChecks(part) {
 }
 
 if (!argv.includes("--no-runtime")) {
-	await attempt("runtime", () => runtimeChecks("runtime"));
-	await attempt("durable-runtime", () => runtimeChecks("durable-runtime"));
+	for (const part of ["runtime", "durable-runtime"]) {
+		const served = reg?.runtime && (reg.runtime.supports?.continuesAfterRestart === true ? "durable-runtime" : "runtime");
+		if (network && served !== part) console.log(`SKIP  ${part} (this service does not register that Runtime tier)`);
+		else await attempt(part, () => runtimeChecks(part));
+	}
+}
+
+if (network) {
+	const containment = containmentOn(reg?.workingEnvironment, process.platform);
+	if (containment === "none") console.log("SKIP  WebSocket env/exec loss cleanup (no containment claim for fixture platform)");
+	else await attempt("WebSocket env/exec loss cleanup", async () => {
+		const env = start();
+		const beat = join(work, `loss-${randomUUID()}`);
+		const size = () => statSync(beat, { throwIfNoEntry: false })?.size ?? 0;
+		try {
+			await env.request("plugin/initialize", initParams);
+			const loop = `for i in $(seq 150); do printf . >> ${beat}; sleep 0.1; done`;
+			const command = containment === "strong" ? `setsid bash -c '${loop}' & wait` : `(${loop}) & wait`;
+			const pending = env.request("env/exec", { cwd: work, sessionId: "kit-loss", command }).catch((e) => e);
+			for (const until = Date.now() + CONTROL_MS; size() < 2 && Date.now() < until;) await sleep(50);
+			const before = size();
+			const disconnectedAt = Date.now();
+			env.wire.end();
+			const outcome = await Promise.race([pending, sleep(CONTROL_MS).then(() => null)]);
+			check("WebSocket: unanswered env/exec settles as lost on disconnect", code(outcome) === "lost");
+			await sleep(Math.max(0, CONTROL_MS - (Date.now() - disconnectedAt)));
+			const after = size();
+			await sleep(700);
+			check(`WebSocket: connection loss stops a running env/exec (${containment})`, before >= 2 && after >= before && size() === after, `heartbeat before/after/later: ${before}/${after}/${size()}`);
+		} finally { await env.stop(); }
+	});
 }
 
 await attempt("shutdown", async () => {
 	const r = await p.request("plugin/shutdown", { reason: "stop" });
 	check("plugin/shutdown answers", r !== undefined);
+	if (network) {
+		const end = await Promise.race([p.exited, sleep(CONTROL_MS).then(() => null)]);
+		check("WebSocket: plugin/shutdown closes the connection with 1000", end?.code === 1000);
+		const fresh = start();
+		try {
+			const r = await fresh.request("plugin/initialize", initParams);
+			check("WebSocket: service accepts a new instance after shutdown", r.binding === BINDING && !!r.name);
+		} finally { await fresh.stop(); await p.stop(); }
+		return;
+	}
 	// Plugin binding: Starting: the handshake. Observe EOF exit before forced cleanup.
 	p.child.stdin.end();
 	const ex = await Promise.race([p.exited, sleep(5000).then(() => null)]);
@@ -1013,9 +1130,11 @@ await attempt("shutdown", async () => {
 });
 
 await attempt("parts and stdin", async () => {
-	const q = start({ MODULAR_AGENT_PLUGIN_PARTS: "tools" });
-	const r = await q.request("plugin/initialize", initParams);
-	check("MODULAR_AGENT_PLUGIN_PARTS=tools registers only tools", !(r.providers ?? []).length && !r.workingEnvironment && !(r.hooks ?? []).length && (r.toolSources ?? []).some((t) => t.id === "conformance-tools"), JSON.stringify(Object.keys(r)));
+	const q = network ? null : start({ MODULAR_AGENT_PLUGIN_PARTS: "tools" });
+	if (q) {
+		const r = await q.request("plugin/initialize", initParams);
+		check("MODULAR_AGENT_PLUGIN_PARTS=tools registers only tools", !(r.providers ?? []).length && !r.workingEnvironment && !(r.hooks ?? []).length && (r.toolSources ?? []).some((t) => t.id === "conformance-tools"), JSON.stringify(Object.keys(r)));
+	} else console.log("SKIP  MODULAR_AGENT_PLUGIN_PARTS=tools (service chooses its parts at startup)");
 	let err;
 	const z = start();
 	try {
@@ -1026,6 +1145,7 @@ await attempt("parts and stdin", async () => {
 		await z.stop();
 	}
 	check("an unknown binding version is not_supported", code(err) === "not_supported", JSON.stringify(err));
+	if (!q) return; // Network instance loss is exercised by the disconnect check above.
 	q.child.stdin.end();
 	const ex = await Promise.race([q.exited, sleep(3000).then(() => null)]);
 	check("the plugin exits when its stdin closes", ex !== null);
