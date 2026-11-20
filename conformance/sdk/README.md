@@ -23,16 +23,16 @@ A scenario that turns out to be wrong is fixed here first, then in the SDKs.
 
 ## Results
 
-SDK specification 0.1 after the second build round, before the last three scenarios were added. Each runner ran all eleven scenarios in process and served by each SDK's fixture program, with `MODULAR_AGENT_SDK_REQUIRE=all`:
+SDK specification 0.1 after the third build round. Each runner ran all fourteen scenarios in process and served by each SDK's fixture program, with `MODULAR_AGENT_SDK_REQUIRE=all`:
 
 | Runner | In process | Rust | TypeScript | Go | Python |
 |---|---|---|---|---|---|
-| Rust | 11/11 | 11/11 | 11/11 | 11/11 | 11/11 |
-| TypeScript | 11/11 | 11/11 | 11/11 | 11/11 | 11/11 |
-| Go | 11/11 | 11/11 | 11/11 | 11/11 | 11/11 |
-| Python | 11/11 | 11/11 | 11/11 | 11/11 | 11/11 |
+| Rust | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
+| TypeScript | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
+| Go | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
+| Python | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
 
-220 runs, all passed. The crash scenarios killed the agent's whole process group with `SIGKILL` in every cell. After the first round, with the first seven scenarios, the same matrix passed 140 runs.
+280 runs, all passed. The crash scenarios killed the agent's whole process group with `SIGKILL` in every cell. Earlier rounds passed the same matrix with fewer scenarios: 140 runs with the first seven, 220 with eleven.
 
 ## Proposed, not yet written
 
