@@ -451,6 +451,9 @@ class ACP(Plugin):
     def tenant_allowed(self, tenant):
         return True
 
+    def session_create_rights(self, tenant, has_mcp):
+        return self.principal["rights"]
+
     async def visible_sessions(self, project):
         return await self.api.session("list", project=project)
 
@@ -466,6 +469,7 @@ class ACP(Plugin):
             raise protocol_error("forbidden", "Tenant outside connection scope")
         async with self.lifecycle:
             await self.select_project(project)
+            authority = self.session_create_rights(tenant, bool(mcp_servers))
             self.creating = True
             try:
                 session = await self.api.session(
@@ -473,7 +477,7 @@ class ACP(Plugin):
                     project=project,
                     actor=self.actor,
                     actor_kind=self.principal["kind"],
-                    authority=self.principal["rights"],
+                    authority=authority,
                     settings=self.new_session_settings(project),
                     tenant=tenant,
                     mcp_servers=[
@@ -508,15 +512,16 @@ class ACP(Plugin):
             self.opening = sid
             self.returned_on_open[sid] = []
             try:
+                attachments = [
+                    x.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    for x in mcp_servers or []
+                ]
                 await self.api.session(
                     "open",
                     session=sid,
                     actor=self.actor,
                     connection_host=not self.network,
-                    mcp_servers=[
-                        x.model_dump(mode="json", by_alias=True, exclude_none=True)
-                        for x in mcp_servers or []
-                    ],
+                    **({"mcp_servers": attachments} if attachments or not self.network else {}),
                 )
             finally:
                 self.opening = None

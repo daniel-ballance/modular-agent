@@ -184,6 +184,18 @@ class _AcpProject(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.
         self.interface.register_project(self.agent, api)
 
 
+class _AcpConnections:
+    """One writer per session, with independent views on that writer."""
+
+    def __init__(self) -> None:
+        self.busy: dict[str, tuple[asyncio.Task[Any] | None, asyncio.Event]] = {}
+        self.sessions: dict[str, dict[_Interface, Agent]] = {}
+        self.projects: dict[Agent, set[_Interface]] = {}
+
+    def composition(self, sid: str) -> Agent | None:
+        return next(iter(self.sessions.get(sid, {}).values()), None)
+
+
 class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
     def __init__(
         self,
@@ -194,7 +206,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
         *,
         principal: AcpActor | None = None,
-        claims: dict[str, str] | None = None,
+        connections: _AcpConnections | None = None,
     ) -> None:
         actor = (
             principal["actor"]["id"] if principal else os.environ.get("MODULAR_AGENT_ACTOR", "user")
@@ -203,7 +215,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         self.network = principal is not None
         self._allowed_projects: set[Path] | None = None
         self._allowed_tenants: set[str | None] = {None}
-        self._claims = claims
+        self._connections = connections
         if principal is not None:
             self.name = "acp:" + uuid4().hex
             self.principal = principal["actor"]
@@ -280,6 +292,17 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             (tenant is None or isinstance(tenant, str)) and tenant in self._allowed_tenants
         )
 
+    def session_create_rights(self, tenant: str | None, has_mcp: bool) -> list[str]:
+        if not self.network:
+            return cast(list[str], super().session_create_rights(tenant, has_mcp))
+        harness = self._current()._h
+        rights = set(self.principal["rights"]) & harness.admin & harness.tenant
+        if tenant is not None:
+            rights &= set(harness.tenant_config(tenant)["rights"])
+        if not ({"input", "tools"} if has_mcp else {"input"}) <= rights:
+            raise protocol_error("forbidden", "Actor cannot create this session")
+        return sorted(rights)
+
     async def visible_sessions(self, project: str | None) -> list[dict[str, Any]]:
         rows = cast(list[dict[str, Any]], await super().visible_sessions(project))
         if not self.network:
@@ -291,7 +314,8 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 continue
             if self._compose is None and Path(row["project"]) != self._agent._project:
                 continue
-            session = agent._h.sessions.get(row["id"])
+            owner = self._connections.composition(row["id"]) if self._connections else None
+            session = (owner or agent)._h.sessions.get(row["id"])
             if session is None:
                 session = await agent._api.call("history", "read", {"session": row["id"]})
             if (
@@ -304,9 +328,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
     async def require_visible_session(self, project: str, sid: str) -> None:
         await super().require_visible_session(project, sid)
-        if self._claims is not None:
-            if self._claims.setdefault(sid, self.name) != self.name:
-                raise protocol_error("busy", "Session already attached to another connection")
+        self._claim(sid)
 
     async def _open(
         self,
@@ -318,20 +340,33 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         kwargs: Any,
     ) -> Any:
         try:
-            return await super()._open(
+            response = await super()._open(
                 cwd, sid, mcp_servers, replay, additional_directories, kwargs
             )
+            if self.network:
+                self._bind(sid)
+            return response
         finally:
-            if sid not in self._agents:
-                self._release_claim(sid)
+            self._release_claim(sid)
+
+    def _claim(self, sid: str) -> None:
+        if self._connections is not None:
+            if sid in self._connections.busy:
+                raise protocol_error("busy", "Session lifecycle operation in progress")
+            self._connections.busy[sid] = (asyncio.current_task(), asyncio.Event())
 
     def _release_claim(self, sid: str) -> None:
-        if self._claims is not None and self._claims.get(sid) == self.name:
-            del self._claims[sid]
+        if self._connections is not None:
+            claim = self._connections.busy.get(sid)
+            if claim is not None and claim[0] is asyncio.current_task():
+                del self._connections.busy[sid]
+                claim[1].set()
 
     async def select_project(self, project: str, session_id: str | None = None) -> None:
         folder = Path(project)
         selected = self._agents.get(session_id or "")
+        if selected is None and session_id is not None and self._connections is not None:
+            selected = self._connections.composition(session_id)
         if selected is None:
             if self._compose_reopen is not None and session_id is not None:
                 selected = await self._compose_reopen(folder, session_id)
@@ -342,26 +377,49 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 await selected.close()
             raise ValueError("Session is not in this project")
         if selected not in self._apis:
+            clients = None
+            if self._connections is not None:
+                clients = self._connections.projects.setdefault(selected, set())
+            first = not clients
+            if clients is not None:
+                clients.add(self)
             try:
-                await selected._install_acp_mcp(self._project_mcp)
+                if first:
+                    await selected._install_acp_mcp(self._project_mcp)
                 if self.network:
-                    selected._h.acp_principal_rights = self._agent._h.acp_principal_rights
                     await selected._h.attach_interface(_AcpProject(selected, self))
                 else:
                     await selected._h.load(_AcpProject(selected, self))
             except BaseException:
-                await selected.close()
+                if clients is not None:
+                    clients.discard(self)
+                if first:
+                    if self._connections is not None:
+                        self._connections.projects.pop(selected, None)
+                    await selected.close()
                 raise
         self._scope.set(selected)
 
     async def session_started(self, payload: JsonObject) -> None:
         sid = cast(str, payload["session"])
-        self._agents[sid] = self._current()
-        if self._claims is not None:
-            self._claims[sid] = self.name
+        self._bind(sid)
         if sid == self.opening:
             await self.api.call("questions", "connect", {"session": sid, "actor": self.actor})
         await super().session_started(payload)
+
+    def _bind(self, sid: str) -> None:
+        agent = self._current()
+        self._agents[sid] = agent
+        if self._connections is not None:
+            self._connections.sessions.setdefault(sid, {})[self] = agent
+
+    def _unbind(self, sid: str) -> None:
+        self._agents.pop(sid, None)
+        if self._connections is not None:
+            refs = self._connections.sessions.get(sid, {})
+            refs.pop(self, None)
+            if not refs:
+                self._connections.sessions.pop(sid, None)
 
     async def session_ended(self, payload: JsonObject) -> None:
         sid = cast(str, payload["session"])
@@ -371,24 +429,42 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             await super().session_ended(payload)
         finally:
             if self.network:
-                self._agents.pop(sid, None)
+                self._unbind(sid)
 
     async def close_session(self, session_id: str, **kwargs: Any) -> Any:
-        result = await super().close_session(session_id, **kwargs)
-        self._release_claim(session_id)
-        return result
+        if session_id not in self.sessions:
+            return await super().close_session(session_id, **kwargs)
+        self._claim(session_id)
+        try:
+            return await super().close_session(session_id, **kwargs)
+        finally:
+            self._release_claim(session_id)
 
     async def close_connection(self) -> None:
         self.client = None
-        owned = list(self._agents.items())
+        connections = self._connections
+        assert connections is not None
         try:
-            await self.disconnect()
-            for sid, agent in owned:
-                if sid in agent._h.sessions:
-                    await agent._h.suspend_session(sid)
+            await self._cancel_requests()
+            for sid, agent in list(self._agents.items()):
+                while claim := connections.busy.get(sid):
+                    await claim[1].wait()
+                self._claim(sid)
+                try:
+                    refs = connections.sessions.get(sid, {})
+                    if sid in agent._h.sessions and not any(
+                        peer.actor == self.actor for peer in refs if peer is not self
+                    ):
+                        await self._apis[agent].call(
+                            "questions", "disconnect", {"session": sid, "actor": self.actor}
+                        )
+                    self._unbind(sid)
+                    self.sessions.discard(sid)
+                    if sid not in connections.sessions and sid in agent._h.sessions:
+                        await agent._h.suspend_session(sid)
+                finally:
+                    self._release_claim(sid)
         finally:
-            for sid, _ in owned:
-                self._release_claim(sid)
             try:
                 await self.close_projects()
             finally:
@@ -413,8 +489,17 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
     async def close_projects(self) -> None:
         for agent in reversed(list(self._apis)):
-            if agent is not self._agent:
-                await agent.close()
+            if agent is self._agent:
+                continue
+            if self._connections is not None:
+                clients = self._connections.projects[agent]
+                if self.name in agent._h.plugins:
+                    await agent._h.unload(self.name)
+                clients.discard(self)
+                if clients:
+                    continue
+                del self._connections.projects[agent]
+            await agent.close()
 
 
 class Agent:
@@ -773,7 +858,7 @@ class Agent:
             if listen is not None:
                 rights: dict[str, set[str]] = {}
                 kinds: dict[str, str] = {}
-                claims: dict[str, str] = {}
+                connections = _AcpConnections()
                 principals = deepcopy(actors)
                 for entry in principals:
                     actor = entry["actor"]
@@ -791,7 +876,6 @@ class Agent:
                     rights[aid], kinds[aid] = allowed, kind
                 if not actors:
                     raise ValueError("WebSocket ACP requires at least one configured actor")
-                self._h.acp_principal_rights = rights
                 await self._install_acp_mcp(project_mcp)
 
                 async def handle(frames: WebSocketFrames, entry: AcpActor) -> None:
@@ -802,7 +886,7 @@ class Agent:
                         project_settings,
                         project_mcp,
                         principal=entry,
-                        claims=claims,
+                        connections=connections,
                     )
                     await self._h.attach_interface(interface)
                     try:

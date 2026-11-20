@@ -298,7 +298,21 @@ async def test_acp_connections_authenticate_and_scope_independently(
                 error = await rpc(b, 3, "session/prompt", {"sessionId": sid, "prompt": []})
                 assert "error" in error
                 reply = await rpc(b, 4, "session/new", params)
-                while reply.get("id") != 4:
-                    reply = json.loads(await b.recv())
-                assert reply["result"]["sessionId"] != sid
+                assert reply["error"]["data"]["code"] == "forbidden"
             assert (await rpc(a, 5, "$/ping", {}))["result"] == {}
+            async with connect(server.url, additional_headers=headers(token_file), **opts) as same:
+                await rpc(same, 1, "initialize", {"protocolVersion": 1})
+                reply = await rpc(same, 2, "session/resume", params | {"sessionId": sid})
+                while reply.get("id") != 2:
+                    reply = json.loads(await same.recv())
+                assert "result" in reply
+                await a.close()
+                reply = await rpc(
+                    same,
+                    3,
+                    "session/prompt",
+                    {"sessionId": sid, "prompt": [{"type": "text", "text": "still here"}]},
+                )
+                while reply.get("id") != 3:
+                    reply = json.loads(await same.recv())
+                assert reply["result"]["_meta"][meta]["outcome"]["kind"] == "completed"
