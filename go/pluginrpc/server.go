@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/conformancemodel"
+	"github.com/daniel-ballance/modular-agent/go/internal/wswire"
 	"github.com/daniel-ballance/modular-agent/go/local"
 	"github.com/daniel-ballance/modular-agent/go/tools"
 	"github.com/daniel-ballance/modular-agent/go/turnrun"
@@ -73,6 +74,7 @@ type Server struct {
 	Commands     map[string]func(context.Context, object) (any, error)
 	Initialize   func(object) error
 	peer         *Peer
+	service      bool
 	mu           sync.Mutex
 	initialized  bool
 	project      string // canonical project for environment requests
@@ -83,10 +85,25 @@ type Server struct {
 }
 
 func (s *Server) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) error {
+	return s.serve(ctx, NewPeer(in, out))
+}
+
+// ServeServiceConnection serves one instance on an already-authenticated connection.
+func (s *Server) ServeServiceConnection(ctx context.Context, conn *wswire.Conn) error {
+	s.service = true
+	p := newMessagePeer(conn)
+	p.afterResponse = func(method string) {
+		if method == "plugin/shutdown" {
+			conn.CloseNormal()
+		}
+	}
+	return s.serve(ctx, p)
+}
+
+func (s *Server) serve(ctx context.Context, p *Peer) error {
 	if s.Initialize == nil {
 		s.ownedEnv = s.Environment
 	}
-	p := NewPeer(in, out)
 	s.peer = p
 	p.Handle = s.handle
 	p.notify = func(ctx context.Context, method string, raw json.RawMessage) {
@@ -117,9 +134,14 @@ func (s *Server) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) err
 		case <-done:
 		}
 	}()
-	// Stdin closing ends the process even if a handler is still blocked.
-	err := p.run(false)
+	// Stdin EOF can end a whole process. A service instead cancels and
+	// joins this connection's handlers before destroying its instance.
+	err := p.run(s.service)
+	p.Close()
 	s.closeEnvironment()
+	if s.service {
+		p.wait.Wait()
+	}
 	return err
 }
 
@@ -208,8 +230,12 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		s.project = str(v, "project")
 		if s.Environment != nil {
 			project, err := filepath.EvalSymlinks(s.project)
-			if err != nil || !cwdInProject(project, project) {
-				return nil, fault("invalid_request", "working environment project must resolve to a directory")
+			if err != nil || !cwdInProject(project, project) || (s.service && project != str(v, "project")) {
+				code := "invalid_request"
+				if s.service {
+					code = "not_supported"
+				}
+				return nil, fault(code, "working environment requires the same absolute project directory")
 			}
 			s.project = project
 		}
@@ -634,7 +660,9 @@ func (e *remoteEnvironment) Bash(ctx context.Context, cwd, command string, progr
 
 // ConformanceServer serves existing tools, the existing echo Provider and local
 // supervised execution. Tools always obtain the environment from the host.
-func ConformanceServer() *Server {
+func ConformanceServer() *Server { return conformanceServer("") }
+
+func conformanceServer(serviceState string) *Server {
 	s := &Server{Providers: map[string]api.Provider{}, Sources: map[string]api.ToolSource{}, Handlers: map[int]func(context.Context, string, object) (any, error){}}
 	s.Initialize = func(init object) error {
 		s.Registration = Registration{Binding: Binding, Name: "go-conformance"}
@@ -697,7 +725,11 @@ func ConformanceServer() *Server {
 			s.Registration.Replaces = append(s.Registration.Replaces, "tool:bash", "tool:read", "tool:nest")
 		}
 		if chosen["environment"] {
-			s.Environment = local.NewAt(filepath.Join(str(init, "home"), "commands"))
+			home := str(init, "home")
+			if serviceState != "" {
+				home = serviceState
+			}
+			s.Environment = local.NewAt(filepath.Join(home, "commands"))
 			containment := "none"
 			if s.Environment.StopsOnCrash() {
 				containment = "strong"

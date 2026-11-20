@@ -150,27 +150,44 @@ func (q *inbox) finish(drain bool) {
 	}
 }
 
+type messageConn interface {
+	io.Closer
+	ReadMessage() ([]byte, error)
+	WriteMessage([]byte) error
+	CloseNormal()
+}
+
 type Peer struct {
-	in      io.ReadCloser
-	out     io.Writer
-	writeMu sync.Mutex
-	mu      sync.Mutex
-	pending map[string]pending
-	active  map[string]context.CancelFunc
-	next    atomic.Uint64
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan struct{}
-	Handle  Handler
-	Notify  Notification
-	notify  notificationHandler
-	OnClose func()
+	in            io.ReadCloser
+	out           io.Writer
+	wire          messageConn
+	wait          sync.WaitGroup
+	afterResponse func(string)
+	onActivity    func()
+	writeMu       sync.Mutex
+	mu            sync.Mutex
+	pending       map[string]pending
+	active        map[string]context.CancelFunc
+	next          atomic.Uint64
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan struct{}
+	Handle        Handler
+	Notify        Notification
+	notify        notificationHandler
+	OnClose       func()
 }
 
 func NewPeer(in io.ReadCloser, out io.Writer) *Peer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Peer{in: in, out: out, ctx: ctx, cancel: cancel, done: make(chan struct{}), pending: map[string]pending{}, active: map[string]context.CancelFunc{}}
 }
+func newMessagePeer(wire messageConn) *Peer {
+	p := NewPeer(nil, nil)
+	p.wire = wire
+	return p
+}
+
 func (p *Peer) Parent(id json.RawMessage) (context.Context, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -192,11 +209,18 @@ func (p *Peer) send(m envelope) error {
 			return fault("result_too_large", "message exceeds 64 MiB")
 		}
 		m.Result = nil
-		m.Error = fault("result_too_large", "result exceeds 64 MiB")
+		if m.Error == nil {
+			m.Error = fault("result_too_large", "result exceeds 64 MiB")
+		} else {
+			m.Error = fault(m.Error.Data.Code, "error exceeds 64 MiB")
+		}
 		b, _ = json.Marshal(m)
 	}
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
+	if p.wire != nil {
+		return p.wire.WriteMessage(b)
+	}
 	_, err = p.out.Write(append(b, '\n'))
 	return err
 }
@@ -267,7 +291,14 @@ func (p *Peer) call(ctx context.Context, method string, params any, out any, acc
 	}
 	return nil
 }
-func (p *Peer) Close()                { p.cancel(); _ = p.in.Close() }
+func (p *Peer) Close() {
+	p.cancel()
+	if p.wire != nil {
+		_ = p.wire.Close()
+	} else {
+		_ = p.in.Close()
+	}
+}
 func (p *Peer) Done() <-chan struct{} { return p.done }
 func (p *Peer) Run() error            { return p.run(true) }
 func (p *Peer) run(drain bool) error {
@@ -285,11 +316,34 @@ func (p *Peer) run(drain bool) error {
 			go p.OnClose()
 		}
 	}()
-	scanner := bufio.NewScanner(p.in)
-	scanner.Buffer(make([]byte, 64*1024), MaxFrame+1)
+	var read func() ([]byte, error)
+	if p.wire != nil {
+		read = p.wire.ReadMessage
+	} else {
+		scanner := bufio.NewScanner(p.in)
+		scanner.Buffer(make([]byte, 64*1024), MaxFrame+1)
+		read = func() ([]byte, error) {
+			if scanner.Scan() {
+				return scanner.Bytes(), nil
+			}
+			if err := scanner.Err(); err != nil {
+				return nil, err
+			}
+			return nil, io.EOF
+		}
+	}
 	seen := map[string]struct{}{}
-	for scanner.Scan() {
-		b := scanner.Bytes()
+	for {
+		b, err := read()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if p.onActivity != nil {
+			p.onActivity()
+		}
 		if len(b) > MaxFrame {
 			return fault("invalid_request", "frame exceeds 64 MiB")
 		}
@@ -378,12 +432,14 @@ func (p *Peer) run(drain bool) error {
 		}
 		p.active[key] = cancel
 		p.mu.Unlock()
-		q.push(func() { go p.answer(ctx, m, cancel) })
+		q.push(func() {
+			p.wait.Add(1)
+			go func() {
+				defer p.wait.Done()
+				p.answer(ctx, m, cancel)
+			}()
+		})
 	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (p *Peer) captureParent(ctx context.Context, raw json.RawMessage) context.Context {
@@ -419,6 +475,8 @@ func (p *Peer) answer(ctx context.Context, m envelope, cancel context.CancelFunc
 	if p.ctx.Err() == nil {
 		if err := p.send(response); err != nil {
 			p.Close()
+		} else if response.Error == nil && p.afterResponse != nil {
+			p.afterResponse(m.Method)
 		}
 	}
 }
