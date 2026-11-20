@@ -3,6 +3,29 @@ import { test } from "node:test";
 import { definePlugin, tool } from "../src/index.js";
 import { overWire, testAgent } from "../src/testing.js";
 
+test("a pending tool gate checkpoints before dispatch", { timeout: 5000 }, async () => {
+  let calls = 0;
+  const agent = await testAgent({ questionsOutlastTurns: true,
+    plugins: [definePlugin({ name: "gate", setup(r) {
+      r.on("tool.before", () => ({ pending: { kind: "text", question: "Which harbour?" } }), "normal", { inProcessOnly: true });
+    } })],
+    tools: [tool({ name: "tide", description: "Look up a tide", input: { type: "object" }, run: () => { calls++; return "14:02"; } })],
+    script: [{ toolCalls: [{ name: "tide", input: {} }] }, { text: "Done." }],
+  });
+  try {
+    const session = await agent.session();
+    assert.equal((await session.prompt("Look up the tide.")).openToolCalls.length, 1);
+    assert.equal(calls, 0);
+    const [question] = await session.questions();
+    assert.equal(question.question, "Which harbour?");
+    const checkpoint = (await session.history()).find(e => e.kind === "toolPending");
+    assert.deepEqual(checkpoint?.data, { requestIds: [question.id] });
+    await session.answer(question.id, { value: "Whitby" });
+    await session.waitIdle();
+    assert.equal(calls, 1);
+  } finally { await agent.close(); }
+});
+
 const note = definePlugin({ name: "late-note", tools: [tool({
   name: "note", description: "Ask for a note", input: { type: "object" },
   async run(_, cx) {

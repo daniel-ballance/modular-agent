@@ -6,7 +6,7 @@ import { toolSource, type Tool } from "./tool.js";
 import { adaptProvider, type Provider } from "./provider.js";
 import { sdkJob, type JobOwner, type JobRecovery, type JobStarter } from "./jobs.js";
 import type {
-  Actor, AssistantMessage, Content, HistoryEntry, ModelError, ModelRef, ModelRequest, Outcome, Settings,
+  Actor, AssistantMessage, Content, HistoryEntry, ModelError, ModelRef, ModelRequest, Outcome, QuestionDraft, Settings,
   ToolCall, ToolDefinition, ToolStatus, TurnResult,
 } from "./data.js";
 
@@ -28,7 +28,7 @@ type Hooks = {
   "turn.start": [Observe, void];
   "step.before": [Observe & { stepId: string; request: ModelRequest }, { change: ModelRequest }];
   "step.after": [Observe & { stepId: string; response: AssistantMessage }, "continue" | { end: string }];
-  "tool.before": [Before, "allow" | { refuse: string } | { change: ToolCall["input"] }];
+  "tool.before": [Before, "allow" | { refuse: string } | { change: ToolCall["input"] } | { pending: QuestionDraft }];
   "tool.after": [After, { change: Partial<ResultFields> }];
   "model.failed": [Observe & { error: ModelError; request: ModelRequest }, "stop" | { retry: true | ModelRequest }];
   "turn.result": [Observe & { result: Pick<TurnResult, "text" | "value">; shape?: Record<string, unknown> }, "accept" | { refuse: string }];
@@ -315,6 +315,10 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
               if (mapped.length !== answer.redact.length) throw new AgentError("invalid_request", "Invalid output gate answer");
               return { action: "pass", events: mapped.map((m, i) => m.restore(answer.redact[i])) };
             }
+          }
+          if (point === "tool.before" && typeof answer === "object" && "pending" in answer) {
+            if (served) throw new AgentError("not_supported", "A served tool gate cannot leave a call open");
+            return api.deferTool(p.sessionId, p.turnId, answer.pending);
           }
           if (point === "input" && typeof answer === "object" && "handle" in answer && typeof answer.handle === "object") {
             if (served) throw new AgentError("not_supported", "A served input hook cannot dispatch a command");

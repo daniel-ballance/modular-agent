@@ -168,6 +168,7 @@ export interface PluginApi {
 	callTool(sessionId: string, call: Omit<ToolCall, "id"> & { id?: string }): Promise<ToolResult>;
 	// actors
 	ask(sessionId: string, request: InputRequestDraft): Promise<Answer>;
+	deferTool(sessionId: string, turnId: string | undefined, question: InputRequestDraft): Promise<{ pending: string } | { refuse: string } | undefined>;
 	answer(sessionId: string, answer: Answer): { accepted: boolean; reason?: string };
 	submitAnswer(sessionId: string, answer: Answer): Promise<{ accepted: boolean; reason?: string }>;
 	openRequests(sessionId: string): InputRequest[];
@@ -413,6 +414,7 @@ export class Harness {
 			tools: (sessionId) => this.toolDefinitions(sessionId ? this.session(sessionId) : undefined),
 			callTool: (sessionId, call) => this.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
 			ask: (sessionId, request) => this.ask(this.session(sessionId), request, pluginName),
+			deferTool: (id, turnId, question) => this.deferTool(this.session(id), turnId, question, pluginName),
 			answer: (sessionId, answer) => this.answer(this.session(sessionId), answer),
 			submitAnswer: (sessionId, answer) => this.submitAnswer(this.session(sessionId), answer),
 			openRequests: (sessionId) => {
@@ -2233,6 +2235,19 @@ export class Harness {
 				await this.recordAnswer(s, request, { requestId: request.id, actorId: "harness", declined: true, reason: "restart" }, entry.stepId);
 			}
 		}
+	}
+
+	private async deferTool(s: Session, turnId: string | undefined, question: InputRequestDraft, plugin: string) {
+		const call = this.toolWork.getStore();
+		if (!this.questionsOutlastTurns || !call || !turnId || turnId !== s.running?.turnId || call.startedBy !== "model" || question.kind === "approval") {
+			return { refuse: "This call cannot wait for a late answer" };
+		}
+		const answer = await this.ask(s, { ...question, toolCallId: call.id, key: `gate:${call.id}:${plugin}:${question.key ?? "question"}`,
+			timeLimitMs: 0, whenTimeLimit: "leaveOpen" }, plugin, s.running.abort.signal);
+		if (!answer.pending) return answer.declined ? { refuse: answer.reason ?? "The gate question was declined" } : undefined;
+		await this.commit(s, [{ kind: "toolPending", writer: "harness", modelVisible: false, turnId, stepId: call.stepId,
+			toolCallId: call.id, data: { requestIds: [answer.requestId] } }]);
+		return { pending: "Waiting for an answer to the gate" };
 	}
 
 	private async ask(s: Session, draft: BoundRequest, askedBy: string, signal?: AbortSignal): Promise<Answer> {
