@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -54,11 +55,21 @@ func JSONStore(path string) Store {
 	}
 	read := func() (data, error) {
 		v := data{Answers: map[string]string{}}
-		b, e := os.ReadFile(path)
-		if os.IsNotExist(e) {
+		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		if errors.Is(err, unix.ENOENT) {
 			return v, nil
 		}
-		if e != nil {
+		if err != nil {
+			return v, errors.New("credential file unavailable")
+		}
+		f := os.NewFile(uintptr(fd), path)
+		defer f.Close()
+		var info unix.Stat_t
+		if err = unix.Fstat(fd, &info); err != nil || info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&0077 != 0 || int(info.Uid) != os.Geteuid() {
+			return v, errors.New("credential file must be private and owned by this user")
+		}
+		b, err := io.ReadAll(f)
+		if err != nil {
 			return v, errors.New("credential file unavailable")
 		}
 		if json.Unmarshal(b, &v) != nil || v.Answers == nil {
