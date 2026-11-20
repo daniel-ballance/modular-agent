@@ -481,10 +481,7 @@ pub(crate) async fn extension(
             .map(|_| string(p, "actorId"))
             .transpose()?
             .unwrap_or(connection_actor.as_str());
-        let represented = std::env::var("MODULAR_AGENT_ACP_REPRESENTS")
-            .ok()
-            .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
-            .unwrap_or_default();
+        let represented = represented_actors();
         if actor != connection_actor.as_str() && !represented.iter().any(|id| id == actor) {
             return Err(
                 request_error("forbidden", "connection does not represent this actor").into(),
@@ -550,10 +547,7 @@ pub(crate) async fn extension(
                     json!({"actor":id,"kind":kind,"authority":rights}),
                 ),
             )?;
-            let represented = std::env::var("MODULAR_AGENT_ACP_REPRESENTS")
-                .ok()
-                .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
-                .unwrap_or_default();
+            let represented = represented_actors();
             if !present
                 || id == connection_actor.as_str()
                 || represented.iter().any(|actor| actor == id)

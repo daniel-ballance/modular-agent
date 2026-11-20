@@ -40,6 +40,38 @@ pub struct AcpOptions {
     pub compose: Option<Arc<dyn AcpComposition>>,
 }
 
+/// A bearer-token principal. Omitted scopes permit all projects or tenants;
+/// an explicit tenant list includes `None` to allow the absence of a tenant.
+#[derive(Clone, Debug)]
+pub struct AcpActor {
+    pub token_file: std::path::PathBuf,
+    pub actor: crate::Actor,
+    pub tenants: Option<Vec<Option<String>>>,
+    pub projects: Option<Vec<std::path::PathBuf>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AcpServiceOptions {
+    pub listen: String,
+    pub actors: Vec<AcpActor>,
+    pub tls: Option<crate::TlsOptions>,
+}
+impl AcpActor {
+    /// The same operator-authorized local principal as stdio without an actor override.
+    pub fn local(token_file: std::path::PathBuf) -> Self {
+        Self {
+            token_file,
+            actor: crate::Actor {
+                id: base::ACP_HOST_ACTOR.into(),
+                kind: "host".into(),
+                rights: crate::Rights::full(),
+            },
+            tenants: None,
+            projects: None,
+        }
+    }
+}
+
 struct ProjectFactory(Arc<dyn AcpComposition>, Agent);
 
 #[async_trait::async_trait]
@@ -111,7 +143,6 @@ impl interface_acp::Factory for ProjectFactory {
 
 #[derive(Default)]
 pub(crate) struct Routes {
-    pending: Mutex<Option<Sink>>,
     attached: Mutex<BTreeMap<String, Sink>>,
     serving: tokio::sync::Mutex<()>,
 }
@@ -133,51 +164,139 @@ impl Agent {
     /// Serve this agent's project on stdio. Build with `plugin_host(true)` before serving.
     /// Start the Interface before opening embedded sessions; stdout belongs to ACP.
     pub async fn serve_acp(&self, options: AcpOptions) -> Result<()> {
+        self.check_acp_host()?;
+        let routes = self.acp_routes();
+        let _serving = routes
+            .serving
+            .try_lock()
+            .map_err(|_| Error::new(Code::Busy, "ACP is already serving"))?;
+        let factory = self.acp_factory(options.compose, routes.clone()).await?;
+        Ok(interface_acp::run(factory).await?)
+    }
+
+    /// Serve ACP over WebSocket, with a new connection and actor scope per upgrade.
+    pub async fn serve_acp_websocket(
+        &self,
+        options: AcpOptions,
+        service: AcpServiceOptions,
+    ) -> Result<crate::WebSocketServer> {
+        self.check_acp_host()?;
+        let mut entries = Vec::new();
+        for token in service.actors {
+            let actor = token.actor;
+            if actor.id.is_empty()
+                || actor.id.starts_with("job:")
+                || !matches!(actor.kind.as_str(), "user" | "host" | "agent" | "plugin")
+                || !crate::Rights::full().contains(&actor.rights)
+            {
+                return Err(Error::new(Code::InvalidComposition, "invalid ACP actor"));
+            }
+            let projects = token
+                .projects
+                .map(|projects| {
+                    projects
+                        .iter()
+                        .map(std::fs::canonicalize)
+                        .collect::<std::io::Result<Vec<_>>>()
+                })
+                .transpose()?;
+            let join_on_open = actor.id == base::ACP_HOST_ACTOR && actor.kind == "host";
+            entries.push((
+                token.token_file,
+                interface_acp::Identity {
+                    id: actor.id,
+                    kind: actor.kind,
+                    rights: actor.rights,
+                    tenants: token.tenants,
+                    projects,
+                    join_on_open,
+                    network: true,
+                },
+            ));
+        }
+        let routes = self.acp_routes();
+        {
+            let _serving = routes.serving.lock().await;
+            self.acp_factory(options.compose.clone(), routes.clone())
+                .await?;
+        }
+        let agent = self.clone();
+        Ok(transport_websocket::serve(
+            &service.listen,
+            service.tls,
+            transport_websocket::ACP,
+            entries,
+            move |identity, conn| {
+                let factory = agent.connection_factory(options.compose.clone(), routes.clone());
+                async move {
+                    let _ = interface_acp::run_websocket(factory, identity, conn).await;
+                }
+            },
+        )
+        .await?)
+    }
+
+    fn check_acp_host(&self) -> Result<()> {
         if !self.inner.plugin_host {
             return Err(Error::new(
                 Code::InvalidComposition,
                 "serve_acp requires a plugin host",
             ));
         }
-        if let Some(compose) = options.compose {
-            return Ok(interface_acp::run(Arc::new(ProjectFactory(compose, self.clone()))).await?);
-        }
-        let routes = self
-            .inner
+        Ok(())
+    }
+
+    fn acp_routes(&self) -> Arc<Routes> {
+        self.inner
             .acp
             .get_or_init(|| Arc::new(Routes::default()))
-            .clone();
-        let _serving = routes
-            .serving
-            .try_lock()
-            .map_err(|_| Error::new(Code::Busy, "ACP is already serving"))?;
-        use base::AgentApi;
-        if !self
-            .inner
-            .harness
-            .capability_names("interface.acp")
-            .iter()
-            .any(|name| name == "interface.acp")
-        {
-            self.inner
-                .harness
-                .load(Arc::new(interface_acp::AcpPlugin {
-                    sink: routes.clone(),
-                }))
-                .await
-                .map_err(|e| {
-                    Error::new(
-                        Code::InvalidComposition,
-                        format!("cannot install ACP: {e:#}"),
-                    )
-                })?;
+            .clone()
+    }
+
+    fn connection_factory(
+        &self,
+        compose: Option<Arc<dyn AcpComposition>>,
+        routes: Arc<Routes>,
+    ) -> Arc<dyn interface_acp::Factory> {
+        match compose {
+            Some(compose) => Arc::new(ProjectFactory(compose, self.clone())),
+            None => Arc::new(Factory(self.clone(), routes, Mutex::default())),
         }
-        interface_acp::run(Arc::new(Factory(self.clone(), routes.clone()))).await?;
-        Ok(())
+    }
+
+    async fn acp_factory(
+        &self,
+        compose: Option<Arc<dyn AcpComposition>>,
+        routes: Arc<Routes>,
+    ) -> Result<Arc<dyn interface_acp::Factory>> {
+        if compose.is_none() {
+            use base::AgentApi;
+            if !self
+                .inner
+                .harness
+                .capability_names("interface.acp")
+                .iter()
+                .any(|name| name == "interface.acp")
+            {
+                self.inner
+                    .harness
+                    .load(Arc::new(interface_acp::AcpPlugin {
+                        sink: routes.clone(),
+                    }))
+                    .await
+                    .map_err(|e| {
+                        Error::new(
+                            Code::InvalidComposition,
+                            format!("cannot install ACP: {e:#}"),
+                        )
+                    })?;
+            }
+        }
+        Ok(self.connection_factory(compose, routes))
     }
 }
 
-struct Factory(Agent, Arc<Routes>);
+struct Factory(Agent, Arc<Routes>, Mutex<Option<Sink>>);
 #[async_trait::async_trait]
 impl interface_acp::Factory for Factory {
     async fn declaration(&self) -> base::Result<Value> {
@@ -194,7 +313,7 @@ impl interface_acp::Factory for Factory {
             project == self.0.inner.project,
             "ACP cwd must be the configured project"
         );
-        *self.1.pending.lock().unwrap() = Some(sink);
+        *self.2.lock().unwrap() = Some(sink);
         Ok(self.0.inner.harness.clone())
     }
     fn list(&self, project: Option<&Path>) -> base::Result<Vec<base::SessionData>> {
@@ -214,8 +333,7 @@ impl interface_acp::Factory for Factory {
         servers: Value,
     ) -> base::Result<()> {
         let sink = self
-            .1
-            .pending
+            .2
             .lock()
             .unwrap()
             .take()

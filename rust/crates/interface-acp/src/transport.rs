@@ -8,6 +8,8 @@ const LIMIT: usize = 64 * 1024 * 1024;
 
 type Reader = BufReader<blocking::Unblock<io::Stdin>>;
 type Writer = Arc<Mutex<blocking::Unblock<io::Stdout>>>;
+type SendLine =
+    Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, io::Result<()>> + Send + Sync>;
 
 fn valid_id(id: &Value) -> bool {
     id.is_string()
@@ -28,39 +30,57 @@ async fn write_line(writer: &Writer, line: &str) -> io::Result<()> {
     writer.flush().await
 }
 
+enum WireReader {
+    Stdio(Reader, Vec<u8>),
+    WebSocket(mpsc::Receiver<String>),
+}
+impl WireReader {
+    async fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
+        match self {
+            Self::WebSocket(rx) => Ok(rx.recv().await.map(String::into_bytes)),
+            Self::Stdio(reader, bytes) => loop {
+                let chunk = reader.fill_buf().await?;
+                if chunk.is_empty() {
+                    return Ok(None);
+                }
+                let newline = chunk.iter().position(|&byte| byte == b'\n');
+                let length = newline.map_or(chunk.len(), |n| n + 1);
+                if bytes.len() + length > LIMIT + 3 {
+                    return Ok(None);
+                }
+                bytes.extend_from_slice(&chunk[..length]);
+                reader.consume_unpin(length);
+                if newline.is_some() {
+                    bytes.pop();
+                    if bytes.last() == Some(&b'\r') {
+                        bytes.pop();
+                    }
+                    return Ok(Some(std::mem::take(bytes)));
+                }
+            },
+        }
+    }
+}
 struct Input {
-    reader: Reader,
-    writer: Writer,
+    reader: WireReader,
+    write: SendLine,
     refusals: mpsc::UnboundedReceiver<String>,
-    bytes: Vec<u8>,
     seen: BTreeSet<String>,
 }
 impl Input {
     async fn next(&mut self) -> io::Result<Option<String>> {
         loop {
-            let chunk = tokio::select! {
+            let frame = tokio::select! {
                 msg = self.refusals.recv(), if !self.refusals.is_closed() => {
                     if msg.is_some() { return Ok(msg); }
                     continue;
                 }
-                bytes = self.reader.fill_buf() => bytes?,
+                frame = self.reader.next() => frame?,
             };
-            if chunk.is_empty() {
+            let Some(frame) = frame else {
                 return Ok(None);
-            }
-            let newline = chunk.iter().position(|&byte| byte == b'\n');
-            let length = newline.map_or(chunk.len(), |n| n + 1);
-            // An incomplete oversized frame has no safely validated request id.
-            if self.bytes.len() + length > LIMIT + 3 {
-                return Ok(None);
-            }
-            self.bytes.extend_from_slice(&chunk[..length]);
-            self.reader.consume_unpin(length);
-            if newline.is_none() {
-                continue;
-            }
-            let line = self.bytes.strip_suffix(b"\n").unwrap();
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            };
+            let line = frame.as_slice();
             let oversized = line.len() > LIMIT;
             match wire::decode_json(line) {
                 Ok(value) if oversized => {
@@ -73,10 +93,12 @@ impl Input {
                     {
                         return Ok(None);
                     }
-                    write_line(
-                        &self.writer,
-                        &error(id, -32000, "message_too_large", "request is too large"),
-                    )
+                    (self.write)(error(
+                        id,
+                        -32000,
+                        "message_too_large",
+                        "request is too large",
+                    ))
                     .await?;
                 }
                 Ok(value) if value.is_object() => {
@@ -86,9 +108,7 @@ impl Input {
                     {
                         return Ok(None);
                     }
-                    let line = String::from_utf8(line.to_vec()).expect("validated wire JSON");
-                    self.bytes.clear();
-                    return Ok(Some(line));
+                    return Ok(Some(String::from_utf8(frame).expect("validated wire JSON")));
                 }
                 Err(wire::JsonError::TooDeep) if !oversized => {
                     let Ok(value) = serde_json::from_slice::<Value>(line) else {
@@ -101,33 +121,61 @@ impl Input {
                         if !valid_id(id) || !self.seen.insert(id.to_string()) {
                             return Ok(None);
                         }
-                        write_line(
-                            &self.writer,
-                            &error(
-                                id,
-                                -32602,
-                                "invalid_request",
-                                "JSON nesting exceeds 64 levels",
-                            ),
-                        )
+                        (self.write)(error(
+                            id,
+                            -32602,
+                            "invalid_request",
+                            "JSON nesting exceeds 64 levels",
+                        ))
                         .await?;
                     }
                 }
                 _ => return Ok(None),
             }
-            self.bytes.clear();
         }
     }
 }
 
 pub(crate) fn stdio() -> impl agent_client_protocol::ConnectTo<agent_client_protocol::Agent> {
     let writer = Arc::new(Mutex::new(blocking::Unblock::new(io::stdout())));
+    lines(
+        WireReader::Stdio(
+            BufReader::new(blocking::Unblock::new(io::stdin())),
+            Vec::new(),
+        ),
+        Arc::new(move |line| {
+            let writer = writer.clone();
+            Box::pin(async move { write_line(&writer, &line).await })
+        }),
+    )
+}
+
+pub(crate) fn websocket(
+    conn: transport_websocket::Connection,
+) -> impl agent_client_protocol::ConnectTo<agent_client_protocol::Agent> {
+    lines(
+        WireReader::WebSocket(conn.incoming),
+        Arc::new(move |line| {
+            let writer = conn.outgoing.clone();
+            Box::pin(async move {
+                writer
+                    .send(line)
+                    .await
+                    .map_err(|_| io::ErrorKind::BrokenPipe.into())
+            })
+        }),
+    )
+}
+
+fn lines(
+    reader: WireReader,
+    write: SendLine,
+) -> impl agent_client_protocol::ConnectTo<agent_client_protocol::Agent> {
     let (refuse, refusals) = mpsc::unbounded_channel();
     let input = Input {
-        reader: BufReader::new(blocking::Unblock::new(io::stdin())),
-        writer: writer.clone(),
+        reader,
+        write: write.clone(),
         refusals,
-        bytes: Vec::new(),
         seen: BTreeSet::new(),
     };
     let incoming = stream::unfold(Some(input), |state| async move {
@@ -139,10 +187,10 @@ pub(crate) fn stdio() -> impl agent_client_protocol::ConnectTo<agent_client_prot
         }
     });
     let outgoing = sink::unfold(
-        (writer, refuse),
-        |(writer, refuse), line: String| async move {
+        (write, refuse),
+        |(write, refuse), line: String| async move {
             if line.len() <= LIMIT {
-                write_line(&writer, &line).await?;
+                write(line).await?;
             } else if let Ok(frame) = serde_json::from_str::<Value>(&line) {
                 if let Some(id) = frame.get("id") {
                     if frame["method"].is_string() {
@@ -154,10 +202,12 @@ pub(crate) fn stdio() -> impl agent_client_protocol::ConnectTo<agent_client_prot
                             "outbound request is too large",
                         ));
                     } else {
-                        write_line(
-                            &writer,
-                            &error(id, -32000, "result_too_large", "response is too large"),
-                        )
+                        write(error(
+                            id,
+                            -32000,
+                            "result_too_large",
+                            "response is too large",
+                        ))
                         .await?;
                     }
                 }
@@ -168,7 +218,7 @@ pub(crate) fn stdio() -> impl agent_client_protocol::ConnectTo<agent_client_prot
                     "invalid outgoing ACP frame",
                 ));
             }
-            Ok((writer, refuse))
+            Ok((write, refuse))
         },
     );
     agent_client_protocol::Lines::new(Box::pin(outgoing), Box::pin(incoming))

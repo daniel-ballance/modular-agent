@@ -25,8 +25,57 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Operator-selected principal and scope for a single ACP connection.
+#[derive(Clone)]
+pub struct Identity {
+    pub id: String,
+    pub kind: String,
+    pub rights: Authority,
+    pub tenants: Option<Vec<Option<String>>>,
+    pub projects: Option<Vec<PathBuf>>,
+    pub join_on_open: bool,
+    pub network: bool,
+}
+impl Identity {
+    pub fn local() -> Self {
+        Self {
+            id: ACP_HOST_ACTOR.into(),
+            kind: "host".into(),
+            rights: Authority::full(),
+            tenants: None,
+            projects: None,
+            join_on_open: true,
+            network: false,
+        }
+    }
+    fn allows_project(&self, path: &Path) -> bool {
+        self.projects
+            .as_ref()
+            .is_none_or(|roots| roots.iter().any(|root| path.starts_with(root)))
+    }
+    fn allows_tenant(&self, tenant: Option<&str>) -> bool {
+        self.tenants
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|name| name.as_deref() == tenant))
+    }
+}
+
+tokio::task_local! { static PRINCIPAL: Arc<Identity>; }
+
 fn connection_actor() -> String {
-    std::env::var("MODULAR_AGENT_ACTOR").unwrap_or_else(|_| ACP_HOST_ACTOR.into())
+    PRINCIPAL.try_with(|id| id.id.clone()).unwrap_or_else(|_| {
+        std::env::var("MODULAR_AGENT_ACTOR").unwrap_or_else(|_| ACP_HOST_ACTOR.into())
+    })
+}
+
+fn represented_actors() -> Vec<String> {
+    if PRINCIPAL.try_with(|id| id.network).unwrap_or(false) {
+        return vec![];
+    }
+    std::env::var("MODULAR_AGENT_ACP_REPRESENTS")
+        .ok()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
 }
 
 fn actor_scope(session: &str) -> Scope {
@@ -89,6 +138,7 @@ impl Plugin for AcpPlugin {
     }
 }
 struct State {
+    principal: Arc<Identity>,
     factory: Arc<dyn Factory>,
     launch_declaration: Option<Value>,
     client: Mutex<Option<Value>>,
@@ -273,8 +323,11 @@ impl State {
             return Ok(
                 json!({"protocolVersion":1,"agentInfo":{"name":"modular-agent-rs","version":"0.1.0"},"authMethods":[],
                 "agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":true,"sse":false},"promptCapabilities":{"image":false,"audio":false,"embeddedContext":false},"sessionCapabilities":{"list":{},"resume":{},"close":{}}},
-                "_meta":{"modular-agent":{"binding":binding,"declaration":declaration,"extensions":binding::EXTENSIONS,"actor":{"id":connection_actor().as_str(),"kind":"host","rights":Authority::full()}}}}),
+                "_meta":{"modular-agent":{"binding":binding,"declaration":declaration,"extensions":binding::EXTENSIONS,"actor":{"id":self.principal.id,"kind":self.principal.kind,"rights":self.principal.rights}}}}),
             );
+        }
+        if method == "$/ping" && self.principal.network {
+            return Ok(json!({}));
         }
         if self.client.lock().unwrap().is_none() {
             return Err(request_error("not_initialized", "initialize first").into());
@@ -345,6 +398,12 @@ impl State {
                 if let Some(project) = &project {
                     ensure!(project.is_absolute(), "cwd must be absolute");
                 }
+                if self.principal.network
+                    && let Some(path) = &project
+                    && !self.principal.allows_project(&path.canonicalize()?)
+                {
+                    return Ok(json!({"sessions":[]}));
+                }
                 let mut sessions: BTreeMap<String, SessionData> = self
                     .factory
                     .list(project.as_deref())?
@@ -367,7 +426,7 @@ impl State {
                     }
                 }
                 Ok(
-                    json!({"sessions":sessions.values().map(|s|json!({"sessionId":s.id,"cwd":s.project})).collect::<Vec<_>>()}),
+                    json!({"sessions":sessions.values().filter(|s| !self.principal.network || sessions::discoverable(&self.principal, s)).map(|s|json!({"sessionId":s.id,"cwd":s.project})).collect::<Vec<_>>()}),
                 )
             }
             "session/close" => {
@@ -485,6 +544,10 @@ impl State {
                 ensure!(p["confirm"] == true, "trust requires explicit confirm=true");
                 let project = Path::new(string(&p, "cwd")?);
                 ensure!(project.is_absolute(), "cwd must be absolute");
+                ensure!(
+                    self.principal.allows_project(project) && self.principal.rights.has("settings"),
+                    request_error("forbidden", "cannot change project trust")
+                );
                 self.factory.trust(project)?;
                 Ok(json!({"trusted":true,"applies":"new or reopened sessions"}))
             }
@@ -649,12 +712,30 @@ pub(crate) fn string<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
 
 /// Stdio is exclusively protocol output. Diagnostics belong on stderr.
 pub async fn run(factory: Arc<dyn Factory>) -> Result<()> {
+    let mut identity = Identity::local();
     if let Some(actor) = std::env::var_os("MODULAR_AGENT_ACTOR") {
-        ensure!(
-            actor.to_str().is_some_and(|id| !id.is_empty()),
-            "MODULAR_AGENT_ACTOR must be a nonempty UTF-8 id"
-        );
+        identity.id = actor
+            .into_string()
+            .ok()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow!("MODULAR_AGENT_ACTOR must be a nonempty UTF-8 id"))?;
     }
+    run_connection(factory, identity, transport::stdio()).await
+}
+
+pub async fn run_websocket(
+    factory: Arc<dyn Factory>,
+    identity: Identity,
+    connection: transport_websocket::Connection,
+) -> Result<()> {
+    run_connection(factory, identity, transport::websocket(connection)).await
+}
+
+async fn run_connection(
+    factory: Arc<dyn Factory>,
+    identity: Identity,
+    wire: impl acp::ConnectTo<acp::Agent>,
+) -> Result<()> {
     // Validate configured plugin startup before opening the ACP connection.
     // A failed launch must exit, not leave a connection with a substitute.
     let launch_declaration = if std::env::var_os("MODULAR_AGENT_PLUGINS").is_some() {
@@ -663,6 +744,7 @@ pub async fn run(factory: Arc<dyn Factory>) -> Result<()> {
         None
     };
     let state = Arc::new(State {
+        principal: Arc::new(identity),
         factory,
         launch_declaration,
         client: Mutex::new(None),
@@ -684,7 +766,7 @@ pub async fn run(factory: Arc<dyn Factory>) -> Result<()> {
                 // https://docs.rs/agent-client-protocol/5.3.0/agent_client_protocol/struct.ConnectionTo.html#method.spawn
                 let requests = requests.clone();
                 let connection = cx.clone();
-                cx.spawn(async move {
+                cx.spawn(PRINCIPAL.scope(requests.principal.clone(), async move {
                     let result = requests.dispatch(request, connection).await.map_err(|e| {
                         if let Some(error) = e.downcast_ref::<acp::Error>() {
                             error.clone()
@@ -713,28 +795,37 @@ pub async fn run(factory: Arc<dyn Factory>) -> Result<()> {
                         }
                     });
                     responder.respond_with_result(result)
-                })
+                }))
             },
             acp::on_receive_request!(),
         )
         .on_receive_notification(
             async move |notification: UntypedMessage, _cx| {
-                if notification.method == "session/cancel"
-                    && let Ok(session) = notifications.session(&notification.params)
-                    && require(session.api.as_ref(), &actor_scope(&session.id), "cancel").is_ok()
-                {
-                    let _ = session.cancel().await;
-                }
-                Ok(())
+                PRINCIPAL
+                    .scope(notifications.principal.clone(), async {
+                        if notification.method == "session/cancel"
+                            && let Ok(session) = notifications.session(&notification.params)
+                            && require(session.api.as_ref(), &actor_scope(&session.id), "cancel")
+                                .is_ok()
+                        {
+                            let _ = session.cancel().await;
+                        }
+                        Ok(())
+                    })
+                    .await
             },
             acp::on_receive_notification!(),
         )
         .on_close(async move |_cx| {
-            closed.shutdown().await;
+            PRINCIPAL
+                .scope(closed.principal.clone(), closed.shutdown())
+                .await;
             Ok(())
         })
-        .connect_to(transport::stdio())
+        .connect_to(wire)
         .await;
-    state.shutdown().await;
+    PRINCIPAL
+        .scope(state.principal.clone(), state.shutdown())
+        .await;
     result.map_err(Into::into)
 }

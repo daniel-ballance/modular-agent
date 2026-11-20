@@ -32,7 +32,7 @@ mod session;
 pub mod testing;
 mod tool;
 
-pub use acp::{AcpComposition, AcpOptions};
+pub use acp::{AcpActor, AcpComposition, AcpOptions, AcpServiceOptions};
 pub use agent::{
     Agent, AgentBuilder, Approval, Durability, ProcessPlugin, ServicePlugin, SessionOptions,
 };
