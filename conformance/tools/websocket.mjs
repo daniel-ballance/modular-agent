@@ -94,8 +94,14 @@ export function socketPeer({ url, protocol, token, retry = false }, onText = () 
 			pingId = `kit-ping-${randomUUID()}`;
 			if (socket.readyState !== WebSocket.OPEN) return;
 			socket.send(JSON.stringify({ jsonrpc: "2.0", id: pingId, method: "$/ping", params: {} }));
-			controlTimer = setTimeout(end, CONTROL_MS);
+			controlTimer = setTimeout(lose, CONTROL_MS);
 		}, 30000);
+	};
+	const lose = () => {
+		clearTimeout(idleTimer);
+		clearTimeout(controlTimer);
+		end();
+		settle({ code: 1006, rejectedFrame });
 	};
 	const dial = async () => {
 		const deadline = Date.now() + CONTROL_MS;
@@ -106,6 +112,7 @@ export function socketPeer({ url, protocol, token, retry = false }, onText = () 
 				const timer = setTimeout(() => { ws.close(); resolve(false); }, Math.max(1, deadline - Date.now()));
 				const done = (ok) => { clearTimeout(timer); resolve(ok); };
 				ws.addEventListener("open", () => done(true), { once: true });
+				ws.addEventListener("error", () => done(false), { once: true });
 				void finish.then(() => done(false));
 			});
 			if (opened) {
@@ -121,13 +128,13 @@ export function socketPeer({ url, protocol, token, retry = false }, onText = () 
 				ws.addEventListener("message", ({ data }) => {
 					if (typeof data !== "string" || Buffer.byteLength(data) > MESSAGE_CAP || data.startsWith("\uFEFF")) {
 						rejectedFrame = true;
-						end();
+						lose();
 						return;
 					}
 					let rpc;
 					try { rpc = JSON.parse(data); } catch { /* the binding adapter handles malformed JSON */ }
 					if (pingId && rpc?.id === pingId && !rpc.method) {
-						if (!rpc.result || Object.keys(rpc.result).length || rpc.error) return end();
+						if (!rpc.result || typeof rpc.result !== "object" || Array.isArray(rpc.result) || Object.keys(rpc.result).length || rpc.error) return lose();
 						clearTimeout(controlTimer);
 						pingId = undefined;
 					} else {
@@ -150,7 +157,11 @@ export function socketPeer({ url, protocol, token, retry = false }, onText = () 
 	return { ready, closed, end, send(data, rpc) {
 		if (stopping || socket.readyState !== WebSocket.OPEN) return false;
 		socket.send(data);
-		if (rpc?.method && Object.hasOwn(rpc, "id")) { outstanding.add(rpc.id); idle(); }
+		if (rpc?.method && Object.hasOwn(rpc, "id")) {
+			const wasIdle = !outstanding.size;
+			outstanding.add(rpc.id);
+			if (wasIdle) idle();
+		}
 		return true;
 	} };
 }
