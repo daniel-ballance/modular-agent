@@ -31,6 +31,14 @@ from .runtime_host import HostedRuntime
 from .server import BINDING, DATA
 
 
+def _carries_provider_data(value):
+    if isinstance(value, dict):
+        return "providerData" in value or any(_carries_provider_data(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_carries_provider_data(v) for v in value)
+    return False
+
+
 class Provider:
     def __init__(self, plugin, registration):
         self.plugin, self.registration = plugin, registration
@@ -66,7 +74,11 @@ class Provider:
             d,
             emit,
         )
-        r = {**r, "model": {"provider": self.id, "id": model}}
+        # Shared data: an absent `model` means the request's model, so keep the
+        # response as the Provider sent it. Only opaque `providerData` needs its
+        # producing Provider named on the record, to bind it to that Provider.
+        if "model" not in r and _carries_provider_data(r):
+            r = {**r, "model": {"provider": self.id, "id": model}}
         if d.get("auxiliary_step"):
             await self.plugin.api.session(
                 "append",
