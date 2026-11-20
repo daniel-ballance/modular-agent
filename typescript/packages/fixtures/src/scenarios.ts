@@ -1,13 +1,14 @@
+import { randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { Actor, AgentOptions, Answer, InputTiming, PromptResult, Session } from "@modular-agent/core";
+import type { Actor, AgentOptions, Answer, InputTiming, PromptResult, ServicePlugin, Session } from "@modular-agent/core";
 import { answers, testAgent, type ScriptStep } from "@modular-agent/core/testing";
 import { count, fixture } from "./index.js";
 
@@ -15,7 +16,7 @@ const repo = fileURLToPath(new URL("../../../../../", import.meta.url)).replace(
 const files = (dir: string) => readdirSync(dir).filter(f => f.endsWith(".json")).sort().map(f => join(dir, f));
 const load = <T>(path: string): T => JSON.parse(readFileSync(path, "utf8"));
 export const scenarioFiles = () => files(join(repo, "conformance/sdk/scenarios"));
-export type Placement = { name: string; command?: string[] };
+export type Placement = { name: string; command?: string[]; servicePlugins?: ServicePlugin[] };
 export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Placement[] {
   // `all`, or a comma-separated list of SDKs (docs/sdk/testing.md#finding-the-fixture-programs).
   const names = (require ?? "").split(",").map(s => s.trim()).filter(Boolean);
@@ -23,6 +24,9 @@ export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Pla
   const required = new Set(names.filter(n => n !== "all"));
   const out: Placement[] = [{ name: "inProcess" }];
   const available = new Set<string>();
+  const services: Placement[] = [];
+  // Inspect just these service SDKs during incremental integration. By default run every built SDK.
+  const selectedServices = process.env.MODULAR_AGENT_SDK_SERVICE?.split(",").map(s => s.trim());
   for (const file of files(join(repo, "conformance/sdk/fixtures"))) {
     const { sdk, build, command } = load<{ sdk: string; build: string; command: string[] }>(file);
     const argv = command.map(a => a.replaceAll("{repo}", repo));
@@ -34,9 +38,10 @@ export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Pla
     }
     available.add(sdk);
     out.push({ name: `process:${sdk}`, command: argv });
+    if (!selectedServices || selectedServices.includes(sdk)) services.push({ name: `service:${sdk}`, command: argv });
   }
   for (const sdk of required) if (!available.has(sdk)) throw new Error(`Required fixture program ${sdk} is not registered`);
-  return out;
+  return [...out, ...services];
 }
 
 type Expect = { outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string; contains?: string }[]; records?: string[]; count?: number; error?: string };
@@ -51,7 +56,7 @@ export interface Scenario {
   placements?: string[];
 }
 export const loadScenario = load<Scenario>;
-export const applies = (s: Scenario, p: Placement) => !s.placements || s.placements.includes(p.name) || !!p.command && s.placements.includes("process");
+export const applies = (s: Scenario, p: Placement) => !s.placements || s.placements.includes(p.name) || p.name.startsWith("process:") && s.placements.includes("process") || p.name.startsWith("service:") && s.placements.includes("service");
 const countFile = (dir: string) => join(dir, "count");
 
 export async function scenarioAgent(s: Scenario, dir: string, p: Placement,
@@ -62,7 +67,8 @@ export async function scenarioAgent(s: Scenario, dir: string, p: Placement,
   const config = { path: countFile(dir) };
   return testAgent({ ...options, script: s.model, project, dataDir: join(dir, "data"),
     onQuestion: handler,
-    ...(p.command ? { processPlugins: plugins.map(name => ({ command: [...p.command!, name], config })) }
+    ...(p.servicePlugins ? { servicePlugins: p.servicePlugins }
+      : p.command ? { processPlugins: plugins.map(name => ({ command: [...p.command!, name], config })) }
       : { plugins: plugins.map(name => fixture(name, config)) }),
   });
 }
@@ -97,9 +103,55 @@ async function waitGroup(pid: number) {
   }
 }
 
+function killGroup(pid?: number) {
+  if (pid) try { process.kill(-pid, "SIGKILL"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+}
+
+async function servicesFor(s: Scenario, dir: string, p: Placement) {
+  const children: { pid?: number; reaped: Promise<void> }[] = [];
+  const kill = () => { for (const { pid } of children) killGroup(pid); };
+  const stop = async () => {
+    kill();
+    await Promise.all(children.map(async ({ pid, reaped }) => { await reaped; if (pid) await waitGroup(pid); }));
+  };
+  if (!p.name.startsWith("service:")) return { placement: p, kill, stop };
+  try {
+    const tokenFile = join(dir, "service-token");
+    if (!existsSync(tokenFile)) await writeFile(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600, flag: "wx" });
+    const servicePlugins: ServicePlugin[] = [];
+    for (const name of s.agent.plugins ?? []) {
+      const command = p.command!;
+      const child = spawn(command[0], [...command.slice(1), name, "--listen", "127.0.0.1:0", "--token-file", tokenFile],
+        { detached: true, stdio: ["ignore", "pipe", "inherit"], env: { PATH: process.env.PATH } });
+      const reaped = new Promise<void>(resolve => child.once("close", () => resolve()));
+      children.push({ pid: child.pid, reaped });
+      const lines = createInterface({ input: child.stdout });
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const url = await new Promise<string>((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`Fixture ${name} did not announce a WebSocket URL`)), 5_000);
+          child.on("error", reject);
+          child.once("exit", (code, signal) => reject(new Error(`Fixture ${name} exited before listening (${signal ?? code})`)));
+          lines.once("line", line => {
+            try {
+              const url = new URL(line);
+              if (url.protocol !== "ws:" || url.hostname !== "127.0.0.1" || !url.port || url.port === "0") throw new Error();
+              resolve(url.href);
+            } catch { reject(new Error(`Fixture ${name} did not print a loopback WebSocket URL`)); }
+          });
+        });
+        servicePlugins.push({ url, tokenFile, config: { path: countFile(dir) } });
+      } finally { clearTimeout(timer); lines.close(); child.stdout.resume(); }
+    }
+    return { placement: { name: p.name, servicePlugins }, kill, stop };
+  } catch (error) { await stop(); throw error; }
+}
+
 async function crashRun(path: string, dir: string, p: Placement, i: number, when: Crash, previous?: string) {
+  const services = await servicesFor(loadScenario(path), dir, p);
   const child = spawn(process.execPath, [fileURLToPath(new URL("./scenario-agent.js", import.meta.url)),
-    path, dir, String(i), JSON.stringify(p), previous ?? ""], { detached: true, stdio: ["ignore", "pipe", "inherit"] });
+    path, dir, String(i), JSON.stringify(services.placement), previous ?? ""], { detached: true, stdio: ["ignore", "pipe", "inherit"] });
   // Node has reaped the direct child by the time it emits close, even if
   // orphaned grandchildren in the group are still awaiting reaping.
   const reaped = new Promise<void>(resolve => child.once("close", () => resolve()));
@@ -122,12 +174,9 @@ async function crashRun(path: string, dir: string, p: Placement, i: number, when
     return sessionId;
   } finally {
     const pid = child.pid;
-    if (pid) {
-      try { process.kill(-pid, "SIGKILL"); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
-    }
-    await reaped;
-    if (pid) await waitGroup(pid);
+    killGroup(pid);
+    services.kill();
+    await Promise.all([services.stop(), reaped.then(async () => { if (pid) await waitGroup(pid); })]);
     lines.close();
   }
 }
@@ -140,6 +189,16 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
   let id: string | undefined;
   let a: Awaited<ReturnType<typeof scenarioAgent>> | undefined;
   let session: Session | undefined;
+  let services: Awaited<ReturnType<typeof servicesFor>> | undefined;
+  const stop = async () => {
+    try { await a?.close(); }
+    finally { a = undefined; session = undefined; await services?.stop(); services = undefined; }
+  };
+  const start = async () => {
+    services = await servicesFor(s, dir, p);
+    try { return await scenarioAgent(s, dir, services.placement, handler); }
+    catch (error) { await stop(); throw error; }
+  };
   try {
     for (const [i, step] of s.steps.entries()) {
       const want = step.expect ?? {};
@@ -151,16 +210,16 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
       let result: PromptResult | undefined;
       try {
         if ("prompt" in step && step.crashWhen) {
-          await a?.close(); a = undefined; session = undefined;
+          await stop();
           id = await crashRun(path, dir, p, i, step.crashWhen, id);
         } else if ("reopen" in step) {
-          await a?.close(); a = undefined; session = undefined;
+          await stop();
           if (!id) throw new Error("No session to reopen");
-          a = await scenarioAgent(s, dir, p, handler);
+          a = await start();
           session = await a.openSession(id);
           result = await session.lastTurn();
         } else {
-          a ??= await scenarioAgent(s, dir, p, handler);
+          a ??= await start();
           session ??= await a.session({ actors: s.agent.actors });
           id = session.id;
           if ("prompt" in step) result = await (step.as === undefined ? session : session.as(step.as)).prompt(step.prompt);
@@ -213,8 +272,8 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
       catch (error) { failures.push(`${s.scenario} (${p.name}): ${String(error)}`); }
     }
   } finally {
-    await a?.close();
-    await rm(dir, { recursive: true, force: true });
+    try { await stop(); }
+    finally { await rm(dir, { recursive: true, force: true }); }
   }
   return failures;
 }
