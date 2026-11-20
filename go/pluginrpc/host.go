@@ -622,6 +622,12 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 			return nil, fault("invalid_request", "parent actor cannot ask")
 		}
 		request := asObject(v["request"])
+		if str(request, "whenTimeLimit") == "leaveOpen" {
+			policy, ok := r.host.a.(interface{ LateQuestions() bool })
+			if ok && !policy.LateQuestions() {
+				return nil, fault("not_supported", "leaving a call open is not supported")
+			}
+		}
 		if str(request, "kind") == "secret" {
 			for _, capability := range r.host.a.All("provider.") {
 				for _, model := range capability.(api.Provider).Catalog() {
