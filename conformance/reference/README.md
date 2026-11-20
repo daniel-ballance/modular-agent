@@ -33,15 +33,15 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 
 ## Results
 
-All four implementations, with `MODULAR_AGENT_REF_REQUIRE=all`, before the last three checks were added:
+After the second pass, with `MODULAR_AGENT_REF_REQUIRE=all`. The ACP kit ran against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`:
 
-| Implementation | Reference checks | ACP kit with crash checks |
+| Implementation | Reference checks | ACP kit |
 |---|---|---|
-| Rust | 12/12 | 123/123 |
-| TypeScript | 12/12 | 123/123 |
-| Go | 12/12 | 94/94: it declared fewer features, a gap the description now closes |
-| Python | 12/12 | 123/123 |
+| Rust | 15/15 | 184/184 |
+| TypeScript | 15/15 | 184/184 |
+| Go | 15/15 | 184/184 |
+| Python | 15/15 | 158/162: it cannot yet host a Runtime served from another process, so four probes fail and 26 checks behind them do not run |
 
-After the second pass, with the full declaration on every path, Rust and TypeScript `ma` each pass the same 184 ACP kit checks with `--crash-checks --probe-checks --job-checks`.
+Rust, TypeScript and Go run the identical set of 184 checks.
 
 The ACP kit is the other half: each implementation must also pass `node conformance/acp/run.mjs -- ma --acp` with `MODULAR_AGENT_CONFORMANCE=1`.
