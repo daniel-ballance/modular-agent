@@ -11,7 +11,7 @@ from typing import Unpack, TypedDict
 from ._agent import Agent, AgentStart, create_agent
 from ._environment import MemoryEnvironment, memory_environment as memory_environment
 from ._history import HistoryStore
-from ._plugin import Plugin, ProcessPlugin
+from ._plugin import Plugin, ProcessPlugin, ServicePlugin
 from ._serve import _OverWire
 from ._provider import ModelInfo, ProviderContext, ProviderSupports
 from ._tool import Tool
@@ -135,6 +135,7 @@ class _Options(TypedDict, total=False):
     tools: Sequence[Tool]
     plugins: Sequence[Plugin]
     process_plugins: Sequence[ProcessPlugin | JsonObject] | None
+    service_plugins: Sequence[ServicePlugin] | None
     plugin_host: bool | None
     settings: JsonObject
     approval: Approval | None

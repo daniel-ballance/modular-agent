@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import signal
 import sys
 from collections.abc import Iterator
@@ -12,7 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from . import Agent, AgentError, JsonObject, ProcessPlugin, PromptResult, Session
+from . import Agent, AgentError, JsonObject, ProcessPlugin, PromptResult, ServicePlugin, Session
 from .fixtures import count, fixture
 from .testing import answers, test_agent
 
@@ -28,6 +29,7 @@ def placements(repo: Path) -> Iterator[tuple[str, list[str]]]:
     yield "inProcess", []
     required = set(os.environ.get("MODULAR_AGENT_SDK_REQUIRE", "").replace(",", " ").split())
     missing = required - {"all", "inProcess"}
+    services = []
     for file in sorted((repo / "conformance/sdk/fixtures").glob("*.json")):
         config = _load(file)
         sdk = config["sdk"]
@@ -45,17 +47,74 @@ def placements(repo: Path) -> Iterator[tuple[str, list[str]]]:
             print(f"Skip {message}", file=sys.stderr)
         else:
             yield "process:" + sdk, command
+            services.append(("service:" + sdk, command))
     if missing:
         raise RuntimeError(f"No fixture registry entry for {', '.join(sorted(missing))}")
+    yield from services
 
 
-async def _agent(scenario: dict[str, Any], directory: Path, command: list[str]) -> Agent:
+def _config(name: str, directory: Path) -> JsonObject:
+    return {"path": str(directory / "count")} if name == "counter" else {}
+
+
+class _Services:
+    def __init__(self, command: list[str], directory: Path) -> None:
+        self.command = command
+        self.directory = directory
+        self.children: list[asyncio.subprocess.Process] = []
+
+    async def start(self, fixtures: list[str]) -> list[ServicePlugin]:
+        assert not self.children
+        token = self.directory / "token"
+        if not token.exists():
+            with os.fdopen(os.open(token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+                f.write(secrets.token_hex(32))
+        specs: list[ServicePlugin] = []
+        for name in fixtures:
+            proc = await asyncio.create_subprocess_exec(
+                *self.command,
+                name,
+                "--listen",
+                "127.0.0.1:0",
+                "--token-file",
+                str(token),
+                cwd=self.directory,
+                env={
+                    k: os.environ[k]
+                    for k in ("PATH", "LANG", "LC_ALL", "TZ", "TMPDIR")
+                    if k in os.environ
+                },
+                stdout=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            self.children.append(proc)
+            assert proc.stdout is not None
+            line = (await proc.stdout.readline()).decode().strip()
+            if not line.startswith("ws://"):
+                raise RuntimeError(f"Fixture {name} did not announce a WebSocket URL: {line!r}")
+            specs.append(
+                {"url": line, "token_file": str(token), "config": _config(name, self.directory)}
+            )
+        return specs
+
+    async def stop(self, other: asyncio.subprocess.Process | None = None) -> None:
+        processes = [*self.children, *([other] if other else [])]
+        self.children.clear()
+        await _kill_groups(processes)
+
+
+async def _agent(
+    scenario: dict[str, Any],
+    directory: Path,
+    command: list[str],
+    services: list[ServicePlugin] | None = None,
+) -> Agent:
     options = scenario["agent"]
     project = directory / "project"
     project.mkdir(exist_ok=True)
     plugins, processes = [], []
-    for name in options.get("plugins", []):
-        config: JsonObject = {"path": str(directory / "count")} if name == "counter" else {}
+    for name in options.get("plugins", []) if services is None else []:
+        config = _config(name, directory)
         if command:
             processes.append(ProcessPlugin([*command, name], config=config))
         else:
@@ -70,13 +129,20 @@ async def _agent(scenario: dict[str, Any], directory: Path, command: list[str]) 
         several_actors=options.get("severalActors", False),
         plugins=plugins,
         process_plugins=processes if command else None,
+        service_plugins=services,
         on_question=answers(options["answers"]) if "answers" in options else None,
     )
 
 
-async def _crash_child(path: Path, directory: Path, index: int, command: list[str]) -> None:
+async def _crash_child(
+    path: Path,
+    directory: Path,
+    index: int,
+    command: list[str],
+    services: list[ServicePlugin] | None,
+) -> None:
     scenario = _load(path)
-    async with await _agent(scenario, directory, command) as agent:
+    async with await _agent(scenario, directory, command, services) as agent:
         session = await agent.session(actors=scenario["agent"].get("actors", []))
         print(session.id, flush=True)
         async for event in session.prompt_stream(scenario["steps"][index]["prompt"]):
@@ -104,8 +170,26 @@ def _live_group(pgid: int) -> bool:
     return True
 
 
+async def _kill_groups(processes: list[asyncio.subprocess.Process]) -> None:
+    for proc in processes:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    await asyncio.gather(*(proc.wait() for proc in processes))
+    async with asyncio.timeout(5):
+        while any(_live_group(proc.pid) for proc in processes):
+            await asyncio.sleep(0.01)
+
+
 async def _crash(
-    path: Path, directory: Path, index: int, condition: dict[str, Any], command: list[str]
+    path: Path,
+    directory: Path,
+    index: int,
+    condition: dict[str, Any],
+    command: list[str],
+    services: list[ServicePlugin] | None,
+    pool: _Services | None,
 ) -> str:
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -115,6 +199,7 @@ async def _crash(
         str(path),
         str(directory),
         str(index),
+        json.dumps(services),
         *command,
         stdout=asyncio.subprocess.PIPE,
         start_new_session=True,
@@ -142,14 +227,10 @@ async def _crash(
             raise RuntimeError("Crash child exited before it could be killed")
         return sid
     finally:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await proc.wait()
-        async with asyncio.timeout(5):
-            while _live_group(proc.pid):
-                await asyncio.sleep(0.01)
+        if pool is not None:
+            await pool.stop(proc)
+        else:
+            await _kill_groups([proc])
 
 
 async def run_scenario(path: Path, placement: str, command: list[str]) -> list[str]:
@@ -160,6 +241,17 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
     session_id: str | None = None
     with TemporaryDirectory(prefix="sdk-scenario-") as temp:
         directory = Path(temp)
+        pool = _Services(command, directory) if placement.startswith("service:") else None
+        process_command = command if pool is None else []
+
+        async def start_services() -> list[ServicePlugin] | None:
+            if pool is None:
+                return None
+            return await pool.start(scenario["agent"].get("plugins", []))
+
+        async def start_agent() -> Agent:
+            return await _agent(scenario, directory, process_command, await start_services())
+
         try:
             for n, step in enumerate(scenario["steps"]):
                 label = f"{scenario['scenario']} ({placement}) step {n}"
@@ -178,11 +270,17 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                                     "Crash step must own the session from its first prompt"
                                 )
                             session_id = await _crash(
-                                path, directory, n, step["crashWhen"], command
+                                path,
+                                directory,
+                                n,
+                                step["crashWhen"],
+                                process_command,
+                                await start_services(),
+                                pool,
                             )
                         elif any(field in step for field in ("prompt", "send", "answer", "wait")):
                             if agent is None:
-                                agent = await _agent(scenario, directory, command)
+                                agent = await start_agent()
                                 session = await agent.session(
                                     actors=scenario["agent"].get("actors", [])
                                 )
@@ -210,9 +308,11 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                         elif step.get("reopen"):
                             if agent is not None:
                                 await agent.close()
+                                if pool is not None:
+                                    await pool.stop()
                             if session_id is None:
                                 raise RuntimeError("No session to reopen")
-                            agent = await _agent(scenario, directory, command)
+                            agent = await start_agent()
                             session = await agent.open_session(session_id)
                             result = await session.last_turn()
                         else:
@@ -259,8 +359,12 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                 if "count" in expect:
                     compare("count", expect["count"], count(directory / "count"))
         finally:
-            if agent is not None:
-                await agent.close()
+            try:
+                if agent is not None:
+                    await agent.close()
+            finally:
+                if pool is not None:
+                    await pool.stop()
     return failures
 
 
@@ -288,7 +392,13 @@ async def _main(files: list[str]) -> int:
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--child":
         asyncio.run(
-            _crash_child(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5:])
+            _crash_child(
+                Path(sys.argv[2]),
+                Path(sys.argv[3]),
+                int(sys.argv[4]),
+                sys.argv[6:],
+                json.loads(sys.argv[5]),
+            )
         )
     else:
         raise SystemExit(asyncio.run(_main(sys.argv[1:])))

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import json
-import sys
 from pathlib import Path
+
+from ma_plugin.websocket import wait_for_stop
 
 from . import AgentError, ErrorCode, JsonObject, Plugin, Registrar, ToolContext, serve, tool
 
@@ -107,9 +110,27 @@ def fixture(name: str, *, config: JsonObject | None = None) -> Plugin:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: python -m modular_agent.fixtures FIXTURE")
-    serve(fixture(sys.argv[1]))
+    parser = argparse.ArgumentParser(description="Serve a shared SDK fixture")
+    parser.add_argument("fixture")
+    parser.add_argument("--listen")
+    parser.add_argument("--token-file", type=Path)
+    args = parser.parse_args()
+    if (args.listen is None) != (args.token_file is None):
+        parser.error("--listen and --token-file must be used together")
+    if args.listen is None:
+        serve(fixture(args.fixture))
+        return
+
+    async def run() -> None:
+        server = await serve(
+            lambda: fixture(args.fixture), listen=args.listen, token_file=args.token_file
+        )
+        print(server.url, flush=True)
+        await wait_for_stop(server)
+
+    # Reject unknown names before announcing readiness.
+    fixture(args.fixture)
+    asyncio.run(run())
 
 
 if __name__ == "__main__":
