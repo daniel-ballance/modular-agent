@@ -2,7 +2,7 @@ import { open } from "node:fs/promises";
 import { constants } from "node:fs";
 import { resolve } from "node:path";
 import type { CredentialStore, Runtime, WorkingEnvironment } from "@modular-agent/harness";
-import { LocalEnvironment } from "@modular-agent/env-local";
+import { GitPoints, LocalEnvironment } from "@modular-agent/env-local";
 import { DurableRuntime } from "@modular-agent/runtime-durable";
 import { TransientRuntime } from "@modular-agent/runtime-transient";
 import { AgentError } from "./errors.js";
@@ -11,7 +11,7 @@ export const transientRuntime = (): Runtime => new TransientRuntime();
 export const durableRuntime = (): Runtime => new DurableRuntime();
 export function localEnvironment(root = process.cwd()): WorkingEnvironment {
   const cwd = resolve(root);
-  return new LocalEnvironment(cwd);
+  return new LocalEnvironment(cwd, undefined, undefined, new GitPoints());
 }
 
 function readOnly(read: CredentialStore["read"]): CredentialStore {

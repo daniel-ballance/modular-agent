@@ -4,9 +4,11 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { join } from "node:path";
 import type { DirEntry, ExecResult, Plugin, WorkingEnvironment } from "@modular-agent/harness";
 import { randomUUID } from "node:crypto";
+import { GitPoints } from "./git-points.js";
 import { SavedPoints } from "./points.js";
 import { COMMAND_MARKER, markedProcesses, ProcessTracker } from "./processes.js";
 
+export { GitPoints };
 export { ProcessTracker, RUN_MARKER, COMMAND_MARKER, markedProcesses } from "./processes.js";
 
 /** The local machine as the working environment. */
@@ -14,9 +16,12 @@ export class LocalEnvironment implements WorkingEnvironment {
 	readonly id: string;
 	readonly containment = process.platform === "linux" ? "strong" : "processGroup";
 	readonly safeToRepeat = this.containment === "strong";
-	readonly points = true;
+	get points(): boolean { return this.keepsPoints(this.cwd); }
+	keepsPoints(cwd: string): boolean {
+		return !(this.snapshots instanceof GitPoints) || this.snapshots.keepsPoints(cwd);
+	}
 	get confinesFiles(): boolean { return this.root !== undefined; }
-	constructor(readonly cwd: string, private processes = new ProcessTracker(), private sessionId?: string, private snapshots = new SavedPoints(), private root?: string) {
+	constructor(readonly cwd: string, private processes = new ProcessTracker(), private sessionId?: string, private snapshots: SavedPoints | GitPoints = new SavedPoints(), private root?: string) {
 		this.id = `local:${cwd}`;
 	}
 	at(cwd: string): WorkingEnvironment {
@@ -148,7 +153,7 @@ export class LocalEnvironment implements WorkingEnvironment {
 	}
 }
 
-export function localEnvironment(options: { cwd?: string; confineFiles?: boolean } = {}): Plugin {
+export function localEnvironment(options: { cwd?: string; confineFiles?: boolean; points?: "copy" | "git" } = {}): Plugin {
 	let stop: () => void | Promise<void> = () => {};
 	return {
 		name: "env-local",
@@ -156,7 +161,7 @@ export function localEnvironment(options: { cwd?: string; confineFiles?: boolean
 		setup(api) {
 			// No command this agent starts outlives it: see ProcessTracker.
 			const processes = new ProcessTracker(join(api.home, "run"));
-			const snapshots = new SavedPoints(api.home);
+			const snapshots = options.points === "copy" ? new SavedPoints(api.home) : new GitPoints(api.home);
 			api.provide("working-environment", new LocalEnvironment(options.cwd ?? api.project, processes, undefined, snapshots, options.confineFiles ? api.project : undefined));
 			stop = async () => { processes.stopAll(); await snapshots.stop(); };
 		},

@@ -18,7 +18,7 @@ const plugins: Plugin[] = [];
 const replaces: string[] = [];
 if (parts.has("provider")) plugins.push(conformanceProvider()), replaces.push("provider:conformance");
 if (parts.has("tools")) plugins.push(conformanceTools()), replaces.push("tool:bash", "tool:read", "tool:nest");
-if (parts.has("environment")) plugins.push(localEnvironment()), replaces.push("working-environment");
+if (parts.has("environment")) plugins.push(localEnvironment({ points: "copy" })), replaces.push("working-environment");
 if (parts.has("hooks")) plugins.push(conformanceHooks());
 if (parts.has("runtime") && parts.has("durable-runtime")) throw new Error("runtime and durable-runtime are never served together");
 if (parts.has("runtime")) plugins.push(transientRuntime()), replaces.push("runtime");
