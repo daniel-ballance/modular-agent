@@ -95,6 +95,16 @@ Commands in the base suite use Linux with unprivileged user, PID and mount names
 
 ## Findings for the SDK specification
 
+### Guide 06: Provider catalog, readiness and served credentials — [API / Providers](../../docs/sdk/api.md#providers), [Contexts](../../docs/sdk/api.md#contexts)
+
+Replace the Go catalog and readiness descriptions with:
+
+> `Models` returns the full catalog. There is no SDK Provider-side `changed()` notifier. `Available` is exposed on `Provider` but not consulted by the embedded adapter; the Go plugin server answers `provider/available` with true.
+
+Replace the Go cell for Provider credentials over the wire with:
+
+> Not supported by the Go SDK server. `ProviderContext.Credential()` reads the Provider's configured environment key locally; in a served Provider it does not route to the host's credential store.
+
 ### Local environment declaration — `docs/sdk/concepts.md`, Defaults; `docs/sdk/api.md`, The declaration
 
 **Resolved in round 2.** The original defaults prescribed `processGroup` by name, but the normative declaration is about the containment the chosen environment can guarantee. The Go local command supervisor can declare `strong`. Replace the working environment default with:
