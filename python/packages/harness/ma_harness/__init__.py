@@ -31,6 +31,7 @@ class Harness(Authority):
         self.handlers = []
         self.commands = {}
         self.sessions = {}
+        self.reopening = set()
         self.append_locks = {}
         self.tool_dispatches = {}
         self.followers = []
@@ -850,18 +851,37 @@ class Harness(Authority):
             s["plugins"] = list(self.plugins)
             s.setdefault("authority", sorted(self.admin & self.tenant))
             s.setdefault("actors", {s["actor"]: {"kind": "user", "authority": s["authority"]}})
-            await self._start_session(
-                s,
-                {"mcp_servers": d.get("mcp_servers", []), "resumed": True},
-                d.get("actor"),
-                connection_host=bool(d.get("connection_host") and d.get("actor")),
-            )
-            if d.get("recover", True):
-                await self._settle_nested(s["id"])
+            sid = s["id"]
+            recover = d.get("recover", True)
+            if recover:
+                # Start hooks may admit input (e.g. an unfinished job can report).
+                # Only admissions loaded from history are subject to restart policy.
+                prior_inputs = [e["id"] for e in s["entries"] if e["kind"] == "input_queued"]
+                self.reopening.add(sid)
+            try:
+                await self._start_session(
+                    s,
+                    {"mcp_servers": d.get("mcp_servers", []), "resumed": True},
+                    d.get("actor"),
+                    connection_host=bool(d.get("connection_host") and d.get("actor")),
+                )
+                if recover:
+                    await self._settle_nested(sid)
+                    if "runtime" in self.capabilities:
+                        await self.call(
+                            "@harness",
+                            "runtime",
+                            "recover",
+                            {"session": sid, "prior_inputs": prior_inputs},
+                        )
+            finally:
+                if recover:
+                    self.reopening.discard(sid)
+            if recover:
                 if "runtime" in self.capabilities:
-                    await self.call("@harness", "runtime", "recover", {"session": s["id"]})
-                await self.fire("@harness", "session.ready", {"session": s["id"]})
-            return self.sessions[s["id"]]
+                    await self.call("@harness", "runtime", "kick", {"session": sid})
+                await self.fire("@harness", "session.ready", {"session": sid})
+            return self.sessions[sid]
         if op == "list":
             return await self.call("@harness", "history", "list", d)
         if op == "declaration" and "session" not in d:
@@ -997,6 +1017,8 @@ class Harness(Authority):
             )
             return e
         if op == "busy":
+            if d.get("unless_reopening") and sid in self.reopening:
+                return {"deferred": True}
             s["busy"] = d["value"]
             return {}
         if op == "move":

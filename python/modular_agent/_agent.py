@@ -124,7 +124,7 @@ class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
 
     async def recover(self, data: dict[str, Any], emit: Any) -> Any:
         sid = data["session"]
-        for queued in await self._pending(sid):
+        for queued in await self._restart_pending(data):
             if not (
                 self.declarations.get("queued_job_reports_after_restart") == "run"
                 and (queued["data"].get("source") or {}).get("job")

@@ -225,7 +225,7 @@ class HostedRuntime(Runtime):
 
         # Hand-backs are open metadata, not recovered execution.
         if not self.declarations["durable"]:
-            for queued in await self._pending(sid):
+            for queued in await self._restart_pending(d):
                 await self._return(sid, queued)
 
         async def resume():
@@ -233,9 +233,6 @@ class HostedRuntime(Runtime):
                 results = [await self._turn(sid, turn=turn) for turn in turns]
                 if self.declarations["durable"] and sid not in self.cancelled:
                     results.extend(await self._drain(sid))
-                else:
-                    for queued in await self._pending(sid):
-                        await self._return(sid, queued)
                 await self.wake(d, emit)
                 # wake can queue work while this task still owns the session.
                 if sid not in self.cancelled and await self._pending(sid):
