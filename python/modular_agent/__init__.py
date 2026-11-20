@@ -3,13 +3,20 @@
 from ._agent import (
     Agent as Agent,
     AgentStart as AgentStart,
+    RuntimeChoice as RuntimeChoice,
     create_agent as create_agent,
+    durable_runtime as durable_runtime,
     run as run,
+    transient_runtime as transient_runtime,
 )
 from ._credentials import (
     CredentialStore as CredentialStore,
     environment_credentials as environment_credentials,
     file_credentials as file_credentials,
+)
+from ._environment import (
+    LocalEnvironment as LocalEnvironment,
+    local_environment as local_environment,
 )
 from ._history import (
     HistoryStore as HistoryStore,

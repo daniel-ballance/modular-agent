@@ -997,7 +997,7 @@ class Harness(Authority):
             if represented_by := d.get("acting_for"):
                 ceiling &= self.permissions(unbounded, represented_by)
             if "administer" not in ceiling or not requested <= ceiling:
-                raise AgentError("Session limit exceeds administrator rights", "forbidden")
+                raise AgentError("Session limit exceeds administrator authority", "forbidden")
             return await self.handle(
                 "append",
                 {
@@ -1385,6 +1385,8 @@ class Harness(Authority):
             ended = {e["job"] for e in s["entries"] if e["kind"] == "job_end"}
             if "actor" in d and (s.get("busy") or started - ended):
                 self.require(s, d["actor"], "cancel")
+                if represented_by := d.get("acting_for"):
+                    self.require(s, represented_by, "cancel")
             self.sessions[sid]["closing"] = True
             await self.fire(
                 "@harness",

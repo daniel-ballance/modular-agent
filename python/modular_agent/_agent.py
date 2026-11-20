@@ -7,6 +7,7 @@ import json
 import os
 from collections.abc import Awaitable, Callable, Coroutine, Generator, Mapping, Sequence
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import TracebackType
@@ -39,7 +40,7 @@ from ma_selection import Selection
 from .compaction import _CompactionPlugin
 from .mcp import _McpPlugin
 from ._credentials import CredentialStore, _CredentialAdapter, environment_credentials
-from ._environment import MemoryEnvironment
+from ._environment import LocalEnvironment, MemoryEnvironment
 from ._history import HistoryStore
 from ._native import (
     _LocalPlugin,
@@ -99,6 +100,21 @@ async def _structured_result(d: dict[str, Any]) -> JsonObject | None:
 class _Questions(Questions):  # type: ignore[misc]  # Untyped base adapter.
     async def definitions(self, d: JsonObject) -> list[JsonObject]:
         return []
+
+
+@dataclass(frozen=True)
+class RuntimeChoice:
+    continues_after_restart: bool
+
+
+def transient_runtime() -> RuntimeChoice:
+    """Choose the SDK Runtime that does not resume interrupted turns."""
+    return RuntimeChoice(False)
+
+
+def durable_runtime() -> RuntimeChoice:
+    """Choose the SDK Runtime that resumes interrupted turns with persistent history."""
+    return RuntimeChoice(True)
 
 
 class _SdkRuntime(Runtime):  # type: ignore[misc]  # Untyped base adapter.
@@ -683,7 +699,8 @@ def create_agent(
     data_dir: str | os.PathLike[str] | None = None,
     durability: Durability = "ephemeral",
     history: HistoryStore | None = None,
-    environment: MemoryEnvironment | None = None,
+    runtime: RuntimeChoice | None = None,
+    environment: MemoryEnvironment | LocalEnvironment | None = None,
     credentials: CredentialStore | None = None,
     providers: Sequence[Provider] = (),
     tools: Sequence[Tool] = (),
@@ -720,10 +737,12 @@ def create_agent(
                 raise AgentError(
                     ErrorCode.INVALID_COMPOSITION, "Kept history needs a persistent store"
                 )
-            if environment is None:
+            if not isinstance(environment, MemoryEnvironment):
                 raise AgentError(
                     ErrorCode.INVALID_COMPOSITION, "Local environment recovery needs data_dir"
                 )
+        if runtime is not None and runtime.continues_after_restart != (durability == "durable"):
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Runtime does not match durability")
         if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "History does not match durability")
         if plugin_host is False and process_plugins is not None:
@@ -735,7 +754,14 @@ def create_agent(
         h.lazy_setup = True
         try:
             root = Path(data_dir).resolve() if data_dir is not None else Path(scratch.name)
-            folder = Path(project or Path.cwd()).resolve(strict=True)
+            environment_root = (
+                environment.root if isinstance(environment, LocalEnvironment) else None
+            )
+            folder = Path(project or environment_root or Path.cwd()).resolve(strict=True)
+            if environment_root is not None and environment_root.resolve() != folder:
+                raise AgentError(
+                    ErrorCode.INVALID_COMPOSITION, "Local environment root must match project"
+                )
             if not folder.is_dir():
                 raise ValueError("Project must be a directory")
             defaults = {"thinking": "off", **settings_in(settings or {})}
@@ -755,12 +781,12 @@ def create_agent(
                 store = History(store_root)
             await h.load(store)
             local = Local(root, point_store="git")
-            if environment is None and local_process_groups:
+            if not isinstance(environment, MemoryEnvironment) and local_process_groups:
                 try:
                     delegated_root()
                 except Exception:
                     local = ProcessGroupLocal(root, point_store="git")
-            await h.load(environment or local)
+            await h.load(environment if isinstance(environment, MemoryEnvironment) else local)
             dispatcher = _SdkTools()
             dispatcher.conformance = conformance
             await h.load(dispatcher)
