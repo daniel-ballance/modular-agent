@@ -151,6 +151,7 @@ class QuestionSpec(TypedDict):
     credential: NotRequired[str]
     options: NotRequired[list[str]]
     details: NotRequired[Json]
+    answerers: NotRequired[list[str]]
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,7 @@ class Question:
     details: Json = None
     call: Json = None
     deadline: Json = None
+    answerable: bool = True
 
 
 @dataclass(frozen=True)

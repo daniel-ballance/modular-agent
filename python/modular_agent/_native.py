@@ -124,6 +124,7 @@ def _question(sid: str, q: dict[str, Any]) -> Question:
         q.get("details"),
         q.get("approval_call"),
         q.get("deadline"),
+        q.get("answerable", True),
     )
 
 
@@ -248,6 +249,7 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                     "park": leave_open,
                     "kind": question["kind"],
                     "name": question.get("credential"),
+                    **({"responders": question["answerers"]} if "answerers" in question else {}),
                 }
                 if question["kind"] == "approval":
                     params["approval_call"] = {"name": call["name"], "input": call["input"]}

@@ -542,21 +542,26 @@ class Session:
         from ._native import _question
 
         questions = await self._agent._call(
-            "questions", "list", session=self.id, actor=self._actor, **self._acting(self._actor)
+            "questions",
+            "list",
+            session=self.id,
+            actor=self._actor,
+            openOnly=True,
+            recipientView=True,
+            **self._acting(self._actor),
         )
         result = []
         for q in questions:
-            if q.get("answerable"):
-                visible = await self._agent._session(
-                    "view",
-                    session=self.id,
-                    recipient=self._actor,
-                    type="reply",
-                    method="questions",
-                    value=q,
-                )
-                if visible is not None:
-                    result.append(_question(self.id, visible))
+            visible = await self._agent._session(
+                "view",
+                session=self.id,
+                recipient=self._actor,
+                type="reply",
+                method="questions",
+                value=q,
+            )
+            if visible is not None:
+                result.append(_question(self.id, visible))
         return result
 
     async def call_tool(self, name: str, input: JsonObject) -> ToolResult:

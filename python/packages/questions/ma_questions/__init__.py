@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 
 from ma_core import AgentError, Plugin, content, identity
 
@@ -84,11 +85,16 @@ class Questions(Plugin):
 
     async def _state(self, sid):
         es = await self.api.session("branch", session=sid)
-        requests = {
-            e["data"]["id"]: {**e["data"], "entry": e["id"]}
-            for e in es
-            if e["kind"] == "question_open"
-        }
+        requests = {}
+        for entry in es:
+            if entry["kind"] != "question_open":
+                continue
+            q = {**entry["data"], "entry": entry["id"]}
+            if q.get("timeout") is not None:
+                q["deadline"] = (
+                    datetime.fromisoformat(entry["time"]) + timedelta(seconds=q["timeout"])
+                ).isoformat()
+            requests[q["id"]] = q
         for e in es:
             state = {
                 "question_answer": "answer",
@@ -107,21 +113,25 @@ class Questions(Plugin):
         ) in allowed
 
     async def list(self, d, emit):
-        qs = await self._state(d["session"])
-        return [
-            {
-                **q,
-                "answerable": "answer" not in q
-                and "closed" not in q
-                and "selected" not in q
-                and (
-                    not d.get("recipientView")
-                    or "actor" not in d
-                    or await self._eligible(d["session"], q, d["actor"], d.get("authority"))
-                ),
-            }
-            for q in qs.values()
-        ]
+        sid = d["session"]
+        qs = await self._state(sid)
+        ceiling = d.get("authority")
+        if acting := d.get("acting_for"):
+            ceiling = await self.api.session(
+                "authority", session=sid, actor=acting, ceiling=ceiling
+            )
+        result = []
+        for q in qs.values():
+            opened = not {"answer", "closed", "selected"}.intersection(q)
+            if not opened and d.get("openOnly"):
+                continue
+            answerable = opened and (
+                not d.get("recipientView")
+                or "actor" not in d
+                or await self._eligible(sid, q, d["actor"], ceiling)
+            )
+            result.append({**q, "answerable": answerable})
+        return result
 
     async def _record(self, sid, kind, data, actor=None):
         es = await self.api.session("branch", session=sid)
@@ -200,13 +210,32 @@ class Questions(Plugin):
             **({"details": d["details"]} if d.get("details") is not None else {}),
             **{k: d[k] for k in ("approval_call", "approval_registration") if k in d},
         }
-        signature = json.dumps(details, sort_keys=True)
+        signature = json.dumps(
+            {
+                **details,
+                "responders": d.get("responders"),
+                "timeout": d.get("timeout"),
+                "park": d.get("park", True),
+                "call": d.get("call"),
+            },
+            sort_keys=True,
+        )
         for q in reversed(list((await self._state(sid)).values())):
             if q["key"] != key or (not key.startswith("call:") and q["asker"] != asker):
                 continue
-            if q["signature"] != signature:
+            signature_matches = q["signature"] == signature
+            if not signature_matches:
+                # Old sessions recorded the details separately from the wait policy.
+                signature_matches = (
+                    q["signature"] == json.dumps(details, sort_keys=True)
+                    and q.get("restrictedResponders") == d.get("responders")
+                    and q.get("timeout") == d.get("timeout")
+                    and q.get("park", True) == d.get("park", True)
+                    and q.get("call") == d.get("call")
+                )
+            if not signature_matches:
                 raise AgentError("Question key reused for different details")
-            if "answer" in q and await self._eligible(sid, q, q["answer"]["actor"]):
+            if "answer" in q and await self._reusable(sid, q):
                 return q
             if "closed" not in q and "answer" not in q:
                 await self._sync_parent(sid, q)
@@ -237,6 +266,7 @@ class Questions(Plugin):
         }
         self.signals[(sid, q["id"])] = asyncio.Event()
         await self._record(sid, "question_open", q, actor)
+        q = (await self._state(sid))[q["id"]]
         await self._publish(sid, q)
         origin = s.get("origin") or {}
         if origin.get("parent"):
@@ -258,9 +288,14 @@ class Questions(Plugin):
             elif parent.get("answer"):
                 answer = parent["answer"]
                 await self._accept(sid, q, actor, answer["value"], declined=answer.get("declined"))
-        elif kind == "approval" or (d.get("timeout") is None and not self.wait_for_unconnected):
-            present = self.connected.get(sid, set())
-            if not any([await self._eligible(sid, q, a) for a in present]):
+        else:
+            eligible = (
+                self.connected.get(sid, set())
+                if kind == "approval"
+                or (d.get("timeout") is None and not self.wait_for_unconnected)
+                else s["actors"]
+            )
+            if not any([await self._eligible(sid, q, a) for a in eligible]):
                 await self._accept(
                     sid,
                     q,
@@ -284,7 +319,7 @@ class Questions(Plugin):
             return {"value": "declined", "declined": True, "reason": "refused"}
         signal = self.signals.setdefault((sid, q["id"]), asyncio.Event())
         try:
-            async with asyncio.timeout(d.get("timeout")):
+            async with asyncio.timeout(self._remaining(q)):
                 while True:
                     current = (await self._state(sid)).get(q["id"])
                     if not current or current.get("closed"):
@@ -297,9 +332,11 @@ class Questions(Plugin):
                     await signal.wait()
                     signal.clear()
         except TimeoutError:
-            if d.get("park", True):
+            if q["park"]:
                 return {"open": True, "request": q["id"]}
             await self._accept(sid, q, q["actor"], "declined", "timeLimit")
+            if answer := (await self._state(sid))[q["id"]].get("answer"):
+                return answer
             return {
                 "value": "declined",
                 "declined": True,
@@ -307,13 +344,32 @@ class Questions(Plugin):
                 "request": q["id"],
             }
 
+    @staticmethod
+    def _remaining(q):
+        deadline = q.get("deadline")
+        return (
+            (datetime.fromisoformat(deadline) - datetime.now(UTC)).total_seconds()
+            if deadline
+            else None
+        )
+
+    async def _reusable(self, sid, q):
+        answer = q["answer"]
+        if answer.get("system") or (answer.get("declined") and q["kind"] != "approval"):
+            return True
+        ceiling = None
+        if acting := answer.get("actingFor"):
+            ceiling = await self.api.session("authority", session=sid, actor=acting)
+        return await self._eligible(sid, q, answer["actor"], ceiling)
+
     async def valid_answer(self, d, emit):
         q = (await self._state(d["session"])).get(d["request"])
         return bool(
             q
             and q.get("answer")
             and not q.get("closed")
-            and await self._eligible(d["session"], q, q["answer"]["actor"])
+            and not q["answer"].get("declined")
+            and await self._reusable(d["session"], q)
         )
 
     async def validate(self, d, emit):
@@ -328,6 +384,9 @@ class Questions(Plugin):
             raise AgentError("Unknown question", "not_found")
         if q.get("answer") or q.get("closed") or q.get("selected"):
             raise AgentError("Question is closed or no longer answerable", "conflict")
+        if not q["park"] and (remaining := self._remaining(q)) is not None and remaining <= 0:
+            await self._accept(d["session"], q, q["actor"], "declined", "timeLimit")
+            raise AgentError("Question is closed: time limit", "conflict")
         ceiling = d.get("authority")
         if acting := d.get("acting_for"):
             ceiling = await self.api.session(

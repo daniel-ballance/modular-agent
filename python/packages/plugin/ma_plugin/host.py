@@ -955,6 +955,7 @@ class External(Plugin):
                 + ":"
                 + str(parent["questions"]),
                 "park": draft.get("whenTimeLimit") == "leaveOpen",
+                **({"responders": draft["answerers"]} if "answerers" in draft else {}),
             }
             if draft.get("timeLimitMs") is not None:
                 args["timeout"] = draft["timeLimitMs"] / 1000
