@@ -46,7 +46,9 @@ type ToolOptions<S extends Schema> = {
   run(input: Infer<S>, context: ToolContext): unknown;
 };
 type Settled = { status: ToolStatus; content: Content; value?: unknown };
-const body = new WeakMap<Tool, (input: unknown, context: ToolContext) => Promise<Settled>>();
+/** Thrown by ask when the host leaves the call pending after its wait. */
+export class LeftOpen extends Error {}
+const body = new WeakMap<Tool, (input: unknown, context: ToolContext) => Promise<Settled | { pending: string }>>();
 class Refusal extends Error {}
 
 export class Tool {
@@ -101,6 +103,7 @@ export class Tool {
         return out;
       } catch (error) {
         if (context.cancelled.aborted) return { status: "cancelled", content: [text("Cancelled")] };
+        if (error instanceof LeftOpen) return { pending: error.message };
         if (error instanceof Refusal) return { status: "refused", content: [text(error.message)] };
         return { status: "failed", content: [text(`Tool failed: ${messageOf(error)}`)] };
       }
@@ -163,8 +166,10 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
         log(message) { check(); console.error(message); },
         async ask(question, wait) {
           check();
-          if (wait) throw new AgentError("not_supported", "Questions cannot outlast the turn");
-          const answer = await ask(base, question);
+          if (wait && (!Number.isSafeInteger(wait.wait) || wait.wait < 0 || wait.then !== "leaveOpen")) {
+            throw new AgentError("invalid_request", "Invalid question wait");
+          }
+          const answer = await ask(base, wait ? { ...question, timeLimitMs: wait.wait, whenTimeLimit: wait.then } : question);
           check();
           return answer;
         },
@@ -175,18 +180,19 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
   };
 }
 
-async function ask(base: BaseContext, question: QuestionDraft): Promise<QuestionReply> {
+async function ask(base: BaseContext, question: Parameters<BaseContext["ask"]>[0]): Promise<QuestionReply> {
   try {
     const a = await base.ask({
       ...question, toolCallId: base.call.id,
     });
-    if (a.pending) throw new AgentError("not_supported", "Questions cannot outlast the turn");
+    if (a.pending) throw new LeftOpen("Waiting for an answer");
     if (a.declined) return { declined: true, reason: a.reason };
     if (question.kind === "secret") {
       return a.stored ? { stored: a.stored } : { declined: true, reason: "The secret was not stored" };
     }
     return question.kind === "approval" && a.value === "allow" ? "allow" : { value: a.value ?? "" };
   } catch (error) {
+    if (error instanceof LeftOpen) throw error;
     throw sdkError(error, "invalid_request");
   }
 }

@@ -8,7 +8,7 @@ export { Session } from "./session.js";
 export type { Event, PromptOptions, PromptResult, ToolResult } from "./session.js";
 export { AgentError } from "./errors.js";
 export type { ErrorCode } from "./errors.js";
-export { Tool, tool } from "./tool.js";
+export { LeftOpen, Tool, tool } from "./tool.js";
 export { standardMcpTools, type McpServerConfig } from "./mcp.js";
 export type { ToolContext, ToolEnvironment, ToolOutput } from "./tool.js";
 export type { JSONSchema, Schema, StandardSchema } from "./schema.js";
