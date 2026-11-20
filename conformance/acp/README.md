@@ -25,7 +25,31 @@ Use Node.js and a Bash/POSIX test environment. The ACP client dependency needs a
 | `--crash-checks` | Kill the agent while the fixture's non-repeatable command is running. Check that it did not finish if within declared containment, then check one `outcomeUnknown`, no replay and the reopener's declared recovery outcome. With `--probe-checks`, crash before and after `step.after` and check which gate runs on resume. With a service declaring a TTL from 1,000 to 15,000 ms inclusive, delay a successful renewal reply and check that it does not restore dispatch authority. With any test service, a simulated restart hold longer than the reopen budget checks the retryable ACP error. |
 | `--portable-checks` | Require a shared history service and the portability declaration. Sample kept fixture logs for fields, order, associations and tombstones, including recorded model offers and grant provenance. Compare same-principal and different-principal retries after reopen. Reopen seeded histories with narrowed or revoked rights, a tombstoned batch hand-back, a cleanup marker and a parked job report. List and release the parked report even if `severalActors` is false. When recovery runs older queued input, check that fresh work cannot overtake it or receive `now` while it waits behind it. Test an unknown approval value when approvals are offered. If the source declares forking, seed a branch over 64 MiB in separate batches and inspect history HTTP requests for any destination write. Check the retryable ACP error for a simulated restart hold. With `--probe-checks`, inspect raw approval bindings and pending and continuation records when supported. Also check remote Runtime recovery: settled calls excluded from resume, empty failed attempts excluded from default context, and abort, fresh preparation and exact replay of interrupted model attempts. Check that a remote Provider request commits at the request hook and that an uncommitted response is refused. A normal portable run without `--probe-checks` does not run these remote Runtime or Provider cases. |
 
-When a session or tenant ceiling removes `tools`, the rights checks accept a completed turn with a refusal or a failed turn with `Invalid tool directive`. They check that no dispatch was recorded, the command did not run, and no result came from the tool. See [Tool dispatch](../../docs/contracts.md#tool-dispatch), [Prompts](../../docs/bindings/acp.md#prompts) and [Conformance mode](../../docs/bindings/acp.md#conformance-mode).
+## Over WebSocket
+
+To check an agent served over the [WebSocket transport](../../docs/bindings/websocket.md), give the kit the service's address and a file holding its bearer token instead of a command:
+
+```sh
+npm ci --prefix conformance/tools
+node conformance/acp/run.mjs [options] --connect ws://127.0.0.1:PORT/ --token-file FILE \
+  [--service-command COMMAND] [--actor ID] [--other-token-file FILE]
+```
+
+The kit runs the default checks over the connection, plus transport checks: an upgrade with no token or a wrong token is refused with HTTP 401, an upgrade without the subprotocol is refused, and two connections with the same token are independent ACP connections acting as the token's actor. `--actor` names the actor the token should select. `--other-token-file` holds a token for a different actor; with `--portable-checks` or `--then`, it runs the retry-by-a-different-principal check, which is skipped without it.
+
+`--crash-checks`, `--probe-checks` and `--job-checks` need to kill and restart the service and to start it with fixture plugins. Give `--service-command`, a shell command that starts the service; the kit runs it with `MODULAR_AGENT_CONFORMANCE_URL` and `MODULAR_AGENT_CONFORMANCE_TOKEN_FILE` set, and starts extra copies on other loopback ports when a check needs a different startup configuration. Without `--service-command`, those checks are skipped with the reason.
+
+To serve a stdio agent over WebSocket, use the bridge, `conformance/tools/ws-bridge.mjs`, a disposable, loopback-only test adapter that starts one agent process per connection. With no `--listen` or `--token-file`, it reads the two variables above, so it can be the service command:
+
+```sh
+MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks \
+  --connect ws://127.0.0.1:39211/ --token-file FILE \
+  --service-command "node $PWD/conformance/tools/ws-bridge.mjs --binding acp -- $PWD/rust/target/debug/ma --acp"
+```
+
+Results through the bridge: Rust `ma`, 96/96 with the default checks and 193/193 with the three options above (stdio: 188/188); the Rust base agent, 219/219 (stdio: 214/214). The bridge accepts one token, so it cannot exercise `--other-token-file`.
+
+, the rights checks accept a completed turn with a refusal or a failed turn with `Invalid tool directive`. They check that no dispatch was recorded, the command did not run, and no result came from the tool. See [Tool dispatch](../../docs/contracts.md#tool-dispatch), [Prompts](../../docs/bindings/acp.md#prompts) and [Conformance mode](../../docs/bindings/acp.md#conformance-mode).
 
 For a local service, use the [history kit setup](../history/README.md). Its 2,500 ms TTL and the reference service's 15,000 ms default both exercise the delayed-renewal probe. If the service declares a TTL outside 1,000 to 15,000 ms, use a disposable instance in that range. Point both agents at the same service:
 

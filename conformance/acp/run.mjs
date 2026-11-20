@@ -8,40 +8,64 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual as equal } from "node:util";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { createInterface } from "node:readline";
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { historyService } from "./history.mjs";
 import { portableProblems } from "./portable.mjs";
+import { manageServices } from "./service.mjs";
+import { ACP_PROTOCOL, checkUpgrades, CONTROL_MS, readToken, socketPeer, websocketOptions } from "../tools/websocket.mjs";
 
-const argv = process.argv.slice(2);
+const args = process.argv.slice(2);
+const dash = args.indexOf("--");
+const argv = dash < 0 ? args : args.slice(0, dash);
+let network, serviceCommand, expectedActor, otherToken;
+try {
+	const options = websocketOptions(argv);
+	network = options && { ...options, tokenFile: resolve(options.tokenFile), protocol: ACP_PROTOCOL };
+	const option = (key) => {
+		const i = argv.indexOf(key);
+		if (i < 0) return;
+		if (!argv[i + 1] || argv[i + 1].startsWith("--") || argv.lastIndexOf(key) !== i) throw new Error(`${key} needs one value`);
+		return argv[i + 1];
+	};
+	serviceCommand = option("--service-command");
+	expectedActor = option("--actor");
+	const otherFile = option("--other-token-file");
+	if (network ? dash >= 0 : serviceCommand || expectedActor || otherFile || dash < 0 || dash === args.length - 1) throw new Error("choose a stdio command or a WebSocket URL");
+	if (otherFile) {
+		otherToken = readToken(otherFile);
+		if (otherToken === network.token) throw new Error("--other-token-file must hold a different token");
+	}
+} catch (e) {
+	console.error(`${e.message}\nUsage: node run.mjs [options] (-- <agent command> [args...] [--then <second command> [args...]] | --connect URL --token-file FILE [--service-command COMMAND] [--actor ID] [--other-token-file FILE])`);
+	process.exit(2);
+}
+const canConfigure = !network || !!serviceCommand;
 const verbose = argv.includes("--verbose");
 // With --plugin-checks, also check the conformance plugin's hooks are in force (docs/bindings/plugin.md).
 const pluginChecks = argv.includes("--plugin-checks");
 // With --crash-checks, also kill the agent with SIGKILL during a bash call, reopen the session in a new
 // process, and check the turn ends as the agent declared: carried on (continuesAfterRestart) or failed.
-const crashChecks = argv.includes("--crash-checks");
+const crashChecks = argv.includes("--crash-checks") && canConfigure;
+if (argv.includes("--crash-checks") && !crashChecks) console.log("SKIP  --crash-checks (killing and restarting a service requires --service-command)");
 // With --probe-checks, also load the probe plugin (../plugin/probe.mjs), which checks the host side of the plugin binding.
-const probeChecks = argv.includes("--probe-checks");
+const probeChecks = argv.includes("--probe-checks") && canConfigure;
+if (argv.includes("--probe-checks") && !probeChecks) console.log("SKIP  --probe-checks (injecting fixture plugins and collecting their traces requires --service-command)");
 // With --job-checks, also load the jobs plugin (../plugin/jobs.mjs): jobs recorded in the standard kinds, reported,
 // cancelled, and taken up after a kill -9 by whichever agent reopens the session (with --then, the second).
-const jobChecks = argv.includes("--job-checks");
+const jobChecks = argv.includes("--job-checks") && canConfigure;
+if (argv.includes("--job-checks") && !jobChecks) console.log("SKIP  --job-checks (injecting the jobs fixture requires --service-command)");
 // With --portable-checks, sample the persisted fixture sessions against the shared shapes
 // (docs/bindings/data.md#portable-sessions). It needs MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE.
 const portableChecks = argv.includes("--portable-checks");
-const dash = argv.indexOf("--");
-if (dash < 0 || dash === argv.length - 1) {
-	console.error("Usage: node run.mjs [--verbose] [--plugin-checks] [--crash-checks] [--probe-checks] [--job-checks] [--portable-checks] -- <agent command> [args...] [--then <second agent command> [args...]]");
-	process.exit(2);
-}
-// With --then, load and recovery reopenings use the second agent: one writes a session and the other,
-// perhaps in another language, reopens, continues and recovers it. Both must use the same history service.
-const rest = argv.slice(dash + 1);
+// With --then, load and recovery reopenings use the second stdio agent.
+const rest = network ? [] : args.slice(dash + 1);
 const then = rest.indexOf("--then");
 const command = then < 0 ? rest : rest.slice(0, then);
 const second = then < 0 ? command : rest.slice(then + 1);
-if (!command.length || !second.length) {
+if (!network && (!command.length || !second.length)) {
 	console.error("--then needs a second agent command");
 	process.exit(2);
 }
@@ -92,8 +116,7 @@ const pluginEnv = {};
 }
 const sessionsUsed = [];
 // Tenants every agent is started with, for the tenant checks (docs/bindings/data.md#limits-and-tenants).
-const tenantRights = ["watch", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
-const TENANTS = JSON.stringify({ "kit-readonly": { rights: ["watch", "input", "answer", "settings"] }, "kit-no-cancel": { rights: tenantRights.filter((right) => right !== "cancel") }, "kit-broke": { rights: tenantRights, tokens: 0 }, "kit-latch": { rights: tenantRights, tokens: 1 }, "kit-race": { rights: tenantRights, tokens: 1 } });
+const TENANTS = readFileSync(new URL("./tenants.json", import.meta.url), "utf8");
 const project = mkdtempSync(join(tmpdir(), "ma-conf-project-"));
 // A git work tree, so an environment that keeps points in git can declare rewinding
 // here. An environment that copies the project copies .git with it, unchanged.
@@ -119,19 +142,58 @@ async function attempt(name, fn) {
 	}
 }
 
+const agentEnv = (which, extraEnv) => ({ ...env, ...(observer ? { MODULAR_AGENT_HISTORY_URL: observer.url } : {}), HOME: home, XDG_CONFIG_HOME: home, XDG_DATA_HOME: home, LANG: "C.UTF-8", ...pluginEnv, ...(!network && portablePair ? { MODULAR_AGENT_ACTOR: portableActor } : {}), MODULAR_AGENT_TENANTS: TENANTS, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: which === command ? dataDir : dataDir2, ...extraEnv });
+const managed = serviceCommand && manageServices(network, serviceCommand, project, (extraEnv) => agentEnv(command, extraEnv), verbose);
+
 function spawnAgent(which, extraEnv) {
 	const child = spawn(which[0], which.slice(1), {
 		cwd: project,
 		stdio: ["pipe", "pipe", verbose ? "inherit" : "ignore"],
-		env: { ...env, ...(observer ? { MODULAR_AGENT_HISTORY_URL: observer.url } : {}), HOME: home, XDG_CONFIG_HOME: home, XDG_DATA_HOME: home, LANG: "C.UTF-8", ...pluginEnv, ...(portablePair ? { MODULAR_AGENT_ACTOR: portableActor } : {}), MODULAR_AGENT_TENANTS: TENANTS, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: which === command ? dataDir : dataDir2, ...extraEnv },
+		env: agentEnv(which, extraEnv),
 	});
 	children.push(child);
 	return child;
 }
 
-/** Start the agent and connect the official client. */
-function connect(which = command, extraEnv = {}) {
-	const child = spawnAgent(which, extraEnv);
+// The SDK takes streams of message objects, not lines. One WebSocket message
+// is one object even when its JSON contains newlines.
+function webTransport(service, token) {
+	let peer, ended = false, input;
+	const closed = service.then(async (listener) => {
+		if (ended) return { code: 1006 };
+		peer = socketPeer({ ...network, url: listener?.url ?? network.url, token, retry: !!listener }, (_, rpc) => {
+			if (!ended && rpc && typeof rpc === "object" && !Array.isArray(rpc)) input.enqueue(rpc);
+			else peer.end();
+		});
+		return peer.closed;
+	});
+	const end = () => { peer?.end(); };
+	const readable = new ReadableStream({
+		start(controller) {
+			input = controller;
+			void closed.then(() => { if (!ended) controller.close(); }, (err) => { if (!ended) controller.error(err); });
+		},
+		cancel() { ended = true; end(); },
+	});
+	const writable = new WritableStream({
+		async write(rpc) {
+			await service;
+			if (!peer) throw new Error("WebSocket connection closed");
+			await peer.ready;
+			if (!peer.send(JSON.stringify(rpc), rpc)) throw new Error("WebSocket connection closed");
+		},
+		close: end,
+		abort: end,
+	});
+	return { readable, writable, closed, end };
+}
+
+/** Connect the official ACP client to a process or service. */
+function connect(which = command, extraEnv = {}, token = network?.token) {
+	const child = network ? null : spawnAgent(which, extraEnv);
+	const variant = !!managed && Object.keys(extraEnv).length > 0;
+	const service = variant ? managed.variant(extraEnv) : Promise.resolve(managed ? managed.primary() : null);
+	const wire = network && webTransport(service, token);
 	const updates = [];
 	const permissions = [];
 	const state = { permissionAnswer: "allow" };
@@ -143,10 +205,17 @@ function connect(which = command, extraEnv = {}) {
 			permissions.push(params);
 			return state.permissionHandler ? await state.permissionHandler(params) : { outcome: { outcome: "selected", optionId: state.permissionAnswer } };
 		});
-	const connection = app.connect(ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)));
-	return { child, ctx: connection.agent, updates, permissions, state };
+	const connection = app.connect(wire || ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)));
+	return { child, service, variant, wire, ctx: connection.agent, updates, permissions, state };
 }
 async function stop(agent) {
+	if (agent.wire) {
+		agent.wire.end();
+		try { await within(CONTROL_MS, agent.wire.closed, "WebSocket close"); }
+		catch { /* still stop the managed variant */ }
+		finally { if (agent.variant) await managed.stop(await agent.service); }
+		return;
+	}
 	if (hasExit(agent.child)) return;
 	agent.child.stdin.end();
 	const exited = new Promise((r) => agent.child.once("exit", r));
@@ -156,6 +225,16 @@ async function stop(agent) {
 		await Promise.race([exited, sleep(2000)]);
 		if (agent.child.exitCode === null && agent.child.signalCode === null) agent.child.kill("SIGKILL");
 	}
+}
+async function crash(agent) {
+	if (agent.wire) {
+		await managed.stop(await agent.service, "SIGKILL");
+		await within(CONTROL_MS, agent.wire.closed, "connection loss after service crash");
+		return;
+	}
+	const exited = new Promise((resolve) => agent.child.once("exit", resolve));
+	if (!agent.child.kill("SIGKILL")) throw Error("could not interrupt the fixture host");
+	await within(CONTROL_MS, exited, "interrupted host exit");
 }
 const meta = (x) => x?._meta?.[NS];
 const textOf = (updates, sessionId, kind = "agent_message_chunk") => updates.filter((u) => u.sessionId === sessionId && u.update.sessionUpdate === kind).map((u) => u.update.content?.text ?? "").join("");
@@ -199,7 +278,7 @@ function checkDeniedTool(name, reply, entries, marker) {
 		JSON.stringify({ stopReason: reply.stopReason, outcome, turnId, started, ran, results: results.map((e) => e.data?.status) }));
 }
 
-let sessionId, mainSession, writerActor;
+let sessionId, mainSession, writerActor, tokenActor;
 let erasedForPortable;
 let portableDeclarations = [];
 const hasExit = (c) => c.exitCode !== null || c.signalCode !== null;
@@ -218,6 +297,8 @@ await attempt("initialize", async () => {
 	check("initialize: protocol version 1", init.protocolVersion === 1, `got ${init.protocolVersion}`);
 	const m = meta(init);
 	writerActor = m?.actor?.id;
+	tokenActor = m?.actor;
+	if (network && expectedActor) check("WebSocket: the supplied token selects the expected actor", writerActor === expectedActor);
 	check("initialize: _meta binding is modular-agent-acp/1", m?.binding === "modular-agent-acp/1", JSON.stringify(m?.binding));
 	const d = m?.declaration ?? {};
 	decl = d;
@@ -235,6 +316,11 @@ await attempt("initialize", async () => {
 	// ACP: initialize; Shared data: Actors. The kind is configured, not inferred from ACP.
 	check("initialize: configured actor has a valid id, kind and rights", ["user", "host", "agent", "program"].includes(m?.actor?.kind) && typeof m?.actor?.id === "string" && m.actor.id.length > 0 && Array.isArray(m.actor.rights) && m.actor.rights.every((r) => typeof r === "string" && r.length > 0));
 });
+
+if (network) {
+	await checkUpgrades(network, check, attempt);
+	if (!canConfigure && portableChecks) console.log("SKIP  portable fork and reopen-hold wire interception (requires a managed service)");
+}
 
 await attempt("session/new", async () => {
 	const s = await within(15000, agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] }), "session/new");
@@ -401,6 +487,13 @@ await attempt("failed turn", async () => {
 		check("/2: its data carries _meta with outcome failed", err?.data?._meta?.[NS]?.outcome?.kind === "failed", String(JSON.stringify(err?.data)).slice(0, 200));
 		const ok = await within(15000, prompt(two, s2.sessionId, "hello again"), "prompt /2");
 		check("/2: a completed turn is end_turn, as in /1", ok.stopReason === "end_turn", ok.stopReason);
+		if (network) {
+			check("WebSocket: simultaneous connections with the same token have the same actor", !!writerActor && equal(meta(init)?.actor, tokenActor));
+			const stillOne = await within(15000, prompt(agent, sessionId, "fail:independent WebSocket connection"), "parallel /1 turn");
+			check("WebSocket: concurrent connections retain separate negotiated bindings and updates",
+				stillOne.stopReason === "refusal" && meta(stillOne)?.outcome?.kind === "failed" && s2.sessionId !== sessionId &&
+				!agent.updates.some((u) => u.sessionId === s2.sessionId) && !two.updates.some((u) => u.sessionId === sessionId));
+		}
 		await two.ctx.request(methods.agent.session.close, { sessionId: s2.sessionId });
 	} finally {
 		await stop(two);
@@ -681,7 +774,7 @@ await attempt("requests and answer", async () => {
 
 // Shared data: General rules; ACP: Starting and Errors. Count the JSON-RPC object as level 1.
 for (const depth of [64, 65]) await attempt(`Starting: JSON nesting at ${depth} levels`, async () => {
-	const peer = connect(command, { MODULAR_AGENT_PLUGINS: "[]" });
+	const peer = connect(command, network ? {} : { MODULAR_AGENT_PLUGINS: "[]" });
 	try {
 		const opaque = Array.from({ length: depth - 3 }).reduce((inner) => [inner], 1);
 		const r = await within(6000, peer.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {}, _meta: { "kit.depth": opaque } }), "initialize with nested metadata").catch((e) => e);
@@ -708,7 +801,20 @@ if (probeChecks) for (const [name, plugins] of [
 	["duplicate plugin name", [probePlugin("probe"), probePlugin("refuse-duplicate")]],
 	["unlisted tool collision", [probePlugin("probe"), probePlugin("refuse-collision")]],
 ]) await attempt(`Choosing plugins at start (${name})`, async () => {
-	const child = spawnAgent(command, { MODULAR_AGENT_PLUGINS: JSON.stringify(plugins), MODULAR_AGENT_DATA_DIR: mkdtempSync(join(probeDir, "startup-")) });
+	const settings = { MODULAR_AGENT_PLUGINS: JSON.stringify(plugins), MODULAR_AGENT_DATA_DIR: mkdtempSync(join(probeDir, "startup-")) };
+	if (network) {
+		const peer = connect(command, settings);
+		try {
+			const init = peer.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
+			const seen = await within(15000, Promise.race([init.then(() => ({ initialized: true }), () => peer.wire.closed), peer.wire.closed]), "startup failure or successful initialize");
+			const service = await peer.service;
+			const exit = seen.code === 1006 && await Promise.race([service.exited, sleep(50).then(() => null)]);
+			check(`Choosing plugins at start (${name}): refuses the connection or closes with failure before initialize`,
+				!seen.initialized && (seen.code === 1011 || (exit?.code != null && exit.code !== 0)), JSON.stringify(seen));
+		} finally { await stop(peer); }
+		return;
+	}
+	const child = spawnAgent(command, settings);
 	const lines = createInterface({ input: child.stdout });
 	try {
 		// Observe the wire and the natural exit. Do not close stdin or signal the host to make it exit.
@@ -1141,7 +1247,7 @@ if (jobChecks) {
 	});
 }
 
-await attempt("load in a new process", async () => {
+await attempt(network ? "load on a new connection" : "load in a new process", async () => {
 	if (agent.state.hasApproval) await setOption(agent, sessionId, "approval", "never");
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
 	await stop(agent);
@@ -1155,15 +1261,15 @@ await attempt("load in a new process", async () => {
 	const replayed = agent.updates.filter((u) => u.sessionId === sessionId);
 	check("load: replays the session before answering", replayed.length > 0 && JSON.stringify(replayed).includes("echo: hello"), `${replayed.length} updates`);
 	const { entries } = await history(agent, sessionId);
-	check("load: history survives a restart", entries.some((e) => e.kind === "turnEnd"));
+	check(network ? "load: history survives reconnect" : "load: history survives a restart", entries.some((e) => e.kind === "turnEnd"));
 	// ACP: Starting and Input admission. Both principals in the tuple default to the connection actor.
 	const readerActor = meta(init)?.actor?.id;
-	const sameScope = !portablePair || (writerActor === portableActor && readerActor === portableActor);
+	const sameScope = network ? !!writerActor && readerActor === writerActor : !portablePair || (writerActor === portableActor && readerActor === portableActor);
 	if (sameScope) {
 		const r = await within(15000, prompt(agent, sessionId, "hello", "key-1"), "resent prompt after restart");
 		check("Input admission: the same principal gets the original receipt after reopen", meta(r)?.duplicate === true && meta(r)?.inputId === firstInputId, JSON.stringify(meta(r)));
 	} else {
-		check("Starting: portable writer and reopener honor MODULAR_AGENT_ACTOR for a same-scope retry", false, JSON.stringify({ configured: portableActor, writerActor, readerActor }));
+		check(network ? "WebSocket: reconnecting with the same token selects the same actor" : "Starting: portable writer and reopener honor MODULAR_AGENT_ACTOR for a same-scope retry", false, JSON.stringify({ writerActor, readerActor }));
 	}
 	const approval = (loaded.configOptions ?? []).find((o) => o.id === "approval");
 	if (approval) {
@@ -1183,12 +1289,13 @@ await attempt("load in a new process", async () => {
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
 });
 
-if (portablePair) await attempt("Input admission: key retry by a different principal", async () => {
-	const peer = connect(second, { MODULAR_AGENT_ACTOR: otherActor });
+if (portablePair && network && !otherToken) console.log("SKIP  retry by a different principal (requires --other-token-file configured for another actor)");
+if (portablePair && (!network || otherToken)) await attempt("Input admission: key retry by a different principal", async () => {
+	const peer = network ? connect(second, {}, otherToken) : connect(second, { MODULAR_AGENT_ACTOR: otherActor });
 	try {
 		const init = await within(15000, peer.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize different principal");
 		const readerActor = meta(init)?.actor?.id;
-		if (!check("Starting: a different MODULAR_AGENT_ACTOR changes the reopener's principal", writerActor === portableActor && readerActor === otherActor, JSON.stringify({ configuredWriter: portableActor, configuredReader: otherActor, writerActor, readerActor }))) return;
+		if (!check(network ? "WebSocket: the other token has a different principal" : "Starting: a different MODULAR_AGENT_ACTOR changes the reopener's principal", network ? !!writerActor && !!readerActor && writerActor !== readerActor : writerActor === portableActor && readerActor === otherActor, JSON.stringify({ writerActor, readerActor }))) return;
 		await within(await reopenWatchdog(), peer.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "reopen as different principal");
 		const r = await within(15000, prompt(peer, sessionId, "retry with a different principal", "key-1"), "key in new scope").catch((e) => e);
 		const m = meta(r);
@@ -1278,7 +1385,8 @@ if (crashChecks) {
 		void prompt(agent, sid, `tool:bash {"command":"echo start >> crash.txt; sleep 4; echo end >> crash.txt"}`).catch(() => undefined);
 		for (let i = 0; i < 200 && !(existsSync(marker) && readFileSync(marker, "utf8").includes("start")); i++) await sleep(50);
 		check("crash: the bash call started", existsSync(marker));
-		agent.child.kill("SIGKILL");
+		if (network) await crash(agent);
+		else agent.child.kill("SIGKILL");
 		await sleep(6000);
 		const after = existsSync(marker) ? readFileSync(marker, "utf8") : "";
 		// Contracts: The working environment. Loss containment follows the session declaration.
@@ -1314,7 +1422,7 @@ if (crashChecks) {
 await stop(agent);
 
 // ACP: Errors; History HTTP: Writing: one writer at a time. Simulate the hold after a TTL decrease.
-if (store && (crashChecks || portableChecks)) await attempt("Errors: reopening during a restart hold", async () => {
+if (canConfigure && store && (crashChecks || portableChecks)) await attempt("Errors: reopening during a restart hold", async () => {
 	const caps = await store.json("/v1"), ttlMs = 1000;
 	const base = store.path(mainSession);
 	let heldAt, holdEnds;
@@ -1336,7 +1444,7 @@ if (store && (crashChecks || portableChecks)) await attempt("Errors: reopening d
 });
 
 // ACP: Extension methods (fork); History HTTP: Sessions (preflight before destination PUT).
-if (portableChecks) await attempt("Extension methods: oversized fork", async () => {
+if (portableChecks && canConfigure) await attempt("Extension methods: oversized fork", async () => {
 	const mutations = [];
 	const tap = await store.observe({ onRequest: (req) => { if (req.method === "PUT" || req.method === "POST") mutations.push(req); } });
 	const s = connect(command, { MODULAR_AGENT_HISTORY_URL: tap.url });
@@ -1542,9 +1650,7 @@ if (probeChecks && crashChecks) for (const boundary of ["before", "after"]) {
 				if (!latch && await Promise.race([pending, sleep(50).then(() => false)])) break;
 			}
 			if (!latch) throw Error(`fixture did not reach the ${boundary} crash boundary`);
-			const exited = new Promise((resolve) => remote.child.once("exit", resolve));
-			if (!remote.child.kill("SIGKILL")) throw Error("could not interrupt the fixture host");
-			await within(5000, exited, "interrupted host exit");
+			await crash(remote);
 			remote = start();
 			await init(remote);
 			await within(await reopenWatchdog(), remote.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "load step.after crash fixture");
@@ -1688,7 +1794,8 @@ if (jobChecks && crashChecks) {
 		const before = await waitFor(agent, sid, (x) => x.some((e) => e.kind === "jobStarted"));
 		const jobId = before.find((e) => e.kind === "jobStarted")?.jobId;
 		check("jobs after a crash: the job started", !!jobId);
-		agent.child.kill("SIGKILL");
+		if (network) await crash(agent);
+		else agent.child.kill("SIGKILL");
 		await sleep(500);
 		agent = connect(second);
 		await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
@@ -1733,6 +1840,7 @@ if (portableChecks) {
 }
 
 
+await managed?.stopAll();
 observer?.stop();
 for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
 rmSync(dataDir, { recursive: true, force: true });
