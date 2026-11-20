@@ -138,6 +138,7 @@ pub struct Peer {
     tx: mpsc::UnboundedSender<(Value, bool)>,
     next: AtomicU64,
     pending: Mutex<BTreeMap<String, Pending>>,
+    activity: tokio::sync::Notify,
     incoming: Mutex<BTreeMap<String, CancellationToken>>,
     pub closed: CancellationToken,
     pub finished: CancellationToken,
@@ -199,6 +200,7 @@ impl Peer {
             tx,
             next: AtomicU64::new(1),
             pending: Mutex::default(),
+            activity: tokio::sync::Notify::new(),
             incoming: Mutex::default(),
             closed: CancellationToken::new(),
             finished: CancellationToken::new(),
@@ -243,6 +245,7 @@ impl Peer {
                 else {
                     break;
                 };
+                p.activity.notify_one();
                 let line = bytes.as_slice();
                 let m: Value = match agent_api::wire::decode_json(line) {
                     Ok(m) => m,
@@ -395,6 +398,45 @@ impl Peer {
         });
         peer
     }
+    pub fn monitor_liveness(
+        self: &Arc<Self>,
+        interval: std::time::Duration,
+        deadline: std::time::Duration,
+    ) {
+        let peer = self.clone();
+        tokio::spawn(async move {
+            let monitor = async {
+                loop {
+                    let activity = peer.activity.notified();
+                    if peer.pending.lock().unwrap().is_empty() {
+                        activity.await;
+                        continue;
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = activity => continue,
+                        _ = tokio::time::sleep(interval) => (),
+                    }
+                    if peer.pending.lock().unwrap().is_empty() {
+                        continue;
+                    }
+                    if !matches!(
+                        tokio::time::timeout(
+                            deadline,
+                            peer.call("$/ping", json!({}), None, CancellationToken::new())
+                        )
+                        .await,
+                        Ok(Ok(_))
+                    ) {
+                        peer.close();
+                        break;
+                    }
+                }
+            };
+            peer.closed.run_until_cancelled(monitor).await;
+        });
+    }
+
     pub fn close(&self) {
         self.closed.cancel();
         for (_, pending) in std::mem::take(&mut *self.pending.lock().unwrap()) {
@@ -464,14 +506,20 @@ impl Peer {
         let id = format!("r{}", self.next.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         let key = json!(id).to_string();
-        self.pending.lock().unwrap().insert(
-            key.clone(),
-            Pending {
-                reply: tx,
-                work,
-                event,
-            },
-        );
+        {
+            let mut pending = self.pending.lock().unwrap();
+            if pending.is_empty() {
+                self.activity.notify_one();
+            }
+            pending.insert(
+                key.clone(),
+                Pending {
+                    reply: tx,
+                    work,
+                    event,
+                },
+            );
+        }
         if self.closed.is_cancelled() {
             self.pending.lock().unwrap().remove(&key);
             return Err(Fault::new("lost", "plugin connection closed"));

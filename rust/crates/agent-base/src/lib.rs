@@ -125,16 +125,11 @@ pub async fn compose_project(
         h.load(Arc::new(ConfiguredPlugin(plugin))).await?;
     }
     if let Ok(value) = std::env::var("MODULAR_AGENT_PLUGINS") {
-        let launches: Vec<plugin_stdio::Launch> = serde_json::from_str(&value)?;
+        let launches: Vec<plugin_stdio::ExternalLaunch> = serde_json::from_str(&value)?;
         for (index, launch) in launches.into_iter().enumerate() {
-            if let Err(error) = plugin_stdio::load(
-                &h,
-                launch,
-                &project,
-                &plugin_home.join(index.to_string()),
-                index,
-            )
-            .await
+            if let Err(error) = launch
+                .load(&h, &project, &plugin_home.join(index.to_string()), index)
+                .await
             {
                 let _ = h.shutdown().await;
                 return Err(anyhow!("configured plugin {index} failed: {error:#}"));

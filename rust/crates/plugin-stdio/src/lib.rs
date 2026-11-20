@@ -8,4 +8,7 @@ mod runtime_host;
 mod runtime_server;
 pub mod server;
 pub use agent_api::wire;
-pub use host::{Launch, Remote, hook_name, hook_payload, hook_result, load, load_pipe};
+pub use host::{
+    ExternalLaunch, Launch, Remote, ServiceLaunch, hook_name, hook_payload, hook_result, load,
+    load_pipe,
+};

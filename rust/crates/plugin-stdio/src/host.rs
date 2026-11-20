@@ -13,6 +13,7 @@ use std::{
 use tokio::process::Command;
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Launch {
     pub command: Vec<String>,
     #[serde(default)]
@@ -20,6 +21,55 @@ pub struct Launch {
     #[serde(default)]
     pub config: Value,
 }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServiceLaunch {
+    pub url: String,
+    pub token_file: PathBuf,
+    #[serde(default)]
+    pub config: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ExternalLaunch {
+    Process(Launch),
+    Service(ServiceLaunch),
+}
+
+impl ExternalLaunch {
+    pub async fn load(
+        self,
+        harness: &Arc<Harness>,
+        project: &Path,
+        home: &Path,
+        index: usize,
+    ) -> Result<Arc<Remote>> {
+        match self {
+            Self::Process(launch) => load(harness, launch, project, home, index).await,
+            Self::Service(launch) => {
+                ensure!(
+                    launch.token_file.is_absolute(),
+                    "plugin service token file must be absolute"
+                );
+                ensure!(
+                    launch.config.is_null() || launch.config.is_object(),
+                    "plugin service config must be an object"
+                );
+                load_transport(
+                    harness,
+                    Transport::Service(launch.url, launch.token_file),
+                    launch.config,
+                    project,
+                    home,
+                    index,
+                )
+                .await
+            }
+        }
+    }
+}
+
 pub(crate) struct Shared {
     pub(crate) api: Weak<dyn AgentApi>,
     pub(crate) registration: Mutex<Value>,
@@ -76,6 +126,7 @@ pub async fn load_pipe(
 enum Transport {
     Process(Launch),
     Pipe(tokio::io::DuplexStream),
+    Service(String, PathBuf),
 }
 
 async fn load_transport(
@@ -105,6 +156,26 @@ async fn load_transport(
     let callbacks = Arc::new(Callbacks(shared.clone()));
     let reaped = CancellationToken::new();
     let peer = match transport {
+        Transport::Service(url, token_file) => {
+            let socket =
+                transport_websocket::connect(&url, &token_file, transport_websocket::PLUGIN)
+                    .await?;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let done = reaped.clone();
+            tokio::spawn(async move {
+                transport_websocket::run(socket, CancellationToken::new(), |conn| async move {
+                    let peer = Peer::websocket(conn, callbacks, false);
+                    peer.monitor_liveness(Duration::from_secs(30), CONTROL);
+                    if tx.send(peer.clone()).is_err() {
+                        peer.close();
+                    }
+                    peer.finished.cancelled().await;
+                })
+                .await;
+                done.cancel();
+            });
+            rx.await?
+        }
         Transport::Pipe(pipe) => {
             let (read, write) = tokio::io::split(pipe);
             let peer = Peer::start(read, write, callbacks);
@@ -153,9 +224,24 @@ async fn load_transport(
             peer
         }
     };
-    let registration=match peer.call("plugin/initialize",json!({"binding":"modular-agent-plugin/1","data":"modular-agent-data/1","host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},"project":project,"home":home,"config":config}),None,CancellationToken::new()).await {
-        Ok(r)=>r,
-        Err(e)=>{peer.close();reaped.cancelled().await;return Err(e.into())}
+    let config = if config.is_null() { json!({}) } else { config };
+    let registration = control(
+        &peer,
+        "plugin/initialize",
+        json!({
+            "binding":"modular-agent-plugin/1","data":"modular-agent-data/1",
+            "host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},
+            "project":project,"home":home,"config":config
+        }),
+    )
+    .await;
+    let registration = match registration {
+        Ok(r) => r,
+        Err(e) => {
+            peer.close();
+            reaped.cancelled().await;
+            return Err(e.into());
+        }
     };
     let result: Result<Arc<Remote>> = async {
         ensure!(
@@ -293,32 +379,32 @@ async fn load_transport(
     }
     .await;
     if let Err(error) = &result {
-        let _ = peer
-            .call(
-                "plugin/shutdown",
-                json!({"reason":"refused","detail":error.to_string()}),
-                None,
-                CancellationToken::new(),
-            )
-            .await;
+        let _ = control(
+            &peer,
+            "plugin/shutdown",
+            json!({"reason":"refused","detail":error.to_string()}),
+        )
+        .await;
         peer.close();
         reaped.cancelled().await;
     }
     result
 }
+const CONTROL: Duration = Duration::from_secs(5);
+
+async fn control(peer: &Peer, method: &str, params: Value) -> Reply {
+    tokio::time::timeout(
+        CONTROL,
+        peer.call(method, params, None, CancellationToken::new()),
+    )
+    .await
+    .unwrap_or_else(|_| Err(Fault::new("lost", "plugin control deadline expired")))
+}
+
 impl Remote {
     pub async fn shutdown(&self) -> Result<()> {
         if !self.peer.closed.is_cancelled() {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                self.peer.call(
-                    "plugin/shutdown",
-                    json!({"reason":"stop"}),
-                    None,
-                    CancellationToken::new(),
-                ),
-            )
-            .await;
+            let _ = control(&self.peer, "plugin/shutdown", json!({"reason":"stop"})).await;
             self.peer.close();
         }
         self.reaped.cancelled().await;
