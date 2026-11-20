@@ -11,7 +11,8 @@ import { readFileSync } from "node:fs";
 import WebSocket from "ws";
 import { servePluginService } from "../src/serve.js";
 import { MAX_MESSAGE, PLUGIN_BINDING, WirePeer } from "../src/wire.js";
-import { connectWebSocket, PLUGIN_PROTOCOL, receiveMessages } from "../src/websocket.js";
+import { connectWebSocket, listenWebSocket, PLUGIN_PROTOCOL, receiveMessages } from "../src/websocket.js";
+import { startPluginService } from "../src/host.js";
 
 async function fixture(t: TestContext) {
 	const dir = await mkdtemp(join(tmpdir(), "plugin-websocket-"));
@@ -39,6 +40,27 @@ async function refuse(url: string, protocol?: string, token?: string) {
 		socket.on("open", () => { socket.terminate(); reject(new Error("Unexpected upgrade")); });
 	});
 }
+
+test("client pings only while work is pending and a missed ping loses the connection", async t => {
+	const f = await fixture(t);
+	let pinged = 0;
+	const service = await listenWebSocket({ listen: "127.0.0.1:0" }, PLUGIN_PROTOCOL, [{ tokenFile: f.tokenFile, value: null }],
+		(socket) => new Promise<void>(resolve => {
+			socket.once("close", resolve);
+			receiveMessages(socket, bytes => {
+				const msg = JSON.parse(bytes.toString());
+				if (msg.method === "plugin/initialize") socket.send(JSON.stringify({ jsonrpc: "2.0", id: msg.id,
+					result: { name: "silent", binding: PLUGIN_BINDING } }));
+				if (msg.method === "$/ping") pinged++;
+			});
+		}));
+	try {
+		const external = await startPluginService({ url: service.url, tokenFile: f.tokenFile, pingIntervalMs: 10, controlTimeoutMs: 100 },
+			{ project: f.dir, home: f.dir });
+		await external.stop();
+		assert.equal(pinged, 1);
+	} finally { await service.close(); }
+});
 
 const init = (dir: string) => ({ binding: PLUGIN_BINDING, data: "modular-agent-data/1", project: dir, home: dir });
 

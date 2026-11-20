@@ -8,7 +8,7 @@ import { contextCompaction } from "@modular-agent/context-compaction";
 import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
-import { startExternalPlugin, pluginSpecsFromEnv, conformanceProvider, conformanceTools } from "@modular-agent/plugin-wire";
+import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
 import { acpInterface } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
@@ -26,6 +26,7 @@ import type { Actor, Declaration, ModelInfo, ModelRef, QuestionHandler, Right, S
 export type Durability = "ephemeral" | "kept" | "durable";
 export type Approval = "off" | "ask" | "all" | "never";
 export interface ProcessPlugin { command: string[]; env?: Record<string, string>; config?: Settings }
+export type ServicePlugin = ServicePluginSpec;
 export interface AgentOptions {
   project?: string;
   dataDir?: string;
@@ -34,6 +35,7 @@ export interface AgentOptions {
   tools?: readonly Tool[];
   plugins?: readonly Plugin[];
   processPlugins?: readonly ProcessPlugin[];
+  servicePlugins?: readonly ServicePlugin[];
   pluginHost?: boolean;
   severalActors?: boolean;
   sessionLimits?: boolean;
@@ -169,8 +171,9 @@ export class Agent {
 
   static async #create(options: AgentOptions): Promise<Agent> {
     const durability = options.durability ?? "ephemeral";
-    if (options.pluginHost === false && options.processPlugins !== undefined) {
-      throw new AgentError("invalid_composition", "Loading processPlugins requires a plugin host");
+    const configuredHost = options.processPlugins !== undefined || options.servicePlugins !== undefined;
+    if (options.pluginHost === false && configuredHost) {
+      throw new AgentError("invalid_composition", "Loading processPlugins or servicePlugins requires a plugin host");
     }
     if (!["ephemeral", "kept", "durable"].includes(durability)) throw new AgentError("invalid_params", "Unknown durability");
     if (options.approval !== undefined && !["off", "ask", "all", "never"].includes(options.approval)) {
@@ -229,8 +232,8 @@ export class Agent {
       for (const t of options.tools ?? []) await agent.#plugin(definePlugin({ name: `tool.${t.definition.name}`, tools: [t] }));
       for (const p of options.plugins ?? []) await agent.#plugin(p);
       if (options.conformance) await agent.#load(conformanceTools(false, agent.#api.tools().map(t => t.name)));
-      agent.#hostEnabled = options.pluginHost ?? options.processPlugins !== undefined;
-      await agent.#loadProcesses([...options.processPlugins ?? [], ...(agent.#hostEnabled ? pluginSpecsFromEnv() : [])]);
+      agent.#hostEnabled = options.pluginHost ?? configuredHost;
+      await agent.#loadRemotes([...options.processPlugins ?? [], ...options.servicePlugins ?? [], ...(agent.#hostEnabled ? pluginSpecsFromEnv() : [])]);
       const effectiveRuntime = h.use<Runtime>("runtime");
       // The ACP kit substitutes its own Runtime to exercise the remote bridge.
       if (durability === "durable" && effectiveRuntime?.supports.continuesAfterRestart !== true &&
@@ -303,8 +306,12 @@ export class Agent {
   }
   #external = new Set<string>();
   #authority = { severalActors: false, sessionLimits: false, tenants: false };
-  async #loadProcesses(specs: ProcessPlugin[]) {
+  async #loadRemotes(specs: PluginSpec[]) {
     for (const spec of specs) {
+      if ("url" in spec) {
+        await this.#loadExternal(await startPluginService(spec, this.#h));
+        continue;
+      }
       if (!spec.command?.length || spec.command.some(a => typeof a !== "string" || !a || a.includes("\0"))) {
         throw new Error("Process plugin needs a nonempty command vector");
       }
