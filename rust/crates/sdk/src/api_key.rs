@@ -62,9 +62,7 @@ impl ApiKeyProvider {
             context_window,
             max_output,
             thinking: match self.vendor {
-                Vendor::OpenAi => ["off", "minimal", "low", "medium", "high", "xhigh"]
-                    .map(str::to_owned)
-                    .to_vec(),
+                Vendor::OpenAi => ["off", "low", "medium", "high"].map(str::to_owned).to_vec(),
                 Vendor::Anthropic => vec![],
             },
             extra: Default::default(),

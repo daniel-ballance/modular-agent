@@ -15,6 +15,9 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "loopback: allow TCP to numeric IPv4 loopback only")
+    config.addinivalue_line(
+        "markers", "live: a live check against real model services; lifts the offline guard"
+    )
 
 
 @pytest.fixture
@@ -30,7 +33,8 @@ def runtime_type(runtime_kind):
 @pytest.fixture(autouse=True)
 def subprocess_runtime(monkeypatch, runtime_kind, request):
     monkeypatch.setenv("MA_TEST_RUNTIME", runtime_kind)
-    monkeypatch.setenv("MA_OFFLINE_TEST", "1")
+    if request.node.get_closest_marker("live") is None:
+        monkeypatch.setenv("MA_OFFLINE_TEST", "1")
     monkeypatch.setenv(
         "MA_PLUGIN_PROCESSES",
         "runtime,files,local,mcp" if request.config.getoption("--binding") == "process" else "",
@@ -39,6 +43,8 @@ def subprocess_runtime(monkeypatch, runtime_kind, request):
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch, request):
+    if request.node.get_closest_marker("live") is not None:
+        return  # Skipped unless MODULAR_AGENT_LIVE=1; then it must reach the model service.
     loopback = request.node.get_closest_marker("loopback") is not None
 
     def guarded(operation):

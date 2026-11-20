@@ -9,9 +9,12 @@ from modular_agent.anthropic import anthropic
 from modular_agent.fixtures import tide
 from modular_agent.openai import openai
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("MODULAR_AGENT_LIVE") != "1", reason="requires MODULAR_AGENT_LIVE=1"
-)
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        os.getenv("MODULAR_AGENT_LIVE") != "1", reason="requires MODULAR_AGENT_LIVE=1"
+    ),
+]
 
 
 @pytest.mark.parametrize(
