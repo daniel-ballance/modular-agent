@@ -2122,9 +2122,14 @@ export class Harness {
 	}
 
 	/** Questions recorded on the current branch that have no answer and were not closed. */
+	private hasAnswerer(s: Session, request: InputRequest): boolean {
+		const candidates = request.kind === "approval" ? this.presentActors(s, request) : [...s.actors.keys()];
+		return candidates.some(id => this.mayAnswer(s, request, id));
+	}
+
 	private closeUnanswerable(s: Session): void {
 		for (const { request, resolve } of s.requests.values()) {
-			if (!this.presentActors(s, request).some((id) => this.mayAnswer(s, request, id))) {
+			if (!this.hasAnswerer(s, request)) {
 				resolve({ requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable" });
 			}
 		}
@@ -2267,11 +2272,12 @@ export class Harness {
 		if (!reopened) {
 			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, data: { request: { ...request, answerable: viewers.length > 0 }, ...approval } }]);
 		}
-		if (!this.presentActors(s, request).some((id) => this.mayAnswer(s, request, id))) {
-			const answer = { requestId: request.id, declined: true, actorId: "harness", reason: "noLongerAnswerable" };
+		if (!this.hasAnswerer(s, request)) {
+			const approval = request.kind === "approval";
+			const answer = { requestId: request.id, declined: true, actorId: "harness", reason: approval ? "refused" : "noLongerAnswerable" };
 			await this.recordAnswer(s, request, answer, stepId);
 			this.emitAnswer(s, request, answer);
-			return answer;
+			return approval ? { ...answer, reason: "No one present can answer" } : answer;
 		}
 		return new Promise<Answer>((resolve, reject) => {
 			const cancel = () => void open.resolve({ requestId: request.id, declined: true, actorId: "harness", reason: "cancelled" });
