@@ -10,7 +10,7 @@ Recorded on 2026-11-20 at the commit that tags [0.1.0](../CHANGELOG.md). [ADR 00
 | Reference checks against `ma` | 15/15 | 15/15 | 15/15 | 15/15 |
 | ACP kit against `ma`, crash, probe and job checks | 188/188 | 188/188 | 188/188 | 188/188 |
 | ACP kit against the base agent, same options | 214/214 | 214/214 | 214/214 | 214/214 |
-| Own suites | 304 tests | 219, also with remote parts | 36 packages, race on SDK and `ma` | 368 in each of four configurations |
+| Own suites | 304 tests | 219, also with remote parts | 36 packages, race on SDK and `ma` | 369 in each of four configurations |
 
 All four `ma` builds run the identical set of 188 ACP checks. Every result above used scripted models; no real model service was called.
 
