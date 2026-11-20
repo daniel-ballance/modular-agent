@@ -409,7 +409,7 @@ The [conformance kit](../../conformance/acp/README.md) exercises this mode. See 
 
 ## Changes
 
-- **Edition 4 draft** ([ADR 0023](../adr/0023-edition-4-draft.md)). Both versions keep their numbers. The optional declaration key `nestedToolCalls`, the fixture tool `nest` for agents that declare it, and `parentToolCallId` on a nested call's first update.
+- **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). Both versions keep their numbers. The optional declaration key `nestedToolCalls`, the fixture tool `nest` for agents that declare it, and `parentToolCallId` on a nested call's first update.
 
 - **Production edition 3.** Approval authority is per recipient and route (TypeScript, Python G100). Gate limits and the history page limit are separate (TypeScript). The operator can set a shared connection actor id (portable F2, TypeScript to Python and Rust: the kit used different principals and the builds misread key scope; F4, Go to TypeScript: the reopener retrieved another actor's receipt).
 

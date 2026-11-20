@@ -34,7 +34,7 @@ Build one **standard configuration** of the Harness: a coding agent with Pi's fe
 - With a real model (`claude/claude-haiku-5-5`, through the sidecar), `ma` read files, ran commands, followed a project skill, wrote a file and resumed a session in a new process.
 - ChatGPT and Grok were tested against a loopback fixture only. Their first real requests wait for the owner's sign-in.
 
-[The Rust README](../../rust/README.md#what-has-been-checked) has the counts and commands.
+[The Rust README](../../rust/README.md#what-is-checked) has the counts and commands.
 
 ## Consequences
 

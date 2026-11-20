@@ -1,6 +1,6 @@
 # The standard configuration
 
-**Status: draft 0.1.** All four implementations exist and pass the [reference checks](../../conformance/reference/README.md): [Rust](../../rust/README.md), [TypeScript](../../typescript/packages/ma/README.md), [Go](../../go/cmd/ma/README.md) and [Python](../../python/packages/ma/README.md). [ADR 0026](../adr/0026-one-reference-product.md) records why there is one product. Where an implementation must guess, the guess becomes a change here first.
+**Status: 0.1.** All four implementations exist and pass the [reference checks](../../conformance/reference/README.md): [Rust](../../rust/README.md), [TypeScript](../../typescript/packages/ma/README.md), [Go](../../go/cmd/ma/README.md) and [Python](../../python/packages/ma/README.md). [ADR 0026](../adr/0026-one-reference-product.md) records why there is one product. Where an implementation must guess, the guess becomes a change here first.
 
 The standard configuration is the reference implementation of layer 4 ([ADR 0024](../adr/0024-five-layers.md)): a coding agent with Pi's feature set, for everyday use. There is one product and four implementations of it, one per language. A person can install any one of them and get the same program: the same commands, files, tools, prompt and behavior. Each is written the way its language is written.
 

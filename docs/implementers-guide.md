@@ -1,6 +1,6 @@
 # Implementer's guide
 
-Start here if you are building an agent from [production edition 3](adr/0021-production-edition.md). The example traces a single approved file read from the ACP client to the working environment and back. It shows where to look up each decision. It does not set requirements.
+Start here if you are building an agent from [edition 4](adr/0027-sdk-0-1-and-edition-4.md), which is [production edition 3](adr/0021-production-edition.md) plus the [edition 4 rules](adr/0023-edition-4-draft.md). The example traces a single approved file read from the ACP client to the working environment and back. It shows where to look up each decision. It does not set requirements.
 
 ## How to read the specification
 

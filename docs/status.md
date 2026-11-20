@@ -1,5 +1,19 @@
 # Status: the description against the code
 
+## SDK 0.1 and edition 4
+
+Recorded on 2026-11-20 at the commit that tags [0.1.0](../CHANGELOG.md). [ADR 0027](adr/0027-sdk-0-1-and-edition-4.md) explains what these results establish.
+
+| Check | Rust | TypeScript | Go | Python |
+|---|---|---|---|---|
+| Shared SDK scenarios, in process and served by each SDK | 55/55 | 55/55 | 55/55 | 55/55 |
+| Reference checks against `ma` | 15/15 | 15/15 | 15/15 | 15/15 |
+| ACP kit against `ma`, crash, probe and job checks | 188/188 | 188/188 | 188/188 | 188/188 |
+| ACP kit against the base agent, same options | 214/214 | 214/214 | 214/214 | 214/214 |
+| Own suites | 304 tests | 219, also with remote parts | 36 packages, race on SDK and `ma` | 368 in each of four configurations |
+
+All four `ma` builds run the identical set of 188 ACP checks. Every result above used scripted models; no real model service was called.
+
 ## Production edition 3
 
 The final round-seven run finished on 2026-11-19 at 02:02. All five builds passed their suites and applicable kits. The last specification change was `cf663a5`; the final kit check was `dde3458`. See [ADR 0021](adr/0021-production-edition.md) for what these results establish.

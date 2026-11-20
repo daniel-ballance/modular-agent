@@ -1,7 +1,9 @@
 ---
-status: draft
+status: accepted
 date: 2026-11-19
 ---
+
+**Current rule:** accepted as SDK specification 0.1 by [ADR 0027](0027-sdk-0-1-and-edition-4.md).
 
 # The SDK specification, draft 0.1
 

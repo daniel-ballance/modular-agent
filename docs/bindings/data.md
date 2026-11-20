@@ -403,7 +403,7 @@ While an intent is unresolved, the Harness MUST block project work and keep othe
 
 ## Changes
 
-- **Edition 4 draft** ([ADR 0023](../adr/0023-edition-4-draft.md)). From the first working build on edition 3. Nested calls have a defined shape and stay out of model context. `modelTools` is a standard setting. A Provider handed a reasoning level its model does not list lowers it, as the host does. DirEntry is added for directory listing.
+- **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). From the first working build on edition 3. Nested calls have a defined shape and stay out of model context. `modelTools` is a standard setting. A Provider handed a reasoning level its model does not list lowers it, as the host does. DirEntry is added for directory listing.
 
 - **Production edition 3.** A turn whose remaining calls are left open ends `completed`, never as a limit, and a host refuses rather than rewrites a Runtime's outcome (Python G107: a Runtime reported `limit: questions`). Session ownership of saved points (Go P11), independent gate and wire size limits (TypeScript), and I-JSON numbers (Elixir PE2-3, TypeScript). The `step.after` checkpoint distinguishes a due gate from a committed decision (Runtime E, Go with Rust, Python and Elixir, and TypeScript with Rust and Python: the host did not restore the answered step's gate state).
 

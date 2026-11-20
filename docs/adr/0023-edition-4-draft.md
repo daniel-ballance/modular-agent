@@ -1,7 +1,9 @@
 ---
-status: draft
+status: accepted
 date: 2026-11-19
 ---
+
+**Current rule:** accepted as edition 4 by [ADR 0027](0027-sdk-0-1-and-edition-4.md) once all four builds implemented it and the cross-language matrix ran. The text below is the record of the draft.
 
 # Edition 4 draft: rules from the first working build
 
@@ -79,7 +81,7 @@ From the Claude sidecar's guesses:
 
 - The Rust build implements all seven, in process and over the plugin binding, as host and as served plugin.
 - The kits gained checks that run only for builds that declare or register the new parts. The TypeScript build, left at edition 3, still passes the kits it passed before.
-- [The Rust README](../../rust/README.md#what-has-been-checked) has the commands and counts.
+- [The Rust README](../../rust/README.md#what-is-checked) has the commands and counts.
 
 ## Consequences
 

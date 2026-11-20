@@ -1,6 +1,6 @@
 # The SDK specification
 
-**Status: draft 0.1, revised after the first build round.** All four SDKs exist: [Rust](../../rust/crates/sdk/README.md), [TypeScript](../../typescript/packages/core/README.md), [Go](../../go/modular/README.md) and [Python](../../python/SDK.md). After two build rounds, every SDK's runner passes all eleven [shared scenarios](../../conformance/sdk/README.md) in process and served by every SDK, 220 runs in all. The builders' findings are folded into these documents and recorded in ADR 0025's [first](../adr/0025-sdk-specification.md#the-first-build-round) and [second](../adr/0025-sdk-specification.md#the-second-build-round) rounds.
+**Status: 0.1, accepted** ([ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). All four SDKs exist: [Rust](../../rust/crates/sdk/README.md), [TypeScript](../../typescript/packages/core/README.md), [Go](../../go/modular/README.md) and [Python](../../python/SDK.md). Every SDK's runner passes all eleven [shared scenarios](../../conformance/sdk/README.md) in process and served by every SDK, 220 runs in all, and runs the [guides](guides/README.md)' examples as tests. Two build rounds shaped this revision; ADR 0025 records their [first](../adr/0025-sdk-specification.md#the-first-build-round) and [second](../adr/0025-sdk-specification.md#the-second-build-round) rounds.
 
 This is layer 2 of the [five layers](../adr/0024-five-layers.md). The [specification](../conformance.md#the-documents) says what an agent and its parts must do and what crosses the wire. It deliberately says nothing about the API a developer writes against. This document set does. It describes one SDK, expressed in four languages, so that someone who has built an agent in one language can build one in another without learning a new model.
 
@@ -15,6 +15,7 @@ An agent builds each SDK from these documents and the specification. Where it ha
 | [API](api.md) | The shape of the API, in language-neutral terms |
 | [Placement and durability](placement.md) | Where each part can run and what survives a restart, and how a developer chooses |
 | [Testing](testing.md) | The testing kit each SDK ships, and the shared scenarios that check the SDKs against each other |
+| [API reference](reference.md) | How to build each language's generated reference |
 | [Languages](languages.md) | How each language expresses the API, and the package names |
 | [Guides](guides/README.md) | Task-by-task walkthroughs in all four languages. Their examples become tests. |
 
@@ -64,4 +65,4 @@ Some of what the SDK promises needs the specification to change first:
 
 - **Parts as services.** The plugin binding runs a plugin as a child process over stdio. Only history has an HTTP binding. A plugin served over a network needs a binding before the SDK can offer that placement. See [Placement](placement.md#services).
 - **A machine-readable schema.** The SDK's data types follow [Shared data](../bindings/data.md). They are hand-written until shared data has a JSON Schema to generate them from.
-- **Edition 4.** Nested calls and `modelTools` are in the [edition 4 draft](../adr/0023-edition-4-draft.md), which only the Rust build implements. The SDK targets edition 4.
+- **Edition 4.** The SDK targets [edition 4](../adr/0027-sdk-0-1-and-edition-4.md), which all four bases now implement.
