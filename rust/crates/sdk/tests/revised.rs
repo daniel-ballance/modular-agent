@@ -96,7 +96,7 @@ async fn stored_sessions_and_provider_data_survive_reopen_but_stay_scoped() -> R
     let requests = b.lock().unwrap()[0].to_string();
     assert!(requests.contains("visible"));
     assert!(!requests.contains("providerData"));
-    assert!(!serde_json::to_string(&session.history()?)?.contains("providerData"));
+    assert!(!serde_json::to_string(&session.history().await?)?.contains("providerData"));
     agent.close().await
 }
 
@@ -153,7 +153,8 @@ async fn store_capabilities_control_erasure_and_service_eligibility() -> Result<
     let session = agent.session().await?;
     session.prompt("Erase my answer").await?;
     let response = session
-        .history()?
+        .history()
+        .await?
         .into_iter()
         .find(|e| e["kind"] == "response")
         .unwrap();
@@ -162,7 +163,8 @@ async fn store_capabilities_control_erasure_and_service_eligibility() -> Result<
     assert!(report.erased.iter().any(|entry| entry.id == id));
     assert!(
         session
-            .history()?
+            .history()
+            .await?
             .iter()
             .any(|e| e["id"] == id && e["message"].is_null())
     );

@@ -209,6 +209,14 @@ impl TestAgentBuilder {
         self.builder = self.builder.several_actors(enabled);
         self
     }
+    pub fn session_limits(mut self, enabled: bool) -> Self {
+        self.builder = self.builder.session_limits(enabled);
+        self
+    }
+    pub fn tenants(mut self, tenants: Value) -> Self {
+        self.builder = self.builder.tenants(tenants);
+        self
+    }
     pub fn setting(mut self, key: impl Into<String>, value: Value) -> Self {
         self.builder = self.builder.setting(key, value);
         self
@@ -217,10 +225,11 @@ impl TestAgentBuilder {
         self.builder = self.builder.approval(policy);
         self
     }
-    pub fn on_question<F, Fut>(mut self, handler: F) -> Self
+    pub fn on_question<F, Fut, Reply>(mut self, handler: F) -> Self
     where
         F: Fn(Question) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Answer> + Send + 'static,
+        Fut: Future<Output = Reply> + Send + 'static,
+        Reply: crate::QuestionReply,
     {
         self.builder = self.builder.on_question(handler);
         self

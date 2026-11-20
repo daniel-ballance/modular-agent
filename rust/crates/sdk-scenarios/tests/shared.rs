@@ -41,6 +41,29 @@ async fn in_process() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn crash_on_a_committed_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("crash-on-record.json");
+    let mut scenario = sdk_scenarios::load(
+        &sdk_scenarios::repo().join("conformance/sdk/scenarios/kept-crash.json"),
+    );
+    scenario["steps"][0]["crashWhen"] = serde_json::json!({"record":"toolStarted"});
+    // The crash may land before or after the effect, but it must be after the tool start.
+    scenario["steps"][1]["expect"]
+        .as_object_mut()
+        .unwrap()
+        .remove("count");
+    std::fs::write(&path, scenario.to_string()).unwrap();
+    let failures = sdk_scenarios::run(
+        &path,
+        &Placement::InProcess,
+        env!("CARGO_BIN_EXE_scenario-agent").as_ref(),
+    )
+    .await;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn served_by_every_sdk() {
     let require = std::env::var("MODULAR_AGENT_SDK_REQUIRE").unwrap_or_default();
     let required = |sdk: &str| require == "all" || require.split(',').any(|s| s.trim() == sdk);

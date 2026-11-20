@@ -41,7 +41,7 @@ pub use credentials::{
     environment_credentials, file_credentials,
 };
 pub use error::{Code, Error, Result};
-pub use events::{Event, Question, QuestionKind};
+pub use events::{Event, Question, QuestionKind, QuestionReply};
 pub use history::{
     ErasedEntry, ErasureReport, History, ServeHistoryOptions, SessionInfo, file_history,
     http_history, http_history_from_env, memory_history, serve_history,
@@ -51,7 +51,7 @@ pub use plugin::{Command, CommandContext, Plugin, Registrar, SessionPrepare, Too
 pub use provider::*;
 pub use serve::serve;
 pub use session::{
-    Actor, Disposition, EventStream, HandedBack, InputReceipt, Outcome, PromptOptions,
+    Actor, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome, PromptOptions,
     PromptResult, Rights, Session, Timing, ToolResult,
 };
 pub use tool::{

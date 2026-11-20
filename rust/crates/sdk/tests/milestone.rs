@@ -169,7 +169,8 @@ async fn nested_result_and_stale_context_in_both_placements() -> Result<()> {
         assert_eq!(texts, ["child result"], "wire={wire}");
         assert_eq!(
             session
-                .history()?
+                .history()
+                .await?
                 .iter()
                 .filter(|e| e["kind"] == "toolResult")
                 .count(),

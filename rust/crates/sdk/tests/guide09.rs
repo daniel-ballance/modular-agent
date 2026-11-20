@@ -50,7 +50,7 @@ async fn handoff(
         reopened.prompt("When is high tide there?").await?.text,
         "14:02."
     );
-    let history = reopened.history()?;
+    let history = reopened.history().await?;
     let actors: Vec<_> = history
         .iter()
         .filter(|entry| entry["kind"] == "input")

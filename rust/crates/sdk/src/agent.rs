@@ -7,7 +7,7 @@ use crate::{
     plugin::{InProcess, Plugin},
     provider::{Provider, ProviderPlugin},
     session::Session,
-    tool::{Answer, Tool},
+    tool::Tool,
 };
 use agent_api as base;
 use agent_harness::Harness;
@@ -454,12 +454,16 @@ impl AgentBuilder {
     }
     /// Answer questions for the local actor. While a handler is set, the local actor
     /// is present to answer; without one, an approval no one can answer is refused.
-    pub fn on_question<F, Fut>(mut self, handler: F) -> Self
+    pub fn on_question<F, Fut, Reply>(mut self, handler: F) -> Self
     where
         F: Fn(Question) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Answer> + Send + 'static,
+        Fut: Future<Output = Reply> + Send + 'static,
+        Reply: crate::QuestionReply,
     {
-        self.on_question = Some(Arc::new(move |q| Box::pin(handler(q))));
+        self.on_question = Some(Arc::new(move |q| {
+            let reply = handler(q);
+            Box::pin(async move { reply.await.into_answer() })
+        }));
         self
     }
     /// Load every part and check the composition. Nothing runs until this succeeds.

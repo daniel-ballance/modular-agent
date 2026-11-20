@@ -117,7 +117,10 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
             }
         }
         if history {
-            println!("{}", serde_json::to_string_pretty(&session.history()?)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&session.history().await?)?
+            );
         } else if let Some(text) = prompt {
             let result = session.prompt(text).await?;
             if mode != Mode::Json {

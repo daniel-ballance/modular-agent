@@ -134,7 +134,13 @@ impl ToolResult {
     }
 }
 
-/// Per-admission options for a prompt.
+/// Options for moving the current position.
+#[derive(Clone, Debug, Default)]
+pub struct MoveOptions {
+    pub rewind: bool,
+}
+
+/// Options for admitting a prompt.
 #[derive(Clone, Debug, Default)]
 pub struct PromptOptions {
     pub key: Option<String>,
@@ -364,10 +370,11 @@ impl Session {
 
     /// Override the agent handler for this session. Use a pending future if the UI
     /// will answer by id; the SDK drops it when the question settles.
-    pub fn on_question<F, Fut>(&self, handler: F) -> Result<()>
+    pub fn on_question<F, Fut, Reply>(&self, handler: F) -> Result<()>
     where
         F: Fn(crate::Question) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = crate::Answer> + Send + 'static,
+        Fut: std::future::Future<Output = Reply> + Send + 'static,
+        Reply: crate::QuestionReply,
     {
         self.require("answer")?;
         if self.actor != LOCAL {
@@ -376,12 +383,13 @@ impl Session {
                 "register handlers on the local session",
             ));
         }
-        self.inner
-            .hub
-            .session_handlers
-            .lock()
-            .unwrap()
-            .insert(self.id.clone(), Arc::new(move |q| Box::pin(handler(q))));
+        self.inner.hub.session_handlers.lock().unwrap().insert(
+            self.id.clone(),
+            Arc::new(move |q| {
+                let reply = handler(q);
+                Box::pin(async move { reply.await.into_answer() })
+            }),
+        );
         base::requests(self.inner.harness.as_ref())?.presence(&self.id, LOCAL, true);
         Ok(())
     }
@@ -473,11 +481,10 @@ impl Session {
         Ok(Box::pin(async_stream::try_stream! {
             let mut events = events;
             for (scope, time, row) in rows {
-                if let Some(view) = me.inner.harness.output(&scope, base::Output {
-                    recipient: "interface.sdk".into(), value: json!({"entry":row}), stream: None, end: true,
-                }).await? {
-                    cursor = row["id"].as_str().map(str::to_owned);
-                    yield Event::new(&scope, time, "entry", view);
+                let entry_id = row["id"].as_str().map(str::to_owned);
+                if let Some(view) = me.gate_entry(&scope, row).await? {
+                    cursor = entry_id;
+                    yield Event::new(&scope, time, "entry", json!({"entry":view}));
                 }
             }
             loop {
@@ -791,7 +798,7 @@ impl Session {
 
     /// Fork at a recorded entry, or at the current position.
     pub fn fork_with(&self, entry_id: Option<&str>) -> Result<Session> {
-        self.require("settings")?;
+        self.require("input")?;
         let data = self.snapshot()?;
         if entry_id.is_some_and(|id| !data.entries.iter().any(|e| e.id == id)) {
             return Err(Error::new(Code::NotFound, "unknown fork point"));
@@ -804,7 +811,10 @@ impl Session {
             inner: self.inner.clone(),
         };
         agent.attach(&id)?;
-        Ok(Session::new(self.inner.clone(), id))
+        Ok(Session {
+            actor: self.actor.clone(),
+            ..Session::new(self.inner.clone(), id)
+        })
     }
 
     /// The outcome of the session's most recent turn, as recorded.
@@ -870,17 +880,70 @@ impl Session {
         Ok(ToolResult::from_base(name.into(), result))
     }
 
-    /// The recorded entries, in the shared format, oldest first.
-    ///
-    /// Not yet the actor's gated view: every entry the session keeps.
-    pub fn history(&self) -> Result<Vec<Value>> {
-        self.require("watch")?;
-        let data = self.inner.harness.snapshot(&self.id)?;
-        data.entries
+    /// Move to a recorded entry without restoring the working environment.
+    pub async fn move_to(&self, entry_id: &str) -> Result<Vec<String>> {
+        self.move_to_with(entry_id, MoveOptions::default()).await
+    }
+
+    /// Move to a recorded entry, optionally restoring its saved working-environment point.
+    pub async fn move_to_with(&self, entry_id: &str, options: MoveOptions) -> Result<Vec<String>> {
+        self.require("settings")?;
+        let h = self.inner.harness.as_ref();
+        if !self
+            .snapshot()?
+            .entries
             .iter()
-            .filter(|e| e.writer != "rust.derived")
-            .map(|e| base::portable::public_entry(e, &data).map_err(Error::from))
-            .collect()
+            .any(|entry| entry.id == entry_id)
+        {
+            return Err(Error::new(Code::NotFound, "unknown position"));
+        }
+        if options.rewind {
+            if h.declaration()?["rewinding"] != true {
+                return Err(Error::new(
+                    Code::NotSupported,
+                    "working environment cannot rewind",
+                ));
+            }
+            return Ok(h.rewind(&self.scope(), entry_id.into()).await?);
+        }
+        h.move_position(&self.scope(), Some(entry_id.into()))?;
+        Ok(vec![])
+    }
+
+    /// This actor's gated view of the recorded entries, oldest first.
+    pub async fn history(&self) -> Result<Vec<Value>> {
+        self.require("watch")?;
+        let data = self.snapshot()?;
+        let mut rows = Vec::new();
+        for e in data.entries.iter().filter(|e| e.writer != "rust.derived") {
+            let row = base::portable::public_entry(e, &data)?;
+            if let Some(view) = self.gate_entry(&e.scope, row).await? {
+                rows.push(view);
+            }
+        }
+        Ok(rows)
+    }
+
+    async fn gate_entry(&self, scope: &base::Scope, row: Value) -> Result<Option<Value>> {
+        self.require("watch")?;
+        let scope = base::Scope {
+            actor: self.actor.clone(),
+            ..scope.clone()
+        };
+        Ok(self
+            .inner
+            .harness
+            .output(
+                &scope,
+                base::Output {
+                    recipient: "interface.sdk".into(),
+                    value: json!({"entry":row}),
+                    stream: None,
+                    end: true,
+                },
+            )
+            .await?
+            .and_then(|mut view| view.get_mut("entry").map(Value::take)))
     }
 
     /// List the commands available to the local actor.

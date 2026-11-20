@@ -120,7 +120,7 @@ async fn credentials_rejected_is_a_failed_model_attempt() -> Result<()> {
             session.prompt("try").await?.outcome.unwrap().kind(),
             "failed"
         );
-        let history = session.history()?;
+        let history = session.history().await?;
         assert!(
             history.iter().any(|e| e["message"]["stop"] == "failed"
                 && e["message"]["error"]["kind"] == "credentials"),

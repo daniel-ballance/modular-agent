@@ -7,7 +7,7 @@ use modular_agent::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 #[derive(Deserialize, JsonSchema)]
 struct Empty {}
@@ -76,11 +76,7 @@ async fn answers_a_choice_from_the_ui() -> Result<()> {
     let agent = test_agent()
         .approval(Approval::Ask)
         .tool(choose_palette())
-        .on_question(move |question| {
-            let (reply, answer) = oneshot::channel();
-            let _ = show.send((question, reply));
-            async move { answer.await.unwrap_or(Answer::Declined { reason: None }) }
-        })
+        .on_question(|_| std::future::ready(None::<Answer>))
         .script(json!([
             {"toolCalls": [{"name": "choose_palette", "input": {}}]},
             {"text": "Done."}
@@ -88,18 +84,29 @@ async fn answers_a_choice_from_the_ui() -> Result<()> {
         .build()
         .await?;
     let session = agent.session().await?;
+    session.on_question(move |question| {
+        let _ = show.send(question);
+        std::future::pending::<Answer>()
+    })?;
     let click = async {
-        let (question, reply) = ui.recv().await.unwrap();
+        let shown = ui.recv().await.unwrap();
+        let [question] = session.questions()?.try_into().expect("one open question");
+        let question: Question = question;
+        assert_eq!(question.id, shown.id);
         assert_eq!(question.session_id, session.id());
         assert_eq!(question.kind, QuestionKind::Choice);
         assert_eq!(question.options, ["light", "dark"]);
-        reply.send(Answer::Value("dark".into())).unwrap();
+        session
+            .answer(&question.id, Answer::Value("dark".into()))
+            .await
     };
-    let (turn, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (turn, answered) = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(session.prompt("Choose a palette."), click)
     })
     .await
     .expect("the question did not settle");
+    answered?;
     assert_eq!(turn?.tool_results()[0].text(), "Selected dark.");
+    assert!(session.questions()?.is_empty());
     agent.close().await
 }

@@ -199,7 +199,7 @@ async fn beacon_streams_and_records_failures() -> Result<()> {
                 turn.outcome,
                 Some(modular_agent::Outcome::Failed { .. })
             ));
-            let history = session.history()?;
+            let history = session.history().await?;
             let response = history.iter().find(|e| e["kind"] == "response").unwrap();
             assert_eq!(response["message"]["stop"], "failed");
             assert_eq!(response["message"]["error"]["kind"], "credentials");

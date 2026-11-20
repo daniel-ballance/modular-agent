@@ -442,6 +442,7 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
             let (_, session, _) = current.as_ref().unwrap();
             let kinds: Vec<String> = session
                 .history()
+                .await
                 .unwrap_or_default()
                 .iter()
                 .map(|e| e["kind"].as_str().unwrap_or_default().to_string())
@@ -521,11 +522,28 @@ fn crash_run(
             .strip_prefix("SESSION ")
             .ok_or(format!("no session id: {line:?}"))?
             .to_string();
-        let count = crash["count"]
-            .as_u64()
-            .ok_or("only crashWhen.count is supported yet")?;
+        let reached: Box<dyn Fn() -> bool> =
+            match (crash["count"].as_u64(), crash["record"].as_str()) {
+                (Some(count), None) => Box::new(move || fixtures::count(&run.counter()) >= count),
+                (None, Some(kind)) => {
+                    // FileHistory publishes an atomic snapshot only after committing the entry.
+                    let snapshot = run.data_dir().join("sessions").join(format!("{id}.json"));
+                    Box::new(move || {
+                        std::fs::read(&snapshot)
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                            .and_then(|v| {
+                                v["entries"]
+                                    .as_array()
+                                    .map(|entries| entries.iter().any(|e| e["kind"] == kind))
+                            })
+                            .unwrap_or(false)
+                    })
+                }
+                _ => return Err("crashWhen needs exactly one count or record".into()),
+            };
         let deadline = Instant::now() + Duration::from_secs(30);
-        while fixtures::count(&run.counter()) < count {
+        while !reached() {
             if Instant::now() > deadline {
                 return Err("the crash condition never held".into());
             }

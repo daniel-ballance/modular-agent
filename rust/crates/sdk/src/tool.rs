@@ -204,6 +204,12 @@ impl ToolOutput {
     }
 }
 
+impl From<Vec<Value>> for ToolOutput {
+    fn from(content: Vec<Value>) -> Self {
+        Self::from(String::new()).with_content(content)
+    }
+}
+
 impl From<String> for ToolOutput {
     fn from(text: String) -> Self {
         ToolOutput {

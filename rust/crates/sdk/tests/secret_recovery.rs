@@ -100,7 +100,7 @@ async fn secret_submission_survives_process_loss() -> Result<()> {
             .build()
             .await?;
         let session = agent.open_session(&id).await?;
-        let entries = session.history()?;
+        let entries = session.history().await?;
         assert!(!format!("{entries:?}").contains(VALUE));
         let answer = entries
             .iter()

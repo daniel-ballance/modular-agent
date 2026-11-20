@@ -143,6 +143,27 @@ impl Question {
     }
 }
 
+/// A handler may answer, decline by returning no answer, or fail.
+pub trait QuestionReply {
+    fn into_answer(self) -> Answer;
+}
+
+impl QuestionReply for Answer {
+    fn into_answer(self) -> Answer {
+        self
+    }
+}
+impl QuestionReply for Option<Answer> {
+    fn into_answer(self) -> Answer {
+        self.unwrap_or(Answer::Declined { reason: None })
+    }
+}
+impl QuestionReply for crate::Result<Answer> {
+    fn into_answer(self) -> Answer {
+        self.unwrap_or(Answer::Declined { reason: None })
+    }
+}
+
 pub(crate) type QuestionHandler = Arc<dyn Fn(Question) -> BoxFuture<'static, Answer> + Send + Sync>;
 
 /// The SDK's Interface: it hears every event and answers questions for the app.
@@ -256,7 +277,16 @@ impl base::EventSink for Hub {
                         reply = handler(Question::from_base(&q)) => reply,
                     };
                     let session = q.scope.session.clone();
-                    let _ = self::answer(h, &session, LOCAL, &q, answer).await;
+                    // If the handler supplied an invalid reply, decline instead of
+                    // stranding the tool with a waiting question. A competing
+                    // manual reply or pending secret activation is unaffected.
+                    if let Err(error) = self::answer(h.clone(), &session, LOCAL, &q, answer).await
+                        && error.code() == crate::Code::InvalidParams
+                    {
+                        let _ =
+                            self::answer(h, &session, LOCAL, &q, Answer::Declined { reason: None })
+                                .await;
+                    }
                 });
             }
         }
