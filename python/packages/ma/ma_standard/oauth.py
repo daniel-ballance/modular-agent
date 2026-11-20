@@ -2,7 +2,9 @@
 
 import asyncio
 import base64
-from collections.abc import Callable
+from collections.abc import AsyncIterable, AsyncIterator, Callable
+from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
@@ -20,7 +22,20 @@ from .auth import AuthFile, OAuth, now_ms
 from .config import claude_launch
 
 type Vendor = Literal["openai-codex", "xai"]
-type Show = Callable[[str, str | None], None]
+
+
+@dataclass(frozen=True)
+class Step:
+    address: str = ""
+    code: str | None = None
+    note: str | None = None
+    open_and_paste: bool = False
+
+
+type Show = Callable[[Step], None]
+
+# Pi's value is a placeholder until the services accept this client's own name.
+CLIENT_IDENTITY = "pi"
 LABELS = {"openai-codex": "ChatGPT subscription", "xai": "Grok subscription"}
 CODEX = "https://auth.openai.com"
 XAI = "https://auth.x.ai"
@@ -31,6 +46,31 @@ CLIENTS: dict[Vendor, str] = {
 SCOPE = "openid profile email offline_access"
 REDIRECT = "http://localhost:1455/auth/callback"
 WAIT = 900
+
+
+def pasted_code(line: str, state: str) -> str | None:
+    """Read a redirect address, its query, code#state or a bare code."""
+    text = line.strip()
+    if not text:
+        return None
+    _, question, query = text.partition("?")
+    if question or "code=" in text:
+        fields = parse_qs(query.partition("#")[0] if question else text, keep_blank_values=True)
+        if question and "error" in fields:
+            detail = fields.get("error_description", fields["error"])[0]
+            raise ValueError(f"the sign-in was not completed: {detail}")
+        code = fields.get("code", [""])[0]
+        found = fields["state"][0] if "state" in fields else None
+    else:
+        code, marker, tail = text.partition("#")
+        found = tail if marker else None
+    if found is not None and found != state:
+        raise ValueError(
+            "that address is from a different sign-in; paste the one from this sign-in"
+        )
+    if not code:
+        raise ValueError("no code found in what was pasted")
+    return code
 
 
 def account(access: str) -> str:
@@ -150,7 +190,7 @@ async def _device(client: AsyncClient, vendor: Vendor, show: Show) -> OAuth:
             data={
                 "client_id": CLIENTS[vendor],
                 "scope": SCOPE + " grok-cli:access api:access",
-                "referrer": "pi",
+                "referrer": CLIENT_IDENTITY,
             },
             headers={"Accept": "application/json"},
         )
@@ -175,7 +215,7 @@ async def _device(client: AsyncClient, vendor: Vendor, show: Show) -> OAuth:
     )
     if not address.startswith("https://"):
         raise ValueError("the Grok sign-in gave an address that is not https")
-    show(address, code)
+    show(Step(address, code))
     interval = _interval(data)
     expiry = data.get("expires_in")
     try:
@@ -230,7 +270,9 @@ async def _device(client: AsyncClient, vendor: Vendor, show: Show) -> OAuth:
         raise ValueError("the sign-in was not completed in time") from None
 
 
-async def _browser(client: AsyncClient, show: Show, port: int = 1455) -> OAuth:
+async def _browser(
+    client: AsyncClient, show: Show, port: int = 1455, pasted: AsyncIterable[str] | None = None
+) -> OAuth:
     state, verifier = secrets.token_urlsafe(16), secrets.token_urlsafe(32)
     challenge = (
         base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
@@ -280,11 +322,24 @@ async def _browser(client: AsyncClient, show: Show, port: int = 1455) -> OAuth:
             writer.close()
             await writer.wait_closed()
 
-    server = await asyncio.start_server(callback, "127.0.0.1", port)
+    try:
+        server = await asyncio.start_server(callback, "127.0.0.1", port)
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            raise
+        if pasted is None:
+            show(
+                Step(
+                    note="Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead."
+                )
+            )
+            return await _device(client, "openai-codex", show)
+        server = None
+        show(Step(note="Port 1455 is in use, so paste the address the browser comes back to."))
     redirect = (
-        REDIRECT
-        if port == 1455
-        else f"http://localhost:{server.sockets[0].getsockname()[1]}/auth/callback"
+        f"http://localhost:{server.sockets[0].getsockname()[1]}/auth/callback"
+        if server is not None and port != 1455
+        else REDIRECT
     )
     params = urlencode(
         {
@@ -297,47 +352,114 @@ async def _browser(client: AsyncClient, show: Show, port: int = 1455) -> OAuth:
             "state": state,
             "id_token_add_organizations": "true",
             "codex_cli_simplified_flow": "true",
-            "originator": "pi",
+            "originator": CLIENT_IDENTITY,
         }
     )
-    async with server:
-        show(CODEX + "/oauth/authorize?" + params, None)
+
+    async def read_paste(lines: AsyncIterable[str]) -> None:
+        try:
+            async for line in lines:
+                if done.done():
+                    return
+                try:
+                    code = pasted_code(line, state)
+                except ValueError as exc:
+                    show(Step(note=f"{exc}. Paste it again."))
+                    continue
+                if code is not None:
+                    done.set_result(code)
+                    return
+        except Exception as exc:
+            if not done.done():
+                done.set_exception(exc)
+
+    paste_task = None
+    try:
+        show(Step(CODEX + "/oauth/authorize?" + params, open_and_paste=pasted is not None))
+        if pasted is not None:
+            paste_task = asyncio.create_task(read_paste(pasted))
         try:
             code = await asyncio.wait_for(done, WAIT)
         except TimeoutError:
             raise ValueError("the sign-in was not completed in time") from None
+    finally:
+        if server is not None:
+            server.close()
+            server.close_clients()
+        if paste_task is not None:
+            paste_task.cancel()
+            await asyncio.gather(paste_task, return_exceptions=True)
+        if server is not None:
+            await server.wait_closed()
     return await _exchange(client, code, verifier, redirect)
 
 
-async def sign_in(vendor: Vendor, device: bool, show: Show) -> OAuth:
+async def sign_in(
+    vendor: Vendor, device: bool, show: Show, pasted: AsyncIterable[str] | None = None
+) -> OAuth:
     async with AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
         if vendor == "xai" or device:
             return await _device(client, vendor, show)
+        return await _browser(client, show, pasted=pasted)
+
+
+async def _terminal_lines(fd: int) -> AsyncIterator[str]:
+    # Wait for input without blocking the event loop or leaving a worker on stdin.
+    loop = asyncio.get_running_loop()
+    pending = b""
+    while True:
+        ready = asyncio.Event()
+        loop.add_reader(fd, ready.set)
         try:
-            return await _browser(client, show)
-        except OSError as exc:
-            if exc.errno not in {98, 48, 13}:
-                raise
-            print(
-                "Could not open the local sign-in callback. Trying device sign-in.", file=sys.stderr
-            )
-            return await _device(client, vendor, show)
+            await ready.wait()
+            chunk = os.read(fd, 4096)
+        finally:
+            loop.remove_reader(fd)
+        if not chunk:
+            if pending:
+                yield pending.decode(errors="replace")
+            return
+        *lines, pending = (pending + chunk).split(b"\n")
+        for line in lines:
+            yield line.decode(errors="replace")
 
 
-def _show(address: str, code: str | None) -> None:
-    if code:
+def _show(step: Step) -> None:
+    if step.note is not None:
+        print(step.note, file=sys.stderr)
+        return
+    address, code = step.address, step.code
+    if step.open_and_paste:
+        print(
+            f"Open this address in a browser, on this machine or any other:\n\n  {address}\n",
+            file=sys.stderr,
+        )
+    elif code:
         print(
             f"Open this address in a browser:\n\n  {address}\n\nand enter the code: {code}\n",
             file=sys.stderr,
         )
     else:
         print(f"Open this address in a browser to sign in:\n\n  {address}\n", file=sys.stderr)
-    if address.startswith("https://") and "MA_NO_BROWSER" not in os.environ:
+    if (
+        address.startswith("https://")
+        and not ({"MA_NO_BROWSER", "SSH_CONNECTION", "SSH_TTY"} & os.environ.keys())
+        and ({"DISPLAY", "WAYLAND_DISPLAY"} & os.environ.keys())
+    ):
         try:
             webbrowser.open(address)
         except (OSError, webbrowser.Error):
             pass
-    print("Waiting for the sign-in to finish...", file=sys.stderr)
+    if step.open_and_paste:
+        print(
+            "After you sign in, the browser goes to a localhost address. If the browser is on this\n"
+            "machine, that finishes the sign-in. Otherwise the page will not load: copy the whole\n"
+            "address from the browser's address bar and paste it here.\n",
+            file=sys.stderr,
+        )
+        print("Paste the address (or the code): ", end="", file=sys.stderr, flush=True)
+    else:
+        print("Waiting for the sign-in to finish...", file=sys.stderr)
 
 
 async def account_command(
@@ -392,5 +514,10 @@ async def account_command(
         await auth.set_login(provider, None)
         print(f"Signed out of {LABELS[provider]}.", file=sys.stderr)
     else:
-        await auth.set_login(provider, await sign_in(cast(Vendor, provider), device, _show))
+        pasted = (
+            _terminal_lines(sys.stdin.fileno())
+            if provider == "openai-codex" and not device and sys.stdin.isatty()
+            else None
+        )
+        await auth.set_login(provider, await sign_in(cast(Vendor, provider), device, _show, pasted))
         print(f"Signed in to {LABELS[provider]} ({provider}).", file=sys.stderr)
