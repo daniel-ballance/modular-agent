@@ -6,9 +6,22 @@ use std::{
 };
 use tokio::io::AsyncReadExt;
 mod containment;
+mod git_points;
 mod points;
+/// Where the local environment keeps saved points for rewinding.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PointStore {
+    /// A copy of the whole project in a temporary folder, kept in this process
+    /// only. For test builds with small projects.
+    #[default]
+    Copy,
+    /// Commits in the project's git repository, under `refs/modular-agent/`.
+    /// Only projects inside a git work tree have points.
+    Git,
+}
 pub struct LocalPlugin {
     pub state: PathBuf,
+    pub points: PointStore,
 }
 pub struct ServedEnvironment {
     pub state: PathBuf,
@@ -16,6 +29,7 @@ pub struct ServedEnvironment {
 pub struct LocalEnvironment {
     state: PathBuf,
     keep_background: bool,
+    store: PointStore,
     points: Arc<points::Points>,
     background: std::sync::Mutex<std::collections::BTreeMap<String, Vec<containment::Command>>>,
 }
@@ -55,7 +69,7 @@ impl Plugin for LocalPlugin {
         "environment.local"
     }
     fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        install(r, &self.state, false)
+        install(r, &self.state, false, self.points)
     }
 }
 impl Plugin for ServedEnvironment {
@@ -63,10 +77,15 @@ impl Plugin for ServedEnvironment {
         "environment.local"
     }
     fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        install(r, &self.state, true)
+        install(r, &self.state, true, PointStore::Copy)
     }
 }
-fn install(r: &mut Registrar<'_>, state: &Path, keep_background: bool) -> Result<()> {
+fn install(
+    r: &mut Registrar<'_>,
+    state: &Path,
+    keep_background: bool,
+    store: PointStore,
+) -> Result<()> {
     // Adopt and reap shell grandchildren instead of leaving zombies to PID 1.
     // https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
     ensure!(
@@ -79,6 +98,7 @@ fn install(r: &mut Registrar<'_>, state: &Path, keep_background: bool) -> Result
         Arc::new(LocalEnvironment {
             state: state.into(),
             keep_background,
+            store,
             points: Arc::default(),
             background: Default::default(),
         }),
@@ -107,26 +127,50 @@ impl WorkingEnvironment for LocalEnvironment {
     fn declaration(&self) -> Value {
         json!({"local":true,"rewinding":true,"stops_commands_after_sigkill":true,"escaped_process_groups":true,"normal_cleanup":true,"containment":"linux-ptrace-exitkill","startup_cleanup":true})
     }
+    fn keeps_points(&self, project: &Path) -> bool {
+        match self.store {
+            PointStore::Copy => true,
+            PointStore::Git => git_points::available(project, &self.state),
+        }
+    }
     async fn save_point(&self, session: &str, project: &Path) -> Result<String> {
-        let (points, session, project, state) = (
+        let (points, store, session, project, state) = (
             self.points.clone(),
+            self.store,
             session.to_owned(),
             project.to_owned(),
             self.state.clone(),
         );
-        tokio::task::spawn_blocking(move || points.save(&session, &project, &state)).await?
+        tokio::task::spawn_blocking(move || match store {
+            PointStore::Copy => points.save(&session, &project, &state),
+            PointStore::Git => git_points::save(&session, &project, &state),
+        })
+        .await?
     }
     async fn check_point(&self, session: &str, project: &Path, point: &str) -> Result<bool> {
-        self.points.check(session, project, point)
+        match self.store {
+            PointStore::Copy => self.points.check(session, project, point),
+            PointStore::Git => {
+                let (session, project, point) =
+                    (session.to_owned(), project.to_owned(), point.to_owned());
+                tokio::task::spawn_blocking(move || git_points::check(&session, &project, &point))
+                    .await?
+            }
+        }
     }
     async fn restore_point(&self, session: &str, project: &Path, point: &str) -> Result<()> {
-        let (points, session, project, point) = (
+        let (points, store, session, project, point) = (
             self.points.clone(),
+            self.store,
             session.to_owned(),
             project.to_owned(),
             point.to_owned(),
         );
-        tokio::task::spawn_blocking(move || points.restore(&session, &project, &point)).await?
+        tokio::task::spawn_blocking(move || match store {
+            PointStore::Copy => points.restore(&session, &project, &point),
+            PointStore::Git => git_points::restore(&session, &project, &point),
+        })
+        .await?
     }
     async fn read_bytes(&self, project: &Path, name: &str) -> Result<Vec<u8>> {
         Ok(tokio::fs::read(path(project, name)).await?)

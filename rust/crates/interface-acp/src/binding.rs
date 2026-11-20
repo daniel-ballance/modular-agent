@@ -32,8 +32,14 @@ pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
     let d = api.declaration()?;
     let mut keeps_state = d["provider_state"] == true;
     let mut runs_tools = d["provider_tools"] == true;
+    let mut rewinding = d["rewinding"] == true;
     if let Some(session) = session {
-        let model = api.snapshot(session)?.settings["model"].clone();
+        let data = api.snapshot(session)?;
+        // Points can depend on the session's project, such as being in git.
+        if let Ok(env) = capability::<dyn WorkingEnvironment>(api, "environment") {
+            rewinding = env.keeps_points(&data.project);
+        }
+        let model = data.settings["model"].clone();
         for key in api.capability_names("provider.") {
             for info in capability::<dyn Provider>(api, &key)?.catalog() {
                 if info.name == model {
@@ -53,7 +59,7 @@ pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
         "inputDuringTurn":d["runtime"]["input_during_turn"] == true,
         "waitingThroughRestart":d["runtime"]["waits_through_restart"] == true,
         "continuesAfterRestart":d["runtime"]["continues_after_restart"] == true,
-        "rewinding":d["rewinding"] == true, "forking":d["forking"] == true,
+        "rewinding":rewinding, "forking":d["forking"] == true,
         "keepsStateAtProvider":keeps_state, "runsToolsAtProvider":runs_tools,
         "liveSessions":d["live_sessions"] == true, "severalActors":d["several_actors"] == true,
         "holdsOutput":d["holds_output"] == true, "outputBypassesAgent":d["output_bypass"] == true,

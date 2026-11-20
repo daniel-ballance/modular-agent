@@ -139,14 +139,15 @@ const checks = [
   {
     name: "declaration",
     about: "ma --declaration prints the declaration the standard configuration publishes, as one JSON object.",
+    git: true,
     script: [],
     runs: [{ args: ["--declaration"], expect: { exit: 0, json: (d, ok) => {
       const want = {
         inputDuringTurn: true, continuesAfterRestart: true, waitingThroughRestart: true, questionsOutlastTurns: true,
         lateAnswersStartTurns: true, startsTurnsUnasked: "jobReports", queuedInputAfterRestart: "handedBack",
         queuedJobReportsAfterRestart: "run", settingsDuringTurn: "refused", erasureDuringTurn: "refused",
-        movingWithUnfinishedWork: "refused", mixedActorInput: "refused", rewinding: true, forking: true, erasure: true,
-        portableSessions: true, nestedToolCalls: true, inputKeys: true, commandContainment: "strong", confinesFiles: false,
+        movingWithUnfinishedWork: "refused", mixedActorInput: "refused", forking: true, erasure: true,
+        portableSessions: true, nestedToolCalls: true, rewinding: true, inputKeys: true, commandContainment: "strong", confinesFiles: false,
         severalActors: false, sessionLimits: false, tenants: false, holdsOutput: false, outputBypassesAgent: false,
         cancellingTurnCancelsJobs: false, pluginsDuringSession: false, keepsStateAtProvider: false,
         runsToolsAtProvider: false, liveSessions: false,
@@ -154,6 +155,29 @@ const checks = [
       for (const [k, v] of Object.entries(want)) ok(d?.[k] === v, `${k} is ${JSON.stringify(v)}`, d?.[k]);
       ok(d?.projectRoot === undefined, "projectRoot is omitted", d?.projectRoot);
     } } }],
+  },
+  {
+    name: "points-in-git",
+    about: "In a git project, a turn saves a point under refs/modular-agent/ and leaves HEAD, the index and git log alone.",
+    git: true,
+    files: { "project/tracked.txt": "one\n" },
+    script: [{ text: "ok" }],
+    runs: [{ args: ["-p", "Hi."], expect: { stdout: "ok", exit: 0 } }],
+    after: (t, ok) => {
+      const refs = gitOut(t.project, ["for-each-ref", "--format=%(refname)", "refs/modular-agent/points/"]).split("\n").filter(Boolean);
+      ok(refs.length >= 1, "a point was saved under refs/modular-agent/points/", refs);
+      ok(gitOut(t.project, ["rev-parse", "--verify", "-q", "HEAD"]) === "", "no commit was made on a branch");
+      ok(gitOut(t.project, ["status", "--porcelain"]).includes("?? tracked.txt"), "the person's index is untouched", gitOut(t.project, ["status", "--porcelain"]));
+    },
+  },
+  {
+    name: "points-outside-git",
+    about: "Outside a git work tree there are no points: rewinding is false and nothing is said about it.",
+    script: [{ text: "ok" }],
+    runs: [
+      { args: ["-p", "Hi."], expect: { stdout: "ok", exit: 0, stderrLacks: "saved point" } },
+      { args: ["--declaration"], expect: { exit: 0, json: (d, ok) => ok(d?.rewinding === false, "rewinding is false", d?.rewinding) } },
+    ],
   },
   {
     name: "prompt-tail",
@@ -194,6 +218,7 @@ const checks = [
 // ---------- running ----------
 
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const gitOut = (dir, args) => { const r = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" }); return r.status === 0 ? r.stdout.trim() : ""; };
 const last = (req, role) => (req?.messages ?? []).filter((m) => m.role === role).at(-1);
 
 function runOnce(command, t, run) {
@@ -234,6 +259,7 @@ async function runCheck(command, check) {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
     writeFileSync(join(dir, path), typeof content === "function" ? content() : content);
   }
+  if (check.git) spawnSync("git", ["init", "-q", t.project], { stdio: "ignore" });
   writeFileSync(t.scriptFile, JSON.stringify(check.script));
   const failures = [];
   const ok = (cond, what, got) => { if (!cond) failures.push(got === undefined ? what : `${what}: got ${JSON.stringify(got)}`); };
@@ -246,6 +272,7 @@ async function runCheck(command, check) {
     if (e.exit !== undefined) ok(r.exit === e.exit, `${where}: exit status ${e.exit}`, `${r.exit}; stderr: ${r.stderr.slice(-500)}`);
     if (e.stdout !== undefined) ok(out === e.stdout, `${where}: stdout ${JSON.stringify(e.stdout)}`, out.slice(-300));
     if (e.stdoutContains) ok(out.includes(e.stdoutContains), `${where}: stdout contains ${e.stdoutContains}`, out.slice(-300));
+    if (e.stderrLacks) ok(!r.stderr.includes(e.stderrLacks), `${where}: stderr does not mention ${JSON.stringify(e.stderrLacks)}`, r.stderr.slice(-300));
     if (e.stdoutMatches) ok(e.stdoutMatches.test(out), `${where}: stdout matches ${e.stdoutMatches}`, out.slice(-300));
     if (e.json) { let v; try { v = JSON.parse(out); } catch { ok(false, `${where}: stdout is one JSON object`, out.slice(0, 300)); } if (v !== undefined) e.json(v, (c, w, g) => ok(c, `${where}: ${w}`, g)); }
     if (e.jsonLines) { let v; try { v = out.split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { ok(false, `${where}: every stdout line is JSON`, out.slice(0, 300)); } if (v) e.jsonLines(v, (c, w, g) => ok(c, `${where}: ${w}`, g)); }
@@ -256,6 +283,7 @@ async function runCheck(command, check) {
       else ok(got === want, `${where}: ${path} is ${JSON.stringify(want)}`, got ?? "(missing)");
     }
   }
+  if (check.after) check.after(t, (c, w, g) => ok(c, `after: ${w}`, g));
   if (check.log) {
     const log = existsSync(t.logFile) ? readFileSync(t.logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
     check.log(log, (c, w, g) => ok(c, `requests: ${w}`, g), t);

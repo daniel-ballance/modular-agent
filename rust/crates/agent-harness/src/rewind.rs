@@ -100,11 +100,8 @@ impl Harness {
         require(self, scope, "settings")?;
         let env: Arc<dyn WorkingEnvironment> =
             capability(self, "environment").map_err(|_| RewindError::NotSupported)?;
-        ensure!(
-            env.declaration()["rewinding"] == true,
-            RewindError::NotSupported
-        );
         let (_reservation, data) = self.reserve_rewind(&scope.session)?;
+        ensure!(env.keeps_points(&data.project), RewindError::NotSupported);
         let branch = data.branch();
         let i = branch
             .iter()
@@ -255,7 +252,7 @@ impl Harness {
     pub(super) async fn recover_rewind(&self, scope: &Scope) -> Result<()> {
         let env: Arc<dyn WorkingEnvironment> = capability(self, "environment")?;
         ensure!(
-            env.declaration()["rewinding"] == true,
+            env.keeps_points(&self.snapshot(&scope.session)?.project),
             "cannot recover rewind without environment points"
         );
         // A successful compensation is safe to reopen, even though the original

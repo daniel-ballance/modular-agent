@@ -420,6 +420,11 @@ pub fn is_file_not_found(error: &anyhow::Error) -> bool {
 }
 #[async_trait]
 pub trait WorkingEnvironment: Send + Sync {
+    /// Whether this environment can save points for this project. Most
+    /// environments answer the same for every project, from their declaration.
+    fn keeps_points(&self, _project: &Path) -> bool {
+        self.declaration()["rewinding"] == true
+    }
     async fn save_point(&self, _session: &str, _project: &Path) -> Result<String> {
         bail!("saved points are not supported")
     }

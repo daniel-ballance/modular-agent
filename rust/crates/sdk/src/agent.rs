@@ -482,6 +482,7 @@ impl AgentBuilder {
                 Some(environment) => Arc::new(environment),
                 None => Arc::new(environment_local::LocalPlugin {
                     state: state.join("commands"),
+                    points: environment_local::PointStore::Git,
                 }),
             },
             runtime,

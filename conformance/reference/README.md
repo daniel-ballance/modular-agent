@@ -26,6 +26,8 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `durable-crash` | After `kill -9` during a command in code, the turn carries on and nothing runs twice |
 | `transient-crash` | With `--runtime transient`, the turn fails and nothing runs twice |
 | `declaration` | `ma --declaration` prints the description's declaration as one JSON object |
+| `points-in-git` | In a git project a turn saves a point under `refs/modular-agent/`, without touching `HEAD`, the index or `git log` |
+| `points-outside-git` | Outside git, `rewinding` is false and nothing is printed about points |
 | `prompt-tail` | The prompt ends with `<cwd>` and then `<date>` |
 | `json-events` | `--json` prints SDK-shaped events, ending with `turnEnded` |
 | `models` | `ma models` lists the scripted model |

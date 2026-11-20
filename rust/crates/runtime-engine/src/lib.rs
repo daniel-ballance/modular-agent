@@ -477,7 +477,9 @@ impl Engine {
                 let (source, definition) = registration.as_ref().unwrap();
                 let mut start = json!({"call":changed,"safeToRepeat":repeat,"openWorld":definition.open_world(),
                     "source":source,"definition":wire::registered_definition(definition)});
-                if scope.turn.is_none() && environment.declaration()["rewinding"] == true {
+                if scope.turn.is_none()
+                    && environment.keeps_points(&api.snapshot(&scope.session)?.project)
+                {
                     match environment
                         .save_point(&scope.session, &api.snapshot(&scope.session)?.project)
                         .await

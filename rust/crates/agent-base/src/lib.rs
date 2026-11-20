@@ -55,6 +55,7 @@ async fn compose_with(
         }),
         Arc::new(environment_local::LocalPlugin {
             state: command_state,
+            points: environment_local::PointStore::Copy,
         }),
         Arc::new(tools_builtin::BuiltinTools),
         Arc::new(tools_mcp::McpPlugin::default()),

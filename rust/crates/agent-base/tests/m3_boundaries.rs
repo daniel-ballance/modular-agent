@@ -97,6 +97,7 @@ async fn ui_tool_calls_do_not_need_a_provider_or_model_selection() {
         .unwrap();
     h.load(Arc::new(environment_local::LocalPlugin {
         state: root.path().join("commands"),
+        points: environment_local::PointStore::Copy,
     }))
     .await
     .unwrap();

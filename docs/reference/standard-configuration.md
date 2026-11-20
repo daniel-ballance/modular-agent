@@ -123,6 +123,16 @@ The inputs, limits and wording are Pi's, as the Rust `tools-files` crate has the
 
 The session setting `model_tools` holds the names offered to the model, `["codemode"]` by default. `null` offers every tool that allows the model as a caller: `codemode`, the six tools and the MCP tools.
 
+## Rewind points
+
+Moving back in a session with `rewind` also puts the project's files back as they were. That needs a saved point at the start of each turn. The local working environment keeps points in the project's git repository:
+
+- **What a point holds:** a commit of the project's files as they are on disk, tracked and untracked, except those git ignores. It is written with a private index: the person's own index, `HEAD` and branches are never touched, and no commit appears in `git log`.
+- **Where:** under `refs/modular-agent/points/<session>/<point>` in the repository. Git keeps it through `gc`, and it survives the agent's restart. Unchanged files cost nothing; new untracked files are stored once.
+- **Restoring** writes back every file the point has and removes files made since, within the project only. Ignored files, such as build output, are left alone. The files as they were just before are kept under `refs/modular-agent/recovery/` until the restore succeeds.
+- **No git, no points.** A project outside a git work tree, or one that holds the agent's own state folder (such as a home folder), has no points: its sessions declare `rewinding: false`, and `ma` says nothing about it.
+- **Removing them:** `git for-each-ref --format='%(refname)' refs/modular-agent/ | xargs -r -n1 git update-ref -d`, then `git gc`.
+
 ## Prompt, skills and MCP
 
 - **The prompt** has Pi's structure, in this order: the rules, the global `AGENTS.md`, project `AGENTS.md` (or `CLAUDE.md`) files from the outermost folder in, the skills listing, the `codemode` functions, a `<cwd>` section with the absolute working folder, and a `<date>` section with the local date as `YYYY-MM-DD`.
@@ -145,7 +155,8 @@ With the durable Runtime on Linux, every implementation declares the same values
 | `queuedInputAfterRestart` | `handedBack` | | `queuedJobReportsAfterRestart` | `run` |
 | `settingsDuringTurn` | `refused` | | `erasureDuringTurn` | `refused` |
 | `movingWithUnfinishedWork` | `refused` | | `mixedActorInput` | `refused` |
-| `rewinding`, `forking`, `erasure`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` |
+| `rewinding` | true when the session's project is in a git work tree ([rewind points](#rewind-points)); false otherwise |
+| `forking`, `erasure`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` |
 | `confinesFiles`, `severalActors`, `sessionLimits`, `tenants`, `holdsOutput`, `outputBypassesAgent`, `cancellingTurnCancelsJobs`, `pluginsDuringSession`, `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | false | | `projectRoot` | omitted |
 
 These are what the Rust implementation declares. An implementation that cannot meet one declares what it does meet, and the difference is a gap to close, not a choice.

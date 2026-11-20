@@ -3,7 +3,7 @@
 // Usage: node run.mjs [--verbose] [options] -- <agent command> [args...] [--then <second agent command> [args...]]
 // The agent is started in conformance mode, with a fresh data folder and project, and driven with the
 // official ACP client library. No external model. Service options use a disposable history service.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual as equal } from "node:util";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -95,6 +95,9 @@ const sessionsUsed = [];
 const tenantRights = ["watch", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 const TENANTS = JSON.stringify({ "kit-readonly": { rights: ["watch", "input", "answer", "settings"] }, "kit-no-cancel": { rights: tenantRights.filter((right) => right !== "cancel") }, "kit-broke": { rights: tenantRights, tokens: 0 }, "kit-latch": { rights: tenantRights, tokens: 1 }, "kit-race": { rights: tenantRights, tokens: 1 } });
 const project = mkdtempSync(join(tmpdir(), "ma-conf-project-"));
+// A git work tree, so an environment that keeps points in git can declare rewinding
+// here. An environment that copies the project copies .git with it, unchanged.
+spawnSync("git", ["init", "-q", project], { stdio: "ignore" });
 const results = [];
 const children = [];
 
