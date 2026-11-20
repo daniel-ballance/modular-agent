@@ -121,3 +121,23 @@ async def test_a_late_answer_resumes_a_tool_in_a_new_turn(served):
         await session.answer(questions[0].id, Answer("value", "notes.md"))
         await session.wait_idle()
         assert (await session.last_turn()).text == "continued"
+
+
+@pytest.mark.parametrize("served", [False, True])
+async def test_scoped_environment_bytes_listing_and_exec(tmp_path, served):
+    async def roundtrip(arguments, context):
+        await context.environment.write("test.txt", b"hello\n")
+        data = await context.environment.read("test.txt")
+        entries = await context.environment.list(".")
+        result = await context.environment.exec("printf hello")
+        return f"{data.decode().strip()} {entries[0]['name']} {result['text']}"
+
+    t = Tool.from_schema("roundtrip", "Exercise scoped file access", {"type": "object"}, roundtrip)
+    part = Plugin("scoped", tools=[t])
+    async with create_agent(
+        project=tmp_path, plugins=[over_wire(part) if served else part], local_process_groups=True
+    ) as agent:
+        session = await agent.session()
+        result = await session.call_tool("roundtrip", {})
+        assert result.text() == "hello test.txt hello"
+        assert (tmp_path / "test.txt").read_bytes() == b"hello\n"

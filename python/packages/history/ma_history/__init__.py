@@ -126,10 +126,12 @@ class History(Plugin):
                 {
                     "id": sid,
                     "project": p,
-                    "position": json.loads(meta)["position"],
+                    "position": state["position"],
+                    "model": state.get("settings", {}).get("model"),
                     "lastActivity": json.loads(last or "{}").get("time", 0),
                 }
                 for sid, p, meta, last in rows
+                for state in [json.loads(meta)]
                 if project is None or p == project
             ]
 

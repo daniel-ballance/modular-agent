@@ -20,7 +20,7 @@ from modular_agent.files import file_tools
 from modular_agent.testing import memory_environment, scripted_provider, test_agent as offline_agent
 from ma_standard import oauth, prompt, responses
 from ma_standard.auth import ApiKey, AuthFile, OAuth
-from ma_standard.code import code_tool
+from ma_standard.code import code_tool, functions, prompt as function_prompt
 from ma_standard.config import Paths
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -273,6 +273,10 @@ async def test_responses_refresh_retry_and_stream(
             {"type": "response.output_text.delta", "delta": "hello"},
             {
                 "type": "response.output_item.done",
+                "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-fixture"},
+            },
+            {
+                "type": "response.output_item.done",
                 "item": {"type": "message", "content": [{"type": "output_text", "text": "hello"}]},
             },
             {
@@ -290,7 +294,7 @@ async def test_responses_refresh_retry_and_stream(
         monkeypatch.setattr(oauth, "CODEX" if vendor == "openai-codex" else "XAI", url)
         monkeypatch.setitem(responses.ENDPOINTS, vendor, url + "/responses")
         provider = responses.Responses(vendor, auth, tmp_path / "models.json")
-        await asyncio.gather(
+        first, _ = await asyncio.gather(
             *[
                 provider.request(
                     ModelRef(vendor, vendors_model),
@@ -307,16 +311,35 @@ async def test_responses_refresh_retry_and_stream(
                 for _ in range(2)
             ]
         )
+        assert first["providerData"] == [
+            {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-fixture"}
+        ]
+        await provider.request(
+            ModelRef(vendor, vendors_model),
+            {
+                "systemPrompt": "instructions",
+                "settings": {"reasoning": "high", "maxOutput": 25},
+                "messages": [
+                    first,
+                    {"role": "user", "content": [{"type": "text", "text": "next"}]},
+                ],
+                "tools": [],
+            },
+            ProviderContext("session-abc", "user", sink, lambda: None),
+        )
     token_requests = [body for path, _, body in requests if path.endswith("/token")]
     assert len(token_requests) == 1 and parse_qs(token_requests[0].decode())["refresh_token"] == [
         "old-refresh"
     ]
     assert isinstance(login := auth.login(vendor), OAuth) and login.refresh == "rotated"
-    assert len(emitted) == 2 and emitted[0]["event"] == {"type": "text", "delta": "hello"}
+    assert len(emitted) == 3 and emitted[0]["event"] == {"type": "text", "delta": "hello"}
     _, headers, body = requests[-1]
     request = json.loads(body)
     assert request["include"] == ["reasoning.encrypted_content"]
     assert headers["authorization"] == "Bearer " + actual
+    assert {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-fixture"} in request[
+        "input"
+    ]
     if vendor == "openai-codex":
         assert request["instructions"] == "instructions" and "max_output_tokens" not in request
         assert headers["chatgpt-account-id"] == "loopback-account" and headers["originator"] == "pi"
@@ -372,6 +395,60 @@ async def test_monty(tmp_path: Path, code: str, limits: dict, status: str, conta
     [tool] = result.tool_results()
     assert tool.status == status, tool.text()
     assert contains.lower() in tool.text().lower()
+
+
+async def test_codemode_lookups_do_not_spend_nested_calls(tmp_path: Path) -> None:
+    script = [
+        {
+            "toolCalls": [
+                {
+                    "name": "codemode",
+                    "input": {
+                        "code": "for i in range(501):\n    describe_tool('read')\n    search_tools('read')\nfor i in range(3):\n    tools.read('in', None, 1)\ntools.read('in')"
+                    },
+                }
+            ]
+        },
+        {"text": "done"},
+    ]
+    async with offline_agent(
+        project=tmp_path,
+        script=script,
+        tools=[code_tool(calls=3)],
+        plugins=[file_tools(tmp_path)],
+        environment=memory_environment({"in": "example\n"}),
+    ) as agent:
+        result = (await (await agent.session()).prompt("read")).tool_results()[0]
+        assert result.status == "failed"
+        assert "this run made more than 3 function calls" in result.text()
+
+
+def test_codemode_large_catalog_keeps_every_signature_and_shortens_descriptions() -> None:
+    definitions = [
+        {
+            "name": f"tool_{i}",
+            "description": "x" * 200 + "\nDetailed notes",
+            "parameters": {
+                "type": "object",
+                "required": ["first"],
+                "properties": {
+                    "zed": {"type": "integer"},
+                    "alpha": {"type": "boolean"},
+                    "first": {"type": "string"},
+                },
+            },
+        }
+        for i in range(13)
+    ]
+    catalog = functions(definitions)
+    listing = function_prompt(catalog)
+    assert listing.count("- `tools.") == 13
+    assert "tools.tool_12(first: str, zed: int = None, alpha: bool = None)" in listing
+    assert "x" * 160 in listing and "x" * 161 not in listing
+    assert (
+        "Detailed notes" not in listing
+        and "Detailed notes" in catalog["tool_12"].describe()["description"]
+    )
 
 
 async def test_prompt_and_skills_against_rust(tmp_path: Path) -> None:

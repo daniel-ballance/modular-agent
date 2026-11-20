@@ -100,6 +100,12 @@ class _Questions(Questions):  # type: ignore[misc]  # Untyped base adapter.
 
 
 class _SdkRuntime(Runtime):  # type: ignore[misc]  # Untyped base adapter.
+    def __init__(self, job_reports_start_turns: bool) -> None:
+        super().__init__()
+        self.declarations = dict(Runtime.declarations)
+        if job_reports_start_turns:
+            self.declarations["queued_job_reports_after_restart"] = "run"
+
     async def _safe_to_repeat(self, sid: str, definition: JsonObject | None) -> bool:
         # Containment of environment commands does not prove cleanup of a
         # plugin's effects. This composition offers no separate repeat promise.
@@ -211,8 +217,9 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             else:
                 selected = await self._compose(folder) if self._compose else self._agent
         if selected is not self._agent and selected._project != folder:
-            await selected.close()
-            raise ValueError("Composition returned an agent for another project")
+            if selected not in self._apis:
+                await selected.close()
+            raise ValueError("Session is not in this project")
         if selected not in self._apis:
             try:
                 await selected._install_acp_mcp(self._project_mcp)
@@ -412,9 +419,13 @@ class Agent:
             return self._attach(id)
 
     async def sessions(self, *, project: Path | None = None) -> list[JsonObject]:
-        return cast(
-            list[JsonObject], await self._session("list", project=str(project) if project else None)
+        rows = cast(
+            list[JsonObject],
+            await self._session("list", project=str(project.resolve()) if project else None),
         )
+        return [
+            {**row, "model": settings_out({"model": row.get("model")})["model"]} for row in rows
+        ]
 
     async def session_info(self, id: str) -> JsonObject:
         """Read saved local session settings without starting recovery or taking its lease."""
@@ -707,7 +718,9 @@ def create_agent(
             agent._conformance = conformance
             agent._late_answers = late_answers_start_turns
             await h.load(
-                _SdkDurable(job_reports_start_turns) if durability == "durable" else _SdkRuntime()
+                _SdkDurable(job_reports_start_turns)
+                if durability == "durable"
+                else _SdkRuntime(job_reports_start_turns)
             )
             jobs = Jobs()
             jobs.declarations = {

@@ -573,9 +573,13 @@ class Runtime(Turns, Plugin):
                     "turn_end",
                     data={"outcome": "failed", "error": "Transient turn interrupted"},
                 )
+        run_jobs = self.declarations.get("queued_job_reports_after_restart") == "run"
         for queued in await self._pending(sid):
-            await self._return(sid, queued)
+            if not (run_jobs and (queued["data"].get("source") or {}).get("job")):
+                await self._return(sid, queued)
         await self.wake(d, emit)
+        if run_jobs:
+            await self.kick(d, emit)
         return {}
 
     async def stop(self):

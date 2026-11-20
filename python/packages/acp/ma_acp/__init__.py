@@ -3,6 +3,7 @@
 import asyncio
 from contextvars import ContextVar
 import functools
+from inspect import signature
 import json
 from pathlib import Path
 
@@ -74,11 +75,14 @@ def rpc(fn):
         "initialize": "initialize",
     }
 
+    parameters = signature(fn)
+
     @functools.wraps(fn)
     async def checked(self, *args, **kwargs):
-        params = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+        bound = parameters.bind_partial(self, *args, **kwargs).arguments
+        params = bound.get("params") or {}
         token = OUTPUT_SESSION.set(
-            kwargs.get("session_id") or params.get("sessionId") or params.get("session")
+            bound.get("session_id") or params.get("sessionId") or params.get("session")
         )
         scope = self.project_scope()
         try:

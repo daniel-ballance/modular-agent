@@ -98,7 +98,11 @@ class _MemoryHistory(_NativePlugin):  # type: ignore[misc]  # Untyped base adapt
 
     async def list(self, d: dict[str, Any], emit: Any) -> list[JsonObject]:
         return [
-            {k: s[k] for k in ("id", "project", "position")}
+            {
+                **{k: s[k] for k in ("id", "project", "position")},
+                "model": s["settings"].get("model"),
+                "lastActivity": max((e["time"] for e in s["entries"]), default=s["created"]),
+            }
             for s in self._sessions.values()
             if not d.get("project") or s["project"] == d["project"]
         ]
@@ -192,8 +196,19 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
 
             def bind_command(item: Any) -> Callable[[dict[str, Any]], Awaitable[JsonObject]]:
                 async def run(d: dict[str, Any]) -> JsonObject:
+                    async def environment(operation: str, params: JsonObject) -> Json:
+                        try:
+                            return cast(
+                                Json,
+                                await self.api.call(
+                                    "environment", operation, {"session": d["session"], **params}
+                                ),
+                            )
+                        except Exception as exc:
+                            raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+
                     reply = await _handle_command(
-                        item, d["args"], CommandContext(d["session"], d["actor"])
+                        item, d["args"], CommandContext(d["session"], d["actor"], environment)
                     )
                     return {"output": reply} if reply is not None else {}
 

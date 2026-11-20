@@ -70,13 +70,13 @@ class ToolEnvironment:
     """Access to this call's working environment, not the agent's own process."""
 
     def __init__(
-        self, context: ToolContext, call: Callable[[str, JsonObject], Awaitable[Json]] | None
+        self, check: Callable[[], None], call: Callable[[str, JsonObject], Awaitable[Json]] | None
     ) -> None:
-        self._context = context
+        self._check = check
         self._call = call
 
     async def _run(self, operation: str, data: JsonObject) -> Json:
-        self._context._check()
+        self._check()
         if self._call is None:
             raise AgentError(ErrorCode.NOT_SUPPORTED, "Environment access is unavailable")
         return await self._call(operation, data)
@@ -135,7 +135,7 @@ class ToolContext:
         self._ask = ask
         self._progress = progress
         self._nested = nested
-        self.environment = ToolEnvironment(self, environment)
+        self.environment = ToolEnvironment(self._check, environment)
         self.tools = _NestedTools(self)
         self._question_index = 0
         self._active = True

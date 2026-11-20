@@ -227,7 +227,12 @@ def code_tool(
                 handlers = {f"tools.{name}": callback(f) for name, f in catalog.items()}
                 async with pool.checkout(
                     external_modules={"tools": module},
-                    limits={"max_turn_duration_secs": compute, "max_recursion_depth": recursion},
+                    limits={
+                        "max_turn_duration_secs": compute,
+                        "max_recursion_depth": recursion,
+                        # The pool counts lookups too. Leave the product call budget to invoke().
+                        "max_suspensions": 2**31 - 1,
+                    },
                 ) as worker:
                     await worker.feed_run("import tools", print_callback=collector)
                     snapshot = await worker.feed_start(

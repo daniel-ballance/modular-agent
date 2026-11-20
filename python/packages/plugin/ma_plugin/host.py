@@ -116,8 +116,12 @@ class NativeProvider:
             "model": model,
             "request": provider_projection(original),
         }
-        changed = await self.h.fire("@harness", "provider.request", payload)
-        request = restore_provider_messages(changed["request"], original, self.target)
+        if d.get("exact_replay"):
+            changed = payload
+            request = request_for_provider(original, self.target)
+        else:
+            changed = await self.h.fire("@harness", "provider.request", payload)
+            request = restore_provider_messages(changed["request"], original, self.target)
         response = await self.service.generate(request_in(request, d), emit)
         await self.h.fire(
             "@harness",

@@ -34,6 +34,7 @@ async def _serve(
     attempted = False
     stopped = False
     active: set[asyncio.Task[Any]] = set()
+    environment_output: dict[str, Callable[[Content], Awaitable[None]]] = {}
     registration: dict[str, Any] = {
         "binding": BINDING,
         "name": plugin.name,
@@ -157,6 +158,11 @@ async def _serve(
             timeout = arguments.pop("timeout", None)
             if isinstance(timeout, (int, float)):
                 arguments["timeoutMs"] = round(timeout * 1000)
+            from uuid import uuid4
+
+            callback_id = uuid4().hex
+            if operation == "bash":
+                environment_output[callback_id] = progress
             try:
                 reply = await server.peer.request(
                     "host/env/" + methods[operation],
@@ -166,9 +172,12 @@ async def _serve(
                         "sessionId": p["sessionId"],
                         "cwd": p["project"],
                     },
+                    key=callback_id,
                 )
             except WireError as exc:
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+            finally:
+                environment_output.pop(callback_id, None)
             if operation == "bash":
                 return {
                     "exit_code": reply["exitCode"],
@@ -224,6 +233,12 @@ async def _serve(
         return {"output": output} if output is not None else {}
 
     class Server(PluginServer):  # type: ignore[misc]  # Untyped base adapter.
+        async def notification(self, method: str, params: dict[str, Any]) -> None:
+            if method == "host/env/output" and isinstance(chunk := params.get("chunk"), str):
+                callback = environment_output.get(params.get("parentRequestId", ""))
+                if callback is not None:
+                    await callback([{"type": "text", "text": chunk}])
+
         async def dispatch(self, method: str, params: dict[str, Any], key: str | int) -> Any:
             nonlocal initialized, attempted
             task = asyncio.current_task()
@@ -256,7 +271,7 @@ async def _serve(
     if streams is None:
         await server.serve()
     else:
-        server.peer = Peer(*streams, server.dispatch, None, "memory-host")
+        server.peer = Peer(*streams, server.dispatch, server.notification, "memory-host")
         try:
             await server.peer.closed.wait()
         finally:
