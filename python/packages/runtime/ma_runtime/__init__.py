@@ -79,6 +79,13 @@ class Runtime(Turns, Plugin):
             and (proposals or (e["data"]["when"] != "propose" and not e["data"].get("parked")))
         ]
 
+    async def _restart_pending(self, d):
+        pending = await self._pending(d["session"])
+        if "prior_inputs" not in d:
+            return pending
+        prior = set(d["prior_inputs"])
+        return [e for e in pending if e["id"] in prior]
+
     async def submit(self, d, emit):
         async with self.admission.setdefault(d["session"], asyncio.Lock()):
             return await self._submit(d, emit)
@@ -182,8 +189,13 @@ class Runtime(Turns, Plugin):
         # Marking the session busy can yield across the process boundary.
         async with self.scheduling.setdefault(sid, asyncio.Lock()):
             if sid not in self.tasks or self.tasks[sid].done():
+                # Recovery must settle old work before ordinary queue dispatch.
+                busy = await self.api.session(
+                    "busy", session=sid, value=True, unless_reopening=True
+                )
+                if busy.get("deferred"):
+                    return
                 self.cancelled.discard(sid)
-                await self.api.session("busy", session=sid, value=True)
                 self.tasks[sid] = asyncio.create_task(self._drain(sid), name="turn:" + sid)
 
     async def release(self, d, emit):
@@ -574,7 +586,7 @@ class Runtime(Turns, Plugin):
                     data={"outcome": "failed", "error": "Transient turn interrupted"},
                 )
         run_jobs = self.declarations.get("queued_job_reports_after_restart") == "run"
-        for queued in await self._pending(sid):
+        for queued in await self._restart_pending(d):
             if not (run_jobs and (queued["data"].get("source") or {}).get("job")):
                 await self._return(sid, queued)
         await self.wake(d, emit)

@@ -138,7 +138,10 @@ async def test_plugin_job_kit_offline(runtime_kind):
     assert "jobs: cancel-job ends the job once" in output
 
 
-async def test_foreign_job_report_runs_as_a_turn(tmp_path, runtime_type, monkeypatch):
+@pytest.mark.parametrize("report_during_open", [False, True], ids=["natural", "during-open"])
+async def test_foreign_job_report_runs_as_a_turn(
+    tmp_path, runtime_type, monkeypatch, report_during_open
+):
     sid, job = "foreign-session", "foreign-job"
     meta = {"id": sid, "project": str(tmp_path), "created": 0}
     records = [
@@ -196,15 +199,31 @@ async def test_foreign_job_report_runs_as_a_turn(tmp_path, runtime_type, monkeyp
 
     h = await build(tmp_path / "state", Echo(), runtime=runtime_type(), project=tmp_path)
     turn_ended = asyncio.Event()
+    report_committed, session_opened = asyncio.Event(), asyncio.Event()
 
     async def receive(event):
+        if event.get("session") != sid:
+            return
+        if event["kind"] == "job_ended" and report_during_open:
+            report_committed.set()
+            await session_opened.wait()
         if event["kind"] == "turn_ended":
             turn_ended.set()
+
+    async def wait_for_report(_):
+        # Force the commit to precede recovery and the job owner's kick to follow it.
+        await asyncio.wait_for(report_committed.wait(), timeout=5)
 
     try:
         a = h.api()
         a.follow("test", receive)
+        if report_during_open:
+            a.on("session.start", wait_for_report, "last")
         await a.session("open", session=sid)
+        session_opened.set()
+        assert not any(e["kind"] == "inputHandedBack" for e in records), (
+            "A report admitted during open is new input, not work left over from a restart"
+        )
         await asyncio.wait_for(turn_ended.wait(), timeout=5)
         await a.call("runtime", "wait", {"session": sid})
         expected = "background: kit-survivor (taken up)"
@@ -224,6 +243,7 @@ async def test_foreign_job_report_runs_as_a_turn(tmp_path, runtime_type, monkeyp
         assert start["data"]["startedBy"] == {"kind": "job", "id": job}
         assert "source" not in start["data"]
     finally:
+        session_opened.set()
         await h.stop()
 
 
