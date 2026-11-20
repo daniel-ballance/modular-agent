@@ -43,8 +43,9 @@ The runner runs each scenario in every applicable placement of the fixture plugi
 
 - `inProcess`: the fixtures in the agent's process;
 - `process:<sdk>`: the fixtures served by an SDK's fixture program, for each of the four.
+- `service:<sdk>`: the fixtures served by the same program as services on a WebSocket ([Services](placement.md#services)), for each of the four.
 
-So a Rust agent runs every scenario with fixtures in process, then served from Rust, TypeScript, Go and Python. Every result MUST be the same. A scenario that uses an in-process-only feature lists `"placements": ["inProcess"]`.
+So a Rust agent runs every scenario with fixtures in process, then served from Rust, TypeScript, Go and Python, first as programs, then as services. Every result MUST be the same. A scenario that uses an in-process-only feature lists `"placements": ["inProcess"]`.
 
 For each run of a scenario in each placement, the runner creates a fresh, empty directory outside the agent's reach and supplies two things from it:
 
@@ -65,7 +66,9 @@ Each SDK lists its fixture program in `conformance/sdk/fixtures/<sdk>.json`:
 
 `command` is the argument vector that starts the program; the runner appends the fixture's name and passes the counter's `path` in the plugin's config. `{repo}` stands for the repository's absolute root. A program whose `{repo}` paths do not exist has not been built: the runner skips that placement and says how to build it, unless `MODULAR_AGENT_SDK_REQUIRE` names that SDK or is `all`, in which case it fails. The program starts with the plugin binding's minimal environment, so `command` uses an absolute path wherever `PATH` alone would not find the program or its dependencies. Each runner uses its own SDK's freshly built program for its own placement.
 
-Steps that crash the agent run it as a separate process, in its own process group. A crash sends `SIGKILL` to the whole group, so served fixture plugins die with the agent, and the runner reaps its direct child and waits until no member of the group can still run before it reopens. A zombie awaiting reaping counts as exited. Recovery then has nothing left running that could race it ([Working environment](../contracts.md#the-working-environment)).
+For `service:<sdk>`, the runner writes a random token to a file readable only by its user, in the run's directory, and starts the program with three more arguments after the fixture's name: `--listen 127.0.0.1:0 --token-file FILE`. The program serves the fixture with `serve(plugin, { listen, tokenFile })` and, once it accepts connections, writes one line to stdout, the server's `url`. It serves until it is killed. The runner names the service in `servicePlugins`, `{ url, tokenFile, config }`, with the same config it would pass a process plugin. It starts one service per fixture for each start of the agent, each in its own process group, and stops them when the run ends.
+
+Steps that crash the agent run it as a separate process, in its own process group. A crash sends `SIGKILL` to the whole group, so served fixture plugins die with the agent, and the runner reaps its direct child and waits until no member of the group can still run before it reopens. A zombie awaiting reaping counts as exited. Recovery then has nothing left running that could race it ([Working environment](../contracts.md#the-working-environment)). In `service:<sdk>`, a crash also sends `SIGKILL` to each service's group; the runner waits the same way, then starts fresh services before it reopens.
 
 ### The fixture plugins
 

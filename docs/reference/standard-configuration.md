@@ -41,6 +41,7 @@ ma sessions [--all]          list saved sessions
 | `--history` | print the session's history, in the shared format |
 | `--declaration` | print the declaration (below) as one JSON object |
 | `--acp` | serve ACP on stdio, for an editor or host. Any project the client names is served, each with its own trust; the declaration names no `projectRoot`. |
+| `--listen ADDR --token-file FILE` | with `--acp`, serve ACP on a WebSocket instead ([an agent service](../bindings/websocket.md#an-agent-service)). `ADDR` is `HOST:PORT` or a `ws:` URL, and must be a loopback address: `ma` has no TLS options. Connections must present the token in `FILE`. They act as `ma`'s local user, the actor a stdio connection has when `MODULAR_AGENT_ACTOR` is unset; `MODULAR_AGENT_ACTOR` does not apply to them. `ma` serves until it is stopped. |
 | `-h`, `--help`; `-V`, `--version` | help; the version, which names the implementation's language |
 
 With no `--model` and none in settings, `ma` uses the first Provider that is signed in, in the order `openai-codex`, `xai`, `claude`. With none signed in it exits with status 1 and says how to sign in.
@@ -178,5 +179,5 @@ Each implementation honors these environment variables, so one set of [checks](.
 Each implementation passes:
 
 - the [reference checks](../../conformance/reference/README.md), which run `ma` with a scripted model and look only at its output and its effects on files;
-- the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp`;
+- the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp`, and with `--connect` against `ma --acp --listen`;
 - its own tests, including that it depends only on its SDK's public API.
