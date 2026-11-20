@@ -482,7 +482,7 @@ export class Agent {
     };
     try {
       const binding = acpInterface({
-        actorId: options.actorId ?? (this.#conformance ? process.env.MODULAR_AGENT_ACTOR : undefined),
+        actorId: options.actorId ?? process.env.MODULAR_AGENT_ACTOR,
         showApproval: options.showApproval ?? this.#approval,
         declaration: id => (id && sessions.get(id) || this).declaration(),
         projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,

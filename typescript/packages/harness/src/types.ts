@@ -510,7 +510,7 @@ export type HandlerOrder = "first" | "normal" | "last";
 /** A gate handler's answer. */
 export type GateAnswer<T> = undefined | { refuse: string } | { change: T } | { pending: string };
 /** A transform handler's answer. */
-export type TransformAnswer<T> = undefined | { value: T; stop?: boolean };
+export type TransformAnswer<T> = undefined | { value: T; stop?: boolean; command?: string };
 export interface GateResult<T> { refused?: string; pending?: string; value: T }
 
 // ---------- Output gate ----------

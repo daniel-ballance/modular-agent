@@ -248,6 +248,8 @@ export class Harness {
 		h("session.prepare", "observe", "harness");
 		h("session.start", "observe", "harness");
 		h("session.end", "observe", "harness");
+		h("session.join", "observe", "harness");
+		h("session.leave", "observe", "harness");
 		h("input", "transform", "harness");
 		h("turn.before", "collect", "harness");
 		h("output", "gate", "harness"); // applied by the Harness with its own rule: pass, redact, block or hold
@@ -263,6 +265,7 @@ export class Harness {
 		// Provider hook points
 		h("provider.request", "transform", "provider");
 		h("provider.response", "observe", "provider");
+		h("provider.piece", "observe", "provider");
 	}
 
 	// ---------- hosting ----------
@@ -371,6 +374,7 @@ export class Harness {
 				if (requestedBy && requestedBy !== actorId) this.requireAuthority(s, requestedBy, "grant");
 				if (!s.actors.has(actorId)) throw new Error(`Actor ${actorId} is not part of this session`);
 				await this.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
+				await this.hooks.observe("session.leave", { sessionId, actorId, requestedBy });
 				this.emit(s.id, "session.left", { actorId }, pluginName, { actorId });
 				this.closeUnanswerable(s);
 			},
@@ -1091,6 +1095,7 @@ export class Harness {
 		const beyond = actor.authority.filter((a) => !ALL_AUTHORITY.includes(a) || !this.rightsOf(s, grantedBy).includes(a));
 		if (beyond.length) throw Object.assign(new Error(`${grantedBy} can't grant ${beyond.join(", ")}`), { code: "forbidden" });
 		await this.commit(s, [actorJoined(actor, writer, grantedBy)]);
+		await this.hooks.observe("session.join", { sessionId: s.id, actorId: actor.id, actor, grantedBy });
 		this.emit(s.id, "session.joined", { actor }, writer, { actorId: actor.id });
 		this.closeUnanswerable(s);
 	}
@@ -1211,10 +1216,22 @@ export class Harness {
 			if (scoped) s.keys.set(scoped, receipt);
 			return receipt;
 		}
-		const transformed = await this.hooks.transform("input", { sessionId, content, actorId: options.actorId, when: options.when ?? "now" });
+		const transformed = await this.hooks.transform("input", { sessionId, content, actorId: options.actorId, when: options.when ?? "now" },
+			(before, after) => {
+				if (!Array.isArray(after.value?.content) || after.value.sessionId !== before.sessionId || after.value.when !== before.when || after.value.actorId !== before.actorId) {
+					throw new Error("An input hook may change only content");
+				}
+			});
 		if (s.erasing) throw new Error("Erasure is in progress");
 		if (transformed.stopped) {
-			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true };
+			let output: string | void = undefined;
+			const command = transformed.command;
+			if (command !== undefined) {
+				if (right !== "input") throw Object.assign(new Error("A proposal cannot run a command"), { code: "forbidden" });
+				if (options.delegatedBy) this.requireAuthority(s, options.delegatedBy, "input");
+				output = await this.runCommand(sessionId, command, options.actorId);
+			}
+			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true, ...(output === undefined ? {} : { output }) };
 			if (scoped) s.keys.set(scoped, receipt);
 			return receipt;
 		}
@@ -1470,8 +1487,9 @@ export class Harness {
 			await this.commit(s, drafts);
 		}
 		for (const request of this.recordedOpenRequests(s).filter((r) => r.turnId === turnId && !s.requests.has(r.id) && !s.lateAnswers.has(r.id) && !open.has(r.toolCallId ?? ""))) {
-			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId, toolCallId: request.toolCallId, data: { requestId: request.id, actorId: "harness", declined: true, reason: outcome.outcome.kind === "cancelled" ? "cancelled" : "noLongerAnswerable" } }]);
-			this.emit(s.id, "input.request.closed", { requestId: request.id, declined: true, lost: true }, "harness", { turnId, toolCallId: request.toolCallId });
+			const answer = { requestId: request.id, actorId: "harness", declined: true, reason: outcome.outcome.kind === "cancelled" ? "cancelled" : "noLongerAnswerable" };
+			await this.recordAnswer(s, request, answer, s.order.map(id => s.entries.get(id)!).find(e => e.kind === "inputRequest" && e.requestId === request.id)?.stepId);
+			this.emitAnswer(s, request, answer);
 		}
 		const sources = s.branch().filter((e) => e.turnId === turnId && (e.kind === "response" || e.kind === "toolResult")).map((e) => e.id);
 		await this.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId, sources, data: { outcome: outcome.outcome, result: outcome.result, usage: outcome.usage } }]);
@@ -1732,7 +1750,9 @@ export class Harness {
 					options.onEffectiveRequest?.(prepared.request);
 					return dispatched;
 				};
+				let observed = Promise.resolve();
 				const onEvent = (event: import("./types.js").ModelStreamEvent) => {
+					observed = observed.then(() => this.hooks.observe("provider.piece", { ...scope, turnId, stepId, piece: structuredClone(event) }));
 					this.emit(s.id, "model.output", event, "harness", { turnId, stepId });
 					options.onEvent?.(event);
 				};
@@ -1742,7 +1762,7 @@ export class Harness {
 					const message = await model.request(finalRequest, { ...options, requestPrepared: true, onEvent });
 					await this.hooks.observe("provider.response", { ...scope, message: withoutProviderData(message) });
 					return message;
-				} finally { this.emit(s.id, "model.streamEnd", {}, "harness", { turnId, stepId }); }
+				} finally { await observed; this.emit(s.id, "model.streamEnd", {}, "harness", { turnId, stepId }); }
 			});
 		} };
 	}
@@ -1984,8 +2004,7 @@ export class Harness {
 		for (const request of this.recordedOpenRequests(s).filter(r => r.toolCallId === callId)) {
 			if (s.lateAnswers.has(request.id)) continue;
 			const answer = { requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable" };
-			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId,
-				toolCallId: callId, requestId: request.id, data: answer }]);
+			await this.recordAnswer(s, request, answer, s.order.map(id => s.entries.get(id)!).find(e => e.kind === "inputRequest" && e.requestId === request.id)?.stepId);
 			s.waiting.delete(request.id);
 			for (const viewer of this.viewersFor(s, request)) viewer.onInputRequestClosed?.(request.id);
 			this.emit(s.id, "input.request.closed", answer, "harness", { turnId: request.turnId, toolCallId: callId });
@@ -2222,7 +2241,16 @@ export class Harness {
 		let reopened = false;
 		if (draft.key) {
 			// Changed input or registration needs a new approval identity, not a replay of the old one.
-			const key = approval?.call.startedBy === "tool" ? draft.key + ":" + approvalKey(approval) : draft.key;
+			let key = approval?.call.startedBy === "tool" ? draft.key + ":" + approvalKey(approval) : draft.key;
+			if (draft.kind === "secret") {
+				const branch = s.branch();
+				for (const entry of branch) {
+					if (entry.kind !== "inputRequest" || entry.erased) continue;
+					const prior = readRequest(entry);
+					if (prior.kind === "secret" && prior.key === key && branch.some(e => e.kind === "inputAnswer" &&
+						requestIdOf(e) === prior.id && (e.data as Answer | undefined)?.reason === "restart")) key += ":" + prior.id;
+				}
+			}
 			draft = { ...draft, key };
 			request = { ...request, key };
 			const recorded = this.recordedAnswer(s, draft, approval);
@@ -2240,10 +2268,10 @@ export class Harness {
 			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, data: { request: { ...request, answerable: viewers.length > 0 }, ...approval } }]);
 		}
 		if (!this.presentActors(s, request).some((id) => this.mayAnswer(s, request, id))) {
-			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId, toolCallId: request.toolCallId,
-				requestId: request.id, stepId, data: { requestId: request.id, declined: true, actorId: "harness", reason: request.kind === "approval" ? "refused" : "noLongerAnswerable" } }]);
-			if (request.kind === "secret") await this.discardSecret(s, request.id);
-			return { requestId: request.id, declined: true, actorId: "harness", reason: "No one present can answer" };
+			const answer = { requestId: request.id, declined: true, actorId: "harness", reason: "noLongerAnswerable" };
+			await this.recordAnswer(s, request, answer, stepId);
+			this.emitAnswer(s, request, answer);
+			return answer;
 		}
 		return new Promise<Answer>((resolve, reject) => {
 			const cancel = () => void open.resolve({ requestId: request.id, declined: true, actorId: "harness", reason: "cancelled" });

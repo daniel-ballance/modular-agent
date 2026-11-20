@@ -1,4 +1,4 @@
-import { advanceSecretSlot, secretStaging, withCredentialLock, type SecretFile, type CredentialStore } from "@modular-agent/harness";
+import { advanceSecretSlot, secretStaging, withCredentialLock, type SecretFile, type CredentialStore } from "@modular-agent/core";
 import { randomUUID } from "node:crypto";
 import { open, rename, rm } from "node:fs/promises";
 import { constants } from "node:fs";

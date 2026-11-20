@@ -12,7 +12,7 @@ export { standardMcpTools, type McpServerConfig } from "./mcp.js";
 export type { ToolContext, ToolEnvironment, ToolOutput } from "./tool.js";
 export type { JSONSchema, Schema, StandardSchema } from "./schema.js";
 export { definePlugin } from "./plugin.js";
-export type { AgentInterface, ToolCatalog, CallContext, CommandContext, CommandHandler, HookPoint, HookHandler, HookOrder, Plugin, Registrar } from "./plugin.js";
+export type { AgentInterface, ToolCatalog, CallContext, CustomHook, CommandContext, CommandHandler, HookPoint, HookHandler, HookOrder, Plugin, Registrar } from "./plugin.js";
 export type * from "./data.js";
 export { defineProvider, ModelFailure } from "./provider.js";
 export type { Provider, ProviderContext } from "./provider.js";
