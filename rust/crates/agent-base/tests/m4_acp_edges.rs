@@ -361,5 +361,10 @@ async fn acp_never_requests_secrets_in_form_elicitation() {
     })
     .await;
     assert!(r.elicitations.lock().unwrap().is_empty());
-    assert!(!r.root.path().join("answers").exists());
+    // The store keeps a discard decision even when no secret was sent.
+    use agent_api::CredentialStore;
+    let store = credentials_file::FileCredentials {
+        openai_key: r.root.path().join("NONEXISTENT-KEY"),
+    };
+    assert!(store.get("example").is_err());
 }

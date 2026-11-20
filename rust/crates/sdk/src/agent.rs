@@ -306,7 +306,9 @@ impl Agent {
         let h = self.inner.harness.as_ref();
         let provider = base::capability::<dyn base::Provider>(h, &format!("provider.{provider}"))
             .map_err(|_| Error::new(Code::NotFound, "unknown Provider"))?;
-        provider.catalog_changes().ok_or_else(|| Error::new(Code::NotSupported, "this Provider has no catalog notifier"))
+        provider
+            .catalog_changes()
+            .ok_or_else(|| Error::new(Code::NotSupported, "this Provider has no catalog notifier"))
     }
 
     /// Keep a folder alive as long as the agent.

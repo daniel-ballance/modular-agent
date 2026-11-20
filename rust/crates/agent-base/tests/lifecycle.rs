@@ -19,7 +19,7 @@ async fn reopening_returns_untaken_input_without_silently_starting_work() {
     );
 }
 #[tokio::test]
-async fn an_end_handler_failure_is_recorded_with_the_same_outcome_that_is_returned() {
+async fn an_end_observer_failure_does_not_change_the_turn_outcome() {
     struct EndFailure;
     impl Plugin for EndFailure {
         fn name(&self) -> &str {
@@ -41,7 +41,7 @@ async fn an_end_handler_failure_is_recorded_with_the_same_outcome_that_is_return
         json!({}),
     )
     .await;
-    assert_eq!(rig.run("start").await.outcome, Outcome::Failed);
+    assert_eq!(rig.run("start").await.outcome, Outcome::Completed);
     assert_eq!(
         rig.data()
             .entries
@@ -51,7 +51,7 @@ async fn an_end_handler_failure_is_recorded_with_the_same_outcome_that_is_return
             .content
             .as_ref()
             .unwrap()["outcome"],
-        "failed"
+        "completed"
     );
 }
 use agent_api::*;

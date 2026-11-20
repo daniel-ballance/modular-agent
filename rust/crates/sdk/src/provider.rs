@@ -299,7 +299,9 @@ impl Adapter {
     }
 }
 impl base::Provider for Adapter {
-    fn catalog_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> { Some(self.notifier.subscribe()) }
+    fn catalog_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.notifier.subscribe())
+    }
 
     fn catalog(&self) -> Vec<base::ModelInfo> {
         self.provider
