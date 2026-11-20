@@ -43,8 +43,22 @@ class WireError(AgentError):
 
 
 class Peer:
-    def __init__(self, reader, writer, dispatch, notification=None, label="plugin"):
+    def __init__(
+        self,
+        reader,
+        writer,
+        dispatch,
+        notification=None,
+        label="plugin",
+        *,
+        frames=None,
+        close_after_shutdown=False,
+    ):
         self.reader, self.writer = reader, writer
+        self.frames = frames
+        self.close_after_shutdown = close_after_shutdown
+        self.last_received = asyncio.get_running_loop().time()
+        self.activity = asyncio.Event()
         self.dispatch, self.notification, self.label = dispatch, notification, label
         self.pending, self.running, self.parents, self.incoming_methods = {}, {}, {}, {}
         self.started, self.cancelled, self.answered = set(), set(), set()
@@ -80,8 +94,11 @@ class Peer:
                 }
             ).encode()
         async with self.lock:
-            self.writer.write(raw + b"\n")
-            await self.writer.drain()
+            if self.frames is not None:
+                await self.frames.send(raw)
+            else:
+                self.writer.write(raw + b"\n")
+                await self.writer.drain()
 
     async def notify(self, method, params):
         await self.send({"method": method, "params": params})
@@ -166,6 +183,12 @@ class Peer:
         self.cancelled.add(key)  # Once answering, a late cancel must not interrupt the write.
         try:
             await self.send({"id": key, **answer})
+            if (
+                self.close_after_shutdown
+                and message["method"] == "plugin/shutdown"
+                and "result" in answer
+            ):
+                await self.frames.close()
         except (ConnectionError, WireError):
             pass
         finally:
@@ -219,14 +242,20 @@ class Peer:
             {"id": key, "error": {"code": number, "message": text, "data": {"code": code}}}
         )
 
+    async def _receive(self):
+        if self.frames is not None:
+            return await self.frames.receive()
+        raw = await self.reader.readline()
+        if not raw.endswith(b"\n"):
+            return None
+        raw = raw[:-1].removesuffix(b"\r")
+        return raw if len(raw) <= MAX_FRAME else None
+
     async def _read(self):
         try:
-            while raw := await self.reader.readline():
-                if (
-                    not raw.endswith(b"\n")
-                    or len(raw.removesuffix(b"\n").removesuffix(b"\r")) > MAX_FRAME
-                ):
-                    break
+            while (raw := await self._receive()) is not None:
+                self.last_received = asyncio.get_running_loop().time()
+                self.activity.set()
                 try:
                     message = json.loads(
                         raw.decode("utf-8"),
@@ -316,4 +345,7 @@ class Peer:
         await asyncio.gather(*list(self.deliveries), return_exceptions=True)
         if self.notes:
             await asyncio.gather(self.notes, return_exceptions=True)
-        self.writer.close()
+        if self.frames is not None:
+            await self.frames.close()
+        else:
+            self.writer.close()

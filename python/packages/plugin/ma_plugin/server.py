@@ -54,6 +54,23 @@ class PluginServer:
             raise WireError("Method not found: " + method, "method_not_found", -32601)
         return await handler(params, key)
 
+    async def serve_frames(self, frames):
+        self.peer = Peer(
+            None,
+            None,
+            self.dispatch,
+            getattr(self, "notification", None),
+            "host",
+            frames=frames,
+            close_after_shutdown=True,
+        )
+        try:
+            await self.peer.closed.wait()
+        finally:
+            await self.peer.close()
+            if self.stop:
+                await self.stop()
+
     async def serve(self):
         # Official pipe APIs: https://docs.python.org/3.13/library/asyncio-eventloop.html#working-with-pipes
         loop = asyncio.get_running_loop()

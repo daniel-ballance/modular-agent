@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from collections.abc import Awaitable, Callable, Coroutine
+from copy import deepcopy
+from os import PathLike
+from typing import Any, cast, overload
 
 from ma_plugin.host import External
 from ma_plugin.rpc import MAX_FRAME, Peer, WireError
 from ma_plugin.server import BINDING, PluginServer
+from ma_plugin.websocket import (
+    PLUGIN_PROTOCOL,
+    WebSocketFrames,
+    WebSocketServer,
+    WebSocketTLS,
+    listen_websocket,
+)
 
 from ._native import _error, _read_answer
 from ._plugin import (
@@ -29,9 +38,10 @@ from ._types import AgentError, Answer, Content, ErrorCode, Json, JsonObject, Mo
 async def _serve(
     plugin: Plugin,
     streams: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None,
+    *,
+    frames: WebSocketFrames | None = None,
 ) -> None:
     registrar: Registrar | None = None
-    initialized = False
     attempted = False
     stopped = False
     active: set[asyncio.Task[Any]] = set()
@@ -102,7 +112,7 @@ async def _serve(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        if initialized:
+        if attempted:
             await plugin._close()
 
     def registered() -> Registrar:
@@ -338,7 +348,7 @@ async def _serve(
                     await callback([{"type": "text", "text": chunk}])
 
         async def dispatch(self, method: str, params: dict[str, Any], key: str | int) -> Any:
-            nonlocal initialized, attempted
+            nonlocal attempted
             task = asyncio.current_task()
             if method == "plugin/initialize":
                 if attempted:
@@ -347,10 +357,7 @@ async def _serve(
             if method != "plugin/shutdown" and task is not None:
                 active.add(task)
             try:
-                value = await super().dispatch(method, params, key)
-                if method == "plugin/initialize":
-                    initialized = True
-                return value
+                return await super().dispatch(method, params, key)
             except AgentError as exc:
                 raise WireError(exc.message, exc.code.value) from exc
             except (KeyError, TypeError) as exc:
@@ -370,7 +377,9 @@ async def _serve(
         "provider/discard": discard,
     }
     server = Server(registration, methods, initialize, stop)
-    if streams is None:
+    if frames is not None:
+        await server.serve_frames(frames)
+    elif streams is None:
         await server.serve()
     else:
         server.peer = Peer(*streams, server.dispatch, server.notification, "memory-host")
@@ -416,10 +425,50 @@ class _MemoryExternal(External):  # type: ignore[misc]  # Untyped base adapter.
                 await self._task
 
 
-def serve(plugin: Plugin) -> None:
-    """Speak the plugin binding on stdin/stdout until the host disconnects."""
+def _check_servable(plugin: Plugin) -> None:
     items = [f"tool:{t.name}" for t in plugin._tools if t.in_process_only]
     items += [point for point in plugin._hooks if point not in _SUPPORTED_HOOKS]
     if items:
         raise AgentError(ErrorCode.NOT_SUPPORTED, "Cannot serve " + ", ".join(items))
-    asyncio.run(_serve(plugin))
+
+
+@overload
+def serve(plugin: Plugin) -> None: ...
+
+
+@overload
+def serve(
+    plugin: Plugin | Callable[[], Plugin],
+    *,
+    listen: str,
+    token_file: str | PathLike[str],
+    tls: WebSocketTLS | None = None,
+) -> Coroutine[Any, Any, WebSocketServer]: ...
+
+
+def serve(
+    plugin: Plugin | Callable[[], Plugin],
+    *,
+    listen: str | None = None,
+    token_file: str | PathLike[str] | None = None,
+    tls: WebSocketTLS | None = None,
+) -> None | Coroutine[Any, Any, WebSocketServer]:
+    """Serve on stdio, or await a WebSocket listener with a fresh instance per host."""
+    if isinstance(plugin, Plugin):
+        _check_servable(plugin)
+    if listen is None:
+        if not isinstance(plugin, Plugin) or token_file is not None or tls is not None:
+            raise ValueError("WebSocket options require listen")
+        asyncio.run(_serve(plugin))
+        return None
+    if token_file is None:
+        raise ValueError("WebSocket serving requires token_file")
+
+    async def connected(frames: WebSocketFrames, _: None) -> None:
+        # Ordinary Plugin values can keep per-connection state in setup's
+        # registrar. Use a factory for external resources or stateful closures.
+        instance = deepcopy(plugin) if isinstance(plugin, Plugin) else plugin()
+        _check_servable(instance)
+        await _serve(instance, frames=frames)
+
+    return listen_websocket(listen, [(token_file, None)], PLUGIN_PROTOCOL, connected, tls)
