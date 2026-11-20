@@ -2,6 +2,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { createAgent, httpHistory, type Agent, type ProcessPlugin, type Settings } from "@modular-agent/core";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
@@ -76,14 +77,22 @@ function claudeSignedIn() {
 }
 function show(step: Step) {
   if (step.kind === "note") { console.error(step.message); return; }
-  console.error(step.kind === "open" ? `Open this address in a browser to sign in:\n\n  ${step.address}\n` :
-    `Open this address in a browser:\n\n  ${step.address}\n\nand enter the code: ${step.code}\n`);
-  if (step.address.startsWith("https://") && process.env.MA_NO_BROWSER === undefined) {
+  if (step.kind === "open-and-paste") console.error(`Open this address in a browser, on this machine or any other:\n\n  ${step.address}\n`);
+  else if (step.kind === "code") console.error(`Open this address in a browser:\n\n  ${step.address}\n\nand enter the code: ${step.code}\n`);
+  else console.error(`Open this address in a browser to sign in:\n\n  ${step.address}\n`);
+  const { MA_NO_BROWSER, SSH_CONNECTION, SSH_TTY, DISPLAY, WAYLAND_DISPLAY } = process.env;
+  if (step.address.startsWith("https://") && MA_NO_BROWSER === undefined &&
+      SSH_CONNECTION === undefined && SSH_TTY === undefined && (DISPLAY !== undefined || WAYLAND_DISPLAY !== undefined)) {
     const child = spawn(process.platform === "darwin" ? "open" : "xdg-open", [step.address], { stdio: "ignore" });
     child.on("error", () => {});
     child.unref();
   }
-  console.error("Waiting for the sign-in to finish...");
+  if (step.kind === "open-and-paste") {
+    console.error("After you sign in, the browser goes to a localhost address. If the browser is on this\n" +
+      "machine, that finishes the sign-in. Otherwise the page will not load: copy the whole\n" +
+      "address from the browser's address bar and paste it here.\n");
+    process.stderr.write("Paste the address (or the code): ");
+  } else console.error("Waiting for the sign-in to finish...");
 }
 async function authCommand(argv: string[], p: Paths, auth: AuthFile) {
   const [cmd, provider, ...rest] = argv;
@@ -112,7 +121,12 @@ async function authCommand(argv: string[], p: Paths, auth: AuthFile) {
   if (!isVendor(provider)) throw new Error(`unknown provider ${provider}${cmd === "login" ? "; use openai-codex, xai or claude" : ""}`);
   if (cmd === "logout") { await auth.setLogin(provider); console.error(`Signed out of ${labels[provider]}.`); }
   else {
-    await auth.setLogin(provider, await oauth().login(provider, rest[0] === "--device", show));
+    const pasted = process.stdin.isTTY ? (onLine: (line: string) => void) => {
+      const reader = createInterface({ input: process.stdin });
+      reader.on("line", onLine);
+      return () => { reader.off("line", onLine); reader.close(); };
+    } : undefined;
+    await auth.setLogin(provider, await oauth().login(provider, rest[0] === "--device", show, pasted));
     console.error(`Signed in to ${labels[provider]} (${provider}).`);
   }
   return 0;

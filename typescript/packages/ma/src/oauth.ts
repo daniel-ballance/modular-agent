@@ -7,6 +7,8 @@ import type { OAuth } from "./auth.js";
 export const vendors = ["openai-codex", "xai"] as const;
 export type Vendor = typeof vendors[number];
 export const labels: Record<Vendor, string> = { "openai-codex": "ChatGPT subscription", xai: "Grok subscription" };
+// Pi's value is a placeholder until the services accept this client's own name.
+export const CLIENT_IDENTITY = "pi";
 const codex = { id: "app_EMoamEEZ73f0CkXaXp7hrann", scope: "openid profile email offline_access", token: "https://auth.openai.com/oauth/token",
   authorize: "https://auth.openai.com/oauth/authorize", deviceCode: "https://auth.openai.com/api/accounts/deviceauth/usercode",
   deviceToken: "https://auth.openai.com/api/accounts/deviceauth/token", devicePage: "https://auth.openai.com/codex/device",
@@ -18,7 +20,31 @@ const realEndpoints = { codexToken: codex.token, codexAuthorize: codex.authorize
 const LOOPBACK = "127.0.0.1";
 const DEVICE_WAIT = 900_000;
 const MARGIN = 300_000;
-export type Step = { kind: "open"; address: string } | { kind: "code"; address: string; code: string } | { kind: "note"; message: string };
+export type Step = { kind: "open" | "open-and-paste"; address: string } | { kind: "code"; address: string; code: string } | { kind: "note"; message: string };
+/** Subscribe to terminal lines and return a cleanup function. */
+type Pasted = (onLine: (line: string) => void) => () => void;
+
+export function pastedCode(line: string, state: string): string | undefined {
+  const input = line.trim();
+  if (!input) return;
+  let code: string | null, found: string | null;
+  const question = input.indexOf("?");
+  if (question !== -1 || input.includes("code=")) {
+    const query = new URLSearchParams(question === -1 ? input : input.slice(question + 1).split("#", 1)[0]);
+    if (question !== -1 && query.has("error")) {
+      throw new Error(`the sign-in was not completed: ${query.get("error_description") ?? query.get("error")}`);
+    }
+    code = query.get("code");
+    found = query.get("state");
+  } else {
+    const hash = input.indexOf("#");
+    code = hash === -1 ? input : input.slice(0, hash);
+    found = hash === -1 ? null : input.slice(hash + 1);
+  }
+  if (found !== null && found !== state) throw new Error("that address is from a different sign-in; paste the one from this sign-in");
+  if (!code) throw new Error("no code found in what was pasted");
+  return code;
+}
 export const loopback = (address: string) => {
   const url = new URL(address);
   if (url.protocol !== "http:" || url.hostname !== LOOPBACK || url.username || url.password) throw new Error("test endpoint must be numeric loopback HTTP");
@@ -85,7 +111,7 @@ export function oauth(test?: TestOptions) {
     }
   }
   const xaiDevice = async (show: (s: Step) => void) => {
-    const [status, body] = await post(endpoint("xaiDeviceCode"), { client_id: xai.id, scope: xai.scope, referrer: "pi" });
+    const [status, body] = await post(endpoint("xaiDeviceCode"), { client_id: xai.id, scope: xai.scope, referrer: CLIENT_IDENTITY });
     if (!ok(status)) throw failure("starting the Grok sign-in", status, body);
     const field = (name: string) => {
       const value = string(body[name]);
@@ -130,23 +156,28 @@ export function oauth(test?: TestOptions) {
     });
     return exchange(authorization, verifier, codex.deviceRedirect);
   };
-  const codexBrowser = async (show: (s: Step) => void) => {
-    const server = createServer({ maxHeaderSize: 8192, requestTimeout: 10_000 });
+  const codexBrowser = async (show: (s: Step) => void, pasted?: Pasted) => {
+    let server: ReturnType<typeof createServer> | undefined = createServer({ maxHeaderSize: 8192, requestTimeout: 10_000 });
     server.listen(test?.port ?? 1455, LOOPBACK);
     try { await once(server, "listening"); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
-      show({ kind: "note", message: "Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead." });
-      return codexDevice(show);
+      if (!pasted) {
+        show({ kind: "note", message: "Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead." });
+        return codexDevice(show);
+      }
+      server = undefined;
+      show({ kind: "note", message: "Port 1455 is in use, so paste the address the browser comes back to." });
     }
-    const actual = server.address();
-    const redirect = `http://${test ? LOOPBACK : "localhost"}:${typeof actual === "object" && actual ? actual.port : 1455}/auth/callback`;
+    const actual = server?.address();
+    const redirect = test && typeof actual === "object" && actual
+      ? `http://${LOOPBACK}:${actual.port}/auth/callback` : "http://localhost:1455/auth/callback";
     const verifier = randomBytes(32).toString("base64url"), state = randomBytes(16).toString("base64url");
-    let timer: NodeJS.Timeout | undefined;
+    let timer: NodeJS.Timeout | undefined, stopPasting: (() => void) | undefined;
     try {
       const code = await new Promise<string>((resolve, reject) => {
         timer = setTimeout(() => reject(new Error("the sign-in was not completed in time")), DEVICE_WAIT);
-        server.on("request", (req, res) => {
+        server?.on("request", (req, res) => {
           const url = new URL(req.url ?? "/", `http://${LOOPBACK}`);
           const send = (status: number, text: string) => res.writeHead(status, { "content-type": "text/plain; charset=utf-8", connection: "close" }).end(text);
           if (url.pathname !== "/auth/callback") { send(404, "Not found."); return; }
@@ -156,16 +187,26 @@ export function oauth(test?: TestOptions) {
           reject(new Error(returned !== state ? "the sign-in came back with the wrong state" :
             `the sign-in was not completed: ${url.searchParams.get("error_description") ?? url.searchParams.get("error") ?? "no code returned"}`));
         });
-        show({ kind: "open", address: `${endpoint("codexAuthorize")}?${form({ response_type: "code", client_id: codex.id, redirect_uri: redirect, scope: codex.scope,
+        show({ kind: pasted ? "open-and-paste" : "open", address: `${endpoint("codexAuthorize")}?${form({ response_type: "code", client_id: codex.id, redirect_uri: redirect, scope: codex.scope,
           code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256", state,
-          id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "pi" })}` });
-      });
+          id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: CLIENT_IDENTITY })}` });
+        let accepted = false;
+        stopPasting = pasted?.(line => {
+          if (accepted) return;
+          try {
+            const code = pastedCode(line, state);
+            if (code !== undefined) { accepted = true; resolve(code); }
+          } catch (error) {
+            show({ kind: "note", message: `${(error as Error).message}. Paste it again.` });
+          }
+        });
+      }).finally(() => { clearTimeout(timer); stopPasting?.(); server?.close(); });
       return await exchange(code, verifier, redirect);
-    } finally { clearTimeout(timer); server.close(); server.closeAllConnections(); }
+    } finally { server?.closeAllConnections(); }
   };
   return {
-    login(vendor: Vendor, device: boolean, show: (s: Step) => void) {
-      return vendor === "xai" ? xaiDevice(show) : device ? codexDevice(show) : codexBrowser(show);
+    login(vendor: Vendor, device: boolean, show: (s: Step) => void, pasted?: Pasted) {
+      return vendor === "xai" ? xaiDevice(show) : device ? codexDevice(show) : codexBrowser(show, pasted);
     },
     async refresh(vendor: Vendor, old: OAuth, signal?: AbortSignal) {
       const [status, body] = await post(endpoint(vendor === "xai" ? "xaiToken" : "codexToken"), {
