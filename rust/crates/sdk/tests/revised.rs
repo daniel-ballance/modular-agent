@@ -218,6 +218,35 @@ async fn step_after_refusal_fails_turn_with_its_reason_in_both_placements() -> R
 }
 
 #[tokio::test]
+async fn built_in_parts_can_be_selected_explicitly() -> Result<()> {
+    use modular_agent::{Agent, Durability, durable_runtime, local_environment, transient_runtime};
+    let project = tempfile::tempdir()?;
+    let agent = Agent::builder()
+        .runtime(transient_runtime())
+        .environment(local_environment(Some(project.path().into())))
+        .build()
+        .await?;
+    assert!(
+        !agent.declaration()?["continuesAfterRestart"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(agent.declaration()?["confinesFiles"], false);
+    let session = agent.session().await?;
+    assert!(!session.id().is_empty());
+    agent.close().await?;
+    let data = tempfile::tempdir()?;
+    let mismatched = Agent::builder()
+        .data_dir(data.path())
+        .durability(Durability::Kept)
+        .runtime(durable_runtime())
+        .build()
+        .await;
+    assert!(matches!(mismatched, Err(e) if e.code() == Code::InvalidComposition));
+    Ok(())
+}
+
+#[tokio::test]
 async fn answer_queue_distinguishes_unused_and_unexpected_questions() -> Result<()> {
     let answer = Answer::Value("yes".into());
     assert!(

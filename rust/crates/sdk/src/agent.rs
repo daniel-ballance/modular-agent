@@ -131,7 +131,8 @@ pub struct AgentBuilder {
     plugins: Vec<Plugin>,
     process_plugins: Vec<ProcessPlugin>,
     wire_plugins: Vec<Plugin>,
-    environment: Option<crate::testing::MemoryEnvironment>,
+    environment: Option<crate::Environment>,
+    runtime: Option<crate::Runtime>,
     plugin_host: Option<bool>,
     model: Option<String>,
     settings: serde_json::Map<String, Value>,
@@ -422,8 +423,13 @@ impl AgentBuilder {
         self.wire_plugins.push(plugin);
         self
     }
-    pub fn environment(mut self, environment: crate::testing::MemoryEnvironment) -> Self {
-        self.environment = Some(environment);
+    pub fn environment(mut self, environment: impl Into<crate::Environment>) -> Self {
+        self.environment = Some(environment.into());
+        self
+    }
+
+    pub fn runtime(mut self, runtime: crate::Runtime) -> Self {
+        self.runtime = Some(runtime);
         self
     }
     /// A plugin program, loaded after the agent's own plugins. Giving one makes the
@@ -479,11 +485,26 @@ impl AgentBuilder {
             && self.wire_plugins.is_empty()
             && self.plugin_host != Some(true))
         .then(|| self.clone());
-        let project = match self.project {
-            Some(p) => p,
-            None => std::env::current_dir()?,
+        use crate::parts::EnvironmentKind;
+        let environment = self
+            .environment
+            .map(|env| env.0)
+            .unwrap_or(EnvironmentKind::Local(None));
+        let local_root = match &environment {
+            EnvironmentKind::Local(root) => root.as_ref().map(|p| p.canonicalize()).transpose()?,
+            EnvironmentKind::Memory(_) => None,
+        };
+        let project = match (self.project, &local_root) {
+            (Some(p), _) => p.canonicalize()?,
+            (None, Some(root)) => root.clone(),
+            (None, None) => std::env::current_dir()?.canonicalize()?,
+        };
+        if local_root.as_ref().is_some_and(|root| *root != project) {
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "the local environment root must match the project",
+            ));
         }
-        .canonicalize()?;
         if let Some(history) = &self.history
             && history.1 != (self.durability != Durability::Ephemeral)
         {
@@ -499,7 +520,7 @@ impl AgentBuilder {
                     "kept and durable agents need a persistent history store",
                 ));
             }
-            if self.environment.is_none() {
+            if matches!(environment, EnvironmentKind::Local(_)) {
                 return Err(Error::new(
                     Code::InvalidComposition,
                     "the local working environment needs a data_dir for recovery bookkeeping",
@@ -535,10 +556,13 @@ impl AgentBuilder {
         let crash = tokio_util::sync::CancellationToken::new();
         let workers = tokio_util::task::TaskTracker::new();
         let hub = Hub::new(self.on_question, crash.clone(), workers.clone());
-        let runtime: Arc<dyn base::Plugin> = match self.durability {
-            Durability::Durable => Arc::new(runtime_durable::DurablePlugin),
-            _ => Arc::new(runtime_transient::TransientPlugin),
-        };
+        let runtime = self
+            .runtime
+            .unwrap_or_else(|| match self.durability {
+                Durability::Durable => crate::durable_runtime(),
+                _ => crate::transient_runtime(),
+            })
+            .plugin();
         let mut plugins: Vec<Arc<dyn base::Plugin>> = vec![
             Arc::new(CorePlugin {
                 configuration: match self.configuration {
@@ -553,9 +577,9 @@ impl AgentBuilder {
                 credentials: self.credentials,
                 history,
             }),
-            match self.environment {
-                Some(environment) => Arc::new(environment),
-                None => Arc::new(environment_local::LocalPlugin {
+            match environment {
+                EnvironmentKind::Memory(environment) => Arc::new(environment),
+                EnvironmentKind::Local(_) => Arc::new(environment_local::LocalPlugin {
                     state: state.join("commands"),
                     points: environment_local::PointStore::Git,
                 }),

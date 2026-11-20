@@ -24,6 +24,7 @@ mod error;
 mod events;
 mod history;
 mod hooks;
+mod parts;
 mod plugin;
 mod provider;
 mod serve;
@@ -47,6 +48,7 @@ pub use history::{
     http_history, http_history_from_env, memory_history, serve_history,
 };
 pub use hooks::*;
+pub use parts::{Environment, Runtime, durable_runtime, local_environment, transient_runtime};
 pub use plugin::{Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource};
 pub use provider::*;
 pub use serve::serve;
