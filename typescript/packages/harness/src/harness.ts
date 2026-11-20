@@ -1116,8 +1116,16 @@ export class Harness {
 			(s.tenant === undefined || tenant?.rights.includes(right) === true);
 	}
 
+	private actorCeilings = new Map<string, ReadonlySet<Authority>>();
+
+	/** Operator restrictions narrow live authority without rewriting recorded grants. */
+	setActorCeilings(ceilings: ReadonlyMap<string, ReadonlySet<Authority>>): void {
+		this.actorCeilings = new Map(ceilings);
+	}
+
 	private actorRights(s: Session, actorId: string): Authority[] {
-		const allowed = (s.actors.get(actorId)?.authority ?? []).filter((right) => this.withinLimits(s, right));
+		const ceiling = this.actorCeilings.get(actorId);
+		const allowed = (s.actors.get(actorId)?.authority ?? []).filter(right => (!ceiling || ceiling.has(right)) && this.withinLimits(s, right));
 		if (!s.meta.parentSessionId) return allowed;
 		const parent = this.sessions.get(s.meta.parentSessionId);
 		const link = s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "harness.parentAuthority");

@@ -496,7 +496,9 @@ export class Agent {
     this.#acp = true;
     const agents = new Map<string, Promise<Agent>>();
     const attachments = new Map<PluginApi, ReturnType<typeof standardMcpTools>>();
+    const ceilings = new Map<string, ReadonlySet<Right>>();
     const installMcp = async (agent: Agent) => {
+      agent.#h.setActorCeilings(ceilings);
       const mcp = standardMcpTools({ servers: async project => await options.projectMcp?.(project) ?? {} });
       await agent.#plugin(mcp);
       attachments.set(agent.#api, mcp);
@@ -596,6 +598,14 @@ export class Agent {
           allowTenant: (tenant: string | null) => !allowedTenants || allowedTenants.has(tenant),
           allowProject: (project: string) => !allowedProjects || allowedProjects.has(project) } };
       }));
+      for (const { value: { actor } } of actors) {
+        const rights = new Set(actor.rights), prior = ceilings.get(actor.id);
+        if (prior && (prior.size !== rights.size || [...rights].some(right => !prior.has(right)))) {
+          throw new AgentError("invalid_params", "Tokens for the same actor must configure the same rights");
+        }
+        ceilings.set(actor.id, rights);
+      }
+      this.#h.setActorCeilings(ceilings);
       const server = await listenWebSocket(options, ACP_PROTOCOL, actors, async (ws, scope) => {
         const { binding, detach } = prepareConnection(scope);
         try {

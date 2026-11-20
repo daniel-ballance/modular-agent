@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Harness, type WorkingEnvironment } from "@modular-agent/harness";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
@@ -50,15 +51,20 @@ test("client pings only while work is pending and a missed ping loses the connec
 			receiveMessages(socket, bytes => {
 				const msg = JSON.parse(bytes.toString());
 				if (msg.method === "plugin/initialize") socket.send(JSON.stringify({ jsonrpc: "2.0", id: msg.id,
-					result: { name: "silent", binding: PLUGIN_BINDING } }));
+					result: { name: "silent", binding: PLUGIN_BINDING, workingEnvironment: { containment: "none" } } }));
 				if (msg.method === "$/ping") pinged++;
 			});
 		}));
 	try {
-		const external = await startPluginService({ url: service.url, tokenFile: f.tokenFile, pingIntervalMs: 10, controlTimeoutMs: 100 },
-			{ project: f.dir, home: f.dir });
-		await external.stop();
-		assert.equal(pinged, 1);
+		const info = { project: f.dir, home: f.dir };
+		const external = await startPluginService({ url: service.url, tokenFile: f.tokenFile, pingIntervalMs: 10, controlTimeoutMs: 500 }, info);
+		const harness = new Harness(info);
+		try {
+			await harness.load([external.plugin]);
+			const env = harness.use<WorkingEnvironment>("working-environment")!;
+			await assert.rejects(env.exists("pending"), { code: "lost", message: "Plugin ping deadline expired" });
+			assert.equal(pinged, 1);
+		} finally { await external.stop(); }
 	} finally { await service.close(); }
 });
 

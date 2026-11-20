@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { open, readFile } from "node:fs/promises";
 import { createServer as httpServer } from "node:http";
 import { createServer as httpsServer } from "node:https";
-import { isIP } from "node:net";
+import { isIP, type Socket } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import { MAX_MESSAGE } from "./wire.js";
 
@@ -27,15 +27,16 @@ const digest = (text: string) => createHash("sha256").update(text).digest();
 
 export function listenAddress({ listen, tls }: ListenOptions) {
 	const scheme = tls ? "wss:" : "ws:";
-	const raw = listen.includes("://") ? listen : `${scheme}//${listen}`;
+	const isUrl = listen.includes("://");
+	const raw = isUrl ? listen : `${scheme}//${listen}`;
 	const url = new URL(raw);
 	const port = /^[^/]+:\/\/(?:\[[^\]]+\]|[^/:?#]+):(\d+)(?:[/?#]|$)/.exec(raw)?.[1];
-	if (url.protocol !== scheme || url.username || url.password || url.search || url.hash || port === undefined) {
+	if (url.protocol !== scheme || url.username || url.password || url.search || url.hash || !isUrl && port === undefined) {
 		throw new Error("Expected HOST:PORT or a WebSocket listen URL matching the TLS options");
 	}
 	const host = hostOf(url);
 	if (!tls && !loopback(host)) throw new Error("Plain WebSocket listeners must bind to loopback");
-	return { url, port: Number(port), host: host === "localhost" ? "127.0.0.1" : host };
+	return { url, port: port === undefined ? (tls ? 443 : 80) : Number(port), host: host === "localhost" ? "127.0.0.1" : host };
 }
 
 async function tokenFrom(file: string): Promise<string> {
@@ -98,6 +99,11 @@ export async function listenWebSocket<T>(options: ListenOptions, protocol: strin
 	const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE, perMessageDeflate: false,
 		handleProtocols: offered => offered.has(protocol) ? protocol : false });
 	const active = new Set<Promise<void>>();
+	const connections = new Set<Socket>();
+	server.on("connection", socket => {
+		connections.add(socket);
+		socket.once("close", () => connections.delete(socket));
+	});
 	let stopping = false;
 	server.on("upgrade", (request, socket, head) => {
 		const presented = digest(request.headers.authorization ?? "");
@@ -128,7 +134,7 @@ export async function listenWebSocket<T>(options: ListenOptions, protocol: strin
 		const stopped = new Promise<void>(resolve => server.close(() => resolve()));
 		const sockets = new Promise<void>(resolve => wss.close(() => resolve()));
 		for (const ws of wss.clients) ws.close(1000);
-		const timer = setTimeout(() => { for (const ws of wss.clients) ws.terminate(); }, 5_000);
+		const timer = setTimeout(() => { for (const socket of connections) socket.destroy(); }, 5_000);
 		try { await Promise.all([stopped, sockets, ...active]); }
 		finally { clearTimeout(timer); }
 	})() };

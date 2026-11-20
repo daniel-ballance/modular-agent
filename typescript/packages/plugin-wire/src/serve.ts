@@ -1,8 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
-import { mkdir, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type WebSocket from "ws";
 import { listenWebSocket, PLUGIN_PROTOCOL, receiveMessages, type ListenOptions } from "./websocket.js";
 import { interruptedCalls, lowerReasoning, pendingToolCalls, restoreAnsweredStep, zeroUsage } from "@modular-agent/harness";
@@ -30,7 +30,7 @@ import type {
 	WorkingEnvironment,
 } from "@modular-agent/harness";
 import { fromWire, toWire } from "./translate.js";
-import { listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+import { DATA_BINDING, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 export interface ServeOptions {
 	/** The plugin's name in its registration. */
@@ -48,14 +48,18 @@ export interface ServeOptions {
 	output?: (line: string) => void;
 }
 
-export interface PluginListenOptions extends ListenOptions { tokenFile: string }
+export interface PluginListenOptions extends ListenOptions {
+	tokenFile: string;
+	/** Private service state; defaults to a sibling directory beside the token file. */
+	stateDir?: string;
+}
 
 interface ServiceConnection { ws: WebSocket; stateDir: string }
 
 /** Create fresh plugin registrations and handlers for each authenticated connection. */
 export function servePluginService(makePlugins: () => ServeOptions, options: PluginListenOptions) {
 	return listenWebSocket(options, PLUGIN_PROTOCOL, [{ tokenFile: options.tokenFile, value: undefined }],
-		(ws, _, key) => servePlugins(makePlugins(), { ws, stateDir: join(`${options.tokenFile}.state`, key) }));
+		(ws, _, key) => servePlugins(makePlugins(), { ws, stateDir: join(options.stateDir ?? `${options.tokenFile}.state`, key) }));
 }
 
 async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: InterruptedTurn, runtime: Runtime) {
@@ -88,9 +92,12 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		if (service.ws.readyState === service.ws.OPEN) service.ws.send(line.slice(0, -1));
 	} : options.output ?? ((line: string) => process.stdout.write(line));
 	let closed = () => {};
+	let registered = false;
+	const startup = new Set(["plugin/initialize", "plugin/shutdown", "$/ping"]);
 	const peer = new WirePeer(write, () => closed(), method => {
+		if (method === "plugin/initialize") registered = true;
 		if (method === "plugin/shutdown") service?.ws.close(1000);
-	});
+	}, service ? method => registered || startup.has(method) : undefined);
 	let projectRoot: string | undefined;
 	let setup: Promise<void> | undefined;
 	let shuttingDown = false;
@@ -238,6 +245,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 
 	peer.handle("plugin/initialize", async (p, ctx) => {
 		if (p.binding !== PLUGIN_BINDING) throw new WireError("not_supported", `This plugin speaks ${PLUGIN_BINDING}, not ${p.binding}`);
+		if (service && p.data !== DATA_BINDING) throw new WireError("not_supported", `This plugin speaks ${DATA_BINDING}`);
 		if (initialized) throw new WireError("invalid_request", "Already initialized");
 		initialized = true;
 		const init = { project: String(p.project), home: String(p.home), config: (p.config ?? {}) as Record<string, unknown> };
@@ -346,6 +354,26 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		if (!environment) throw new WireError("not_supported", "This plugin is not a working environment");
 		return environment;
 	};
+	const withinProject = (path: string) => {
+		const rel = projectRoot && relative(projectRoot, path);
+		if (rel === undefined || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+			throw new WireError("invalid_request", "Path is outside the host project");
+		}
+	};
+	const checkFile = async (cwd: string, path: unknown) => {
+		if (!service) return;
+		if (typeof path !== "string" || path.includes("\0")) throw new WireError("invalid_request", "Invalid project path");
+		let current = resolve(await realpath(cwd), path);
+		withinProject(current);
+		for (;;) {
+			try { withinProject(await realpath(current)); return; }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT" || current === projectRoot) throw error;
+				if (await lstat(current).catch(e => { if (e.code !== "ENOENT") throw e; })) throw error;
+				current = dirname(current);
+			}
+		}
+	};
 	const envAt = async ({ cwd, sessionId }: { cwd: string; sessionId: string }) => {
 		if (typeof sessionId !== "string" || !sessionId) throw new WireError("invalid_request", "A session is required");
 		if (shuttingDown) throw new WireError("lost", "The plugin instance is stopping");
@@ -353,26 +381,28 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 			let target: string;
 			try { if (!isAbsolute(cwd)) throw new Error(); target = await realpath(cwd); }
 			catch { throw new WireError("invalid_request", "Invalid working directory"); }
-			const rel = projectRoot && relative(projectRoot, target);
-			if (rel === undefined || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-				throw new WireError("invalid_request", "Working directory is outside the host project");
-			}
+			withinProject(target);
 		}
 		const base = env();
 		const e = await base.forSession?.(sessionId) ?? base;
 		return cwd && e.cwd !== cwd && e.at ? (e.at(cwd) as WorkingEnvironment) : e;
 	};
 	const missing = (error: unknown) => ((error as NodeJS.ErrnoException)?.code === "ENOENT" ? new WireError("not_found", `No file ${(error as NodeJS.ErrnoException).path ?? ""}`) : error);
+	const filesAt = async (p: { cwd: string; sessionId: string; path: string }) => {
+		const scoped = await envAt(p);
+		await checkFile(scoped.cwd, p.path);
+		return scoped;
+	};
 	peer.handle("env/read", async (p) => {
 		try {
-			return { data: (await (await envAt(p)).readFile(p.path)).toString("base64") };
+			return { data: (await (await filesAt(p)).readFile(p.path)).toString("base64") };
 		} catch (error) {
 			throw missing(error);
 		}
 	});
-	peer.handle("env/write", async (p) => (await (await envAt(p)).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
-	peer.handle("env/list", async p => listDirectory(await envAt(p), p.path));
-	peer.handle("env/exists", async (p) => ({ exists: await (await envAt(p)).exists(p.path) }));
+	peer.handle("env/write", async (p) => (await (await filesAt(p)).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
+	peer.handle("env/list", async p => listDirectory(await filesAt(p), p.path));
+	peer.handle("env/exists", async (p) => ({ exists: await (await filesAt(p)).exists(p.path) }));
 	peer.handle("env/save", async (p) => {
 		const e = await envAt(p);
 		if (!e.points || !e.save) throw new WireError("not_supported", "This environment does not save points");

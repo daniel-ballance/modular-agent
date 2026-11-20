@@ -1,6 +1,6 @@
 # Modular Agent in TypeScript
 
-This directory contains the TypeScript base, the public SDK, and [`ma`](packages/ma/README.md), the TypeScript reference implementation of the [standard configuration](../docs/reference/standard-configuration.md). The SDK, [`@modular-agent/core`](packages/core/README.md), wraps the base with embedded agents, sessions, typed tools, and plugins that can run in process or over stdio.
+This directory contains the TypeScript base, the public SDK, and [`ma`](packages/ma/README.md), the TypeScript reference implementation of the [standard configuration](../docs/reference/standard-configuration.md). The SDK, [`@modular-agent/core`](packages/core/README.md), wraps the base with embedded agents, sessions, typed tools, and plugins that can run in process, over stdio, or as WebSocket services.
 
 | Path | Holds |
 |---|---|
@@ -24,13 +24,14 @@ npm test
 MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test
 ```
 
-`npm test` includes runs of the ACP kit against the agent, with history kept locally and in a history service, and of the history kit against its own service. It also runs the SDK tests and shared scenarios against each built fixture program. [Status](../docs/status.md) records what the build exercises.
+`npm test` includes runs of the ACP kit against the agent, with history kept locally and in a history service, and of the history kit against its own service. It also runs the SDK tests and shared scenarios against each built fixture program. Until all fixture programs support `--listen`, set `MODULAR_AGENT_SDK_SERVICE=typescript` to limit the service placements without skipping any built stdio fixtures. [Status](../docs/status.md) records what the build exercises.
 
 ## Run
 
 ```sh
 node packages/ma/dist/src/main.js              # the standard terminal agent
-node packages/ma/dist/src/main.js --acp        # the standard ACP agent
+node packages/ma/dist/src/main.js --acp        # ACP over stdio
+node packages/ma/dist/src/main.js --acp --listen 127.0.0.1:7401 --token-file /path/to/token
 ```
 
 `npm run agent` still starts the development CLI for the base build.

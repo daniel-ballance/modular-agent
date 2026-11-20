@@ -71,7 +71,7 @@ export class WirePeer {
 	private received = new Set<number | string>();
 
 	constructor(private write: (line: string) => void, private onClose?: () => void,
-		private afterReply?: (method: string) => void) {
+		private afterReply?: (method: string) => void, private allowRequest?: (method: string) => boolean) {
 		this.handle("$/ping", () => ({}));
 		this.onNotification("$/cancel", (p) => this.running.get(p?.id)?.abort());
 	}
@@ -237,6 +237,7 @@ export class WirePeer {
 		try {
 			await Promise.resolve();
 			if (abort.signal.aborted) throw new WireError("cancelled", "Cancelled");
+			if (this.allowRequest && !this.allowRequest(m.method!)) throw new WireError("invalid_request", "The plugin is not registered");
 			const result = await handler(m.params ?? {}, { signal: abort.signal, id: m.id! });
 			this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result });
 			if (!this.closed) this.afterReply?.(m.method!);
