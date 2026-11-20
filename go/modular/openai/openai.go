@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -36,10 +35,9 @@ func New(opts ...Option) modular.Provider {
 	return modular.Provider{
 		ID: "openai",
 		Models: func() []modular.ModelInfo {
-			return []modular.ModelInfo{{ModelRef: modular.ModelRef{Provider: "openai", ID: o.model}, ContextWindow: 128000, MaxOutput: 16000, Input: []string{"text"}, Reasoning: true}}
+			return []modular.ModelInfo{{ModelRef: modular.ModelRef{Provider: "openai", ID: o.model}, ContextWindow: 128000, MaxOutput: 16000, Input: []string{"text"}, Reasoning: true, Thinking: []string{"off", "low", "medium", "high"}}}
 		},
-		Available: func() bool { return os.Getenv("OPENAI_API_KEY") != "" },
-		Request:   o.request,
+		Request: o.request,
 	}
 }
 func (o options) request(ctx context.Context, model modular.ModelRef, request modular.ModelRequest, pc *modular.ProviderContext) (modular.AssistantMessage, error) {
@@ -64,6 +62,9 @@ func (o options) request(ctx context.Context, model modular.ModelRef, request mo
 		}
 	}
 	payload := map[string]any{"model": model.ID, "input": input, "stream": true, "store": false}
+	if effort, ok := request.Settings["reasoning"].(string); ok && effort != "" && effort != "off" {
+		payload["reasoning"] = map[string]any{"effort": effort}
+	}
 	if request.SystemPrompt != "" {
 		payload["instructions"] = request.SystemPrompt
 	}
