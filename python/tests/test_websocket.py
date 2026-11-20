@@ -83,7 +83,7 @@ async def test_plugin_service_auth_frames_and_instance_lifetime(token_file):
         await server.close()
 
 
-async def test_plugin_service_tls(token_file, tmp_path: Path):
+async def test_plugin_service_tls(token_file, tmp_path: Path, monkeypatch):
     with pytest.raises(ValueError, match="loopback"):
         await serve(Plugin("sample"), listen="0.0.0.0:0", token_file=token_file)
     cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
@@ -123,6 +123,13 @@ async def test_plugin_service_tls(token_file, tmp_path: Path):
         client = ssl.create_default_context(cafile=cert)
         async with connect(server.url, ssl=client, **opts) as conn:
             assert (await rpc(conn, 1, "$/ping", {}))["result"] == {}
+        service = {"url": server.url, "token_file": token_file}
+        with pytest.raises(AgentError, match="CERTIFICATE_VERIFY_FAILED") as exc:
+            await create_agent(service_plugins=[service])
+        assert exc.value.code == "invalid_composition"
+        monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+        async with create_agent(service_plugins=[service]):
+            pass
     finally:
         await server.close()
 

@@ -194,7 +194,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
         *,
         principal: AcpActor | None = None,
-        claims: set[str] | None = None,
+        claims: dict[str, str] | None = None,
     ) -> None:
         actor = (
             principal["actor"]["id"] if principal else os.environ.get("MODULAR_AGENT_ACTOR", "user")
@@ -302,6 +302,12 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 visible.append(row)
         return visible
 
+    async def require_visible_session(self, project: str, sid: str) -> None:
+        await super().require_visible_session(project, sid)
+        if self._claims is not None:
+            if self._claims.setdefault(sid, self.name) != self.name:
+                raise protocol_error("busy", "Session already attached to another connection")
+
     async def _open(
         self,
         cwd: str,
@@ -311,20 +317,17 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         additional_directories: Any,
         kwargs: Any,
     ) -> Any:
-        if self._claims is None:
-            return await super()._open(
-                cwd, sid, mcp_servers, replay, additional_directories, kwargs
-            )
-        if sid in self._claims and sid not in self._agents:
-            raise protocol_error("busy", "Session already attached to another connection")
-        self._claims.add(sid)
         try:
             return await super()._open(
                 cwd, sid, mcp_servers, replay, additional_directories, kwargs
             )
         finally:
             if sid not in self._agents:
-                self._claims.discard(sid)
+                self._release_claim(sid)
+
+    def _release_claim(self, sid: str) -> None:
+        if self._claims is not None and self._claims.get(sid) == self.name:
+            del self._claims[sid]
 
     async def select_project(self, project: str, session_id: str | None = None) -> None:
         folder = Path(project)
@@ -343,7 +346,9 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 await selected._install_acp_mcp(self._project_mcp)
                 if self.network:
                     selected._h.acp_principal_rights = self._agent._h.acp_principal_rights
-                await selected._h.load(_AcpProject(selected, self))
+                    await selected._h.attach_interface(_AcpProject(selected, self))
+                else:
+                    await selected._h.load(_AcpProject(selected, self))
             except BaseException:
                 await selected.close()
                 raise
@@ -353,7 +358,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         sid = cast(str, payload["session"])
         self._agents[sid] = self._current()
         if self._claims is not None:
-            self._claims.add(sid)
+            self._claims[sid] = self.name
         if sid == self.opening:
             await self.api.call("questions", "connect", {"session": sid, "actor": self.actor})
         await super().session_started(payload)
@@ -370,8 +375,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
     async def close_session(self, session_id: str, **kwargs: Any) -> Any:
         result = await super().close_session(session_id, **kwargs)
-        if self._claims is not None:
-            self._claims.discard(session_id)
+        self._release_claim(session_id)
         return result
 
     async def close_connection(self) -> None:
@@ -383,8 +387,8 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 if sid in agent._h.sessions:
                     await agent._h.suspend_session(sid)
         finally:
-            if self._claims is not None:
-                self._claims.difference_update(sid for sid, _ in owned)
+            for sid, _ in owned:
+                self._release_claim(sid)
             try:
                 await self.close_projects()
             finally:
@@ -768,20 +772,23 @@ class Agent:
                 raise ValueError("Network ACP options require listen")
             if listen is not None:
                 rights: dict[str, set[str]] = {}
-                claims: set[str] = set()
+                kinds: dict[str, str] = {}
+                claims: dict[str, str] = {}
                 principals = deepcopy(actors)
                 for entry in principals:
                     actor = entry["actor"]
+                    aid, kind, allowed = actor["id"], actor["kind"], set(actor["rights"])
                     if (
-                        not actor["id"]
-                        or actor["kind"] not in {"user", "host", "agent", "program"}
-                        or not set(actor["rights"]) <= PERMISSIONS
-                        or actor["id"] in rights
+                        not aid
+                        or kind not in {"user", "host", "agent", "program"}
+                        or not allowed <= PERMISSIONS
                     ):
+                        raise ValueError("Each WebSocket actor needs an id, kind and valid rights")
+                    if aid in rights and (allowed != rights[aid] or kind != kinds[aid]):
                         raise ValueError(
-                            "Each WebSocket actor needs a unique id, kind and valid rights"
+                            "Tokens for the same actor id must agree on kind and rights"
                         )
-                    rights[actor["id"]] = set(actor["rights"])
+                    rights[aid], kinds[aid] = allowed, kind
                 if not actors:
                     raise ValueError("WebSocket ACP requires at least one configured actor")
                 self._h.acp_principal_rights = rights
@@ -1128,7 +1135,7 @@ def create_agent(
                 services = [
                     {
                         "url": p["url"],
-                        "tokenFile": os.fspath(p["token_file"]),
+                        "tokenFile": str(Path(p["token_file"]).absolute()),
                         "config": p.get("config", {}),
                     }
                     for p in service_plugins or ()

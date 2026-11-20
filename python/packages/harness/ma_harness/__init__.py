@@ -814,10 +814,14 @@ class Harness(Authority):
         parts = {
             name: p.declarations
             for name, p in sorted(self.plugins.items(), key=lambda pair: pair[0] not in active)
-            if name in active
-            or p.role not in {"runtime", "environment"}
-            or not (
-                "parallel_tools" in p.declarations or "stops_commands_on_crash" in p.declarations
+            if not getattr(p, "connection_local", False)
+            and (
+                name in active
+                or p.role not in {"runtime", "environment"}
+                or not (
+                    "parallel_tools" in p.declarations
+                    or "stops_commands_on_crash" in p.declarations
+                )
             )
         }
         if project is not None and "environment" in self.capabilities:

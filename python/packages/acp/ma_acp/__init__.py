@@ -454,6 +454,10 @@ class ACP(Plugin):
     async def visible_sessions(self, project):
         return await self.api.session("list", project=project)
 
+    async def require_visible_session(self, project, sid):
+        if not any(row["id"] == sid for row in await self.visible_sessions(project)):
+            raise protocol_error("forbidden", "Session inaccessible")
+
     @rpc
     async def new_session(self, cwd, mcp_servers=None, additional_directories=None, **kwargs):
         project = self.cwd(cwd, additional_directories, **kwargs)
@@ -494,10 +498,13 @@ class ACP(Plugin):
         if self.lifecycle.locked():
             raise protocol_error("busy", "Session lifecycle operation in progress")
         async with self.lifecycle:
+            if self.network:
+                # The service's history and authority decide scope before a
+                # project composition gets to see the request.
+                await self.require_visible_session(project, sid)
             await self.select_project(project, sid)
-            listed = await self.visible_sessions(project)
-            if not any(row["id"] == sid for row in listed):
-                raise protocol_error("forbidden", "Session inaccessible")
+            if not self.network:
+                await self.require_visible_session(project, sid)
             self.opening = sid
             self.returned_on_open[sid] = []
             try:

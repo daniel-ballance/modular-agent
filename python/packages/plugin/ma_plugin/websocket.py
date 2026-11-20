@@ -166,6 +166,13 @@ async def listen_websocket[T](
     return WebSocketServer(server, f"{scheme}://{authority}:{port}{path}")
 
 
+class _DirectConnect(connect):
+    def process_redirect(self, exc: Exception) -> Exception:
+        # The bearer authorizes only the configured endpoint. Never forward
+        # the header to a URL chosen by an HTTP response.
+        return exc
+
+
 async def connect_plugin(
     url: str, token_file: str | os.PathLike[str], *, timeout: float
 ) -> WebSocketFrames:
@@ -178,7 +185,7 @@ async def connect_plugin(
     ):
         raise ValueError("Expected a ws: or wss: plugin service URL")
     host_override = {"host": _loopback(dest.hostname)} if dest.scheme == "ws" else {}
-    ws = await connect(
+    ws = await _DirectConnect(
         url,
         subprotocols=[PLUGIN_PROTOCOL],
         additional_headers={"Authorization": "Bearer " + read_token(token_file)},
