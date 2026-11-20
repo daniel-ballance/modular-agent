@@ -172,6 +172,7 @@ Beyond the draft rules, these defects in the seeded build were fixed:
 - **A command's deadline belongs to the working environment** (`WorkingEnvironment::exec`), so a remote environment enforces it where the command runs.
 - **Tool results can carry content beyond text,** such as an image, live and through the store.
 - **A Provider's credential goes only to the plugin that claimed its name** at load (`Registrar::claim_credentials`). Both credential stores refuse a sign-in to anyone else, and a second plugin claiming a held name fails to load.
+- **Strong-containment kit check:** Cancelling a `setsid` escapee after it opened its heartbeat with `>` but before it wrote the timestamp left an empty file. The kit reported a changing heartbeat even though the process was stopped. Gating the second write at that boundary reproduced the failure. [Command lifetime](../docs/bindings/plugin.md#command-lifetime) requires stopping descendants, not completing an interrupted write: the kit now requires a heartbeat before cancel and checks that its append-only length stops changing. Rust containment code is unchanged.
 - **Lint:** `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check` are clean.
 
 ## Layout

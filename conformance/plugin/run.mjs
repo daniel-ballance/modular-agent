@@ -694,10 +694,15 @@ await attempt("environment", async () => {
 	const t1 = Date.now();
 	const tl = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "sleep 20", timeoutMs: 300 }, 20000);
 	check("env/exec: a positive timeoutMs stops the command and reports timedOut", tl.timedOut === true && tl.exitCode === null && Date.now() - t1 <= 5300, `${JSON.stringify(tl)} after ${Date.now() - t1} ms`);
-	// The escapee writes a heartbeat file; a PID would mean nothing if the environment has its own PID namespace.
+	// Command lifetime specifies process liveness, not the contents of a file mid-write.
+	// Append so sampling (or killing) between open and write cannot erase the last beat.
+	// A PID would mean nothing if the environment has its own PID namespace.
+	const heartbeatCommand = (f) => `for i in $(seq 600); do printf . >> ${f}; sleep 0.1; done`;
+	const heartbeatSize = (f) => statSync(f, { throwIfNoEntry: false })?.size ?? 0;
 	const escBeat = join(work, `esc-${randomUUID()}`);
-	const s = p.request("env/exec", { cwd: work, sessionId: "s1", command: `setsid bash -c 'for i in $(seq 600); do date +%s%N > ${escBeat}; sleep 0.1; done' >/dev/null 2>&1 & sleep 60` }, 20000);
-	for (let i = 0; i < 100 && !existsSync(escBeat); i++) await sleep(50);
+	const s = p.request("env/exec", { cwd: work, sessionId: "s1", command: `setsid bash -c '${heartbeatCommand(escBeat)}' >/dev/null 2>&1 & sleep 60` }, 20000);
+	for (let i = 0; i < 100 && heartbeatSize(escBeat) === 0; i++) await sleep(50);
+	const beforeCancel = heartbeatSize(escBeat);
 	const t0 = Date.now();
 	p.cancel(s.id);
 	// Plugin binding: Command lifetime.
@@ -707,10 +712,10 @@ await attempt("environment", async () => {
 	const containment = containmentOn(reg.workingEnvironment, process.platform);
 	if (containment === "strong") {
 		await sleep(1500);
-		const a = existsSync(escBeat) ? readFileSync(escBeat, "utf8") : "";
+		const a = heartbeatSize(escBeat);
 		await sleep(700);
-		const b = existsSync(escBeat) ? readFileSync(escBeat, "utf8") : "";
-		check("env/exec: strong containment stops a setsid escapee", a !== "" && a === b, "its heartbeat still changes after the cancel");
+		const b = heartbeatSize(escBeat);
+		check("env/exec: strong containment stops a setsid escapee", beforeCancel > 0 && a >= beforeCancel && a === b, `heartbeat sizes (before cancel, after, later): ${beforeCancel}, ${a}, ${b}`);
 	}
 
 	// Saved points, if the environment offers them.
@@ -750,15 +755,13 @@ await attempt("environment", async () => {
 	}
 
 	// A session's background processes outlive the call, and stop at env/sessionEnded for that session only.
-	// Each writes a heartbeat file; a PID would mean nothing to the kit if the environment uses its own PID namespace.
 	const beat = (sessionId) => join(work, `beat-${sessionId}`);
-	const bg = (sessionId) => p.request("env/exec", { cwd: work, sessionId, command: `(for i in $(seq 600); do date +%s%N > ${beat(sessionId)}; sleep 0.1; done) >/dev/null 2>&1 &` });
-	const beating = async (sessionId) => {
+	const bg = (sessionId) => p.request("env/exec", { cwd: work, sessionId, command: `(${heartbeatCommand(beat(sessionId))}) >/dev/null 2>&1 &` });
+	const heartbeatDelta = async (sessionId) => {
 		const f = beat(sessionId);
-		const a = existsSync(f) ? readFileSync(f, "utf8") : "";
+		const a = heartbeatSize(f);
 		await sleep(600);
-		const b = existsSync(f) ? readFileSync(f, "utf8") : "";
-		return a !== "" && a !== b;
+		return heartbeatSize(f) - a;
 	};
 	// Plugin binding: Command lifetime. No descendant cleanup guarantee under containment none.
 	if (containment === "none") {
@@ -768,12 +771,12 @@ await attempt("environment", async () => {
 	await bg("kit-session-1");
 	await bg("kit-session-2");
 	await sleep(300);
-	const both = [await beating("kit-session-1"), await beating("kit-session-2")];
-	check("env/exec: a background process outlives the call", both[0] && both[1], JSON.stringify(both));
+	const both = [await heartbeatDelta("kit-session-1"), await heartbeatDelta("kit-session-2")];
+	check("env/exec: a background process outlives the call", both[0] > 0 && both[1] > 0, `heartbeat growth: ${JSON.stringify(both)}`);
 	const ended = await p.request("env/sessionEnded", { sessionId: "kit-session-1" }, 10000).catch((e) => ({ error: e }));
-	const oneAfter = await beating("kit-session-1");
-	check("env/sessionEnded: answers {}, with the session's background processes stopped", JSON.stringify(ended) === "{}" && !oneAfter, JSON.stringify({ ended, stillBeating: oneAfter }));
-	check("env/sessionEnded: another session's processes keep running", await beating("kit-session-2"));
+	const oneAfter = await heartbeatDelta("kit-session-1");
+	check("env/sessionEnded: answers {}, with the session's background processes stopped", JSON.stringify(ended) === "{}" && oneAfter === 0, JSON.stringify({ ended, heartbeatDelta: oneAfter }));
+	check("env/sessionEnded: another session's processes keep running", await heartbeatDelta("kit-session-2") > 0);
 	await p.request("env/sessionEnded", { sessionId: "kit-session-2" }, 10000).catch(() => undefined);
 });
 
