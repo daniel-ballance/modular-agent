@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -67,11 +67,32 @@ test("if the watcher dies too, the next agent to start cleans up", { skip: proce
 	});
 	assert.ok(watcher, "a watcher is running");
 	process.kill(Number(watcher), "SIGKILL");
+	const exited = new Promise((r) => agent.once("exit", r));
 	agent.kill("SIGKILL");
+	await exited; // reaped, so the agent's pid is gone, not a zombie
 	await new Promise((r) => setTimeout(r, 500));
 	assert.ok(alive(bg), "nothing cleaned up yet");
 	const { ProcessTracker } = await import(envLocal);
 	new ProcessTracker(join(home, "run"));
 	assert.ok(await until(() => !alive(bg)), "the next agent's start swept it");
 	assert.deepEqual(readdirSync(join(home, "run")), []);
+});
+
+test("an agent killed but not yet reaped (a zombie) counts as dead, so its leftovers are swept", { skip: process.platform !== "linux" && "reads /proc" }, async () => {
+	const home = mkdtempSync(join(tmpdir(), "ma-h-"));
+	const run = join(home, "run");
+	mkdirSync(run);
+	// `sleep 0` exits and its parent execs into `sleep 5`, which never reaps it: a zombie.
+	const holder = spawn("sh", ["-c", "sleep 0 & echo $!; exec sleep 5"], { stdio: ["ignore", "pipe", "ignore"] });
+	const zombie = Number(await new Promise<string>((r) => holder.stdout.once("data", (d) => r(String(d)))));
+	assert.ok(await until(() => readFileSync(`/proc/${zombie}/stat`, "latin1").split(") ")[1]?.startsWith("Z")), "the agent pid is a zombie");
+	const runId = "zombie-test-run";
+	const leftover = spawn("sleep", ["60"], { env: { ...process.env, MODULAR_AGENT_RUN: runId }, stdio: "ignore" });
+	await until(() => readFileSync(`/proc/${leftover.pid}/environ`, "latin1").includes(`MODULAR_AGENT_RUN=${runId}\0`));
+	writeFileSync(join(run, "1-zombie.json"), JSON.stringify({ agentPid: zombie, runId, groups: [] }));
+	const { ProcessTracker } = await import(envLocal);
+	new ProcessTracker(run);
+	assert.ok(await until(() => leftover.exitCode !== null || leftover.signalCode !== null), "the leftover was killed");
+	assert.deepEqual(readdirSync(run), []);
+	holder.kill("SIGKILL");
 });

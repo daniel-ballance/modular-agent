@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +17,18 @@ const alive = (pid: number) => {
 		return true;
 	} catch (error) {
 		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+};
+
+/** Whether the process can still run. A zombie (killed, not yet reaped by its parent) cannot, though kill(pid, 0) still succeeds. */
+const running = (pid: number) => {
+	if (!alive(pid)) return false;
+	if (process.platform !== "linux") return true;
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "latin1");
+		return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z";
+	} catch {
+		return false;
 	}
 };
 
@@ -55,7 +67,7 @@ export function cleanUp(file: string): void {
 		rmSync(file, { force: true });
 		return;
 	}
-	if (alive(run.agentPid)) return;
+	if (running(run.agentPid)) return;
 	for (const pgid of run.groups) killGroup(pgid);
 	for (const pid of markedProcesses(run.runId)) {
 		try {
@@ -81,7 +93,11 @@ export class ProcessTracker {
 	constructor(private runDir?: string) {
 		if (!runDir) return;
 		mkdirSync(runDir, { recursive: true });
-		for (const name of readdirSync(runDir)) if (name.endsWith(".json")) cleanUp(join(runDir, name));
+		for (const name of readdirSync(runDir)) {
+			if (name.endsWith(".json")) cleanUp(join(runDir, name));
+			// A run file being replaced; its writer died before the rename if that pid no longer runs.
+			else if (name.endsWith(".json.tmp") && !running(Number(name.split("-")[0]))) rmSync(join(runDir, name), { force: true });
+		}
 		this.file = join(runDir, `${process.pid}-${this.runId.slice(0, 8)}.json`);
 	}
 
@@ -130,7 +146,10 @@ export class ProcessTracker {
 	private save(): void {
 		if (!this.file) return;
 		const run: RunFile = { agentPid: process.pid, runId: this.runId, groups: [...this.commands.keys()] };
-		writeFileSync(this.file, JSON.stringify(run));
+		// Replace the file whole: an agent killed mid-write must not leave an empty or partial run file,
+		// which the next sweep could not read and would discard with the processes it lists still running.
+		writeFileSync(`${this.file}.tmp`, JSON.stringify(run));
+		renameSync(`${this.file}.tmp`, this.file);
 	}
 
 	private watch(): void {
