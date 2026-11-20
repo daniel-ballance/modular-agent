@@ -30,6 +30,9 @@ type handler struct {
 type Harness struct {
 	localActor      string
 	handBackOnOpen  bool
+	parkJobReports  bool
+	refuseSettings  bool
+	inTurnQuestions bool
 	tenants         map[string]tenantConfig
 	tenantConfigErr error
 	mu              sync.RWMutex
@@ -61,7 +64,7 @@ func NewWithLocalActor(actor string) *Harness {
 	h := &Harness{external: map[string]bool{}, externalPlugins: map[string]bool{}, plugins: map[string]api.Plugin{}, caps: map[string]registration{}, hooks: map[string]*hook{}, commands: map[string]registration{}, sessions: map[string]*session{}, listeners: map[int]outputListener{}, outputStreams: map[outputStream][]api.Event{}}
 	h.localActor = actor
 	h.tenants, h.tenantConfigErr = readTenants()
-	for name, rule := range map[string]api.Rule{"plugin.load": api.Gate, "process.stop": api.Observe, "session.start": api.Observe, "session.ready": api.Observe, "session.stop": api.Observe, "session.end": api.Observe, "session.fork": api.Transform, "input": api.Transform, "turn.prepare": api.Transform, "output": api.Transform, "output.batch": api.Gate} {
+	for name, rule := range map[string]api.Rule{"plugin.load": api.Gate, "process.stop": api.Observe, "session.prepare": api.Observe, "session.start": api.Observe, "session.ready": api.Observe, "session.stop": api.Observe, "session.end": api.Observe, "session.fork": api.Transform, "input": api.Transform, "turn.prepare": api.Transform, "output": api.Transform, "output.batch": api.Gate} {
 		h.hooks[name] = &hook{owner: "harness", rule: rule}
 	}
 	return h
@@ -70,11 +73,22 @@ func NewWithLocalActor(actor string) *Harness {
 // HandBackQueuedOnOpen selects the embedded SDK's recovery policy before loading plugins.
 func (h *Harness) HandBackQueuedOnOpen() { h.handBackOnOpen = true }
 
-// QueuedRecoveryPolicy reports the policy actually used to install recovered work.
-// The harness handles queued jobs and ordinary queued input alike.
+// ConfigureSessions sets SDK policies before plugins or sessions are loaded.
+func (h *Harness) ConfigureSessions(jobReportsStartTurns, lateQuestions, refuseSettings bool) {
+	h.parkJobReports = !jobReportsStartTurns
+	h.inTurnQuestions = !lateQuestions
+	h.refuseSettings = refuseSettings
+}
+
+func (c *client) LateQuestions() bool { return !c.h.inTurnQuestions }
+
+// QueuedRecoveryPolicy reports the policy used when installing recovered work.
 func (h *Harness) QueuedRecoveryPolicy() (inputs, jobReports string) {
 	if h.handBackOnOpen {
-		return "handedBack", "handedBack"
+		if h.parkJobReports {
+			return "handedBack", "handedBack"
+		}
+		return "handedBack", "run"
 	}
 	return "run", "run"
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
 	"os"
 	"path/filepath"
 	"slices"
@@ -95,8 +96,8 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	if !info.IsDir() {
 		return "", errors.New("project is not a folder")
 	}
-	settings := api.Settings{}
-	if v, err := c.Get("configuration"); err == nil {
+	settings, provided := api.SessionSettings(ctx)
+	if v, err := c.Get("configuration"); !provided && err == nil {
 		settings, err = v.(api.Configuration).Settings(project)
 		if err != nil {
 			return "", err
@@ -148,6 +149,10 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		if s.lease != nil {
 			_ = s.lease.Close()
 		}
+		return "", err
+	}
+	if _, err = c.h.API().Invoke(ctx, "session.prepare", api.SessionPrepare{Session: clone(s.data)}); err != nil {
+		_ = c.CloseSession(id)
 		return "", err
 	}
 	if _, err = c.h.API().Invoke(ctx, "session.start", clone(s.data)); err != nil {
@@ -220,6 +225,10 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = lease.Close()
 		return err
 	}
+	if _, err = c.h.API().Invoke(ctx, "session.prepare", api.SessionPrepare{Session: clone(snap), Reopened: true}); err != nil {
+		_ = c.StopSession(id)
+		return err
+	}
 	if err = c.recoverNested(s); err != nil {
 		_ = c.StopSession(id)
 		return err
@@ -245,15 +254,20 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	s.queue = slices.DeleteFunc(s.queue, parked)
 	if c.h.handBackOnOpen && len(s.queue) > 0 {
 		ids := make([]string, 0, len(s.queue))
-		for _, in := range s.queue {
+		s.queue = slices.DeleteFunc(s.queue, func(in api.Input) bool {
+			if in.Job != "" && !c.h.parkJobReports {
+				return false
+			}
 			ids = append(ids, in.ID)
+			return true
+		})
+		if len(ids) > 0 {
+			if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
+				s.mu.Unlock()
+				_ = c.StopSession(id)
+				return err
+			}
 		}
-		if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
-			s.mu.Unlock()
-			_ = c.StopSession(id)
-			return err
-		}
-		s.queue = nil
 	}
 	s.external = externalRecovery(s.data)
 	nextInput := runnableInput(s.queue)
@@ -374,6 +388,9 @@ func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Sess
 	snap, err := c.Snapshot(id)
 	if err != nil {
 		return snap, err
+	}
+	for i, entry := range snap.Entries {
+		snap.Entries[i] = portable.PublicEntry(entry)
 	}
 	event := api.Event{Kind: "history.view", Session: id, Data: api.JSON(snap)}
 	if gateRemote {
@@ -881,7 +898,12 @@ func recordedOutcome(snap api.Session) api.Outcome {
 }
 
 // SettingsDuringTurn describes the effect of supported model and approval settings.
-func (c *client) SettingsDuringTurn() string { return "nextTurn" }
+func (c *client) SettingsDuringTurn() string {
+	if c.h.refuseSettings {
+		return "refused"
+	}
+	return "nextTurn"
+}
 
 func (c *client) SetSettings(ctx context.Context, id string, settings api.Settings) error {
 	if !c.Authorize(id, api.Acting(ctx), "settings") {
@@ -894,6 +916,9 @@ func (c *client) SetSettings(ctx context.Context, id string, settings api.Settin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running {
+		if c.h.refuseSettings {
+			return api.ErrSettingsBusy
+		}
 		// Selection and approval changes apply to the next turn. The running
 		// turn retains its recorded settings, including across recovery.
 		before, after := s.data.Settings, settings
@@ -1126,7 +1151,18 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	}
 	ctx = api.WithExecution(api.AsActor(ctx, in.Actor), api.Execution{Session: snap.ID, Turn: turnID})
 	ctx = api.WithJobContributors(ctx, in.Actor, in.ViaActor, in.ReleasedBy)
-	before := api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content}
+	var tools []api.Tool
+	seen := map[string]bool{}
+	for _, source := range h.API().All("tools.") {
+		for _, tool := range source.(api.ToolSource).Tools(snap) {
+			if seen[tool.Name] {
+				return api.Outcome{Status: "failed", Error: "duplicate tool " + tool.Name}
+			}
+			seen[tool.Name] = true
+			tools = append(tools, tool)
+		}
+	}
+	before := api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content, Tools: tools}
 	prepared, err := h.API().Invoke(ctx, "turn.prepare", before)
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
@@ -1146,17 +1182,6 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 			return unavailableTurn(ctx, ports, selectionView.Settings, before, nil, resume, err)
 		}
 		return api.Outcome{Status: "failed", Error: err.Error()}
-	}
-	var tools []api.Tool
-	seen := map[string]bool{}
-	for _, source := range h.API().All("tools.") {
-		for _, tool := range source.(api.ToolSource).Tools(snap) {
-			if seen[tool.Name] {
-				return api.Outcome{Status: "failed", Error: "duplicate tool " + tool.Name}
-			}
-			seen[tool.Name] = true
-			tools = append(tools, tool)
-		}
 	}
 	h.mu.RLock()
 	owner := h.caps["runtime"].owner

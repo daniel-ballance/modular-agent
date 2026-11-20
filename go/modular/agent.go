@@ -57,23 +57,25 @@ type ProcessPlugin struct {
 	Config  map[string]any    `json:"config,omitempty"`
 }
 type options struct {
-	project, dataDir, model string
-	durability              Durability
-	providers               []Provider
-	plugins                 []Plugin
-	tools                   []Tool
-	process                 []ProcessPlugin
-	wire                    []wirePlugin
-	environment             Environment
-	host                    *bool
-	settings                Settings
-	approval                Approval
-	handler                 QuestionHandler
-	history                 HistoryStore
-	mcp                     []MCPServer
-	mcpWarning              func(error)
-	conformance             bool
-	input                   func(context.Context, Content) (Content, error)
+	project, dataDir, model                 string
+	durability                              Durability
+	providers                               []Provider
+	plugins                                 []Plugin
+	tools                                   []Tool
+	process                                 []ProcessPlugin
+	wire                                    []wirePlugin
+	environment                             Environment
+	host                                    *bool
+	settings                                Settings
+	approval                                Approval
+	handler                                 QuestionHandler
+	history                                 HistoryStore
+	mcp                                     []MCPServer
+	mcpWarning                              func(error)
+	conformance                             bool
+	jobReports, lateAnswers, refuseSettings bool
+	compaction                              bool
+	input                                   func(context.Context, Content) (Content, error)
 }
 type Environment = api.WorkingEnvironment
 type DirEntry = api.DirEntry
@@ -132,34 +134,55 @@ func WithApproval(a Approval) Option {
 		return nil
 	}
 }
-func OnQuestion(h QuestionHandler) Option { return WithOnQuestion(h) }
 func WithOnQuestion(h QuestionHandler) Option {
 	return func(o *options) error { o.handler = h; return nil }
 }
 
+// WithCompaction controls automatic summarization and the /compact command.
+// Compaction is enabled by default.
+func WithCompaction(enabled bool) Option {
+	return func(o *options) error { o.compaction = enabled; return nil }
+}
+
+// WithJobReportsStartTurns lets a job's report start a turn without new actor input.
+func WithJobReportsStartTurns(enabled bool) Option {
+	return func(o *options) error { o.jobReports = enabled; return nil }
+}
+
+// WithLateAnswersStartTurns lets a question stay open and its answer continue the call.
+func WithLateAnswersStartTurns(enabled bool) Option {
+	return func(o *options) error { o.lateAnswers = enabled; return nil }
+}
+
+// WithRefusedSettingsDuringTurn refuses settings changes while a turn is active.
+func WithRefusedSettingsDuringTurn() Option {
+	return func(o *options) error { o.refuseSettings = true; return nil }
+}
+
 type Agent struct {
-	h          *harness.Harness
-	a          api.API
-	project    string
-	scratch    string
-	persistent bool
-	erasure    bool
-	closed     atomic.Bool
-	restarting atomic.Bool
-	lifecycle  sync.Mutex
-	settingsMu sync.Mutex
-	pluginHost bool
-	q          *questionRouter
-	closeOnce  sync.Once
-	closeErr   error
-	restart    func(context.Context) (*Agent, error)
+	h                       *harness.Harness
+	a                       api.API
+	project                 string
+	scratch                 string
+	persistent              bool
+	jobReports, lateAnswers bool
+	erasure                 bool
+	closed                  atomic.Bool
+	restarting              atomic.Bool
+	lifecycle               sync.Mutex
+	settingsMu              sync.Mutex
+	pluginHost              bool
+	q                       *questionRouter
+	closeOnce               sync.Once
+	closeErr                error
+	restart                 func(context.Context) (*Agent, error)
 }
 type sessionDefaults struct{ settings *api.Settings }
 
 func (s sessionDefaults) Settings(string) (api.Settings, error) { return *s.settings, nil }
 
 func New(ctx context.Context, opts ...Option) (*Agent, error) {
-	o := options{durability: Ephemeral, settings: Settings{}}
+	o := options{durability: Ephemeral, settings: Settings{}, compaction: true}
 	for _, opt := range opts {
 		if opt == nil {
 			return nil, &Error{Code: InvalidParams, Message: "nil option"}
@@ -239,7 +262,8 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	h := harness.NewWithLocalActor(localActor)
 	h.HandBackQueuedOnOpen()
-	a := &Agent{h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
+	h.ConfigureSessions(o.jobReports, o.lateAnswers, o.refuseSettings)
+	a := &Agent{jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
 	state := o.dataDir
 	if state == "" {
 		state, err = os.MkdirTemp("", "modular-go-")
@@ -287,7 +311,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		{Name: "configuration", Setup: func(a api.API) error { return a.Provide("configuration", sessionDefaults{&defaults}) }},
 		{Name: "sdk-credentials", Setup: func(a api.API) error { return a.Provide("credentials", environmentCredentials{}) }},
 		configuration.BoundProject(project), environment, runtime,
-		modelselect.Plugin(), contextview.Plugin(), questions.Plugin(), acpinterface.Plugin(project),
+		modelselect.Plugin(), contextview.PluginWithCompaction(o.compaction), questions.Plugin(), jobs.Plugin(), acpinterface.Plugin(project),
 		mcptools.Configured(o.mcp, project, o.mcpWarning),
 		{Name: "sdk-model-admission", Setup: func(host api.API) error {
 			return host.Handle("input", "last", func(_ context.Context, payload any) (api.Decision, error) {
@@ -306,7 +330,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		core = append(core, approval.Plugin())
 	}
 	if o.conformance {
-		core = append(core, conformancemodel.Plugin(), pluginrpc.NestFixture(), jobs.Plugin())
+		core = append(core, conformancemodel.Plugin(), pluginrpc.NestFixture())
 	}
 	a.q = newQuestionRouter(a.a, o.handler)
 	core = append(core, a.q.plugin())
@@ -454,6 +478,7 @@ func (a *Agent) OpenSession(ctx context.Context, id string) (*Session, error) {
 }
 func (a *Agent) Declaration() Declaration {
 	d := acpinterface.Declaration(a.a, a.project, "")
+	delete(d, "projectRoot")
 	d["portableSessions"] = a.persistent
 	inputs, reports := a.h.QueuedRecoveryPolicy()
 	d["queuedInputAfterRestart"] = inputs
@@ -467,8 +492,11 @@ func (a *Agent) Declaration() Declaration {
 	}
 	runtime, err := a.a.Get("runtime")
 	d["nestedToolCalls"] = err == nil && runtime.(api.Runtime).Declaration().NestedToolCalls
-	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = false, false
+	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = a.lateAnswers, a.lateAnswers
 	d["startsTurnsUnasked"] = "never"
+	if a.jobReports {
+		d["startsTurnsUnasked"] = "jobReports"
+	}
 	d["severalActors"], d["sessionLimits"], d["tenants"] = false, false, false
 	d["erasure"] = a.erasure
 	d["confinesFiles"], d["commandContainment"] = false, "none"
@@ -493,16 +521,32 @@ func (a *Agent) Declaration() Declaration {
 	return d
 }
 
-func (a *Agent) ServeACP(ctx context.Context) error {
-	return a.ServeACPStreams(ctx, os.Stdin, os.Stdout)
+// ServeACPOptions customizes project composition and session resources.
+// A composed agent must use the connection's history store. The connection owns it.
+type ServeACPOptions struct {
+	Compose         func(context.Context, string) (*Agent, error)
+	ProjectSettings func(project string) (Settings, error)
+	ProjectMCP      func(project string) ([]MCPServer, error)
+	WarnMCP         func(error)
+	Input           io.ReadCloser
+	Output          io.Writer
 }
 
-// ServeACPStreams serves ACP on the supplied streams until the connection ends.
-func (a *Agent) ServeACPStreams(ctx context.Context, in io.ReadCloser, out io.Writer) error {
-	return a.serveACP(ctx, in, out)
-}
-
-func (a *Agent) serveACP(ctx context.Context, in io.ReadCloser, out io.Writer) error {
+// ServeACP serves one stdio connection, or the streams supplied in options.
+func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error {
+	if len(options) > 1 {
+		return &Error{Code: InvalidParams, Message: "at most one ServeACPOptions value"}
+	}
+	var opt ServeACPOptions
+	if len(options) == 1 {
+		opt = options[0]
+	}
+	if opt.Input == nil {
+		opt.Input = os.Stdin
+	}
+	if opt.Output == nil {
+		opt.Output = os.Stdout
+	}
 	if !a.pluginHost {
 		return &Error{Code: InvalidComposition, Message: "ACP requires WithPluginHost(true)"}
 	}
@@ -510,7 +554,53 @@ func (a *Agent) serveACP(ctx context.Context, in io.ReadCloser, out io.Writer) e
 	if err != nil {
 		return appError(err, NotSupported)
 	}
-	return appError(v.(*acpinterface.Interface).ServeWithDeclaration(ctx, in, out, func() map[string]any { return a.Declaration() }), Lost)
+	declared := func() map[string]any {
+		d := a.Declaration()
+		if opt.Compose == nil {
+			d["projectRoot"] = a.project
+		}
+		return d
+	}
+	projects := acpinterface.Projects{MCP: opt.ProjectMCP, WarnMCP: opt.WarnMCP}
+	if opt.Compose != nil {
+		projects.Compose = func(ctx context.Context, project, id string) (acpinterface.Project, error) {
+			child, err := opt.Compose(context.WithValue(ctx, reopeningSessionKey{}, id), project)
+			if err != nil {
+				return acpinterface.Project{}, err
+			}
+			if child == nil || child == a || child.project != project {
+				if child != nil && child != a {
+					_ = child.Close(context.Background())
+				}
+				return acpinterface.Project{}, &Error{Code: InvalidComposition, Message: "Compose must return a separate agent bound to the requested project"}
+			}
+			return acpinterface.Project{API: child.a, Declaration: func() map[string]any { return child.Declaration() }, Close: func() error { return child.Close(context.Background()) }}, nil
+		}
+	}
+	if opt.ProjectSettings != nil {
+		projects.Settings = func(project string, defaults api.Settings) (api.Settings, error) {
+			settings, err := opt.ProjectSettings(project)
+			if err != nil {
+				return defaults, err
+			}
+			for key, value := range settings {
+				if err := applySetting(&defaults, key, value); err != nil {
+					return defaults, err
+				}
+			}
+			return defaults, nil
+		}
+	}
+	return appError(v.(*acpinterface.Interface).ServeWithDeclaration(ctx, opt.Input, opt.Output, declared, projects), Lost)
+}
+
+type reopeningSessionKey struct{}
+
+// ACPReopeningSession returns the stored session ID when a factory is called for a reopen.
+// The call does not grant access to the session or start its recovery.
+func ACPReopeningSession(ctx context.Context) string {
+	id, _ := ctx.Value(reopeningSessionKey{}).(string)
+	return id
 }
 
 func decodeInto(v any, p any) error {

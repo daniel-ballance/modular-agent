@@ -207,10 +207,36 @@ func (r *Registrar) OnToolAfter(fn func(context.Context, ToolAfter) (ToolChange,
 	}}, opts)
 }
 
+type SessionPrepare struct {
+	SessionID string
+	Project   string
+	Reopened  bool
+}
+
+// OnSessionPrepare installs resources before session start and recovery. It is in-process only.
+func (r *Registrar) OnSessionPrepare(fn func(context.Context, SessionPrepare) error, opts ...HookOption) error {
+	return r.on(hookRegistration{point: "session.prepare", only: true, handle: func(ctx context.Context, p pluginrpc.Object) (any, error) {
+		var in SessionPrepare
+		if err := decodeInto(p, &in); err != nil {
+			return nil, err
+		}
+		return nil, fn(ctx, in)
+	}}, opts)
+}
+
+// OnSessionEnd releases resources on session close or interruption.
+func (r *Registrar) OnSessionEnd(fn func(context.Context, string) error, opts ...HookOption) error {
+	return r.on(hookRegistration{point: "session.end", only: true, handle: func(ctx context.Context, p pluginrpc.Object) (any, error) {
+		return nil, fn(ctx, p["sessionId"].(string))
+	}}, opts)
+}
+
 type TurnBefore struct {
-	SessionID string  `json:"sessionId"`
-	TurnID    string  `json:"turnId"`
-	Input     Content `json:"input"`
+	Project   string           `json:"project,omitempty"`
+	Tools     []ToolDefinition `json:"tools,omitempty"`
+	SessionID string           `json:"sessionId"`
+	TurnID    string           `json:"turnId"`
+	Input     Content          `json:"input"`
 }
 type TurnContribution struct {
 	System  string  `json:"system,omitempty"`
@@ -319,10 +345,33 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 			if hook.order == Normal {
 				order = ""
 			}
-			if hook.point == "turn.before" {
+			if hook.point == "session.end" {
+				for _, point := range []string{"session.end", "session.stop"} {
+					if err := a.Handle(point, order, func(ctx context.Context, v any) (api.Decision, error) {
+						_, err := hook.handle(ctx, pluginrpc.Object{"sessionId": v.(string)})
+						return api.Decision{}, err
+					}); err != nil {
+						return err
+					}
+				}
+			} else if hook.point == "session.prepare" {
+				if err := a.Handle(hook.point, order, func(ctx context.Context, v any) (api.Decision, error) {
+					prepare := v.(api.SessionPrepare)
+					_, err := hook.handle(ctx, pluginrpc.Object{"SessionID": prepare.Session.ID, "Project": prepare.Session.Project, "Reopened": prepare.Reopened})
+					return api.Decision{}, err
+				}); err != nil {
+					return err
+				}
+			} else if hook.point == "turn.before" {
 				if err := a.Handle("turn.prepare", order, func(ctx context.Context, v any) (api.Decision, error) {
 					before := v.(api.BeforeTurn)
-					result, err := hook.handle(ctx, pluginrpc.Object{"sessionId": before.Session.ID, "turnId": before.Turn, "input": portable.Content(before.Input)})
+					var tools []portable.Object
+					for _, def := range before.Tools {
+						if api.CanCall(def, "plugin") {
+							tools = append(tools, portable.Tool(def))
+						}
+					}
+					result, err := hook.handle(ctx, pluginrpc.Object{"sessionId": before.Session.ID, "turnId": before.Turn, "input": portable.Content(before.Input), "project": before.Session.Project, "tools": tools})
 					if err != nil {
 						return api.Decision{}, err
 					}

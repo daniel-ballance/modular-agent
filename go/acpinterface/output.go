@@ -23,6 +23,9 @@ func heldError(err error) error {
 }
 
 func outputReplyError(err error) error {
+	if errors.Is(err, api.ErrSettingsBusy) {
+		return &acp.RequestError{Code: -32000, Message: err.Error(), Data: map[string]string{"code": "busy"}}
+	}
 	if errors.Is(err, api.ErrUnknownModel) {
 		return acp.NewInvalidParams(map[string]any{"reason": err.Error()})
 	}

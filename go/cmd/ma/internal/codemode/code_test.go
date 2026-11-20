@@ -2,12 +2,53 @@ package codemode
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/OWNER/modular-agent/go/modular"
 	"github.com/OWNER/modular-agent/go/modular/files"
 )
+
+func TestPromptCatalogThreshold(t *testing.T) {
+	defs := make([]modular.ToolDefinition, 13)
+	for i := range defs {
+		defs[i] = modular.ToolDefinition{Name: fmt.Sprintf("fixture_%d", i), Description: strings.Repeat("a", 170) + "\nSecond line", Parameters: []byte(`{"type":"object"}`)}
+	}
+	full, err := Prompt(defs[:12])
+	if err != nil || strings.Count(full, "Second line") != 12 {
+		t.Fatalf("full prompt: %v\n%s", err, full)
+	}
+	short, err := Prompt(defs)
+	if err != nil || strings.Count(short, "- `tools.fixture_") != 13 || strings.Contains(short, "Second line") || strings.Contains(short, strings.Repeat("a", 161)) {
+		t.Fatalf("abbreviated prompt: %v\n%s", err, short)
+	}
+}
+
+func TestStandardNestedCallBudget(t *testing.T) {
+	defs := []modular.ToolDefinition{files.Tools("")[0].Definition()}
+	fs, err := catalog(defs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	result, err := run(t.Context(), `
+for i in range(500):
+    search_tools('read')
+    describe_tool('read')
+    tools.read('fixture.txt', None)
+try:
+    tools.read('fixture.txt')
+except RuntimeError as e:
+    print(e)
+`, fs, func(context.Context, string, any) (modular.ToolResult, error) {
+		calls++
+		return modular.ToolResult{Status: modular.Completed, Content: modular.Text("fixture")}, nil
+	}, StandardLimits())
+	if err != nil || calls != 500 || !strings.Contains(result.Content.Text(), "more than 500 function calls") {
+		t.Fatalf("calls=%d, result=%+v, error=%v", calls, result, err)
+	}
+}
 
 func TestMontyCallsAndLimits(t *testing.T) {
 	var defs []modular.ToolDefinition
@@ -25,6 +66,7 @@ func TestMontyCallsAndLimits(t *testing.T) {
 	}{
 		{"invoke", "print(tools.read(path='in.txt').upper())", "WHITBY", false, 1},
 		{"alias", "t = tools\nt.read('in.txt')", "whitby", false, 1},
+		{"positional and None", "tools.read('in.txt', None, None)", "whitby", false, 1},
 		{"count", "tools.read('in.txt')\ntools.read('in.txt')", "more than 1 function calls", true, 1},
 		{"bad args", "tools.read(other='x')", "unexpected argument other", true, 0},
 		{"exception", "tools.read('missing')", "read() failed: file missing", true, 1},

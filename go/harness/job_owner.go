@@ -43,12 +43,12 @@ func (c *client) finishJobLocked(s *session, end api.Entry) (api.Entry, api.Entr
 	}
 	end = appendEntry(&next, end, c.owner, true)
 	if job.Report {
-		in, admission = appendJobReport(&next, end, job, api.ID(), job.Outcome.Result, false)
+		in, admission = appendJobReport(&next, end, job, api.ID(), job.Outcome.Result, c.h.parkJobReports)
 	}
 	if err := s.commitLocked(next); err != nil {
 		return end, api.Entry{}, fmt.Errorf("%w: %v", api.ErrJobCommitLost, err)
 	}
-	if admission.ID != "" && !s.opening {
+	if admission.ID != "" && !s.opening && !parked(in) {
 		c.enqueueLocked(s, in)
 	}
 	return end, admission, nil

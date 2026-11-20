@@ -96,6 +96,11 @@ func (m *Manager) Add(ctx context.Context, id string, specs []Server) error {
 	return m.add(ctx, id, specs, false)
 }
 
+// AddConfigured adds one configured server to a session's existing attachment.
+func (m *Manager) AddConfigured(ctx context.Context, id string, spec Server) error {
+	return m.add(ctx, id, []Server{spec}, true)
+}
+
 func (m *Manager) add(ctx context.Context, id string, specs []Server, extend bool) error {
 	m.mu.RLock()
 	_, exists := m.groups[id]

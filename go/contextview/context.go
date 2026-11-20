@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
 	"github.com/OWNER/modular-agent/go/turnrun"
 )
 
@@ -16,7 +17,10 @@ type summary struct {
 	Usage   api.Usage
 }
 
-func Plugin() api.Plugin {
+func Plugin() api.Plugin { return PluginWithCompaction(true) }
+
+// PluginWithCompaction installs context projection with optional summarization.
+func PluginWithCompaction(compact bool) api.Plugin {
 	return api.Plugin{Name: "context", Setup: func(a api.API) error {
 		m := &manager{a}
 		if err := a.Handle("session.fork", "", func(ctx context.Context, v any) (api.Decision, error) {
@@ -36,20 +40,22 @@ func Plugin() api.Plugin {
 		}); err != nil {
 			return err
 		}
-		if err := a.RegisterCommand("compact", func(ctx context.Context, id string, args []string) (string, error) {
-			if len(args) > 0 {
-				return "", errors.New("usage: /compact")
+		if compact {
+			if err := a.RegisterCommand("compact", func(ctx context.Context, id string, args []string) (string, error) {
+				if len(args) > 0 {
+					return "", errors.New("usage: /compact")
+				}
+				if err := m.compact(ctx, id); err != nil {
+					return "", err
+				}
+				return "Compacted. Raw history retained.", nil
+			}); err != nil {
+				return err
 			}
-			if err := m.compact(ctx, id); err != nil {
-				return "", err
-			}
-			return "Compacted. Raw history retained.", nil
-		}); err != nil {
-			return err
 		}
 		if err := a.Handle("runtime.step.before", "", func(ctx context.Context, v any) (api.Decision, error) {
 			sc := v.(api.StepContext)
-			if sc.Compact {
+			if compact && sc.Compact {
 				if err := m.compactTurn(ctx, sc); err != nil {
 					return api.Decision{}, err
 				}
@@ -58,7 +64,7 @@ func Plugin() api.Plugin {
 			if err != nil {
 				return api.Decision{}, err
 			}
-			sc.Request.Messages, sc.Sources = Messages(snap.Branch())
+			sc.Request.Messages, sc.Sources = forProvider(snap.Branch(), sc.Turn.Access.Model().Provider)
 			if len(sc.Turn.Context) > 0 {
 				sc.Request.Messages = append(sc.Request.Messages, api.Message{Role: "user", Content: sc.Turn.Context})
 			}
@@ -66,7 +72,7 @@ func Plugin() api.Plugin {
 			if snap.Settings.ContextLimit > 0 {
 				limit = snap.Settings.ContextLimit
 			}
-			if estimate(sc.Request)+sc.Request.MaxOutput > limit {
+			if compact && estimate(sc.Request)+sc.Request.MaxOutput > limit {
 				if sc.Compact {
 					return api.Decision{}, errors.New("context remains too large after compaction")
 				}
@@ -82,7 +88,7 @@ func Plugin() api.Plugin {
 				if err != nil {
 					return api.Decision{}, err
 				}
-				sc.Request.Messages, sc.Sources = Messages(snap.Branch())
+				sc.Request.Messages, sc.Sources = forProvider(snap.Branch(), sc.Turn.Access.Model().Provider)
 				if len(sc.Turn.Context) > 0 {
 					sc.Request.Messages = append(sc.Request.Messages, api.Message{Role: "user", Content: sc.Turn.Context})
 				}
@@ -98,6 +104,9 @@ func Plugin() api.Plugin {
 			return api.Decision{Value: sc}, nil
 		}); err != nil {
 			return err
+		}
+		if !compact {
+			return nil
 		}
 		return a.Handle("runtime.request.failed", "", func(ctx context.Context, v any) (api.Decision, error) {
 			f := v.(api.Failure)
@@ -140,13 +149,24 @@ func effective(entries []api.Entry) []api.Entry {
 	}
 	return out
 }
-func Messages(entries []api.Entry) ([]api.Message, []string) { return messages(effective(entries)) }
-func messages(entries []api.Entry) ([]api.Message, []string) {
+func Messages(entries []api.Entry) ([]api.Message, []string) { return forProvider(entries, "") }
+
+func forProvider(branch []api.Entry, provider string) ([]api.Message, []string) {
+	return messages(effective(branch), branch, provider)
+}
+
+func messages(entries, branch []api.Entry, provider string) ([]api.Message, []string) {
 	var out []api.Message
 	var sources []string
 	// A late exchange cannot be sent as an unpaired vendor tool call. Render
 	// waiting calls and their later results as text in the model view only.
 	late := map[string]bool{}
+	owners := map[[2]string]string{}
+	for _, e := range branch {
+		if e.Kind == "model.request" {
+			owners[[2]string{e.Turn, e.Step}] = api.Decode[api.Model](e.Data).Provider
+		}
+	}
 	for i, e := range entries {
 		if e.Kind != "model" {
 			continue
@@ -188,6 +208,9 @@ func messages(entries []api.Entry) ([]api.Message, []string) {
 				}
 			}
 			m = api.Message{Role: "assistant", Content: content, Wire: api.Decode[struct{ Wire json.RawMessage }](e.Data).Wire}
+			if provider == "" || owners[[2]string{e.Turn, e.Step}] != provider {
+				m = portable.PublicMessage(m)
+			}
 		case "tool.result":
 			r := api.Decode[api.ToolResult](e.Data)
 			if late[r.Call] {
@@ -232,7 +255,6 @@ func (m *manager) compactWith(ctx context.Context, id string, step *api.StepCont
 	if len(prefix) == 1 && prefix[0].Kind == "summary" {
 		return errors.New("no new older history to compact")
 	}
-	messages, sources := messages(prefix)
 	var access api.ModelAccess
 	maxOutput := snap.Settings.MaxOutput
 	if step != nil {
@@ -248,6 +270,7 @@ func (m *manager) compactWith(ctx context.Context, id string, step *api.StepCont
 			return err
 		}
 	}
+	messages, sources := messages(prefix, snap.Branch(), access.Model().Provider)
 	request := api.Request{System: "Summarize this older session history faithfully. Preserve facts, decisions, file paths and unresolved work. Return only a short summary; do not use tools.", Messages: messages, Thinking: "off", MaxOutput: min(maxOutput, 512)}
 	var auxiliary api.Entry
 	if step != nil {

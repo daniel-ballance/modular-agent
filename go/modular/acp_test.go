@@ -76,7 +76,7 @@ func TestServeACPResumeDoesNotWaitForRecovery(t *testing.T) {
 	defer fresh.Close(context.Background())
 	agentSide, clientSide := net.Pipe()
 	done := make(chan error, 1)
-	go func() { done <- fresh.serveACP(ctx, agentSide, agentSide) }()
+	go func() { done <- fresh.ServeACP(ctx, ServeACPOptions{Input: agentSide, Output: agentSide}) }()
 	conn := acp.NewClientSideConnection(&testACPClient{}, clientSide, clientSide)
 	defer func() {
 		conn.Close()
@@ -98,6 +98,63 @@ func TestServeACPResumeDoesNotWaitForRecovery(t *testing.T) {
 	}
 }
 
+func TestServeACPComposesProjects(t *testing.T) {
+	t.Setenv("MODULAR_AGENT_PLUGINS", "")
+	first, second := t.TempDir(), t.TempDir()
+	store := MemoryHistory()
+	provider := Provider{ID: "projects", Models: func() []ModelInfo {
+		return []ModelInfo{{ModelRef: ModelRef{Provider: "projects", ID: "offline"}, ContextWindow: 4000, MaxOutput: 2000, Thinking: []string{"off", "low"}}}
+	}, Request: func(_ context.Context, _ ModelRef, _ ModelRequest, _ *ProviderContext) (AssistantMessage, error) {
+		return AssistantMessage{Content: Text("Hello."), Stop: "finished"}, nil
+	}}
+	compose := func(ctx context.Context, project string) (*Agent, error) {
+		return New(ctx, WithProject(project), WithHistory(store), WithPluginHost(true), WithProvider(provider))
+	}
+	a, err := compose(t.Context(), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(t.Context())
+	agentSide, clientSide := net.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- a.ServeACP(t.Context(), ServeACPOptions{Input: agentSide, Output: agentSide, Compose: compose, ProjectSettings: func(project string) (Settings, error) {
+			if project == second {
+				return Settings{"reasoning": "low"}, nil
+			}
+			return nil, nil
+		}})
+	}()
+	conn := acp.NewClientSideConnection(&testACPClient{}, clientSide, clientSide)
+	defer func() {
+		_ = conn.Close()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	init, err := conn.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: 1})
+	if err != nil || strings.Contains(string(init.Meta["modular-agent"]), "projectRoot") {
+		t.Fatalf("initialize: %s (%v)", init.Meta["modular-agent"], err)
+	}
+	for project, reasoning := range map[string]string{first: "off", second: "low"} {
+		session, err := conn.NewSession(t.Context(), acp.NewSessionRequest{Cwd: project, McpServers: []acp.McpServer{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := session.ConfigOptions[1].Select.CurrentValue; string(got) != reasoning {
+			t.Fatalf("%s: thinking = %s, want %s", project, got, reasoning)
+		}
+		turn, err := conn.Prompt(t.Context(), acp.PromptRequest{SessionId: session.SessionId, Prompt: []acp.ContentBlock{acp.TextBlock("Hello.")}})
+		if err != nil || turn.StopReason != acp.StopReasonEndTurn {
+			t.Fatalf("%s: prompt: %#v (%v)", project, turn, err)
+		}
+	}
+	list, err := conn.ListSessions(t.Context(), acp.ListSessionsRequest{})
+	if err != nil || len(list.Sessions) != 2 {
+		t.Fatalf("list: %#v (%v)", list, err)
+	}
+}
+
 func TestServeACP(t *testing.T) {
 	t.Setenv("MODULAR_AGENT_PLUGINS", "")
 	project := t.TempDir()
@@ -114,7 +171,7 @@ func TestServeACP(t *testing.T) {
 	defer a.Close(t.Context())
 	agentSide, clientSide := net.Pipe()
 	done := make(chan error, 1)
-	go func() { done <- a.serveACP(t.Context(), agentSide, agentSide) }()
+	go func() { done <- a.ServeACP(t.Context(), ServeACPOptions{Input: agentSide, Output: agentSide}) }()
 	client := &testACPClient{}
 	conn := acp.NewClientSideConnection(client, clientSide, clientSide)
 	defer func() {
@@ -132,7 +189,9 @@ func TestServeACP(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := json.Marshal(metadata.Declaration)
-	want, _ := json.Marshal(a.Declaration())
+	declaration := a.Declaration()
+	declaration["projectRoot"] = project
+	want, _ := json.Marshal(declaration)
 	if string(got) != string(want) {
 		t.Fatalf("ACP declaration %s does not match SDK %s", got, want)
 	}

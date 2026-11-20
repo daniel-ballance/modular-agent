@@ -25,12 +25,15 @@ func uniquePairs(pairs []api.EntryPair) []api.EntryPair {
 }
 
 func (s *server) HandleExtensionMethod(ctx context.Context, method string, b json.RawMessage) (any, error) {
+	var p struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(b, &p)
+	if host := s.sessionHost(p.SessionID); host != s {
+		return host.HandleExtensionMethod(ctx, method, b)
+	}
 	result, err := s.handleExtensionMethod(ctx, method, b)
 	if err == nil {
-		var p struct {
-			SessionID string `json:"sessionId"`
-		}
-		_ = json.Unmarshal(b, &p)
 		if st, e := s.attached(p.SessionID); e == nil {
 			if method != "_modular-agent/requests" {
 				result, err = s.gateAnswer(api.AsActor(ctx, st.actor), p.SessionID, method, result)

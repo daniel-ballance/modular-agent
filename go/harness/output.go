@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/OWNER/modular-agent/go/api"
+	"github.com/OWNER/modular-agent/go/portable"
 	"slices"
 )
 
@@ -83,6 +84,18 @@ func (c *client) HoldsOutput() bool {
 }
 
 func (c *client) output(ctx context.Context, e api.Event) (api.Output, error) {
+	switch e.Kind {
+	case "history.added":
+		e.Data = api.JSON(portable.PublicEntry(api.Decode[api.Entry](e.Data)))
+	case "model.delta":
+		if p := api.Decode[api.Part](e.Data); p.Type == "reasoning" {
+			if parts := portable.PublicContent(api.Content{p}); len(parts) != 0 {
+				e.Data = api.JSON(parts[0])
+			} else {
+				return api.Output{Event: e, Hold: true}, nil
+			}
+		}
+	}
 	v, err := c.h.API().Invoke(ctx, "output", api.Output{Event: e})
 	if err != nil {
 		return api.Output{}, err

@@ -32,6 +32,10 @@ func Allow() Answer                { return Answer{Value: "allow"} }
 func Decline(reason string) Answer { return Answer{Declined: true, Reason: reason} }
 
 type QuestionHandler func(context.Context, Question) (Answer, error)
+
+// LeftOpen signals that a call must be continued when its question is answered.
+var LeftOpen = api.ErrQuestionOpen
+
 type AskOptions struct {
 	Wait time.Duration
 	Then string
@@ -157,7 +161,7 @@ func (q *questionRouter) event(e api.Event) {
 			_ = decodeInto(portable.Call(*raw.ApprovalCall), &c)
 			question.Call = &c
 		}
-		if raw.Wait > 0 {
+		if raw.Wait > 0 && !raw.Defer {
 			deadline := time.Now().Add(raw.Wait)
 			question.Deadline = &deadline
 			var cancel context.CancelFunc
