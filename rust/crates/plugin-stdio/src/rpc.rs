@@ -1,6 +1,6 @@
-//! Symmetric, cancellable NDJSON RPC. Each direction has its own id space.
+//! Symmetric, cancellable JSON-RPC over stdio or WebSocket. Each direction has its own id space.
 use agent_api::*;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt, sink, stream};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -110,6 +110,7 @@ pub trait Endpoint: Send + Sync {
         cancel: CancellationToken,
     ) -> Reply;
     async fn notification(&self, _peer: Arc<Peer>, _method: &str, _params: Value) {}
+    async fn disconnected(&self) {}
 }
 type OnEvent = Box<dyn Fn(Value) + Send + Sync>;
 struct Pending {
@@ -134,7 +135,7 @@ impl Drop for Outgoing<'_> {
     }
 }
 pub struct Peer {
-    tx: mpsc::UnboundedSender<Value>,
+    tx: mpsc::UnboundedSender<(Value, bool)>,
     next: AtomicU64,
     pending: Mutex<BTreeMap<String, Pending>>,
     incoming: Mutex<BTreeMap<String, CancellationToken>>,
@@ -142,12 +143,58 @@ pub struct Peer {
     pub finished: CancellationToken,
 }
 impl Peer {
-    pub fn start<R, W>(reader: R, mut writer: W, endpoint: Arc<dyn Endpoint>) -> Arc<Self>
+    pub fn start<R, W>(reader: R, writer: W, endpoint: Arc<dyn Endpoint>) -> Arc<Self>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+        let incoming = stream::unfold(BufReader::new(reader), |mut reader| async move {
+            let mut bytes = Vec::new();
+            let n = (&mut reader)
+                .take((MAX_FRAME + 3) as u64)
+                .read_until(b'\n', &mut bytes)
+                .await
+                .ok()?;
+            if n == 0 || bytes.pop() != Some(b'\n') {
+                return None;
+            }
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+            (bytes.len() <= MAX_FRAME).then_some((bytes, reader))
+        });
+        let outgoing = sink::unfold(writer, |mut writer, mut bytes: Vec<u8>| async move {
+            bytes.push(b'\n');
+            writer.write_all(&bytes).await?;
+            writer.flush().await?;
+            Ok::<_, std::io::Error>(writer)
+        });
+        Self::start_frames(incoming, outgoing, endpoint, false)
+    }
+
+    pub fn websocket(
+        conn: transport_websocket::Connection,
+        endpoint: Arc<dyn Endpoint>,
+        server: bool,
+    ) -> Arc<Self> {
+        let incoming = stream::unfold(conn.incoming, |mut rx| async move {
+            Some((rx.recv().await?.into_bytes(), rx))
+        });
+        let outgoing = sink::unfold(conn.outgoing, |tx, bytes| async move {
+            tx.send(String::from_utf8(bytes).expect("serialized JSON is UTF-8"))
+                .await?;
+            Ok::<_, mpsc::error::SendError<String>>(tx)
+        });
+        Self::start_frames(incoming, outgoing, endpoint, server)
+    }
+
+    fn start_frames(
+        incoming: impl Stream<Item = Vec<u8>> + Send + 'static,
+        outgoing: impl Sink<Vec<u8>> + Send + 'static,
+        endpoint: Arc<dyn Endpoint>,
+        shutdown_closes: bool,
+    ) -> Arc<Self> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<(Value, bool)>();
         let peer = Arc::new(Self {
             tx,
             next: AtomicU64::new(1),
@@ -157,52 +204,46 @@ impl Peer {
             finished: CancellationToken::new(),
         });
         let p = peer.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    message = rx.recv() => {
-                        let Some(message) = message else { break };
-                        let mut bytes = match serde_json::to_vec(&message) { Ok(b) => b, Err(_) => break };
-                        if bytes.len() > MAX_FRAME {
-                            if let Some(id) = message.get("id").filter(|_| message.get("method").is_none()) {
-                                bytes = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"result exceeds 64 MiB","data":{"code":"result_too_large"}}})).unwrap();
-                            } else { p.close(); break }
-                        }
-                        bytes.push(b'\n');
-                        if writer.write_all(&bytes).await.is_err() || writer.flush().await.is_err() { p.close(); break }
+        let writer = tokio::spawn(async move {
+            let mut outgoing = Box::pin(outgoing);
+            while let Some((message, end)) = p.closed.run_until_cancelled(rx.recv()).await.flatten()
+            {
+                let mut bytes = match serde_json::to_vec(&message) {
+                    Ok(b) => b,
+                    Err(_) => break,
+                };
+                if bytes.len() > MAX_FRAME {
+                    if let Some(id) = message
+                        .get("id")
+                        .filter(|_| message.get("method").is_none())
+                    {
+                        bytes = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"result exceeds 64 MiB","data":{"code":"result_too_large"}}})).unwrap();
+                    } else {
+                        break;
                     }
-                    _ = p.closed.cancelled() => break,
+                }
+                if !matches!(
+                    p.closed.run_until_cancelled(outgoing.send(bytes)).await,
+                    Some(Ok(()))
+                ) || end
+                {
+                    break;
                 }
             }
-            let _ = writer.shutdown().await;
+            p.close();
         });
         let p = peer.clone();
         tokio::spawn(async move {
-            let mut reader = BufReader::new(reader);
+            let mut reader = Box::pin(incoming);
             let mut tasks = JoinSet::new();
             let mut used = BTreeSet::new();
             loop {
-                let mut bytes = vec![];
-                // Take bounds allocation even for a peer that never sends a newline.
                 while tasks.try_join_next().is_some() {}
-                let mut bounded = (&mut reader).take((MAX_FRAME + 3) as u64);
-                let read = bounded.read_until(b'\n', &mut bytes);
-                tokio::pin!(read);
-                let n = tokio::select! {
-                    _ = p.closed.cancelled() => break,
-                    n = &mut read => match n { Ok(n) => n, Err(_) => break },
-                };
-                if n == 0 {
-                    break;
-                }
-                let Some(line) = bytes.strip_suffix(b"\n") else {
+                let Some(bytes) = p.closed.run_until_cancelled(reader.next()).await.flatten()
+                else {
                     break;
                 };
-                let line = line.strip_suffix(b"\r").unwrap_or(line);
-                if line.len() > MAX_FRAME {
-                    break;
-                }
+                let line = bytes.as_slice();
                 let m: Value = match agent_api::wire::decode_json(line) {
                     Ok(m) => m,
                     Err(agent_api::wire::JsonError::TooDeep) => {
@@ -313,7 +354,8 @@ impl Peer {
                                 })
                             };
                             p.incoming.lock().unwrap().remove(&key);
-                            p.respond(id, reply);
+                            let end = shutdown_closes && method == "plugin/shutdown";
+                            p.respond_frame(id, reply, end);
                         });
                     } else {
                         endpoint.notification(p.clone(), method, params).await;
@@ -347,6 +389,8 @@ impl Peer {
             .await;
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
+            let _ = writer.await;
+            endpoint.disconnected().await;
             p.finished.cancel();
         });
         peer
@@ -360,11 +404,15 @@ impl Peer {
         }
     }
     pub fn notify(&self, method: &str, params: Value) {
-        let _ = self
-            .tx
-            .send(json!({"jsonrpc":"2.0","method":method,"params":params}));
+        let _ = self.tx.send((
+            json!({"jsonrpc":"2.0","method":method,"params":params}),
+            false,
+        ));
     }
     fn respond(&self, id: Value, reply: Reply) {
+        self.respond_frame(id, reply, false);
+    }
+    fn respond_frame(&self, id: Value, reply: Reply, end: bool) {
         let message = match reply {
             Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
             Err(e) => {
@@ -375,7 +423,7 @@ impl Peer {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":e.number,"message":e.message,"data":data}})
             }
         };
-        let _ = self.tx.send(message);
+        let _ = self.tx.send((message, end));
     }
     pub fn parent(&self, id: &Value) -> Option<Arc<Work>> {
         self.pending
@@ -437,7 +485,7 @@ impl Peer {
             self.pending.lock().unwrap().remove(&key);
             return Err(Fault::new("result_too_large", "request exceeds 64 MiB"));
         }
-        let _ = self.tx.send(frame);
+        let _ = self.tx.send((frame, false));
         let mut outgoing = Outgoing {
             peer: self,
             id: &id,

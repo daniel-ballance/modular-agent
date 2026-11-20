@@ -11,6 +11,30 @@ pub async fn serve(endpoint: Arc<dyn Endpoint>) {
     let peer = Peer::start(tokio::io::stdin(), tokio::io::stdout(), endpoint);
     peer.finished.cancelled().await;
 }
+pub async fn serve_websocket(
+    listen: &str,
+    token_file: PathBuf,
+    tls: Option<transport_websocket::TlsOptions>,
+    endpoint: impl Fn() -> Arc<dyn Endpoint> + Send + Sync + 'static,
+) -> Result<transport_websocket::Server> {
+    transport_websocket::serve(
+        listen,
+        tls,
+        transport_websocket::PLUGIN,
+        vec![(token_file, ())],
+        move |(), conn| {
+            let endpoint = endpoint();
+            async move {
+                Peer::websocket(conn, endpoint, true)
+                    .finished
+                    .cancelled()
+                    .await;
+            }
+        },
+    )
+    .await
+}
+
 #[derive(Default)]
 pub struct Conformance {
     state: Mutex<Option<(Api, Value)>>,
@@ -43,6 +67,12 @@ impl Conformance {
             parts,
             ..Self::default()
         })
+    }
+    pub fn new_instance(&self) -> Self {
+        Self {
+            parts: self.parts.clone(),
+            ..Self::default()
+        }
     }
     fn has(&self, part: &str) -> bool {
         self.parts.contains(part)
@@ -139,6 +169,12 @@ impl Plugin for Sink {
 }
 #[async_trait]
 impl Endpoint for Conformance {
+    async fn disconnected(&self) {
+        let state = self.state.lock().unwrap().take();
+        if let Some((api, _)) = state {
+            let _ = api.shutdown().await;
+        }
+    }
     async fn request(
         &self,
         peer: Arc<Peer>,
@@ -184,7 +220,10 @@ impl Endpoint for Conformance {
         };
         match method {
             "plugin/shutdown" => {
-                api.shutdown().await?;
+                let state = self.state.lock().unwrap().take();
+                if let Some((api, _)) = state {
+                    api.shutdown().await?;
+                }
                 Ok(json!({}))
             }
             "runtime/runTurn" | "runtime/resumeTurn" | "runtime/continueOpenCalls" => {

@@ -25,6 +25,31 @@ pub async fn serve(plugin: Plugin) -> Result<()> {
     endpoint.startup_error().map_or(Ok(()), Err)
 }
 
+/// Options for serving a plugin as an authenticated service.
+#[derive(Clone, Debug)]
+pub struct ServeOptions {
+    pub listen: String,
+    pub token_file: std::path::PathBuf,
+    pub tls: Option<crate::TlsOptions>,
+}
+
+/// Serve a fresh plugin instance on each authenticated WebSocket connection.
+pub async fn serve_websocket(
+    plugin: Plugin,
+    options: ServeOptions,
+) -> Result<crate::WebSocketServer> {
+    if let Some(item) = plugin.local_items.first() {
+        return Err(cannot_serve(item));
+    }
+    Ok(plugin_stdio::server::serve_websocket(
+        &options.listen,
+        options.token_file,
+        options.tls,
+        move || Served::new(plugin.clone()),
+    )
+    .await?)
+}
+
 pub(crate) struct Served {
     plugin: Plugin,
     registered: Mutex<Option<Arc<Registrar>>>,

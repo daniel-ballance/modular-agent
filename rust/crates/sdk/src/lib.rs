@@ -51,7 +51,7 @@ pub use hooks::*;
 pub use parts::{Environment, Runtime, durable_runtime, local_environment, transient_runtime};
 pub use plugin::{Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource};
 pub use provider::*;
-pub use serve::serve;
+pub use serve::{ServeOptions, serve, serve_websocket};
 pub use session::{
     Actor, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome, PromptOptions,
     PromptResult, Rights, Session, Timing, ToolResult,
@@ -60,3 +60,4 @@ pub use tool::{
     Answer, Ask, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext, ToolEnvironment,
     ToolOutput, ToolStatus,
 };
+pub use transport_websocket::{Server as WebSocketServer, TlsOptions};
