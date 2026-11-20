@@ -30,6 +30,21 @@ pub struct ServiceLaunch {
     pub config: Value,
 }
 
+impl ServiceLaunch {
+    pub fn new(url: impl Into<String>, token_file: impl Into<PathBuf>) -> Self {
+        Self {
+            url: url.into(),
+            token_file: token_file.into(),
+            config: json!({}),
+        }
+    }
+
+    pub fn config(mut self, config: Value) -> Self {
+        self.config = config;
+        self
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 pub enum ExternalLaunch {
@@ -157,6 +172,18 @@ async fn load_transport(
     let reaped = CancellationToken::new();
     let peer = match transport {
         Transport::Service(url, token_file) => {
+            let interval = match std::env::var("MODULAR_AGENT_PLUGIN_IDLE_MS") {
+                Ok(value) => value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .map(Duration::from_millis)
+                    .ok_or_else(|| {
+                        anyhow!("MODULAR_AGENT_PLUGIN_IDLE_MS must be a positive integer")
+                    })?,
+                Err(std::env::VarError::NotPresent) => Duration::from_secs(30),
+                Err(e) => return Err(e.into()),
+            };
             let socket =
                 transport_websocket::connect(&url, &token_file, transport_websocket::PLUGIN)
                     .await?;
@@ -165,7 +192,7 @@ async fn load_transport(
             tokio::spawn(async move {
                 transport_websocket::run(socket, CancellationToken::new(), |conn| async move {
                     let peer = Peer::websocket(conn, callbacks, false);
-                    peer.monitor_liveness(Duration::from_secs(30), CONTROL);
+                    peer.monitor_liveness(interval, CONTROL);
                     if tx.send(peer.clone()).is_err() {
                         peer.close();
                     }

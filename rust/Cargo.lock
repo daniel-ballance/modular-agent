@@ -4484,7 +4484,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures-util",
+ "log",
  "rcgen",
+ "rustls-native-certs",
  "sha2 0.10.9",
  "subtle",
  "tempfile",

@@ -183,11 +183,13 @@ impl Agent {
         self.check_acp_host()?;
         let mut entries = Vec::new();
         for token in service.actors {
-            let actor = token.actor;
+            let mut actor = token.actor;
+            if actor.kind == "plugin" {
+                actor.kind = "program".into();
+            }
             if actor.id.is_empty()
                 || actor.id.starts_with("job:")
-                || !matches!(actor.kind.as_str(), "user" | "host" | "agent" | "plugin")
-                || !crate::Rights::full().contains(&actor.rights)
+                || !matches!(actor.kind.as_str(), "user" | "host" | "agent" | "program")
             {
                 return Err(Error::new(Code::InvalidComposition, "invalid ACP actor"));
             }

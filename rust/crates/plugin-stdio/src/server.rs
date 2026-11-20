@@ -37,6 +37,7 @@ pub async fn serve_websocket(
 
 #[derive(Default)]
 pub struct Conformance {
+    initializing: tokio::sync::Mutex<()>,
     state: Mutex<Option<(Api, Value)>>,
     parts: BTreeSet<String>,
 }
@@ -184,6 +185,7 @@ impl Endpoint for Conformance {
         cancel: CancellationToken,
     ) -> Reply {
         if method == "plugin/initialize" {
+            let _guard = self.initializing.lock().await;
             if p["binding"] != "modular-agent-plugin/1" || p["data"] != "modular-agent-data/1" {
                 return Err(Fault::new("not_supported", "unsupported binding"));
             }

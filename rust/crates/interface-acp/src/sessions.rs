@@ -299,8 +299,12 @@ pub(crate) fn discoverable(identity: &Identity, data: &SessionData) -> bool {
         && identity.allows_tenant(tenant)
         && identity.rights.has("watch")
         && match recorded_rights(data, &identity.id) {
-            Some(rights) => rights
-                .is_some_and(|rights| rights.has("watch") && identity.rights.contains(&rights)),
+            Some(rights) => rights.is_some_and(|rights| {
+                rights.has("watch")
+                    && identity
+                        .rights
+                        .contains(&rights.intersect(&Authority::full()))
+            }),
             None => identity.join_on_open,
         }
 }
@@ -317,7 +321,9 @@ pub(crate) fn join_host(api: &dyn AgentApi, session: &str) -> Result<()> {
     let latest = recorded_rights(&data, &identity.id);
     if let Some(rights) = latest {
         ensure!(
-            rights.is_some_and(|r| r.has("watch") && identity.rights.contains(&r)),
+            rights
+                .is_some_and(|r| r.has("watch")
+                    && identity.rights.contains(&r.intersect(&Authority::full()))),
             request_error("forbidden", "session inaccessible")
         );
     } else {

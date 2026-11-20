@@ -20,12 +20,13 @@ use tokio::{
 use tokio_rustls::{
     TlsAcceptor,
     rustls::{
-        ServerConfig,
+        ClientConfig, RootCertStore, ServerConfig,
+        crypto::ring,
         pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     },
 };
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
+    Connector, MaybeTlsStream, WebSocketStream,
     tungstenite::{
         Error, Message,
         client::IntoClientRequest,
@@ -156,10 +157,19 @@ pub async fn connect(
         )
         .await?;
         let tcp = TcpStream::connect(addrs.as_slice()).await?;
-        let (socket, reply) =
-            tokio_tungstenite::client_async_tls_with_config(request, tcp, Some(framing()), None)
-                .await
-                .map_err(|_| anyhow!("WebSocket connection or upgrade failed"))?;
+        let connector = if url.scheme() == "wss" {
+            Some(tokio::task::spawn_blocking(tls_client).await??)
+        } else {
+            None
+        };
+        let (socket, reply) = tokio_tungstenite::client_async_tls_with_config(
+            request,
+            tcp,
+            Some(framing()),
+            connector,
+        )
+        .await
+        .map_err(|_| anyhow!("WebSocket connection or upgrade failed"))?;
         ensure!(
             reply
                 .headers()
@@ -171,6 +181,21 @@ pub async fn connect(
     })
     .await
     .context("WebSocket connection timed out")?
+}
+
+fn tls_client() -> Result<Connector> {
+    let mut roots = RootCertStore::empty();
+    let (loaded, _) =
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    ensure!(loaded != 0, "no native root certificates available");
+    // Workspace feature unification can enable both ring and aws-lc-rs.
+    // Select a provider locally rather than requiring a process-wide default.
+    // https://docs.rs/rustls/0.23.46/rustls/struct.ConfigBuilder.html#crypto-provider
+    let config = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Connector::Rustls(Arc::new(config)))
 }
 
 fn refuse(status: StatusCode) -> ErrorResponse {
@@ -206,12 +231,10 @@ where
             let certs =
                 CertificateDer::pem_file_iter(tls.cert_file)?.collect::<Result<Vec<_>, _>>()?;
             let key = PrivateKeyDer::from_pem_file(tls.key_file)?;
-            let config = ServerConfig::builder_with_provider(Arc::new(
-                tokio_rustls::rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(certs, key)?;
+            let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_safe_default_protocol_versions()?
+                .with_no_client_auth()
+                .with_single_cert(certs, key)?;
             Ok(TlsAcceptor::from(Arc::new(config)))
         })
         .transpose()?;
@@ -266,7 +289,7 @@ where
                     let (entries, tls, closing, handler) = (entries.clone(), tls.clone(), closing.clone(), handler.clone());
                     clients.spawn(async move {
                         if let Some(tls) = tls {
-                            let Ok(Ok(io)) = closing.run_until_cancelled(timeout(CONTROL, tls.accept(tcp))).await.ok_or(()).and_then(|r| r.map_err(|_| ())) else { return };
+                            let Some(Ok(Ok(io))) = closing.run_until_cancelled(timeout(CONTROL, tls.accept(tcp))).await else { return };
                             accept(io, &entries, protocol, closing, handler).await;
                         } else {
                             accept(tcp, &entries, protocol, closing, handler).await;
@@ -298,6 +321,8 @@ async fn accept<T, F, Fut>(
     Fut: Future<Output = ()>,
 {
     let mut selected = None;
+    // Tungstenite's callback signature fixes the HTTP error response type.
+    #[allow(clippy::result_large_err)]
     let upgrade = tokio_tungstenite::accept_hdr_async_with_config(
         io,
         |req: &Request, mut reply: Response| {
@@ -398,6 +423,7 @@ where
                 sink.send(Message::Text(text.into())).await?;
             }
         }
+        drop(rx);
         if let Some(code) = code {
             sink.send(Message::Close(Some(CloseFrame {
                 code,

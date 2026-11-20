@@ -545,7 +545,8 @@ impl State {
                 let project = Path::new(string(&p, "cwd")?);
                 ensure!(project.is_absolute(), "cwd must be absolute");
                 ensure!(
-                    self.principal.allows_project(project) && self.principal.rights.has("settings"),
+                    self.principal.allows_project(&project.canonicalize()?)
+                        && self.principal.rights.has("settings"),
                     request_error("forbidden", "cannot change project trust")
                 );
                 self.factory.trust(project)?;

@@ -1,4 +1,7 @@
-use modular_agent::{AcpActor, AcpServiceOptions, Actor, Agent, Rights};
+use modular_agent::{
+    AcpActor, AcpServiceOptions, Actor, Agent, Code, Plugin, Rights, ServeOptions, ServicePlugin,
+    Tool, ToolContext, ToolStatus, serve_websocket, testing::test_agent,
+};
 use serde_json::{Value, json};
 use std::{
     io::Write,
@@ -69,7 +72,7 @@ async fn acp_tokens_bind_independent_principals_and_scopes() {
         token_file: observer.clone(),
         actor: Actor {
             id: "observer".into(),
-            kind: "agent".into(),
+            kind: "program".into(),
             rights: Rights::full(),
         },
         tenants: None,
@@ -95,7 +98,66 @@ async fn acp_tokens_bind_independent_principals_and_scopes() {
         json!({"id":"editor","kind":"user","rights":["input","watch"]})
     );
     assert_eq!(b["id"], "observer");
-    assert_eq!(b["kind"], "agent");
+    assert_eq!(b["kind"], "program");
     server.close().await;
     agent.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn service_registration_and_pending_tool_loss() -> modular_agent::Result<()> {
+    use std::{sync::Arc, time::Duration};
+    use tokio::{sync::Notify, time::timeout};
+    let dir = tempfile::tempdir()?;
+    let bearer = token(dir.path(), "plugin", "af712a1174815937db47ebb99cc64e83");
+    let entered = Arc::new(Notify::new());
+    let start = entered.clone();
+    let tool = Tool::new("hold", "Wait for cancellation.").run(move |_: Value, cx: ToolContext| {
+        let start = start.clone();
+        async move {
+            start.notify_one();
+            cx.cancelled().cancelled().await;
+            Ok("held")
+        }
+    });
+    let service = serve_websocket(
+        Plugin::new("remote-hold").tool(tool),
+        ServeOptions {
+            listen: "127.0.0.1:0".into(),
+            token_file: bearer.clone(),
+            tls: None,
+        },
+    )
+    .await?;
+    let registration = ServicePlugin::new(service.url.clone(), bearer);
+    let refused = Agent::builder()
+        .plugin(Plugin::new("remote-hold"))
+        .service_plugin(registration.clone())
+        .build()
+        .await;
+    assert_eq!(
+        refused.err().expect("duplicate registration").code(),
+        Code::InvalidComposition
+    );
+    let agent = test_agent()
+        .service_plugin(registration.clone())
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    let work = tokio::spawn(async move { session.call_tool("hold", json!({})).await });
+    timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    service.close().await;
+    let result = timeout(Duration::from_secs(5), work)
+        .await
+        .unwrap()
+        .unwrap()?;
+    assert_eq!(result.status, ToolStatus::OutcomeUnknown);
+    agent.close().await?;
+    let unreachable = Agent::builder().service_plugin(registration).build().await;
+    assert_eq!(
+        unreachable.err().expect("unreachable service").code(),
+        Code::InvalidComposition
+    );
+    Ok(())
 }
