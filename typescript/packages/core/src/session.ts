@@ -92,7 +92,7 @@ const noTurn = (inputId: string, disposition: "handled" | "handedBack"): PromptR
   ({ inputId, disposition, text: "", openToolCalls: [], toolResults: () => [] });
 
 export interface PromptOptions { key?: string; actor?: string; result?: import("./schema.js").Schema }
-type Owner = { enabled: { severalActors: boolean; sessionLimits: boolean }; isOpen(): boolean; interruption: AbortSignal; fork(entry?: string): Promise<Session>; close(): Promise<void>; handler(handler?: QuestionHandler): void };
+type Owner = { enabled: { severalActors: boolean; sessionLimits: boolean }; isOpen(): boolean; interruption: AbortSignal; fork(entry?: string): Promise<Session>; close(actor: string, delegatedBy?: string): Promise<void>; handler(handler?: QuestionHandler): void };
 const local = "user";
 
 export function questionOf(api: PluginApi, request: InputRequest): Question {
@@ -357,7 +357,7 @@ export class Session {
     return checked(async () => (await this.#api.cancel(this.id)).map(q => ({ inputId: q.id, content: structuredClone(q.content) })));
   }
   async fork(entryId?: string): Promise<Session> {
-    this.#require("watch");
+    this.#require("settings");
     const fork = await this.#owner.fork(entryId);
     return this.actor === local ? fork : fork.as(this.actor);
   }
@@ -394,7 +394,6 @@ export class Session {
   }
   async close(): Promise<void> {
     if (!this.#owner.isOpen()) return;
-    if (this.actor !== local) throw new AgentError("forbidden", "Close from the local session");
-    await this.#owner.close();
+    await this.#owner.close(this.actor, this.actor === local ? undefined : local);
   }
 }

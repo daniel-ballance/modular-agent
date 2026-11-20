@@ -333,7 +333,7 @@ export class Agent {
     return { name: "sdk.local", setup: api => {
       const capability: InterfaceCapability = {
         id: "sdk.local", actorId: local.id,
-        present: (id, request) => !this.#acp && (request?.kind !== "approval" || !!(this.#handlers.get(id) ?? this.#defaultHandler)),
+        present: id => !this.#acp && !!(this.#handlers.get(id) ?? this.#defaultHandler),
         onInputRequest: request => {
           const handler = this.#handlers.get(request.sessionId) ?? this.#defaultHandler;
           if (!handler) return;
@@ -370,8 +370,8 @@ export class Agent {
         const fork = await checked(() => this.#api.forkSession(id, at), "busy");
         return this.openSession(fork);
       },
-      close: async () => {
-        await checked(() => this.#api.closeSession(id, local.id));
+      close: async (actor, delegatedBy) => {
+        await checked(() => this.#api.closeSession(id, actor, delegatedBy));
         this.#open.delete(id);
         this.#handlers.delete(id);
       },
