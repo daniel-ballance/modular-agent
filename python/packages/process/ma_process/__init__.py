@@ -161,11 +161,11 @@ async def child_main(plugin, sock):
     try:
         await asyncio.wait({gone, stop}, return_when=asyncio.FIRST_COMPLETED)
         if gone.done():
-            await asyncio.gather(*list(peer.running.values()), return_exceptions=True)
+            await peer.wait_running()
         if not stopped:
             await plugin.stop()
         # The stop answer must leave before the channel closes.
-        await asyncio.gather(*list(peer.running.values()), return_exceptions=True)
+        await peer.wait_running()
     finally:
         gone.cancel()
         stop.cancel()
