@@ -1,0 +1,274 @@
+# Share sessions between agents
+
+Run one history service. Let one agent start a session and another take over, without copying files or running the first agent's code.
+
+## Serve a history store
+
+Start with a new directory for the service. Use a file-backed store so the history can survive the service itself restarting. Don't point it at a native history directory expecting an import: some SDKs use a separate namespace for served records. See [Services](../placement.md#services) and the [history service binding](../../bindings/history-http.md).
+
+On a trusted development host, create a private token file. The service and the agents need the same token. For example, in a fresh private directory:
+
+```sh
+umask 077
+openssl rand -hex 32 > history.token
+```
+
+Use a numeric loopback address such as `127.0.0.1:39071`. Plain HTTP is only for loopback on a host where you trust every local account. Use verified TLS for other deployments; do not expose these plaintext listeners. The token gives access to the history store, not to just one session. Keep it out of source, logs and prompts. See [Authentication on each wire](../../security.md#authentication-on-each-wire).
+
+Run the following helper in the service process. Rust's future runs until stopped; Go stops when its context is cancelled; Python's call blocks; TypeScript returns a handle with `url` and `close()`. The [Rust](../../../rust/crates/sdk/tests/guide09.rs), [TypeScript](../../../typescript/packages/core/test/guide09.test.ts), [Go](../../../go/modular/guide09_test.go) and [Python](../../../python/tests/test_sdk_guide09.py) tests call these same helpers on loopback with a temporary store and a test token. See those files for imports and service startup. TypeScript applications import from `@modular-agent/core` and `@modular-agent/core/testing`.
+
+**Rust**
+
+```rust
+async fn serve_store(address: SocketAddr, store_dir: &Path, token_file: &Path) -> Result<()> {
+    let options = ServeHistoryOptions::new(address, token_file);
+    serve_history(file_history(store_dir)?, options).await
+}
+```
+
+**TypeScript**
+
+```ts
+function serveStore(address: string, storeDir: string, tokenFile: string) {
+  return serveHistory(fileHistory(storeDir), { address, tokenFile });
+}
+```
+
+**Go**
+
+```go
+func serveStore(ctx context.Context, address, storeDir, tokenFile string) error {
+	return modular.ServeHistory(ctx, modular.FileHistory(storeDir),
+		modular.HistoryOptions{Address: address, TokenFile: tokenFile})
+}
+```
+
+**Python**
+
+```python
+def serve_store(address: tuple[str, int], store_dir: Path, token_file: Path) -> None:
+    serve_history(file_history(store_dir), address=address, token_file=token_file)
+```
+
+## Hand off a session
+
+Connect each agent to the same URL and token file, with `kept` durability. Both use the same project. Each gets its own `dataDir` for local command recovery bookkeeping; the history goes to the service instead.
+
+The first agent prompts once and saves the session ID. Close that agent or session before the second opens it: only one writer can hold a session at a time. If the first process crashed, the old lease may take time to expire; a `held` error can carry `retryAfterMs`. See [Writing: one writer at a time](../../bindings/history-http.md#writing-one-writer-at-a-time).
+
+The tests run both agents in each SDK against a real loopback service, without a real model. The scripted Provider's second answer is selected only when the reopened session's earlier answer is in model context. The tests also check that the stored input actor IDs are unchanged.
+
+**Rust**
+
+```rust
+async fn connect_history(
+    project: &Path,
+    data_dir: &Path,
+    url: &str,
+    token_file: &Path,
+) -> Result<Agent> {
+    Agent::builder()
+        .project(project)
+        .data_dir(data_dir)
+        .durability(Durability::Kept)
+        .history(http_history(url, token_file)?)
+        .provider(scripted_provider(
+            json!([{ "text": "Whitby." }, { "text": "14:02." }]),
+        ))
+        .model("scripted/script")
+        .build()
+        .await
+}
+
+async fn handoff(
+    project: &Path,
+    writer_dir: &Path,
+    reader_dir: &Path,
+    url: &str,
+    token_file: &Path,
+) -> Result<()> {
+    let writer = connect_history(project, writer_dir, url, token_file).await?;
+    let first = writer.session().await?;
+    assert_eq!(first.prompt("Name a harbour.").await?.text, "Whitby.");
+    let id = first.id().to_owned();
+    writer.close().await?; // Give up the writer lease.
+
+    let reader = connect_history(project, reader_dir, url, token_file).await?;
+    let reopened = reader.open_session(&id).await?;
+    assert_eq!(reopened.last_turn()?.unwrap().text, "Whitby.");
+    assert_eq!(
+        reopened.prompt("When is high tide there?").await?.text,
+        "14:02."
+    );
+    let history = reopened.history()?;
+    let actors: Vec<_> = history
+        .iter()
+        .filter(|entry| entry["kind"] == "input")
+        .map(|entry| entry["actorId"].as_str())
+        .collect();
+    assert_eq!(actors, [Some("user"), Some("user")]);
+    reader.close().await
+}
+```
+
+**TypeScript**
+
+```ts
+function connectHistory(project: string, dataDir: string, url: string, tokenFile: string) {
+  return createAgent({
+    project, dataDir, durability: "kept",
+    history: httpHistory(url, tokenFile),
+    providers: [scriptedProvider([{ text: "Whitby." }, { text: "14:02." }])],
+    model: "scripted/script",
+  });
+}
+
+async function handoff(project: string, writerDir: string, readerDir: string, url: string, tokenFile: string) {
+  const writer = await connectHistory(project, writerDir, url, tokenFile);
+  let id: string;
+  try {
+    const first = await writer.session();
+    assert.equal((await first.prompt("Name a harbour.")).text, "Whitby.");
+    id = first.id;
+  } finally {
+    await writer.close(); // Give up the writer lease.
+  }
+
+  const reader = await connectHistory(project, readerDir, url, tokenFile);
+  try {
+    const reopened = await reader.openSession(id);
+    assert.equal((await reopened.lastTurn())?.text, "Whitby.");
+    assert.equal((await reopened.prompt("When is high tide there?")).text, "14:02.");
+    const history = await reopened.history();
+    assert.deepEqual(history.filter(e => e.kind === "input").map(e => e.actorId), ["user", "user"]);
+  } finally {
+    await reader.close();
+  }
+}
+```
+
+**Go**
+
+```go
+func connectHistory(ctx context.Context, project, dataDir, url, tokenFile string) (*modular.Agent, error) {
+	return modular.New(ctx,
+		modular.WithProject(project),
+		modular.WithDataDir(dataDir),
+		modular.WithDurability(modular.Kept),
+		modular.WithHistory(modular.HTTPHistory(url, tokenFile)),
+		modulartest.Script(`[{"text": "Whitby."}, {"text": "14:02."}]`),
+		modular.WithModel("scripted/script"))
+}
+
+func handoff(t *testing.T, ctx context.Context, project, writerDir, readerDir, url, tokenFile string) {
+	t.Helper()
+	writer, err := connectHistory(ctx, project, writerDir, url, tokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close(ctx)
+	first, err := writer.Session(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn, err := first.Prompt(ctx, "Name a harbour."); err != nil || turn.Text != "Whitby." {
+		t.Fatalf("first turn: %+v, %v", turn, err)
+	}
+	id := first.ID()
+	if err := writer.Close(ctx); err != nil { // Give up the writer lease.
+		t.Fatal(err)
+	}
+
+	reader, err := connectHistory(ctx, project, readerDir, url, tokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close(ctx)
+	reopened, err := reader.OpenSession(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn, err := reopened.LastTurn(ctx); err != nil || turn == nil || turn.Text != "Whitby." {
+		t.Fatalf("saved turn: %+v, %v", turn, err)
+	}
+	if turn, err := reopened.Prompt(ctx, "When is high tide there?"); err != nil || turn.Text != "14:02." {
+		t.Fatalf("next turn: %+v, %v", turn, err)
+	}
+	history, err := reopened.History(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actors []any
+	for _, entry := range history {
+		if entry["kind"] == "input" {
+			actors = append(actors, entry["actorId"])
+		}
+	}
+	if !slices.Equal(actors, []any{"user", "user"}) {
+		t.Fatalf("input actor ids: %v", actors)
+	}
+}
+```
+
+**Python**
+
+```python
+async def connect_history(project: Path, data_dir: Path, url: str, token_file: Path) -> Agent:
+    return await create_agent(
+        project=project,
+        data_dir=data_dir,
+        durability="kept",
+        history=http_history(url, token_file),
+        providers=[scripted_provider([{"text": "Whitby."}, {"text": "14:02."}])],
+        model="scripted/script",
+    )
+
+
+async def handoff(
+    project: Path, writer_dir: Path, reader_dir: Path, url: str, token_file: Path
+) -> None:
+    async with await connect_history(project, writer_dir, url, token_file) as writer:
+        first = await writer.session()
+        assert (await first.prompt("Name a harbour.")).text == "Whitby."
+        session_id = first.id
+    # The writer lease has been released.
+
+    async with await connect_history(project, reader_dir, url, token_file) as reader:
+        reopened = await reader.open_session(session_id)
+        saved = await reopened.last_turn()
+        assert saved is not None and saved.text == "Whitby."
+        assert (await reopened.prompt("When is high tide there?")).text == "14:02."
+        history = await reopened.history()
+        assert [e["actorId"] for e in history if e["kind"] == "input"] == ["user", "user"]
+```
+
+## Switch languages
+
+For example, on the same host, keep the history service running. Use the Rust `connect_history` above to write the first turn, then pass the printed ID to a Python program using its own `connect_history`. Use the same URL, token and canonical project path, and separate local data directories. This mixed-language example is shown, not run in the guide tests.
+
+**Rust writer**
+
+```rust
+let writer = connect_history(project, writer_dir, url, token_file).await?;
+let first = writer.session().await?;
+first.prompt("Name a harbour.").await?;
+let id = first.id().to_owned();
+writer.close().await?;
+println!("{id}");
+```
+
+**Python reader** (use `run` from `modular_agent` to run the coroutine)
+
+```python
+async def resume(session_id: str) -> None:
+    async with await connect_history(project, reader_dir, url, token_file) as reader:
+        reopened = await reader.open_session(session_id)
+        turn = await reopened.prompt("When is high tide there?")
+        print(turn.text)
+```
+
+## Keep identity and portability separate
+
+Both embedded agents in the example act as `user`. In an app with authenticated actors, use the same stable actor ID for the same principal across deployments. A session ID tells the agent what to open, not who is asking. A history token authenticates access to the store; it does not authenticate a session actor. An Interface such as ACP authenticates its own actors, and reopening does not reset recorded rights or undo a departure. See [Actors and rights](../api.md#actors-and-rights) and [Authority](../../contracts.md#authority).
+
+Two builds declaring `portableSessions` can read, replay and extend each other's standard session records. The project and lineage are part of the stored session header; sending just its entries is not the same as sharing the session. Provider state, credentials, arbitrary plugin state and working-environment snapshots do not travel with the session. Configure the model, tools and other parts the reader needs. Resuming interrupted work still depends on the receiving Runtime and its safety checks, not just on being able to read the record. See [Portable sessions](../../bindings/data.md#portable-sessions) and [Sessions that survive a crash](05-sessions-that-survive-a-crash.md).

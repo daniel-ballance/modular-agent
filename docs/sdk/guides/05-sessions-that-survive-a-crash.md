@@ -6,7 +6,7 @@ Keep a session when the agent exits. Decide separately whether to resume a turn 
 
 | Durability | After the agent process ends |
 |---|---|
-| `ephemeral` (default) | History is in memory by default. A new process cannot reopen the session. |
+| `ephemeral` (default) | With the default in-memory history, a new process cannot reopen the session. |
 | `kept` | Committed history survives. On reopen, an interrupted turn ends `failed`; you can send a fresh prompt. |
 | `durable` | Committed history survives. On reopen, the Runtime tries to continue the interrupted turn from its last committed checkpoint. |
 
