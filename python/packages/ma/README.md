@@ -24,18 +24,17 @@ Build the [Claude sidecar](../../../typescript/sidecars/claude/README.md) with N
 ## What is checked
 
 - **Reference:** 15/15, including the declaration, crash recovery, the prompt tail and SDK-shaped JSON events.
-- **ACP:** `ma` passes 115/115 with `--crash-checks --job-checks`. With `--probe-checks` added, `ma` passes 162/166 (all four new refusal checks pass; four pre-existing remote Runtime probes still fail) and the base passes 213/214 (the pre-existing Provider response extra-member probe still fails). The base declares all three features true, so it runs the positive rather than the refusal checks.
-- **Python ma and SDK revisions:** 29/29 focused tests, including loopback browser and device sign-in, concurrent token refresh, encrypted reasoning replay and isolation on Provider switch, the shared `auth.json` format, Monty limits, project trust and multi-project ACP, SDK environment callbacks in process and over the wire, and late answers. No real sign-in, credentials or model calls were used.
+- **ACP:** 184/184 with `--crash-checks --probe-checks --job-checks`, with the same check names in the same order as Rust `ma`. This includes transient Runtime replacement, steering cutoff, both `step.after` crash boundaries and the served Provider response probe. The standard composition does not declare several actors, tenants or session limits.
+- **Python ma and SDK revisions:** 29 earlier focused tests plus three ACP regressions for transient Runtime replacement, crash recovery and served Provider response fidelity. The earlier tests cover loopback sign-in, concurrent token refresh, opaque reasoning, shared `auth.json`, Monty limits, project trust, multi-project ACP, SDK environment callbacks and late answers. No real sign-in, credentials or model calls were used.
 - **SDK scenarios:** 55/55: 11 in process and 11 each through the built Python, Rust, Go and TypeScript fixture programs.
-- **Python suites:** 365/365 in each of the four runs: transient and durable, with the local binding and with the process binding.
+- **Python suites:** 368/368 for transient/local, durable/local and durable/process. Transient/process passed 367/368 on two full runs; its pre-existing `test_foreign_job_report_runs_as_a_turn` timed out and passed on an isolated retry.
 - **Python static checks:** Ruff lint and format checks passed; strict mypy passed (30 source files).
 
 ```sh
 # From the repository root, after uv sync above:
 npm ci --prefix conformance/acp
 node conformance/reference/run.mjs --agent python
-MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs -- "$PWD/python/.venv/bin/ma" --acp
-MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --job-checks -- "$PWD/python/.venv/bin/ma" --acp
+MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/python/.venv/bin/ma" --acp
 cd python
 uv run --offline pytest -q --runtime transient
 uv run --offline pytest -q --runtime durable
@@ -46,24 +45,35 @@ uv run --offline ruff format --check .
 uv run --offline mypy
 ```
 
-See the [SDK README](../../SDK.md) for fixture build commands. Process-binding tests include the base's intermittent `test_foreign_job_report_runs_as_a_turn`.
+See the [SDK README](../../SDK.md) for fixture build commands. If running Python suites concurrently, give each a separate writable delegated `MA_CGROUP_ROOT` so containment recovery in one suite does not clean up another suite's deliberate crash. Process-binding tests include the base's intermittent `test_foreign_job_report_runs_as_a_turn`.
 
 ## Known gaps
 
 - The local environment does not confine paths. Strong command containment requires a writable, delegated Linux cgroup v2 subtree. Without it, `ma` declares `processGroup`, which cannot stop descendants that leave the group. The terminal and local tool environment are for POSIX systems.
 - Some file and MCP errors still differ from the Rust wording. The file search uses Git enumeration or `find` plus Python glob matching; it does not support every Rust glob extension. Monty requires a finite suspension ceiling, separate from the 500 nested-call budget; Python sets it to 2,147,483,647 so lookups do not spend that budget.
 - The terminal stores secret answers before recording their credential names. The SDK does not yet provide the staged credential-store recovery protocol; a crash between these two writes can leave an unused answer in `auth.json`. ACP does not accept secret answers. Served tools have byte, directory and command callbacks; served commands do not have working-environment access.
-- The optional ACP remote Runtime probes are not all supported by `ma`: the two transient replacement probes conflict with the default durable composition; the two `step.after` crash probes fail to load their interrupted fixture sessions. The standard local Runtime crash checks, late answers and recovered job reports pass.
 - Real services were not tested. The earlier Claude test used the sidecar’s fake SDK; the new ACP project tests use the SDK's scripted Provider.
 
-## Findings for docs/reference and docs/sdk
+## Served Runtime findings
 
 The base ACP Interface forwarded proposed input, actor joins, limit changes and tenant queries to the underlying APIs despite the SDK's session declaration. The bound handlers now use that declaration to return `not_supported`. They still allow `proposals`, `release` and `withdraw` for parked job reports. This change does not touch served Runtime composition or the Provider callback.
+
+
+The Python SDK rejected the transient Runtime fixtures after registration because their recovery declaration differed from the default `durable` composition. Offline ACP conformance now allows the registered Runtime to determine recovery with persistent history; normal SDK durability validation still applies outside that profile. The two `step.after` probes actually failed at `session/new`, not at recovery: the fixture's Provider made the catalog contain more than one model, so automatic single-model selection left ACP without a current model. `ma` now selects `conformance/echo` by default in that profile and still allows the host to select a fixture Provider.
 
 Suggested text. No shared specification documents were changed.
 
 - **Reference, Checks** — replace the ACP-kit bullet with: “the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;”
 
+The newly reachable Provider check also found that Python accepted an unknown `provider.response` payload member but inserted an absent `model` into the recorded assistant message. The bridge now leaves that field absent unless it needs trusted provenance to replay opaque Provider data. When it binds provenance, it uses the associated request's model, not the Provider's claimed identity.
+
+## Findings for the shared docs
+
+Suggested replacement text. No shared documents were changed.
+
+- **SDK, Durability** — replace the last invalid-composition bullet with: “a Runtime that does not declare `continuesAfterRestart` under `durable`, except in the offline ACP conformance profile when a fixture explicitly replaces the Runtime over the plugin binding and history is persistent. In that case the registered Runtime determines recovery and its declaration.”
+- **ACP, Conformance mode** — replace the first sentence with: “With `MODULAR_AGENT_CONFORMANCE=1` the agent MUST offer the fixture model `conformance/echo` and fixture tools `bash` (`{ command: string }`) and `read` (`{ path: string }`). Use `conformance/echo` when no model was explicitly selected, even when a served fixture adds a Provider.”
+- **Plugin binding, The host asks a Provider** — replace the sentence beginning “It MUST compare that response” with: “The host MUST compare that response with the final result before canonicalizing call IDs and fail an inconsistent attempt without dispatching its calls. An omitted assistant `model` stays omitted unless trusted model attribution is needed to replay opaque Provider data. Any `model` attribution MUST use the associated request's model.”
 - **Reference, What it declares** — replace the `commandContainment` value cell with: “`strong` when the local environment can stop every descendant of a command; `processGroup` when only the command's process group is contained.” Linux alone does not guarantee delegated cgroup access.
 - **Reference, Tools** — replace the first sandbox rule with: “Arguments go by keyword or position. Positional arguments follow the JSON Schema's `required` array, then the remaining property names in lexicographic order. Passing `None` omits an argument.” Rust sorts optional names. The revised text reads as declaration order, which Python preserves, but JSON objects do not define a portable member order.
 - **SDK, The agent** — replace the `compose(project)` clause with: “`compose(project, reopening?)` builds an Agent for a canonical project. On reopening, pass the saved session id so the factory can choose the Provider before opening it. The Interface uses the serving Agent's history to find saved sessions; agents returned by the factory must use the same persistent history when they serve those sessions.” Python takes the optional reopening factory as `compose_reopen(project, id)`.

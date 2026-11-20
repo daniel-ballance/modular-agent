@@ -821,7 +821,10 @@ def create_agent(
 
                 await load_plugins(h, specs, folder, root, external_factory=factory)
             runtime_owner = h.capabilities["runtime"][0]
-            if bool(h.plugins[runtime_owner].declarations.get("durable")) != (
+            continues = bool(h.plugins[runtime_owner].declarations.get("durable"))
+            # Offline ACP fixtures exercise both Runtime kinds with persistent
+            # history. The registered Runtime still determines recovery.
+            if not (conformance and durability != "ephemeral") and continues != (
                 durability == "durable"
             ):
                 raise ValueError("Runtime does not match the requested durability")

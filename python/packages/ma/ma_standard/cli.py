@@ -363,6 +363,9 @@ async def _agent(
         providers.append(Script(cast(list[JsonObject], script_data)))
         model = "scripted/script"
     elif testing:
+        # A served fixture may add Providers. Do not depend on the SDK's
+        # implicit model selection for a single-model catalog.
+        model = model or "conformance/echo"
         settings.pop("modelTools", None)
         settings["thinking"] = "off"
     else:
