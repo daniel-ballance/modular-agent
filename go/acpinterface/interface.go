@@ -57,6 +57,7 @@ type server struct {
 	a            api.API
 	project      string
 	actor        string
+	principal    *Principal
 	ctx          context.Context
 	peer         *acp.AgentSideConnection
 	mu           sync.Mutex
@@ -85,6 +86,14 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 		}
 		who = id
 	}
+	var config Projects
+	if len(configs) > 0 {
+		config = configs[0]
+	}
+	return i.serve(ctx, in, out, declared, config, who, nil)
+}
+
+func (i *Interface) serve(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any, config Projects, who string, principal *Principal) error {
 	project, err := configuration.Canonical(i.project)
 	if err != nil {
 		return err
@@ -92,7 +101,7 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	represented := map[string]bool{}
-	if config := os.Getenv("MODULAR_AGENT_ACP_REPRESENTS"); config != "" {
+	if config := os.Getenv("MODULAR_AGENT_ACP_REPRESENTS"); principal == nil && config != "" {
 		var ids []string
 		if err := json.Unmarshal([]byte(config), &ids); err != nil || ids == nil {
 			return errors.New("MODULAR_AGENT_ACP_REPRESENTS must be a JSON array of principal IDs")
@@ -104,12 +113,9 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 			represented[id] = true
 		}
 	}
-	s := &server{declared: declared, a: i.a, project: project, actor: who, ctx: ctx, represents: represented, sessions: map[string]*attachment{}}
-	if len(configs) > 0 {
-		s.resources = configs[0]
-		if s.resources.Compose != nil {
-			s.projects = &projectHosts{compose: s.resources.Compose, hosts: map[projectKey]*server{}}
-		}
+	s := &server{declared: declared, a: i.a, project: project, actor: who, principal: principal, ctx: ctx, represents: represented, sessions: map[string]*attachment{}, resources: config}
+	if config.Compose != nil {
+		s.projects = &projectHosts{compose: config.Compose, hosts: map[projectKey]*server{}}
 	}
 	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, in, acp.ConnectionOptions{MaxFrameSize: (64 << 20) + 2})
 	if err != nil {
@@ -236,6 +242,9 @@ func (s *server) root(cwd string, extra []string, prompt *acp.SystemPrompt) erro
 	if err != nil || p != s.project {
 		return acp.NewInvalidParams(map[string]any{"reason": "cwd differs from the configured process project"})
 	}
+	if !s.allowsProject(p) {
+		return acpError("forbidden")
+	}
 	return nil
 }
 func (s *server) attach(id string, loading bool, identity ...string) *attachment {
@@ -263,6 +272,9 @@ func (s *server) detach(id string, st *attachment) {
 	s.mcp().Remove(id)
 }
 func (s *server) hostActor() api.Actor {
+	if s.principal != nil {
+		return s.principal.Actor
+	}
 	return api.Actor{ID: s.actor, Kind: "host", Rights: api.Rights}
 }
 func convertServers(in []acp.McpServer) ([]mcptools.Server, error) {
@@ -326,6 +338,9 @@ func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.N
 			return acp.NewSessionResponse{}, acp.NewInvalidParams(nil)
 		}
 	}
+	if !s.allowsTenant(tenant) || (len(specs) != 0 && !s.hasRight("tools")) {
+		return acp.NewSessionResponse{}, acpError("forbidden")
+	}
 	if s.resources.Settings != nil {
 		var defaults api.Settings
 		if v, e := s.a.Get("configuration"); e == nil {
@@ -381,7 +396,7 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 	}
 	found := false
 	for _, snap := range list {
-		if snap.ID == id {
+		if snap.ID == id && s.permitsMembership(snap) {
 			found = true
 			break
 		}
@@ -389,8 +404,11 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 	if !found {
 		return result, acpError("forbidden")
 	}
+	if len(servers) != 0 && !s.hasRight("tools") {
+		return result, acpError("forbidden")
+	}
 	_, alreadyOpen := s.a.Snapshot(id)
-	if alreadyOpen == nil && (!s.a.Authorize(id, s.actor, "watch") || len(servers) != 0) {
+	if alreadyOpen == nil && (!s.authorize(id, s.actor, "watch") || len(servers) != 0) {
 		return result, acpError("forbidden")
 	}
 	specs, err := convertServers(servers)
@@ -522,6 +540,9 @@ func (s *server) CloseSession(ctx context.Context, p acp.CloseSessionRequest) (a
 	if err != nil {
 		return acp.CloseSessionResponse{}, acpError("not_open")
 	}
+	if s.principal != nil && !s.authorize(id, st.actor, "cancel") {
+		return acp.CloseSessionResponse{}, acpError("forbidden")
+	}
 	if closer, ok := s.a.(interface{ CloseAs(string, string) error }); ok {
 		err = closer.CloseAs(id, st.actor)
 	} else {
@@ -558,13 +579,16 @@ func (s *server) ListSessions(ctx context.Context, p acp.ListSessionsRequest) (a
 			return acp.ListSessionsResponse{}, err
 		}
 	}
+	if project != "" && !s.allowsProject(project) {
+		return acp.ListSessionsResponse{}, acpError("forbidden")
+	}
 	list, err := s.a.List(project)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
 	out := acp.ListSessionsResponse{Sessions: []acp.SessionInfo{}}
 	for _, snap := range list {
-		if snap.Parent != "" {
+		if snap.Parent != "" || !s.discoverable(snap) {
 			continue
 		}
 		info := acp.SessionInfo{SessionId: acp.SessionId(snap.ID), Cwd: snap.Project}
@@ -592,7 +616,7 @@ func (s *server) Cancel(ctx context.Context, p acp.CancelNotification) error {
 		}
 	}
 	s.mu.Unlock()
-	if st == nil || !s.a.Authorize(string(p.SessionId), st.actor, "cancel") {
+	if st == nil || !s.authorize(string(p.SessionId), st.actor, "cancel") {
 		return acpError("forbidden")
 	}
 	err := s.a.CancelAs(api.AsActor(ctx, st.actor), string(p.SessionId))

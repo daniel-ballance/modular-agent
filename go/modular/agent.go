@@ -619,9 +619,13 @@ type ServeACPOptions struct {
 	WarnMCP         func(error)
 	Input           io.ReadCloser
 	Output          io.Writer
+	Listen          string
+	Actors          []ACPActor
+	TLS             *TLSOptions
 }
 
-// ServeACP serves one stdio connection, or the streams supplied in options.
+// ServeACP serves stdio (or the supplied streams), or blocks until its
+// WebSocket listener and all connections have stopped.
 func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error {
 	if len(options) > 1 {
 		return &Error{Code: InvalidParams, Message: "at most one ServeACPOptions value"}
@@ -630,19 +634,43 @@ func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error 
 	if len(options) == 1 {
 		opt = options[0]
 	}
+	if opt.Listen != "" {
+		service, err := a.ListenACP(ctx, opt)
+		if err != nil {
+			return err
+		}
+		<-service.Done()
+		return service.Close()
+	}
+	if opt.TLS != nil || opt.Actors != nil {
+		return &Error{Code: InvalidParams, Message: "ACP actors and TLS require Listen"}
+	}
 	if opt.Input == nil {
 		opt.Input = os.Stdin
 	}
 	if opt.Output == nil {
 		opt.Output = os.Stdout
 	}
+	iface, err := a.acpInterface()
+	if err != nil {
+		return err
+	}
+	declared, projects := a.acpResources(opt)
+	return appError(iface.ServeWithDeclaration(ctx, opt.Input, opt.Output, declared, projects), Lost)
+}
+
+func (a *Agent) acpInterface() (*acpinterface.Interface, error) {
 	if !a.pluginHost {
-		return &Error{Code: InvalidComposition, Message: "ACP requires WithPluginHost(true)"}
+		return nil, &Error{Code: InvalidComposition, Message: "ACP requires WithPluginHost(true)"}
 	}
 	v, err := a.a.Get("interface.acp")
 	if err != nil {
-		return appError(err, NotSupported)
+		return nil, appError(err, NotSupported)
 	}
+	return v.(*acpinterface.Interface), nil
+}
+
+func (a *Agent) acpResources(opt ServeACPOptions) (func() map[string]any, acpinterface.Projects) {
 	declared := func() map[string]any {
 		d := a.Declaration()
 		if opt.Compose == nil {
@@ -680,7 +708,7 @@ func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error 
 			return defaults, nil
 		}
 	}
-	return appError(v.(*acpinterface.Interface).ServeWithDeclaration(ctx, opt.Input, opt.Output, declared, projects), Lost)
+	return declared, projects
 }
 
 type reopeningSessionKey struct{}

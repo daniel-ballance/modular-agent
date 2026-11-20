@@ -342,7 +342,20 @@ func (c *Conn) Read(p []byte) (int, error) {
 	return n, nil
 }
 func (c *Conn) Write(p []byte) (int, error) {
-	if err := c.WriteMessage(bytes.TrimSuffix(p, []byte{'\n'})); err != nil {
+	b := bytes.TrimSuffix(p, []byte{'\n'})
+	if len(b) > MaxFrame {
+		// ACP uses the same bounded failure for either a result or an error.
+		// An update or question that cannot be sent is withheld instead.
+		var header struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if json.Unmarshal(b, &header) != nil || header.Method != "" || len(header.ID) == 0 {
+			return 0, errors.New("ACP message withheld: exceeds 64 MiB")
+		}
+		b = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"Result exceeds 64 MiB","data":{"code":"result_too_large"}}}`, header.ID)
+	}
+	if err := c.WriteMessage(b); err != nil {
 		return 0, err
 	}
 	return len(p), nil

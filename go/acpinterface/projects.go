@@ -52,6 +52,9 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 	if err != nil {
 		return nil, acp.NewInvalidParams(map[string]string{"reason": err.Error()})
 	}
+	if !s.allowsProject(project) {
+		return nil, acpError("forbidden")
+	}
 	key := projectKey{project: project}
 	if id != "" {
 		if host := s.sessionHost(id); host != s {
@@ -68,7 +71,7 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 		}
 		found := false
 		for _, row := range list {
-			if row.ID == id {
+			if row.ID == id && s.permitsMembership(row) {
 				found = true
 				key.savedModel = row.Settings.Model
 				break
@@ -99,7 +102,7 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 	if part.API == nil || part.Close == nil {
 		return nil, errors.New("project factory returned no agent")
 	}
-	host := &server{declared: part.Declaration, a: part.API, project: project, actor: s.actor, ctx: s.ctx,
+	host := &server{declared: part.Declaration, a: part.API, project: project, actor: s.actor, principal: s.principal, ctx: s.ctx,
 		peer: s.peer, initialized: true, binding: s.binding, capabilities: s.capabilities,
 		represents: s.represents, sessions: map[string]*attachment{}, resources: s.resources}
 	unsubscribe := host.subscribe()

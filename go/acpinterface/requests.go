@@ -39,11 +39,11 @@ func (s *server) eligible(st *attachment, q api.Question, who string) bool {
 	present := who == st.actor || st.joined[who] != nil
 	s.mu.Unlock()
 	return q.Answerable && present && (q.Allowed == nil || slices.Contains(q.Allowed, who)) &&
-		s.a.Authorize(q.Session, who, right) && s.a.Authorize(q.Session, st.actor, right)
+		s.authorize(q.Session, who, right) && s.authorize(q.Session, st.actor, right)
 }
 
 func (s *server) projectRequests(ctx context.Context, st *attachment, id, who string, remember bool) (map[string]any, error) {
-	if !s.a.Authorize(id, who, "watch") || !s.a.Authorize(id, st.actor, "watch") {
+	if !s.authorize(id, who, "watch") || !s.authorize(id, st.actor, "watch") {
 		return nil, acpError("forbidden")
 	}
 	out := []map[string]any{}

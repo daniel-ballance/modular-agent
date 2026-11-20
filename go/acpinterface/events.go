@@ -17,7 +17,7 @@ func (s *server) update(ctx context.Context, id string, u acp.SessionUpdate) err
 func (s *server) outputRecipient(e api.Event) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if st := s.sessions[e.Session]; st != nil && !s.closed && s.a.Authorize(e.Session, st.actor, "watch") {
+	if st := s.sessions[e.Session]; st != nil && !s.closed && s.authorize(e.Session, st.actor, "watch") {
 		return st.actor
 	}
 	return ""
@@ -25,7 +25,7 @@ func (s *server) outputRecipient(e api.Event) string {
 func (s *server) event(e api.Event) {
 	s.mu.Lock()
 	st := s.sessions[e.Session]
-	if st == nil || s.closed || !s.a.Authorize(e.Session, st.actor, "watch") {
+	if st == nil || s.closed || !s.authorize(e.Session, st.actor, "watch") {
 		s.mu.Unlock()
 		return
 	}

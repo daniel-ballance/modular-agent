@@ -49,7 +49,7 @@ func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionCon
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
-	if !s.a.Authorize(id, st.actor, "settings") {
+	if !s.authorize(id, st.actor, "settings") {
 		return acp.SetSessionConfigOptionResponse{}, acpError("forbidden")
 	}
 	opts, err := s.config(id)
@@ -139,6 +139,9 @@ func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptRes
 	defer func() { s.mu.Lock(); st.busy = false; s.mu.Unlock() }()
 	// A previous turn from a release, extension input, or job may still be
 	// finishing. Queue behind it instead of mixing the actors' input.
+	if s.principal != nil && !s.authorize(id, st.actor, "input") {
+		return acp.PromptResponse{}, acpError("forbidden")
+	}
 	receipt, err := s.a.Submit(api.AsActor(ctx, st.actor), id, api.Input{Key: meta.Key, When: "after", Content: content})
 	if err != nil {
 		return acp.PromptResponse{}, outputReplyError(err)
