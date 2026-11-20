@@ -139,6 +139,8 @@ With the durable Runtime on Linux, every implementation declares the same values
 
 These are what the Rust implementation declares. An implementation that cannot meet one declares what it does meet, and the difference is a gap to close, not a choice.
 
+The same values go out on every path: `ma --declaration`, the ACP `initialize` result, every session reply and every configuration update. Conformance mode changes none of them: the ACP kit checks the agent as shipped, so a test-only declaration would have it check a different agent.
+
 ## Hooks for testing
 
 Each implementation honors these environment variables, so one set of [checks](../../conformance/reference/README.md) can drive all four without a model:

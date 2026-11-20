@@ -39,7 +39,9 @@ All four implementations, with `MODULAR_AGENT_REF_REQUIRE=all`, before the last 
 |---|---|---|
 | Rust | 12/12 | 123/123 |
 | TypeScript | 12/12 | 123/123 |
-| Go | 12/12 | 94/94: it declares fewer features, a gap the description now closes |
+| Go | 12/12 | 94/94: it declared fewer features, a gap the description now closes |
 | Python | 12/12 | 123/123 |
+
+After the second pass, with the full declaration on every path, Rust and TypeScript `ma` each pass the same 184 ACP kit checks with `--crash-checks --probe-checks --job-checks`.
 
 The ACP kit is the other half: each implementation must also pass `node conformance/acp/run.mjs -- ma --acp` with `MODULAR_AGENT_CONFORMANCE=1`.
