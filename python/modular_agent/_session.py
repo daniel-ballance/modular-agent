@@ -452,7 +452,16 @@ class Session:
         result = await self._agent._call(
             "runtime", "run_tool", session=self.id, actor="user", name=name, input=input
         )
-        public = result_out(result)
+        public = await self._agent._session(
+            "view",
+            session=self.id,
+            recipient="user",
+            value=result_out(result),
+            type="reply",
+            method="callTool",
+        )
+        if public is None:
+            raise AgentError(ErrorCode.WITHHELD, "Tool result withheld")
         return ToolResult(
             name=name,
             status=ToolStatus(public["status"]),
