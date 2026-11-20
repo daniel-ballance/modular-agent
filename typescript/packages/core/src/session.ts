@@ -1,6 +1,6 @@
-import { inputHandedBackIds, inputIdOf, isToolCall, textOf, type AgentEvent, type PluginApi, type TurnOutcome } from "@modular-agent/harness";
+import { inputHandedBackIds, inputIdOf, isToolCall, textOf, type AgentEvent, type InputRequest, type PluginApi, type TurnOutcome } from "@modular-agent/harness";
 import { setTimeout as delay } from "node:timers/promises";
-import type { Content, HistoryEntry, InputTiming, InputReceipt, Input, Outcome, QuestionHandler, Settings, ToolStatus, TurnResult, Usage } from "./data.js";
+import type { Actor, Answer, Content, Question, Right, ToolCall, HistoryEntry, InputTiming, InputReceipt, Input, Outcome, QuestionHandler, Settings, ToolStatus, TurnResult, Usage } from "./data.js";
 import { AgentError, checked, sdkError } from "./errors.js";
 import { schema } from "./schema.js";
 
@@ -43,6 +43,7 @@ const names: Record<string, StandardEvent> = {
   "turn.started": "turnStarted", "step.started": "stepStarted", "step.ended": "stepEnded",
   "tool.call": "toolCall", "tool.started": "toolStarted", "tool.progress": "toolOutput",
   "tool.result": "toolResult", "input.request.opened": "questionOpened", "input.request.closed": "questionClosed",
+  "input.request.answered": "questionAnswered", "input.request.unanswerable": "questionNoLongerAnswerable",
   "job.started": "jobStarted", "job.progress": "jobProgress", "job.ended": "jobEnded",
   "history.position": "positionMoved", "history.erased": "entriesErased", "setting.changed": "settingChanged",
   "plugin.loaded": "pluginLoaded", "plugin.replaced": "pluginReplaced", "plugin.unloaded": "pluginUnloaded",
@@ -82,41 +83,115 @@ function readTurn(entries: HistoryEntry[], end: HistoryEntry): PromptResult {
     toolResults: () => results.slice(),
   };
 }
+function structuredCloneResult(result: import("@modular-agent/harness").ToolResult, name: string): ToolResult {
+  const saved = structuredClone(result);
+  return { ...saved, name, text: () => textOf(saved.content) };
+}
+
 const noTurn = (inputId: string, disposition: "handled" | "handedBack"): PromptResult =>
   ({ inputId, disposition, text: "", openToolCalls: [], toolResults: () => [] });
 
 export interface PromptOptions { key?: string; actor?: string; result?: import("./schema.js").Schema }
-type Owner = { interruption: AbortSignal; fork(entry?: string): Promise<Session>; close(): Promise<void>; handler(handler?: QuestionHandler): void };
+type Owner = { enabled: { severalActors: boolean; sessionLimits: boolean }; isOpen(): boolean; interruption: AbortSignal; fork(entry?: string): Promise<Session>; close(actor: string, delegatedBy?: string): Promise<void>; handler(handler?: QuestionHandler): void };
 const local = "user";
+
+export function questionOf(api: PluginApi, request: InputRequest): Question {
+  const { id, kind, sessionId, question, details, options, timeLimitMs, answerers, credential } = request;
+  const entry = api.history(sessionId, { all: true }).findLast(e => e.kind === "inputRequest" && e.requestId === id);
+  return structuredClone({ id, kind, sessionId, question, details, options, answerers, credential,
+    call: (entry?.data as { call?: ToolCall } | undefined)?.call,
+    deadline: timeLimitMs === undefined || !entry ? undefined : entry.time + timeLimitMs });
+}
+
+export async function submitAnswer(api: PluginApi, request: InputRequest, actorId: string, answer: Answer, delegatedBy?: string): Promise<void> {
+  const { sessionId, id, kind } = request;
+  const decline = answer === "decline" || (answer && typeof answer === "object" && "declined" in answer && answer.declined === true);
+  const value = answer === "allow" ? "allow" : answer && typeof answer === "object" && "value" in answer ? answer.value : undefined;
+  const reason = answer && typeof answer === "object" && "reason" in answer ? answer.reason : undefined;
+  if (!decline && (kind === "approval" ? answer !== "allow" : typeof value !== "string" || answer === "allow") ||
+      !decline && kind === "choice" && !request.options?.includes(value!)) {
+    throw new AgentError("invalid_params", "Answer does not match the question");
+  }
+  const reply = { requestId: id, actorId, delegatedBy, ...(decline ? { declined: true, reason } : { value }) };
+  const result = await api.submitAnswer(sessionId, reply);
+  if (!result.accepted) throw new AgentError("conflict", result.reason ?? "Question is already closed");
+}
 export let makeSession: (id: string, api: PluginApi, owner: Owner) => Session;
 
 export class Session {
   static { makeSession = (id, api, owner) => new Session(id, api, owner); }
   #api: PluginApi;
   #owner: Owner;
-  #open = true;
-  private constructor(readonly id: string, api: PluginApi, owner: Owner) { this.#api = api; this.#owner = owner; }
+  private constructor(readonly id: string, api: PluginApi, owner: Owner, private readonly actor = local) { this.#api = api; this.#owner = owner; }
+
+  #require(right: Right, actor = this.actor) {
+    this.#check();
+    const actors = this.#api.session(this.id).actors;
+    if (![local, this.actor, actor].every(id => actors.find(a => a.id === id)?.authority.includes(right))) {
+      throw new AgentError("forbidden", `Actor ${actor} may not ${right}`);
+    }
+  }
+  as(actorId: string): Session {
+    this.#check();
+    if (actorId === this.actor) return this;
+    if (!this.#owner.enabled.severalActors) throw new AgentError("not_supported", "Several actors are disabled");
+    if (this.actor !== local) throw new AgentError("forbidden", "Select actors from the local session");
+    if (!this.#api.session(this.id).actors.some(a => a.id === actorId)) throw new AgentError("not_found", "Actor is not joined");
+    return new Session(this.id, this.#api, this.#owner, actorId);
+  }
+  async join(actor: Actor, grantedBy = this.actor): Promise<void> {
+    this.#check();
+    if (!this.#owner.enabled.severalActors) throw new AgentError("not_supported", "Several actors are disabled");
+    this.#require("grant", grantedBy);
+    if (this.#api.session(this.id).actors.some(a => a.id === actor.id)) throw new AgentError("conflict", "Actor is already joined");
+    const { rights, ...identity } = structuredClone(actor);
+    const actors = this.#api.session(this.id).actors;
+    if (!rights.every(right => [local, this.actor, grantedBy].every(id => actors.find(a => a.id === id)?.authority.includes(right)))) {
+      throw new AgentError("forbidden", "Cannot grant a right outside shared authority");
+    }
+    await checked(() => this.#api.join(this.id, { ...identity, authority: rights }, grantedBy));
+  }
+  async leave(actorId: string): Promise<void> {
+    this.#check();
+    if (!this.#owner.enabled.severalActors) throw new AgentError("not_supported", "Several actors are disabled");
+    if (actorId !== this.actor) this.#require("grant");
+    if (!this.#api.session(this.id).actors.some(a => a.id === actorId)) throw new AgentError("not_found", "Actor is not joined");
+    await checked(() => this.#api.leave(this.id, actorId, this.actor));
+  }
+  async setLimit(rights?: Right[]): Promise<void> {
+    this.#check();
+    if (!this.#owner.enabled.sessionLimits) throw new AgentError("not_supported", "Session limits are disabled");
+    this.#require("administer");
+    await checked(() => this.#api.setLimit(this.id, rights ? [...rights] : null, this.actor));
+  }
 
   #check() {
-    if (!this.#open || this.#owner.interruption.aborted) throw new AgentError("not_open", `Session ${this.id} is closed`);
+    if (!this.#owner.isOpen() || this.#owner.interruption.aborted) throw new AgentError("not_open", `Session ${this.id} is closed`);
   }
   async send(input: Input, timing: InputTiming, options: PromptOptions = {}): Promise<InputReceipt> {
     this.#check();
     if (options.result !== undefined && timing !== "now") throw new AgentError("invalid_params", "Only a prompt can request a structured turn result");
-    if (options.actor !== undefined && options.actor !== local) throw new AgentError("forbidden", "Only the local actor is supported");
+    const actor = options.actor ?? this.actor;
+    if (!this.#owner.enabled.severalActors && (actor !== local || timing === "propose")) {
+      throw new AgentError("not_supported", "Several actors are disabled");
+    }
+    if (this.actor !== local && actor !== this.actor) throw new AgentError("forbidden", "This view is bound to one actor");
     if (!["now", "steer", "after", "propose"].includes(timing) || options.key !== undefined && typeof options.key !== "string" ||
       typeof input !== "string" && (!Array.isArray(input) || input.some(p => typeof p?.type !== "string"))) {
       throw new AgentError("invalid_params", "Invalid input, timing or key");
     }
     if (options.key === "") throw new AgentError("invalid_params", "Input key must not be empty");
     const resultShape = options.result === undefined ? undefined : await checked(() => schema(options.result!).parameters, "invalid_params");
-    return checked(() => this.#api.input(this.id, { content: structuredClone(input), when: timing, key: options.key, actorId: local, resultShape }));
+    this.#require(timing === "propose" ? "propose" : "input", actor);
+    return checked(() => this.#api.input(this.id, { content: structuredClone(input), when: timing, key: options.key,
+      actorId: actor, delegatedBy: actor === local ? undefined : local, resultShape }));
   }
 
   async #run(input: Input, options: PromptOptions, stream?: { event(e: AgentEvent): void; admitted(id: string): void; lag(): void }): Promise<PromptResult> {
     this.#check();
+    const view = options.actor === undefined ? this : this.as(options.actor);
     let wake: () => void = () => {};
-    const off = this.#api.follow(this.id, { recipient: local, onLag: stream?.lag }, e => { stream?.event(e); wake(); });
+    const off = this.#api.follow(this.id, { recipient: view.actor, onLag: stream?.lag }, e => { stream?.event(e); wake(); });
     try {
       const receipt = await this.send(input, "now", options) as InputReceipt & { handled?: boolean };
       const id = receipt.inputId;
@@ -126,7 +201,7 @@ export class Session {
       for (;;) {
         if (this.#owner.interruption.aborted) throw new AgentError("lost", "Agent was interrupted");
         const changed = new Promise<void>(r => { wake = r; });
-        const entries = await this.history();
+        const entries = await view.history();
         const turn = entries.find(e => e.kind === "input" && inputIdOf(e) === id)?.turnId;
         const end = turn && entries.find(e => e.kind === "turnEnd" && e.turnId === turn && !e.erased);
         if (end) { await off.idle(); return readTurn(entries, end); }
@@ -189,7 +264,7 @@ export class Session {
   }
 
   async *events(fromEntry?: string | null): AsyncIterable<Event> {
-    this.#check();
+    this.#require("watch");
     const entries = this.#api.history(this.id, { all: true });
     const index = fromEntry == null ? -1 : entries.findIndex(e => e.id === fromEntry);
     if (fromEntry != null && index < 0) throw new AgentError("not_found", "Unknown entry cursor");
@@ -200,7 +275,7 @@ export class Session {
     const lag = () => { dropped = true; wake(); };
     // Snapshot the committed watermark and subscribe synchronously. Gate replay
     // on demand so a long history alone cannot make a new subscriber lag.
-    const off = this.#api.follow(this.id, { recipient: local, onLag: lag }, e => {
+    const off = this.#api.follow(this.id, { recipient: this.actor, onLag: lag }, e => {
       if (queue.length >= 1024) {
         lag();
         off();
@@ -213,12 +288,12 @@ export class Session {
       if (dropped || this.#owner.interruption.aborted) throw new AgentError("lost", "Session event stream disconnected", { fromEntry: cursor });
     };
     try {
-      if (index >= 0 && !await this.#api.gateOutput(this.id, local, "entry", entries[index])) {
+      if (index >= 0 && !await this.#api.gateOutput(this.id, this.actor, "entry", entries[index])) {
         throw new AgentError("not_found", "Unknown entry cursor");
       }
       for (const entry of entries.slice(index + 1)) {
         check();
-        const view = await this.#api.gateOutput(this.id, local, "entry", entry);
+        const view = await this.#api.gateOutput(this.id, this.actor, "entry", entry);
         check();
         if (!view) continue;
         cursor = view.id;
@@ -241,15 +316,15 @@ export class Session {
   }
 
   commands(): { name: string; description: string }[] {
-    this.#check();
+    this.#require("watch");
     return this.#api.commands().map(({ name, description }) => ({ name, description }));
   }
   async runCommand(line: string): Promise<string | void> {
-    this.#check();
+    this.#require("input");
     const name = /^\/(\S+)/.exec(line.trim())?.[1];
     if (!name) throw new AgentError("invalid_params", "A command starts with /");
     if (!this.commands().some(c => c.name === name)) throw new AgentError("not_found", `Unknown command /${name}`);
-    return checked(() => this.#api.runCommand(this.id, line, local));
+    return checked(() => this.#api.runCommand(this.id, line, this.actor));
   }
 
   async lastTurn(): Promise<PromptResult | undefined> {
@@ -258,34 +333,67 @@ export class Session {
     return end && readTurn(entries, end);
   }
   async history(options: { all?: boolean } = {}): Promise<HistoryEntry[]> {
-    this.#check();
-    return checked(async () => structuredClone(await this.#api.gatedHistory(this.id, { recipient: local, all: options.all ?? true })));
+    this.#require("watch");
+    return checked(async () => structuredClone(await this.#api.gatedHistory(this.id, { recipient: this.actor, all: options.all ?? true })));
   }
   /** Wait for the current turn and its queued follow-up inputs to settle. */
   async waitIdle(): Promise<void> {
-    this.#check();
+    this.#require("watch");
     await checked(() => this.#api.waitForIdle(this.id));
   }
-  settings(): Settings { this.#check(); return structuredClone(this.#api.session(this.id).settings); }
+  settings(): Settings { this.#require("watch"); return structuredClone(this.#api.session(this.id).settings); }
   async setSetting(key: string, value: unknown): Promise<void> {
-    this.#check();
+    this.#require("settings");
     if (typeof key !== "string" || !key) throw new AgentError("invalid_params", "A setting key is required");
-    await checked(() => this.#api.setSetting(this.id, key, structuredClone(value), local), "invalid_params");
+    await checked(() => this.#api.setSetting(this.id, key, structuredClone(value), this.actor), "invalid_params");
   }
   async erase(entryIds: string[]): Promise<import("@modular-agent/harness").ErasureReport> {
-    this.#check();
+    this.#require("erase");
     if (this.#api.declaration(this.id).erasure !== true) throw new AgentError("not_supported", "This store does not support erasure");
-    return checked(() => this.#api.erase(this.id, entryIds, local));
+    return checked(() => this.#api.erase(this.id, entryIds, this.actor));
   }
   async cancel(): Promise<{ inputId: string; content: Content }[]> {
-    this.#check();
+    this.#require("cancel");
     return checked(async () => (await this.#api.cancel(this.id)).map(q => ({ inputId: q.id, content: structuredClone(q.content) })));
   }
-  async fork(entryId?: string): Promise<Session> { this.#check(); return this.#owner.fork(entryId); }
-  onQuestion(handler?: QuestionHandler): void { this.#check(); this.#owner.handler(handler); }
+  async fork(entryId?: string): Promise<Session> {
+    this.#require("settings");
+    const fork = await this.#owner.fork(entryId);
+    return this.actor === local ? fork : fork.as(this.actor);
+  }
+  async moveTo(entryId: string, options?: { rewind?: boolean }): Promise<{ outOfReach?: string[] }> {
+    this.#require("settings");
+    return checked(() => this.#api.moveTo(this.id, entryId, { ...options, actorId: this.actor }), "busy");
+  }
+  async callTool(name: string, input: Record<string, unknown>): Promise<ToolResult> {
+    this.#require("tools");
+    const result = await checked(() => this.#api.callTool(this.id, { name, input: structuredClone(input), startedBy: "ui", actorId: this.actor }));
+    const view = await this.#api.gateOutput(this.id, this.actor, "tool.result", result);
+    if (!view) throw new AgentError("withheld", "Tool result was withheld");
+    return structuredCloneResult(view, name);
+  }
+  async questions(): Promise<Question[]> {
+    this.#require("watch");
+    const visible = await Promise.all(this.#api.openRequests(this.id).map(request =>
+      this.#api.gateOutput(this.id, this.actor, "input.request.opened", questionOf(this.#api, request))));
+    const open = new Set(this.#api.openRequests(this.id).map(request => request.id));
+    return visible.flatMap(q => q && open.has(q.id) ? [structuredClone(q)] : []);
+  }
+  async answer(id: string, answer: Answer): Promise<void> {
+    this.#check();
+    const request = this.#api.openRequests(this.id).find(r => r.id === id);
+    if (!request) throw new AgentError("not_found", "No such open question");
+    this.#require(request.kind === "approval" ? "approve" : "answer");
+    if (request.answerers.length && !request.answerers.includes(this.actor)) throw new AgentError("forbidden", "Actor is not an eligible answerer");
+    await checked(() => submitAnswer(this.#api, request, this.actor, answer, this.actor === local ? undefined : local));
+  }
+  onQuestion(handler?: QuestionHandler): void {
+    this.#check();
+    if (this.actor !== local) throw new AgentError("forbidden", "Register a handler on the local session");
+    this.#owner.handler(handler);
+  }
   async close(): Promise<void> {
-    if (!this.#open) return;
-    await this.#owner.close();
-    this.#open = false;
+    if (!this.#owner.isOpen()) return;
+    await this.#owner.close(this.actor, this.actor === local ? undefined : local);
   }
 }

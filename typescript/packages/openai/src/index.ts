@@ -12,7 +12,7 @@ export function openai({ baseUrl }: OpenAIOptions = {}): Provider {
   return {
     id: "openai", models: () => structuredClone(models),
     supports: { keepsState: false, safeToRepeat: true },
-    available: () => !!process.env.OPENAI_API_KEY,
+    available: async cx => !!(await cx.credential()),
     async request(model, request, cx) {
       if (model.provider !== "openai" || !models.some(m => m.id === model.id)) throw new AgentError("invalid_request", "Model is not offered");
       const key = await cx.credential();

@@ -1,9 +1,13 @@
+import { randomUUID } from "node:crypto";
+import { open, rename, rm } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
-import type { CredentialStore, Plugin } from "@modular-agent/harness";
+import { advanceSecretSlot, secretStaging, type SecretFile, type CredentialStore, type Plugin } from "@modular-agent/harness";
 
+const metadata = "$modular-agent.staging";
+type File = SecretFile & { values: Data };
 type Data = Record<string, { type: string; [key: string]: unknown }>;
 
 /**
@@ -12,6 +16,12 @@ type Data = Record<string, { type: string; [key: string]: unknown }>;
  */
 export class FileCredentialStore implements CredentialStore {
 	constructor(private path: string) {}
+	private readonly stages = secretStaging(async () => this.load(), (change) => this.update(change),
+		(file, name, value) => { file.values[name] = { type: "api_key", key: value }; });
+	stage: NonNullable<CredentialStore["stage"]> = (scope, value) => scope.credential === metadata ? Promise.resolve(undefined) : this.stages.stage(scope, value);
+	lookupStaged = this.stages.lookupStaged;
+	activate = this.stages.activate;
+	discard = this.stages.discard;
 
 	private ensure(): string {
 		if (!existsSync(this.path)) {
@@ -21,33 +31,49 @@ export class FileCredentialStore implements CredentialStore {
 		return realpathSync(this.path);
 	}
 
-	private load(): Data {
-		if (!existsSync(this.path)) return {};
-		const raw = readFileSync(this.path, "utf8").replace(/^\uFEFF/, "").trim();
-		return raw ? (JSON.parse(raw) as Data) : {};
+	private load(): File {
+		const raw = existsSync(this.path) ? readFileSync(this.path, "utf8").replace(/^\uFEFF/, "").trim() : "";
+		const values = Object.assign(Object.create(null), raw ? JSON.parse(raw) : {});
+		const staging = values[metadata];
+		delete values[metadata];
+		return { values, staging };
 	}
 
 	async read(providerId: string): Promise<unknown | undefined> {
-		return this.load()[providerId];
+		return this.load().values[providerId];
 	}
 
 	async list(): Promise<readonly { providerId: string; type: string }[]> {
-		return Object.entries(this.load()).map(([providerId, c]) => ({ providerId, type: c.type }));
+		return Object.entries(this.load().values).map(([providerId, c]) => ({ providerId, type: c.type }));
 	}
 
 	/** The only write path: a read-modify-write under the file lock. */
 	async modify(providerId: string, fn: (current: any) => Promise<any>): Promise<unknown | undefined> {
+		if (providerId === metadata) throw new Error("Reserved credential name");
+		return this.update(async data => {
+			const next = await fn(data.values[providerId]);
+			if (next === undefined) delete data.values[providerId];
+			else data.values[providerId] = next;
+			advanceSecretSlot(data, providerId);
+			return next;
+		});
+	}
+
+	private async update<T>(change: (data: File) => Promise<T>): Promise<T> {
 		const path = this.ensure();
 		const release = await lockfile.lock(path, { retries: { retries: 20, minTimeout: 25, maxTimeout: 500 }, stale: 30_000 });
+		const temporary = path + "." + randomUUID() + ".tmp";
 		try {
-			const data = this.load();
-			const next = await fn(data[providerId]);
-			if (next === undefined) delete data[providerId];
-			else data[providerId] = next;
-			writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
-			return next;
+			const data = this.load(), result = await change(data);
+			await using file = await open(temporary, "wx", 0o600);
+			await file.writeFile(JSON.stringify({ ...data.values, [metadata]: data.staging }, null, 2));
+			await file.sync();
+			await rename(temporary, path);
+			await using directory = await open(dirname(path), "r");
+			await directory.sync();
+			return result;
 		} finally {
-			await release();
+			try { await rm(temporary, { force: true }); } finally { await release(); }
 		}
 	}
 

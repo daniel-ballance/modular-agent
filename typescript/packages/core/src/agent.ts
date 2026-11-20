@@ -20,8 +20,8 @@ import { MemoryHistory, memoryArchive, memoryStore } from "./history.js";
 import { wirePlugin } from "./serve.js";
 import { environmentCredentials } from "./parts.js";
 import { standardMcpTools, type McpServerConfig } from "./mcp.js";
-import { makeSession, type Session } from "./session.js";
-import type { Declaration, ModelInfo, ModelRef, Question, QuestionHandler, Settings, ToolCall } from "./data.js";
+import { makeSession, questionOf, submitAnswer, type Session } from "./session.js";
+import type { Actor, Declaration, ModelInfo, ModelRef, QuestionHandler, Right, Settings } from "./data.js";
 
 export type Durability = "ephemeral" | "kept" | "durable";
 export type Approval = "off" | "ask" | "all" | "never";
@@ -35,6 +35,9 @@ export interface AgentOptions {
   plugins?: readonly Plugin[];
   processPlugins?: readonly ProcessPlugin[];
   pluginHost?: boolean;
+  severalActors?: boolean;
+  sessionLimits?: boolean;
+  tenants?: Record<string, { rights: Right[]; tokens?: number }>;
   model?: string | ModelRef;
   settings?: Settings;
   approval?: Approval;
@@ -51,8 +54,10 @@ export interface AgentOptions {
   runtime?: Runtime;
   credentials?: CredentialStore;
 }
-export interface SessionOptions { settings?: Settings }
+export interface SessionOptions { settings?: Settings; tenant?: string; actors?: Actor[] }
 export interface ServeAcpOptions {
+  /** Trusted operator identity; never taken from a client request. */
+  actorId?: string;
   compose?(project: string, saved?: SessionInfo): Promise<Agent>;
   projectSettings?(project: string): Settings | Promise<Settings>;
   projectMcp?(project: string): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
@@ -180,8 +185,10 @@ export class Agent {
       const home = options.dataDir ? resolve(options.dataDir) : scratch;
       await mkdir(home, { recursive: true });
       const h = new Harness({ project, home, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
-        jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn", rejectUnknownModel: true });
+        jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn",
+        rejectUnknownModel: true, tenants: options.tenants ?? (options.conformance ? undefined : null) });
       agent = new Agent(h, scratch, project, options.onQuestion);
+      agent.#authority = { severalActors: options.severalActors ?? false, sessionLimits: options.sessionLimits ?? false, tenants: options.tenants !== undefined };
       agent.#conformance = options.conformance ?? false;
       agent.#approval = options.approval !== undefined || agent.#conformance;
       const settings = structuredClone(options.settings ?? {});
@@ -295,6 +302,7 @@ export class Agent {
     }
   }
   #external = new Set<string>();
+  #authority = { severalActors: false, sessionLimits: false, tenants: false };
   async #loadProcesses(specs: ProcessPlugin[]) {
     for (const spec of specs) {
       if (!spec.command?.length || spec.command.some(a => typeof a !== "string" || !a || a.includes("\0"))) {
@@ -325,32 +333,22 @@ export class Agent {
     return { name: "sdk.local", setup: api => {
       const capability: InterfaceCapability = {
         id: "sdk.local", actorId: local.id,
-        present: id => !!(this.#handlers.get(id) ?? this.#defaultHandler),
+        present: id => !this.#acp && !!(this.#handlers.get(id) ?? this.#defaultHandler),
         onInputRequest: request => {
           const handler = this.#handlers.get(request.sessionId) ?? this.#defaultHandler;
           if (!handler) return;
-          const { kind, id, question, sessionId, details, options, timeLimitMs } = request;
-          if (kind === "secret") {
-            api.answer(sessionId, { requestId: id, actorId: local.id, declined: true });
-            return;
-          }
+          const { id, sessionId } = request;
+          if (!api.session(sessionId).actors.find(a => a.id === local.id)?.authority.includes(request.kind === "approval" ? "approve" : "answer") ||
+              request.answerers.length && !request.answerers.includes(local.id)) return;
           const controller = new AbortController();
           this.#questions.set(request.id, controller);
-          const recorded = api.history(sessionId, { all: true }).findLast(e => e.kind === "inputRequest" && e.requestId === id);
-          const call = (recorded?.data as { call?: ToolCall } | undefined)?.call;
-          const q: Question = { kind, id, sessionId, question, details, options, call, deadline: timeLimitMs === undefined ? undefined : Date.now() + timeLimitMs };
-          void Promise.resolve().then(() => handler(structuredClone(q), { sessionId, actorId: local.id, cancelled: controller.signal }))
+          const q = questionOf(api, request);
+          void Promise.resolve().then(() => handler(q, { sessionId, actorId: local.id, cancelled: controller.signal }))
             .catch(() => undefined).then(async answer => {
-              if (controller.signal.aborted) return;
-              const value = answer === "allow" ? "allow" : answer && typeof answer === "object" && "value" in answer ? answer.value : undefined;
-              const reason = answer && typeof answer === "object" && "reason" in answer ? answer.reason : undefined;
-              const granted = kind === "approval" ? answer === "allow" : typeof value === "string";
-              const reply = api.answer(sessionId, { requestId: id, actorId: local.id,
-                ...(granted ? { value } : { declined: true, reason }) });
-              if (!reply.accepted) api.answer(sessionId, { requestId: id, actorId: local.id, declined: true });
+              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, answer ?? "decline");
             }).catch(async () => {
-              if (!controller.signal.aborted) api.answer(sessionId, { requestId: id, actorId: local.id, declined: true });
-            }).finally(() => { this.#questions.delete(request.id); });
+              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, "decline").catch(() => {});
+            }).finally(() => { this.#questions.delete(id); });
         },
         onInputRequestClosed: id => this.#questions.get(id)?.abort(),
       };
@@ -363,6 +361,8 @@ export class Agent {
     if (existing) return existing;
     const s = makeSession(id, this.#api, {
       interruption: this.#interruption.signal,
+      enabled: this.#authority,
+      isOpen: () => this.#open.has(id),
       fork: async entry => {
         this.#check();
         const at = entry ?? this.#api.session(id).position;
@@ -370,8 +370,8 @@ export class Agent {
         const fork = await checked(() => this.#api.forkSession(id, at), "busy");
         return this.openSession(fork);
       },
-      close: async () => {
-        await checked(() => this.#api.closeSession(id, local.id));
+      close: async (actor, delegatedBy) => {
+        await checked(() => this.#api.closeSession(id, actor, delegatedBy));
         this.#open.delete(id);
         this.#handlers.delete(id);
       },
@@ -386,7 +386,15 @@ export class Agent {
   }
   async session(options: SessionOptions = {}): Promise<Session> {
     this.#check();
-    return checked(async () => this.#session(await this.#h.startSession({ actor: local, settings: structuredClone(options.settings) })));
+    if (options.tenant !== undefined && !this.#authority.tenants) throw new AgentError("not_supported", "Tenants are disabled");
+    if (options.actors?.length && !this.#authority.severalActors) throw new AgentError("not_supported", "Several actors are disabled");
+    const session = await checked(async () => this.#session(await this.#h.startSession({
+      actor: local, settings: structuredClone(options.settings), tenant: options.tenant,
+    })));
+    try {
+      for (const actor of options.actors ?? []) await session.join(actor);
+      return session;
+    } catch (error) { await session.close().catch(() => {}); throw error; }
   }
   async openSession(id: string): Promise<Session> {
     this.#check();
@@ -430,6 +438,17 @@ export class Agent {
       return { ...meta, updated: entries.at(-1)?.time ?? meta.created, settings };
     });
   }
+  /** Refresh served catalogs; /1 has a query, not a catalog-change notification. */
+  async refreshModels(): Promise<ModelInfo[]> {
+    this.#check();
+    await checked(() => Promise.all(this.#h.useAll<BaseProvider>("provider").map(p => p.refreshModels?.())));
+    return this.models();
+  }
+  onModelsChanged(handler: () => void): () => void {
+    this.#check();
+    const off = this.#h.useAll<BaseProvider>("provider").flatMap(p => p.onChange ? [p.onChange(handler)] : []);
+    return () => { for (const remove of off) remove(); };
+  }
   models(): ModelInfo[] {
     this.#check();
     return structuredClone(this.#h.useAll<BaseProvider>("provider").flatMap(p => p.models()));
@@ -445,7 +464,7 @@ export class Agent {
       liveSessions: providers.some(p => p.supports.liveSessions === true),
       portableSessions: this.#portable && !providers.some(p => p.supports.runsTools === true || p.supports.keepsState === true),
       nestedToolCalls: base.nestedToolCalls === true, lateAnswersStartTurns: base.questionsOutlastTurns === true,
-      severalActors: false, tenants: false, sessionLimits: false, holdsOutput: false, mixedActorInput: "refused",
+      ...this.#authority, mixedActorInput: "refused",
       startsTurnsUnasked: base.startsTurnsUnasked === "never" ? "never" : "jobReports",
     };
   }
@@ -463,7 +482,7 @@ export class Agent {
     };
     try {
       const binding = acpInterface({
-        actorId: this.#conformance ? process.env.MODULAR_AGENT_ACTOR : undefined,
+        actorId: options.actorId ?? process.env.MODULAR_AGENT_ACTOR,
         showApproval: options.showApproval ?? this.#approval,
         declaration: id => (id && sessions.get(id) || this).declaration(),
         projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,
@@ -485,6 +504,7 @@ export class Agent {
                 if (agent === this) return agent;
                 try {
                   if (agent.#project !== project || agent.#open.size || agent.#acp) throw new AgentError("invalid_composition", "Factory must return a fresh agent for this project");
+                  agent.#acp = true;
                   await installMcp(agent);
                   await agent.#load({ name: binding.name, setup(api) {
                     binding.acp.attach(api, false);

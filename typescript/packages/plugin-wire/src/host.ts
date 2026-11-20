@@ -149,6 +149,7 @@ interface Parent {
 	actors?: string[];
 	jobs?: string[];
 	runtime?: boolean;
+	command?: boolean;
 	provider?: ProviderAttempt;
 	sessionId?: string;
 	tool?: ToolContext;
@@ -343,7 +344,8 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			};
 			peer.handle("host/jobs/start", async (p) => {
 				const parent = parentOf(p);
-				if (!parent.sessionId || !parent.actors?.length || parent.signal?.aborted ||
+				if (parent.signal?.aborted) throw new WireError("cancelled", "The parent was cancelled");
+				if ((!parent.tool && !parent.command) || !parent.sessionId || !parent.actors?.length ||
 					typeof p.kind !== "string" || (p.key !== undefined && typeof p.key !== "string")) throw new WireError("invalid_request", "Job needs an authorized parent and kind");
 				try {
 					const handle = api.startJob(parent.sessionId, { kind: p.kind, key: p.key, detail: p.detail, actors: parent.actors, jobs: parent.jobs, toolCallId: parent.tool?.call.id });
@@ -435,7 +437,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			for (const c of reg.commands ?? []) {
 				api.registerCommand(c.name, {
 					description: c.description,
-					run: async (args, ctx) => (await track(peer.request<{ output?: string }>("command/run", { name: c.name, args, sessionId: ctx.sessionId, actorId: ctx.actorId }), { sessionId: ctx.sessionId, actors: [ctx.actorId] }))?.output,
+					run: async (args, ctx) => (await track(peer.request<{ output?: string }>("command/run", { name: c.name, args, sessionId: ctx.sessionId, actorId: ctx.actorId }), { sessionId: ctx.sessionId, actors: [ctx.actorId], command: true }))?.output,
 				});
 			}
 		},
@@ -785,8 +787,23 @@ class WireProvider implements Provider {
 	models(): ModelInfo[] {
 		return this.list;
 	}
+	private refresh?: Promise<void>;
+	private changed = new Set<() => void>();
+	onChange(handler: () => void): () => void {
+		this.changed.add(handler);
+		return () => { this.changed.delete(handler); };
+	}
+	refreshModels(): Promise<void> {
+		return this.refresh ??= this.peer.request<{ models: ModelInfo[] }>("provider/models", { provider: this.id }).then(reply => {
+			const models = fromWire(reply.models) as ModelInfo[];
+			if (!wireEqual(models, this.list)) {
+				this.list = models;
+				for (const handler of this.changed) handler();
+			}
+		}).finally(() => { this.refresh = undefined; });
+	}
 	async available(): Promise<boolean> {
-		return (await this.peer.request<{ available: boolean }>("provider/available", { provider: this.id }).catch(() => ({ available: true }))).available;
+		return (await this.peer.request<{ available: boolean }>("provider/available", { provider: this.id })).available === true;
 	}
 	async request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
 		const attempt: ProviderAttempt = { model, request: toWire(request), prepare: options.prepareDispatch };

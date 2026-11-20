@@ -1,12 +1,13 @@
-import { spawn } from "node:child_process";
+import { advanceSecretSlot, secretStaging, withCredentialLock, type SecretFile, type CredentialStore } from "@modular-agent/core";
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { open, rename, rm } from "node:fs/promises";
+import { constants } from "node:fs";
 import { join } from "node:path";
 
 export type OAuth = { type: "oauth"; access: string; refresh: string; expires: number; account?: string };
 export type Login = OAuth | { type: "api_key"; key: string };
 export const expired = (login: Login) => login.type === "oauth" && login.expires <= Date.now();
-type Contents = { logins: Record<string, Login>; answers: Record<string, string> };
+type Contents = SecretFile & { logins: Record<string, Login>; answers: Record<string, string> };
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 function loginValue(value: unknown): Login {
   if (object(value)) {
@@ -26,12 +27,19 @@ export class AuthFile {
   constructor(readonly directory: string) { this.path = join(directory, "auth.json"); }
   async #read(): Promise<Contents> {
     let raw;
-    try { raw = await readFile(this.path, "utf8"); }
+    try {
+      await using file = await open(this.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const info = await file.stat();
+      if (!info.isFile() || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid())) {
+        throw new Error("The credential file must be private to its owner");
+      }
+      raw = await file.readFile("utf8");
+    }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { logins: Object.create(null), answers: Object.create(null) }; throw error; }
     try {
       const value: unknown = JSON.parse(raw);
       if (!object(value)) throw new Error();
-      const { logins = {}, answers = {} } = value;
+      const { logins = {}, answers = {}, staging } = value;
       if (!object(logins) || !object(answers)) throw new Error();
       const result: Contents = { logins: Object.create(null), answers: Object.create(null) };
       for (const [name, login] of Object.entries(logins)) result.logins[name] = loginValue(login);
@@ -39,16 +47,20 @@ export class AuthFile {
         if (typeof answer !== "string") throw new Error();
         result.answers[name] = answer;
       }
+      if (staging !== undefined) {
+        if (!object(staging) || !object(staging.generations) || !object(staging.requests)) throw new Error();
+        result.staging = staging as unknown as SecretFile["staging"];
+      }
       return result;
     } catch { throw new Error(`${this.path} is not a valid credential file`); }
   }
-  async #write({ logins, answers }: Contents) {
+  async #write({ logins, answers, staging }: Contents) {
     const tmp = join(this.directory, `.auth-${randomUUID()}.tmp`);
     try {
       await using file = await open(tmp, "wx", 0o600);
       await file.chmod(0o600);
       // Keep Rust's field order, indentation, and absence of a final newline.
-      await file.writeFile(JSON.stringify({ logins: ordered(logins), answers: ordered(answers) }, null, 2));
+      await file.writeFile(JSON.stringify({ logins: ordered(logins), answers: ordered(answers), staging }, null, 2));
       await file.sync();
       await rename(tmp, this.path);
       await using dir = await open(this.directory, "r");
@@ -59,17 +71,30 @@ export class AuthFile {
     }
   }
   async #locked<T>(fn: () => Promise<T>, signal?: AbortSignal) {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    await using file = await open(join(this.directory, "auth.lock"), "a", 0o600);
-    // flock(2) attaches to the open file description shared by the child and
-    // this process, not its PID. The lock stays until the parent closes it.
-    await new Promise<void>((resolve, reject) => {
-      const lock = spawn("flock", ["-x", "3"], { stdio: ["ignore", "ignore", "ignore", file.fd], signal });
-      lock.once("error", e => reject(new Error(`could not lock auth.lock: ${e.message}`)));
-      lock.once("exit", code => code === 0 ? resolve() : reject(new Error("could not lock auth.lock")));
+    return withCredentialLock(join(this.directory, "auth.lock"), fn, signal);
+  }
+  credentials(): CredentialStore {
+    const read = () => this.#read();
+    const update = <T>(change: (file: Contents) => Promise<T>) => this.#locked(async () => {
+      const file = await read();
+      const result = await change(file);
+      await this.#write(file);
+      return result;
     });
-    signal?.throwIfAborted();
-    return await fn();
+    const modify: CredentialStore["modify"] = (name, change) => update(async file => {
+      const value = await change(file.answers[name]);
+      if (value === undefined) delete file.answers[name];
+      else if (typeof value === "string") file.answers[name] = value;
+      else throw new Error("Secret answers must be strings");
+      advanceSecretSlot(file, name);
+      return value;
+    });
+    return {
+      ...secretStaging(read, update, (file, name, value) => { file.answers[name] = value; }),
+      read: async name => (await read()).answers[name],
+      list: async () => Object.keys((await read()).answers).map(providerId => ({ providerId, type: "api_key" })),
+      modify, delete: async name => { await modify(name, async () => undefined); },
+    };
   }
   async login(provider: string) { return (await this.#read()).logins[provider]; }
   async setLogin(provider: string, login?: Login) {

@@ -782,7 +782,13 @@ export class AcpInterface implements InterfaceCapability {
 
 	private async configOptions(sessionId: string): Promise<acp.SessionConfigOption[]> {
 		const providers = this.apiFor(sessionId).useAll<Provider>("provider");
-		const usable = await Promise.all(providers.map(async (p) => ((await p.available?.()) ?? true ? p : undefined)));
+		const usable = await Promise.all(providers.map(async p => {
+			try {
+				if (await p.available?.() === false) return undefined;
+				await p.refreshModels?.();
+				return p;
+			} catch { return undefined; }
+		}));
 		const settings = this.apiFor(sessionId).session(sessionId).settings;
 		const ref = parseModel(settings.model);
 		const current = ref ? `${ref.provider}/${ref.id}` : "";

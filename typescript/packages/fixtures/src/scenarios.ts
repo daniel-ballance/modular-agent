@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { AgentOptions, Answer, PromptResult, Session } from "@modular-agent/core";
+import type { Actor, AgentOptions, Answer, InputTiming, PromptResult, Session } from "@modular-agent/core";
 import { answers, testAgent, type ScriptStep } from "@modular-agent/core/testing";
 import { count, fixture } from "./index.js";
 
@@ -41,10 +41,11 @@ export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Pla
 
 type Expect = { outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string; contains?: string }[]; records?: string[]; count?: number; error?: string };
 type Crash = { record: string } | { count: number };
-type Step = { prompt: string; crashWhen?: Crash; expect?: Expect } | { reopen: true; expect?: Expect };
+type Step = ({ prompt: string; as?: string; crashWhen?: Crash } | { reopen: true } |
+  { send: string; timing?: InputTiming } | { answer: Answer } | { wait: true }) & { expect?: Expect };
 export interface Scenario {
   scenario: string;
-  agent: Pick<AgentOptions, "durability" | "approval" | "settings"> & { plugins?: string[]; answers?: Answer[] };
+  agent: Pick<AgentOptions, "durability" | "approval" | "settings" | "severalActors"> & { plugins?: string[]; answers?: Answer[]; actors?: Actor[] };
   model: ScriptStep[];
   steps: Step[];
   placements?: string[];
@@ -57,7 +58,7 @@ export async function scenarioAgent(s: Scenario, dir: string, p: Placement,
   handler = s.agent.answers && answers(s.agent.answers)) {
   const project = join(dir, "project");
   await mkdir(project, { recursive: true });
-  const { plugins = [], answers: _answers, ...options } = s.agent;
+  const { plugins = [], answers: _answers, actors: _actors, ...options } = s.agent;
   const config = { path: countFile(dir) };
   return testAgent({ ...options, script: s.model, project, dataDir: join(dir, "data"),
     onQuestion: handler,
@@ -158,11 +159,24 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
           a = await scenarioAgent(s, dir, p, handler);
           session = await a.openSession(id);
           result = await session.lastTurn();
-        } else if ("prompt" in step) {
+        } else {
           a ??= await scenarioAgent(s, dir, p, handler);
-          session ??= await a.session();
+          session ??= await a.session({ actors: s.agent.actors });
           id = session.id;
-          result = await session.prompt(step.prompt);
+          if ("prompt" in step) result = await (step.as === undefined ? session : session.as(step.as)).prompt(step.prompt);
+          else if ("send" in step) await session.send(step.send, step.timing ?? "now");
+          else if ("answer" in step) {
+            const deadline = Date.now() + 10_000;
+            let open;
+            while ((open = await session.questions()).length !== 1) {
+              if (Date.now() >= deadline) throw new Error(`Expected exactly one question; got ${open.length}`);
+              await delay(20);
+            }
+            await session.answer(open[0].id, step.answer);
+          } else if ("wait" in step) {
+            await session.waitIdle();
+            result = await session.lastTurn();
+          }
         }
       } catch (error) {
         const code = (error as { code?: string }).code;

@@ -1,10 +1,12 @@
-import type { Configuration, CredentialStore, HistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
+import { mapOutput } from "@modular-agent/plugin-wire";
+import type { Configuration, CredentialStore, ModelStreamEvent, OutputPayload, HistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
 import type { Agent } from "./agent.js";
 import { AgentError } from "./errors.js";
 import { toolSource, type Tool } from "./tool.js";
 import { adaptProvider, type Provider } from "./provider.js";
+import { sdkJob, type JobOwner, type JobRecovery, type JobStarter } from "./jobs.js";
 import type {
-  AssistantMessage, Content, HistoryEntry, ModelError, ModelRef, ModelRequest, Outcome, Settings,
+  Actor, AssistantMessage, Content, HistoryEntry, ModelError, ModelRef, ModelRequest, Outcome, QuestionDraft, Settings,
   ToolCall, ToolDefinition, ToolStatus, TurnResult,
 } from "./data.js";
 
@@ -18,19 +20,24 @@ type Hooks = {
   "session.prepare": [{ sessionId: string; project: string; resumed: boolean }, void];
   "session.start": [{ sessionId: string; resumed: boolean }, void];
   "session.end": [{ sessionId: string }, void];
-  input: [{ sessionId: string; actorId: string; content: Content; when: string }, { change: Content } | { handle: true }];
+  "session.join": [{ sessionId: string; actorId: string; actor: Actor; grantedBy: string }, void];
+  "session.leave": [{ sessionId: string; actorId: string; requestedBy?: string }, void];
+  output: [Omit<OutputPayload, "events"> & { events: OutputEvent[] }, "block" | { redact: OutputEvent[] }];
+  input: [{ sessionId: string; actorId: string; content: Content; when: string }, { change: Content } | { handle: true | { command: string } }];
   "turn.before": [Observe & { input: Content; project?: string; tools?: ToolDefinition[] }, { add: { system?: string; context?: Content } }];
   "turn.start": [Observe, void];
   "step.before": [Observe & { stepId: string; request: ModelRequest }, { change: ModelRequest }];
   "step.after": [Observe & { stepId: string; response: AssistantMessage }, "continue" | { end: string }];
-  "tool.before": [Before, "allow" | { refuse: string } | { change: ToolCall["input"] }];
+  "tool.before": [Before, "allow" | { refuse: string } | { change: ToolCall["input"] } | { pending: QuestionDraft }];
   "tool.after": [After, { change: Partial<ResultFields> }];
   "model.failed": [Observe & { error: ModelError; request: ModelRequest }, "stop" | { retry: true | ModelRequest }];
   "turn.result": [Observe & { result: Pick<TurnResult, "text" | "value">; shape?: Record<string, unknown> }, "accept" | { refuse: string }];
   "turn.end": [Observe & { outcome: Outcome; result: TurnResult }, void];
   "provider.request": [{ sessionId: string | null; provider: string; model: ModelRef; request: ModelRequest }, { change: ModelRequest }];
+  "provider.piece": [{ sessionId: string; provider: string; model: ModelRef; turnId: string; stepId: string; piece: ModelStreamEvent }, void];
   "provider.response": [{ sessionId: string | null; provider: string; model: ModelRef; message: AssistantMessage }, void];
 };
+export interface OutputEvent { type: string; data: unknown }
 export type HookPoint = keyof Hooks;
 export type HookOrder = "first" | "normal" | "last";
 export interface CallContext {
@@ -42,11 +49,13 @@ export interface CallContext {
   cancelled: AbortSignal;
   /** In-process access to the current session's project and tool catalog. */
   session?(): { project: string; tools: ToolDefinition[] };
+  /** Available to the job owner during session.start. */
+  jobs?: JobRecovery;
   log(message: string): void;
   history(cursor?: string): Promise<{ entries: HistoryEntry[]; next?: string }>;
   emit(type: string, data: unknown): void;
 }
-export interface CommandContext extends CallContext { sessionId: string; actorId: string }
+export interface CommandContext extends Omit<CallContext, "jobs"> { sessionId: string; actorId: string; jobs: JobStarter }
 export type HookHandler<P extends HookPoint> =
   (payload: Readonly<Hooks[P][0]>, context: CallContext) => Awaitable<Hooks[P][1] | void>;
 export type CommandHandler = (args: string, context: CommandContext) => Awaitable<string | void>;
@@ -62,11 +71,17 @@ export interface Registrar {
   configuration(source: Configuration): void;
   interface(part: AgentInterface): void;
   provider(provider: Provider): void;
+  jobs(owner: JobOwner): void;
   on<P extends HookPoint>(point: P, handler: HookHandler<P>, order?: HookOrder,
     options?: { inProcessOnly?: boolean }): void;
   command(name: string, description: string, handler: CommandHandler,
     options?: { usesModel?: boolean; inProcessOnly?: boolean }): void;
-  defineHook(name: string, rule: "observe" | "gate" | "transform" | "collect" | "firstAnswer"): void;
+  defineHook<P = unknown, A = unknown, R = unknown>(name: string, rule: "observe" | "gate" | "transform" | "collect" | "firstAnswer"): CustomHook<P, A, R>;
+}
+
+export interface CustomHook<P, A, R> {
+  on(handler: (payload: P) => Awaitable<A | void>, order?: HookOrder): void;
+  call(payload: P): Promise<R>;
 }
 
 export interface AgentInterface {
@@ -138,6 +153,7 @@ export interface Work {
   signal?: AbortSignal;
   history?: CallContext["history"];
   emit?: CallContext["emit"];
+  startJob?(kind: string, detail: unknown, key?: string): Promise<import("@modular-agent/harness").JobHandle>;
 }
 
 function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" | "turnId" | "stepId" | "callId">, work?: Work, inProcessOnly = false) {
@@ -173,10 +189,11 @@ function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" 
       else api.emit(ids.sessionId, type, structuredClone(data));
     },
   };
-  return { cx, finish: () => { live = false; } };
+  return { cx, assert, finish: () => { live = false; } };
 }
 
-const points = new Set("plugin.load session.start session.end input turn.before turn.start step.before step.after tool.before tool.after model.failed turn.result turn.end provider.request provider.response".split(" "));
+const inProcessPoints = new Set<HookPoint>(["session.prepare", "session.join", "session.leave", "provider.piece"]);
+const points = new Set("plugin.load session.start session.end input turn.before turn.start step.before step.after tool.before tool.after model.failed turn.result turn.end provider.request provider.response output".split(" "));
 
 export async function collect(plugin: Plugin, config: Settings, served = false) {
   const tools: Tool[] = [];
@@ -184,6 +201,22 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
   const items = new Set<string>();
   const registrations: ((api: PluginApi) => unknown)[] = [];
   let settingUp = true;
+  let jobOwner: JobOwner | undefined;
+  const resumedJobs = new Set<string>();
+  const jobRecovery = (api: PluginApi, sessionId: string, assert: () => void): JobRecovery => ({
+    async unfinished() {
+      assert();
+      const jobs = await api.unfinishedJobs(sessionId);
+      return jobs.map(({ job, key, detail }) => structuredClone({ id: job.id, kind: job.kind, actorId: job.actorId, key, detail }));
+    },
+    async resume(job) {
+      assert();
+      if (resumedJobs.has(job.id)) throw new AgentError("invalid_request", "Job was already resumed");
+      resumedJobs.add(job.id);
+      try { return sdkJob(await api.resumeJob(sessionId, job.id)); }
+      catch (error) { resumedJobs.delete(job.id); throw error; }
+    },
+  });
   const check = () => {
     if (!settingUp) throw new AgentError("invalid_request", "Registrar has settled");
   };
@@ -244,45 +277,94 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
         if (value && typeof value === "object" && "key" in value && typeof value.key === "string") return value.key;
       })));
     },
+    jobs(owner) {
+      check();
+      if (jobOwner) throw new AgentError("invalid_composition", "Plugin registers two job owners");
+      jobOwner = owner;
+    },
     on(point, handler, order, options) {
       check();
-      if (served && (options?.inProcessOnly || !points.has(point))) unavailable(`hook ${point}`);
-      if (point !== "session.prepare" && !points.has(point)) throw new AgentError("not_supported", `Hook ${point} is not supported`);
+      if (served && (options?.inProcessOnly || inProcessPoints.has(point) || !points.has(point))) unavailable(`hook ${point}`);
+      if (!inProcessPoints.has(point) && !points.has(point)) throw new AgentError("not_supported", `Hook ${point} is not supported`);
       if (order !== undefined && !["first", "normal", "last"].includes(order)) throw new AgentError("invalid_composition", "Unknown hook order");
       registrations.push(api => api.on(point, async (payload: Hooks[typeof point][0], work?: Work) => {
         const p = payload as Observe & { actorId?: string; stepId?: string; call?: ToolCall };
-        const { cx, finish } = context(api, {
+        const { cx, finish, assert } = context(api, {
           sessionId: p.sessionId, actorId: p.actorId ?? p.call?.actorId,
           turnId: p.turnId, stepId: p.stepId ?? p.call?.stepId, callId: p.call?.id,
         }, work, options?.inProcessOnly);
+        if (point === "session.start" && jobOwner) cx.jobs = jobRecovery(api, p.sessionId, assert);
         try {
           const snapshot = structuredClone(payload);
           if (!served && point === "turn.before" && p.sessionId) Object.assign(snapshot, {
             project: api.session(p.sessionId).project, tools: structuredClone(api.tools(p.sessionId)),
           });
+          if (point === "session.join") {
+            const actor = (snapshot as unknown as { actor: { authority: Actor["rights"]; kind: string } }).actor;
+            Object.assign(actor, { rights: actor.authority, kind: actor.kind === "plugin" ? "program" : actor.kind });
+            Reflect.deleteProperty(actor, "authority");
+          }
+          const mapped = point === "output" && !served ? (payload as unknown as OutputPayload).events.map(mapOutput) : undefined;
+          if (mapped) Object.assign(snapshot, { events: mapped.map(m => structuredClone(m.wire)) });
           const answer = await handler(snapshot, cx);
           if (answer === undefined || answer === null) return;
+          if (point === "output") {
+            if (answer === "block") return { action: "block" };
+            if (typeof answer === "object" && "redact" in answer) {
+              if (!mapped) return { action: "pass", events: answer.redact };
+              if (mapped.length !== answer.redact.length) throw new AgentError("invalid_request", "Invalid output gate answer");
+              return { action: "pass", events: mapped.map((m, i) => m.restore(answer.redact[i])) };
+            }
+          }
+          if (point === "tool.before" && typeof answer === "object" && "pending" in answer) {
+            if (served) throw new AgentError("not_supported", "A served tool gate cannot leave a call open");
+            return api.deferTool(p.sessionId, p.turnId, answer.pending);
+          }
+          if (point === "input" && typeof answer === "object" && "handle" in answer && typeof answer.handle === "object") {
+            if (served) throw new AgentError("not_supported", "A served input hook cannot dispatch a command");
+            if (!/^\/\S/.test(answer.handle.command)) throw new AgentError("invalid_request", "An input hook command starts with /");
+            return { value: payload, stop: true, command: answer.handle.command };
+          }
           if ((point === "tool.before" || point === "plugin.load") && answer === "allow" ||
               point === "step.after" && answer === "continue" || point === "turn.result" && answer === "accept") return;
           if (point === "model.failed" && answer === "stop") return { retry: false };
           return change(point, payload as unknown as Record<string, unknown>, answer as Record<string, unknown>);
         } finally { finish(); }
-      }, order));
+      }, order, point === "output" ? { stream: true } : undefined));
     },
     command(name, description, handler, options) {
       add(`command:${name}`);
       if (served && (options?.usesModel || options?.inProcessOnly)) unavailable(`command ${name}`);
       if (options?.usesModel) throw new AgentError("not_supported", `Model-using command ${name}`);
       registrations.push(api => api.registerCommand(name, { description, async run(args, ids) {
-        const { cx, finish } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId }, ids as Work, options?.inProcessOnly);
-        try { return await handler(args, cx as CommandContext); }
+        const { cx, finish, assert } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId }, ids as Work, options?.inProcessOnly);
+        const jobs: JobStarter = { async start(kind, detail, key) {
+          assert();
+          const handle = served
+            ? await (ids as Work).startJob!(kind, detail, key)
+            : api.startJob(ids.sessionId, { kind, detail: structuredClone(detail), key, actorId: ids.actorId });
+          await handle.ready;
+          return sdkJob(handle);
+        } };
+        try { return await handler(args, { ...cx, sessionId: ids.sessionId, actorId: ids.actorId, jobs }); }
         finally { finish(); }
       } }));
     },
-    defineHook(name, rule) {
+    defineHook<P, A, R>(name: string, rule: Parameters<Registrar["defineHook"]>[1]): CustomHook<P, A, R> {
       check();
       if (served) unavailable(`hook ${name}`);
-      registrations.push(api => api.defineHook(name, rule === "firstAnswer" ? "first" : rule));
+      let defined: PluginApi | undefined;
+      registrations.push(api => { api.defineHook(name, rule === "firstAnswer" ? "first" : rule); defined = api; });
+      return {
+        on(handler, order) {
+          check();
+          registrations.push(api => api.on(name, payload => handler(structuredClone(payload)), order));
+        },
+        async call(payload) {
+          if (!defined) throw new AgentError("invalid_request", `Hook ${name} is not installed`);
+          return defined.runHook<R>(name, structuredClone(payload));
+        },
+      };
     },
   };
   try { await plugin.setup(r); }
@@ -294,6 +376,21 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
   const base: BasePlugin = { name: plugin.name, stop: plugin.stop?.bind(plugin), setup(api) {
     if (tools.length) api.provide("tool-source", toolSource(plugin.name, tools));
     for (const register of registrations) register(api);
+    if (jobOwner) {
+      const owner = jobOwner;
+      api.onJobCancel(async id => {
+        const found = await api.findJob(id);
+        if (!found) throw new AgentError("invalid_request", `No job ${id} of this plugin`);
+        const job = (await jobRecovery(api, found.sessionId, () => {}).unfinished()).find(job => job.id === id);
+        if (!job) throw new AgentError("invalid_request", `Job ${id} is not unfinished`);
+        await owner.cancel(job, { job: sdkJob(await api.resumeJob(found.sessionId, id, true)) });
+      });
+      api.on("session.start", async ({ sessionId, resumed }: { sessionId: string; resumed: boolean }) => {
+        if (!resumed || !owner.resume) return;
+        const recovery = jobRecovery(api, sessionId, () => {});
+        for (const job of await recovery.unfinished()) await owner.resume(job, { job: await recovery.resume(job) });
+      }, "first");
+    }
   } };
   return { items, base, interfaces };
 }
