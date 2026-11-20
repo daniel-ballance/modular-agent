@@ -29,11 +29,13 @@ import (
 type scenario struct {
 	Name  string `json:"scenario"`
 	Agent struct {
-		Durability modular.Durability
-		Plugins    []string
-		Approval   modular.Approval
-		Answers    []json.RawMessage
-		Settings   modular.Settings
+		Durability    modular.Durability
+		Plugins       []string
+		Approval      modular.Approval
+		Answers       []json.RawMessage
+		Settings      modular.Settings
+		SeveralActors bool
+		Actors        []modular.Actor
 	}
 	Model      json.RawMessage
 	Placements []string
@@ -41,6 +43,11 @@ type scenario struct {
 }
 type step struct {
 	Prompt    *string
+	As        string
+	Send      *string
+	Timing    modular.Timing
+	Answer    json.RawMessage
+	Wait      bool
 	Reopen    bool
 	CrashWhen *condition
 	Expect    *expectation
@@ -100,7 +107,7 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 	if durability == "" {
 		durability = modular.Ephemeral
 	}
-	opts := []modular.Option{modulartest.Script(string(s.Model)), modular.WithProject(project), modular.WithDataDir(r.dataDir()), modular.WithDurability(durability), modular.WithSettings(s.Agent.Settings)}
+	opts := []modular.Option{modulartest.Script(string(s.Model)), modular.WithProject(project), modular.WithDataDir(r.dataDir()), modular.WithDurability(durability), modular.WithSettings(s.Agent.Settings), modular.WithSeveralActors(s.Agent.SeveralActors)}
 	config := map[string]any{"path": r.countPath()}
 	for _, name := range s.Agent.Plugins {
 		if r.placement.SDK == "" {
@@ -120,18 +127,11 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 	if s.Agent.Answers != nil {
 		var answers []modular.Answer
 		for _, raw := range s.Agent.Answers {
-			switch string(raw) {
-			case `"allow"`:
-				answers = append(answers, modular.Allow())
-			case `"decline"`:
-				answers = append(answers, modular.Decline(""))
-			default:
-				var a modular.Answer
-				if err := json.Unmarshal(raw, &a); err != nil {
-					return nil, err
-				}
-				answers = append(answers, a)
+			a, err := readAnswer(raw)
+			if err != nil {
+				return nil, err
 			}
+			answers = append(answers, a)
 		}
 		script := modulartest.Answers(answers...)
 		if checkAnswers != nil {
@@ -140,6 +140,48 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 		opts = append(opts, modular.WithOnQuestion(script.Handle))
 	}
 	return modular.New(ctx, opts...)
+}
+
+func readAnswer(raw json.RawMessage) (modular.Answer, error) {
+	switch string(raw) {
+	case `"allow"`:
+		return modular.Allow(), nil
+	case `"decline"`:
+		return modular.Decline(""), nil
+	}
+	var value struct{ Value *string }
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return modular.Answer{}, err
+	}
+	if value.Value == nil {
+		return modular.Answer{}, errors.New("answer needs a value")
+	}
+	return modular.Value(*value.Value), nil
+}
+
+func answerOpen(ctx context.Context, s *modular.Session, raw json.RawMessage) error {
+	a, err := readAnswer(raw)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		qs, err := s.Questions(ctx)
+		if err != nil {
+			return err
+		}
+		if len(qs) == 1 {
+			return s.Answer(ctx, qs[0].ID, a)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("want one open question, got %d: %w", len(qs), ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func TestShared(t *testing.T) {
@@ -257,20 +299,44 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 		case step.Prompt != nil && step.CrashWhen != nil:
 			closeAgent()
 			id, err = r.crash(ctx, path, i, id, *step.CrashWhen)
-		case step.Prompt != nil:
+		case step.Prompt != nil || step.Send != nil:
 			if a == nil {
 				a, err = r.agent(ctx, sc, remember)
 				if err == nil {
-					s, err = a.Session(ctx)
+					s, err = a.Session(ctx, modular.SessionOptions{Actors: sc.Agent.Actors})
 					if err == nil {
 						id = s.ID()
 					}
 				}
 			}
 			if err == nil {
-				var p modular.PromptResult
-				p, err = s.Prompt(ctx, *step.Prompt)
-				result = &p
+				view := s
+				if step.As != "" {
+					view, err = s.As(step.As)
+				}
+				if err == nil && step.Send != nil {
+					timing := step.Timing
+					if timing == "" {
+						timing = modular.Now
+					}
+					_, err = view.Send(ctx, *step.Send, timing)
+				} else if err == nil {
+					var p modular.PromptResult
+					p, err = view.Prompt(ctx, *step.Prompt)
+					result = &p
+				}
+			}
+		case step.Answer != nil:
+			if s == nil {
+				err = errors.New("no open session")
+			} else {
+				err = answerOpen(ctx, s, step.Answer)
+			}
+		case step.Wait:
+			if s == nil {
+				err = errors.New("no open session")
+			} else if err = s.WaitIdle(ctx); err == nil {
+				result, err = s.LastTurn(ctx)
 			}
 		case step.Reopen:
 			closeAgent()
@@ -400,7 +466,7 @@ func TestCrashChild(t *testing.T) {
 	defer a.Close(context.Background())
 	var s *modular.Session
 	if args[3] == "" {
-		s, err = a.Session(t.Context())
+		s, err = a.Session(t.Context(), modular.SessionOptions{Actors: sc.Agent.Actors})
 	} else {
 		s, err = a.OpenSession(t.Context(), args[3])
 	}

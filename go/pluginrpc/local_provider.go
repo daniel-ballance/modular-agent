@@ -4,16 +4,25 @@ import (
 	"context"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/harness"
 )
 
 // Local Providers get the same standard hook payloads as external Providers.
 // External Providers dispatch their own points through host/hook instead.
 type localProvider struct {
 	api.Provider
-	host *host
+	host api.API
 	id   string
 }
 
+// WrapLocalProviders routes local Providers through the standard Provider hooks.
+func WrapLocalProviders(h *harness.Harness) error {
+	return h.WrapProviders(func(id string, p api.Provider) api.Provider {
+		return &localProvider{host: h.API(), Provider: p, id: id}
+	})
+}
+
+func (p *localProvider) Available() bool { return providerAvailable(p.Provider) }
 func (p *localProvider) Access(id string) (api.ModelAccess, error) {
 	access, err := p.Provider.Access(id)
 	if err != nil {
@@ -53,7 +62,7 @@ func (a *localAccess) Generate(ctx context.Context, request api.Request, emit fu
 	fence := api.FinalDispatch(ctx)
 	prepared := payload
 	if !fence.Replay {
-		transformed, err := p.host.a.Invoke(ctx, "binding.provider.request", payload)
+		transformed, err := p.host.Invoke(ctx, "binding.provider.request", payload)
 		if err != nil {
 			return api.Response{}, err
 		}
@@ -83,6 +92,6 @@ func (a *localAccess) Generate(ctx context.Context, request api.Request, emit fu
 		msg["stop"] = "failed"
 		msg["error"] = errorOut(err)
 	}
-	_, _ = p.host.a.Invoke(ctx, "binding.provider.response", providerResponsePayload(payload, msg))
+	_, _ = p.host.Invoke(ctx, "binding.provider.response", providerResponsePayload(payload, msg))
 	return response, err
 }

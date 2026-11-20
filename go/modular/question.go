@@ -13,20 +13,27 @@ import (
 )
 
 type Question struct {
-	ID        string          `json:"id,omitempty"`
-	SessionID string          `json:"sessionId,omitempty"`
-	Kind      string          `json:"kind"`
-	Question  string          `json:"question"`
-	Details   json.RawMessage `json:"details,omitempty"`
-	Options   []string        `json:"options,omitempty"`
-	Call      *ToolCall       `json:"call,omitempty"`
-	Deadline  *time.Time      `json:"deadline,omitempty"`
+	ID         string          `json:"id,omitempty"`
+	SessionID  string          `json:"sessionId,omitempty"`
+	Kind       string          `json:"kind"`
+	Question   string          `json:"question"`
+	Details    json.RawMessage `json:"details,omitempty"`
+	Options    []string        `json:"options,omitempty"`
+	Call       *ToolCall       `json:"call,omitempty"`
+	Credential string          `json:"credential,omitempty"`
+	Deadline   *time.Time      `json:"deadline,omitempty"`
 }
 type Answer struct {
 	Value    string `json:"value,omitempty"`
 	Declined bool   `json:"declined,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// Stored names the credential; the submitted secret is never returned.
+	Stored   string `json:"stored,omitempty"`
+	provided bool
 }
+
+func Value(value string) Answer  { return Answer{Value: value, provided: true} }
+func Secret(value string) Answer { return Value(value) }
 
 func Allow() Answer                { return Answer{Value: "allow"} }
 func Decline(reason string) Answer { return Answer{Declined: true, Reason: reason} }
@@ -133,6 +140,16 @@ func answerQuestion(ctx context.Context, handler QuestionHandler, q Question) (a
 	return handler(ctx, q)
 }
 
+func sdkQuestion(raw api.Question) Question {
+	q := Question{ID: raw.ID, SessionID: raw.Session, Kind: raw.Kind, Question: raw.Prompt, Details: raw.Details, Options: raw.Options, Credential: raw.Credential, Deadline: raw.Deadline}
+	if raw.ApprovalCall != nil {
+		var c ToolCall
+		_ = decodeInto(portable.Call(*raw.ApprovalCall), &c)
+		q.Call = &c
+	}
+	return q
+}
+
 func (q *questionRouter) event(e api.Event) {
 	if e.Kind != "question.open" {
 		return
@@ -140,7 +157,7 @@ func (q *questionRouter) event(e api.Event) {
 	raw := api.Decode[api.Question](e.Data)
 	q.mu.Lock()
 	s := q.sessions[raw.Session]
-	if s == nil || s.responding[raw.ID] {
+	if s == nil || s.handler == nil || s.responding[raw.ID] {
 		q.mu.Unlock()
 		return
 	}
@@ -149,28 +166,17 @@ func (q *questionRouter) event(e api.Event) {
 	go func() {
 		defer func() { q.mu.Lock(); delete(s.responding, raw.ID); q.mu.Unlock() }()
 		ctx := api.AsActor(s.ctx, localActor)
-		if s.handler == nil {
-			if raw.Kind != "approval" {
-				q.manager().DeclineUnanswered(raw, "noLongerAnswerable")
-			}
-			return
-		}
-		question := Question{ID: raw.ID, SessionID: raw.Session, Kind: raw.Kind, Question: raw.Prompt, Details: raw.Details, Options: raw.Options}
-		if raw.ApprovalCall != nil {
-			var c ToolCall
-			_ = decodeInto(portable.Call(*raw.ApprovalCall), &c)
-			question.Call = &c
-		}
-		if raw.Wait > 0 && !raw.Defer {
-			deadline := time.Now().Add(raw.Wait)
-			question.Deadline = &deadline
+		question := sdkQuestion(raw)
+		if raw.Deadline != nil && !raw.Defer {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithDeadline(ctx, deadline)
+			ctx, cancel = context.WithDeadline(ctx, *raw.Deadline)
 			defer cancel()
 		}
 		ans, err := answerQuestion(ctx, s.handler, question)
 		if err != nil {
-			ans = Decline(err.Error())
+			ans = Decline("question handler failed")
+		} else if ans == (Answer{}) {
+			ans = Decline("")
 		}
 		if ctx.Err() != nil {
 			return

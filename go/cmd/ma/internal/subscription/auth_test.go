@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 // Rust serde_json::to_vec_pretty(Contents), with the variants in
@@ -59,6 +61,34 @@ func TestRustAuthFixtureRoundTrip(t *testing.T) {
 		if err != nil || stat.Mode().Perm() != 0600 {
 			t.Fatalf("%s mode is not 0600: %v %v", file, stat, err)
 		}
+	}
+}
+
+func TestStagedAnswerPreservesAuthLogins(t *testing.T) {
+	ctx := t.Context()
+	a := AuthFile(filepath.Join(t.TempDir(), "auth.json"))
+	if err := a.Set(ctx, "xai", &Login{Type: "api_key", Key: "test-key"}); err != nil {
+		t.Fatal(err)
+	}
+	store := a.CredentialStore()
+	receipt, err := store.Stage(ctx, "session", "request", "named", "user", "answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = a.CredentialStore() // Re-read the same file, not an in-memory stage.
+	got, ok, err := store.LookupStaged(ctx, "session", "request")
+	if err != nil || !ok || got != receipt {
+		t.Fatalf("stage did not survive: %v", err)
+	}
+	if value, err := store.Get(ctx, "named"); err != nil || value != "" {
+		t.Fatalf("stage visible: %v", err)
+	}
+	if decision, err := store.Activate(ctx, receipt); err != nil || decision != modular.SecretActivated {
+		t.Fatalf("activation: %v, %v", decision, err)
+	}
+	data, err := a.read()
+	if err != nil || data.Answers["named"] != "answer" || data.Logins["xai"].Secret() != "test-key" {
+		t.Fatal("activated answer or login missing", err)
 	}
 }
 

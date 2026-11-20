@@ -2,6 +2,7 @@ package pluginrpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
 )
@@ -20,13 +21,11 @@ func (h *host) plugin() api.Plugin {
 		if err := a.Provide("job-owner-present", func(name string) bool { return h.jobOwner(name) != nil }); err != nil {
 			return err
 		}
-		if err := h.h.WrapProviders(func(id string, p api.Provider) api.Provider { return &localProvider{host: h, Provider: p, id: id} }); err != nil {
+		if err := WrapLocalProviders(h.h); err != nil {
 			return err
 		}
-		for name, rule := range map[string]api.Rule{"binding.turn.before": api.Collect, "binding.provider.request": api.Transform, "binding.provider.response": api.Observe} {
-			if err := a.Define(name, rule); err != nil {
-				return err
-			}
+		if err := a.Define("binding.turn.before", api.Collect); err != nil {
+			return err
 		}
 		return a.Handle("turn.prepare", "last", func(ctx context.Context, v any) (api.Decision, error) {
 			before := v.(api.BeforeTurn)
@@ -79,9 +78,21 @@ func (r *remote) handler(reg HookRegistration) api.Handler {
 	}
 }
 
+// IsHook reports whether the plugin binding carries the hook.
+func IsHook(point string) bool { return hookNames[point] != "" }
+
 // RegisterLocalHook uses the same payload and answer adapter as served hooks.
 func RegisterLocalHook(a api.API, point, order string, handle func(context.Context, Object) (any, error)) error {
 	return a.Handle(hookNames[point], order, func(ctx context.Context, v any) (api.Decision, error) {
+		if point == "output" {
+			return handleOutput(ctx, v.(api.OutputBatch), func(ctx context.Context, payload Object, out any) error {
+				answer, err := handle(ctx, payload)
+				if err != nil {
+					return err
+				}
+				return json.Unmarshal(mustJSON(answer), out)
+			})
+		}
 		answer, err := handle(ctx, hookPayload(ctx, "", point, v))
 		if err != nil {
 			return api.Decision{}, err
@@ -141,10 +152,10 @@ func hookAnswer(point string, v any, answer any) (api.Decision, error) {
 	case "turn.before":
 		return api.Decision{Value: answer}, nil
 	case "model.failed":
-		if boolean(result, "retry") {
+		if retry, ok := result["retry"].(bool); ok {
 			f := v.(api.Failure)
-			f.Retry = true
-			if has(result, "request") {
+			f.Retry = retry
+			if retry && has(result, "request") {
 				f.Context.Request = requestIn(asObject(result["request"]))
 			}
 			return api.Decision{Answer: true, Value: f}, nil
@@ -192,7 +203,7 @@ func hookPayload(ctx context.Context, project, hook string, v any) object {
 		return object{"name": v, "origin": "configuration", "project": project}
 	case "session.start":
 		s := v.(api.Session)
-		return object{"sessionId": s.ID, "resumed": len(s.Entries) > 0}
+		return object{"sessionId": s.ID, "resumed": api.IsReopenedSession(ctx)}
 	case "session.end":
 		return object{"sessionId": v}
 	case "input":

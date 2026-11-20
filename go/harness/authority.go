@@ -26,7 +26,7 @@ func (c *client) Authorize(id, who, right string) bool {
 }
 
 func (c *client) authorized(snap api.Session, who, right string) bool {
-	if snap.Limit != nil && !slices.Contains(*snap.Limit, right) {
+	if snap.Limit != nil && right != "administer" && !slices.Contains(*snap.Limit, right) {
 		return false
 	}
 	if snap.Tenant != "" {
@@ -50,6 +50,10 @@ func (c *client) authorized(snap api.Session, who, right string) bool {
 	}
 	return true
 }
+func (c *client) authorizedBy(s api.Session, ctx context.Context, right string) bool {
+	via := api.ActingVia(ctx)
+	return c.authorized(s, api.Acting(ctx), right) && (via == "" || c.authorized(s, via, right))
+}
 func (c *client) Grant(ctx context.Context, id string, actor api.Actor) error {
 	who := api.Acting(ctx)
 	s, err := c.find(id)
@@ -58,12 +62,12 @@ func (c *client) Grant(ctx context.Context, id string, actor api.Actor) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !c.authorized(s.data, who, "grant") || actor.ID == "" {
-		return errors.New("authority grant refused")
+	if !c.authorizedBy(s.data, ctx, "grant") || actor.ID == "" {
+		return api.ErrAuthority
 	}
 	for _, r := range actor.Rights {
-		if !c.authorized(s.data, who, r) {
-			return errors.New("authority cannot widen")
+		if slices.Contains(api.Rights, r) && !c.authorizedBy(s.data, ctx, r) {
+			return api.ErrAuthority
 		}
 	}
 	return s.joinActorLocked(who, actor, c.owner)
@@ -94,7 +98,7 @@ func (c *client) LeaveActor(ctx context.Context, id, who string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	by := api.Acting(ctx)
-	if _, ok := actors(s.data)[who]; !ok || (by != who && !c.authorized(s.data, by, "grant")) {
+	if _, ok := actors(s.data)[who]; !ok || (by != who && !c.authorizedBy(s.data, ctx, "grant")) {
 		return errors.New("actor leave refused")
 	}
 	next := clone(s.data)

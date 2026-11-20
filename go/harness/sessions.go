@@ -68,17 +68,24 @@ func (c *client) NewInTenant(ctx context.Context, project, tenant string) (strin
 	if err := c.checkTenant(tenant); err != nil {
 		return "", err
 	}
-	return c.newSession(ctx, project, tenant, nil, false, nil)
+	return c.newSession(ctx, project, tenant, nil, false, nil, nil)
 }
 
 func (c *client) NewForHost(ctx context.Context, project, tenant string, host api.Actor) (string, error) {
 	if err := c.checkTenant(tenant); err != nil {
 		return "", err
 	}
-	return c.newSession(ctx, project, tenant, nil, false, &host)
+	return c.newSession(ctx, project, tenant, nil, false, &host, nil)
 }
 
-func (c *client) newSession(ctx context.Context, project, tenant string, limit *[]string, forking bool, host *api.Actor) (string, error) {
+func (c *client) NewEmbedded(ctx context.Context, project, tenant string, actors []api.Actor) (string, error) {
+	if err := c.checkTenant(tenant); err != nil {
+		return "", err
+	}
+	return c.newSession(ctx, project, tenant, nil, false, nil, actors)
+}
+
+func (c *client) newSession(ctx context.Context, project, tenant string, limit *[]string, forking bool, host *api.Actor, initial []api.Actor) (string, error) {
 	project, err := filepath.Abs(project)
 	if err == nil {
 		project, err = filepath.EvalSymlinks(project)
@@ -102,6 +109,9 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		if err != nil {
 			return "", err
 		}
+	}
+	if host == nil && !forking && tenant != "" && !slices.Contains(c.h.tenants[tenant].Rights, "input") {
+		return "", api.ErrAuthority
 	}
 	id := api.ID()
 	if settings.Approval == "" {
@@ -127,6 +137,11 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		// The portable store reconstructs the actor from records, not the snapshot.
 		local := api.Actor{ID: s.data.Actor, Kind: "user", Rights: slices.Clone(api.Rights)}
 		if err := s.joinHostLocked(local); err != nil {
+			return "", err
+		}
+	}
+	for _, actor := range initial {
+		if err := s.joinActorLocked("", actor, "harness"); err != nil {
 			return "", err
 		}
 	}
@@ -229,6 +244,10 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = c.StopSession(id)
 		return err
 	}
+	if _, err = c.h.API().Invoke(ctx, "session.recoverQuestions", clone(s.data)); err != nil {
+		_ = c.StopSession(id)
+		return err
+	}
 	if err = c.recoverNested(s); err != nil {
 		_ = c.StopSession(id)
 		return err
@@ -241,7 +260,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = c.StopSession(id)
 		return err
 	}
-	_, err = c.h.API().Invoke(ctx, "session.start", clone(snap))
+	_, err = c.h.API().Invoke(api.WithReopenedSession(ctx), "session.start", clone(snap))
 	if err != nil {
 		_ = c.CloseSession(id)
 		return err
@@ -523,7 +542,7 @@ func (c *client) move(ctx context.Context, id, target string, rewind bool, outsi
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !c.authorized(s.data, api.Acting(ctx), "settings") {
+	if !c.authorizedBy(s.data, ctx, "settings") {
 		return errors.New("move refused")
 	}
 	if s.rewindBlocked {
@@ -564,7 +583,7 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	s.mu.Lock()
 	snap := s.data
 	running := s.running
-	allowed := c.authorized(snap, api.Acting(ctx), "input")
+	allowed := c.authorizedBy(snap, ctx, "input") && c.authorizedBy(snap, ctx, "settings")
 	s.mu.Unlock()
 	if !allowed {
 		return "", errors.New("fork refused")
@@ -593,7 +612,7 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	if pending, _ := recovery(snap); pending != nil {
 		return "", errors.New("fork target is inside a turn; choose a completed boundary")
 	}
-	fork, err := c.newSession(ctx, snap.Project, snap.Tenant, snap.Limit, true, nil)
+	fork, err := c.newSession(ctx, snap.Project, snap.Tenant, snap.Limit, true, nil, nil)
 	if err != nil {
 		return "", err
 	}
@@ -962,7 +981,7 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 	}
 	if !c.canAdmit(s.data, in) {
 		s.mu.Unlock()
-		return api.Receipt{}, errors.New("input authority refused")
+		return api.Receipt{}, api.ErrAuthority
 	}
 	if r, ok := duplicate(s.data, in); ok {
 		s.mu.Unlock()
@@ -989,7 +1008,7 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !c.canAdmit(s.data, in) {
-		return api.Receipt{}, errors.New("input authority refused")
+		return api.Receipt{}, api.ErrAuthority
 	}
 	if r, ok := duplicate(s.data, in); ok {
 		return r, nil
@@ -1317,12 +1336,15 @@ func (c *client) StopSession(id string) error  { return c.stopSession(id, false)
 func (c *client) CloseAs(id, who string) error {
 	return c.stopSessionAs(id, true, who)
 }
+func (c *client) CloseFor(ctx context.Context, id string) error {
+	return c.stopSessionAs(id, true, api.Acting(ctx), api.ActingVia(ctx))
+}
 
 func (c *client) stopSession(id string, closing bool) error {
 	return c.stopSessionAs(id, closing, "")
 }
 
-func (c *client) stopSessionAs(id string, closing bool, who string) error {
+func (c *client) stopSessionAs(id string, closing bool, who string, via ...string) error {
 	s, err := c.find(id)
 	if err != nil {
 		return err
@@ -1331,6 +1353,13 @@ func (c *client) stopSessionAs(id string, closing bool, who string) error {
 	if who != "" {
 		_, member := actors(s.data)[who]
 		if !member || (s.running || hasUnfinishedJobs(s.data)) && !c.authorized(s.data, who, "cancel") {
+			s.mu.Unlock()
+			return api.ErrCloseForbidden
+		}
+	}
+	if len(via) > 0 && via[0] != "" {
+		_, member := actors(s.data)[via[0]]
+		if !member || (s.running || hasUnfinishedJobs(s.data)) && !c.authorized(s.data, via[0], "cancel") {
 			s.mu.Unlock()
 			return api.ErrCloseForbidden
 		}

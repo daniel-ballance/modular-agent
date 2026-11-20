@@ -25,9 +25,10 @@ type stored struct {
 	ForwardSession, ForwardRequest string
 }
 type state struct {
-	q      stored
-	answer *api.Answer
-	closed bool
+	q        stored
+	answer   *api.Answer
+	closed   bool
+	selected string
 }
 type relayKey struct{}
 type relay struct{ Session, Request string }
@@ -58,6 +59,11 @@ func Plugin() api.Plugin {
 				}
 			}
 			return api.Decision{}, e
+		}); err != nil {
+			return err
+		}
+		if err := a.Handle("session.recoverQuestions", "", func(ctx context.Context, v any) (api.Decision, error) {
+			return api.Decision{}, m.recoverSecrets(ctx, v.(api.Session))
 		}); err != nil {
 			return err
 		}
@@ -103,7 +109,12 @@ func states(s api.Session) map[string]*state {
 			if q.Question.Session != s.ID {
 				continue
 			}
+			q.Question.Deadline = questionDeadline(e.Time, q.Question.Wait)
 			out[q.Question.ID] = &state{q: q}
+		case "question.secret":
+			if st := out[api.Decode[string](e.Data)]; st != nil {
+				st.selected = e.Actor
+			}
 		case "question.answer":
 			a := api.Decode[api.Answer](e.Data)
 			if st := out[a.Request]; st != nil {
@@ -139,6 +150,18 @@ func (m *Manager) closeSettled(id, turn, call string) {
 	}
 }
 
+func questionDeadline(at time.Time, wait time.Duration) *time.Time {
+	if wait <= 0 {
+		return nil
+	}
+	deadline := time.UnixMilli(at.UnixMilli() + max(1, wait.Milliseconds())).UTC()
+	return &deadline
+}
+
+func expired(q api.Question) bool {
+	return q.Deadline != nil && !q.Defer && !time.Now().Before(*q.Deadline)
+}
+
 func (m *Manager) valid(q api.Question, a api.Answer) bool {
 	right := "answer"
 	if q.Kind == "approval" {
@@ -162,14 +185,14 @@ func (m *Manager) List(id string) ([]api.Question, error) {
 	var out []api.Question
 	for _, st := range states(s) {
 		q := st.q.Question
-		q.Answerable = !st.closed && st.answer == nil
+		q.Answerable = !st.closed && st.answer == nil && st.selected == "" && !expired(q)
 		out = append(out, q)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 func signature(q api.Question) string {
-	return fmt.Sprintf("%x", sha256.Sum256(api.JSON([]any{q.Call, q.Actor, q.Kind, q.Prompt, q.Options, q.Allowed, q.Credential, q.Details})))
+	return fmt.Sprintf("%x", sha256.Sum256(api.JSON([]any{q.Call, q.Actor, q.Kind, q.Prompt, q.Options, q.Allowed, q.Credential, q.Details, q.Wait, q.Defer})))
 }
 func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 	if q.Session == "" {
@@ -194,14 +217,17 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 	}
 	if q.Kind == "secret" {
 		v, e := m.a.Get("credentials")
-		if e != nil || q.Credential == "" || q.Credential == "anthropic" {
-			return api.Answer{}, errors.New("secret destination unavailable")
+		if e != nil || q.Credential == "" {
+			return api.Answer{Declined: true, Reason: "secret destination unavailable"}, nil
 		}
-		if _, ok := v.(api.SecretWriter); !ok {
-			return api.Answer{}, errors.New("credential store is read-only")
+		if _, err := m.a.Get("provider." + q.Credential); err == nil {
+			return api.Answer{Declined: true, Reason: "secret destination unavailable"}, nil
+		}
+		if _, staged := v.(api.StagedCredentials); !staged {
+			return api.Answer{Declined: true, Reason: "credential store is read-only"}, nil
 		}
 		if d, ok := v.(api.SecretDestination); ok && !d.CanStore(q.Credential) {
-			return api.Answer{}, errors.New("secret destination unavailable")
+			return api.Answer{Declined: true, Reason: "secret destination unavailable"}, nil
 		}
 	}
 	if !m.a.Authorize(q.Session, q.Actor, "tools") {
@@ -256,7 +282,7 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 			}
 		}
 		if found.answer == nil && !found.closed {
-			q.ID = found.q.Question.ID
+			q.ID, q.Deadline = found.q.Question.ID, found.q.Question.Deadline
 		} else {
 			q.ID = ""
 		}
@@ -278,10 +304,12 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 		if st.ForwardRequest != "" {
 			copies = append(copies, st.ForwardRequest)
 		}
-		if _, err = m.a.Record(ctx, q.Session, api.Entry{Copies: copies, ID: q.ID, Kind: "question.open", Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: q.Actor, Data: api.JSON(st)}); err != nil {
+		entry, err := m.a.Record(ctx, q.Session, api.Entry{Copies: copies, ID: q.ID, Kind: "question.open", Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: q.Actor, Data: api.JSON(st)})
+		if err != nil {
 			m.mu.Unlock()
 			return api.Answer{}, err
 		}
+		q.Deadline = questionDeadline(entry.Time, q.Wait)
 	}
 	m.mu.Unlock()
 	m.a.Emit(ctx, api.Event{Kind: "question.open", Session: q.Session, Turn: q.Turn, Call: q.Call, Data: api.JSON(q)})
@@ -305,8 +333,8 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 		}
 	}
 	var deadline <-chan time.Time
-	if q.Wait > 0 {
-		timer := time.NewTimer(q.Wait)
+	if q.Deadline != nil {
+		timer := time.NewTimer(time.Until(*q.Deadline))
 		defer timer.Stop()
 		deadline = timer.C
 	}
@@ -335,7 +363,7 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 			}
 			return a, nil
 		}
-		present := false
+		present, eligible := false, false
 		if q.Kind == "approval" {
 			for who := range s.Actors {
 				if m.present[q.Session+":"+who] > 0 && m.valid(q, api.Answer{Actor: who}) {
@@ -348,6 +376,20 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 			}
 		}
 		m.mu.Unlock()
+		if q.Kind != "approval" && s.Parent == "" {
+			for who := range s.Actors {
+				if m.valid(q, api.Answer{Actor: who}) {
+					eligible = true
+					break
+				}
+			}
+			if s.Actors == nil {
+				eligible = m.valid(q, api.Answer{Actor: s.Actor})
+			}
+			if !eligible {
+				return api.Answer{}, m.decline(q, "noLongerAnswerable")
+			}
+		}
 		if q.Kind == "approval" && s.Parent == "" && !present {
 			return api.Answer{}, m.decline(q, "refused")
 		}
@@ -401,8 +443,13 @@ func (m *Manager) decline(q api.Question, reason string) error {
 		m.mu.Unlock()
 		return err
 	}
-	if st := states(s)[q.ID]; st != nil && st.answer == nil {
+	if st := states(s)[q.ID]; st != nil && st.answer == nil && st.selected == "" {
 		_, err = m.a.Record(context.Background(), q.Session, api.Entry{Kind: "question.answer", Turn: q.Turn, Step: st.q.Question.Step, Call: q.Call, Actor: q.Actor, Copies: []string{q.ID}, Data: api.JSON(api.Answer{Request: q.ID, Declined: true, Reason: reason})})
+		if err == nil && q.Kind == "secret" {
+			if store := m.secretStore(); store != nil {
+				err = store.Discard(context.Background(), q.Session, q.ID)
+			}
+		}
 		close(m.changed)
 		m.changed = make(chan struct{})
 	}
@@ -440,11 +487,16 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 		return err
 	}
 	st := states(s)[a.Request]
-	if st == nil || st.closed || st.answer != nil {
+	if st == nil || st.closed || st.answer != nil || st.selected != "" {
 		m.mu.Unlock()
-		return errors.New("request closed or unknown")
+		return api.ErrQuestionNotFound
 	}
 	q := st.q.Question
+	if expired(q) {
+		m.mu.Unlock()
+		_ = m.decline(q, "timeLimit")
+		return api.ErrQuestionNotFound
+	}
 	if !m.valid(q, a) {
 		m.mu.Unlock()
 		return api.ErrAnswerAuthority
@@ -463,22 +515,40 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 			m.mu.Unlock()
 			return errors.New("credential store unavailable")
 		}
-		w, ok := v.(api.SecretWriter)
-		if !ok {
+		if store, ok := v.(api.StagedCredentials); ok {
+			if e := m.selectSecret(ctx, store, q, a); e != nil {
+				m.mu.Unlock()
+				if errors.Is(e, errDeadline) {
+					_ = m.decline(q, "timeLimit")
+					return api.ErrQuestionNotFound
+				}
+				return e
+			}
+			decision, e := m.activateSecret(ctx, store, q, a.Actor)
+			if e != nil {
+				m.mu.Unlock()
+				return e
+			}
+			if decision == api.SecretSuperseded {
+				a.Declined, a.Reason = true, "superseded"
+			} else {
+				a.Value, a.Stored = q.Credential, q.Credential
+			}
+		} else {
 			m.mu.Unlock()
 			return errors.New("credential store read-only")
 		}
-		if e = w.Put(ctx, q.Credential, a.Value); e != nil {
-			m.mu.Unlock()
-			return errors.New("secret was not stored")
-		}
-		a.Value, a.Stored = q.Credential, q.Credential
 	}
 	if a.Declined {
 		a.Value = ""
 	}
 	_, err = m.a.Record(ctx, id, api.Entry{Kind: "question.answer", Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: a.Actor, Copies: []string{q.ID}, Data: api.JSON(a)})
 	if err == nil {
+		if q.Kind == "secret" && a.Declined && st.selected == "" {
+			if store := m.secretStore(); store != nil {
+				err = store.Discard(ctx, id, q.ID)
+			}
+		}
 		close(m.changed)
 		m.changed = make(chan struct{})
 	}

@@ -20,7 +20,6 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/configuration"
 	"github.com/daniel-ballance/modular-agent/go/conformancemodel"
 	"github.com/daniel-ballance/modular-agent/go/contextview"
-	"github.com/daniel-ballance/modular-agent/go/durable"
 	"github.com/daniel-ballance/modular-agent/go/harness"
 	"github.com/daniel-ballance/modular-agent/go/jobs"
 	"github.com/daniel-ballance/modular-agent/go/local"
@@ -29,7 +28,6 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/questions"
-	"github.com/daniel-ballance/modular-agent/go/transient"
 )
 
 const localActor = "user"
@@ -65,6 +63,10 @@ type options struct {
 	process                                 []ProcessPlugin
 	wire                                    []wirePlugin
 	environment                             Environment
+	runtime                                 Runtime
+	credentials                             CredentialStore
+	severalActors, sessionLimits            bool
+	tenants                                 map[string]Tenant
 	host                                    *bool
 	settings                                Settings
 	approval                                Approval
@@ -160,22 +162,24 @@ func WithRefusedSettingsDuringTurn() Option {
 }
 
 type Agent struct {
-	h                       *harness.Harness
-	a                       api.API
-	project                 string
-	scratch                 string
-	persistent              bool
-	jobReports, lateAnswers bool
-	erasure                 bool
-	closed                  atomic.Bool
-	restarting              atomic.Bool
-	lifecycle               sync.Mutex
-	settingsMu              sync.Mutex
-	pluginHost              bool
-	q                       *questionRouter
-	closeOnce               sync.Once
-	closeErr                error
-	restart                 func(context.Context) (*Agent, error)
+	h                                     *harness.Harness
+	a                                     api.API
+	project                               string
+	scratch                               string
+	persistent                            bool
+	jobReports, lateAnswers               bool
+	erasure                               bool
+	closed                                atomic.Bool
+	restarting                            atomic.Bool
+	lifecycle                             sync.Mutex
+	settingsMu                            sync.Mutex
+	pluginHost                            bool
+	q                                     *questionRouter
+	severalActors, sessionLimits, tenants bool
+	defaults                              api.Settings
+	closeOnce                             sync.Once
+	closeErr                              error
+	restart                               func(context.Context) (*Agent, error)
 }
 type sessionDefaults struct{ settings *api.Settings }
 
@@ -261,9 +265,10 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		specs = append(specs, more...)
 	}
 	h := harness.NewWithLocalActor(localActor)
+	h.ConfigureTenants(o.tenants)
 	h.HandBackQueuedOnOpen()
 	h.ConfigureSessions(o.jobReports, o.lateAnswers, o.refuseSettings)
-	a := &Agent{jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
+	a := &Agent{severalActors: o.severalActors, sessionLimits: o.sessionLimits, tenants: o.tenants != nil, jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
 	state := o.dataDir
 	if state == "" {
 		state, err = os.MkdirTemp("", "modular-go-")
@@ -282,9 +287,12 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err != nil {
 		return nil, appError(err, InvalidComposition)
 	}
-	runtime := transient.Plugin()
-	if o.durability == Durable {
-		runtime = durable.Plugin()
+	runtime := o.runtime
+	if runtime == nil {
+		runtime = TransientRuntime()
+		if o.durability == Durable {
+			runtime = DurableRuntime()
+		}
 	}
 	store := o.history.make
 	if store == nil && o.durability == Ephemeral {
@@ -307,10 +315,14 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	} else {
 		environment = api.Plugin{Name: "environment", Setup: func(a api.API) error { return a.Provide("working-environment", o.environment) }, Close: o.environment.Close}
 	}
+	if o.credentials == nil {
+		o.credentials = EnvironmentCredentials()
+	}
 	core := []api.Plugin{historyPlugin,
 		{Name: "configuration", Setup: func(a api.API) error { return a.Provide("configuration", sessionDefaults{&defaults}) }},
-		{Name: "sdk-credentials", Setup: func(a api.API) error { return a.Provide("credentials", environmentCredentials{}) }},
-		configuration.BoundProject(project), environment, runtime,
+		{Name: "sdk-credentials", Setup: func(a api.API) error { return a.Provide("credentials", o.credentials) }},
+		configuration.BoundProject(project), environment,
+		{Name: "sdk-runtime", Setup: func(host api.API) error { return runtimeSetup(host, runtime) }},
 		modelselect.Plugin(), contextview.PluginWithCompaction(o.compaction), questions.Plugin(), jobs.Plugin(), acpinterface.Plugin(project),
 		mcptools.Configured(o.mcp, project, o.mcpWarning),
 		{Name: "sdk-model-admission", Setup: func(host api.API) error {
@@ -386,11 +398,26 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err := h.Load(commands.Plugin()); err != nil {
 		return nil, appError(err, InvalidComposition)
 	}
+	if len(specs) == 0 {
+		if err := pluginrpc.WrapLocalProviders(h); err != nil {
+			return nil, appError(err, InvalidComposition)
+		}
+	}
 	if err := pluginrpc.Load(ctx, h, project, state, specs); err != nil {
 		if ctx.Err() != nil {
 			return nil, appError(ctx.Err(), CancelledCode)
 		}
 		return nil, &Error{Code: InvalidComposition, Message: err.Error()}
+	}
+	selectedRuntime, err := a.a.Get("runtime")
+	if err != nil {
+		return nil, appError(err, InvalidComposition)
+	}
+	continues := selectedRuntime.(Runtime).Declaration().Durable
+	// The conformance harness deliberately probes a non-recovering served
+	// Runtime on a durable host. Ordinary SDK compositions must agree.
+	if continues && o.durability != Durable || !o.conformance && !continues && o.durability == Durable {
+		return nil, &Error{Code: InvalidComposition, Message: "selected Runtime does not match the durability mode"}
 	}
 	models := a.Models()
 	if defaults.Model == "" && len(models) == 1 {
@@ -406,6 +433,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		}
 		a.restart = func(ctx context.Context) (*Agent, error) { return New(ctx, options...) }
 	}
+	a.defaults = defaults
 	success = true
 	return a, nil
 }
@@ -431,7 +459,7 @@ func (a *Agent) Close(ctx context.Context) error {
 	})
 	return appError(a.closeErr, Lost)
 }
-func (a *Agent) Session(ctx context.Context) (*Session, error) {
+func (a *Agent) Session(ctx context.Context, options ...SessionOptions) (*Session, error) {
 	a.lifecycle.Lock()
 	defer a.lifecycle.Unlock()
 	if a.closed.Load() {
@@ -440,7 +468,47 @@ func (a *Agent) Session(ctx context.Context) (*Session, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, appError(err, CancelledCode)
 	}
-	id, err := a.a.New(ctx, a.project)
+	if len(options) > 1 {
+		return nil, &Error{Code: InvalidParams, Message: "at most one SessionOptions value"}
+	}
+	var opt SessionOptions
+	if len(options) > 0 {
+		opt = options[0]
+	}
+	if (opt.Tenant != "" && !a.tenants) || (len(opt.Actors) > 0 && !a.severalActors) {
+		return nil, &Error{Code: NotSupported, Message: "session feature disabled"}
+	}
+	settings := a.defaults
+	for key, value := range opt.Settings {
+		if err := applySetting(&settings, key, value); err != nil {
+			return nil, err
+		}
+	}
+	if settings.Model != "" && !a.offersModel(settings.Model) {
+		return nil, &Error{Code: InvalidRequest, Message: "model is not offered"}
+	}
+	var initial []api.Actor
+	seen := make(map[string]bool)
+	for _, actor := range opt.Actors {
+		if err := validActor(actor); err != nil {
+			return nil, err
+		}
+		if seen[actor.ID] {
+			return nil, &Error{Code: InvalidParams, Message: "duplicate initial actor"}
+		}
+		seen[actor.ID] = true
+		if actor.ID == localActor && !slices.Contains(actor.Rights, "input") {
+			return nil, &Error{Code: Forbidden, Message: "the local actor requires input to create a session"}
+		}
+		initial = append(initial, copyActor(actor))
+	}
+	ctx = api.WithSessionSettings(api.AsActor(ctx, localActor), settings)
+	id, err := a.a.(interface {
+		NewEmbedded(context.Context, string, string, []api.Actor) (string, error)
+	}).NewEmbedded(ctx, a.project, opt.Tenant, initial)
+	if errors.Is(err, api.ErrTenantForbidden) || errors.Is(err, api.ErrAuthority) {
+		return nil, appError(err, Forbidden)
+	}
 	if err != nil {
 		return nil, appError(err, Lost)
 	}
@@ -497,7 +565,7 @@ func (a *Agent) Declaration() Declaration {
 	if a.jobReports {
 		d["startsTurnsUnasked"] = "jobReports"
 	}
-	d["severalActors"], d["sessionLimits"], d["tenants"] = false, false, false
+	d["severalActors"], d["sessionLimits"], d["tenants"] = a.severalActors, a.sessionLimits, a.tenants
 	d["erasure"] = a.erasure
 	d["confinesFiles"], d["commandContainment"] = false, "none"
 	if v, err := a.a.Get("working-environment"); err == nil {

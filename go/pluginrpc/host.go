@@ -47,6 +47,7 @@ type remote struct {
 	sources   map[string]*remoteSource
 	closeOnce sync.Once
 	active    atomic.Bool
+	inOutput  atomic.Int32
 }
 type work struct {
 	session, actor, provider string
@@ -417,7 +418,38 @@ func (r *remote) notification(ctx context.Context, method string, raw json.RawMe
 		r.toolsChanged(ctx, v)
 		return
 	}
-	if method == "host/emit" || method == "host/problem" {
+	if method == "host/emit" {
+		// Capture the parent before reading the reply that releases it.
+		// Delivery may run its own output hooks, so keep it off the peer reader.
+		if !r.active.Load() || r.inOutput.Load() != 0 {
+			return
+		}
+		kind, session := str(v, "type"), str(v, "sessionId")
+		if !strings.Contains(kind, ".") || session == "" {
+			return
+		}
+		var w work
+		if has(v, "parentRequestId") {
+			parent, ok := r.peer.requestParent(ctx, mustJSON(v["parentRequestId"]))
+			if !ok || parent.Err() != nil {
+				return
+			}
+			w, _ = parent.Value(workKey{}).(work)
+			if w.runtime != nil || w.session != session {
+				return
+			}
+		}
+		go func() {
+			if w.actor != "" && !r.host.a.Authorize(session, w.actor, "watch") {
+				return
+			}
+			if _, err := r.host.a.Snapshot(session); err == nil {
+				r.a.Emit(ctx, api.Event{Kind: "plugin." + r.reg.Name + "." + kind, Session: session, Actor: w.actor, Call: w.call.ID, Data: mustJSON(v["data"])})
+			}
+		}()
+		return
+	}
+	if method == "host/problem" {
 		go func() {
 			_, err := r.callback(ctx, method, raw)
 			if err != nil {
@@ -450,7 +482,11 @@ func (r *remote) notification(ctx context.Context, method string, raw json.RawMe
 			e := asObject(v["event"])
 			kind := str(e, "type")
 			if kind == "text" || kind == "reasoning" || kind == "toolInput" {
-				w.event(api.Part{Type: kind, Text: str(e, "delta")})
+				part := api.Part{Type: kind, Text: str(e, "delta")}
+				if id := str(e, "toolCallId"); id != "" {
+					part.Wire = mustJSON(object{"type": kind, "text": part.Text, "toolCallId": id})
+				}
+				w.event(part)
 			}
 		}
 	}
@@ -463,7 +499,7 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 	}
 	if method != "host/problem" && method != "host/credentials/read" && method != "host/hook" &&
 		method != "host/declaration" && method != "host/session" && method != "host/history" &&
-		method != "host/emit" && method != "host/ask" && !isEnvironmentMethod(method, "host/") &&
+		method != "host/ask" && !isEnvironmentMethod(method, "host/") &&
 		!strings.HasPrefix(method, "host/runtime/") && method != "host/tools/list" && method != "host/tools/call" {
 		return nil, unknownMethod(method)
 	}
@@ -610,10 +646,7 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 	case "host/declaration":
 		return acpinterface.Declaration(r.host.a, r.host.project, session), nil
 	case "host/history":
-		return historyPage(snap, v)
-	case "host/emit":
-		r.host.a.Emit(ctx, api.Event{Kind: "plugin." + r.reg.Name + "." + str(v, "type"), Session: session, Actor: w.actor, Data: mustJSON(v["data"])})
-		return object{}, nil
+		return HistoryPage(snap, v)
 	case "host/ask":
 		if w.session == "" || w.questions == nil {
 			return nil, fault("invalid_request", "question needs parent work")
@@ -626,15 +659,6 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 			policy, ok := r.host.a.(interface{ LateQuestions() bool })
 			if ok && !policy.LateQuestions() {
 				return nil, fault("not_supported", "leaving a call open is not supported")
-			}
-		}
-		if str(request, "kind") == "secret" {
-			for _, capability := range r.host.a.All("provider.") {
-				for _, model := range capability.(api.Provider).Catalog() {
-					if model.Provider == str(request, "credential") {
-						return object{"requestId": api.ID(), "actorId": w.actor, "declined": true, "reason": "Provider credentials are reserved"}, nil
-					}
-				}
 			}
 		}
 		execution := api.Executing(ctx)
@@ -659,7 +683,7 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 			return nil, err
 		}
 		if q.Kind == "secret" {
-			return object{"requestId": answer.Request, "actorId": answer.Actor, "stored": answer.Value, "declined": answer.Declined}, nil
+			return object{"requestId": answer.Request, "actorId": answer.Actor, "stored": answer.Stored, "declined": answer.Declined, "reason": answer.Reason}, nil
 		}
 		return object{"requestId": answer.Request, "actorId": answer.Actor, "value": answer.Value, "declined": answer.Declined, "reason": answer.Reason}, nil
 	}

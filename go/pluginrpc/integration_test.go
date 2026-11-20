@@ -245,7 +245,7 @@ func TestBindingChild(t *testing.T) {
 			if err != nil || answer["declined"] != true {
 				return nil, fmt.Errorf("ask: %v %v", answer, err)
 			}
-			_ = peer.Send("host/emit", map[string]any{"sessionId": p["sessionId"], "type": "probe", "data": "emitted"})
+			_ = peer.Send("host/emit", map[string]any{"sessionId": p["sessionId"], "type": "probe.notice", "data": "emitted"})
 			_ = peer.Send("host/problem", map[string]any{"where": "fixture", "message": "reported problem"})
 			changed.Store(true)
 			_ = peer.Send("tools/changed", map[string]any{"toolSource": "fixture", "parentRequestId": pluginrpc.RequestID(ctx)})
@@ -444,7 +444,7 @@ func TestHostCallbacksCommandsChangedListsAndLostTools(t *testing.T) {
 	}
 	var emitted, problem atomic.Bool
 	a.Subscribe(func(e api.Event) {
-		if e.Kind == "plugin.wire-fixture.probe" {
+		if e.Kind == "plugin.wire-fixture.probe.notice" {
 			emitted.Store(true)
 		}
 		if e.Kind == "plugin.problem" {

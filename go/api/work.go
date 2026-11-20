@@ -9,6 +9,7 @@ import (
 )
 
 var ErrTenantTokens = errors.New("tenantTokens limit")
+var ErrAuthority = errors.New("authority refused")
 var ErrTenantForbidden = errors.New("tenant access forbidden")
 
 var ErrSettingsBusy = errors.New("settings cannot change during a turn")
@@ -35,6 +36,25 @@ func SessionSettings(ctx context.Context) (Settings, bool) {
 	return settings, ok
 }
 
+type reopeningKey struct{}
+
+// WithReopenedSession identifies a session.start hook dispatched on reopen.
+func WithReopenedSession(ctx context.Context) context.Context {
+	return context.WithValue(ctx, reopeningKey{}, true)
+}
+
+func IsReopenedSession(ctx context.Context) bool {
+	v, _ := ctx.Value(reopeningKey{}).(bool)
+	return v
+}
+
+type actingViaKey struct{}
+
+func WithActingVia(ctx context.Context, actor string) context.Context {
+	return context.WithValue(ctx, actingViaKey{}, actor)
+}
+func ActingVia(ctx context.Context) string { a, _ := ctx.Value(actingViaKey{}).(string); return a }
+
 type actorKey struct{}
 
 func AsActor(ctx context.Context, actor string) context.Context {
@@ -60,6 +80,7 @@ type Question struct {
 	ID, Key, Session, Turn, Step, Call, Actor, Kind, Prompt, Credential string
 	Options, Allowed, Path                                              []string
 	Wait                                                                time.Duration
+	Deadline                                                            *time.Time `json:",omitempty"`
 	Defer                                                               bool
 	Answerable                                                          bool
 }
@@ -76,10 +97,26 @@ type Questions interface {
 	List(string) ([]Question, error)
 	Connect(string, string) func()
 }
-type SecretDestination interface{ CanStore(string) bool }
-type SecretWriter interface {
-	Put(context.Context, string, string) error
+type SecretReceipt struct {
+	Session, Request, Name, Actor, ID string
 }
+type SecretDecision string
+
+const (
+	SecretActivated  SecretDecision = "activated"
+	SecretSuperseded SecretDecision = "superseded"
+	SecretDiscarded  SecretDecision = "discarded"
+)
+
+type StagedCredentials interface {
+	Credentials
+	Stage(ctx context.Context, session, request, name, actor, value string) (SecretReceipt, error)
+	LookupStaged(ctx context.Context, session, request string) (SecretReceipt, bool, error)
+	Activate(context.Context, SecretReceipt) (SecretDecision, error)
+	Discard(ctx context.Context, session, request string) error
+}
+
+type SecretDestination interface{ CanStore(string) bool }
 type Job struct {
 	ID, Key, Session, Turn, Call, Actor, Owner, Kind, State string
 	StartEntry                                              string

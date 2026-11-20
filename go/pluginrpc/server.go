@@ -124,6 +124,23 @@ func (s *Server) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) err
 }
 
 // Callback sends a scoped request on behalf of the current served handler.
+func providerAvailable(p api.Provider) bool {
+	a, ok := p.(interface{ Available() bool })
+	return !ok || a.Available()
+}
+
+// ProviderCredential uses the host-owned credential handed to this Provider.
+func (s *Server) ProviderCredential(ctx context.Context, provider string) (string, error) {
+	var reply struct{ Credential *struct{ Type, Key string } }
+	if err := s.peer.Call(ctx, "host/credentials/read", object{"provider": provider}, &reply); err != nil {
+		return "", err
+	}
+	if reply.Credential == nil || reply.Credential.Type != "apiKey" {
+		return "", nil
+	}
+	return reply.Credential.Key, nil
+}
+
 func (s *Server) Callback(ctx context.Context, method string, params Object, out any) error {
 	id := RequestID(ctx)
 	if len(id) == 0 || ctx.Err() != nil {
@@ -131,6 +148,16 @@ func (s *Server) Callback(ctx context.Context, method string, params Object, out
 	}
 	params["parentRequestId"] = id
 	return s.peer.Call(ctx, method, params, out)
+}
+
+// Notify sends a notification on behalf of the current served handler.
+func (s *Server) Notify(ctx context.Context, method string, params Object) error {
+	id := RequestID(ctx)
+	if len(id) == 0 || ctx.Err() != nil {
+		return fault("invalid_request", "no active request")
+	}
+	params["parentRequestId"] = id
+	return s.peer.Send(method, params)
 }
 
 func (s *Server) ownEnvironment(env api.WorkingEnvironment) {
@@ -269,7 +296,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 			return object{"models": list}, nil
 		}
 		if method == "provider/available" {
-			return object{"available": true}, nil
+			return object{"available": providerAvailable(provider)}, nil
 		}
 		if method == "provider/discard" {
 			session := str(v, "sessionId")
@@ -345,7 +372,11 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 				if ctx.Err() != nil {
 					return
 				}
-				_ = s.peer.Send("provider/event", object{"parentRequestId": id, "event": object{"type": part.Type, "delta": part.Text}})
+				event := object{"type": part.Type, "delta": part.Text}
+				if callID := str(obj(part.Wire), "toolCallId"); callID != "" {
+					event["toolCallId"] = callID
+				}
+				_ = s.peer.Send("provider/event", object{"parentRequestId": id, "event": event})
 			})
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) || Code(err) == "cancelled" {
 				return nil, fault("cancelled", "Provider request cancelled")

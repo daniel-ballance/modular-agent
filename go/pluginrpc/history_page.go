@@ -7,6 +7,9 @@ import (
 
 const maxHistoryPage = 4 * 1024 * 1024
 
+// HistoryPage projects the same raw record page for local and served plugins.
+func HistoryPage(s api.Session, v Object) (any, error) { return historyPage(s, v) }
+
 func historyPage(s api.Session, v object) (any, error) {
 	entries := s.Branch()
 	if has(v, "all") {

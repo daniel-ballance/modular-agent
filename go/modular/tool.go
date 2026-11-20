@@ -163,6 +163,10 @@ type ToolContext struct {
 	refused                    atomic.Pointer[string]
 	ask                        func(context.Context, Question, AskOptions) (Answer, error)
 	progress                   func(string)
+	host                       api.API
+	server                     *pluginrpc.Server
+	plugin                     string
+	only                       bool
 }
 
 func (t *ToolContext) Cancelled() <-chan struct{} { return t.ctx.Done() }
@@ -184,7 +188,7 @@ func (t *ToolContext) Ask(ctx context.Context, q Question, options ...AskOptions
 	if t.settled.Load() {
 		return Answer{}, &Error{Code: InvalidRequest, Message: "tool call has settled"}
 	}
-	if q.Kind != "approval" && q.Kind != "text" && q.Kind != "choice" && q.Kind != "link" {
+	if q.Kind != "approval" && q.Kind != "text" && q.Kind != "choice" && q.Kind != "link" && q.Kind != "secret" {
 		return Answer{}, &Error{Code: NotSupported, Message: "unsupported question kind " + q.Kind}
 	}
 	if q.Kind == "choice" && len(q.Options) == 0 {
@@ -230,6 +234,7 @@ type toolSource struct {
 	tools  []Tool
 	a      api.API
 	server *pluginrpc.Server
+	plugin string
 }
 
 func (s *toolSource) Tools(api.Session) []api.Tool {
@@ -242,7 +247,7 @@ func (s *toolSource) Tools(api.Session) []api.Tool {
 	return defs
 }
 func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call, progress func(string)) api.ToolResult {
-	tc := &ToolContext{SessionID: session.ID, ActorID: call.Actor, CallID: call.ID, ctx: ctx, progress: progress}
+	tc := &ToolContext{SessionID: session.ID, ActorID: call.Actor, CallID: call.ID, ctx: ctx, progress: progress, host: s.a, server: s.server, plugin: s.plugin}
 	tc.Tools = ToolCalls{tc: tc, port: api.InvocationTools(ctx)}
 	tc.Environment = ToolEnvironment{tc: tc, project: session.Project}
 	if s.server != nil {
@@ -258,6 +263,9 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 		if s.server != nil {
 			var out Answer
 			req := pluginrpc.Object{"kind": q.Kind, "question": q.Question}
+			if q.Credential != "" {
+				req["credential"] = q.Credential
+			}
 			if len(q.Options) > 0 {
 				req["options"] = q.Options
 			}
@@ -278,6 +286,9 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 			if response.Pending {
 				return out, LeftOpen
 			}
+			if response.Stored != "" {
+				response.Value = response.Stored
+			}
 			return response.Answer, appError(err, Internal)
 		}
 		value, err := s.a.Get("questions")
@@ -288,7 +299,7 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 			return Answer{}, &Error{Code: NotSupported, Message: "leaving a call open is not supported"}
 		}
 		e := api.Executing(ctx)
-		ans, err := value.(api.Questions).Ask(ctx, api.Question{Session: session.ID, Turn: e.Turn, Step: e.Call.Step, Call: call.ID, Actor: call.Actor, Kind: q.Kind, Prompt: q.Question, Options: q.Options, Details: q.Details, Wait: wait, Defer: leaveOpen})
+		ans, err := value.(api.Questions).Ask(ctx, api.Question{Session: session.ID, Turn: e.Turn, Step: e.Call.Step, Call: call.ID, Actor: call.Actor, Kind: q.Kind, Prompt: q.Question, Options: q.Options, Details: q.Details, Credential: q.Credential, Wait: wait, Defer: leaveOpen})
 		if errors.Is(err, api.ErrQuestionOpen) {
 			return Answer{}, LeftOpen
 		}
@@ -296,12 +307,13 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 		if errors.As(err, &declined) {
 			return Decline(declined.Reason), nil
 		}
-		return Answer{Value: ans.Value, Declined: ans.Declined, Reason: ans.Reason}, appError(err, InvalidRequest)
+		return Answer{Value: ans.Value, Declined: ans.Declined, Reason: ans.Reason, Stored: ans.Stored}, appError(err, InvalidRequest)
 	}
 	for _, t := range s.tools {
 		if t.definition.Name != call.Name {
 			continue
 		}
+		tc.only = t.only
 		output, err := t.run(ctx, call.Input, tc)
 		tc.settled.Store(true)
 		result := api.ToolResult{Call: call.ID, Name: call.Name, Status: "completed"}

@@ -3,6 +3,7 @@ package modular
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -47,14 +48,16 @@ type Command struct {
 	InProcessOnly, UsesModel bool
 }
 type Registrar struct {
-	config    map[string]any
-	tools     []Tool
-	hooks     []hookRegistration
-	commands  []Command
-	providers []Provider
-	items     map[string]bool
-	stopped   bool
-	err       error
+	config      map[string]any
+	tools       []Tool
+	hooks       []hookRegistration
+	commands    []Command
+	providers   []Provider
+	runtime     Runtime
+	environment Environment
+	items       map[string]bool
+	stopped     bool
+	err         error
 }
 
 func (r *Registrar) Config() map[string]any {
@@ -226,7 +229,7 @@ func (r *Registrar) OnSessionPrepare(fn func(context.Context, SessionPrepare) er
 
 // OnSessionEnd releases resources on session close or interruption.
 func (r *Registrar) OnSessionEnd(fn func(context.Context, string) error, opts ...HookOption) error {
-	return r.on(hookRegistration{point: "session.end", only: true, handle: func(ctx context.Context, p pluginrpc.Object) (any, error) {
+	return r.on(hookRegistration{point: "session.end", handle: func(ctx context.Context, p pluginrpc.Object) (any, error) {
 		return nil, fn(ctx, p["sessionId"].(string))
 	}}, opts)
 }
@@ -322,14 +325,40 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 		}
 		return err
 	}
-	err = h.LoadItems(api.Plugin{Name: p.Name, Close: p.Stop, Setup: func(a api.API) error {
+	stop := p.Stop
+	if env := r.environment; env != nil {
+		stop = func() error {
+			err := env.Close()
+			if p.Stop != nil {
+				return errors.Join(err, p.Stop())
+			}
+			return err
+		}
+	}
+	err = h.LoadItems(api.Plugin{Name: p.Name, Close: stop, Setup: func(a api.API) error {
+		if r.runtime != nil {
+			if err := runtimeSetup(a, r.runtime); err != nil {
+				return err
+			}
+		}
+		if r.environment != nil {
+			if err := a.Provide("working-environment", r.environment); err != nil {
+				return err
+			}
+		}
 		if len(r.tools) > 0 {
-			if err := a.Provide("tools.sdk."+p.Name, &toolSource{a: a, tools: r.tools}); err != nil {
+			if err := a.Provide("tools.sdk."+p.Name, &toolSource{a: a, tools: r.tools, plugin: p.Name}); err != nil {
 				return err
 			}
 		}
 		for _, p := range r.providers {
-			if err := a.Provide("provider."+p.ID, providerAdapter{p}); err != nil {
+			if err := a.Provide("provider."+p.ID, providerAdapter{p: p, read: func(ctx context.Context, id string) (string, error) {
+				v, err := a.Get("credentials")
+				if err != nil {
+					return "", err
+				}
+				return v.(api.Credentials).Get(ctx, id)
+			}}); err != nil {
 				return err
 			}
 		}
@@ -375,7 +404,13 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 					if err != nil {
 						return api.Decision{}, err
 					}
-					add := result.(TurnContribution)
+					if result == nil {
+						return api.Decision{}, nil
+					}
+					var add TurnContribution
+					if err := decodeInto(result, &add); err != nil {
+						return api.Decision{}, err
+					}
 					if add.System != "" {
 						if before.System != "" {
 							before.System += "\n"
@@ -393,8 +428,8 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 		}
 		return nil
 	}}, p.Replaces)
-	if err != nil && p.Stop != nil {
-		_ = p.Stop()
+	if err != nil && stop != nil {
+		_ = stop()
 	}
 	return err
 }

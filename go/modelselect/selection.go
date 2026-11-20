@@ -26,8 +26,14 @@ func Plugin() api.Plugin {
 func (s *Selection) Resolve(session api.Session) (api.ModelAccess, error) {
 	for _, v := range s.a.All("provider.") {
 		p := v.(api.Provider)
+		if refresh, ok := p.(interface{ RefreshCatalog(context.Context) error }); ok {
+			_ = refresh.RefreshCatalog(context.Background())
+		}
 		for _, m := range p.Catalog() {
 			if m.ID == session.Settings.Model || (m.Provider != "" && m.Provider+"/"+m.ID == session.Settings.Model) {
+				if a, ok := p.(interface{ Available() bool }); ok && !a.Available() {
+					return nil, errors.New("Provider unavailable")
+				}
 				return p.Access(m.ID)
 			}
 		}

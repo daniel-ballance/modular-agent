@@ -16,10 +16,17 @@ import (
 type Session struct {
 	agent *Agent
 	id    string
+	actor string
 }
 
-func (s *Session) ID() string                              { return s.id }
-func (s *Session) ctx(ctx context.Context) context.Context { return api.AsActor(ctx, localActor) }
+func (s *Session) ID() string { return s.id }
+func (s *Session) ctx(ctx context.Context) context.Context {
+	ctx = api.AsActor(ctx, s.actorID())
+	if s.actorID() != localActor {
+		return api.WithActingVia(ctx, localActor)
+	}
+	return api.WithActingVia(ctx, "")
+}
 
 type Disposition string
 
@@ -89,6 +96,9 @@ func (s *Session) Send(ctx context.Context, input any, timing Timing, opts ...Pr
 	if timing != Now && timing != Steer && timing != After && timing != Propose {
 		return InputReceipt{}, &Error{Code: InvalidParams, Message: "invalid input timing"}
 	}
+	if timing == Propose && !s.agent.severalActors {
+		return InputReceipt{}, &Error{Code: NotSupported, Message: "several actors disabled"}
+	}
 	var content api.Content
 	switch v := input.(type) {
 	case string:
@@ -113,7 +123,14 @@ func (s *Session) Send(ctx context.Context, input any, timing Timing, opts ...Pr
 			return InputReceipt{}, appError(err, InvalidParams)
 		}
 	}
-	r, err := s.agent.a.Submit(s.ctx(ctx), s.id, api.Input{When: string(timing), Key: p.key, Content: content, ResultSchema: p.schema})
+	var via string
+	if s.actorID() != localActor {
+		via = localActor
+	}
+	r, err := s.agent.a.Submit(s.ctx(ctx), s.id, api.Input{Actor: s.actorID(), ViaActor: via, When: string(timing), Key: p.key, Content: content, ResultSchema: p.schema})
+	if errors.Is(err, api.ErrAuthority) {
+		return InputReceipt{}, appError(err, Forbidden)
+	}
 	if errors.Is(err, api.ErrUnknownModel) {
 		return InputReceipt{}, appError(err, InvalidRequest)
 	}
@@ -140,7 +157,7 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 	subscribe := s.agent.a.(interface {
 		SubscribeOutput(func(api.Event) string, func(api.Event)) func()
 	})
-	stop := subscribe.SubscribeOutput(func(api.Event) string { return localActor }, func(e api.Event) {
+	stop := subscribe.SubscribeOutput(func(api.Event) string { return s.actorID() }, func(e api.Event) {
 		if e.Session != s.id {
 			return
 		}
@@ -248,6 +265,9 @@ func (s *Session) view(ctx context.Context) (api.Session, error) {
 	}
 	if _, err := s.agent.a.Snapshot(s.id); err != nil {
 		return api.Session{}, appError(err, NotOpen)
+	}
+	if err := s.require(ctx, "watch"); err != nil {
+		return api.Session{}, err
 	}
 	v, err := s.agent.a.View(s.ctx(ctx), s.id)
 	if errors.Is(err, api.ErrOutputWithheld) {
@@ -368,12 +388,18 @@ func (s *Session) History(ctx context.Context) ([]HistoryEntry, error) {
 
 // Busy reports whether the session has active work.
 func (s *Session) Busy() (bool, error) {
+	if err := s.require(context.Background(), "watch"); err != nil {
+		return false, err
+	}
 	busy, err := s.agent.h.Busy(s.id)
 	return busy, appError(err, NotOpen)
 }
 
 // WaitIdle waits until the session has settled its admitted work.
 func (s *Session) WaitIdle(ctx context.Context) error {
+	if err := s.require(ctx, "watch"); err != nil {
+		return err
+	}
 	_, err := s.agent.a.Wait(s.ctx(ctx), s.id)
 	return appError(err, Lost)
 }
@@ -382,6 +408,9 @@ func (s *Session) Cancel(ctx context.Context) ([]InputReceipt, error) {
 	ctx = s.ctx(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, appError(err, CancelledCode)
+	}
+	if err := s.require(ctx, "cancel"); err != nil {
+		return nil, err
 	}
 	busy, err := s.agent.h.Busy(s.id)
 	if err != nil {
@@ -434,6 +463,9 @@ func (s *Session) SetSetting(ctx context.Context, key string, value any) error {
 	if err != nil {
 		return appError(err, NotOpen)
 	}
+	if err := s.require(ctx, "settings"); err != nil {
+		return err
+	}
 	if err = applySetting(&snap.Settings, key, value); err != nil {
 		return err
 	}
@@ -456,11 +488,14 @@ func (s *Session) Fork(ctx context.Context, entryID ...string) (*Session, error)
 	if _, err := s.agent.a.Snapshot(s.id); err != nil {
 		return nil, appError(err, NotOpen)
 	}
+	if err := s.require(ctx, "settings"); err != nil {
+		return nil, err
+	}
 	id, err := s.agent.a.Fork(s.ctx(ctx), s.id, target)
 	if err != nil {
 		return nil, appError(err, Busy)
 	}
-	return &Session{agent: s.agent, id: id}, nil
+	return &Session{agent: s.agent, id: id, actor: s.actor}, nil
 }
 func (s *Session) OnQuestion(ctx context.Context, h QuestionHandler) error {
 	if err := ctx.Err(); err != nil {
@@ -468,6 +503,9 @@ func (s *Session) OnQuestion(ctx context.Context, h QuestionHandler) error {
 	}
 	if _, err := s.agent.a.Snapshot(s.id); err != nil {
 		return appError(err, NotOpen)
+	}
+	if s.actorID() != localActor {
+		return &Error{Code: NotSupported, Message: "only the local actor has a question handler"}
 	}
 	s.agent.q.attach(s.id, h)
 	return nil
@@ -478,6 +516,9 @@ func (s *Session) Commands(ctx context.Context) ([]string, error) {
 	}
 	if _, err := s.agent.a.Snapshot(s.id); err != nil {
 		return nil, appError(err, NotOpen)
+	}
+	if err := s.require(ctx, "watch"); err != nil {
+		return nil, err
 	}
 	return s.agent.a.Commands(), nil
 }
@@ -503,7 +544,16 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 	v, ok := s.agent.a.(interface{ CloseAs(string, string) error })
 	if ok {
-		return appError(v.CloseAs(s.id, localActor), NotOpen)
+		if delegated, ok := s.agent.a.(interface {
+			CloseFor(context.Context, string) error
+		}); ok {
+			err := delegated.CloseFor(s.ctx(ctx), s.id)
+			if errors.Is(err, api.ErrCloseForbidden) {
+				return appError(err, Forbidden)
+			}
+			return appError(err, NotOpen)
+		}
+		return appError(v.CloseAs(s.id, s.actorID()), NotOpen)
 	}
 	return appError(s.agent.a.CloseSession(s.id), NotOpen)
 }

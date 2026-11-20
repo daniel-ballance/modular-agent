@@ -39,11 +39,13 @@ func TestNamedSecretsPersistPrivatelyAndCannotReplaceExperimentKey(t *testing.T)
 		t.Fatal(info.Mode())
 	}
 	files, _ := os.ReadDir(path + ".d")
-	if len(files) != 1 {
+	if len(files) != 2 {
 		t.Fatal(files)
 	}
-	info, _ = files[0].Info()
-	if info.Mode().Perm() != 0600 {
-		t.Fatal(info.Mode())
+	for _, file := range files {
+		info, err := file.Info()
+		if err != nil || info.Mode().Perm() != 0600 {
+			t.Fatalf("credential file %s is not private: %v, %v", file.Name(), info, err)
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -59,8 +60,25 @@ func serve(ctx context.Context, plugin Plugin, in io.ReadCloser, out io.Writer) 
 			return serveFault(startupErr)
 		}
 		reg := pluginrpc.Registration{Binding: pluginrpc.Binding, Name: plugin.Name, Replaces: plugin.Replaces}
+		if r.runtime != nil {
+			d := r.runtime.Declaration()
+			reg.Runtime = &pluginrpc.RuntimeRegistration{ID: plugin.Name, Supports: pluginrpc.RuntimeSupports{
+				InputDuringTurn: d.Steering, WaitingThroughRestart: d.WaitingThroughRestart, ContinuesAfterRestart: d.Durable,
+			}}
+			server.Runtime = r.runtime
+		}
+		if r.environment != nil {
+			env := r.environment
+			c := "none"
+			if v, ok := env.(interface{ Containment() string }); ok {
+				c = v.Containment()
+			}
+			_, points := api.Points(env)
+			reg.Environment = &pluginrpc.EnvironmentRegistration{Containment: c, Platforms: []string{runtime.GOOS}, Points: points}
+			server.Environment = env
+		}
 		if len(r.tools) > 0 {
-			source := &toolSource{tools: r.tools, server: server}
+			source := &toolSource{tools: r.tools, server: server, plugin: plugin.Name}
 			sr := pluginrpc.SourceRegistration{ID: "tools"}
 			for _, t := range source.Tools(api.Session{}) {
 				sr.Tools = append(sr.Tools, portable.Tool(t))
@@ -70,7 +88,7 @@ func serve(ctx context.Context, plugin Plugin, in io.ReadCloser, out io.Writer) 
 		}
 		server.Providers = map[string]api.Provider{}
 		for _, p := range r.providers {
-			provider := providerAdapter{p}
+			provider := providerAdapter{p: p, read: server.ProviderCredential}
 			pr := pluginrpc.ProviderRegistration{ID: p.ID}
 			pr.Supports.KeepsState = p.Supports.KeepsState
 			for _, model := range provider.Catalog() {

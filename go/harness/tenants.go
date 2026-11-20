@@ -9,9 +9,16 @@ import (
 	"os"
 )
 
-type tenantConfig struct {
+type TenantConfig struct {
 	Rights []string `json:"rights"`
 	Tokens *int64   `json:"tokens"`
+}
+
+type tenantConfig = TenantConfig
+
+// ConfigureTenants replaces the standalone build's environment-derived policy.
+func (h *Harness) ConfigureTenants(tenants map[string]TenantConfig) {
+	h.tenants, h.tenantConfigErr = tenants, nil
 }
 
 func readTenants() (map[string]tenantConfig, error) {
@@ -52,12 +59,18 @@ func (c *client) Limit(ctx context.Context, id string, rights []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	who := api.Acting(ctx)
-	if !c.authorized(s.data, who, "administer") {
-		return errors.New("limit refused")
+	uncapped := s.data
+	uncapped.Limit = nil
+	if !c.authorizedBy(uncapped, ctx, "administer") {
+		return api.ErrAuthority
 	}
-	for _, r := range rights {
-		if !c.authorized(s.data, who, r) {
-			return errors.New("limit cannot widen authority")
+	check := rights
+	if rights == nil {
+		check = api.Rights
+	}
+	for _, r := range check {
+		if !c.authorizedBy(uncapped, ctx, r) {
+			return api.ErrAuthority
 		}
 	}
 	next := s.data

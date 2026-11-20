@@ -146,6 +146,14 @@ func outputIn(e api.Event, v outputEvent) (api.Event, error) {
 }
 
 func (r *remote) outputHandler(ctx context.Context, id int, batch api.OutputBatch) (api.Decision, error) {
+	r.inOutput.Add(1)
+	defer r.inOutput.Add(-1)
+	return handleOutput(ctx, batch, func(ctx context.Context, payload Object, out any) error {
+		return r.call(withWork(ctx, work{session: batch.Session}), "hook/handle", object{"handlerId": id, "hook": "output", "payload": payload}, out)
+	})
+}
+
+func handleOutput(ctx context.Context, batch api.OutputBatch, invoke func(context.Context, Object, any) error) (api.Decision, error) {
 	events := make([]outputEvent, 0, len(batch.Events))
 	byKind := map[string][]api.Event{}
 	for _, e := range batch.Events {
@@ -158,7 +166,7 @@ func (r *remote) outputHandler(ctx context.Context, id int, batch api.OutputBatc
 		Events *[]outputEvent `json:"events"`
 	}
 	payload := object{"sessionId": batch.Session, "recipient": batch.Recipient, "events": events, "final": true}
-	if err := r.call(withWork(ctx, work{session: batch.Session}), "hook/handle", object{"handlerId": id, "hook": "output", "payload": payload}, &result); err != nil {
+	if err := invoke(ctx, payload, &result); err != nil {
 		return api.Decision{}, err
 	}
 	if result == nil {

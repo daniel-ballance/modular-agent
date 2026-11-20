@@ -27,7 +27,7 @@ func (a *providerAttempt) hook(ctx context.Context, h *host, hook string, payloa
 		}
 		a.response = asObject(payload["message"])
 		a.answered = true
-		_, err := h.a.Invoke(ctx, hookNames[hook], payload)
+		_, err := h.h.API().Invoke(ctx, hookNames[hook], payload)
 		return nil, err
 	}
 	if a.requested || !sameJSON(a.request, payload["request"]) {
@@ -36,7 +36,7 @@ func (a *providerAttempt) hook(ctx context.Context, h *host, hook string, payloa
 	a.requested = true
 	final := payload
 	if !a.fence.Replay {
-		changed, err := h.a.Invoke(ctx, hookNames[hook], payload)
+		changed, err := h.h.API().Invoke(ctx, hookNames[hook], payload)
 		if err != nil {
 			return nil, err
 		}

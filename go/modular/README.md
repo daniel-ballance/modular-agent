@@ -1,6 +1,6 @@
 # modular: the Go SDK
 
-This is the Go implementation of [SDK draft 0.1](../../docs/sdk/README.md). It wraps the Go build with the edition 4 draft extensions. Application and plugin code uses the `modular` package, not the base Harness or its API. The Go module path uses `OWNER` until the repository is published.
+This is the Go implementation of [SDK 0.1](../../docs/sdk/README.md). It wraps the edition 4 Go build. Application and plugin code uses the `modular` package, not the base Harness or its API.
 
 ```go
 agent := modulartest.Agent(t, modulartest.Script(`[{"text":"Hello."}]`))
@@ -32,52 +32,49 @@ The [Go `ma` README](../cmd/ma/README.md) shows these parts composed and tested 
 From the repository root:
 
 ```sh
+export TMPDIR="$HOME/.cache/ma-std-tmp"
+mkdir -p "$TMPDIR"
 (cd conformance/acp && npm ci)
-(cd go && mise exec -- go build ./... && mise exec -- go vet ./... && mise exec -- gofmt -l .)
-(cd go && MODULAR_AGENT_SDK_REQUIRE=go mise exec -- go test -json -count=1 ./... > /tmp/modular-go-test.log 2>&1)
-(cd go && MODULAR_AGENT_SDK_REQUIRE=go mise exec -- go test -race -json -count=1 ./modular/... > /tmp/modular-go-race.log 2>&1)
-
-# Build peers for the cross-language runs.
-(cd rust && mise exec -- cargo build -p sdk-scenarios --bin modular-agent-fixtures)
-(cd go && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures)
-(cd typescript && npm ci && npm run build)
-(cd python && uv sync --python 3.13)
-(cd go && MODULAR_AGENT_SDK_REQUIRE=go mise exec -- go test -json -count=1 ./modular/scenarios -run '^TestShared$' > /tmp/modular-go-matrix.log 2>&1)
-mkdir -p "$HOME/.cache/ma-std-tmp"
-(cd rust && TMPDIR="$HOME/.cache/ma-std-tmp" MODULAR_AGENT_SDK_REQUIRE=go mise exec -- cargo test -p sdk-scenarios --test shared > /tmp/modular-rust-matrix.log 2>&1)
+(cd go && mise exec -- go build ./... && mise exec -- go vet ./... && test -z "$(mise exec -- gofmt -l .)")
+(cd go && mise exec -- go test -json -count=1 ./... > "$TMPDIR/go-test.json" 2>&1)
+(cd go && mise exec -- go test -race -json -count=1 ./modular/... ./cmd/ma/... > "$TMPDIR/go-race.json" 2>&1)
+(cd go && mise exec -- go build -o .bin/ma ./cmd/ma)
+node conformance/reference/run.mjs --agent go
+(cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- ../../go/.bin/ma --acp)
 ```
 
-Commands in the base suite use Linux with unprivileged user, PID and mount namespaces. The SDK suites use scripted Providers or loopback servers only. The scenario runner builds its own fixture program and checks the registry for other built programs. Use `-v` to see the skipped placements and their build commands. Until the peer revisions merge, run the full and race suites with the peer fixture artifacts absent, then run the separate matrix checks with all four programs built. `MODULAR_AGENT_SDK_REQUIRE=go` makes Go mandatory; it does not filter out other built programs.
+The base suites use Linux with unprivileged user, PID and mount namespaces. The scenario runner builds Go's fixture and discovers built peer programs. Build each peer with the command in its [fixture registry](../../conformance/sdk/fixtures/) and set `MODULAR_AGENT_SDK_REQUIRE=all` to require them. Until the peer note fixtures merge, the three `decline-is-not-text/process:<peer>` runs are expected to fail. To run the remaining suite with those peer builds present, use `-skip '^TestShared$/^decline-is-not-text$/^process:(python|rust|typescript)$'`; it skips only those three runs.
 
 ### What is checked
 
-- **Go suite:** 31 packages pass (234 top-level tests and 447 subtests in the full run); 15 have no tests. Build and vet pass, and `gofmt -l .` emits no paths. The SDK race run passes 30 top-level tests and 60 subtests across two test packages.
-- **Binding kits:** ACP 123/123 each for transient, durable and external durable (plus 121/121 each with split stdio plugins, for transient and durable); plugin 144/144. The SDK history kit passes 39/39 each over memory, files and an HTTP relay (normal runs, without restart mode). The SDK ACP test compares the published declaration to `Agent.Declaration()`.
-- **Shared scenarios:** Go passes 22/22 in its own two placements. With all four programs built, Go passes 49/55: all 35 original combinations and 14 of the 20 new combinations. The six failures are `quay` and `pilot` missing in the three peer programs at the pinned baseline. The Rust runner passes 10/11 against Go, including all seven original scenarios. In `nested-call` it successfully runs Go’s `pilot` and `tide`, but its baseline `PromptResult` also lists the child result. Across all four served programs, Rust passes 37/44; its in-process suite passes six cases before stopping at the missing `pilot`. Both Go crash cases kill the agent’s process group, reap the direct child, and wait for remaining live group members before reopening.
-- **Round 1 negative control:** changing the Go tide fixture's text to `High tide at Whitby is deliberately wrong.` failed `tool-call/process:go`, step 0, with the expected and actual result text. The fixture was restored and rebuilt.
-- **Guide examples:** three offline tests from guides 01 and 02: scripted hello, iterating a text stream through `turnEnded`, and typed tide lookup. The process fixture program and the served scenario checks exercise guide 03's `Serve` and process-plugin path. Examples using the default real Provider endpoint are not run.
-- **Placement and composition:** nine invalid compositions, default host isolation, identical tool refusal wording, rejection of an in-process-only tool at initialize, and file/command declarations for the local and memory environments.
-- **Sessions and plugins:** cancellation hands a queued prompt back; structured results record refusal feedback, retry, and preserve JSON null; lagged streams return a replay cursor; invalid transformed tool values preserve the confirmed execution status and fail the turn. Settings/fork/reopen, item replacement, and a command plus four hook registrations are also tested.
-- **Interfaces and Providers:** ACP prompts and reopening while recovery is still blocked, history HTTP reopen, three history service eligibility cases, unknown-model rejection before input admission, and ordinary Provider error settlement in both placements. Two loopback cases per official Provider cover streaming success and a rejected key.
+- **Go build, vet and formatting:** pass. The full run passed 36 packages (275 top-level tests and 528 subtests); 15 packages had no tests. The SDK and `ma` race run passed seven packages (67 top-level tests and 141 subtests). Both runs exclude the three unavailable peer note fixtures. The full-suite log predates two credential tests, which also passed in the focused run and in the race run.
+- **Reference and bindings:** standard Go `ma`: 17/17 reference checks and 188/188 ACP kit checks including crash, probe and job checks. The base ACP checks pass 123/123 each for transient, durable and external durable; split stdio passes 121/121 each for transient and durable. Plugin binding: 144/144. SDK history kit: 39/39 each for memory, files and HTTP relay (without restart mode).
+- **Shared scenarios:** 28/28 in process and served by Go, including answer-later, tagged decline and actor rights. With every peer built and required, the original eleven pass in all five placements (55/55). The crash scenarios kill the process group, reap the direct child and wait for remaining live members before reopen.
+- **Questions and authority:** session handler override, open question listing, answers from the app, tenant and session ceilings, actor departure, and recording both submission identities. Secret tests force process exit after staging, after recording acceptance, and after activation. Recoveries discard unselected stages and finish selected answers. The SDK also checks private files, stale generations and idempotent activation; `ma` tests the same transactions in the `answers` section of `auth.json`.
+- **Guides and Providers:** guides 01–09 have offline coverage. The developer Provider test changes its catalog, checks readiness, streams, transforms a request, observes its response and gets a host credential in both placements. The official Providers have loopback streaming and rejected-key tests.
+- **Live Providers:** `TestLiveProviders` compiles and skips unless `MODULAR_AGENT_LIVE=1`. With opt-in it independently skips each Provider without its key. This run did not enable live checks.
 
 ## Built so far
 
-| Milestone item | Go implementation |
+| Area | Go implementation |
 |---|---|
-| 1. Build an agent | Functional options, three durability modes, Provider catalog and model selection, default settings, approval, project and data directories. History override via `WithHistory`. Kept/durable require persistent history; default local recovery bookkeeping also requires `WithDataDir` in those modes. `WithEnvironment` overrides local. An explicit environment with `NeedsDataDir() bool` returning true also requires `WithDataDir`. Runtime override is not exposed. |
-| 2. Sessions | `Session`, `OpenSession`, `Prompt`, `PromptStream`, `LastTurn`, `History`, `Send`, `Cancel`, `Settings`, `SetSetting`, `Fork`, `Commands`, `RunCommand`, `Close`. Keyed prompts are supported. `WithResult(schema)` accepts one validated JSON value (including null), and records feedback and retries invalid candidates; `Events(ctx, cursor)` replays gated committed entries after the cursor, then follows live events. A lagged reader gets `lost` with the last delivered entry ID (or null) in `Data["fromEntry"]`. |
-| 3. Local actor | `user`, present for questions only while a handler is registered. An approval without one is refused. |
-| 4. Tools | Struct-derived JSON Schema 2020-12, hints serialized inside `hints`, schema validation before dispatch and after result transforms, cancellation and refusal, `Ask`, `Progress`, and `Log`. Opt-in leave-open questions. Tool contexts expose a scoped working environment; secret questions and general history and emit callbacks are not yet supported. |
-| 5. Errors | `*modular.Error` with a typed `Code`. Binding and context errors retain their known code; several untyped base errors have an operation-level fallback. |
-| 6. Plugins | `Plugin` and `Registrar` for tools, Providers, commands, `tool.before`, `tool.after`, `turn.before`, `step.after`, `turn.end`. Configuration and item-level replacements are checked during composition. Other registrar roles and hook points are not exposed. |
-| 7. Serve | Base plugin RPC server for registration, tools, ask, progress, hooks, commands, Providers, and shutdown. Flags for in-process-only tools, hooks and commands. An item discovered in setup gets a `not_supported` initialize reply with no registration. Served Provider credential lookup is not exposed through `ProviderContext` yet. |
-| 8. Process plugins | Explicit launch specs require a plugin host and imply environment discovery; `WithPluginHost(false)` with listed process plugins is rejected. Startup failure is `invalid_composition`. |
-| 9. Testing | Scripted Provider indexed by the final request, `modulartest.Agent` with a memory environment by default, `Answers` (`Handle` and `AssertDone`), six fixtures, and the shared runner with exact and substring expectations. `MemoryEnvironment`, `OverWire` (the real plugin binding over a pipe), and `Restart` (in-process simulated interruption, preserving the configured store). Real process and crash cleanup are covered by the shared scenarios, not by `Restart`. |
-| 10. Guides | Offline examples and placement as listed above. |
-| 11. Providers | Go `Provider` with model catalog and request functions. OpenAI Responses and Anthropic Messages, using `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`; both tested over loopback. Model errors are recorded. A cancelled served request emits no `provider.response`; served Providers lower unsupported reasoning levels. `outOfReach` descriptions are human-facing. |
-| 12. Nested calls | `tc.Tools.List(ctx)` and `tc.Tools.Call(ctx, name, input)` work in both placements, through the Harness. The maximum depth is eight edges below a root call. The child has its own checks, commits, and settlement; it stays in history but out of the model context and `PromptResult.ToolResults()`. `modelTools` narrows the model offer without changing plugin access. ACP announces the parent; the plugin binding supports `host/tools/list`, `host/tools/call`, `env/list` and `host/env/list`. |
-| 13. Declaration and ACP | `Declaration` and `ServeACP` publish the same SDK declaration, including the selected Runtime’s nested-call support, queued recovery policy, store erasure, and the environment’s containment and file confinement. Embedded reopen waits for recovery; ACP reopen does not. |
-| 14. HTTP history | `ServeHistory` binds plaintext only on loopback. It serves `FileHistory`, `HTTPHistory` (as an authenticated relay) or `HistoryServiceFiles`; `MemoryHistory` requires `HistoryOptions.AllowVolatileForTests`. |
+| Agent composition | Functional options; three durability modes; `WithRuntime` with `TransientRuntime()` and `DurableRuntime()`; history and environment overrides; Provider catalog and default model; settings and approval. Kept and durable need persistent history. The default local environment also needs `WithDataDir` in those modes. |
+| Sessions | `Session(ctx, ...SessionOptions)`, `OpenSession`, `Sessions`, `SessionInfo`, `Prompt`, `PromptStream`, `LastTurn`, `Send`, `Cancel`, `Settings`, `SetSetting`, `Fork`, `Commands`, `RunCommand`, `WaitIdle` and `Close`. Keyed prompts and schema-checked JSON results (including null). Events replay gated committed entries and return a cursor on lag. |
+| Actors and limits | `WithSeveralActors`, `WithSessionLimits`, `WithTenants`; settings, tenant and initial actors in `SessionOptions`; `Join`, `Leave`, `As` and `SetLimit`. The declaration reflects the options. The standard agent leaves all three off. |
+| Questions and credentials | `WithOnQuestion`, session `OnQuestion`, `Questions` (open only), `Answer`, `Value` and tagged `Decline`. Without a handler, an approval is refused; another question waits while an eligible actor can answer it. `FileCredentials` stages and atomically activates or discards secrets. Only the stored name is returned. Leave-open calls are opt-in. |
+| Tools | Struct-derived or explicit JSON Schema, dispatch and transformed-result validation, cancellation, refusal, ask, progress, log, raw history pages and custom events. Scoped environment and nested calls work in both placements. A tool marked `InProcessOnly` can read named non-Provider credentials. Nesting is limited to eight edges below the root; nested results stay in history, outside the model context and `PromptResult.ToolResults()`. |
+| Plugins and hooks | Static tools, Providers, commands, Runtimes and environments, with item-level replacement. `Registrar.On` exposes the standard binding hooks with shared payloads; typed helpers are available for common points. `OnSessionPrepare` is local; `OnSessionEnd` is also served. Setup-time placement failures return `not_supported`, without registering a partial plugin. |
+| Providers | `Provider.Available`, `CatalogChanges.Changed()`, `ProviderContext.Credential()` and streamed pieces. Served Providers use `provider/models`, `provider/available`, `provider/request`, `provider/event`, the two `host/hook` callbacks and `host/credentials/read`. OpenAI Responses and Anthropic Messages by API key. Model failures settle the attempt; cancellation suppresses a late response callback. |
+| Errors | `*modular.Error` with a typed `Code`. Binding and context errors retain known codes; some untyped base errors still need operation-level fallbacks. |
+| Process plugins | Explicit process specs imply plugin hosting and environment discovery unless `WithPluginHost(false)` (a composition error). A configured plugin that fails to start invalidates the composition. |
+| Testing | Scripted Provider, memory environment, `Answers`, `OverWire`, simulated `Restart` and seven shared fixture plugins. Shared scenarios check real process termination separately from the simulated restart. |
+| ACP and history | Stdio and supplied streams, multi-project composition, project settings and MCP, and the SDK declaration. Embedded reopen waits for recovery; ACP reopen does not. `ServeHistory` serves file history, service files, or an authenticated HTTP relay; memory is test-only. |
+
+### Remaining Go gaps
+
+- The SDK does not yet expose all base roles: a developer tool source with change notification, a job owner and resumable job handles, and registrar History, Credential Store, Configuration and Interface roles. The bundled parts and the binding endpoints are not substitutes for those developer APIs.
+- Standard binding hooks are registerable, but not every point has a typed helper and a scoped SDK hook context. In-process-only hook points and answers such as plugin-defined hooks, join/leave observers, and pending from a tool gate still need SDK adapters. The Go SDK also does not yet expose all command-context callbacks or the embedded move, erase and direct-call operations.
+- Service placement over the new WebSocket transport needs Go host and server adapters. Stdio, the in-memory plugin binding and HTTP history are available; none of them is a replacement for WebSocket service placement.
 
 ## Where the base and the specification differ
 
@@ -101,24 +98,27 @@ Replace the Go ACP options description with:
 
 > `ServeACP(ctx, options ...ServeACPOptions)` accepts at most one options value. `Compose(ctx, project)` supplies a separate Agent bound to the canonical project. During reopen, `ACPReopeningSession(ctx)` returns the saved id. `ProjectSettings` returns new-session defaults; `ProjectMCP` returns trusted configured servers. `Input` and `Output` can replace stdin and stdout for the connection.
 
-### Guide 06: Provider catalog, readiness and served credentials — [API / Providers](../../docs/sdk/api.md#providers), [Contexts](../../docs/sdk/api.md#contexts)
+### Guides 04, 06 and 07 describe an earlier Go API
 
-Replace the Go catalog and readiness descriptions with:
+Replace the Go limitation in [Guide 04 / Answer from your UI](../../docs/sdk/guides/04-questions-and-approvals.md#ask-for-a-choice-and-answer-from-your-ui) with:
 
-> `Models` returns the full catalog. There is no SDK Provider-side `changed()` notifier. `Available` is exposed on `Provider` but not consulted by the embedded adapter; the Go plugin server answers `provider/available` with true.
+> Go can register an agent default with `WithOnQuestion` and a session override with `session.OnQuestion(ctx, handler)`. For a choice or text question, call `session.Questions(ctx)` and answer an open request with `session.Answer(ctx, id, modular.Value(text))` or `modular.Decline(reason)`. An approval still needs a present, eligible actor. The string `declined` is a text value, not a decline.
 
-Replace the Go cell for Provider credentials over the wire with:
+Replace the Go readiness and served-credentials limitations in [Guide 06](../../docs/sdk/guides/06-write-a-provider.md) with:
 
-> Not supported by the Go SDK server. `ProviderContext.Credential()` reads the Provider's configured environment key locally; in a served Provider it does not route to the host's credential store.
-### Embedded questions and hook registration — `docs/sdk/api.md`, Questions and Hooks
+> Go consults an optional `Provider.Available` callback. Give the Provider a `*modular.CatalogChanges` and call its `Changed()` method after replacing the catalog. `ProviderContext.Credential()` reads the Provider's own credential from the agent's store in process or through `host/credentials/read` when served. Credential errors can still occur after admission.
 
-For Go question examples use:
+Replace the Go hook placement sentence in [Guide 07](../../docs/sdk/guides/07-hooks.md#keep-local-hooks-local) with:
 
-> Register the agent handler with `WithOnQuestion(handler)` or override it with `session.OnQuestion(ctx, handler)`. The embedded Session does not expose `Questions` or `Answer`. Give the UI the question from the handler and return the UI's decision through that handler.
+> Go's `OnSessionEnd` is servable. `OnSessionPrepare` stays in process, and `Registrar.On(point, handler, options...)` registers the standard binding hooks with their shared payload and answer shapes. Use `HookOrder` for explicit order.
 
-For Go hook examples use:
+### Duplicate credentials option — [API / Building an agent](../../docs/sdk/api.md#building-an-agent)
 
-> Register with `OnToolBefore`, `OnToolAfter`, `OnTurnBefore`, `OnStepAfter` or `OnTurnEnd` and use `HookOrder` for explicit order. Use `Gate{Input: input}` to replace tool input and `StepDecision{End: reason}` to end a turn. The Go registrar does not provide a generic `On` or expose the full hook table. Both `OnSessionPrepare` and `OnSessionEnd` are in-process only in the Go SDK, although the binding carries `session.end`.
+Replace the first credentials row below `environment` with:
+
+> | `credentials` | a credential store | environment variables. A writable store (such as `fileCredentials(path)`) implements the [secret staging operations](#the-other-parts), so a `secret` question can be answered. |
+
+Remove the duplicate credentials row below `tenants`.
 
 ### Local environment declaration — `docs/sdk/concepts.md`, Defaults; `docs/sdk/api.md`, The declaration
 
@@ -193,6 +193,6 @@ The validation sentence omits when the check happens and what an invalid complet
 ### Findings from guides 05 and 09
 
 - **[API — Sessions and turns](../../docs/sdk/api.md#sessions-and-turns):** Add: “`lastTurn()` returns the latest settled turn as a PromptResult, or no value if none exists; it does not admit input. In Go, call `LastTurn(ctx)` and check the error and the possibly nil result.”
-- **[API — The agent](../../docs/sdk/api.md#the-agent) and [Actors and rights](../../docs/sdk/api.md#actors-and-rights):** For the Go guide, replace the session-options and actor-selection instructions with: “Call `Agent.Session(ctx)` without options. Set new-session defaults with `WithSettings`. The embedded actor is `user`; the Go SDK does not expose `actors`, `tenant`, or actor-selection session methods. ACP authenticates its own actor.”
+- **[API — The agent](../../docs/sdk/api.md#the-agent) and [Actors and rights](../../docs/sdk/api.md#actors-and-rights):** Use this Go spelling: “Call `Agent.Session(ctx, modular.SessionOptions{Settings: settings, Tenant: tenant, Actors: actors})` to override session defaults. With the relevant creation options enabled, call `Join`, `Leave`, `As` and `SetLimit` on an embedded session. ACP authenticates its own actor.”
 - **[API — The declaration](../../docs/sdk/api.md#the-declaration):** Go accepts an explicit persistent store with `Ephemeral` but does not declare `portableSessions` in that mode. In the guide, say: “Use `Kept` or `Durable` with a persistent store for portable sessions.”
 - **[Placement — Services](../../docs/sdk/placement.md#services):** Use this Go spelling: “`modular.HTTPHistory(url, tokenFile)` creates the client store. `modular.ServeHistory(ctx, store, modular.HistoryOptions{Address: address, TokenFile: tokenFile})` runs the service until its context is cancelled; it does not return a listener address.”

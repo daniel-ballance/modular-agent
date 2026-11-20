@@ -135,7 +135,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 			opts = append(opts, modular.WithPluginHost(true), modular.WithProcessPlugin(modular.ProcessPlugin{Command: []string{"node", script}, Env: env}))
 		}
 	}
-	return modular.New(ctx, append(opts, modular.WithSettings(settings))...)
+	return modular.New(ctx, append(opts, modular.WithSettings(settings), modular.WithCredentials(d.auth().CredentialStore()))...)
 }
 func scripted(path, log string) (modular.Provider, error) {
 	var script []modulartest.Reply
