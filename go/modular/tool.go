@@ -163,6 +163,10 @@ type ToolContext struct {
 	refused                    atomic.Pointer[string]
 	ask                        func(context.Context, Question, AskOptions) (Answer, error)
 	progress                   func(string)
+	host                       api.API
+	server                     *pluginrpc.Server
+	plugin                     string
+	only                       bool
 }
 
 func (t *ToolContext) Cancelled() <-chan struct{} { return t.ctx.Done() }
@@ -230,6 +234,7 @@ type toolSource struct {
 	tools  []Tool
 	a      api.API
 	server *pluginrpc.Server
+	plugin string
 }
 
 func (s *toolSource) Tools(api.Session) []api.Tool {
@@ -242,7 +247,7 @@ func (s *toolSource) Tools(api.Session) []api.Tool {
 	return defs
 }
 func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call, progress func(string)) api.ToolResult {
-	tc := &ToolContext{SessionID: session.ID, ActorID: call.Actor, CallID: call.ID, ctx: ctx, progress: progress}
+	tc := &ToolContext{SessionID: session.ID, ActorID: call.Actor, CallID: call.ID, ctx: ctx, progress: progress, host: s.a, server: s.server, plugin: s.plugin}
 	tc.Tools = ToolCalls{tc: tc, port: api.InvocationTools(ctx)}
 	tc.Environment = ToolEnvironment{tc: tc, project: session.Project}
 	if s.server != nil {
@@ -308,6 +313,7 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 		if t.definition.Name != call.Name {
 			continue
 		}
+		tc.only = t.only
 		output, err := t.run(ctx, call.Input, tc)
 		tc.settled.Store(true)
 		result := api.ToolResult{Call: call.ID, Name: call.Name, Status: "completed"}

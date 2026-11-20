@@ -3,6 +3,7 @@ package modular
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -47,14 +48,16 @@ type Command struct {
 	InProcessOnly, UsesModel bool
 }
 type Registrar struct {
-	config    map[string]any
-	tools     []Tool
-	hooks     []hookRegistration
-	commands  []Command
-	providers []Provider
-	items     map[string]bool
-	stopped   bool
-	err       error
+	config      map[string]any
+	tools       []Tool
+	hooks       []hookRegistration
+	commands    []Command
+	providers   []Provider
+	runtime     Runtime
+	environment Environment
+	items       map[string]bool
+	stopped     bool
+	err         error
 }
 
 func (r *Registrar) Config() map[string]any {
@@ -322,9 +325,29 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 		}
 		return err
 	}
-	err = h.LoadItems(api.Plugin{Name: p.Name, Close: p.Stop, Setup: func(a api.API) error {
+	stop := p.Stop
+	if env := r.environment; env != nil {
+		stop = func() error {
+			err := env.Close()
+			if p.Stop != nil {
+				return errors.Join(err, p.Stop())
+			}
+			return err
+		}
+	}
+	err = h.LoadItems(api.Plugin{Name: p.Name, Close: stop, Setup: func(a api.API) error {
+		if r.runtime != nil {
+			if err := runtimeSetup(a, r.runtime); err != nil {
+				return err
+			}
+		}
+		if r.environment != nil {
+			if err := a.Provide("working-environment", r.environment); err != nil {
+				return err
+			}
+		}
 		if len(r.tools) > 0 {
-			if err := a.Provide("tools.sdk."+p.Name, &toolSource{a: a, tools: r.tools}); err != nil {
+			if err := a.Provide("tools.sdk."+p.Name, &toolSource{a: a, tools: r.tools, plugin: p.Name}); err != nil {
 				return err
 			}
 		}
@@ -399,8 +422,8 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 		}
 		return nil
 	}}, p.Replaces)
-	if err != nil && p.Stop != nil {
-		_ = p.Stop()
+	if err != nil && stop != nil {
+		_ = stop()
 	}
 	return err
 }

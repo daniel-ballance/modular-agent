@@ -17,7 +17,9 @@ import (
 
 func TestHistoryBindingContract(t *testing.T) {
 	dir := t.TempDir()
-	s, err := historyhttp.New(dir, 120*time.Millisecond)
+	// The contract test does multiple fsyncs between renew and erase; allow for slow disks.
+	const ttl = 3 * time.Second
+	s, err := historyhttp.New(dir, ttl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +81,7 @@ func TestHistoryBindingContract(t *testing.T) {
 	}
 	needRetryAfter := func(out map[string]any) {
 		t.Helper()
-		if delay, ok := out["retryAfterMs"].(float64); !ok || delay <= 0 || delay > 120 {
+		if delay, ok := out["retryAfterMs"].(float64); !ok || delay <= 0 || delay > float64(ttl.Milliseconds()) {
 			t.Fatalf("held did not declare time left on the lease: %v", out)
 		}
 	}
@@ -143,7 +145,7 @@ func TestHistoryBindingContract(t *testing.T) {
 	call("POST", "/v1/sessions/one/lease/"+lease+"/renew", "", "token", 409, "lost")
 	call("POST", "/v1/sessions/one/entries", appendBody, "token", 409, "lost")
 	next := call("POST", "/v1/sessions/one/lease", `{"owner":"second"}`, "token", 200, "")["lease"].(string)
-	time.Sleep(160 * time.Millisecond)
+	time.Sleep(ttl + 40*time.Millisecond)
 	call("POST", "/v1/sessions/one/lease/"+next+"/renew", "", "token", 409, "lost")
 	call("POST", "/v1/sessions/one/entries", `{"lease":"`+next+`","entries":[]}`, "token", 409, "lost")
 	call("POST", "/v1/sessions/one/erase", `{"entryIds":["b"]}`, "token", 200, "")

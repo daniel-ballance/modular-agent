@@ -73,6 +73,9 @@ func sdkEvent(e api.Event) Event {
 			return TextEvent{EventHeader: h, Delta: p.Text}
 		}
 		piece := map[string]any{"delta": p.Text}
+		if id := api.Decode[struct{ ToolCallID string }](p.Wire).ToolCallID; id != "" {
+			piece["toolCallId"] = id
+		}
 		if e.Step != "" {
 			piece["stepId"] = e.Step
 		}

@@ -20,7 +20,6 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/configuration"
 	"github.com/daniel-ballance/modular-agent/go/conformancemodel"
 	"github.com/daniel-ballance/modular-agent/go/contextview"
-	"github.com/daniel-ballance/modular-agent/go/durable"
 	"github.com/daniel-ballance/modular-agent/go/harness"
 	"github.com/daniel-ballance/modular-agent/go/jobs"
 	"github.com/daniel-ballance/modular-agent/go/local"
@@ -29,7 +28,6 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/questions"
-	"github.com/daniel-ballance/modular-agent/go/transient"
 )
 
 const localActor = "user"
@@ -65,6 +63,7 @@ type options struct {
 	process                                 []ProcessPlugin
 	wire                                    []wirePlugin
 	environment                             Environment
+	runtime                                 Runtime
 	credentials                             CredentialStore
 	severalActors, sessionLimits            bool
 	tenants                                 map[string]Tenant
@@ -288,9 +287,12 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err != nil {
 		return nil, appError(err, InvalidComposition)
 	}
-	runtime := transient.Plugin()
-	if o.durability == Durable {
-		runtime = durable.Plugin()
+	runtime := o.runtime
+	if runtime == nil {
+		runtime = TransientRuntime()
+		if o.durability == Durable {
+			runtime = DurableRuntime()
+		}
 	}
 	store := o.history.make
 	if store == nil && o.durability == Ephemeral {
@@ -319,7 +321,8 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	core := []api.Plugin{historyPlugin,
 		{Name: "configuration", Setup: func(a api.API) error { return a.Provide("configuration", sessionDefaults{&defaults}) }},
 		{Name: "sdk-credentials", Setup: func(a api.API) error { return a.Provide("credentials", o.credentials) }},
-		configuration.BoundProject(project), environment, runtime,
+		configuration.BoundProject(project), environment,
+		{Name: "sdk-runtime", Setup: func(host api.API) error { return runtimeSetup(host, runtime) }},
 		modelselect.Plugin(), contextview.PluginWithCompaction(o.compaction), questions.Plugin(), jobs.Plugin(), acpinterface.Plugin(project),
 		mcptools.Configured(o.mcp, project, o.mcpWarning),
 		{Name: "sdk-model-admission", Setup: func(host api.API) error {
@@ -400,6 +403,14 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 			return nil, appError(ctx.Err(), CancelledCode)
 		}
 		return nil, &Error{Code: InvalidComposition, Message: err.Error()}
+	}
+	selectedRuntime, err := a.a.Get("runtime")
+	if err != nil {
+		return nil, appError(err, InvalidComposition)
+	}
+	continues := selectedRuntime.(Runtime).Declaration().Durable
+	if continues && o.durability != Durable || !continues && o.durability == Durable {
+		return nil, &Error{Code: InvalidComposition, Message: "selected Runtime does not match the durability mode"}
 	}
 	models := a.Models()
 	if defaults.Model == "" && len(models) == 1 {

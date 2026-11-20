@@ -146,6 +146,8 @@ func outputIn(e api.Event, v outputEvent) (api.Event, error) {
 }
 
 func (r *remote) outputHandler(ctx context.Context, id int, batch api.OutputBatch) (api.Decision, error) {
+	r.inOutput.Add(1)
+	defer r.inOutput.Add(-1)
 	events := make([]outputEvent, 0, len(batch.Events))
 	byKind := map[string][]api.Event{}
 	for _, e := range batch.Events {

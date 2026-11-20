@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"os"
-	"slices"
 )
 
 type TenantConfig struct {
@@ -70,7 +69,7 @@ func (c *client) Limit(ctx context.Context, id string, rights []string) error {
 		check = api.Rights
 	}
 	for _, r := range check {
-		if slices.Contains(api.Rights, r) && !c.authorizedBy(uncapped, ctx, r) {
+		if !c.authorizedBy(uncapped, ctx, r) {
 			return api.ErrAuthority
 		}
 	}

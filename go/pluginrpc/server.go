@@ -150,6 +150,16 @@ func (s *Server) Callback(ctx context.Context, method string, params Object, out
 	return s.peer.Call(ctx, method, params, out)
 }
 
+// Notify sends a notification on behalf of the current served handler.
+func (s *Server) Notify(ctx context.Context, method string, params Object) error {
+	id := RequestID(ctx)
+	if len(id) == 0 || ctx.Err() != nil {
+		return fault("invalid_request", "no active request")
+	}
+	params["parentRequestId"] = id
+	return s.peer.Send(method, params)
+}
+
 func (s *Server) ownEnvironment(env api.WorkingEnvironment) {
 	s.envMu.Lock()
 	if !s.envClosed {
