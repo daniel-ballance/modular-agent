@@ -52,6 +52,11 @@ struct Contents {
     logins: std::collections::BTreeMap<String, Login>,
     #[serde(default)]
     answers: std::collections::BTreeMap<String, String>,
+    #[serde(
+        default,
+        skip_serializing_if = "modular_agent::SecretJournal::is_empty"
+    )]
+    staging: modular_agent::SecretJournal,
 }
 
 #[derive(Clone)]
@@ -206,7 +211,9 @@ impl AuthFile {
         self.answer_name(name)?;
         let _lock = self.lock()?;
         let mut contents = self.read()?;
-        contents.answers.insert(name.into(), value.into());
+        contents
+            .staging
+            .replace(&mut contents.answers, name, Some(value.into()))?;
         self.write(&contents)
     }
 }
@@ -227,6 +234,39 @@ impl modular_agent::CredentialStore for AuthFile {
     }
     fn write(&self, name: &str, value: &str) -> modular_agent::Result<()> {
         Ok(self.put_answer(name, value)?)
+    }
+    fn stage(
+        &self,
+        receipt: modular_agent::StagingReceipt,
+        value: &str,
+    ) -> modular_agent::Result<()> {
+        self.answer_name(&receipt.name)?;
+        let _lock = self.lock()?;
+        let mut contents = self.read()?;
+        contents.staging.stage(receipt, value)?;
+        Ok(self.write(&contents)?)
+    }
+    fn lookup_staged(
+        &self,
+        request: &modular_agent::SecretRequest,
+    ) -> modular_agent::Result<Option<modular_agent::StagingReceipt>> {
+        Ok(self.read()?.staging.lookup(request))
+    }
+    fn activate(
+        &self,
+        request: &modular_agent::SecretRequest,
+    ) -> modular_agent::Result<modular_agent::Activation> {
+        let _lock = self.lock()?;
+        let mut contents = self.read()?;
+        let decision = contents.staging.activate(request, &mut contents.answers)?;
+        self.write(&contents)?;
+        Ok(decision)
+    }
+    fn discard(&self, request: &modular_agent::SecretRequest) -> modular_agent::Result<()> {
+        let _lock = self.lock()?;
+        let mut contents = self.read()?;
+        contents.staging.discard(request);
+        Ok(self.write(&contents)?)
     }
     fn writable(&self) -> bool {
         true

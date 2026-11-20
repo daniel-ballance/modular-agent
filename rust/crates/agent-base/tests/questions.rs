@@ -138,7 +138,7 @@ async fn secret_answer_exists_only_in_the_credential_store() {
     assert!(rig.results()[0].text.contains("service_token"));
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
-        std::fs::metadata(rig.root.path().join("answers/service_token"))
+        std::fs::metadata(rig.root.path().join("answers/credentials.json"))
             .unwrap()
             .permissions()
             .mode()

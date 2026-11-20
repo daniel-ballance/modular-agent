@@ -20,7 +20,18 @@ pub struct Session {
     inner: Arc<Inner>,
     id: String,
     driver: Arc<Driver>,
+    actor: String,
 }
+
+/// Membership and a grant for an embedded actor.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Actor {
+    pub id: String,
+    pub kind: String,
+    pub rights: Rights,
+}
+
+pub use base::Authority as Rights;
 
 #[derive(Default)]
 pub(crate) struct Driver {
@@ -34,6 +45,17 @@ pub enum Timing {
     Steer,
     After,
     Propose,
+}
+
+impl From<Timing> for base::Timing {
+    fn from(timing: Timing) -> Self {
+        match timing {
+            Timing::Now => Self::Now,
+            Timing::Steer => Self::Steer,
+            Timing::After => Self::After,
+            Timing::Propose => Self::Propose,
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -161,11 +183,218 @@ impl Session {
                     driver
                 })
         };
-        Session { inner, id, driver }
+        Session {
+            inner,
+            id,
+            driver,
+            actor: LOCAL.into(),
+        }
     }
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    fn scope(&self) -> base::Scope {
+        base::Scope {
+            actor: self.actor.clone(),
+            ..base::Scope::session(&self.id)
+        }
+    }
+
+    fn require(&self, right: &str) -> Result<()> {
+        self.snapshot()?;
+        base::require(
+            self.inner.harness.as_ref(),
+            &base::Scope::session(&self.id),
+            right,
+        )?;
+        base::require(self.inner.harness.as_ref(), &self.scope(), right)?;
+        Ok(())
+    }
+
+    fn check_actor_option(&self) -> Result<()> {
+        if !self.inner.several_actors {
+            return Err(Error::new(
+                Code::NotSupported,
+                "several actors are disabled",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Act for another session member. The local principal remains the sponsor.
+    pub fn r#as(&self, actor_id: &str) -> Result<Self> {
+        if actor_id != LOCAL {
+            self.check_actor_option()?;
+            if !base::actors(&self.snapshot()?).contains_key(actor_id) {
+                return Err(Error::new(Code::NotFound, "unknown actor"));
+            }
+        }
+        Ok(Self {
+            actor: actor_id.into(),
+            ..self.clone()
+        })
+    }
+
+    pub fn join(&self, actor: Actor) -> Result<()> {
+        self.join_with(actor, None)
+    }
+
+    pub fn join_with(&self, actor: Actor, granted_by: Option<&str>) -> Result<()> {
+        self.check_actor_option()?;
+        let who = match granted_by {
+            Some(id) => self.r#as(id)?,
+            None => self.clone(),
+        };
+        who.require("grant")?;
+        if actor.id.is_empty()
+            || actor.id.starts_with("job:")
+            || actor.id == LOCAL
+            || actor.id == base::ACP_HOST_ACTOR
+            || !matches!(actor.kind.as_str(), "user" | "host" | "agent" | "plugin")
+            || !Rights::full().contains(&actor.rights)
+        {
+            return Err(Error::new(
+                Code::InvalidParams,
+                "invalid actor identity, kind or rights",
+            ));
+        }
+        let h = self.inner.harness.as_ref();
+        if !h
+            .authority(&self.id, &who.actor)?
+            .intersect(&h.authority(&self.id, LOCAL)?)
+            .contains(&actor.rights)
+        {
+            return Err(Error::new(
+                Code::Forbidden,
+                "cannot grant a right you do not have",
+            ));
+        }
+        h.append(&who.scope(), "interface.sdk", base::Draft::new("actor.grant", false,
+            json!({"actor":actor.id,"kind":actor.kind,"authority":actor.rights,"sponsor":LOCAL})))?;
+        base::requests(h)?.presence(&self.id, &actor.id, true);
+        Ok(())
+    }
+
+    pub fn leave(&self, actor_id: &str) -> Result<()> {
+        self.check_actor_option()?;
+        let data = self.snapshot()?;
+        if actor_id != self.actor {
+            self.require("grant")?;
+        }
+        if !base::actors(&data).contains_key(actor_id) || actor_id == LOCAL {
+            return Err(Error::new(Code::NotFound, "unknown actor"));
+        }
+        let h = self.inner.harness.as_ref();
+        h.append(
+            &self.scope(),
+            "interface.sdk",
+            base::Draft::new(
+                "actor.left",
+                false,
+                json!({"actorId":actor_id,"sponsor":LOCAL}),
+            ),
+        )?;
+        base::requests(h)?.presence(&self.id, actor_id, false);
+        Ok(())
+    }
+
+    pub fn set_limit(&self, rights: Option<Rights>) -> Result<()> {
+        if !self.inner.session_limits {
+            return Err(Error::new(
+                Code::NotSupported,
+                "session limits are disabled",
+            ));
+        }
+        self.require("administer")?;
+        let h = self.inner.harness.as_ref();
+        if let Some(rights) = &rights
+            && !Rights::full()
+                .intersect(&h.authority(&self.id, &self.actor)?)
+                .intersect(&h.authority(&self.id, LOCAL)?)
+                .contains(rights)
+        {
+            return Err(Error::new(
+                Code::Forbidden,
+                "cannot grant a right you do not have",
+            ));
+        }
+        h.append(
+            &self.scope(),
+            "interface.sdk",
+            base::Draft::new("limit", false, json!({"rights":rights,"sponsor":LOCAL})),
+        )?;
+        Ok(())
+    }
+
+    /// List open questions visible to this actor.
+    pub fn questions(&self) -> Result<Vec<crate::Question>> {
+        self.require("watch")?;
+        let h = self.inner.harness.as_ref();
+        Ok(base::requests(h)?
+            .visible(h, &self.id, &self.actor)?
+            .into_iter()
+            .filter(|q| q.answerable && q.answer.is_none())
+            .map(|q| crate::Question::from_base(&q))
+            .collect())
+    }
+
+    /// Answer an open question by id.
+    pub async fn answer(&self, id: &str, answer: crate::Answer) -> Result<()> {
+        self.snapshot()?;
+        let api: base::Api = self.inner.harness.clone();
+        let mut q = None;
+        for data in api.list(None)? {
+            q = base::questions(&data)?
+                .into_iter()
+                .find(|q| q.id == id && q.route.contains(&self.id));
+            if q.is_some() {
+                break;
+            }
+        }
+        let q = q.ok_or_else(|| Error::new(Code::NotFound, "unknown question"))?;
+        self.require(if q.kind == base::RequestKind::Approval {
+            "approve"
+        } else {
+            "answer"
+        })?;
+        crate::events::answer(api, &self.id, &self.actor, &q, answer).await
+    }
+
+    /// Override the agent handler for this session. Use a pending future if the UI
+    /// will answer by id; the SDK drops it when the question settles.
+    pub fn on_question<F, Fut>(&self, handler: F) -> Result<()>
+    where
+        F: Fn(crate::Question) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = crate::Answer> + Send + 'static,
+    {
+        self.require("answer")?;
+        if self.actor != LOCAL {
+            return Err(Error::new(
+                Code::NotSupported,
+                "register handlers on the local session",
+            ));
+        }
+        self.inner
+            .hub
+            .session_handlers
+            .lock()
+            .unwrap()
+            .insert(self.id.clone(), Arc::new(move |q| Box::pin(handler(q))));
+        base::requests(self.inner.harness.as_ref())?.presence(&self.id, LOCAL, true);
+        Ok(())
+    }
+
+    pub async fn release(&self, input_id: &str, timing: Timing, declined: bool) -> Result<()> {
+        self.check_actor_option()?;
+        self.require("input")?;
+        self.inner
+            .harness
+            .release(&self.scope(), input_id, timing.into(), declined)
+            .await?;
+        drop(self.drive());
+        Ok(())
     }
 
     /// Admit input with timing `now` and wait for the turn that takes it.
@@ -223,8 +452,7 @@ impl Session {
         } else {
             0
         };
-        let scope = base::Scope::session(&self.id);
-        base::require(self.inner.harness.as_ref(), &scope, "watch")?;
+        self.require("watch")?;
         let existing = data
             .entries
             .iter()
@@ -255,7 +483,7 @@ impl Session {
             loop {
                 match events.recv().await {
                     Ok(event) if event.session_id == me.id => {
-                        base::require(me.inner.harness.as_ref(), &scope, "watch")?;
+                        me.require("watch")?;
                         if event.event_type == "entry" {
                             let entry = &event.data["entry"];
                             let Some(id) = entry["id"].as_str() else { continue };
@@ -364,26 +592,27 @@ impl Session {
         key: Option<String>,
         shape: Option<Value>,
     ) -> Result<InputReceipt> {
-        self.snapshot()?;
+        if matches!(timing, Timing::Propose) {
+            self.check_actor_option()?;
+        }
+        self.require(if matches!(timing, Timing::Propose) {
+            "propose"
+        } else {
+            "input"
+        })?;
+        let sponsor = (self.actor != LOCAL).then_some(LOCAL);
         let h = &self.inner.harness;
         let receipt = if let Some(shape) = shape {
             base::schema::compile(&shape)
                 .map_err(|e| Error::new(Code::InvalidParams, e.to_string()))?;
-            h.submit_shaped(&self.id, LOCAL, &text, key, shape).await?
+            h.submit_shaped_as(&self.scope(), sponsor, &text, key, shape)
+                .await?
+        } else if let Some(sponsor) = sponsor {
+            h.submit_as(&self.scope(), sponsor, &text, timing.into(), key)
+                .await?
         } else {
-            h.submit(
-                &self.id,
-                LOCAL,
-                &text,
-                match timing {
-                    Timing::Now => base::Timing::Now,
-                    Timing::Steer => base::Timing::Steer,
-                    Timing::After => base::Timing::After,
-                    Timing::Propose => base::Timing::Propose,
-                },
-                key,
-            )
-            .await?
+            h.submit(&self.id, &self.actor, &text, timing.into(), key)
+                .await?
         };
         let taken = if receipt.erased {
             "handedBack".into()
@@ -454,7 +683,7 @@ impl Session {
 
     /// Cancel the current turn and hand queued inputs back.
     pub async fn cancel(&self) -> Result<Vec<HandedBack>> {
-        self.snapshot()?;
+        self.require("cancel")?;
         Ok(self
             .inner
             .harness
@@ -469,12 +698,13 @@ impl Session {
     }
 
     pub fn settings(&self) -> Result<Value> {
+        self.require("watch")?;
         Ok(base::portable::settings_to_wire(&self.snapshot()?.settings))
     }
 
     /// This agent refuses to change settings while a turn is running.
     pub fn set_setting(&self, key: &str, value: Value) -> Result<()> {
-        self.snapshot()?;
+        self.require("settings")?;
         if key.starts_with('_') {
             return Err(Error::new(
                 Code::InvalidParams,
@@ -494,15 +724,13 @@ impl Session {
                 .ok_or_else(|| Error::new(Code::InvalidRequest, "invalid model"))?;
             crate::agent::require_model(self.inner.harness.as_ref(), name)?;
         }
-        self.inner
-            .harness
-            .settings(&base::Scope::session(&self.id), patch)?;
+        self.inner.harness.settings(&self.scope(), patch)?;
         Ok(())
     }
 
     /// Erase kept entries and their known copies using the installed history store.
     pub async fn erase(&self, entries: Vec<String>) -> Result<crate::ErasureReport> {
-        self.snapshot()?;
+        self.require("erase")?;
         let harness = self.inner.harness.as_ref();
         if harness.declaration()?["erasure"] != true {
             return Err(Error::new(
@@ -529,10 +757,7 @@ impl Session {
             return Err(Error::new(Code::Busy, "erasure requires an idle session"));
         }
         let report = harness
-            .erase(
-                &base::Scope::session(&self.id),
-                entries.into_iter().collect(),
-            )
+            .erase(&self.scope(), entries.into_iter().collect())
             .await?;
         let mut out = crate::ErasureReport {
             out_of_reach: report.out_of_reach,
@@ -566,6 +791,7 @@ impl Session {
 
     /// Fork at a recorded entry, or at the current position.
     pub fn fork_with(&self, entry_id: Option<&str>) -> Result<Session> {
+        self.require("settings")?;
         let data = self.snapshot()?;
         if entry_id.is_some_and(|id| !data.entries.iter().any(|e| e.id == id)) {
             return Err(Error::new(Code::NotFound, "unknown fork point"));
@@ -573,7 +799,7 @@ impl Session {
         let id = self
             .inner
             .harness
-            .fork(&base::Scope::session(&self.id), entry_id.map(str::to_owned))?;
+            .fork(&self.scope(), entry_id.map(str::to_owned))?;
         let agent = crate::Agent {
             inner: self.inner.clone(),
         };
@@ -583,6 +809,7 @@ impl Session {
 
     /// The outcome of the session's most recent turn, as recorded.
     pub fn last_turn(&self) -> Result<Option<PromptResult>> {
+        self.require("watch")?;
         let data = self.inner.harness.snapshot(&self.id)?;
         let Some(end) = data.entries.iter().rev().find(|e| e.kind == "turn.end") else {
             return Ok(None);
@@ -606,6 +833,7 @@ impl Session {
     /// Wait for admitted work to finish without admitting input or closing
     /// the session. Proposed or parked input does not keep it busy.
     pub async fn wait_idle(&self) -> Result<()> {
+        self.require("watch")?;
         let mut events = self.inner.hub.events.subscribe();
         loop {
             {
@@ -632,15 +860,12 @@ impl Session {
 
     /// Run a tool on behalf of the local actor, outside the model's conversation.
     pub async fn call_tool(&self, name: &str, input: Value) -> Result<ToolResult> {
+        self.require("tools")?;
         let data = self.snapshot()?;
         let api: base::Api = self.inner.harness.clone();
         let runtime = base::session_runtime(api.as_ref(), &data)?;
         let result = runtime
-            .tool(
-                api,
-                base::Scope::session(&self.id),
-                base::ToolCall::new(name, input),
-            )
+            .tool(api, self.scope(), base::ToolCall::new(name, input))
             .await?;
         Ok(ToolResult::from_base(name.into(), result))
     }
@@ -649,6 +874,7 @@ impl Session {
     ///
     /// Not yet the actor's gated view: every entry the session keeps.
     pub fn history(&self) -> Result<Vec<Value>> {
+        self.require("watch")?;
         let data = self.inner.harness.snapshot(&self.id)?;
         data.entries
             .iter()
@@ -659,12 +885,13 @@ impl Session {
 
     /// List the commands available to the local actor.
     pub fn commands(&self) -> Result<Vec<String>> {
-        self.snapshot()?;
+        self.require("watch")?;
         Ok(self.inner.harness.commands())
     }
 
     /// Run a command without starting a turn. The result is text, if any.
     pub async fn run_command(&self, line: &str) -> Result<Option<String>> {
+        self.require("input")?;
         let line = line.trim().trim_start_matches('/');
         let (name, args) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         if !self.commands()?.iter().any(|command| command == name) {
@@ -676,7 +903,7 @@ impl Session {
         let value = self
             .inner
             .harness
-            .command(&base::Scope::session(&self.id), name, args.trim())
+            .command(&self.scope(), name, args.trim())
             .await?;
         Ok(if let Some(content) = value.get("content") {
             Some(base::wire::text(content))
@@ -691,7 +918,15 @@ impl Session {
     pub async fn close(&self) -> Result<()> {
         self.cancel().await?;
         let _run = self.driver.run.lock().await;
-        Ok(self.inner.harness.close(&self.id).await?)
+        self.inner.harness.close(&self.id).await?;
+        self.inner
+            .hub
+            .session_handlers
+            .lock()
+            .unwrap()
+            .remove(&self.id);
+        base::requests(self.inner.harness.as_ref())?.presence(&self.id, LOCAL, false);
+        Ok(())
     }
 }
 

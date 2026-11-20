@@ -17,14 +17,16 @@ pub enum Mode {
     Json,
 }
 
+type PendingAnswers =
+    std::collections::BTreeMap<String, (modular_agent::QuestionKind, oneshot::Sender<Answer>)>;
 #[derive(Clone, Default)]
-pub struct Questions(Arc<Mutex<std::collections::BTreeMap<String, oneshot::Sender<Answer>>>>);
+pub struct Questions(Arc<Mutex<PendingAnswers>>);
 impl Questions {
     pub fn install(&self, b: AgentBuilder) -> AgentBuilder {
         let this = self.clone();
         b.on_question(move |q| {
             let (tx, rx) = oneshot::channel();
-            this.0.lock().unwrap().insert(q.id, tx);
+            this.0.lock().unwrap().insert(q.id, (q.kind, tx));
             async move {
                 rx.await.unwrap_or(Answer::Declined {
                     reason: Some("terminal closed".into()),
@@ -34,18 +36,21 @@ impl Questions {
     }
 
     fn answer(&self, id: &str, value: &str) -> Result<()> {
-        let answer = match value {
-            "allow" => Answer::Allow,
-            "decline" => Answer::Declined {
-                reason: Some("declined".into()),
-            },
-            value => Answer::Value(value.into()),
-        };
-        self.0
+        let (kind, sender) = self
+            .0
             .lock()
             .unwrap()
             .remove(id)
-            .ok_or_else(|| anyhow!("no question named {id}"))?
+            .ok_or_else(|| anyhow!("no question named {id}"))?;
+        let answer = match value {
+            "allow" if kind == modular_agent::QuestionKind::Approval => Answer::Allow,
+            "decline" => Answer::Declined {
+                reason: Some("declined".into()),
+            },
+            value if kind == modular_agent::QuestionKind::Secret => Answer::Secret(value.into()),
+            value => Answer::Value(value.into()),
+        };
+        sender
             .send(answer)
             .map_err(|_| anyhow!("question is no longer answerable"))
     }

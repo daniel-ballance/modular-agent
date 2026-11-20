@@ -73,7 +73,9 @@ async fn terminal_secret_answers_bypass_ordinary_history_and_event_input() {
             .contains("TERMINAL-PRIVATE-547")
     );
     assert_eq!(
-        std::fs::read_to_string(root.path().join("answers/terminal_token")).unwrap(),
+        credentials_file::SecretFile(root.path().join("answers/credentials.json"))
+            .read("terminal_token")
+            .unwrap(),
         "TERMINAL-PRIVATE-547"
     );
     let entries: Vec<_> = std::fs::read_dir(root.path().join("sessions"))
