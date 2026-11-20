@@ -1,6 +1,7 @@
 //! A runner for the shared SDK scenarios (docs/sdk/testing.md#the-shared-scenarios).
 use modular_agent::{
-    Agent, Answer, Approval, Durability, ProcessPlugin,
+    Agent, Answer, Approval, Code, Durability, Error, ProcessPlugin, Session, SessionOptions,
+    Timing,
     testing::{Answers, answers, fixtures, test_agent},
 };
 use serde_json::Value;
@@ -145,6 +146,7 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent,
     std::fs::create_dir_all(run.project())?;
     let mut builder = test_agent()
         .script(scenario["model"].clone())
+        .several_actors(spec["severalActors"] == true)
         .project(run.project())
         .data_dir(run.data_dir())
         .durability(match spec["durability"].as_str() {
@@ -152,6 +154,11 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent,
             Some("durable") => Durability::Durable,
             _ => Durability::Ephemeral,
         });
+    if let Some(settings) = spec["settings"].as_object() {
+        for (key, value) in settings {
+            builder = builder.setting(key, value.clone());
+        }
+    }
     let config = serde_json::json!({"path": run.counter()});
     for name in spec["plugins"].as_array().into_iter().flatten() {
         let name = name.as_str().unwrap();
@@ -175,17 +182,93 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent,
             _ => Approval::Never,
         });
     }
-    let queue = spec["answers"].as_array().map(|list| {
-        answers(list.iter().map(|a| match a {
-            Value::String(s) if s == "allow" => Answer::Allow,
-            Value::String(_) => Answer::Declined { reason: None },
-            other => Answer::Value(other["value"].as_str().unwrap_or_default().into()),
-        }))
-    });
+    let queue = spec["answers"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(scenario_answer)
+                .collect::<modular_agent::Result<Vec<_>>>()
+                .map(answers)
+        })
+        .transpose()?;
     if let Some(queue) = &queue {
         builder = builder.answers(queue.clone());
     }
     Ok((builder.build().await?, queue))
+}
+
+fn scenario_answer(value: &Value) -> modular_agent::Result<Answer> {
+    if value == "allow" {
+        Ok(Answer::Allow)
+    } else if value == "decline" {
+        Ok(Answer::Declined { reason: None })
+    } else if let Some(value) = value["value"].as_str() {
+        Ok(Answer::Value(value.into()))
+    } else {
+        Err(Error::new(Code::InvalidParams, "invalid scenario answer"))
+    }
+}
+
+pub async fn new_session(agent: &Agent, scenario: &Value) -> modular_agent::Result<Session> {
+    let actors = scenario["agent"]
+        .get("actors")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    agent
+        .session_with(SessionOptions {
+            actors,
+            ..Default::default()
+        })
+        .await
+}
+
+async fn perform(
+    session: &Session,
+    step: &Value,
+) -> modular_agent::Result<Option<modular_agent::PromptResult>> {
+    let session = match step["as"].as_str() {
+        Some(actor) => session.r#as(actor)?,
+        None => session.clone(),
+    };
+    if let Some(prompt) = step["prompt"].as_str() {
+        return session.prompt(prompt).await.map(Some);
+    }
+    if let Some(input) = step["send"].as_str() {
+        let timing = step
+            .get("timing")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?
+            .unwrap_or(Timing::Now);
+        session.send(input, timing).await?;
+    } else if let Some(answer) = step.get("answer") {
+        let answer = scenario_answer(answer)?;
+        let question = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut open = session.questions()?;
+                if open.len() == 1 {
+                    return Ok::<_, Error>(open.remove(0));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            Error::new(
+                Code::Busy,
+                "expected exactly one open question within 10 seconds",
+            )
+        })??;
+        session.answer(&question.id, answer).await?;
+    } else if step["wait"] == true {
+        session.wait_idle().await?;
+        return session.last_turn();
+    } else {
+        return Err(Error::new(Code::InvalidParams, "unknown scenario step"));
+    }
+    Ok(None)
 }
 
 /// Whether a scenario applies to a placement.
@@ -222,8 +305,8 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
     let mut session_id = None;
     for (index, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
         let expect = &step["expect"];
-        let mut result = None;
-        if let Some(prompt) = step["prompt"].as_str() {
+        let result;
+        if step["reopen"] != true {
             if let Some(crash) = step.get("crashWhen") {
                 match crash_run(crash_agent, path, &run, index, crash) {
                     Ok(id) => session_id = Some(id),
@@ -233,7 +316,7 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
             }
             if current.is_none() {
                 match agent(&scenario, &run).await {
-                    Ok((a, queue)) => match a.session().await {
+                    Ok((a, queue)) => match new_session(&a, &scenario).await {
                         Ok(s) => {
                             session_id = Some(s.id().to_string());
                             current = Some((a, s, queue));
@@ -244,20 +327,20 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
                         }
                     },
                     Err(e) => {
-                        check_error(expect, &e, &mut |w| fail(index, w));
+                        fail(index, format!("compose agent: {e}"));
                         break;
                     }
                 }
             }
             let (_, session, _) = current.as_ref().unwrap();
-            match session.prompt(prompt).await {
-                Ok(r) => result = Some(r),
+            match perform(session, step).await {
+                Ok(r) => result = r,
                 Err(e) => {
                     check_error(expect, &e, &mut |w| fail(index, w));
                     continue;
                 }
             }
-        } else if step["reopen"] == true {
+        } else {
             if let Some((a, _, queue)) = current.take() {
                 let _ = a.close().await;
                 if let Some(Err(e)) = queue.map(|q| q.assert_done()) {
@@ -359,6 +442,7 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
             let (_, session, _) = current.as_ref().unwrap();
             let kinds: Vec<String> = session
                 .history()
+                .await
                 .unwrap_or_default()
                 .iter()
                 .map(|e| e["kind"].as_str().unwrap_or_default().to_string())
@@ -438,11 +522,28 @@ fn crash_run(
             .strip_prefix("SESSION ")
             .ok_or(format!("no session id: {line:?}"))?
             .to_string();
-        let count = crash["count"]
-            .as_u64()
-            .ok_or("only crashWhen.count is supported yet")?;
+        let reached: Box<dyn Fn() -> bool> =
+            match (crash["count"].as_u64(), crash["record"].as_str()) {
+                (Some(count), None) => Box::new(move || fixtures::count(&run.counter()) >= count),
+                (None, Some(kind)) => {
+                    // FileHistory publishes an atomic snapshot only after committing the entry.
+                    let snapshot = run.data_dir().join("sessions").join(format!("{id}.json"));
+                    Box::new(move || {
+                        std::fs::read(&snapshot)
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                            .and_then(|v| {
+                                v["entries"]
+                                    .as_array()
+                                    .map(|entries| entries.iter().any(|e| e["kind"] == kind))
+                            })
+                            .unwrap_or(false)
+                    })
+                }
+                _ => return Err("crashWhen needs exactly one count or record".into()),
+            };
         let deadline = Instant::now() + Duration::from_secs(30);
-        while fixtures::count(&run.counter()) < count {
+        while !reached() {
             if Instant::now() > deadline {
                 return Err("the crash condition never held".into());
             }

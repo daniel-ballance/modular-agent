@@ -96,7 +96,7 @@ async fn stored_sessions_and_provider_data_survive_reopen_but_stay_scoped() -> R
     let requests = b.lock().unwrap()[0].to_string();
     assert!(requests.contains("visible"));
     assert!(!requests.contains("providerData"));
-    assert!(!serde_json::to_string(&session.history()?)?.contains("providerData"));
+    assert!(!serde_json::to_string(&session.history().await?)?.contains("providerData"));
     agent.close().await
 }
 
@@ -153,7 +153,8 @@ async fn store_capabilities_control_erasure_and_service_eligibility() -> Result<
     let session = agent.session().await?;
     session.prompt("Erase my answer").await?;
     let response = session
-        .history()?
+        .history()
+        .await?
         .into_iter()
         .find(|e| e["kind"] == "response")
         .unwrap();
@@ -162,7 +163,8 @@ async fn store_capabilities_control_erasure_and_service_eligibility() -> Result<
     assert!(report.erased.iter().any(|entry| entry.id == id));
     assert!(
         session
-            .history()?
+            .history()
+            .await?
             .iter()
             .any(|e| e["id"] == id && e["message"].is_null())
     );
@@ -212,6 +214,35 @@ async fn step_after_refusal_fails_turn_with_its_reason_in_both_placements() -> R
         );
         agent.close().await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn built_in_parts_can_be_selected_explicitly() -> Result<()> {
+    use modular_agent::{Agent, Durability, durable_runtime, local_environment, transient_runtime};
+    let project = tempfile::tempdir()?;
+    let agent = Agent::builder()
+        .runtime(transient_runtime())
+        .environment(local_environment(Some(project.path().into())))
+        .build()
+        .await?;
+    assert!(
+        !agent.declaration()?["continuesAfterRestart"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(agent.declaration()?["confinesFiles"], false);
+    let session = agent.session().await?;
+    assert!(!session.id().is_empty());
+    agent.close().await?;
+    let data = tempfile::tempdir()?;
+    let mismatched = Agent::builder()
+        .data_dir(data.path())
+        .durability(Durability::Kept)
+        .runtime(durable_runtime())
+        .build()
+        .await;
+    assert!(matches!(mismatched, Err(e) if e.code() == Code::InvalidComposition));
     Ok(())
 }
 

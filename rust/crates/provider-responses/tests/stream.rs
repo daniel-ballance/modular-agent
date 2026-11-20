@@ -126,6 +126,7 @@ async fn a_streamed_answer_becomes_text_calls_and_usage() {
     session.prompt("hi").await.unwrap();
     let response = session
         .history()
+        .await
         .unwrap()
         .into_iter()
         .find(|e| e["kind"] == "response")

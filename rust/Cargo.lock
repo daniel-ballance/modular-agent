@@ -765,6 +765,9 @@ version = "0.1.0"
 dependencies = [
  "agent-api",
  "anyhow",
+ "fs2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2258,6 +2261,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "config-files",
+ "credentials-file",
  "environment-local",
  "feature-approval",
  "feature-commands",

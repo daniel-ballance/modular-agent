@@ -122,6 +122,11 @@ impl Endpoint for Served {
                     *self.startup.lock().unwrap() = Some(e);
                     return Err(fault);
                 }
+                // The binding has no catalog-changed notification. The host can
+                // re-read provider/models; do not invent a private wire message.
+                for provider in &r.providers {
+                    provider.catalog_notifier(crate::CatalogNotifier::default());
+                }
                 let v = registration(&self.plugin.name, &self.plugin.replaces, &r);
                 *registered = Some(Arc::new(r));
                 Ok(v)
@@ -152,6 +157,9 @@ impl Endpoint for Served {
                             || !provider.models().iter().any(|info| info.model == model)
                         {
                             return Err(Fault::new("invalid_request", "unknown model"));
+                        }
+                        if !provider.available() {
+                            return Err(Fault::new("invalid_request", "Provider is unavailable"));
                         }
                         let session = p["sessionId"].as_str().filter(|s| !s.is_empty());
                         if (!p["sessionId"].is_null() && session.is_none())

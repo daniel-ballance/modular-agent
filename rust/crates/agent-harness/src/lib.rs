@@ -347,6 +347,12 @@ impl Harness {
             sessions.get_mut(id).unwrap().rewinding = false;
             self.blocked_projects.lock().unwrap().remove(&project);
         }
+        if let Ok(questions) = requests(self)
+            && let Err(error) = questions.recover(self, id)
+        {
+            self.sessions.lock().unwrap().remove(id);
+            return Err(error);
+        }
         if let Err(error) = self.prepare_session(id).await {
             let _ = self.close(id).await;
             self.sessions.lock().unwrap().remove(id);
@@ -597,12 +603,22 @@ impl Harness {
         key: Option<String>,
         shape: Value,
     ) -> Result<Receipt> {
-        schema::compile(&shape)?;
         let scope = Scope {
             actor: actor.into(),
             ..Scope::session(session)
         };
-        self.admit(&scope, text, Timing::Now, key, None, Some(shape))
+        self.submit_shaped_as(&scope, None, text, key, shape).await
+    }
+    pub async fn submit_shaped_as(
+        &self,
+        scope: &Scope,
+        sponsor: Option<&str>,
+        text: &str,
+        key: Option<String>,
+        shape: Value,
+    ) -> Result<Receipt> {
+        schema::compile(&shape)?;
+        self.admit(scope, text, Timing::Now, key, sponsor, Some(shape))
             .await
     }
     async fn admit(
@@ -1644,6 +1660,14 @@ impl AgentApi for Harness {
     fn capability(&self, name: &str) -> Result<Arc<dyn Any + Send + Sync>> {
         self.registry.read().unwrap().capability(name)
     }
+    fn provider_credential(&self, name: &str) -> bool {
+        let r = self.registry.read().unwrap();
+        r.has_credential_claim(name)
+            || r.capability_names("provider.")
+                .iter()
+                .any(|key| key.strip_prefix("provider.") == Some(name))
+    }
+
     fn capability_names(&self, prefix: &str) -> Vec<String> {
         self.registry.read().unwrap().capability_names(prefix)
     }

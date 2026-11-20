@@ -99,17 +99,19 @@ impl Rig {
     async fn run(&self, text: &str) -> Outcome {
         self.session.prompt(text).await.unwrap().outcome.unwrap()
     }
-    fn entries(&self, kind: &str) -> Vec<Value> {
+    async fn entries(&self, kind: &str) -> Vec<Value> {
         self.session
             .history()
+            .await
             .unwrap()
             .into_iter()
             .filter(|e| e["kind"] == kind)
             .collect()
     }
-    fn result(&self, id: &str) -> ResultEntry {
+    async fn result(&self, id: &str) -> ResultEntry {
         let record = self
             .entries("toolResult")
+            .await
             .into_iter()
             .find(|e| e["toolCallId"] == self.ids[id])
             .unwrap();
@@ -154,7 +156,7 @@ async fn the_model_is_offered_one_tool_and_its_calls_are_nested_and_private() {
         std::fs::read_to_string(rig.project.path().join("a.txt")).unwrap(),
         "one\n2\n"
     );
-    let outer = rig.result("c1");
+    let outer = rig.result("c1").await;
     assert_eq!(outer.status, "completed");
     assert_eq!(outer.text, "printed\none\n2");
 
@@ -179,7 +181,7 @@ async fn the_model_is_offered_one_tool_and_its_calls_are_nested_and_private() {
     );
 
     // Each call the code made is its own record, tied to the code call.
-    let calls = rig.entries("toolStarted");
+    let calls = rig.entries("toolStarted").await;
     let nested: Vec<_> = calls
         .iter()
         .map(|e| &e["data"]["call"])
@@ -216,7 +218,7 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
     ])
     .await;
     assert_eq!(rig.run("go").await, Outcome::Completed);
-    let first = rig.result("c1");
+    let first = rig.result("c1").await;
     assert_eq!(first.status, "completed");
     assert!(
         first
@@ -224,7 +226,7 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
             .starts_with("caught read() failed: File not found: nope.txt\n")
     );
     assert!(first.text.contains("\"hi\\n\""));
-    let second = rig.result("c2");
+    let second = rig.result("c2").await;
     assert_eq!(second.status, "failed");
     assert!(
         second
@@ -234,8 +236,8 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
         second.text
     );
     assert!(second.text.contains("line 1"));
-    assert_eq!(rig.result("c3").status, "failed");
-    let fourth = rig.result("c4");
+    assert_eq!(rig.result("c3").await.status, "failed");
+    let fourth = rig.result("c4").await;
     assert_eq!(fourth.status, "failed");
     assert!(fourth.text.contains("SyntaxError"), "{}", fourth.text);
 }
@@ -254,24 +256,24 @@ async fn the_sandbox_reaches_nothing_itself_and_is_bounded() {
     ])
     .await;
     assert_eq!(rig.run("go").await, Outcome::Completed);
-    let fs = rig.result("fs");
+    let fs = rig.result("fs").await;
     assert_eq!(fs.status, "failed");
     assert!(fs.text.contains("no direct access"), "{}", fs.text);
-    let spin = rig.result("spin");
+    let spin = rig.result("spin").await;
     assert_eq!(spin.status, "failed");
     assert!(
         spin.text.to_lowercase().contains("time limit"),
         "{}",
         spin.text
     );
-    let many = rig.result("many");
+    let many = rig.result("many").await;
     assert_eq!(many.status, "failed");
     assert!(
         many.text.contains("more than 5 function calls"),
         "{}",
         many.text
     );
-    let deep = rig.result("deep");
+    let deep = rig.result("deep").await;
     assert_eq!(deep.status, "failed");
     assert!(deep.text.contains("RecursionError"), "{}", deep.text);
 }
@@ -304,19 +306,20 @@ async fn a_nested_call_passes_its_own_gate() {
     .await;
     assert_eq!(rig.run("go").await, Outcome::Completed);
     assert!(!rig.project.path().join("a.txt").exists());
-    let outer = rig.result("c1");
+    let outer = rig.result("c1").await;
     assert_eq!(outer.status, "completed");
     assert!(outer.text.contains("write() was refused"), "{}", outer.text);
     assert!(outer.text.contains("writes are not allowed here"));
     assert!(outer.text.ends_with("kept.txt"));
     let refused = rig
         .entries("toolResult")
+        .await
         .iter()
         .filter(|e| e["data"]["status"] == "refused")
         .count();
     assert_eq!(refused, 1);
     // Refused before dispatch: the code call and list started, write did not.
-    assert_eq!(rig.entries("toolStarted").len(), 2);
+    assert_eq!(rig.entries("toolStarted").await.len(), 2);
 }
 
 #[tokio::test]
@@ -340,7 +343,7 @@ async fn without_the_setting_the_tools_are_offered_directly_too() {
             "{name} missing from {offered:?}"
         );
     }
-    assert_eq!(rig.result("direct").text, "direct read");
+    assert_eq!(rig.result("direct").await.text, "direct read");
 }
 
 #[tokio::test]
@@ -348,7 +351,7 @@ async fn a_direct_call_is_refused_when_only_the_code_tool_is_offered() {
     let call = call("direct", "write", json!({"path":"a.txt","content":"x"}));
     let rig = Rig::new(vec![call, text("done")]).await;
     assert_eq!(rig.run("go").await, Outcome::Completed);
-    assert_eq!(rig.result("direct").status, "refused");
+    assert_eq!(rig.result("direct").await.status, "refused");
     assert!(!rig.project.path().join("a.txt").exists());
 }
 
@@ -526,13 +529,13 @@ async fn nesting_is_bounded_and_a_deadline_ends_a_command() {
     )
     .await;
     assert_eq!(rig.run("go").await, Outcome::Completed);
-    let deep = rig.result("deep");
+    let deep = rig.result("deep").await;
     assert_eq!(deep.status, "failed", "{}", deep.text);
     assert!(deep.text.contains("4 deep at most"), "{}", deep.text);
-    let shallow = rig.result("shallow");
+    let shallow = rig.result("shallow").await;
     assert_eq!(shallow.status, "completed", "{}", shallow.text);
     assert_eq!(shallow.text, "here.txt");
-    let slow = rig.result("slow");
+    let slow = rig.result("slow").await;
     assert_eq!(slow.status, "completed", "{}", slow.text);
     let value: Value = serde_json::from_str(&slow.text).unwrap();
     assert_eq!(value, json!([true, "begun\n", true]));

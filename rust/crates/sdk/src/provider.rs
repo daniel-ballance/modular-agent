@@ -99,6 +99,9 @@ pub trait Provider: Send + Sync + 'static {
     fn available(&self) -> bool {
         true
     }
+    /// Install an optional notifier during plugin setup. Call `changed()`
+    /// after changing the catalog, not from `models()`.
+    fn catalog_notifier(&self, _notifier: CatalogNotifier) {}
     async fn request(
         &self,
         model: ModelRef,
@@ -228,6 +231,19 @@ impl ProviderContext {
     }
 }
 
+/// Subscriptions are coalesced: each notification means re-read the full catalog.
+#[derive(Clone, Default)]
+pub struct CatalogNotifier(tokio::sync::watch::Sender<u64>);
+impl CatalogNotifier {
+    pub fn changed(&self) {
+        self.0
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.subscribe()
+    }
+}
+
 pub(crate) struct ProviderPlugin {
     pub name: String,
     pub provider: Arc<dyn Provider>,
@@ -250,11 +266,14 @@ impl base::Plugin for ProviderPlugin {
             );
         }
         let claim = r.claim_credentials(&[id])?;
+        let notifier = CatalogNotifier::default();
+        self.provider.catalog_notifier(notifier.clone());
         r.provide::<dyn base::Provider>(
             &self.name,
             Arc::new(Adapter {
                 provider: self.provider.clone(),
                 claim,
+                notifier,
             }),
         )
     }
@@ -264,6 +283,7 @@ impl base::Plugin for ProviderPlugin {
 struct Adapter {
     provider: Arc<dyn Provider>,
     claim: base::CredentialClaim,
+    notifier: CatalogNotifier,
 }
 impl Adapter {
     fn info(&self, model: &ModelInfo) -> base::ModelInfo {
@@ -279,6 +299,10 @@ impl Adapter {
     }
 }
 impl base::Provider for Adapter {
+    fn catalog_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.notifier.subscribe())
+    }
+
     fn catalog(&self) -> Vec<base::ModelInfo> {
         self.provider
             .models()
@@ -314,6 +338,23 @@ impl base::ModelAccess for Bound {
     async fn discard(&self, session: &str) -> base::Result<()> {
         Ok(self.adapter.provider.discard_state(session).await?)
     }
+    async fn refresh(
+        &self,
+        _api: &base::Api,
+        _scope: &base::Scope,
+        _cancel: CancellationToken,
+    ) -> base::Result<()> {
+        base::ensure!(self.adapter.provider.available(), "Provider is unavailable");
+        base::ensure!(
+            self.adapter
+                .provider
+                .models()
+                .iter()
+                .any(|model| model.model == self.model.model),
+            "selected model is unavailable"
+        );
+        Ok(())
+    }
     async fn generate(
         &self,
         api: base::Api,
@@ -325,6 +366,12 @@ impl base::ModelAccess for Bound {
             kind: base::FailureKind::Other,
             message: e.message().into(),
         };
+        if !self.adapter.provider.available() {
+            return Err(base::ModelFailure {
+                kind: base::FailureKind::Temporary,
+                message: "Provider is unavailable".into(),
+            });
+        }
         let stream = base::id();
         let done = CancellationToken::new();
         let _on_drop = done.clone().drop_guard();

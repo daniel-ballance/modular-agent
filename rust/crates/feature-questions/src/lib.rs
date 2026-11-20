@@ -99,7 +99,10 @@ impl Questions {
 impl InputRequests for Questions {
     async fn ask(&self, api: Api, q: Question, cancel: CancellationToken) -> Result<RequestReply> {
         if q.kind == RequestKind::Secret
-            && (q.credential.as_ref().is_none_or(|s| s.is_empty())
+            && (q
+                .credential
+                .as_ref()
+                .is_none_or(|s| s.is_empty() || api.provider_credential(s))
                 || !capability::<dyn CredentialStore>(api.as_ref(), "credentials")
                     .is_ok_and(|s| q.credential.as_deref().is_some_and(|name| s.accepts(name))))
         {
@@ -198,7 +201,7 @@ impl InputRequests for Questions {
                 }
                 _ = &mut deadline => {
                     if q.extra["whenTimeLimit"] == "decline" {
-                        api.append(&q.scope, "feature.questions", Draft::new("request.closed", false, json!({"request":q.id,"reason":"timeLimit"})))?;
+                        self.close_if_open(api.as_ref(), &q, "timeLimit")?;
                         return Ok(RequestReply::Declined);
                     }
                     api.append(&q.scope, "feature.questions", Draft::new("request.suspended", false, json!({"request":q.id})))?;
@@ -215,6 +218,131 @@ impl InputRequests for Questions {
         request: &str,
         value: Value,
         declined: bool,
+    ) -> Result<()> {
+        self.record_answer(api, session, actor, request, value, declined, None)
+            .await
+    }
+
+    async fn decline(
+        &self,
+        api: Api,
+        session: &str,
+        actor: &str,
+        request: &str,
+        reason: Option<String>,
+    ) -> Result<()> {
+        self.record_answer(api, session, actor, request, Value::Null, true, reason)
+            .await
+    }
+
+    fn recover(&self, api: &dyn AgentApi, session: &str) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        let data = api.snapshot(session)?;
+        let store = match capability::<dyn CredentialStore>(api, "credentials") {
+            Ok(store) => store,
+            Err(_) => return Ok(()),
+        };
+        for q in questions(&data)?
+            .into_iter()
+            .filter(|q| q.kind == RequestKind::Secret)
+        {
+            let request = secret_request(&q);
+            if !q.answerable {
+                if !q.answer.as_ref().is_some_and(|a| !a.declined) {
+                    store.discard(&request)?;
+                }
+            } else if let Some(selected) = selected(&data, &q) {
+                self.finish_secret(api, store.as_ref(), &q, selected)?;
+            } else if store.lookup_staged(&request)?.is_some() {
+                // No decision reached the ledger. Retire this id so a durable
+                // replay re-asks with a new id even if the tool uses a key.
+                self.close_question(api, &q, "noLongerAnswerable")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn visible(&self, api: &dyn AgentApi, session: &str, actor: &str) -> Result<Vec<Question>> {
+        require(
+            api,
+            &Scope {
+                actor: actor.into(),
+                ..Scope::session(session)
+            },
+            "watch",
+        )?;
+        let mut result = vec![];
+        for data in api.list(None)? {
+            result.extend(
+                questions(&data)?
+                    .into_iter()
+                    .filter(|q| q.route.iter().any(|s| s == session)),
+            );
+        }
+        Ok(result)
+    }
+
+    fn eligible(
+        &self,
+        api: &dyn AgentApi,
+        question: &Question,
+        session: &str,
+        actor: &str,
+    ) -> bool {
+        may_answer(api, question, session, actor)
+    }
+
+    fn presence(&self, session: &str, actor: &str, present: bool) {
+        let key = (session.into(), actor.into());
+        if present {
+            self.present.lock().unwrap().insert(key);
+        } else {
+            self.present.lock().unwrap().remove(&key);
+        }
+        self.notify.notify_waiters();
+    }
+
+    fn present(&self, session: &str) -> Vec<String> {
+        self.present
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| id == session)
+            .map(|(_, actor)| actor.clone())
+            .collect()
+    }
+
+    fn close_turn_with_reason(
+        &self,
+        api: &dyn AgentApi,
+        scope: &Scope,
+        reason: &str,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        let data = api.snapshot(&scope.session)?;
+        for q in questions(&data)?
+            .into_iter()
+            .filter(|q| q.answerable && q.scope.turn == scope.turn)
+        {
+            if selected(&data, &q).is_none() {
+                self.close_question(api, &q, reason)?;
+            }
+        }
+        self.notify.notify_waiters();
+        Ok(())
+    }
+}
+impl Questions {
+    #[allow(clippy::too_many_arguments)]
+    async fn record_answer(
+        &self,
+        api: Api,
+        session: &str,
+        actor: &str,
+        request: &str,
+        value: Value,
+        declined: bool,
+        reason: Option<String>,
     ) -> Result<()> {
         let (q, answer) = {
             let _guard = self.lock.lock().unwrap();
@@ -235,126 +363,206 @@ impl InputRequests for Questions {
                 may_answer(api.as_ref(), &q, session, actor),
                 "actor may not answer"
             );
+            if q.kind == RequestKind::Approval {
+                ensure!(
+                    self.present
+                        .lock()
+                        .unwrap()
+                        .contains(&(session.into(), actor.into())),
+                    "approval answerer is not present"
+                );
+            }
             // The portable answer for an approval refusal is an actor decline,
             // even when the permission route sends the option as a string.
             let declined = declined || (q.kind == RequestKind::Approval && value == "refuse");
-            let value = if declined {
-                Value::Null
-            } else {
-                match q.kind {
-                    RequestKind::Approval | RequestKind::Choice => {
-                        ensure!(
-                            value
-                                .as_str()
-                                .is_some_and(|s| q.options.iter().any(|o| o == s)),
-                            "invalid option"
-                        );
-                        value
+            let data = api.snapshot(&q.scope.session)?;
+            if q.kind == RequestKind::Secret && (selected(&data, &q).is_some() || !declined) {
+                let store = capability::<dyn CredentialStore>(api.as_ref(), "credentials")?;
+                let receipt = StagingReceipt {
+                    request: secret_request(&q),
+                    name: q
+                        .credential
+                        .clone()
+                        .ok_or_else(|| anyhow!("credential name missing"))?,
+                    actor: actor.into(),
+                    answer_session: session.into(),
+                };
+                if let Some(previous) = selected(&data, &q) {
+                    ensure!(
+                        previous["actorId"] == actor
+                            && previous["answerSession"] == session
+                            && !declined,
+                        "secret decision is already selected"
+                    );
+                } else {
+                    ensure!(
+                        store.accepts(&receipt.name) && !api.provider_credential(&receipt.name),
+                        "invalid secret target"
+                    );
+                    if let Some(secret) = value.as_str() {
+                        store.stage(receipt.clone(), secret)?;
                     }
-                    RequestKind::Text => {
-                        ensure!(value.is_string(), "text answer required");
-                        value
-                    }
-                    RequestKind::Secret => {
-                        let name = q
-                            .credential
-                            .as_ref()
-                            .ok_or_else(|| anyhow!("credential name missing"))?;
-                        capability::<dyn CredentialStore>(api.as_ref(), "credentials")?.put(
-                            name,
-                            value
-                                .as_str()
-                                .ok_or_else(|| anyhow!("secret answer required"))?,
-                        )?;
-                        json!({"credential":name})
-                    }
+                    ensure!(
+                        store.lookup_staged(&receipt.request)?.as_ref() == Some(&receipt),
+                        "invalid staging receipt"
+                    );
+                    let scope = Scope {
+                        actor: actor.into(),
+                        ..q.scope.clone()
+                    };
+                    api.append(
+                        &scope,
+                        "feature.questions",
+                        Draft::new(
+                            "request.secretAccepted",
+                            false,
+                            json!({"requestId":q.id,"actorId":actor,"answerSession":session}),
+                        ),
+                    )?;
                 }
-            };
-            let answer = Answer {
-                request: q.id.clone(),
-                actor: actor.into(),
-                session: session.into(),
-                value,
-                declined,
-            };
-            let mut scope = q.scope.clone();
-            scope.actor = actor.into();
-            api.append(
-                &scope,
-                "feature.questions",
-                Draft::new("request.answer", false, json!(answer)),
-            )?;
-            (q, answer)
+                let committed = json!({"actorId":actor,"answerSession":session});
+                let answer = self.finish_secret(api.as_ref(), store.as_ref(), &q, &committed)?;
+                (q, answer)
+            } else {
+                let value = if declined {
+                    Value::Null
+                } else {
+                    match q.kind {
+                        RequestKind::Approval | RequestKind::Choice => {
+                            ensure!(
+                                value
+                                    .as_str()
+                                    .is_some_and(|s| q.options.iter().any(|o| o == s)),
+                                "invalid option"
+                            );
+                            value
+                        }
+                        RequestKind::Text => {
+                            ensure!(value.is_string(), "text answer required");
+                            value
+                        }
+                        RequestKind::Secret => unreachable!("secret values use staging"),
+                    }
+                };
+                let answer = Answer {
+                    request: q.id.clone(),
+                    actor: actor.into(),
+                    session: session.into(),
+                    value,
+                    declined,
+                    reason,
+                };
+                let mut scope = q.scope.clone();
+                scope.actor = actor.into();
+                api.append(
+                    &scope,
+                    "feature.questions",
+                    Draft::new("request.answer", false, json!(answer)),
+                )?;
+                if q.kind == RequestKind::Secret {
+                    capability::<dyn CredentialStore>(api.as_ref(), "credentials")?
+                        .discard(&secret_request(&q))?;
+                }
+                (q, Some(answer))
+            }
         };
         self.notify.notify_waiters();
-        api.emit(Event::new(&q.scope, "request.answered", json!(answer)))
-            .await?;
+        if let Some(answer) = answer {
+            api.emit(Event::new(&q.scope, "request.answered", json!(answer)))
+                .await?;
+        }
         Ok(())
     }
-    fn visible(&self, api: &dyn AgentApi, session: &str, actor: &str) -> Result<Vec<Question>> {
+
+    fn finish_secret(
+        &self,
+        api: &dyn AgentApi,
+        store: &dyn CredentialStore,
+        q: &Question,
+        selected: &Value,
+    ) -> Result<Option<Answer>> {
+        let request = secret_request(q);
+        let receipt = store
+            .lookup_staged(&request)?
+            .ok_or_else(|| anyhow!("selected secret receipt unavailable"))?;
         ensure!(
-            api.authority(session, actor)?.has("watch"),
-            "actor may not watch"
+            receipt.request == request
+                && Some(receipt.name.as_str()) == q.credential.as_deref()
+                && selected["actorId"] == receipt.actor
+                && selected["answerSession"] == receipt.answer_session,
+            "selected secret receipt does not match the ledger"
         );
-        let mut result = vec![];
-        for data in api.list(None)? {
-            for q in questions(&data)? {
-                if q.route.iter().any(|s| s == session) {
-                    result.push(q);
-                }
-            }
+        if store.activate(&request)? == Activation::Superseded {
+            self.append_closed(api, q, "superseded")?;
+            return Ok(None);
         }
-        Ok(result)
+        let answer = Answer {
+            request: q.id.clone(),
+            actor: receipt.actor,
+            session: receipt.answer_session,
+            value: json!({"credential":receipt.name}),
+            declined: false,
+            reason: None,
+        };
+        let scope = Scope {
+            actor: answer.actor.clone(),
+            ..q.scope.clone()
+        };
+        api.append(
+            &scope,
+            "feature.questions",
+            Draft::new("request.answer", false, json!(answer)),
+        )?;
+        Ok(Some(answer))
     }
-    fn eligible(
-        &self,
-        api: &dyn AgentApi,
-        question: &Question,
-        session: &str,
-        actor: &str,
-    ) -> bool {
-        may_answer(api, question, session, actor)
-    }
-    fn presence(&self, session: &str, actor: &str, present: bool) {
-        let key = (session.into(), actor.into());
-        if present {
-            self.present.lock().unwrap().insert(key);
-        } else {
-            self.present.lock().unwrap().remove(&key);
-        }
-        self.notify.notify_waiters();
-    }
-    fn present(&self, session: &str) -> Vec<String> {
-        self.present
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(id, _)| id == session)
-            .map(|(_, actor)| actor.clone())
-            .collect()
-    }
-    fn close_turn_with_reason(
-        &self,
-        api: &dyn AgentApi,
-        scope: &Scope,
-        reason: &str,
-    ) -> Result<()> {
-        for q in questions(&api.snapshot(&scope.session)?)?
-            .into_iter()
-            .filter(|q| q.answerable && q.scope.turn == scope.turn)
+
+    fn close_if_open(&self, api: &dyn AgentApi, q: &Question, reason: &str) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        let data = api.snapshot(&q.scope.session)?;
+        if selected(&data, q).is_none()
+            && questions(&data)?
+                .iter()
+                .any(|current| current.id == q.id && current.answerable)
         {
-            api.append(
-                &q.scope,
-                "feature.questions",
-                Draft::new(
-                    "request.closed",
-                    false,
-                    json!({"request":q.id,"reason":reason}),
-                ),
-            )?;
+            self.close_question(api, q, reason)?;
         }
-        self.notify.notify_waiters();
         Ok(())
+    }
+
+    fn append_closed(&self, api: &dyn AgentApi, q: &Question, reason: &str) -> Result<()> {
+        api.append(
+            &q.scope,
+            "feature.questions",
+            Draft::new(
+                "request.closed",
+                false,
+                json!({"request":q.id,"reason":reason}),
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn close_question(&self, api: &dyn AgentApi, q: &Question, reason: &str) -> Result<()> {
+        self.append_closed(api, q, reason)?;
+        if q.kind == RequestKind::Secret
+            && let Ok(store) = capability::<dyn CredentialStore>(api, "credentials")
+        {
+            store.discard(&secret_request(q))?;
+        }
+        Ok(())
+    }
+}
+fn selected<'a>(data: &'a SessionData, q: &Question) -> Option<&'a Value> {
+    data.entries
+        .iter()
+        .filter(|e| e.kind == "request.secretAccepted")
+        .filter_map(|e| e.content.as_ref())
+        .find(|c| c["requestId"] == q.id)
+}
+fn secret_request(q: &Question) -> SecretRequest {
+    SecretRequest {
+        session: q.scope.session.clone(),
+        request: q.id.clone(),
     }
 }
 #[async_trait]

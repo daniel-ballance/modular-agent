@@ -204,6 +204,12 @@ impl ToolOutput {
     }
 }
 
+impl From<Vec<Value>> for ToolOutput {
+    fn from(content: Vec<Value>) -> Self {
+        Self::from(String::new()).with_content(content)
+    }
+}
+
 impl From<String> for ToolOutput {
     fn from(text: String) -> Self {
         ToolOutput {
@@ -296,6 +302,8 @@ pub struct Ask {
     kind: base::RequestKind,
     text: String,
     options: Vec<String>,
+    credential: Option<String>,
+    link: bool,
 }
 
 impl Ask {
@@ -304,6 +312,8 @@ impl Ask {
             kind: base::RequestKind::Choice,
             text: question.into(),
             options: options.iter().map(|o| o.to_string()).collect(),
+            credential: None,
+            link: false,
         }
     }
     pub fn approval(question: impl Into<String>) -> Self {
@@ -311,6 +321,8 @@ impl Ask {
             kind: base::RequestKind::Approval,
             text: question.into(),
             options: vec![],
+            credential: None,
+            link: false,
         }
     }
     pub fn text(question: impl Into<String>) -> Self {
@@ -318,16 +330,44 @@ impl Ask {
             kind: base::RequestKind::Text,
             text: question.into(),
             options: vec![],
+            credential: None,
+            link: false,
+        }
+    }
+    pub fn link(question: impl Into<String>) -> Self {
+        Self {
+            link: true,
+            ..Self::text(question)
+        }
+    }
+    pub fn secret(question: impl Into<String>, credential: impl Into<String>) -> Self {
+        Self {
+            kind: base::RequestKind::Secret,
+            credential: Some(credential.into()),
+            ..Self::text(question)
         }
     }
 }
 
 /// The answer to a tool's question.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Answer {
     Allow,
     Value(String),
+    Secret(String),
     Declined { reason: Option<String> },
+}
+impl std::fmt::Debug for Answer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allow => f.write_str("Allow"),
+            Self::Value(v) => f.debug_tuple("Value").field(v).finish(),
+            Self::Secret(_) => f.write_str("Secret([redacted])"),
+            Self::Declined { reason } => {
+                f.debug_struct("Declined").field("reason", reason).finish()
+            }
+        }
+    }
 }
 
 impl ToolContext {
@@ -403,6 +443,10 @@ impl ToolContext {
             Backend::Local { api, scope } => {
                 let mut question = base::Question::new(scope.clone(), ask.kind, &ask.text);
                 question.options = ask.options;
+                question.credential = ask.credential;
+                if ask.link {
+                    question.extra["kind"] = json!("link");
+                }
                 if approval {
                     let data = api.snapshot(&scope.session)?;
                     if let Some(call) = data
@@ -423,12 +467,14 @@ impl ToolContext {
                     .await?
                 {
                     base::RequestReply::Answer(a) if a.declined => {
-                        Ok(Answer::Declined { reason: None })
+                        Ok(Answer::Declined { reason: a.reason })
                     }
                     base::RequestReply::Answer(a) => Ok(match a.value {
                         Value::String(s) if approval && s == "allow" => Answer::Allow,
                         Value::String(s) => Answer::Value(s),
-                        other => Answer::Value(other.to_string()),
+                        other => {
+                            Answer::Value(other["credential"].as_str().unwrap_or_default().into())
+                        }
                     }),
                     base::RequestReply::Declined => Ok(Answer::Declined { reason: None }),
                     base::RequestReply::Waiting => Err(not_open()),
@@ -438,10 +484,14 @@ impl ToolContext {
                 let kind = match ask.kind {
                     base::RequestKind::Approval => "approval",
                     base::RequestKind::Choice => "choice",
+                    base::RequestKind::Text if ask.link => "link",
                     base::RequestKind::Text => "text",
                     base::RequestKind::Secret => "secret",
                 };
                 let mut request = json!({"kind": kind, "question": ask.text});
+                if let Some(name) = ask.credential {
+                    request["credential"] = json!(name);
+                }
                 if !ask.options.is_empty() {
                     request["options"] = json!(ask.options);
                 }

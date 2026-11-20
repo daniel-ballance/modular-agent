@@ -155,6 +155,11 @@ pub trait AgentApi: Send + Sync {
     fn cancellation(&self, session: &str) -> Result<CancellationToken>;
     fn capability(&self, name: &str) -> Result<Arc<dyn Any + Send + Sync>>;
     fn capability_names(&self, prefix: &str) -> Vec<String>;
+    fn provider_credential(&self, name: &str) -> bool {
+        self.capability_names("provider.")
+            .iter()
+            .any(|key| key.strip_prefix("provider.") == Some(name))
+    }
     fn tool_registration(&self, capability: &str) -> Value {
         json!({"plugin":capability,"toolSource":capability.strip_prefix("tools.").unwrap_or(capability)})
     }
@@ -260,6 +265,18 @@ pub trait CredentialStore: Send + Sync {
     fn accepts(&self, _name: &str) -> bool {
         self.writable()
     }
+    fn stage(&self, _receipt: StagingReceipt, _value: &str) -> Result<()> {
+        bail!("credential staging is not supported")
+    }
+    fn lookup_staged(&self, _request: &SecretRequest) -> Result<Option<StagingReceipt>> {
+        Ok(None)
+    }
+    fn activate(&self, _request: &SecretRequest) -> Result<Activation> {
+        bail!("credential staging is not supported")
+    }
+    fn discard(&self, _request: &SecretRequest) -> Result<()> {
+        Ok(())
+    }
 }
 #[async_trait]
 pub trait ModelAccess: Send + Sync {
@@ -329,6 +346,9 @@ pub trait Provider: Send + Sync {
         Ok(vec![])
     }
     fn catalog(&self) -> Vec<ModelInfo>;
+    fn catalog_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
     fn bind(&self, model: &str) -> Result<Arc<dyn ModelAccess>>;
 }
 #[async_trait]

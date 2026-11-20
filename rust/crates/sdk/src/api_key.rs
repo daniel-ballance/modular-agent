@@ -106,14 +106,6 @@ impl Provider for ApiKeyProvider {
     fn models(&self) -> Vec<ModelInfo> {
         self.models.clone()
     }
-    fn available(&self) -> bool {
-        self.test
-            || std::env::var(match self.vendor {
-                Vendor::OpenAi => "OPENAI_API_KEY",
-                Vendor::Anthropic => "ANTHROPIC_API_KEY",
-            })
-            .is_ok_and(|key| !key.is_empty())
-    }
     async fn request(
         &self,
         model: ModelRef,

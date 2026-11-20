@@ -2,8 +2,10 @@
 pub mod portable;
 pub mod recovery;
 pub mod schema;
+mod secrets;
 pub mod wire;
 mod work;
+pub use secrets::*;
 pub use work::*;
 mod context;
 mod model_attempt;

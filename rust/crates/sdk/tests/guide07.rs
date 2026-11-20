@@ -107,7 +107,7 @@ async fn previews_tides_in_process_and_served() -> Result<()> {
             turn.outcome
         );
         assert!(turn.text.is_empty());
-        let history = session.history()?;
+        let history = session.history().await?;
         let start = history
             .iter()
             .find(|entry| entry["kind"] == "turnStart")

@@ -20,7 +20,9 @@ impl Plugin for CorePlugin {
         r.provide::<dyn Configuration>("configuration", self.configuration.clone())?;
         let credentials: Arc<dyn CredentialStore> = match &self.credentials {
             Some(credentials) => Arc::new(crate::credentials::StoreAdapter(credentials.clone())),
-            None => Arc::new(EnvironmentCredentials),
+            None => Arc::new(crate::credentials::StoreAdapter(Arc::new(
+                crate::environment_credentials(),
+            ))),
         };
         r.provide::<dyn CredentialStore>("credentials", credentials)?;
         r.provide::<dyn HistoryStore>("history", self.history.clone())
@@ -44,19 +46,6 @@ pub(crate) struct Defaults(pub Value);
 impl Configuration for Defaults {
     fn settings(&self, _: &Path) -> Result<Value> {
         Ok(self.0.clone())
-    }
-}
-
-/// Credentials from environment variables, by the names each Provider documents.
-struct EnvironmentCredentials;
-impl CredentialStore for EnvironmentCredentials {
-    fn get(&self, name: &str) -> Result<String> {
-        let key = match name {
-            "openai" => "OPENAI_API_KEY".to_owned(),
-            "anthropic" => "ANTHROPIC_API_KEY".to_owned(),
-            other => other.to_ascii_uppercase().replace('-', "_") + "_API_KEY",
-        };
-        std::env::var(&key).map_err(|_| anyhow!("credential {key} is not set in the environment"))
     }
 }
 

@@ -165,6 +165,7 @@ pub fn test_agent() -> TestAgentBuilder {
     TestAgentBuilder {
         builder: Agent::builder(),
         script: Value::Array(vec![]),
+        model: None,
         project: None,
         environment: memory_environment(),
     }
@@ -174,11 +175,16 @@ pub fn test_agent() -> TestAgentBuilder {
 pub struct TestAgentBuilder {
     builder: AgentBuilder,
     script: Value,
+    model: Option<String>,
     project: Option<PathBuf>,
     environment: MemoryEnvironment,
 }
 
 impl TestAgentBuilder {
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
     pub fn script(mut self, script: Value) -> Self {
         self.script = script;
         self
@@ -199,14 +205,31 @@ impl TestAgentBuilder {
         self.builder = self.builder.durability(durability);
         self
     }
+    pub fn several_actors(mut self, enabled: bool) -> Self {
+        self.builder = self.builder.several_actors(enabled);
+        self
+    }
+    pub fn session_limits(mut self, enabled: bool) -> Self {
+        self.builder = self.builder.session_limits(enabled);
+        self
+    }
+    pub fn tenants(mut self, tenants: Value) -> Self {
+        self.builder = self.builder.tenants(tenants);
+        self
+    }
+    pub fn setting(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.builder = self.builder.setting(key, value);
+        self
+    }
     pub fn approval(mut self, policy: Approval) -> Self {
         self.builder = self.builder.approval(policy);
         self
     }
-    pub fn on_question<F, Fut>(mut self, handler: F) -> Self
+    pub fn on_question<F, Fut, Reply>(mut self, handler: F) -> Self
     where
         F: Fn(Question) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Answer> + Send + 'static,
+        Fut: Future<Output = Reply> + Send + 'static,
+        Reply: crate::QuestionReply,
     {
         self.builder = self.builder.on_question(handler);
         self
@@ -214,6 +237,10 @@ impl TestAgentBuilder {
     /// Use a shared answer queue. Keep a clone to verify it with `Answers::assert_done`.
     pub fn answers(self, queue: Answers) -> Self {
         self.on_question(move |question| std::future::ready(queue.answer(question)))
+    }
+    pub fn credentials(mut self, store: impl crate::CredentialStore) -> Self {
+        self.builder = self.builder.credentials(store);
+        self
     }
     pub fn plugin(mut self, plugin: crate::Plugin) -> Self {
         self.builder = self.builder.plugin(plugin);
@@ -250,7 +277,7 @@ impl TestAgentBuilder {
             .builder
             .environment(self.environment)
             .provider(scripted_provider(self.script))
-            .model(SCRIPTED_MODEL)
+            .model(self.model.as_deref().unwrap_or(SCRIPTED_MODEL))
             .project(project)
             .build()
             .await?;
@@ -317,6 +344,7 @@ pub mod fixtures {
                 ))
             }
             "confirm" => Plugin::new("confirm").tool(confirm()),
+            "note" => Plugin::new("note").tool(note()),
             "gate" => Plugin::new("gate").on_tool_before(|before| async move {
                 Ok(if before.input.to_string().contains("forbidden") {
                     Gate::Refuse("the gate refused it".into())
@@ -391,6 +419,17 @@ pub mod fixtures {
         question: String,
     }
 
+    pub fn note() -> Tool {
+        Tool::new("note", "Ask for a note.").run(
+            |input: ConfirmInput, cx: ToolContext| async move {
+                Ok(match cx.ask(Ask::text(input.question)).await? {
+                    Answer::Value(value) => format!("value: {value}"),
+                    _ => "declined".into(),
+                })
+            },
+        )
+    }
+
     pub fn confirm() -> Tool {
         Tool::new("confirm", "Ask whether to go ahead.").run(
             |input: ConfirmInput, cx: ToolContext| async move {
@@ -398,6 +437,7 @@ pub mod fixtures {
                     match cx.ask(Ask::choice(input.question, &["yes", "no"])).await? {
                         Answer::Value(v) => v,
                         Answer::Allow => "allow".into(),
+                        Answer::Secret(_) => unreachable!("a choice has no secret value"),
                         Answer::Declined { .. } => "declined".into(),
                     },
                 )

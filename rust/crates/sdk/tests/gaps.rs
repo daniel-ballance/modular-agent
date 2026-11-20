@@ -107,7 +107,7 @@ async fn structured_prompt_retries_schema_and_hook_refusals() -> Result<()> {
         .await?;
     assert_eq!(result.outcome, Some(Outcome::Completed));
     assert_eq!(result.value, Some(json!({"n":2})));
-    let rows = session.history()?;
+    let rows = session.history().await?;
     assert_eq!(
         rows.iter()
             .filter(|e| e["kind"] == "resultFeedback")
@@ -155,7 +155,7 @@ async fn events_replay_from_last_delivered_entry_after_lag() -> Result<()> {
     ])).build().await?;
     let session = agent.session().await?;
     session.prompt("first").await?;
-    let rows = session.history()?;
+    let rows = session.history().await?;
     let after = rows[rows.len() - 2]["id"].as_str().unwrap();
     let cursor = rows.last().unwrap()["id"].as_str().unwrap();
     let mut first = session.events(Some(after))?;
@@ -171,7 +171,7 @@ async fn events_replay_from_last_delivered_entry_after_lag() -> Result<()> {
     assert_eq!(lag.code(), Code::Lost);
     assert_eq!(lag.data().unwrap()["fromEntry"], cursor);
     assert!(first.next().await.is_none());
-    let after_lag = session.history()?;
+    let after_lag = session.history().await?;
     let mut again = session.events(Some(cursor))?;
     for want in &after_lag[rows.len()..] {
         assert!(

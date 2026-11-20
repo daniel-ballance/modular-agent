@@ -7,10 +7,11 @@ use crate::{
     plugin::{InProcess, Plugin},
     provider::{Provider, ProviderPlugin},
     session::Session,
-    tool::{Answer, Tool},
+    tool::Tool,
 };
 use agent_api as base;
 use agent_harness::Harness;
+use base::AgentApi as _;
 use serde_json::{Value, json};
 use std::{
     future::Future,
@@ -98,6 +99,9 @@ pub(crate) struct Inner {
     pub plugin_host: bool,
     pub acp: std::sync::OnceLock<Arc<crate::acp::Routes>>,
     pub session_settings: Value,
+    pub several_actors: bool,
+    pub session_limits: bool,
+    pub tenants: bool,
     pub drivers: std::sync::Mutex<
         std::collections::HashMap<String, std::sync::Weak<crate::session::Driver>>,
     >,
@@ -115,7 +119,9 @@ pub struct AgentBuilder {
     history: Option<History>,
     configuration: Option<crate::FilesConfiguration>,
     credentials: Option<Arc<dyn crate::CredentialStore>>,
-    tenants: Option<String>,
+    tenants: Option<Value>,
+    several_actors: bool,
+    session_limits: bool,
     pub(crate) acp_conformance: bool,
     no_default_prompt: bool,
     no_compaction: bool,
@@ -125,13 +131,22 @@ pub struct AgentBuilder {
     plugins: Vec<Plugin>,
     process_plugins: Vec<ProcessPlugin>,
     wire_plugins: Vec<Plugin>,
-    environment: Option<crate::testing::MemoryEnvironment>,
+    environment: Option<crate::Environment>,
+    runtime: Option<crate::Runtime>,
     plugin_host: Option<bool>,
     model: Option<String>,
     settings: serde_json::Map<String, Value>,
     approval: Option<Approval>,
     on_question: Option<QuestionHandler>,
     pub(crate) restartable: bool,
+}
+
+/// Overrides and initial membership for a new session.
+#[derive(Clone, Debug, Default)]
+pub struct SessionOptions {
+    pub settings: serde_json::Map<String, Value>,
+    pub tenant: Option<String>,
+    pub actors: Vec<crate::Actor>,
 }
 
 impl Agent {
@@ -141,14 +156,54 @@ impl Agent {
 
     /// Create a session.
     pub async fn session(&self) -> Result<Session> {
+        self.session_with(SessionOptions::default()).await
+    }
+
+    pub async fn session_with(&self, options: SessionOptions) -> Result<Session> {
         self.check_crashed()?;
+        if options.tenant.is_some() && !self.inner.tenants {
+            return Err(Error::new(Code::NotSupported, "tenants are disabled"));
+        }
+        if !options.actors.is_empty() && !self.inner.several_actors {
+            return Err(Error::new(
+                Code::NotSupported,
+                "several actors are disabled",
+            ));
+        }
+        let mut settings = self.inner.session_settings.clone();
+        let patch = base::portable::settings_from_wire(&Value::Object(options.settings));
+        if patch
+            .as_object()
+            .is_some_and(|p| p.keys().any(|key| key.starts_with('_')))
+        {
+            return Err(Error::new(
+                Code::InvalidParams,
+                "internal settings cannot be changed",
+            ));
+        }
+        if let Some(model) = patch.get("model") {
+            require_model(
+                self.inner.harness.as_ref(),
+                model
+                    .as_str()
+                    .ok_or_else(|| Error::new(Code::InvalidParams, "invalid model"))?,
+            )?;
+        }
+        base::merge(&mut settings, patch);
         let id = self
             .inner
             .harness
-            .create(&self.inner.project, self.inner.session_settings.clone())
+            .create_in_tenant(&self.inner.project, settings, options.tenant.as_deref())
             .await?;
         self.attach(&id)?;
-        Ok(Session::new(self.inner.clone(), id))
+        let session = Session::new(self.inner.clone(), id);
+        for actor in options.actors {
+            if let Err(error) = session.join(actor) {
+                let _ = self.inner.harness.close(session.id()).await;
+                return Err(error);
+            }
+        }
+        Ok(session)
     }
 
     /// Reopen a kept session. Interrupted work is recovered, as the Runtime declares,
@@ -224,12 +279,9 @@ impl Agent {
     ) -> Result<Value> {
         let mut declaration = interface_acp::declaration(api, session)?;
         declaration["portableSessions"] = json!(self.inner.persistent);
-        // The SDK does not expose several actors, limits or tenants yet, so no path,
-        // including ACP conformance mode, may declare them: a test-only declaration
-        // would have the kit check a different agent from the one shipped.
-        declaration["severalActors"] = json!(false);
-        declaration["sessionLimits"] = json!(false);
-        declaration["tenants"] = json!(false);
+        declaration["severalActors"] = json!(self.inner.several_actors);
+        declaration["sessionLimits"] = json!(self.inner.session_limits);
+        declaration["tenants"] = json!(self.inner.tenants);
         declaration["mixedActorInput"] = json!("refused");
         Ok(declaration)
     }
@@ -248,6 +300,16 @@ impl Agent {
             }
         }
         Ok(models)
+    }
+
+    /// Watch an in-process Provider's catalog. Re-read `models()` after a notification.
+    pub fn model_changes(&self, provider: &str) -> Result<tokio::sync::watch::Receiver<u64>> {
+        let h = self.inner.harness.as_ref();
+        let provider = base::capability::<dyn base::Provider>(h, &format!("provider.{provider}"))
+            .map_err(|_| Error::new(Code::NotFound, "unknown Provider"))?;
+        provider
+            .catalog_changes()
+            .ok_or_else(|| Error::new(Code::NotSupported, "this Provider has no catalog notifier"))
     }
 
     /// Keep a folder alive as long as the agent.
@@ -315,8 +377,18 @@ impl AgentBuilder {
     }
 
     /// Deployment limits and rights, in the binding's tenant configuration format.
-    pub fn tenants(mut self, tenants: Option<String>) -> Self {
-        self.tenants = tenants;
+    pub fn tenants(mut self, tenants: Value) -> Self {
+        self.tenants = Some(tenants);
+        self
+    }
+
+    pub fn several_actors(mut self, enabled: bool) -> Self {
+        self.several_actors = enabled;
+        self
+    }
+
+    pub fn session_limits(mut self, enabled: bool) -> Self {
+        self.session_limits = enabled;
         self
     }
 
@@ -351,8 +423,13 @@ impl AgentBuilder {
         self.wire_plugins.push(plugin);
         self
     }
-    pub fn environment(mut self, environment: crate::testing::MemoryEnvironment) -> Self {
-        self.environment = Some(environment);
+    pub fn environment(mut self, environment: impl Into<crate::Environment>) -> Self {
+        self.environment = Some(environment.into());
+        self
+    }
+
+    pub fn runtime(mut self, runtime: crate::Runtime) -> Self {
+        self.runtime = Some(runtime);
         self
     }
     /// A plugin program, loaded after the agent's own plugins. Giving one makes the
@@ -383,12 +460,16 @@ impl AgentBuilder {
     }
     /// Answer questions for the local actor. While a handler is set, the local actor
     /// is present to answer; without one, an approval no one can answer is refused.
-    pub fn on_question<F, Fut>(mut self, handler: F) -> Self
+    pub fn on_question<F, Fut, Reply>(mut self, handler: F) -> Self
     where
         F: Fn(Question) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Answer> + Send + 'static,
+        Fut: Future<Output = Reply> + Send + 'static,
+        Reply: crate::QuestionReply,
     {
-        self.on_question = Some(Arc::new(move |q| Box::pin(handler(q))));
+        self.on_question = Some(Arc::new(move |q| {
+            let reply = handler(q);
+            Box::pin(async move { reply.await.into_answer() })
+        }));
         self
     }
     /// Load every part and check the composition. Nothing runs until this succeeds.
@@ -404,11 +485,26 @@ impl AgentBuilder {
             && self.wire_plugins.is_empty()
             && self.plugin_host != Some(true))
         .then(|| self.clone());
-        let project = match self.project {
-            Some(p) => p,
-            None => std::env::current_dir()?,
+        use crate::parts::EnvironmentKind;
+        let environment = self
+            .environment
+            .map(|env| env.0)
+            .unwrap_or(EnvironmentKind::Local(None));
+        let local_root = match &environment {
+            EnvironmentKind::Local(root) => root.as_ref().map(|p| p.canonicalize()).transpose()?,
+            EnvironmentKind::Memory(_) => None,
+        };
+        let project = match (self.project, &local_root) {
+            (Some(p), _) => p.canonicalize()?,
+            (None, Some(root)) => root.clone(),
+            (None, None) => std::env::current_dir()?.canonicalize()?,
+        };
+        if local_root.as_ref().is_some_and(|root| *root != project) {
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "the local environment root must match the project",
+            ));
         }
-        .canonicalize()?;
         if let Some(history) = &self.history
             && history.1 != (self.durability != Durability::Ephemeral)
         {
@@ -424,7 +520,7 @@ impl AgentBuilder {
                     "kept and durable agents need a persistent history store",
                 ));
             }
-            if self.environment.is_none() {
+            if matches!(environment, EnvironmentKind::Local(_)) {
                 return Err(Error::new(
                     Code::InvalidComposition,
                     "the local working environment needs a data_dir for recovery bookkeeping",
@@ -460,10 +556,13 @@ impl AgentBuilder {
         let crash = tokio_util::sync::CancellationToken::new();
         let workers = tokio_util::task::TaskTracker::new();
         let hub = Hub::new(self.on_question, crash.clone(), workers.clone());
-        let runtime: Arc<dyn base::Plugin> = match self.durability {
-            Durability::Durable => Arc::new(runtime_durable::DurablePlugin),
-            _ => Arc::new(runtime_transient::TransientPlugin),
-        };
+        let runtime = self
+            .runtime
+            .unwrap_or_else(|| match self.durability {
+                Durability::Durable => crate::durable_runtime(),
+                _ => crate::transient_runtime(),
+            })
+            .plugin();
         let mut plugins: Vec<Arc<dyn base::Plugin>> = vec![
             Arc::new(CorePlugin {
                 configuration: match self.configuration {
@@ -478,9 +577,9 @@ impl AgentBuilder {
                 credentials: self.credentials,
                 history,
             }),
-            match self.environment {
-                Some(environment) => Arc::new(environment),
-                None => Arc::new(environment_local::LocalPlugin {
+            match environment {
+                EnvironmentKind::Memory(environment) => Arc::new(environment),
+                EnvironmentKind::Local(_) => Arc::new(environment_local::LocalPlugin {
                     state: state.join("commands"),
                     points: environment_local::PointStore::Git,
                 }),
@@ -517,7 +616,10 @@ impl AgentBuilder {
 
         own.push((Arc::new(feature_commands::CommandsPlugin), vec![]));
         let harness = Harness::for_project(project.clone());
-        harness.configure_tenants(self.tenants.as_deref())?;
+        let tenants = self.tenants.as_ref().map(Value::to_string);
+        harness
+            .configure_tenants(tenants.as_deref())
+            .map_err(|_| Error::new(Code::InvalidParams, "invalid tenant configuration"))?;
         for (plugin, replaces) in own {
             let name = plugin.name().to_string();
             let loaded = if replaces.is_empty() {
@@ -642,6 +744,9 @@ impl AgentBuilder {
                 plugin_host,
                 acp: Default::default(),
                 session_settings,
+                several_actors: self.several_actors,
+                session_limits: self.session_limits,
+                tenants: tenants.is_some(),
                 drivers: Default::default(),
                 _scratch: scratch,
                 kept: Default::default(),
