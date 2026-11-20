@@ -1,0 +1,22 @@
+{
+  "scenario": "decline-is-not-text",
+  "about": "A decline is a tagged answer, not a string: answering a text question with the word declined is a value, and declining is not.",
+  "rules": ["sdk/api.md#questions", "bindings/data.md#questions"],
+  "agent": { "durability": "ephemeral", "plugins": ["note"], "answers": [{ "value": "declined" }, "decline"] },
+  "model": [
+    { "toolCalls": [{ "name": "note", "input": { "question": "First?" } }, { "name": "note", "input": { "question": "Second?" } }] },
+    { "text": "Done." }
+  ],
+  "steps": [
+    {
+      "prompt": "Ask me twice.",
+      "expect": {
+        "outcome": "completed",
+        "toolResults": [
+          { "name": "note", "status": "completed", "text": "value: declined" },
+          { "name": "note", "status": "completed", "text": "declined" }
+        ]
+      }
+    }
+  ]
+}

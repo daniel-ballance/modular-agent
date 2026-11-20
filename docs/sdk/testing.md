@@ -78,6 +78,7 @@ Every SDK implements these identically and serves them from a fixture program, `
 | `confirm` | tool `confirm`, input `{ question: string }` | Asks a `choice` question with options `yes` and `no` and returns the answer. |
 | `gate` | hook `tool.before` | Refuses any call whose input, as JSON text, contains `forbidden`, with the reason `the gate refused it`. |
 | `quay` | tool `moor`, input `{ harbour: string }` | Refuses with the reason `the quay is closed`, through the tool context's `refuse`. |
+| `note` | tool `note`, input `{ question: string }` | Asks a `text` question. Returns `value: ` followed by the answer, or `declined` if the question was declined. |
 | `pilot` | tool `pilot`, input `{ harbour: string }`; needs `tide` loaded too | Calls `tide` with the same harbour as a [nested call](../contracts.md#nested-calls), then returns `Pilot: ` followed by the nested result's text. |
 
 ### The format
@@ -105,7 +106,7 @@ Every SDK implements these identically and serves them from a fixture program, `
 | `scenario` | a unique name, the file's name without `.json` |
 | `about` | one sentence for people |
 | `rules` | the rules it checks, as links relative to `docs/` |
-| `agent` | `durability`, `plugins` (fixture names, in load order), `approval`, `answers` (for the [`answers` handler](#the-testing-kit), or absent for no handler), `settings` |
+| `agent` | `durability`, `plugins` (fixture names, in load order), `approval`, `answers` (for the [`answers` handler](#the-testing-kit), or absent for no handler), `settings`, `severalActors`, and `actors`: actors to join to the session after it is created, each `{ id, kind, rights }` |
 | `model` | the [model script](#the-model-script) |
 | `placements` | optional; the placements it applies to, all by default |
 | `steps` | in order |
@@ -117,6 +118,10 @@ A step is one of:
 | `{ "prompt": text }` | `session.prompt(text)` and waits for the outcome |
 | `{ "prompt": text, "crashWhen": { "record": kind } }` | sends the prompt and kills the agent's process once a record of that kind is committed |
 | `{ "prompt": text, "crashWhen": { "count": n } }` | sends the prompt and kills the agent's process once the `counter` fixture's count reaches `n`, so the crash lands after the effect |
+| `{ "prompt": text, "as": actorId }` | `session.as(actorId).prompt(text)` |
+| `{ "send": text, "timing": timing }` | `session.send(text, timing)`, without waiting for a turn; `timing` is `now` if absent |
+| `{ "answer": answer }` | waits up to 10 seconds until exactly one question is open in `session.questions()`, then answers it with `session.answer`; `answer` takes the forms the `answers` list does |
+| `{ "wait": true }` | `session.waitIdle()`; expectations then apply to the session's last turn |
 | `{ "reopen": true }` | starts the agent again over the same data and reopens the session; waits until it is idle |
 
 and can have `expect`:
@@ -131,6 +136,17 @@ and can have `expect`:
 | `error` | the step itself raised this error code |
 
 The runner MUST report each failed expectation with the scenario, placement, step and both values. It MUST NOT retry a failed scenario.
+
+## Live checks
+
+Everything above runs offline. Each SDK also has a small set of live checks against real model services, skipped unless `MODULAR_AGENT_LIVE=1`. Each check is skipped, not failed, when its key is absent.
+
+| Variable | Used for |
+|---|---|
+| `OPENAI_API_KEY`, and `MODULAR_AGENT_LIVE_OPENAI_MODEL` (default `gpt-6-luna`) | the `openai` Provider |
+| `ANTHROPIC_API_KEY`, and `MODULAR_AGENT_LIVE_ANTHROPIC_MODEL` (default `claude-haiku-5-5`) | the `anthropic` Provider |
+
+For each Provider with a key, the checks run: one prompt that must come back `completed` with non-empty text; streamed `text` events that join to that text; one turn in which the model calls a `tide` tool and answers with its result; and a reasoning setting the model lists. They spend a few cents at most. Run them by hand before a release, never in a loop.
 
 ## Adding a scenario
 

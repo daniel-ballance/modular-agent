@@ -1,0 +1,22 @@
+{
+  "scenario": "question-answered-later",
+  "about": "With no question handler, a tool's choice question waits; the app answers it later from its own view of the session's open questions.",
+  "rules": ["contracts.md#questions", "sdk/api.md#questions"],
+  "agent": { "durability": "ephemeral", "plugins": ["confirm"] },
+  "model": [
+    { "toolCalls": [{ "name": "confirm", "input": { "question": "Proceed?" } }] },
+    { "text": "You said yes." }
+  ],
+  "steps": [
+    { "send": "Ask me whether to proceed." },
+    { "answer": { "value": "yes" } },
+    {
+      "wait": true,
+      "expect": {
+        "outcome": "completed",
+        "text": "You said yes.",
+        "toolResults": [{ "name": "confirm", "status": "completed", "text": "yes" }]
+      }
+    }
+  ]
+}

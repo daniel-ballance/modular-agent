@@ -1,0 +1,11 @@
+{
+  "scenario": "actor-rights",
+  "about": "With several actors, an actor without the input right cannot prompt; the local actor still can.",
+  "rules": ["contracts.md#authority", "sdk/api.md#actors-and-rights"],
+  "agent": { "durability": "ephemeral", "plugins": [], "severalActors": true, "actors": [{ "id": "viewer", "kind": "user", "rights": ["watch"] }] },
+  "model": [{ "text": "Hello." }],
+  "steps": [
+    { "prompt": "Say hello.", "as": "viewer", "expect": { "error": "forbidden" } },
+    { "prompt": "Say hello.", "expect": { "outcome": "completed", "text": "Hello." } }
+  ]
+}

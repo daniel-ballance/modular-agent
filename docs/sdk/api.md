@@ -31,6 +31,10 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `approval` | `off`, `ask`, `all` or `never` | absent: no approval plugin. Any value loads the approval plugin and records that policy for new sessions; `off` means the plugin is loaded and its check does not ask ([Approval policy](../contracts.md#approval-policy)). |
 | `onQuestion` | a question handler | none; see [Questions](#questions) |
 | `pluginHost` | boolean | false, or true when `processPlugins` is given. A plugin host also reads `MODULAR_AGENT_PLUGINS`; see [Placement](placement.md#a-plugin-in-another-process). |
+| `severalActors` | boolean | false. When true, the agent declares `severalActors`, and `session.join`, `leave`, `as` and proposed input work. When false they raise `not_supported` for any actor but the local one, as the [ACP binding](../bindings/acp.md#several-actors) requires. |
+| `sessionLimits` | boolean | false. When true, the agent declares `sessionLimits` and `session.setLimit` works; otherwise it raises `not_supported`. |
+| `tenants` | map of tenant name to `{ rights, tokens? }`, the shape of `MODULAR_AGENT_TENANTS` | none. Given, the agent declares `tenants`, and `session({ tenant })` places a session in one ([Limits and tenants](../contracts.md#limits-and-tenants)). |
+| `credentials` | a credential store | environment variables. A writable store (such as `fileCredentials(path)`) implements the [secret staging operations](#the-other-parts), so a `secret` question can be answered. |
 | `jobReportsStartTurns` | boolean | false: a job's report is parked until released ([Jobs](../contracts.md#jobs)) |
 
 Each SDK provides constructors for the parts it ships: `transientRuntime()`, `durableRuntime()`, `memoryHistory()`, `fileHistory(dir)`, `httpHistory(url, tokenFile)`, `localEnvironment(root?)`, `environmentCredentials()` and `fileCredentials(path)`. `serve(plugin)` and `serveHistory(store, options)` are covered in [Placement](placement.md).
@@ -69,7 +73,7 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `forking` | true |
 | `rewinding` | true only if the working environment declares `points` |
 | `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | from the Providers; false for those the SDK ships |
-| `severalActors`, `sessionLimits`, `tenants` | false unless the app enables them |
+| `severalActors`, `sessionLimits`, `tenants` | from the options of the same names; false by default |
 | `holdsOutput`, `outputBypassesAgent` | false |
 | `cancellingTurnCancelsJobs` | false |
 | `pluginsDuringSession` | false |

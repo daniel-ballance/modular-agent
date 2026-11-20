@@ -13,6 +13,9 @@ A scenario that turns out to be wrong is fixed here first, then in the SDKs.
 | [`invalid-input`](scenarios/invalid-input.json) | Input that does not match the schema ends `failed`; the tool never runs |
 | [`nested-call`](scenarios/nested-call.json) | A nested call is recorded as its own call and is not listed as the turn's result |
 | [`question-answered`](scenarios/question-answered.json) | A tool's question answered by the app's handler |
+| [`question-answered-later`](scenarios/question-answered-later.json) | With no handler, the app answers a waiting question from its own UI |
+| [`decline-is-not-text`](scenarios/decline-is-not-text.json) | A decline and the text `declined` are different answers |
+| [`actor-rights`](scenarios/actor-rights.json) | An actor without `input` cannot prompt |
 | [`approval-without-handler`](scenarios/approval-without-handler.json) | With no handler, an approval is refused rather than left waiting |
 | [`read-only-approval`](scenarios/read-only-approval.json) | Under `ask`, a read-only tool runs without asking |
 | [`kept-crash`](scenarios/kept-crash.json) | A crash under `kept`: the turn fails, the call is not repeated |
@@ -20,7 +23,7 @@ A scenario that turns out to be wrong is fixed here first, then in the SDKs.
 
 ## Results
 
-SDK specification 0.1 after the second build round. Each runner ran all eleven scenarios in process and served by each SDK's fixture program, with `MODULAR_AGENT_SDK_REQUIRE=all`:
+SDK specification 0.1 after the second build round, before the last three scenarios were added. Each runner ran all eleven scenarios in process and served by each SDK's fixture program, with `MODULAR_AGENT_SDK_REQUIRE=all`:
 
 | Runner | In process | Rust | TypeScript | Go | Python |
 |---|---|---|---|---|---|
@@ -33,8 +36,4 @@ SDK specification 0.1 after the second build round. Each runner ran all eleven s
 
 ## Proposed, not yet written
 
-These need step kinds the format does not have yet (`send`, `cancel`, and answering with a tagged decline):
-
-- **queued-input-after-crash:** a held tool from the first input, a second input queued behind it, a crash; on reopen the second input is handed back.
-- **queued-cancel:** an input queued `after` a held call, then cancel, then a retry with the same key returns `handedBack` without another turn.
-- **decline-is-not-text:** a text question answered once with the string `declined` and once with a decline; the tool sees two different answers.
+- **queued-cancel:** an input queued `after` a held call, then cancel, then a retry with the same key returns `handedBack` without another turn. Needs receipt expectations in the format.
