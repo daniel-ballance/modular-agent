@@ -1,6 +1,7 @@
 """Build agents, tools and plugins without importing the underlying Harness."""
 
 from ._agent import (
+    AcpActor as AcpActor,
     Agent as Agent,
     AgentStart as AgentStart,
     RuntimeChoice as RuntimeChoice,

@@ -226,3 +226,72 @@ async def test_service_loss_settles_dispatched_tool(token_file, stall):
                 assert result.status == "outcomeUnknown"
     finally:
         await close()
+
+
+async def test_acp_connections_authenticate_and_scope_independently(
+    token_file, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MODULAR_AGENT_ACTOR", "not-the-network-actor")
+    other = tmp_path / "other"
+    other.touch(mode=0o600)
+    other.write_text(secrets.token_hex(32))
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    first = {"id": "first", "kind": "program", "rights": ["watch", "input"]}
+    second = {"id": "second", "kind": "agent", "rights": ["watch"]}
+    tenants = {"team": {"rights": ["watch", "input"]}}
+    async with create_agent(
+        project=allowed,
+        plugin_host=True,
+        tenants=tenants,
+        providers=[scripted_provider([{"text": "done"}])],
+    ) as agent:
+
+        async def compose(project):
+            return agent
+
+        server = await agent.serve_acp(
+            listen="127.0.0.1:0",
+            compose=compose,
+            actors=[
+                {
+                    "token_file": token_file,
+                    "actor": first,
+                    "projects": [allowed],
+                    "tenants": ["team"],
+                },
+                {"token_file": other, "actor": second},
+            ],
+        )
+        opts = {"subprotocols": ["modular-agent-acp-1"]}
+        meta = "modular-agent"
+        with pytest.raises(InvalidStatus) as exc:
+            await connect(server.url, **opts)
+        assert exc.value.response.status_code == 401
+        async with connect(server.url, additional_headers=headers(token_file), **opts) as a:
+            assert (await rpc(a, 1, "initialize", {"protocolVersion": 1}))["result"]["_meta"][meta][
+                "actor"
+            ] == first
+            params = {"cwd": str(allowed), "mcpServers": []}
+            error = await rpc(a, 2, "session/new", params)
+            assert error["error"]["data"]["code"] == "forbidden"
+            scoped = params | {"_meta": {meta: {"tenant": "team"}}}
+            error = await rpc(a, 3, "session/new", scoped | {"cwd": str(tmp_path)})
+            assert error["error"]["data"]["code"] == "forbidden"
+            reply = await rpc(a, 4, "session/new", scoped)
+            while reply.get("id") != 4:
+                reply = json.loads(await a.recv())
+            sid = reply["result"]["sessionId"]
+            async with connect(server.url, additional_headers=headers(other), **opts) as b:
+                assert (await rpc(b, 1, "initialize", {"protocolVersion": 1}))["result"]["_meta"][
+                    meta
+                ]["actor"] == second
+                listing = await rpc(b, 2, "session/list", {})
+                assert listing["result"]["sessions"] == []
+                error = await rpc(b, 3, "session/prompt", {"sessionId": sid, "prompt": []})
+                assert "error" in error
+                reply = await rpc(b, 4, "session/new", params)
+                while reply.get("id") != 4:
+                    reply = json.loads(await b.recv())
+                assert reply["result"]["sessionId"] != sid
+            assert (await rpc(a, 5, "$/ping", {}))["result"] == {}

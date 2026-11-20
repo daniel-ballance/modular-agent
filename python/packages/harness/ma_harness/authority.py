@@ -97,6 +97,8 @@ class Authority:
         if actor not in actors:
             return set()
         allowed = set(actors[actor]["authority"]) & self.session_ceiling(s)
+        if actor in getattr(self, "acp_principal_rights", {}):
+            allowed &= self.acp_principal_rights[actor]
         origin = s.get("origin") or {}
         if origin.get("parent"):
             parent = self.sessions.get(origin["parent"])
