@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+transport-websocket = { path = "../transport-websocket" }
 runtime-engine = { path = "../runtime-engine" }
 agent-api.workspace = true
 anyhow.workspace = true

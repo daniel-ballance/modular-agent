@@ -32,8 +32,10 @@ mod session;
 pub mod testing;
 mod tool;
 
-pub use acp::{AcpComposition, AcpOptions};
-pub use agent::{Agent, AgentBuilder, Approval, Durability, ProcessPlugin, SessionOptions};
+pub use acp::{AcpActor, AcpComposition, AcpOptions, AcpServiceOptions};
+pub use agent::{
+    Agent, AgentBuilder, Approval, Durability, ProcessPlugin, ServicePlugin, SessionOptions,
+};
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
 pub use configuration::FilesConfiguration;
@@ -51,7 +53,7 @@ pub use hooks::*;
 pub use parts::{Environment, Runtime, durable_runtime, local_environment, transient_runtime};
 pub use plugin::{Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource};
 pub use provider::*;
-pub use serve::serve;
+pub use serve::{ServeOptions, serve, serve_websocket};
 pub use session::{
     Actor, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome, PromptOptions,
     PromptResult, Rights, Session, Timing, ToolResult,
@@ -60,3 +62,4 @@ pub use tool::{
     Answer, Ask, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext, ToolEnvironment,
     ToolOutput, ToolStatus,
 };
+pub use transport_websocket::{Server as WebSocketServer, TlsOptions};

@@ -7,6 +7,7 @@ publish = false
 description = "Runs conformance/sdk/scenarios against the Rust SDK"
 
 [dependencies]
+uuid.workspace = true
 modular-agent = { path = "../sdk" }
 futures-util.workspace = true
 libc.workspace = true

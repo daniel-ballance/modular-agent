@@ -1,13 +1,29 @@
 //! The Rust fixture program (docs/sdk/testing.md#the-fixture-plugins): serves the named
-//! fixture plugin over the plugin binding on stdio.
-use modular_agent::{serve, testing::fixtures::fixture};
+//! fixture plugin over stdio or WebSocket.
+use modular_agent::{ServeOptions, serve, serve_websocket, testing::fixtures::fixture};
+use std::io::Write;
 
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let [name] = args.as_slice() else {
-        eprintln!("usage: modular-agent-fixtures FIXTURE");
-        std::process::exit(2);
+    let (name, options) = match args.as_slice() {
+        [name] => (name, None),
+        [name, flag, listen, token_flag, token_file]
+            if flag == "--listen" && token_flag == "--token-file" =>
+        {
+            (
+                name,
+                Some(ServeOptions {
+                    listen: listen.clone(),
+                    token_file: token_file.into(),
+                    tls: None,
+                }),
+            )
+        }
+        _ => {
+            eprintln!("usage: modular-agent-fixtures FIXTURE [--listen ADDR --token-file FILE]");
+            std::process::exit(2);
+        }
     };
     let plugin = if name == "provider-script" {
         Some(modular_agent::Plugin::new("fixture.provider").setup(|r| {
@@ -22,7 +38,20 @@ async fn main() {
         eprintln!("no fixture named {name:?}");
         std::process::exit(2);
     };
-    if let Err(e) = serve(plugin).await {
+    let result = if let Some(options) = options {
+        async {
+            let server = serve_websocket(plugin, options).await?;
+            println!("{}", server.url);
+            std::io::stdout().flush()?;
+            let stopped = tokio::signal::ctrl_c().await;
+            server.close().await;
+            Ok(stopped?)
+        }
+        .await
+    } else {
+        serve(plugin).await
+    };
+    if let Err(e) = result {
         eprintln!("{e}");
         std::process::exit(1);
     }

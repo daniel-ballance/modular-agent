@@ -275,32 +275,64 @@ impl Session {
         Ok(json!({"stopReason":reason,"_meta":{"result":last}}))
     }
 }
-pub(crate) fn join_host(api: &dyn AgentApi, session: &str) -> Result<()> {
-    let rights = Authority::full();
-    let data = api.snapshot(session)?;
-    let latest = data.entries.iter().rev().find_map(|e| {
+fn recorded_rights(data: &SessionData, id: &str) -> Option<Option<Authority>> {
+    data.entries.iter().rev().find_map(|e| {
         let v = e.content.as_ref()?;
         match e.kind.as_str() {
-            "actor.grant" if v["actor"] == connection_actor().as_str() => Some(
-                serde_json::from_value::<Authority>(v["authority"].clone())
-                    .is_ok_and(|a| a.has("watch")),
-            ),
-            "actor.left" if v["actorId"] == connection_actor().as_str() => Some(false),
+            "actor.grant" if v["actor"] == id => {
+                Some(serde_json::from_value(v["authority"].clone()).ok())
+            }
+            "actor.left" if v["actorId"] == id => Some(None),
             _ => None,
         }
-    });
-    if latest == Some(false) {
-        return Err(request_error("forbidden", "session inaccessible").into());
-    }
-    if latest.is_none() {
+    })
+}
+
+pub(crate) fn discoverable(identity: &Identity, data: &SessionData) -> bool {
+    let tenant = data
+        .entries
+        .iter()
+        .find(|e| e.kind == "tenant")
+        .and_then(|e| e.content.as_ref())
+        .and_then(|v| v["tenant"].as_str());
+    identity.allows_project(&data.project)
+        && identity.allows_tenant(tenant)
+        && identity.rights.has("watch")
+        && match recorded_rights(data, &identity.id) {
+            Some(rights) => rights.is_some_and(|rights| {
+                rights.has("watch")
+                    && identity
+                        .rights
+                        .contains(&rights.intersect(&Authority::full()))
+            }),
+            None => identity.join_on_open,
+        }
+}
+
+pub(crate) fn join_host(api: &dyn AgentApi, session: &str) -> Result<()> {
+    let identity = PRINCIPAL
+        .try_with(|id| id.as_ref().clone())
+        .unwrap_or_else(|_| {
+            let mut identity = Identity::local();
+            identity.id = connection_actor();
+            identity
+        });
+    let data = api.snapshot(session)?;
+    let latest = recorded_rights(&data, &identity.id);
+    if let Some(rights) = latest {
+        ensure!(
+            rights
+                .is_some_and(|r| r.has("watch")
+                    && identity.rights.contains(&r.intersect(&Authority::full()))),
+            request_error("forbidden", "session inaccessible")
+        );
+    } else {
         api.append(
             &actor_scope(session),
             "interface.acp",
-            Draft::new(
-                "actor.grant",
-                false,
-                json!({"actor":connection_actor().as_str(),"kind":"host","authority":rights,"operatorAdmission":true}),
-            ),
+            Draft::new("actor.grant", false, json!({
+                "actor":identity.id,"kind":identity.kind,"authority":identity.rights,"operatorAdmission":true
+            })),
         )?;
     }
     Ok(())
@@ -425,7 +457,24 @@ impl State {
                 .is_none_or(|v| v.is_empty()),
             "additional roots are not supported"
         );
+        let tenant = wire::optional(&p["_meta"]["modular-agent"], "tenant")
+            .map(|v| v.as_str().ok_or_else(|| anyhow!("tenant must be a string")))
+            .transpose()?;
         let reopening = method != "session/new";
+        if self.principal.network {
+            let has_servers = p["mcpServers"]
+                .as_array()
+                .is_some_and(|servers| !servers.is_empty());
+            ensure!(
+                self.principal.allows_project(&project)
+                    && (!has_servers || self.principal.rights.has("tools"))
+                    && (reopening
+                        || (self.principal.allows_tenant(tenant)
+                            && self.principal.rights.has("input")
+                            && self.principal.rights.has("watch"))),
+                request_error("forbidden", "session inaccessible")
+            );
+        }
         let _opening = if reopening {
             let id = string(&p, "sessionId")?.to_owned();
             ensure!(
@@ -454,8 +503,10 @@ impl State {
                 .factory
                 .list(None)?
                 .into_iter()
-                .find(|s| &s.id == id)
-                .ok_or_else(|| anyhow!("unknown session"))?;
+                .find(|s| {
+                    &s.id == id && (!self.principal.network || discoverable(&self.principal, s))
+                })
+                .ok_or_else(|| request_error("forbidden", "session inaccessible"))?;
             ensure!(
                 data.project == project,
                 "cwd differs from recorded session project"
@@ -493,9 +544,6 @@ impl State {
         let id = if let Some(data) = existing {
             data.id
         } else {
-            let tenant = wire::optional(&p["_meta"]["modular-agent"], "tenant")
-                .map(|v| v.as_str().ok_or_else(|| anyhow!("tenant must be a string")))
-                .transpose()?;
             match api
                 .create_in_tenant(&project, self.factory.project_settings(&project)?, tenant)
                 .await
@@ -526,11 +574,14 @@ impl State {
             approval_views: Mutex::default(),
         });
         requests(api.as_ref())?.presence(&id, connection_actor().as_str(), true);
-        let worker = tokio::spawn(events::pump(
-            session.clone(),
-            rx,
-            cx.clone(),
-            self.client.lock().unwrap().clone().unwrap_or_default(),
+        let worker = tokio::spawn(PRINCIPAL.scope(
+            self.principal.clone(),
+            events::pump(
+                session.clone(),
+                rx,
+                cx.clone(),
+                self.client.lock().unwrap().clone().unwrap_or_default(),
+            ),
         ));
         *session.worker.lock().unwrap() = Some(worker);
         let setup: Result<Value> = async {

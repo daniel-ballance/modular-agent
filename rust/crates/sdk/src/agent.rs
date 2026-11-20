@@ -81,6 +81,9 @@ impl ProcessPlugin {
     }
 }
 
+/// A plugin service configured by its URL, bearer-token file and registration settings.
+pub use plugin_stdio::ServiceLaunch as ServicePlugin;
+
 /// An agent: parts put together, and the sessions they serve.
 #[derive(Clone)]
 pub struct Agent {
@@ -130,6 +133,7 @@ pub struct AgentBuilder {
     tools: Vec<Tool>,
     plugins: Vec<Plugin>,
     process_plugins: Vec<ProcessPlugin>,
+    service_plugins: Vec<ServicePlugin>,
     wire_plugins: Vec<Plugin>,
     environment: Option<crate::Environment>,
     runtime: Option<crate::Runtime>,
@@ -434,12 +438,16 @@ impl AgentBuilder {
     }
     /// A plugin program, loaded after the agent's own plugins. Giving one makes the
     /// agent a plugin host.
+    pub fn service_plugin(mut self, plugin: ServicePlugin) -> Self {
+        self.service_plugins.push(plugin);
+        self
+    }
     pub fn process_plugin(mut self, plugin: ProcessPlugin) -> Self {
         self.process_plugins.push(plugin);
         self
     }
     /// Whether the agent hosts plugin programs. A plugin host also starts the programs
-    /// named in `MODULAR_AGENT_PLUGINS`. Default: only when process plugins are given.
+    /// named in `MODULAR_AGENT_PLUGINS`. Default: when process or service plugins are given.
     pub fn plugin_host(mut self, host: bool) -> Self {
         self.plugin_host = Some(host);
         self
@@ -474,14 +482,17 @@ impl AgentBuilder {
     }
     /// Load every part and check the composition. Nothing runs until this succeeds.
     pub async fn build(self) -> Result<Agent> {
-        if self.plugin_host == Some(false) && !self.process_plugins.is_empty() {
+        if self.plugin_host == Some(false)
+            && !(self.process_plugins.is_empty() && self.service_plugins.is_empty())
+        {
             return Err(Error::new(
                 Code::InvalidComposition,
-                "process plugins require a plugin host",
+                "external plugins require a plugin host",
             ));
         }
         let mut restart = (self.restartable
             && self.process_plugins.is_empty()
+            && self.service_plugins.is_empty()
             && self.wire_plugins.is_empty()
             && self.plugin_host != Some(true))
         .then(|| self.clone());
@@ -634,22 +645,26 @@ impl AgentBuilder {
                 )
             })?;
         }
-        let mut launches: Vec<plugin_stdio::Launch> = self
+        use plugin_stdio::ExternalLaunch;
+        let mut launches: Vec<_> = self
             .process_plugins
             .into_iter()
-            .map(|p| plugin_stdio::Launch {
-                command: p.command,
-                env: p.env,
-                config: if p.config.is_null() {
-                    json!({})
-                } else {
-                    p.config
-                },
+            .map(|p| {
+                ExternalLaunch::Process(plugin_stdio::Launch {
+                    command: p.command,
+                    env: p.env,
+                    config: p.config,
+                })
             })
+            .chain(
+                self.service_plugins
+                    .into_iter()
+                    .map(ExternalLaunch::Service),
+            )
             .collect();
         let plugin_host = self.plugin_host.unwrap_or(!launches.is_empty());
         if plugin_host && let Some(value) = std::env::var_os("MODULAR_AGENT_PLUGINS") {
-            let named: Vec<plugin_stdio::Launch> = serde_json::from_slice(value.as_encoded_bytes())
+            let named: Vec<ExternalLaunch> = serde_json::from_slice(value.as_encoded_bytes())
                 .map_err(|e| {
                     Error::new(
                         Code::InvalidComposition,
@@ -688,14 +703,13 @@ impl AgentBuilder {
             .enumerate()
             .map(|(i, l)| (i + wire_count, l))
         {
-            let command = launch.command.join(" ");
             let home = state.join("plugins").join(index.to_string());
-            if let Err(e) = plugin_stdio::load(&harness, launch, &project, &home, index).await {
+            if let Err(e) = launch.load(&harness, &project, &home, index).await {
                 // An agent never runs without a part it was configured to have.
                 let _ = base::AgentApi::shutdown(harness.as_ref()).await;
                 return Err(Error::new(
                     Code::InvalidComposition,
-                    format!("plugin program {command} did not start: {e:#}"),
+                    format!("external plugin {index} did not start: {e:#}"),
                 ));
             }
         }

@@ -1,15 +1,15 @@
 //! A runner for the shared SDK scenarios (docs/sdk/testing.md#the-shared-scenarios).
 use modular_agent::{
-    Agent, Answer, Approval, Code, Durability, Error, ProcessPlugin, Session, SessionOptions,
-    Timing,
+    Agent, Answer, Approval, Code, Durability, Error, ProcessPlugin, ServicePlugin, Session,
+    SessionOptions, Timing,
     testing::{Answers, answers, fixtures, test_agent},
 };
 use serde_json::Value;
 use std::{
-    io::{BufRead, BufReader},
-    os::unix::process::CommandExt,
+    io::{BufRead, BufReader, Write},
+    os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -22,6 +22,10 @@ pub enum Placement {
         sdk: String,
         command: Vec<String>,
     },
+    Service {
+        sdk: String,
+        command: Vec<String>,
+    },
 }
 
 impl Placement {
@@ -29,20 +33,27 @@ impl Placement {
         match self {
             Placement::InProcess => "inProcess".into(),
             Placement::Process { sdk, .. } => format!("process:{sdk}"),
+            Placement::Service { sdk, .. } => format!("service:{sdk}"),
         }
     }
     /// As command-line arguments, for the crash helper.
     pub fn to_args(&self) -> Vec<String> {
         match self {
             Placement::InProcess => vec!["inProcess".into()],
-            Placement::Process { sdk, command } => [vec![sdk.clone()], command.clone()].concat(),
+            Placement::Process { command, .. } | Placement::Service { command, .. } => {
+                [vec![self.name()], command.clone()].concat()
+            }
         }
     }
     pub fn from_args(args: &[String]) -> Self {
         match args[0].as_str() {
             "inProcess" => Placement::InProcess,
-            sdk => Placement::Process {
-                sdk: sdk.into(),
+            name if name.starts_with("service:") => Placement::Service {
+                sdk: name["service:".len()..].into(),
+                command: args[1..].to_vec(),
+            },
+            name => Placement::Process {
+                sdk: name.strip_prefix("process:").unwrap_or(name).into(),
                 command: args[1..].to_vec(),
             },
         }
@@ -64,6 +75,12 @@ impl Run {
     }
     pub fn project(&self) -> PathBuf {
         self.dir.join("project")
+    }
+    fn service_config(&self) -> PathBuf {
+        self.dir.join("services.json")
+    }
+    fn token(&self) -> PathBuf {
+        self.dir.join("service-token")
     }
 }
 
@@ -160,6 +177,17 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent,
         }
     }
     let config = serde_json::json!({"path": run.counter()});
+    if matches!(run.placement, Placement::Service { .. }) {
+        let urls: Vec<String> = serde_json::from_slice(&std::fs::read(run.service_config())?)
+            .map_err(|e| Error::new(Code::InvalidComposition, e.to_string()))?;
+        for url in urls {
+            builder = builder.service_plugin(ServicePlugin {
+                url,
+                token_file: run.token(),
+                config: config.clone(),
+            });
+        }
+    }
     for name in spec["plugins"].as_array().into_iter().flatten() {
         let name = name.as_str().unwrap();
         builder = match &run.placement {
@@ -172,6 +200,7 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent,
                 ProcessPlugin::new(command.iter().cloned().chain([name.to_string()]))
                     .config(config.clone()),
             ),
+            Placement::Service { .. } => builder,
         };
     }
     if let Some(policy) = spec["approval"].as_str() {
@@ -279,6 +308,7 @@ pub fn applies(scenario: &Value, placement: &Placement) -> bool {
             p == "inProcess" && matches!(placement, Placement::InProcess)
                 || p.as_str() == Some(&placement.name())
                 || p == "process" && matches!(placement, Placement::Process { .. })
+                || p == "service" && matches!(placement, Placement::Service { .. })
         }),
     }
 }
@@ -303,18 +333,26 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
 
     let mut current: Option<(Agent, modular_agent::Session, Option<Answers>)> = None;
     let mut session_id = None;
+    let mut services = Vec::new();
     for (index, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
         let expect = &step["expect"];
         let result;
         if step["reopen"] != true {
             if let Some(crash) = step.get("crashWhen") {
-                match crash_run(crash_agent, path, &run, index, crash) {
+                match crash_run(crash_agent, path, &scenario, &run, index, crash) {
                     Ok(id) => session_id = Some(id),
                     Err(e) => fail(index, e),
                 }
                 continue;
             }
             if current.is_none() {
+                match start_services(&scenario, &run) {
+                    Ok(children) => services = children,
+                    Err(e) => {
+                        fail(index, e);
+                        break;
+                    }
+                }
                 match agent(&scenario, &run).await {
                     Ok((a, queue)) => match new_session(&a, &scenario).await {
                         Ok(s) => {
@@ -351,6 +389,17 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
                 fail(index, "no session to reopen".into());
                 break;
             };
+            if let Err(e) = stop_groups(&mut services) {
+                fail(index, e);
+                break;
+            }
+            match start_services(&scenario, &run) {
+                Ok(children) => services = children,
+                Err(e) => {
+                    fail(index, e);
+                    break;
+                }
+            }
             let opened = match agent(&scenario, &run).await {
                 Ok((a, queue)) => a.open_session(&id).await.map(|s| (a, s, queue)),
                 Err(e) => Err(e),
@@ -482,6 +531,9 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
             );
         }
     }
+    if let Err(e) = stop_groups(&mut services) {
+        fail(scenario["steps"].as_array().unwrap().len(), e);
+    }
     failures
 }
 
@@ -498,11 +550,13 @@ fn check_error(expect: &Value, e: &modular_agent::Error, fail: &mut dyn FnMut(St
 fn crash_run(
     bin: &Path,
     path: &Path,
+    scenario: &Value,
     run: &Run,
     step: usize,
     crash: &Value,
 ) -> Result<String, String> {
-    let mut child = Command::new(bin)
+    let mut groups = start_services(scenario, run)?;
+    let child = Command::new(bin)
         .arg(path)
         .arg(&run.dir)
         .arg(step.to_string())
@@ -511,7 +565,8 @@ fn crash_run(
         .process_group(0)
         .spawn()
         .map_err(|e| format!("spawn: {e}"))?;
-    let pid = child.id() as i32;
+    groups.push(ChildGroup(Some(child)));
+    let child = groups.last_mut().unwrap().0.as_mut().unwrap();
     let result = (|| {
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
@@ -552,24 +607,133 @@ fn crash_run(
         }
         Ok(id)
     })();
-    // Signal the group even on a fixture failure. wait() only reaps our direct
-    // child, not the plugin grandchildren that may still be exiting.
-    let signal = unsafe { libc::kill(-pid, libc::SIGKILL) };
-    let signal_error = (signal != 0).then(std::io::Error::last_os_error);
-    child.wait().map_err(|e| format!("reap crash agent: {e}"))?;
-    if let Some(e) = signal_error
-        && e.raw_os_error() != Some(libc::ESRCH)
-    {
-        return Err(format!("kill crash agent group: {e}"));
-    }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while group_can_run(pid).map_err(|e| format!("inspect crash agent group: {e}"))? {
-        if Instant::now() > deadline {
-            return Err("some of the crash agent's process group did not exit".into());
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    stop_groups(&mut groups)?;
     result
+}
+
+/// A service has its own group, distinct from the agent and all other services.
+/// The parent owns these guards even when the crash agent is unconditionally killed.
+struct ChildGroup(Option<Child>);
+impl ChildGroup {
+    fn signal(&self) -> std::io::Result<()> {
+        let Some(child) = &self.0 else {
+            return Ok(());
+        };
+        if unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::ESRCH) {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+    fn reap(&mut self) -> std::io::Result<()> {
+        let Some(mut child) = self.0.take() else {
+            return Ok(());
+        };
+        let pid = child.id() as i32;
+        child.wait()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while group_can_run(pid)? {
+            if Instant::now() > deadline {
+                return Err(std::io::Error::other(
+                    "some of the process group did not exit",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    }
+}
+impl Drop for ChildGroup {
+    fn drop(&mut self) {
+        let _ = self.signal();
+        let _ = self.reap();
+    }
+}
+
+fn stop_groups(groups: &mut Vec<ChildGroup>) -> Result<(), String> {
+    // Signal all groups before waiting for any one of them.
+    let mut errors = vec![];
+    for group in groups.iter() {
+        if let Err(e) = group.signal() {
+            errors.push(format!("kill process group: {e}"));
+        }
+    }
+    for mut group in groups.drain(..) {
+        if let Err(e) = group.reap() {
+            errors.push(format!("reap process group: {e}"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn start_services(scenario: &Value, run: &Run) -> Result<Vec<ChildGroup>, String> {
+    let Placement::Service { command, .. } = &run.placement else {
+        return Ok(vec![]);
+    };
+    let prepare = || -> std::io::Result<()> {
+        std::fs::create_dir_all(run.project())?;
+        let path = run.token();
+        if !path.exists() {
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)?;
+            writeln!(
+                file,
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            )?;
+        }
+        Ok(())
+    };
+    prepare().map_err(|e| format!("prepare services: {e}"))?;
+    let mut groups = Vec::new();
+    let mut urls = Vec::new();
+    for name in scenario["agent"]["plugins"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let name = name.as_str().unwrap();
+        let child = Command::new(&command[0])
+            .args(&command[1..])
+            .arg(name)
+            .args(["--listen", "127.0.0.1:0", "--token-file"])
+            .arg(run.token())
+            .env_clear()
+            .env(
+                "PATH",
+                std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+            )
+            .current_dir(run.project())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .map_err(|e| format!("start {name} service: {e}"))?;
+        groups.push(ChildGroup(Some(child)));
+        let mut line = String::new();
+        let child = groups.last_mut().unwrap().0.as_mut().unwrap();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .map_err(|e| format!("read {name} service URL: {e}"))?;
+        let url = line.trim();
+        if !url.starts_with("ws://") {
+            return Err(format!("{name} service did not publish a WebSocket URL"));
+        }
+        urls.push(url.to_owned());
+    }
+    std::fs::write(run.service_config(), serde_json::to_vec(&urls).unwrap())
+        .map_err(|e| format!("write service configuration: {e}"))?;
+    Ok(groups)
 }
 
 #[cfg(target_os = "linux")]

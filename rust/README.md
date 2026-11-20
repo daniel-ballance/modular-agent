@@ -72,6 +72,7 @@ ma --model xai/grok-4.7 --thinking high
 ma -c                                        # reopen this folder's last session
 ma -v                                        # also show each call the code makes
 ma --acp                                     # serve ACP on stdio, for an editor or T3 Code
+ma --acp --listen 127.0.0.1:7401 --token-file /path/to/owner-only-token
 ```
 
 `ma --help` lists the rest. With no `--model` and none in settings, `ma` uses the first Provider that is signed in.
@@ -102,6 +103,7 @@ Run from `rust/` with `TMPDIR` off `/tmp`:
 ```sh
 export TMPDIR="$HOME/.cache/ma-std-tmp"; mkdir -p "$TMPDIR"
 (cd ../conformance/acp && npm ci)
+(cd ../conformance/tools && npm ci)
 mise exec -- cargo build --locked -p standard --bin ma
 node ../conformance/reference/run.mjs --agent rust
 MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs -- "$PWD/target/debug/ma" --acp
@@ -112,11 +114,11 @@ mise exec -- cargo fmt --all -- --check
 mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-- **Standard reference checks:** 15/15, including both Runtime crash cases, the declaration, the prompt tail and the SDK-shaped JSON stream.
-- **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 against `ma` and 214/214 against the base build. The expanded run covers late answers and job report turns, including after a crash.
+- **Standard reference checks:** 17/17, including both Runtime crash cases, the declaration, the prompt tail and the SDK-shaped JSON stream.
+- **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
+- **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. Neither WebSocket run used a bridge.
 - **Standard and its plugins:** 35 Rust tests: 17 for `ma`, including the dependency boundary, prompt, skills, MCP, nested calls, crash recovery, state isolation and JSON event IDs; 4 for file tools; 2 for auth storage and locking; and 12 for subscription sign-in, refresh and requests.
-- **Workspace:** 304 passed, 0 failed, 0 ignored, including doctests and the base build's kit tests. Formatting and Clippy with `-D warnings` pass.
-- **SDK shared scenarios:** 55/55 placements: 11 in process and 11 each with the Rust, Go, Python and TypeScript fixture programs.
+- **Workspace and SDK shared scenarios:** See the [SDK verification matrix](crates/sdk/README.md#what-is-checked). Formatting and Clippy with `-D warnings` pass.
 - **Offline only:** browser sign-in uses a simulated browser on loopback; both device flows and refresh use loopback HTTP fixtures. No credentials, real sign-ins or model requests were used.
 
 To try the terminal without a login:
