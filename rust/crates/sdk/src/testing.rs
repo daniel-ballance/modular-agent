@@ -262,6 +262,10 @@ impl TestAgentBuilder {
         self.builder = self.builder.process_plugin(plugin);
         self
     }
+    pub fn service_plugin(mut self, plugin: crate::ServicePlugin) -> Self {
+        self.builder = self.builder.service_plugin(plugin);
+        self
+    }
     pub async fn build(mut self) -> Result<Agent> {
         self.builder.restartable = true;
         let (project, keep) = match self.project {
