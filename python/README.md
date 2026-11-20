@@ -22,3 +22,7 @@ uv run --offline mypy
 ```
 
 Run whole suites one at a time: command cleanup looks for stale work across data directories.
+
+### Known flaky test, fixed
+
+`test_foreign_job_report_runs_as_a_turn` could time out when the plugin committed its job report during `session.open`, before transient recovery read the queue. Recovery handed the new report back as if it had been queued before restart, so no turn ended. Restart policy now applies only to admissions loaded from history, and ordinary queue dispatch waits for recovery. The test also forces the old failing order without extending its timeout.
