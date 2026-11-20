@@ -21,9 +21,19 @@ let network;
 try {
 	const options = websocketOptions(argv);
 	network = options && { ...options, protocol: PLUGIN_PROTOCOL };
+	// A service registers its parts at startup, so each Runtime tier is a separate service.
+	if (network) {
+		network.tiers = {};
+		for (const [part, flag] of [["runtime", "--runtime-url"], ["durable-runtime", "--durable-runtime-url"]]) {
+			const i = argv.indexOf(flag);
+			if (i < 0) continue;
+			if (!argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error(`${flag} needs a URL`);
+			network.tiers[part] = websocketOptions(["--connect", argv[i + 1], "--token-file", options.tokenFile]).url;
+		}
+	} else if (argv.includes("--runtime-url") || argv.includes("--durable-runtime-url")) throw new Error("--runtime-url and --durable-runtime-url need --connect");
 	if (network ? dash >= 0 : dash < 0 || dash === args.length - 1) throw new Error("choose a stdio command or a WebSocket URL");
 } catch (e) {
-	console.error(`${e.message}\nUsage: node run.mjs [--verbose] [--no-runtime] (-- <plugin command> [args...] | --connect URL --token-file FILE)`);
+	console.error(`${e.message}\nUsage: node run.mjs [--verbose] [--no-runtime] (-- <plugin command> [args...] | --connect URL --token-file FILE [--runtime-url URL] [--durable-runtime-url URL])`);
 	process.exit(2);
 }
 const command = args.slice(dash + 1);
@@ -61,7 +71,8 @@ const alive = (pid) => {
 /** One plugin instance, and the kit as its host. */
 function start(extraEnv = {}) {
 	const child = network ? null : spawn(command[0], command.slice(1), { cwd: work, stdio: ["pipe", "pipe", verbose ? "inherit" : "ignore"], env: { ...safeEnv, ...extraEnv } });
-	const wire = network && socketPeer(network, (line, parsed) => receive(line, parsed));
+	const tierUrl = network && network.tiers[extraEnv.MODULAR_AGENT_PLUGIN_PARTS];
+	const wire = network && socketPeer(tierUrl ? { ...network, url: tierUrl } : network, (line, parsed) => receive(line, parsed));
 	const pending = new Map();
 	const notes = [];
 	const hostCalls = [];
@@ -1078,7 +1089,7 @@ async function runtimeChecks(part) {
 if (!argv.includes("--no-runtime")) {
 	for (const part of ["runtime", "durable-runtime"]) {
 		const served = reg?.runtime && (reg.runtime.supports?.continuesAfterRestart === true ? "durable-runtime" : "runtime");
-		if (network && served !== part) console.log(`SKIP  ${part} (this service does not register that Runtime tier)`);
+		if (network && served !== part && !network.tiers[part]) console.log(`SKIP  ${part} (this service does not register that Runtime tier; name a service that does with --${part}-url)`);
 		else await attempt(part, () => runtimeChecks(part));
 	}
 }
