@@ -244,8 +244,9 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		if p.EntryID == "" {
 			return nil, acp.NewInvalidParams(nil)
 		}
-		s.lifecycle.Lock()
-		defer s.lifecycle.Unlock()
+		lifecycle := s.sessionLifecycle()
+		lifecycle.Lock()
+		defer lifecycle.Unlock()
 		id, err := s.a.Fork(ctx, p.SessionID, p.EntryID)
 		if errors.Is(err, api.ErrResultTooLarge) {
 			return nil, acpError("result_too_large")

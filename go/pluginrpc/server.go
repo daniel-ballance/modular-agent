@@ -662,6 +662,23 @@ func (e *remoteEnvironment) Bash(ctx context.Context, cwd, command string, progr
 // supervised execution. Tools always obtain the environment from the host.
 func ConformanceServer() *Server { return conformanceServer("") }
 
+// ListenConformancePlugin serves the same fixture as ConformanceServer, with
+// a private command ledger per connection instead of trusting a host home path.
+func ListenConformancePlugin(ctx context.Context, address, tokenFile string) (*wswire.Server, error) {
+	token, err := wswire.ReadToken(tokenFile)
+	if err != nil {
+		return nil, err
+	}
+	return wswire.Listen(ctx, address, nil, wswire.Plugin, map[string]struct{}{token: {}}, func(ctx context.Context, c *wswire.Conn, _ struct{}) {
+		dir, err := os.MkdirTemp("", "go-conformance-plugin-")
+		if err != nil {
+			return
+		}
+		defer os.RemoveAll(dir)
+		_ = conformanceServer(dir).ServeServiceConnection(ctx, c)
+	})
+}
+
 func conformanceServer(serviceState string) *Server {
 	s := &Server{Providers: map[string]api.Provider{}, Sources: map[string]api.ToolSource{}, Handlers: map[int]func(context.Context, string, object) (any, error){}}
 	s.Initialize = func(init object) error {

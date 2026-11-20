@@ -71,7 +71,7 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 		}
 		found := false
 		for _, row := range list {
-			if row.ID == id && s.permitsMembership(row) {
+			if row.ID == id && s.discoverable(row) {
 				found = true
 				key.savedModel = row.Settings.Model
 				break

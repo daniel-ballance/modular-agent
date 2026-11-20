@@ -4,9 +4,45 @@ import (
 	"context"
 	"io"
 	"slices"
+	"sync"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 )
+
+// Connections sharing the same harness reuse its writer. The shared
+// lifecycle lock also protects refs; only the last disconnect unloads it.
+type connectionAttachments struct {
+	mu   sync.Mutex
+	refs map[string]int
+}
+
+func (s *server) sessionLifecycle() *sync.Mutex {
+	if s.shared != nil {
+		return &s.shared.mu
+	}
+	return &s.lifecycle
+}
+
+func (s *server) link(id string) {
+	if s.shared != nil {
+		if s.shared.refs == nil {
+			s.shared.refs = map[string]int{}
+		}
+		s.shared.refs[id]++
+	}
+}
+
+func (s *server) unlink(id string) bool {
+	if s.shared == nil {
+		return true
+	}
+	s.shared.refs[id]--
+	if s.shared.refs[id] > 0 {
+		return false
+	}
+	delete(s.shared.refs, id)
+	return true
+}
 
 // Principal is the operator's policy for an authenticated ACP connection.
 // Nil Projects allows any project in the composition. Empty string in Tenants
@@ -33,7 +69,7 @@ func (s *server) permitsMembership(sess api.Session) bool {
 	if s.principal == nil {
 		return true
 	}
-	if !s.allowsProject(sess.Project) || !s.allowsTenant(sess.Tenant) || !s.hasRight("watch") {
+	if !s.allowsProject(sess.Project) || !s.allowsTenant(sess.Tenant) {
 		return false
 	}
 	// Do not reuse a durable grant broader than the authenticated token.
@@ -50,7 +86,7 @@ func (s *server) discoverable(sess api.Session) bool {
 	if s.principal == nil {
 		return true
 	}
-	if !s.permitsMembership(sess) {
+	if !s.permitsMembership(sess) || !s.hasRight("watch") {
 		return false
 	}
 	return s.a.(interface {

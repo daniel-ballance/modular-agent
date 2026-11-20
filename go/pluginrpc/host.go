@@ -23,11 +23,11 @@ import (
 
 type Spec struct {
 	Serve                         func(context.Context, io.ReadCloser, io.Writer) error `json:"-"`
-	Command                       []string                                              `json:"command"`
-	Env                           map[string]string                                     `json:"env"`
+	Command                       []string                                              `json:"command,omitempty"`
+	Env                           map[string]string                                     `json:"env,omitempty"`
 	Config                        object                                                `json:"config"`
-	URL                           string                                                `json:"url"`
-	TokenFile                     string                                                `json:"tokenFile"`
+	URL                           string                                                `json:"url,omitempty"`
+	TokenFile                     string                                                `json:"tokenFile,omitempty"`
 	PingInterval, ControlDeadline time.Duration                                         `json:"-"`
 	envKeys                       map[string]json.RawMessage
 }

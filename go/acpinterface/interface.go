@@ -29,10 +29,11 @@ const actor = "local-user"
 type Interface struct {
 	a       api.API
 	project string
+	network connectionAttachments
 }
 
 func Plugin(project string) api.Plugin {
-	return api.Plugin{Name: "acp-interface", Setup: func(a api.API) error { return a.Provide("interface.acp", &Interface{a, project}) }}
+	return api.Plugin{Name: "acp-interface", Setup: func(a api.API) error { return a.Provide("interface.acp", &Interface{a: a, project: project}) }}
 }
 
 type attachment struct {
@@ -62,6 +63,7 @@ type server struct {
 	peer         *acp.AgentSideConnection
 	mu           sync.Mutex
 	lifecycle    sync.Mutex
+	shared       *connectionAttachments
 	closed       bool
 	initialized  bool
 	binding      string
@@ -116,6 +118,8 @@ func (i *Interface) serve(ctx context.Context, in io.ReadCloser, out io.Writer, 
 	s := &server{declared: declared, a: i.a, project: project, actor: who, principal: principal, ctx: ctx, represents: represented, sessions: map[string]*attachment{}, resources: config}
 	if config.Compose != nil {
 		s.projects = &projectHosts{compose: config.Compose, hosts: map[projectKey]*server{}}
+	} else if principal != nil {
+		s.shared = &i.network
 	}
 	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, in, acp.ConnectionOptions{MaxFrameSize: (64 << 20) + 2})
 	if err != nil {
@@ -157,7 +161,8 @@ func (s *server) subscribe() func() {
 }
 
 func (s *server) stop() {
-	s.lifecycle.Lock()
+	lifecycle := s.sessionLifecycle()
+	lifecycle.Lock()
 	s.mu.Lock()
 	s.closed = true
 	attached := s.sessions
@@ -169,9 +174,11 @@ func (s *server) stop() {
 			disconnect()
 		}
 		st.cancel()
-		_ = s.a.StopSession(id)
+		if s.unlink(id) {
+			_ = s.a.StopSession(id)
+		}
 	}
-	s.lifecycle.Unlock()
+	lifecycle.Unlock()
 	s.wg.Wait()
 }
 func (s *server) Initialize(ctx context.Context, p acp.InitializeRequest) (acp.InitializeResponse, error) {
@@ -258,9 +265,10 @@ func (s *server) attach(id string, loading bool, identity ...string) *attachment
 	s.mu.Lock()
 	s.sessions[id] = st
 	s.mu.Unlock()
+	s.link(id)
 	return st
 }
-func (s *server) detach(id string, st *attachment) {
+func (s *server) detach(id string, st *attachment) bool {
 	s.mu.Lock()
 	delete(s.sessions, id)
 	s.mu.Unlock()
@@ -269,7 +277,11 @@ func (s *server) detach(id string, st *attachment) {
 		disconnect()
 	}
 	st.cancel()
-	s.mcp().Remove(id)
+	last := s.unlink(id)
+	if last {
+		s.mcp().Remove(id)
+	}
+	return last
 }
 func (s *server) hostActor() api.Actor {
 	if s.principal != nil {
@@ -316,8 +328,9 @@ func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.N
 		}
 		return host.NewSession(ctx, p)
 	}
-	s.lifecycle.Lock()
-	defer s.lifecycle.Unlock()
+	lifecycle := s.sessionLifecycle()
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
 	if err := s.root(p.Cwd, p.AdditionalDirectories, p.SystemPrompt); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -338,7 +351,7 @@ func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.N
 			return acp.NewSessionResponse{}, acp.NewInvalidParams(nil)
 		}
 	}
-	if !s.allowsTenant(tenant) || (len(specs) != 0 && !s.hasRight("tools")) {
+	if !s.allowsTenant(tenant) || !s.hasRight("input") || (len(specs) != 0 && !s.hasRight("tools")) {
 		return acp.NewSessionResponse{}, acpError("forbidden")
 	}
 	if s.resources.Settings != nil {
@@ -396,7 +409,7 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 	}
 	found := false
 	for _, snap := range list {
-		if snap.ID == id && s.permitsMembership(snap) {
+		if snap.ID == id && s.discoverable(snap) {
 			found = true
 			break
 		}
@@ -415,12 +428,14 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 	if err != nil {
 		return result, err
 	}
-	if err = s.mcp().Add(ctx, id, specs); err != nil {
-		return result, err
-	}
-	if err = s.addProjectMCP(ctx, id); err != nil {
-		s.mcp().Remove(id)
-		return result, err
+	if alreadyOpen != nil || s.shared == nil {
+		if err = s.mcp().Add(ctx, id, specs); err != nil {
+			return result, err
+		}
+		if err = s.addProjectMCP(ctx, id); err != nil {
+			s.mcp().Remove(id)
+			return result, err
+		}
 	}
 	st := s.attach(id, true)
 	if alreadyOpen != nil {
@@ -440,8 +455,9 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 	if replay {
 		snap, e := s.historyView(st.ctx, id)
 		if e != nil {
-			s.detach(id, st)
-			_ = s.a.StopSession(id)
+			if s.detach(id, st) {
+				_ = s.a.StopSession(id)
+			}
 			return result, e
 		}
 		for _, entry := range snap.Branch() {
@@ -502,10 +518,11 @@ func (s *server) LoadSession(ctx context.Context, p acp.LoadSessionRequest) (acp
 		}
 		return host.LoadSession(ctx, p)
 	}
-	if !s.lifecycle.TryLock() {
+	lifecycle := s.sessionLifecycle()
+	if !lifecycle.TryLock() {
 		return acp.LoadSessionResponse{}, acpError("busy")
 	}
-	defer s.lifecycle.Unlock()
+	defer lifecycle.Unlock()
 	result, err := s.reopen(ctx, string(p.SessionId), p.Cwd, p.McpServers, p.AdditionalDirectories, p.SystemPrompt, true)
 	return result, outputReplyError(err)
 }
@@ -517,10 +534,11 @@ func (s *server) ResumeSession(ctx context.Context, p acp.ResumeSessionRequest) 
 		}
 		return host.ResumeSession(ctx, p)
 	}
-	if !s.lifecycle.TryLock() {
+	lifecycle := s.sessionLifecycle()
+	if !lifecycle.TryLock() {
 		return acp.ResumeSessionResponse{}, acpError("busy")
 	}
-	defer s.lifecycle.Unlock()
+	defer lifecycle.Unlock()
 	result, err := s.reopen(ctx, string(p.SessionId), p.Cwd, p.McpServers, p.AdditionalDirectories, p.SystemPrompt, false)
 	return acp.ResumeSessionResponse{ConfigOptions: result.ConfigOptions, Meta: result.Meta}, outputReplyError(err)
 }
@@ -531,17 +549,21 @@ func (s *server) CloseSession(ctx context.Context, p acp.CloseSessionRequest) (a
 	if err := s.ready(); err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
-	if !s.lifecycle.TryLock() {
+	lifecycle := s.sessionLifecycle()
+	if !lifecycle.TryLock() {
 		return acp.CloseSessionResponse{}, acpError("busy")
 	}
-	defer s.lifecycle.Unlock()
+	defer lifecycle.Unlock()
 	id := string(p.SessionId)
 	st, err := s.attached(id)
 	if err != nil {
 		return acp.CloseSessionResponse{}, acpError("not_open")
 	}
-	if s.principal != nil && !s.authorize(id, st.actor, "cancel") {
-		return acp.CloseSessionResponse{}, acpError("forbidden")
+	if s.principal != nil {
+		snap, err := s.a.Snapshot(id)
+		if err != nil || !s.permitsMembership(snap) {
+			return acp.CloseSessionResponse{}, acpError("forbidden")
+		}
 	}
 	if closer, ok := s.a.(interface{ CloseAs(string, string) error }); ok {
 		err = closer.CloseAs(id, st.actor)
