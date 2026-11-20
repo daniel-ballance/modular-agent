@@ -1,4 +1,5 @@
-import type { AgentEvent, Configuration, CredentialStore, ModelStreamEvent, OutputPayload, HistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
+import { mapOutput } from "@modular-agent/plugin-wire";
+import type { Configuration, CredentialStore, ModelStreamEvent, OutputPayload, HistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
 import type { Agent } from "./agent.js";
 import { AgentError } from "./errors.js";
 import { toolSource, type Tool } from "./tool.js";
@@ -20,7 +21,7 @@ type Hooks = {
   "session.end": [{ sessionId: string }, void];
   "session.join": [{ sessionId: string; actorId: string; actor: Actor; grantedBy: string }, void];
   "session.leave": [{ sessionId: string; actorId: string; requestedBy?: string }, void];
-  output: [OutputPayload, "block" | { redact: AgentEvent[] }];
+  output: [Omit<OutputPayload, "events"> & { events: OutputEvent[] }, "block" | { redact: OutputEvent[] }];
   input: [{ sessionId: string; actorId: string; content: Content; when: string }, { change: Content } | { handle: true | { command: string } }];
   "turn.before": [Observe & { input: Content; project?: string; tools?: ToolDefinition[] }, { add: { system?: string; context?: Content } }];
   "turn.start": [Observe, void];
@@ -35,6 +36,7 @@ type Hooks = {
   "provider.piece": [{ sessionId: string; provider: string; model: ModelRef; turnId: string; stepId: string; piece: ModelStreamEvent }, void];
   "provider.response": [{ sessionId: string | null; provider: string; model: ModelRef; message: AssistantMessage }, void];
 };
+export interface OutputEvent { type: string; data: unknown }
 export type HookPoint = keyof Hooks;
 export type HookOrder = "first" | "normal" | "last";
 export interface CallContext {
@@ -185,8 +187,8 @@ function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" 
   return { cx, finish: () => { live = false; } };
 }
 
-const inProcessPoints = new Set<HookPoint>(["session.prepare", "session.join", "session.leave", "output", "provider.piece"]);
-const points = new Set("plugin.load session.start session.end input turn.before turn.start step.before step.after tool.before tool.after model.failed turn.result turn.end provider.request provider.response".split(" "));
+const inProcessPoints = new Set<HookPoint>(["session.prepare", "session.join", "session.leave", "provider.piece"]);
+const points = new Set("plugin.load session.start session.end input turn.before turn.start step.before step.after tool.before tool.after model.failed turn.result turn.end provider.request provider.response output".split(" "));
 
 export async function collect(plugin: Plugin, config: Settings, served = false) {
   const tools: Tool[] = [];
@@ -275,11 +277,17 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
             Object.assign(actor, { rights: actor.authority, kind: actor.kind === "plugin" ? "program" : actor.kind });
             Reflect.deleteProperty(actor, "authority");
           }
+          const mapped = point === "output" && !served ? (payload as unknown as OutputPayload).events.map(mapOutput) : undefined;
+          if (mapped) Object.assign(snapshot, { events: mapped.map(m => structuredClone(m.wire)) });
           const answer = await handler(snapshot, cx);
           if (answer === undefined || answer === null) return;
           if (point === "output") {
             if (answer === "block") return { action: "block" };
-            if (typeof answer === "object" && "redact" in answer) return { action: "pass", events: answer.redact };
+            if (typeof answer === "object" && "redact" in answer) {
+              if (!mapped) return { action: "pass", events: answer.redact };
+              if (mapped.length !== answer.redact.length) throw new AgentError("invalid_request", "Invalid output gate answer");
+              return { action: "pass", events: mapped.map((m, i) => m.restore(answer.redact[i])) };
+            }
           }
           if (point === "input" && typeof answer === "object" && "handle" in answer && typeof answer.handle === "object") {
             if (served) throw new AgentError("not_supported", "A served input hook cannot dispatch a command");

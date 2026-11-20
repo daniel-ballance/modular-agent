@@ -2628,7 +2628,7 @@ export class Harness {
 			severalActors: true,
 			sessionLimits: true,
 			tenants: true,
-			holdsOutput: true,
+			holdsOutput: this.hooks.raw("output").some(handler => handler.stream),
 			outputBypassesAgent: false,
 			startsTurnsUnasked: this.jobReportsStartTurns ? "when a job reports back" : "never",
 			cancellingTurnCancelsJobs: false,

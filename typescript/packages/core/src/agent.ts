@@ -464,7 +464,7 @@ export class Agent {
       liveSessions: providers.some(p => p.supports.liveSessions === true),
       portableSessions: this.#portable && !providers.some(p => p.supports.runsTools === true || p.supports.keepsState === true),
       nestedToolCalls: base.nestedToolCalls === true, lateAnswersStartTurns: base.questionsOutlastTurns === true,
-      ...this.#authority, holdsOutput: false, mixedActorInput: "refused",
+      ...this.#authority, mixedActorInput: "refused",
       startsTurnsUnasked: base.startsTurnsUnasked === "never" ? "never" : "jobReports",
     };
   }
