@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { interruptedCalls, modelView, pendingToolCalls, restoreAnsweredStep, withoutProviderData } from "./view.js";
@@ -15,6 +16,7 @@ import {
 	type ContentPart,
 	type Declaration,
 	type CredentialStore,
+	type SecretScope,
 	type EntryDraft,
 	type GateResult,
 	type HandlerOrder,
@@ -167,6 +169,7 @@ export interface PluginApi {
 	// actors
 	ask(sessionId: string, request: InputRequestDraft): Promise<Answer>;
 	answer(sessionId: string, answer: Answer): { accepted: boolean; reason?: string };
+	submitAnswer(sessionId: string, answer: Answer): Promise<{ accepted: boolean; reason?: string }>;
 	openRequests(sessionId: string): InputRequest[];
 	// jobs
 	/** Start a job. It is recorded in the history, with the plugin's own detail. */
@@ -192,11 +195,11 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean }
+export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; tenants?: Record<string, Tenant> | null }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
-interface Tenant { rights: Authority[]; tokens?: number }
+export interface Tenant { rights: Authority[]; tokens?: number }
 interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens: { budget: number; used: number } | null }
 interface TurnState extends TurnSnapshot { endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
@@ -212,7 +215,7 @@ export class Harness {
 	private loaded: { plugin: Plugin; api: PluginApi }[] = [];
 	private sessions = new Map<string, Session>();
 	private opening = new Set<string>();
-	private readonly tenants = readTenants(process.env.MODULAR_AGENT_TENANTS);
+	private readonly tenants: Map<string, Tenant>;
 	private listeners: { plugin: string; raw: boolean; fn: (e: AgentEvent) => void }[] = [];
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
@@ -229,6 +232,7 @@ export class Harness {
 	readonly problems: { plugin: string; where: string; error: string }[] = [];
 
 	constructor(options: HarnessOptions) {
+		this.tenants = readTenants(options.tenants === undefined ? process.env.MODULAR_AGENT_TENANTS : JSON.stringify(options.tenants ?? {}));
 		this.project = options.project;
 		this.home = options.home;
 		this.now = options.now ?? Date.now;
@@ -244,6 +248,8 @@ export class Harness {
 		h("session.prepare", "observe", "harness");
 		h("session.start", "observe", "harness");
 		h("session.end", "observe", "harness");
+		h("session.join", "observe", "harness");
+		h("session.leave", "observe", "harness");
 		h("input", "transform", "harness");
 		h("turn.before", "collect", "harness");
 		h("output", "gate", "harness"); // applied by the Harness with its own rule: pass, redact, block or hold
@@ -259,6 +265,7 @@ export class Harness {
 		// Provider hook points
 		h("provider.request", "transform", "provider");
 		h("provider.response", "observe", "provider");
+		h("provider.piece", "observe", "provider");
 	}
 
 	// ---------- hosting ----------
@@ -367,6 +374,7 @@ export class Harness {
 				if (requestedBy && requestedBy !== actorId) this.requireAuthority(s, requestedBy, "grant");
 				if (!s.actors.has(actorId)) throw new Error(`Actor ${actorId} is not part of this session`);
 				await this.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
+				await this.hooks.observe("session.leave", { sessionId, actorId, requestedBy });
 				this.emit(s.id, "session.left", { actorId }, pluginName, { actorId });
 				this.closeUnanswerable(s);
 			},
@@ -406,6 +414,7 @@ export class Harness {
 			callTool: (sessionId, call) => this.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
 			ask: (sessionId, request) => this.ask(this.session(sessionId), request, pluginName),
 			answer: (sessionId, answer) => this.answer(this.session(sessionId), answer),
+			submitAnswer: (sessionId, answer) => this.submitAnswer(this.session(sessionId), answer),
 			openRequests: (sessionId) => {
 				const s = this.session(sessionId);
 				return [...[...s.requests.values()].map((r) => r.request), ...this.waitingRequests(s)];
@@ -569,7 +578,7 @@ export class Harness {
 		const sourceId = options.forkFrom?.sessionId ?? options.parentSessionId;
 		const ancestor = sourceId ? this.sessions.get(sourceId) ?? await this.loadInto(sourceId) : undefined;
 		const tenant = ancestor?.tenant ?? options.tenant;
-		if (tenant !== undefined && !this.tenants.has(tenant)) throw new Error(`Unknown tenant ${tenant}`);
+		if (tenant !== undefined && !this.tenants.has(tenant)) throw Object.assign(new Error(`Unknown tenant ${tenant}`), { code: "invalid_params" });
 		const cwd = options.settings?.cwd;
 		const meta: StoredSession = { id: this.newId(), created: this.now(), project: ancestor?.meta.project ?? (typeof cwd === "string" ? cwd : this.project), forkedFrom: options.forkFrom, parentSessionId: options.parentSessionId };
 		const s = new Session(meta, !store);
@@ -695,6 +704,8 @@ export class Harness {
 		catch (error) { await store.close(id); throw error; }
 		this.sessions.set(id, s);
 		s.reopening = true;
+		try { await this.recoverSecrets(s); }
+		catch (error) { this.sessions.delete(id); await store.close(id); throw error; }
 		await this.prepareSession(s, true, prepare);
 		const latest = s.entries.get(s.order.at(-1) ?? "");
 		if (latest?.kind === "position") {
@@ -1082,16 +1093,18 @@ export class Harness {
 	private async join(s: Session, actor: Actor, grantedBy: string, writer: string): Promise<void> {
 		this.requireAuthority(s, grantedBy, "grant");
 		const beyond = actor.authority.filter((a) => !ALL_AUTHORITY.includes(a) || !this.rightsOf(s, grantedBy).includes(a));
-		if (beyond.length) throw new Error(`${grantedBy} can't grant ${beyond.join(", ")}`);
+		if (beyond.length) throw Object.assign(new Error(`${grantedBy} can't grant ${beyond.join(", ")}`), { code: "forbidden" });
 		await this.commit(s, [actorJoined(actor, writer, grantedBy)]);
+		await this.hooks.observe("session.join", { sessionId: s.id, actorId: actor.id, actor, grantedBy });
 		this.emit(s.id, "session.joined", { actor }, writer, { actorId: actor.id });
 		this.closeUnanswerable(s);
 	}
 
 	private requireAuthority(s: Session, actorId: string, authority: Authority): void {
 		const actor = s.actors.get(actorId);
-		if (!actor) throw new Error(`Actor ${actorId} is not part of this session`);
-		if (!this.rightsOf(s, actorId).includes(authority)) throw new Error(`Actor ${actorId} may not ${authority}`);
+		if (!actor || !this.rightsOf(s, actorId).includes(authority)) {
+			throw Object.assign(new Error(`Actor ${actorId} may not ${authority}`), { code: "forbidden" });
+		}
 	}
 
 	private withinLimits(s: Session, right: Authority): boolean {
@@ -1138,7 +1151,7 @@ export class Harness {
 		return this.admit(s, async () => {
 			this.requireAuthority(s, actorId, "administer");
 			const effective = (s.actors.get(actorId)?.authority ?? []).filter((r) => s.tenant === undefined || this.tenants.get(s.tenant)?.rights.includes(r));
-			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw new Error("A limit cannot give a right the administrator lacks");
+			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw Object.assign(new Error("A limit cannot give a right the administrator lacks"), { code: "forbidden" });
 			await this.commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
 			this.closeUnanswerable(s);
 		});
@@ -1203,10 +1216,22 @@ export class Harness {
 			if (scoped) s.keys.set(scoped, receipt);
 			return receipt;
 		}
-		const transformed = await this.hooks.transform("input", { sessionId, content, actorId: options.actorId, when: options.when ?? "now" });
+		const transformed = await this.hooks.transform("input", { sessionId, content, actorId: options.actorId, when: options.when ?? "now" },
+			(before, after) => {
+				if (!Array.isArray(after.value?.content) || after.value.sessionId !== before.sessionId || after.value.when !== before.when || after.value.actorId !== before.actorId) {
+					throw new Error("An input hook may change only content");
+				}
+			});
 		if (s.erasing) throw new Error("Erasure is in progress");
 		if (transformed.stopped) {
-			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true };
+			let output: string | void = undefined;
+			const command = transformed.command;
+			if (command !== undefined) {
+				if (right !== "input") throw Object.assign(new Error("A proposal cannot run a command"), { code: "forbidden" });
+				if (options.delegatedBy) this.requireAuthority(s, options.delegatedBy, "input");
+				output = await this.runCommand(sessionId, command, options.actorId);
+			}
+			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true, ...(output === undefined ? {} : { output }) };
 			if (scoped) s.keys.set(scoped, receipt);
 			return receipt;
 		}
@@ -1237,8 +1262,9 @@ export class Harness {
 
 	private async acceptInput(s: Session, q: QueuedInput): Promise<InputReceipt> {
 		if (s.closed || s.closing || s.suspended || s.erasing || s.moving) throw new Error("Session cannot take input right now");
-		if (this.rejectUnknownModel && q.startedBy.kind === "actor" && q.when !== "propose" && s.settings.model != null && !this.modelAccess(s)) {
-			throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
+		if (this.rejectUnknownModel && q.startedBy.kind === "actor" && q.when !== "propose" && s.settings.model != null) {
+			await this.providerFor(s)?.refreshModels?.();
+			if (!this.modelAccess(s)) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
 		}
 		const steer = q.when === "steer" && this.runtime()?.supports.inputDuringTurn === true && !s.running?.steeringClosed;
 		const taken = q.when === "propose" ? "proposed" : !s.isBusy() && !s.reopening && !s.followUps.length ? "now" : steer && !s.reopening ? "inTurn" : "after";
@@ -1460,9 +1486,10 @@ export class Harness {
 			});
 			await this.commit(s, drafts);
 		}
-		for (const request of this.recordedOpenRequests(s).filter((r) => r.turnId === turnId && !s.requests.has(r.id) && !open.has(r.toolCallId ?? ""))) {
-			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId, toolCallId: request.toolCallId, data: { requestId: request.id, actorId: "harness", declined: true, reason: outcome.outcome.kind === "cancelled" ? "cancelled" : "noLongerAnswerable" } }]);
-			this.emit(s.id, "input.request.closed", { requestId: request.id, declined: true, lost: true }, "harness", { turnId, toolCallId: request.toolCallId });
+		for (const request of this.recordedOpenRequests(s).filter((r) => r.turnId === turnId && !s.requests.has(r.id) && !s.lateAnswers.has(r.id) && !open.has(r.toolCallId ?? ""))) {
+			const answer = { requestId: request.id, actorId: "harness", declined: true, reason: outcome.outcome.kind === "cancelled" ? "cancelled" : "noLongerAnswerable" };
+			await this.recordAnswer(s, request, answer, s.order.map(id => s.entries.get(id)!).find(e => e.kind === "inputRequest" && e.requestId === request.id)?.stepId);
+			this.emitAnswer(s, request, answer);
 		}
 		const sources = s.branch().filter((e) => e.turnId === turnId && (e.kind === "response" || e.kind === "toolResult")).map((e) => e.id);
 		await this.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId, sources, data: { outcome: outcome.outcome, result: outcome.result, usage: outcome.usage } }]);
@@ -1723,7 +1750,9 @@ export class Harness {
 					options.onEffectiveRequest?.(prepared.request);
 					return dispatched;
 				};
+				let observed = Promise.resolve();
 				const onEvent = (event: import("./types.js").ModelStreamEvent) => {
+					observed = observed.then(() => this.hooks.observe("provider.piece", { ...scope, turnId, stepId, piece: structuredClone(event) }));
 					this.emit(s.id, "model.output", event, "harness", { turnId, stepId });
 					options.onEvent?.(event);
 				};
@@ -1733,7 +1762,7 @@ export class Harness {
 					const message = await model.request(finalRequest, { ...options, requestPrepared: true, onEvent });
 					await this.hooks.observe("provider.response", { ...scope, message: withoutProviderData(message) });
 					return message;
-				} finally { this.emit(s.id, "model.streamEnd", {}, "harness", { turnId, stepId }); }
+				} finally { await observed; this.emit(s.id, "model.streamEnd", {}, "harness", { turnId, stepId }); }
 			});
 		} };
 	}
@@ -1752,7 +1781,13 @@ export class Harness {
 			model: info,
 			supports: provider.supports,
 			prepareOnWire: provider.prepareOnWire,
-			request: (request, options) => provider.request(ref, request, { ...options, sessionId: s.id }),
+			request: async (request, options) => {
+				const available = provider.prepareOnWire ? true : await provider.available?.().catch(() => false);
+				options.signal.throwIfAborted();
+				if (available === false) return { role: "assistant", stop: "failed", content: [],
+					error: { kind: "credentials", message: "Provider is not available" } };
+				return provider.request(ref, request, { ...options, sessionId: s.id });
+			},
 		};
 	}
 
@@ -1969,8 +2004,7 @@ export class Harness {
 		for (const request of this.recordedOpenRequests(s).filter(r => r.toolCallId === callId)) {
 			if (s.lateAnswers.has(request.id)) continue;
 			const answer = { requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable" };
-			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId,
-				toolCallId: callId, requestId: request.id, data: answer }]);
+			await this.recordAnswer(s, request, answer, s.order.map(id => s.entries.get(id)!).find(e => e.kind === "inputRequest" && e.requestId === request.id)?.stepId);
 			s.waiting.delete(request.id);
 			for (const viewer of this.viewersFor(s, request)) viewer.onInputRequestClosed?.(request.id);
 			this.emit(s.id, "input.request.closed", answer, "harness", { turnId: request.turnId, toolCallId: callId });
@@ -2075,8 +2109,8 @@ export class Harness {
 		return this.useAll<InterfaceCapability>("interface");
 	}
 
-	private presentActors(s: Session): string[] {
-		return [...new Set(this.interfaces().filter((i) => i.present?.(s.id) !== false)
+	private presentActors(s: Session, request?: InputRequest): string[] {
+		return [...new Set(this.interfaces().filter((i) => i.present?.(s.id, request) !== false)
 			.flatMap((i) => [i.actorId, ...(i.presentActors?.(s.id) ?? [])]))].filter((id) => s.actors.has(id));
 	}
 
@@ -2090,7 +2124,7 @@ export class Harness {
 	/** Questions recorded on the current branch that have no answer and were not closed. */
 	private closeUnanswerable(s: Session): void {
 		for (const { request, resolve } of s.requests.values()) {
-			if (!this.presentActors(s).some((id) => this.mayAnswer(s, request, id))) {
+			if (!this.presentActors(s, request).some((id) => this.mayAnswer(s, request, id))) {
 				resolve({ requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable" });
 			}
 		}
@@ -2098,8 +2132,9 @@ export class Harness {
 
 	private recordedOpenRequests(s: Session): InputRequest[] {
 		const branch = s.branch();
-		const settled = new Set(branch.filter((e) => !e.erased && (e.kind === "inputAnswer" || e.kind === "inputClosed")).map((e) => (e.data as { requestId: string }).requestId));
-		return branch.filter((e) => e.kind === "inputRequest" && !e.erased).map(readRequest).filter((r) => !settled.has(r.id));
+		const settled = new Set(s.order.map(id => s.entries.get(id)!).filter(e =>
+			e.kind === "inputAnswer" || e.kind === "inputClosed" || e.kind === "secretAnswerAccepted").map(requestIdOf));
+		return branch.filter(e => e.kind === "inputRequest" && !e.erased).map(readRequest).filter(r => !settled.has(r.id));
 	}
 
 	/** A recorded answer to the question with this key, if it can still be used. */
@@ -2124,23 +2159,67 @@ export class Harness {
 		if (!answered) return { request };
 		const body = answered.data as Answer & { answer?: Answer };
 		const answer = body.answer ?? body;
+		if (request.kind === "secret" && (answer.reason === "restart" || !answer.declined &&
+			!branch.some(e => !e.erased && e.kind === "secretAnswerAccepted" && e.requestId === request.id))) return undefined;
 		// A secret's recorded answer holds only where it was stored, so it can be reused like any other.
 		// A recorded allow counts only if whoever gave it may still answer.
 		if (!answer.declined && !this.mayAnswer(s, request, answer.actorId)) return undefined;
 		return { request, answer };
 	}
 
-	/** A secret's answer goes to the credential store. What the asker and the record get is only where it went. */
-	private async keepSecret(request: InputRequest, answer: Answer): Promise<Answer> {
-		if (request.kind !== "secret" || answer.declined || answer.pending) return answer;
-		const { value, ...rest } = answer;
-		try {
-			const store = this.use<CredentialStore>("credential-store");
-			if (!store || !request.credential) throw new Error("there is nowhere to keep a secret");
-			await store.modify(request.credential, async () => ({ type: "api_key", key: value ?? "" }));
-			return { ...rest, stored: request.credential };
-		} catch (error) {
-			return { ...rest, declined: true, reason: `The secret was not kept: ${error instanceof Error ? error.message : String(error)}` };
+	private secretStore() {
+		const store = this.use<CredentialStore>("credential-store");
+		return store?.stage && store.lookupStaged && store.activate && store.discard
+			? store as CredentialStore & Required<Pick<CredentialStore, "stage" | "lookupStaged" | "activate" | "discard">> : undefined;
+	}
+
+	private secretScope(s: Session, requestId: string): SecretScope {
+		return { deployment: resolve(this.home), sessionId: s.id, requestId };
+	}
+
+	private async recordAnswer(s: Session, request: InputRequest, answer: Answer, stepId?: string, acceptSecret = false): Promise<Answer> {
+		const fields = { writer: "harness", modelVisible: false, turnId: request.turnId, stepId,
+			requestId: request.id, toolCallId: request.toolCallId, actorId: answer.actorId };
+		let kept = answer;
+		if (request.kind === "secret" && !answer.declined) {
+			if (acceptSecret) await this.commit(s, [{ ...fields, kind: "secretAnswerAccepted" }]);
+			let outcome;
+			try { outcome = await this.secretStore()!.activate(this.secretScope(s, request.id)); }
+			catch { throw new Error("Could not confirm secret activation"); }
+			kept = outcome === "activated" ? { requestId: request.id, actorId: answer.actorId, stored: request.credential }
+				: { requestId: request.id, actorId: answer.actorId, declined: true, reason: "superseded" };
+		}
+		await this.commit(s, [{ ...fields, kind: "inputAnswer", data: kept }]);
+		if (request.kind === "secret" && kept.declined) await this.discardSecret(s, request.id);
+		return kept;
+	}
+
+	private async discardSecret(s: Session, requestId: string): Promise<void> {
+		try { await this.secretStore()?.discard(this.secretScope(s, requestId)); }
+		catch { throw new Error("Could not discard secret staging"); }
+	}
+
+	private async recoverSecrets(s: Session): Promise<void> {
+		const entries = s.order.map(id => s.entries.get(id)!).filter(e => !s.copied.has(e.id));
+		const decisions = new Map(entries.filter(e => e.kind === "secretAnswerAccepted").map(e => [e.requestId, e]));
+		const answers = new Map(entries.filter(e => e.kind === "inputAnswer").map(e => [requestIdOf(e), e]));
+		for (const entry of entries) {
+			if (entry.kind !== "inputRequest" || entry.erased) continue;
+			const request = readRequest(entry);
+			if (request.kind !== "secret") continue;
+			const answer = answers.get(request.id);
+			if (answer) {
+				if (answer.erased || (answer.data as Answer)?.declined) await this.discardSecret(s, request.id);
+				continue;
+			}
+			const decision = decisions.get(request.id);
+			if (decision?.actorId) {
+				await this.recordAnswer(s, request, { requestId: request.id, actorId: decision.actorId }, entry.stepId);
+			} else {
+				// Do not let pre-decision staging win on reopen. If the Runtime asks again,
+				// recordedAnswer ignores this closure and ask allocates a fresh identity.
+				await this.recordAnswer(s, request, { requestId: request.id, actorId: "harness", declined: true, reason: "restart" }, entry.stepId);
+			}
 		}
 	}
 
@@ -2151,7 +2230,8 @@ export class Harness {
 		if (draft.whenTimeLimit === "leaveOpen" && !this.questionsOutlastTurns) throw Object.assign(new Error("Questions cannot outlast the turn"), { code: "not_supported" });
 		const call = this.toolWork.getStore();
 		if (call && call.id === draft.toolCallId) draft = { ...draft, boundCall: { name: call.name, input: call.input } };
-		if (draft.kind === "secret" && (!draft.credential || !this.use<CredentialStore>("credential-store"))) {
+		if (draft.kind === "secret" && (!draft.credential || !this.secretStore() ||
+			this.useAll<Provider>("provider").some(p => p.id === draft.credential))) {
 			return { requestId: "", declined: true, actorId: "harness", reason: "A secret needs a credential name and a credential store to keep it" };
 		}
 		let request: InputRequest = { ...draft, id: this.newId(), sessionId: s.id, askedBy, answerers: draft.answerers ?? [], turnId: s.running?.turnId };
@@ -2161,7 +2241,16 @@ export class Harness {
 		let reopened = false;
 		if (draft.key) {
 			// Changed input or registration needs a new approval identity, not a replay of the old one.
-			const key = approval?.call.startedBy === "tool" ? draft.key + ":" + approvalKey(approval) : draft.key;
+			let key = approval?.call.startedBy === "tool" ? draft.key + ":" + approvalKey(approval) : draft.key;
+			if (draft.kind === "secret") {
+				const branch = s.branch();
+				for (const entry of branch) {
+					if (entry.kind !== "inputRequest" || entry.erased) continue;
+					const prior = readRequest(entry);
+					if (prior.kind === "secret" && prior.key === key && branch.some(e => e.kind === "inputAnswer" &&
+						requestIdOf(e) === prior.id && (e.data as Answer | undefined)?.reason === "restart")) key += ":" + prior.id;
+				}
+			}
 			draft = { ...draft, key };
 			request = { ...request, key };
 			const recorded = this.recordedAnswer(s, draft, approval);
@@ -2178,13 +2267,14 @@ export class Harness {
 		if (!reopened) {
 			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, data: { request: { ...request, answerable: viewers.length > 0 }, ...approval } }]);
 		}
-		if (!this.presentActors(s).some((id) => this.mayAnswer(s, request, id))) {
-			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId, toolCallId: request.toolCallId,
-				data: { requestId: request.id, declined: true, actorId: "harness", reason: request.kind === "approval" ? "refused" : "noLongerAnswerable" } }]);
-			return { requestId: request.id, declined: true, actorId: "harness", reason: "No one present can answer" };
+		if (!this.presentActors(s, request).some((id) => this.mayAnswer(s, request, id))) {
+			const answer = { requestId: request.id, declined: true, actorId: "harness", reason: "noLongerAnswerable" };
+			await this.recordAnswer(s, request, answer, stepId);
+			this.emitAnswer(s, request, answer);
+			return answer;
 		}
-		return new Promise<Answer>((resolve) => {
-			const cancel = () => open.resolve({ requestId: request.id, declined: true, actorId: "harness", reason: "cancelled" });
+		return new Promise<Answer>((resolve, reject) => {
+			const cancel = () => void open.resolve({ requestId: request.id, declined: true, actorId: "harness", reason: "cancelled" });
 			const open = {
 				request,
 				resolve: (answer: Answer) => {
@@ -2193,15 +2283,14 @@ export class Harness {
 					s.requests.delete(request.id);
 					s.lateAnswers.add(request.id);
 					for (const i of viewers) i.onInputRequestClosed?.(request.id);
-					void this.keepSecret(request, answer).then((kept) =>
-						this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, actorId: kept.actorId, data: kept }])
-							.catch((error) => this.problem("harness", "record answer", error))
-							.finally(() => {
-								this.emit(s.id, "input.request.closed", { requestId: request.id, declined: kept.declined ?? false, value: kept.value }, "harness", { actorId: kept.actorId, toolCallId: request.toolCallId });
-								s.lateAnswers.delete(request.id);
-								resolve(kept);
-							}),
-					);
+					if (s.suspended) { resolve({ ...answer, declined: true }); return Promise.resolve(); }
+					const work = this.recordAnswer(s, request, answer, stepId, request.kind === "secret" && !answer.declined).then(kept => {
+						this.emitAnswer(s, request, kept);
+						s.lateAnswers.delete(request.id);
+						resolve(kept);
+					}, error => { reject(error); throw error; });
+					void work.catch(error => this.problem("harness", "record answer", error));
+					return work;
 				},
 				timer: undefined as NodeJS.Timeout | undefined,
 			};
@@ -2225,7 +2314,7 @@ export class Harness {
 	}
 
 	private viewersFor(s: Session, request: InputRequest): InterfaceCapability[] {
-		return this.interfaces().filter((i) => i.present?.(s.id) !== false && (this.actorRights(s, i.actorId).includes("watch") || this.mayAnswer(s, request, i.actorId)));
+		return this.interfaces().filter((i) => i.present?.(s.id, request) !== false && (this.actorRights(s, i.actorId).includes("watch") || this.mayAnswer(s, request, i.actorId)));
 	}
 
 	/** Questions on the current branch that were left open past their turn and have no answer yet. */
@@ -2236,26 +2325,27 @@ export class Harness {
 	}
 
 	/** Answer a question left open past its turn. The answer is recorded, then the open calls carry on if they can. */
-	private answerLate(s: Session, answer: Answer): { accepted: boolean; reason?: string } {
+	private answerLate(s: Session, answer: Answer): { accepted: boolean; reason?: string; settled?: Promise<void> } {
 		const request = this.waitingRequests(s).find((r) => r.id === answer.requestId);
 		if (!request) return { accepted: false, reason: "The request is closed or can no longer be answered" };
 		if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
 		s.lateAnswers.add(request.id);
 		const previous = s.settling ?? Promise.resolve();
 		const work = previous.then(async () => {
-			const kept = await this.keepSecret(request, answer);
-			await this.commit(s, [{ kind: "inputAnswer", writer: "harness", modelVisible: false, turnId: request.turnId, stepId: s.order.map((id) => s.entries.get(id)!).find((e) => e.requestId === request.id)?.stepId, requestId: request.id, toolCallId: request.toolCallId, actorId: answer.actorId, data: kept }]);
+			const kept = await this.recordAnswer(s, request, answer,
+				s.order.map(id => s.entries.get(id)!).find(e => e.requestId === request.id)?.stepId,
+				request.kind === "secret" && !answer.declined);
 			s.lateAnswers.delete(request.id);
 			for (const i of this.viewersFor(s, request)) i.onInputRequestClosed?.(request.id);
-			this.emit(s.id, "input.request.closed", { requestId: request.id, declined: answer.declined ?? false, late: true }, "harness", { actorId: answer.actorId, toolCallId: request.toolCallId });
+			this.emitAnswer(s, request, kept, true);
 			s.waiting.delete(request.id);
-			this.continueOpenCalls(s, answer);
+			this.continueOpenCalls(s, kept);
 		});
 		s.settling = work.catch((error) => this.problem("harness", "late answer", error)).finally(() => {
 			if (s.settling === tracked) s.settling = undefined;
 		});
 		const tracked = s.settling;
-		return { accepted: true };
+		return { accepted: true, settled: work };
 	}
 
 	/** Tool calls on the current branch that have no result and are not part of a running turn. */
@@ -2308,9 +2398,61 @@ export class Harness {
 		} else this.startTurn(s, queued);
 	}
 
+	private emitAnswer(s: Session, request: InputRequest, answer: Answer, late = false): void {
+		const ids = { actorId: answer.actorId, toolCallId: request.toolCallId, turnId: request.turnId };
+		if (answer.reason === "noLongerAnswerable") this.emit(s.id, "input.request.unanswerable", { requestId: request.id }, "harness", ids);
+		if (answer.actorId !== "harness") this.emit(s.id, "input.request.answered", { requestId: request.id, declined: answer.declined ?? false }, "harness", ids);
+		this.emit(s.id, "input.request.closed", { requestId: request.id, declined: answer.declined ?? false, value: answer.value, late }, "harness", ids);
+	}
+
+	private async submitAnswer(s: Session, answer: Answer): Promise<{ accepted: boolean; reason?: string }> {
+		const find = () => s.requests.get(answer.requestId)?.request ?? this.waitingRequests(s).find(r => r.id === answer.requestId);
+		const may = (request: InputRequest) => this.mayAnswer(s, request, answer.actorId) &&
+			(!answer.delegatedBy || this.mayAnswer(s, { ...request, answerers: [] }, answer.delegatedBy));
+		const request = find();
+		if (!request || !may(request)) return { accepted: false };
+		if (request.kind === "secret" && !answer.declined) {
+			const store = this.secretStore();
+			if (!store || !request.credential || typeof answer.value !== "string") return { accepted: false };
+			const scope = { ...this.secretScope(s, request.id), credential: request.credential, actorId: answer.actorId };
+			try {
+				const staged = await store.stage(scope, answer.value);
+				if (!staged) return { accepted: false };
+				const receipt = await store.lookupStaged(scope);
+				if (!receipt || receipt.receipt !== staged.receipt || !Object.entries(scope).every(([k, value]) => receipt[k as keyof typeof scope] === value)) {
+					await this.discardSecret(s, request.id);
+					return { accepted: false };
+				}
+			} catch { throw new Error("Could not stage the secret answer"); }
+			if (!find() || !may(request)) {
+				await this.discardSecret(s, request.id);
+				return { accepted: false };
+			}
+			answer = { requestId: answer.requestId, actorId: answer.actorId, delegatedBy: answer.delegatedBy };
+		}
+		const open = s.requests.get(request.id);
+		if (open) await open.resolve(answer);
+		else {
+			const accepted = this.answerLate(s, answer);
+			if (!accepted.accepted) return accepted;
+			await accepted.settled;
+		}
+		return { accepted: true };
+	}
+
 	private answer(s: Session, answer: Answer): { accepted: boolean; reason?: string } {
 		const open = s.requests.get(answer.requestId);
-		if (!open) return this.answerLate(s, answer);
+		const request = open?.request ?? this.waitingRequests(s).find(r => r.id === answer.requestId);
+		// Legacy local interfaces can submit asynchronously. ACP never carries secret values.
+		if (request?.kind === "secret" && !answer.declined) {
+			if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false };
+			void this.submitAnswer(s, answer).catch(error => this.problem("harness", "secret answer", error));
+			return { accepted: true };
+		}
+		if (!open) {
+			const { accepted, reason } = this.answerLate(s, answer);
+			return reason === undefined ? { accepted } : { accepted, reason };
+		}
 		if (!this.mayAnswer(s, open.request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
 		open.resolve(answer); // the first accepted answer closes the request
 		return { accepted: true };
@@ -2714,6 +2856,10 @@ function approvalKey(binding?: ApprovalBinding): string {
 }
 
 type BoundRequest = InputRequestDraft & { boundCall?: Pick<ToolCall, "name" | "input"> };
+
+function requestIdOf(entry: HistoryEntry): string | undefined {
+	return entry.requestId ?? (entry.data as { requestId?: string } | undefined)?.requestId;
+}
 
 function readRequest(entry: HistoryEntry): InputRequest {
 	const request = (entry.data as { request: InputRequest }).request;

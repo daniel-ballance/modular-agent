@@ -247,6 +247,9 @@ export interface Provider {
 	readonly prepareOnWire?: boolean;
 	supports: Declaration;
 	models(): ModelInfo[];
+	onChange?(handler: () => void): () => void;
+	/** A served Provider may refresh its cached catalog using provider/models. */
+	refreshModels?(): Promise<void>;
 	/** Whether this Provider can be used now, for example because it has credentials. */
 	available?(): Promise<boolean>;
 	/** Make one model request. Never rejects for a model failure: the message says why. */
@@ -264,7 +267,15 @@ export interface ModelAccess {
 
 // ---------- Credential store ----------
 
+export interface SecretScope { deployment: string; sessionId: string; requestId: string }
+export interface SecretSubmission extends SecretScope { credential: string; actorId: string }
+export interface SecretReceipt extends SecretSubmission { receipt: string }
+
 export interface CredentialStore {
+	stage?(scope: SecretSubmission, value: string): Promise<SecretReceipt | undefined>;
+	lookupStaged?(scope: SecretScope): Promise<SecretReceipt | undefined>;
+	activate?(scope: SecretScope): Promise<"activated" | "superseded">;
+	discard?(scope: SecretScope): Promise<void>;
 	read(providerId: string, options?: { signal?: AbortSignal }): Promise<unknown | undefined>;
 	list(options?: { signal?: AbortSignal }): Promise<readonly { providerId: string; type: string }[]>;
 	modify(providerId: string, fn: (current: any) => Promise<any>, options?: { signal?: AbortSignal }): Promise<unknown | undefined>;
@@ -340,7 +351,7 @@ export interface InterfaceCapability {
 	id: string;
 	actorId: string;
 	/** Whether this Interface declares its actor present for the session. */
-	present?(sessionId: string): boolean;
+	present?(sessionId: string, request?: InputRequest): boolean;
 	/** Other actors whose presence this connection declares. */
 	presentActors?(sessionId: string): string[];
 	/** Told about input requests this Interface's actor may see. */
@@ -375,6 +386,7 @@ export interface InputRequest {
 export type InputRequestDraft = Omit<InputRequest, "id" | "sessionId" | "askedBy" | "answerers" | "turnId"> & { answerers?: string[] };
 export interface Answer {
 	requestId: string;
+	delegatedBy?: string;
 	value?: string;
 	declined?: boolean;
 	actorId: string;
@@ -498,7 +510,7 @@ export type HandlerOrder = "first" | "normal" | "last";
 /** A gate handler's answer. */
 export type GateAnswer<T> = undefined | { refuse: string } | { change: T } | { pending: string };
 /** A transform handler's answer. */
-export type TransformAnswer<T> = undefined | { value: T; stop?: boolean };
+export type TransformAnswer<T> = undefined | { value: T; stop?: boolean; command?: string };
 export interface GateResult<T> { refused?: string; pending?: string; value: T }
 
 // ---------- Output gate ----------

@@ -121,8 +121,13 @@ export interface InputReceipt {
   duplicate?: boolean;
   erased?: true;
 }
+export type Right = import("@modular-agent/harness").Authority;
+export interface Actor { id: string; kind: "user" | "agent" | "host" | "program"; rights: Right[] }
+
 export interface QuestionDraft {
-  kind: "approval" | "choice" | "text" | "link";
+  kind: "approval" | "choice" | "text" | "link" | "secret";
+  credential?: string;
+  answerers?: string[];
   question: string;
   details?: string;
   options?: string[];
@@ -135,6 +140,7 @@ export interface Question extends QuestionDraft {
   deadline?: number;
 }
 export type Answer = "allow" | "decline" | { value: string } | { declined: true; reason?: string };
+export type QuestionReply = Answer | { stored: string };
 export type QuestionHandler = (question: Question, context: {
   sessionId: string; actorId: string; cancelled: AbortSignal;
 }) => Answer | void | Promise<Answer | void>;

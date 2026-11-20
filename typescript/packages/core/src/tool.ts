@@ -1,5 +1,5 @@
 import { text, type ToolContext as BaseContext, type ToolSource } from "@modular-agent/harness";
-import type { Answer, Content, Input, QuestionDraft, ToolDefinition, ToolStatus } from "./data.js";
+import type { Content, Input, QuestionDraft, QuestionReply, ToolDefinition, ToolStatus } from "./data.js";
 import { AgentError, checked, messageOf, sdkError } from "./errors.js";
 import { schema, type Infer, type Schema } from "./schema.js";
 
@@ -21,7 +21,7 @@ export interface ToolContext {
     call(name: string, input: Record<string, unknown>): Promise<import("@modular-agent/harness").ToolResult>;
   };
   refuse(reason: string): never;
-  ask(question: QuestionDraft, wait?: { wait: number; then: "leaveOpen" }): Promise<Answer>;
+  ask(question: QuestionDraft, wait?: { wait: number; then: "leaveOpen" }): Promise<QuestionReply>;
   progress(content: Input): void;
   log(message: string): void;
 }
@@ -175,13 +175,16 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
   };
 }
 
-async function ask(base: BaseContext, question: QuestionDraft): Promise<Answer> {
+async function ask(base: BaseContext, question: QuestionDraft): Promise<QuestionReply> {
   try {
     const a = await base.ask({
       ...question, toolCallId: base.call.id,
     });
     if (a.pending) throw new AgentError("not_supported", "Questions cannot outlast the turn");
     if (a.declined) return { declined: true, reason: a.reason };
+    if (question.kind === "secret") {
+      return a.stored ? { stored: a.stored } : { declined: true, reason: "The secret was not stored" };
+    }
     return question.kind === "approval" && a.value === "allow" ? "allow" : { value: a.value ?? "" };
   } catch (error) {
     throw sdkError(error, "invalid_request");

@@ -14,9 +14,19 @@ export interface Provider {
   models(): ModelInfo[];
   supports: { keepsState: boolean; safeToRepeat: boolean };
   inProcessOnly?: boolean;
-  available?(): boolean | Promise<boolean>;
+  available?(context: Pick<ProviderContext, "credential">): boolean | Promise<boolean>;
+  /** Subscribe to local catalog invalidation. Use defineProvider to publish it. */
+  onChange?(handler: () => void): () => void;
   request(model: ModelRef, request: ModelRequest, context: ProviderContext): AssistantMessage | Promise<AssistantMessage>;
   discardState?(sessionId: string): void | Promise<void>;
+}
+
+export function defineProvider<P extends Provider>(provider: P): P & { changed(): void } {
+  const listeners = new Set<() => void>();
+  return Object.assign(provider, {
+    changed() { for (const listener of listeners) listener(); },
+    onChange(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+  });
 }
 
 export class ModelFailure extends Error {
@@ -27,7 +37,8 @@ export function adaptProvider(p: Provider, credential: () => Promise<string | un
   return {
     id: p.id, models: () => structuredClone(p.models()),
     supports: { ...p.supports, runsTools: false, liveSessions: false },
-    available: p.available && (async () => p.available!()),
+    available: p.available && (async () => p.available!({ credential })),
+    onChange: p.onChange?.bind(p),
     discardState: p.discardState && (async id => { await p.discardState!(id); }),
     async request(model, request, opts) {
       let active = true;
@@ -42,7 +53,7 @@ export function adaptProvider(p: Provider, credential: () => Promise<string | un
             check();
             opts.onEvent?.({ type, delta, ...(toolCallId ? { toolCallId } : {}) });
           },
-          async credential() { check(); return credential(); },
+          async credential() { check(); const key = await credential(); check(); return key; },
         });
       } catch (error) {
         opts.signal.throwIfAborted();

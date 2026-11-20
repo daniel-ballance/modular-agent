@@ -47,6 +47,14 @@ export function fixture(name: string, config?: Record<string, unknown>): Plugin 
         return typeof answer === "object" && "value" in answer ? answer.value : "declined";
       },
     })] });
+    case "note": return definePlugin({ name, config, tools: [tool({
+      name: "note", description: "Ask for a text answer.",
+      input: z.object({ question: z.string() }),
+      async run({ question }, cx) {
+        const answer = await cx.ask({ kind: "text", question });
+        return typeof answer === "object" && "value" in answer ? `value: ${answer.value}` : "declined";
+      },
+    })] });
     case "gate": return definePlugin({ name, config, hooks: {
       "tool.before": ({ call }) => JSON.stringify(call.input).includes("forbidden") ? { refuse: "the gate refused it" } : "allow",
     } });

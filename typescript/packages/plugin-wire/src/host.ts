@@ -785,8 +785,23 @@ class WireProvider implements Provider {
 	models(): ModelInfo[] {
 		return this.list;
 	}
+	private refresh?: Promise<void>;
+	private changed = new Set<() => void>();
+	onChange(handler: () => void): () => void {
+		this.changed.add(handler);
+		return () => { this.changed.delete(handler); };
+	}
+	refreshModels(): Promise<void> {
+		return this.refresh ??= this.peer.request<{ models: ModelInfo[] }>("provider/models", { provider: this.id }).then(reply => {
+			const models = fromWire(reply.models) as ModelInfo[];
+			if (!wireEqual(models, this.list)) {
+				this.list = models;
+				for (const handler of this.changed) handler();
+			}
+		}).finally(() => { this.refresh = undefined; });
+	}
 	async available(): Promise<boolean> {
-		return (await this.peer.request<{ available: boolean }>("provider/available", { provider: this.id }).catch(() => ({ available: true }))).available;
+		return (await this.peer.request<{ available: boolean }>("provider/available", { provider: this.id })).available === true;
 	}
 	async request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
 		const attempt: ProviderAttempt = { model, request: toWire(request), prepare: options.prepareDispatch };
