@@ -196,7 +196,7 @@ async function main(argv: string[]) {
     const providers = script ? [script] : conformance ? [] : vendors.map(v => responses(v, auth, overrides));
     const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p)];
     if (!opts.acp) plugins.push(standardMcpTools({ servers: projectMcp }));
-    return createAgent({ ...base, project: cwd, settings, model: opts.command === "models" ? undefined : model, providers, plugins,
+    return createAgent({ ...base, project: cwd, settings, credentials: auth.credentials(), model: opts.command === "models" ? undefined : model, providers, plugins,
       compaction: !conformance, conformance, questionsOutlastTurns: true, jobReportsStartTurns: true, settingsDuringTurn: "refused",
       pluginHost: opts.acp || !!claude, ...(claude ? { processPlugins: [claude] } : {}) });
   };

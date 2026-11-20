@@ -43,6 +43,7 @@ const names: Record<string, StandardEvent> = {
   "turn.started": "turnStarted", "step.started": "stepStarted", "step.ended": "stepEnded",
   "tool.call": "toolCall", "tool.started": "toolStarted", "tool.progress": "toolOutput",
   "tool.result": "toolResult", "input.request.opened": "questionOpened", "input.request.closed": "questionClosed",
+  "input.request.answered": "questionAnswered", "input.request.unanswerable": "questionNoLongerAnswerable",
   "job.started": "jobStarted", "job.progress": "jobProgress", "job.ended": "jobEnded",
   "history.position": "positionMoved", "history.erased": "entriesErased", "setting.changed": "settingChanged",
   "plugin.loaded": "pluginLoaded", "plugin.replaced": "pluginReplaced", "plugin.unloaded": "pluginUnloaded",

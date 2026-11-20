@@ -264,7 +264,15 @@ export interface ModelAccess {
 
 // ---------- Credential store ----------
 
+export interface SecretScope { deployment: string; sessionId: string; requestId: string }
+export interface SecretSubmission extends SecretScope { credential: string; actorId: string }
+export interface SecretReceipt extends SecretSubmission { receipt: string }
+
 export interface CredentialStore {
+	stage?(scope: SecretSubmission, value: string): Promise<SecretReceipt | undefined>;
+	lookupStaged?(scope: SecretScope): Promise<SecretReceipt | undefined>;
+	activate?(scope: SecretScope): Promise<"activated" | "superseded">;
+	discard?(scope: SecretScope): Promise<void>;
 	read(providerId: string, options?: { signal?: AbortSignal }): Promise<unknown | undefined>;
 	list(options?: { signal?: AbortSignal }): Promise<readonly { providerId: string; type: string }[]>;
 	modify(providerId: string, fn: (current: any) => Promise<any>, options?: { signal?: AbortSignal }): Promise<unknown | undefined>;

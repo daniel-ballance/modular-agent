@@ -43,7 +43,7 @@ export interface InputReceipt { inputId: string; taken: "now" | "inTurn" | "afte
 export interface RunningTurn { turnId: string; abort: AbortController; done: Promise<void>; steeringClosed?: boolean }
 export interface OpenRequest {
 	request: InputRequest;
-	resolve(answer: Answer): void;
+	resolve(answer: Answer): Promise<void>;
 	timer?: NodeJS.Timeout;
 }
 export interface JobRecord {
