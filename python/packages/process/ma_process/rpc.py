@@ -7,6 +7,7 @@ Cancellation: https://docs.python.org/3.13/library/asyncio-task.html#task-cancel
 import asyncio
 import json
 import struct
+from dataclasses import dataclass, field
 
 from ma_core import AgentError, Stop
 
@@ -38,6 +39,19 @@ def exception(data):
     if kind == "TimeoutError":
         return TimeoutError(message)
     return AgentError(message, data["code"])
+
+
+@dataclass
+class Incoming:
+    task: asyncio.Task = field(init=False)
+    dispatching: bool = False
+    cancelled: bool = False
+
+    def cancel(self):
+        if not self.cancelled:
+            self.cancelled = True
+            if self.dispatching:
+                self.task.cancel()
 
 
 class Peer:
@@ -84,13 +98,20 @@ class Peer:
             if future.done() and not future.cancelled():
                 future.exception()  # Retrieve even when cancellation won a race.
 
-    async def _answer(self, frame):
+    async def _answer(self, frame, request):
         key = frame["id"]
         try:
+            # The reader may consume request and cancel in one turn. Let the
+            # answer task start so it can acknowledge without dispatching.
+            if request.cancelled:
+                raise asyncio.CancelledError
+            request.dispatching = True
             result = pack(await self.dispatch(frame["operation"], frame["data"]))
             answer = {"result": result}
         except BaseException as exc:
             answer = {"error": failure(exc)}
+        finally:
+            request.dispatching = False
         try:
             await self.send({"kind": "answer", "id": key, **answer})
         except (ConnectionError, AgentError):
@@ -109,7 +130,8 @@ class Peer:
                 if kind == "request":
                     if key in self.running:
                         raise AgentError("Duplicate plugin request", "protocol_error")
-                    self.running[key] = asyncio.create_task(self._answer(frame))
+                    request = self.running[key] = Incoming()
+                    request.task = asyncio.create_task(self._answer(frame, request))
                 elif kind == "cancel":
                     if key in self.running:
                         self.running[key].cancel()
@@ -133,13 +155,16 @@ class Peer:
                             self.label + " process disconnected; outcome unknown", "process_lost"
                         )
                     )
-            for task in list(self.running.values()):
-                task.cancel()
+            for request in self.running.values():
+                request.cancel()
             self.writer.close()
+
+    async def wait_running(self):
+        await asyncio.gather(*(r.task for r in self.running.values()), return_exceptions=True)
 
     async def close(self):
         self.writer.close()
         self.reader_task.cancel()
         await asyncio.gather(self.reader_task, return_exceptions=True)
-        await asyncio.gather(*list(self.running.values()), return_exceptions=True)
+        await self.wait_running()
         await self.writer.wait_closed()
