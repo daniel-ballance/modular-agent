@@ -1008,6 +1008,18 @@ class ACP(Plugin):
     async def bound_extension(self, operation, params):
         sid = params["sessionId"]
         self.check_session(sid)
+        # Proposals, release and withdraw also serve parked job reports.
+        feature = {"limit": "sessionLimits", "tenant": "tenants"}.get(operation)
+        actor = params.get("actorId", self.actor)
+        represented = isinstance(actor, str) and actor != self.actor
+        if (
+            operation in {"actors", "join", "leave"}
+            or (operation == "input" and (params.get("when") == "propose" or represented))
+            or (operation == "answer" and represented)
+        ):
+            feature = "severalActors"
+        if feature and (await self.declaration(sid)).get(feature) is not True:
+            raise protocol_error("not_supported", "Feature is disabled in this session")
         base = {"session": sid, "actor": self.actor}
         if operation == "history":
             if "all" in params and not isinstance(params["all"], bool):

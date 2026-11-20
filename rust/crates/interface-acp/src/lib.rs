@@ -313,7 +313,8 @@ impl State {
                             request_error("conflict", "cannot rewind a shared project").into()
                         );
                     }
-                    let result = binding::extension(s.clone(), name, &p).await;
+                    let result =
+                        binding::extension(self.factory.as_ref(), s.clone(), name, &p).await;
                     if s.api.rewind_pending(&s.id).unwrap_or(false) {
                         self.rewind_blocks
                             .lock()
@@ -322,7 +323,8 @@ impl State {
                     }
                     return result;
                 }
-                return binding::extension(self.session(&p)?, name, &p).await;
+                return binding::extension(self.factory.as_ref(), self.session(&p)?, name, &p)
+                    .await;
             }
             // Build-specific extras retain their old shapes, now in the binding namespace.
             // Like every binding extension, they are scoped to an open session.
