@@ -163,7 +163,8 @@ type Peer struct {
 	wire          messageConn
 	wait          sync.WaitGroup
 	afterResponse func(string)
-	onActivity    func()
+	activity      func()
+	lastActivity  time.Time // protected by mu; used only by network clients
 	writeMu       sync.Mutex
 	mu            sync.Mutex
 	pending       map[string]pending
@@ -241,9 +242,19 @@ func (p *Peer) call(ctx context.Context, method string, params any, out any, acc
 	key := string(id)
 	ch := make(chan envelope, 1)
 	p.mu.Lock()
+	if p.activity != nil && len(p.pending) == 0 {
+		p.heardLocked()
+	}
 	p.pending[key] = pending{ctx, ch}
 	p.mu.Unlock()
-	defer func() { p.mu.Lock(); delete(p.pending, key); p.mu.Unlock() }()
+	defer func() {
+		p.mu.Lock()
+		delete(p.pending, key)
+		if p.activity != nil {
+			p.activity()
+		}
+		p.mu.Unlock()
+	}()
 	if err := p.send(envelope{ID: id, Method: method, Params: mustJSON(params)}); err != nil {
 		if Code(err) != "" {
 			return err
@@ -262,6 +273,10 @@ func (p *Peer) call(ctx context.Context, method string, params any, out any, acc
 			return fault("lost", "plugin connection ended during "+method)
 		}
 	case <-ctx.Done():
+		if p.wire != nil && (method == "$/ping" || method == "plugin/initialize" || method == "plugin/shutdown") {
+			p.Close()
+			return fault("lost", "plugin control deadline reached during "+method)
+		}
 		_ = p.Send("$/cancel", map[string]any{"id": id})
 		// Wait for the receiver to acknowledge cleanup, but never wait indefinitely
 		// for a misbehaving peer. The process owner tears it down on lost.
@@ -341,8 +356,10 @@ func (p *Peer) run(drain bool) error {
 		if err != nil {
 			return err
 		}
-		if p.onActivity != nil {
-			p.onActivity()
+		if p.activity != nil {
+			p.mu.Lock()
+			p.heardLocked()
+			p.mu.Unlock()
 		}
 		if len(b) > MaxFrame {
 			return fault("invalid_request", "frame exceeds 64 MiB")
@@ -440,6 +457,11 @@ func (p *Peer) run(drain bool) error {
 			}()
 		})
 	}
+}
+
+func (p *Peer) heardLocked() {
+	p.lastActivity = time.Now()
+	p.activity()
 }
 
 func (p *Peer) captureParent(ctx context.Context, raw json.RawMessage) context.Context {

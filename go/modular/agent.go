@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/acpinterface"
 	"github.com/daniel-ballance/modular-agent/go/api"
@@ -54,6 +55,15 @@ type ProcessPlugin struct {
 	Env     map[string]string `json:"env,omitempty"`
 	Config  map[string]any    `json:"config,omitempty"`
 }
+
+// ServicePlugin loads a trusted plugin over a WebSocket.
+type ServicePlugin struct {
+	URL, TokenFile string
+	Config         map[string]any
+	// Zero selects the defaults (30 seconds of silence and a 5 second control wait).
+	PingInterval, ControlDeadline time.Duration
+}
+
 type options struct {
 	project, dataDir, model                 string
 	durability                              Durability
@@ -61,6 +71,7 @@ type options struct {
 	plugins                                 []Plugin
 	tools                                   []Tool
 	process                                 []ProcessPlugin
+	services                                []ServicePlugin
 	wire                                    []wirePlugin
 	environment                             Environment
 	runtime                                 Runtime
@@ -118,6 +129,10 @@ func WithPlugin(p Plugin) Option {
 func WithProcessPlugin(p ProcessPlugin) Option {
 	return func(o *options) error { o.process = append(o.process, p); return nil }
 }
+func WithServicePlugin(p ServicePlugin) Option {
+	return func(o *options) error { o.services = append(o.services, p); return nil }
+}
+
 func WithPluginHost(host bool) Option { return func(o *options) error { o.host = &host; return nil } }
 func WithSettings(s Settings) Option {
 	return func(o *options) error {
@@ -201,8 +216,8 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if o.durability != Ephemeral && o.durability != Kept && o.durability != Durable {
 		return nil, &Error{Code: InvalidParams, Message: "unknown durability"}
 	}
-	if o.host != nil && !*o.host && len(o.process) > 0 {
-		return nil, &Error{Code: InvalidComposition, Message: "process plugins require a plugin host"}
+	if o.host != nil && !*o.host && (len(o.process) > 0 || len(o.services) > 0) {
+		return nil, &Error{Code: InvalidComposition, Message: "process and service plugins require a plugin host"}
 	}
 	if o.history.serviceDir != "" {
 		return nil, &Error{Code: InvalidComposition, Message: "use HTTPHistory to connect to a history service"}
@@ -246,7 +261,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if o.approval != "" {
 		defaults.Approval = api.ApprovalInternal(string(o.approval))
 	}
-	host := len(o.process) > 0
+	host := len(o.process) > 0 || len(o.services) > 0
 	if o.host != nil {
 		host = *o.host
 	}
@@ -256,6 +271,12 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	for _, p := range o.process {
 		specs = append(specs, pluginrpc.Spec{Command: p.Command, Env: p.Env, Config: p.Config})
+	}
+	for _, p := range o.services {
+		if p.URL == "" {
+			return nil, &Error{Code: InvalidComposition, Message: "plugin service URL is empty"}
+		}
+		specs = append(specs, pluginrpc.Spec{URL: p.URL, TokenFile: p.TokenFile, Config: p.Config, PingInterval: p.PingInterval, ControlDeadline: p.ControlDeadline})
 	}
 	if host {
 		more, e := pluginrpc.EnvironmentSpecs()

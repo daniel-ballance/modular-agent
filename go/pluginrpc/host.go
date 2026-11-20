@@ -22,11 +22,24 @@ import (
 )
 
 type Spec struct {
-	Serve   func(context.Context, io.ReadCloser, io.Writer) error `json:"-"`
-	Command []string                                              `json:"command"`
-	Env     map[string]string                                     `json:"env"`
-	Config  object                                                `json:"config"`
+	Serve                         func(context.Context, io.ReadCloser, io.Writer) error `json:"-"`
+	Command                       []string                                              `json:"command"`
+	Env                           map[string]string                                     `json:"env"`
+	Config                        object                                                `json:"config"`
+	URL                           string                                                `json:"url"`
+	TokenFile                     string                                                `json:"tokenFile"`
+	PingInterval, ControlDeadline time.Duration                                         `json:"-"`
+	envKeys                       map[string]json.RawMessage
 }
+
+func (s *Spec) UnmarshalJSON(b []byte) error {
+	type spec Spec
+	if err := json.Unmarshal(b, (*spec)(s)); err != nil {
+		return err
+	}
+	return json.Unmarshal(b, &s.envKeys)
+}
+
 type host struct {
 	h                 *harness.Harness
 	a                 api.API
@@ -48,6 +61,7 @@ type remote struct {
 	closeOnce sync.Once
 	active    atomic.Bool
 	inOutput  atomic.Int32
+	deadline  time.Duration
 }
 type work struct {
 	session, actor, provider string
@@ -71,13 +85,9 @@ func withWork(ctx context.Context, w work) context.Context {
 // LoadEnvironment starts the configured subprocesses after local plugins. It is
 // used by every vanilla Harness, including terminal, ACP and HTTP composition.
 func LoadEnvironment(h *harness.Harness, project, home string) error {
-	raw := os.Getenv("MODULAR_AGENT_PLUGINS")
-	if raw == "" {
-		return nil
-	}
-	var specs []Spec
-	if err := json.Unmarshal([]byte(raw), &specs); err != nil {
-		return fmt.Errorf("MODULAR_AGENT_PLUGINS: %w", err)
+	specs, err := EnvironmentSpecs()
+	if err != nil {
+		return err
 	}
 	return load(context.Background(), h, project, home, specs, true)
 }
@@ -106,7 +116,20 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 		return nil
 	}
 	for _, spec := range specs {
-		if spec.Serve == nil && (len(spec.Command) == 0 || spec.Command[0] == "") {
+		_, hasURL := spec.envKeys["url"]
+		if spec.URL != "" || hasURL {
+			if _, command := spec.envKeys["command"]; command || spec.Command != nil || spec.Serve != nil {
+				return errors.New("plugin entry cannot name both a command and a service")
+			}
+			if _, env := spec.envKeys["env"]; env || spec.Env != nil {
+				return errors.New("plugin service cannot name a process environment")
+			}
+			if spec.URL == "" || !filepath.IsAbs(spec.TokenFile) || spec.PingInterval < 0 || spec.ControlDeadline < 0 {
+				return errors.New("invalid plugin service URL, tokenFile or deadline")
+			}
+		} else if _, token := spec.envKeys["tokenFile"]; token || spec.TokenFile != "" {
+			return errors.New("tokenFile requires a plugin service URL")
+		} else if spec.Serve == nil && (len(spec.Command) == 0 || spec.Command[0] == "") {
 			return errors.New("plugin command is empty")
 		}
 	}
@@ -141,6 +164,10 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 				defer pluginConn.Close()
 				_ = spec.Serve(context.Background(), pluginConn, pluginConn)
 			}()
+		} else if spec.URL != "" {
+			if err := r.startService(ctx, spec); err != nil {
+				return err
+			}
 		} else if err := r.startProcess(spec, project, legacyCommandArgs); err != nil {
 			return err
 		}
@@ -152,13 +179,23 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 			if r.cmd != nil {
 				_ = r.cmd.Wait()
 				close(r.exited)
+			} else if spec.URL != "" {
+				r.peer.Close()
+				close(r.exited)
 			}
 		}()
 		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": spec.Config}
 		if spec.Config == nil {
 			init["config"] = object{}
 		}
-		if err = r.peer.Call(ctx, "plugin/initialize", init, &r.reg); err != nil {
+		initCtx := ctx
+		cancelInit := func() {}
+		if r.deadline > 0 {
+			initCtx, cancelInit = context.WithTimeout(ctx, r.deadline)
+		}
+		err = r.peer.Call(initCtx, "plugin/initialize", init, &r.reg)
+		cancelInit()
+		if err != nil {
 			_ = r.Close()
 			return err
 		}
@@ -179,6 +216,12 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 		bridge.jobOwners[r.reg.Name] = r
 		r.active.Store(true)
 		bridge.jobOwnersMu.Unlock()
+		select {
+		case <-r.peer.Done():
+			r.active.Store(false)
+			return fault("lost", "plugin disconnected during registration")
+		default:
+		}
 	}
 	return nil
 }
@@ -232,7 +275,11 @@ func (r *remote) shutdown(reason, detail string) {
 			return
 		default:
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		deadline := r.deadline
+		if deadline == 0 {
+			deadline = time.Second // existing stdio behavior
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
 		params := object{"reason": reason}
 		if detail != "" {
@@ -240,7 +287,7 @@ func (r *remote) shutdown(reason, detail string) {
 		}
 		_ = r.peer.Call(ctx, "plugin/shutdown", params, nil)
 		_ = r.stdin.Close()
-		timer := time.NewTimer(time.Second)
+		timer := time.NewTimer(deadline)
 		defer timer.Stop()
 		select {
 		case <-r.exited:
