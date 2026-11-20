@@ -14,7 +14,27 @@ async fn main() {
 }
 async fn start() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--serve-plugin") {
-        plugin_stdio::server::serve(Arc::new(plugin_stdio::server::Conformance::from_env()?)).await;
+        let plugin = plugin_stdio::server::Conformance::from_env()?;
+        let args: Vec<_> = std::env::args().skip(2).collect();
+        match args.as_slice() {
+            [] => plugin_stdio::server::serve(Arc::new(plugin)).await,
+            [flag, address, token_flag, token_file]
+                if flag == "--listen" && token_flag == "--token-file" =>
+            {
+                let server = plugin_stdio::server::serve_websocket(
+                    address,
+                    token_file.into(),
+                    None,
+                    move || Arc::new(plugin.new_instance()),
+                )
+                .await?;
+                println!("{}", server.url);
+                let stopped = tokio::signal::ctrl_c().await;
+                server.close().await;
+                stopped?;
+            }
+            _ => bail!("usage: modular-agent --serve-plugin [--listen ADDR --token-file FILE]"),
+        }
         return Ok(());
     }
     let home = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME missing"))?);
@@ -52,7 +72,7 @@ async fn start() -> Result<()> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "modular-agent [--project DIR] [--session ID] [-p PROMPT | --json [--prompt PROMPT]]\n  --data-dir DIR  --global-config FILE  --list [--all-projects]\n  --acp  --trust-project  --history  --declaration  --fake-script FILE  --runtime transient|durable\n  --provider-mode stateless|stateful\n  --serve-plugin (modular-agent-plugin/1 stdio)\n  --subagents transient|durable  --approval off|ask_always|ask_unless_read_only|never_ask\nLine mode: /commands, /after TEXT, /cancel, /quit, /questions, /answer ID VALUE, /jobs, /cancel-job ID, /tool JSON"
+                    "modular-agent [--project DIR] [--session ID] [-p PROMPT | --json [--prompt PROMPT]]\n  --data-dir DIR  --global-config FILE  --list [--all-projects]\n  --acp  --trust-project  --history  --declaration  --fake-script FILE  --runtime transient|durable\n  --provider-mode stateless|stateful\n  --serve-plugin [--listen ADDR --token-file FILE] (modular-agent-plugin/1)\n  --subagents transient|durable  --approval off|ask_always|ask_unless_read_only|never_ask\nLine mode: /commands, /after TEXT, /cancel, /quit, /questions, /answer ID VALUE, /jobs, /cancel-job ID, /tool JSON"
                 );
                 return Ok(());
             }

@@ -35,6 +35,8 @@ Options:
   --history             print the session's history
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol on stdio, for an editor or host
+  --listen ADDR --token-file FILE
+                        with --acp, serve ACP on a loopback WebSocket instead
 
 While the agent works, a line you type steers it; /after TEXT queues a new
 turn; /cancel or Ctrl-C stops the turn. /commands lists the rest, including
@@ -283,6 +285,7 @@ async fn start() -> Result<()> {
         verbose: false,
     };
     let (mut acp, mut trust, mut resume) = (false, false, false);
+    let (mut listen, mut token_file) = (None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
@@ -296,6 +299,8 @@ async fn start() -> Result<()> {
             "sessions" => terminal.list = true,
             "--all" => terminal.all_projects = true,
             "--acp" => acp = true,
+            "--listen" => listen = Some(take(&mut args, &arg)?),
+            "--token-file" => token_file = Some(take(&mut args, &arg)?),
             "--trust-project" => trust = true,
             "--model" => terminal.settings["model"] = json!(take(&mut args, &arg)?),
             "--thinking" => terminal.settings["thinking"] = json!(take(&mut args, &arg)?),
@@ -322,6 +327,15 @@ async fn start() -> Result<()> {
             _ => bail!("unknown argument {arg}; use --help"),
         }
     }
+    let service = match (listen, token_file) {
+        (Some(listen), Some(token_file)) if acp => Some(sdk::AcpServiceOptions {
+            listen,
+            actors: vec![sdk::AcpActor::local(token_file.into())],
+            tls: None,
+        }),
+        (None, None) => None,
+        _ => bail!("--listen and --token-file must be used together with --acp"),
+    };
     if acp {
         ensure!(
             terminal.prompt.is_none() && terminal.session.is_none() && !resume,
@@ -334,15 +348,24 @@ async fn start() -> Result<()> {
         // The bootstrap agent supplies the declaration. Only the actual
         // project/session composition can choose to start Claude.
         let agent = builder(&standard, &project, &mcp, vec![])?.build().await?;
-        let served = agent
-            .serve_acp(sdk::AcpOptions {
-                compose: Some(std::sync::Arc::new(standard::acp::Factory {
-                    standard,
-                    settings: terminal.settings,
-                    mcp,
-                })),
-            })
-            .await;
+        let options = sdk::AcpOptions {
+            compose: Some(std::sync::Arc::new(standard::acp::Factory {
+                standard,
+                settings: terminal.settings,
+                mcp,
+            })),
+        };
+        let served = if let Some(service) = service {
+            async {
+                let server = agent.serve_acp_websocket(options, service).await?;
+                let stopped = tokio::signal::ctrl_c().await;
+                server.close().await;
+                Ok(stopped?)
+            }
+            .await
+        } else {
+            agent.serve_acp(options).await
+        };
         let closed = agent.close().await;
         return Ok(served.and(closed)?);
     }
