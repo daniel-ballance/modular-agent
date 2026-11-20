@@ -8,18 +8,31 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 func runtimePlatform() string { return runtime.GOOS }
 
 type remoteProvider struct {
-	remote *remote
-	reg    ProviderRegistration
+	remote    *remote
+	reg       ProviderRegistration
+	mu        sync.Mutex
+	models    []object
+	refreshed bool
 }
 
 func (p *remoteProvider) Catalog() []api.Model {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.catalogLocked()
+}
+func (p *remoteProvider) catalogLocked() []api.Model {
 	out := []api.Model{}
-	for _, v := range p.reg.Models {
+	models := p.reg.Models
+	if p.refreshed {
+		models = p.models
+	}
+	for _, v := range models {
 		m := modelIn(v)
 		m.Stateful = p.reg.Supports.KeepsState
 		m.RunsTools = p.reg.Supports.RunsTools
@@ -27,6 +40,36 @@ func (p *remoteProvider) Catalog() []api.Model {
 	}
 	return out
 }
+func (p *remoteProvider) RefreshCatalog(ctx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var out struct{ Models []object }
+	err := p.remote.call(ctx, "provider/models", object{"provider": p.reg.ID}, &out)
+	p.models, p.refreshed = nil, true
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, m := range out.Models {
+		id := str(m, "id")
+		if id == "" || str(m, "provider") != p.reg.ID || seen[id] {
+			return fault("invalid_request", "invalid Provider catalog")
+		}
+		seen[id] = true
+	}
+	p.models = out.Models
+	return nil
+}
+
+func (p *remoteProvider) Available() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out struct{ Available bool }
+	return p.remote.call(ctx, "provider/available", object{"provider": p.reg.ID}, &out) == nil && out.Available
+}
+
 func (p *remoteProvider) Access(id string) (api.ModelAccess, error) {
 	for _, m := range p.Catalog() {
 		if m.ID == id {

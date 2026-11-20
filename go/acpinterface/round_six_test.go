@@ -114,8 +114,11 @@ func TestSessionLimitAppliesBeforeTheNextToolInARunningTurn(t *testing.T) {
 		if err := limit([]string{"watch", "input", "administer"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := limit([]string{"watch", "input", "administer", "tools"}); err == nil {
-			t.Fatal("explicit widening passed")
+		if err := limit([]string{"watch", "input", "administer", "tools"}); err != nil {
+			t.Fatalf("replacement must be checked against the administrator's uncapped rights: %v", err)
+		}
+		if err := limit([]string{"watch", "input"}); err != nil {
+			t.Fatal(err)
 		}
 		close(release)
 		select {

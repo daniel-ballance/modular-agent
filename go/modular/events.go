@@ -24,7 +24,7 @@ func (s *Session) Events(ctx context.Context, fromEntry ...string) iter.Seq2[Eve
 		subscribe := s.agent.a.(interface {
 			SubscribeOutput(func(api.Event) string, func(api.Event)) func()
 		})
-		stop := subscribe.SubscribeOutput(func(api.Event) string { return localActor }, func(e api.Event) {
+		stop := subscribe.SubscribeOutput(func(api.Event) string { return s.actorID() }, func(e api.Event) {
 			if e.Session != s.id {
 				return
 			}

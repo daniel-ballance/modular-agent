@@ -628,15 +628,6 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 				return nil, fault("not_supported", "leaving a call open is not supported")
 			}
 		}
-		if str(request, "kind") == "secret" {
-			for _, capability := range r.host.a.All("provider.") {
-				for _, model := range capability.(api.Provider).Catalog() {
-					if model.Provider == str(request, "credential") {
-						return object{"requestId": api.ID(), "actorId": w.actor, "declined": true, "reason": "Provider credentials are reserved"}, nil
-					}
-				}
-			}
-		}
 		execution := api.Executing(ctx)
 		q := api.Question{Wire: mustJSON(request), Details: mustJSON(request["details"]), Session: session, Turn: execution.Turn, Call: w.call.ID, Actor: w.actor, Kind: str(request, "kind"), Prompt: str(request, "question"), Credential: str(request, "credential"), Key: str(request, "key"), Wait: time.Duration(number(request, "timeLimitMs")) * time.Millisecond, Defer: str(request, "whenTimeLimit") == "leaveOpen"}
 		_ = json.Unmarshal(mustJSON(request["options"]), &q.Options)
@@ -659,7 +650,7 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 			return nil, err
 		}
 		if q.Kind == "secret" {
-			return object{"requestId": answer.Request, "actorId": answer.Actor, "stored": answer.Value, "declined": answer.Declined}, nil
+			return object{"requestId": answer.Request, "actorId": answer.Actor, "stored": answer.Stored, "declined": answer.Declined, "reason": answer.Reason}, nil
 		}
 		return object{"requestId": answer.Request, "actorId": answer.Actor, "value": answer.Value, "declined": answer.Declined, "reason": answer.Reason}, nil
 	}

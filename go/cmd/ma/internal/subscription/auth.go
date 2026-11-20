@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 type Login struct {
@@ -55,11 +57,12 @@ func (l Login) Expired() bool {
 type contents struct {
 	Logins  map[string]Login  `json:"logins"`
 	Answers map[string]string `json:"answers"`
+	modular.CredentialStages
 }
 type AuthFile string
 
 func (a AuthFile) read() (contents, error) {
-	data := contents{map[string]Login{}, map[string]string{}}
+	data := contents{Logins: map[string]Login{}, Answers: map[string]string{}}
 	b, err := os.ReadFile(string(a))
 	if os.IsNotExist(err) {
 		return data, nil
@@ -78,6 +81,27 @@ func (a AuthFile) read() (contents, error) {
 	}
 	return data, nil
 }
+func (a AuthFile) CredentialStore() modular.TransactionalCredentials {
+	return modular.TransactionalCredentials{
+		Read: func(ctx context.Context, name string) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			data, err := a.read()
+			return data.Answers[name], err
+		},
+		Update: func(ctx context.Context, fn func(*modular.CredentialStages, map[string]string) (bool, error)) error {
+			return a.locked(ctx, func(data contents) error {
+				save, err := fn(&data.CredentialStages, data.Answers)
+				if err != nil || !save {
+					return err
+				}
+				return a.write(data)
+			})
+		},
+	}
+}
+
 func (a AuthFile) Login(provider string) (*Login, error) {
 	data, err := a.read()
 	if err != nil {

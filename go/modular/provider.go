@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
@@ -81,16 +83,54 @@ func (c *ProviderContext) Credential() (string, error) {
 
 type ProviderSupport struct{ KeepsState, SafeToRepeat bool }
 type Provider struct {
-	ID           string
-	Models       func() []ModelInfo
-	Supports     ProviderSupport
-	Available    func() bool
-	Request      func(context.Context, ModelRef, ModelRequest, *ProviderContext) (AssistantMessage, error)
-	DiscardState func(context.Context, string) error
+	ID             string
+	Models         func() []ModelInfo
+	Supports       ProviderSupport
+	Available      func() bool
+	Request        func(context.Context, ModelRef, ModelRequest, *ProviderContext) (AssistantMessage, error)
+	DiscardState   func(context.Context, string) error
+	CatalogChanges *CatalogChanges
 }
-type providerAdapter struct{ p Provider }
+
+// CatalogChanges lets a Provider invalidate a cached catalog after changing it.
+type CatalogChanges struct {
+	mu      sync.Mutex
+	version uint64
+	catalog []api.Model
+	valid   bool
+}
+
+func (c *CatalogChanges) Changed() { c.mu.Lock(); c.version++; c.valid = false; c.mu.Unlock() }
+
+type providerAdapter struct {
+	p    Provider
+	read func(context.Context, string) (string, error)
+}
+
+func (p providerAdapter) Available() bool { return p.p.Available == nil || p.p.Available() }
 
 func (p providerAdapter) Catalog() []api.Model {
+	c := p.p.CatalogChanges
+	if c == nil {
+		return p.catalog()
+	}
+	c.mu.Lock()
+	if c.valid {
+		out := c.catalog
+		c.mu.Unlock()
+		return out
+	}
+	version := c.version
+	c.mu.Unlock()
+	out := p.catalog()
+	c.mu.Lock()
+	if c.version == version {
+		c.catalog, c.valid = out, true
+	}
+	c.mu.Unlock()
+	return out
+}
+func (p providerAdapter) catalog() []api.Model {
 	var out []api.Model
 	for _, m := range p.p.Models() {
 		m.Provider = p.p.ID
@@ -106,7 +146,7 @@ func (p providerAdapter) Catalog() []api.Model {
 func (p providerAdapter) Access(id string) (api.ModelAccess, error) {
 	for _, m := range p.Catalog() {
 		if m.ID == id || strings.TrimPrefix(m.ID, p.p.ID+"/") == id {
-			return modelAccess{p.p, m}, nil
+			return modelAccess{p, m}, nil
 		}
 	}
 	return nil, &Error{Code: InvalidRequest, Message: "unknown model " + id}
@@ -119,12 +159,15 @@ func (p providerAdapter) Discard(ctx context.Context, session string) error {
 }
 
 type modelAccess struct {
-	p     Provider
+	p     providerAdapter
 	model api.Model
 }
 
 func (m modelAccess) Model() api.Model { return m.model }
 func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.Part)) (api.Response, error) {
+	if !m.p.Available() {
+		return failedModelResponse(&ModelError{Kind: Temporary, Message: "Provider unavailable"}), nil
+	}
 	var request ModelRequest
 	if err := decodeInto(portable.Request(r), &request); err != nil {
 		return failedModelResponse(err), nil
@@ -133,11 +176,19 @@ func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.
 		request.SessionID = api.Executing(ctx).Session
 	}
 	ref := ModelRef{Provider: m.model.Provider, ID: strings.TrimPrefix(m.model.ID, m.model.Provider+"/")}
+	var settled atomic.Bool
+	defer settled.Store(true)
 	pc := &ProviderContext{credential: func() (string, error) {
+		if settled.Load() {
+			return "", &Error{Code: InvalidRequest, Message: "Provider request has settled"}
+		}
 		if err := ctx.Err(); err != nil {
 			return "", appError(err, CancelledCode)
 		}
-		key, err := (environmentCredentials{}).Get(ctx, ref.Provider)
+		if m.p.read == nil {
+			return "", &Error{Code: NotFound, Message: "provider credential unavailable"}
+		}
+		key, err := m.p.read(ctx, ref.Provider)
 		if err != nil {
 			return "", err
 		}
@@ -146,13 +197,14 @@ func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.
 		}
 		return key, nil
 	}, piece: func(p Part) {
-		if ctx.Err() == nil {
+		if ctx.Err() == nil && !settled.Load() {
 			if c := portable.ReadContent(Content{p}); len(c) > 0 {
 				emit(c[0])
 			}
 		}
 	}}
-	response, err := m.p.Request(ctx, ref, request, pc)
+	response, err := m.p.p.Request(ctx, ref, request, pc)
+	settled.Store(true)
 	if ctx.Err() != nil {
 		return api.Response{}, ctx.Err()
 	}
@@ -180,6 +232,9 @@ func failedModelResponse(err error) api.Response {
 func (a *Agent) Models() []ModelInfo {
 	var result []ModelInfo
 	for _, p := range a.a.All("provider.") {
+		if refresh, ok := p.(interface{ RefreshCatalog(context.Context) error }); ok {
+			_ = refresh.RefreshCatalog(context.Background())
+		}
 		for _, m := range p.(api.Provider).Catalog() {
 			var info ModelInfo
 			if decodeInto(portable.Model(m), &info) == nil {

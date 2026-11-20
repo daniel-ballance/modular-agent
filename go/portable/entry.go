@@ -13,7 +13,7 @@ import (
 var standard = map[string]string{
 	"job.start": "jobStarted", "job.end": "jobEnded", "job.cleanup": "jobCleanupUnconfirmed",
 	"input.accepted": "inputAccepted", "input.returned": "inputHandedBack", "model.request": "modelRequest", "plugins.set": "plugins",
-	"tool.open": "toolPending", "limit": "limit", "tenant": "tenant", "input": "input", "turn.start": "turnStart", "model": "response", "tool.started": "toolStarted", "tool.result": "toolResult", "question.open": "inputRequest", "question.answer": "inputAnswer", "turn.end": "turnEnd", "summary": "summary", "setting": "setting", "actor.set": "actorJoined", "actor.left": "actorLeft", "position": "position", "erasure": "erasure", "resultFeedback": "resultFeedback",
+	"tool.open": "toolPending", "limit": "limit", "tenant": "tenant", "input": "input", "turn.start": "turnStart", "model": "response", "tool.started": "toolStarted", "tool.result": "toolResult", "question.open": "inputRequest", "question.answer": "inputAnswer", "question.secret": "secretAnswerAccepted", "turn.end": "turnEnd", "summary": "summary", "setting": "setting", "actor.set": "actorJoined", "actor.left": "actorLeft", "position": "position", "erasure": "erasure", "resultFeedback": "resultFeedback",
 }
 
 func kindOut(kind string) string {
@@ -320,6 +320,9 @@ func Entry(e api.Entry) map[string]any {
 			d["source"] = q.Source
 		}
 		d["request"] = r
+	case "question.secret":
+		v["requestId"] = api.Decode[string](e.Data)
+		delete(v, "data")
 	case "question.answer":
 		a := api.Decode[api.Answer](e.Data)
 		set(v, "requestId", a.Request, a.Request != "")
@@ -579,6 +582,8 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 			q.Source = &identity
 		}
 		e.Data = api.JSON(storedQuestion{q, str(r, "go.forwardSession"), str(r, "go.forwardRequest")})
+	case "question.secret":
+		e.Data = api.JSON(association(v, d, "requestId"))
 	case "question.answer":
 		e.Data = api.JSON(api.Answer{Request: association(v, d, "requestId"), Actor: str(d, "actorId"), Value: str(d, "value"), Reason: str(d, "reason"), Stored: str(d, "stored"), Declined: boolean(d, "declined"), Via: api.Decode[[]api.ActorRef](api.JSON(d["go.via"]))})
 	case "turn.end":
