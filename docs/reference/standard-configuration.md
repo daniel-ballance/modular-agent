@@ -85,7 +85,18 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 | `xai` | Grok subscription models over the Responses API | `ma login xai`: a device code |
 | `claude` | Claude subscription models, through the Claude Agent SDK | `ma login claude` runs `claude auth login`; Claude Code keeps the sign-in |
 
-Request shapes, headers, endpoints and client ids follow Pi 1.5.2, as the Rust `provider-responses` crate does. The Claude Provider is the sidecar. The terminal starts it to run a Claude model or list its models; ACP starts it when the launch or the session's saved settings select a Claude model. An agent started without it cannot switch to a Claude model until it is started again.
+Request shapes, headers, endpoints and client ids follow Pi 1.5.2, as the Rust `provider-responses` crate does.
+
+**Signing in to ChatGPT** works where the browser is not on the agent's machine, as over SSH:
+
+- `ma login openai-codex` prints the sign-in address and, when standard input is a terminal, also asks the person to paste. The browser returns to `http://localhost:1455/auth/callback`. If the browser runs on the agent's machine, `ma` hears that on port 1455 and finishes. If it runs elsewhere the page fails to load; the person copies the address from the browser's address bar and pastes it. Whichever comes first finishes the sign-in.
+- A pasted line may be the whole address, its query (`code=…&state=…`), `code#state`, or the bare code. A state that is present must match the sign-in's; a mismatch, or an `error` in the address, is reported and the prompt asks again.
+- If port 1455 is in use, pasting is the only way back. If it is in use and standard input is not a terminal, `ma` uses the device code sign-in.
+- `--device` uses the device code sign-in: a code typed at a page on any machine. The ChatGPT account must allow device code sign-in in its security settings.
+- `ma` opens a browser itself only when there is a local display and no SSH session (`SSH_CONNECTION` or `SSH_TTY`), and never when `MA_NO_BROWSER` is set.
+- Over SSH, `ssh -L 1455:localhost:1455` also works: the browser's return then reaches the agent's machine directly.
+
+**The client identity.** Requests and sign-ins name the client to the service: `originator` on ChatGPT requests and in the sign-in address, `referrer` when starting a Grok sign-in. Every implementation sends Pi's value, `pi`, the only one known to be accepted, from one constant (`CLIENT_IDENTITY` in Rust). This is a placeholder, not a claim to be Pi. An agent built from this code should send its own name in that one place once the services are known to accept it. The Claude Provider is the sidecar. The terminal starts it to run a Claude model or list its models; ACP starts it when the launch or the session's saved settings select a Claude model. An agent started without it cannot switch to a Claude model until it is started again.
 
 ## Tools
 

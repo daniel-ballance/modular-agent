@@ -100,7 +100,7 @@ impl ResponsesPlugin {
             vendor,
             models,
             endpoint: vendor.endpoint().into(),
-            originator: "pi".into(),
+            originator: oauth::CLIENT_IDENTITY.into(),
             client,
             auth,
             test: false,

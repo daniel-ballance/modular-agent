@@ -103,7 +103,13 @@ async fn browser_sign_in_binds_state_and_pkce_to_the_exchange() {
     };
     let login = tokio::time::timeout(
         Duration::from_secs(4),
-        codex_browser(&client(), listener, &show, &format!("{}/token", fake.base)),
+        codex_browser(
+            &client(),
+            Some(listener),
+            None,
+            &show,
+            &format!("{}/token", fake.base),
+        ),
     )
     .await
     .unwrap()
@@ -123,6 +129,90 @@ async fn browser_sign_in_binds_state_and_pkce_to_the_exchange() {
     assert_eq!(
         *challenge.lock().unwrap(),
         b64(&sha2::Sha256::digest(verifier.as_bytes()))
+    );
+}
+
+/// Over SSH the browser is on another machine: the person pastes the address it
+/// was sent back to. A wrong-state address is refused and the sign-in keeps waiting.
+#[tokio::test]
+async fn browser_sign_in_finishes_from_a_pasted_redirect_address() {
+    let fake = server(vec![("/token", 200, codex_tokens())]).await;
+    let (paste, pasted) = tokio::sync::mpsc::unbounded_channel();
+    let notes = Mutex::new(Vec::new());
+    let show = |step: Step<'_>| match step {
+        Step::OpenAndPaste(address) => {
+            let (_, params) = address.split_once('?').unwrap();
+            let state = query(params, "state").unwrap();
+            assert_eq!(
+                query(params, "originator").as_deref(),
+                Some(CLIENT_IDENTITY)
+            );
+            paste.send(String::new()).unwrap();
+            paste
+                .send("http://localhost:1455/auth/callback?code=stale&state=other".into())
+                .unwrap();
+            paste
+                .send(format!(
+                    "http://localhost:1455/auth/callback?code=pasted-code&scope=x&state={state}"
+                ))
+                .unwrap();
+        }
+        Step::Note(text) => notes.lock().unwrap().push(text.to_owned()),
+        _ => panic!("expected the paste prompt"),
+    };
+    let login = tokio::time::timeout(
+        Duration::from_secs(4),
+        codex_browser(
+            &client(),
+            None,
+            Some(pasted),
+            &show,
+            &format!("{}/token", fake.base),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    account(login);
+    fake.task.await.unwrap();
+    let seen = fake.seen.lock().unwrap();
+    assert_eq!(query(&seen[0].1, "code").as_deref(), Some("pasted-code"));
+    assert_eq!(
+        query(&seen[0].1, "redirect_uri").as_deref(),
+        Some(CODEX_REDIRECT)
+    );
+    let notes = notes.lock().unwrap();
+    assert!(
+        notes.len() == 1 && notes[0].contains("different sign-in"),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn a_pasted_code_is_read_from_each_form_people_paste() {
+    let read = |s: &str| pasted_code(s, "st").map_err(|e| e.to_string());
+    assert_eq!(
+        read("http://localhost:1455/auth/callback?code=c1&state=st"),
+        Ok(Some("c1".into()))
+    );
+    assert_eq!(read("  code=c2&state=st  "), Ok(Some("c2".into())));
+    assert_eq!(read("c3#st"), Ok(Some("c3".into())));
+    assert_eq!(read("c4"), Ok(Some("c4".into())));
+    assert_eq!(read("   "), Ok(None));
+    assert!(
+        read("http://localhost:1455/auth/callback?code=c&state=other")
+            .unwrap_err()
+            .contains("different sign-in")
+    );
+    assert!(
+        read("http://localhost:1455/auth/callback?error=access_denied&state=st")
+            .unwrap_err()
+            .contains("not completed")
+    );
+    assert!(
+        read("http://localhost:1455/auth/callback?state=st")
+            .unwrap_err()
+            .contains("no code")
     );
 }
 

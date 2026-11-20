@@ -104,6 +104,7 @@ The other languages' builds are in [`typescript/packages/ma`](typescript/package
 ## Known gaps
 
 - **Linux only.** Command containment uses Linux namespaces, ptrace and cgroups. macOS and Windows are not supported yet.
+- **`ma` names itself `pi` to OpenAI and xAI,** Pi's client identity, because it is the only one known to be accepted. If you build an agent from this code, change it in the one place each implementation keeps it ([client identity](docs/reference/standard-configuration.md#providers)).
 - **Not tried against real services.** Every test uses scripted models and local fakes. The API-key and subscription Providers have not made a real request through the SDKs.
 - **Secrets are not crash-safe.** Storing a secret answer and recording it are separate writes.
 - **The code sandbox runs in the agent's process**, with no memory limit. The Go binding to Monty cannot import `tools` or assign a function to a variable.

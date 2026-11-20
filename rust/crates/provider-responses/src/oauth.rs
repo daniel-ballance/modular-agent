@@ -10,6 +10,12 @@ use sha2::Digest;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// How this agent names itself to OpenAI and xAI: the `originator` of a ChatGPT
+/// sign-in and request, and the `referrer` of a Grok sign-in. It is Pi's value,
+/// the only one known to be accepted. An agent built on this code should send its
+/// own name once the services are known to accept it.
+pub const CLIENT_IDENTITY: &str = "pi";
+
 const CODEX_CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_AUTHORIZE: &str = "https://auth.openai.com/oauth/authorize";
 const CODEX_TOKEN: &str = "https://auth.openai.com/oauth/token";
@@ -39,6 +45,48 @@ pub enum Step<'a> {
         code: &'a str,
     },
     Note(&'a str),
+    /// Open this address in a browser anywhere. When the browser comes back to
+    /// `localhost`, paste the address it shows, or the code, here.
+    OpenAndPaste(&'a str),
+}
+
+/// Lines a person types while a sign-in waits, such as a pasted redirect address.
+pub type Pasted = tokio::sync::mpsc::UnboundedReceiver<String>;
+
+/// Read the code from what a person pasted: the whole redirect address, its
+/// query (`code=...&state=...`), `code#state`, or the bare code. A state that is
+/// present must match this sign-in's.
+pub fn pasted_code(input: &str, state: &str) -> Result<Option<String>> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(None);
+    }
+    let (code, found) = if let Some((_, query_part)) = input.split_once('?') {
+        let query_part = query_part.split('#').next().unwrap_or("");
+        if let Some(error) = query(query_part, "error") {
+            bail!(
+                "the sign-in was not completed: {}",
+                query(query_part, "error_description").unwrap_or(error)
+            );
+        }
+        (query(query_part, "code"), query(query_part, "state"))
+    } else if input.contains("code=") {
+        (query(input, "code"), query(input, "state"))
+    } else if let Some((code, found)) = input.split_once('#') {
+        (Some(code.to_owned()), Some(found.to_owned()))
+    } else {
+        (Some(input.to_owned()), None)
+    };
+    if let Some(found) = found {
+        ensure!(
+            found == state,
+            "that address is from a different sign-in; paste the one from this sign-in"
+        );
+    }
+    let code = code
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| anyhow!("no code found in what was pasted"))?;
+    Ok(Some(code))
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -260,7 +308,7 @@ async fn xai_device(
         &[
             ("client_id", XAI_CLIENT),
             ("scope", XAI_SCOPE),
-            ("referrer", "pi"),
+            ("referrer", CLIENT_IDENTITY),
         ],
     )
     .await?;
@@ -463,32 +511,78 @@ async fn callback(listener: tokio::net::TcpListener, state: &str) -> Result<Stri
     }
 }
 
+/// The browser sign-in. The browser comes back to `localhost:1455`. If that is
+/// this machine, the local listener finishes the sign-in. If not, as over SSH, the
+/// person pastes the address the browser shows, even when the page fails to load.
 async fn codex_browser(
     client: &reqwest::Client,
-    listener: tokio::net::TcpListener,
+    listener: Option<tokio::net::TcpListener>,
+    mut pasted: Option<Pasted>,
     show: &(dyn Fn(Step<'_>) + Sync),
     token_url: &str,
 ) -> Result<Login> {
+    ensure!(
+        listener.is_some() || pasted.is_some(),
+        "the browser sign-in needs port 1455 or a terminal to paste into"
+    );
     let verifier = random(32)?;
     let challenge = b64(&sha2::Sha256::digest(verifier.as_bytes()));
     let state = random(16)?;
     let address = format!(
-        "{CODEX_AUTHORIZE}?response_type=code&client_id={CODEX_CLIENT}&redirect_uri={}&scope={}&code_challenge={challenge}&code_challenge_method=S256&state={state}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=pi",
+        "{CODEX_AUTHORIZE}?response_type=code&client_id={CODEX_CLIENT}&redirect_uri={}&scope={}&code_challenge={challenge}&code_challenge_method=S256&state={state}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator={}",
         encode(CODEX_REDIRECT),
-        encode(CODEX_SCOPE)
+        encode(CODEX_SCOPE),
+        encode(CLIENT_IDENTITY)
     );
-    show(Step::Open(&address));
-    let code = tokio::time::timeout(DEVICE_WAIT, callback(listener, &state))
+    if pasted.is_some() {
+        show(Step::OpenAndPaste(&address));
+    } else {
+        show(Step::Open(&address));
+    }
+    let wait = async {
+        let returned = async {
+            match listener {
+                Some(listener) => callback(listener, &state).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(returned);
+        loop {
+            let line = async {
+                match pasted.as_mut() {
+                    Some(lines) => lines.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                code = &mut returned => return code,
+                line = line => match line {
+                    // The terminal closed: only the browser can finish now.
+                    None => {
+                        pasted = None;
+                    }
+                    Some(line) => match pasted_code(&line, &state) {
+                        Ok(Some(code)) => return Ok(code),
+                        Ok(None) => (),
+                        Err(error) => show(Step::Note(&format!("{error:#}. Paste it again."))),
+                    },
+                },
+            }
+        }
+    };
+    let code = tokio::time::timeout(DEVICE_WAIT, wait)
         .await
         .map_err(|_| anyhow!("the sign-in was not completed in time"))??;
     codex_exchange(client, &code, &verifier, CODEX_REDIRECT, token_url).await
 }
 
 /// Sign in to a subscription. `device` asks for a code typed on another
-/// machine instead of a browser on this one.
+/// machine instead of a browser. `pasted` carries lines the person types, so a
+/// ChatGPT browser sign-in can finish from a browser on another machine.
 pub async fn login(
     vendor: Vendor,
     device: bool,
+    pasted: Option<Pasted>,
     show: &(dyn Fn(Step<'_>) + Sync),
 ) -> Result<Login> {
     let client = reqwest::Client::builder()
@@ -507,22 +601,34 @@ pub async fn login(
             )
             .await
         }
-        Vendor::Codex => match tokio::net::TcpListener::bind(("127.0.0.1", 1455)).await {
-            Ok(listener) => codex_browser(&client, listener, show, CODEX_TOKEN).await,
-            Err(_) => {
-                show(Step::Note(
-                    "Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead.",
-                ));
-                codex_device(
-                    &client,
-                    show,
-                    CODEX_DEVICE_CODE,
-                    CODEX_DEVICE_TOKEN,
-                    CODEX_TOKEN,
-                )
+        Vendor::Codex => {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 1455))
                 .await
+                .ok();
+            match (listener, pasted) {
+                (None, None) => {
+                    show(Step::Note(
+                        "Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead.",
+                    ));
+                    codex_device(
+                        &client,
+                        show,
+                        CODEX_DEVICE_CODE,
+                        CODEX_DEVICE_TOKEN,
+                        CODEX_TOKEN,
+                    )
+                    .await
+                }
+                (listener, pasted) => {
+                    if listener.is_none() {
+                        show(Step::Note(
+                            "Port 1455 is in use, so paste the address the browser comes back to.",
+                        ));
+                    }
+                    codex_browser(&client, listener, pasted, show, CODEX_TOKEN).await
+                }
             }
-        },
+        }
     }
 }
 

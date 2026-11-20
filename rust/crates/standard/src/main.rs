@@ -69,12 +69,52 @@ fn show(step: oauth::Step<'_>) {
             open_browser(address);
             eprintln!("Waiting for the sign-in to finish...");
         }
+        oauth::Step::OpenAndPaste(address) => {
+            eprintln!(
+                "Open this address in a browser, on this machine or any other:\n\n  {address}\n"
+            );
+            open_browser(address);
+            eprintln!(
+                "After you sign in, the browser goes to a localhost address. If the browser is on this\n\
+                 machine, that finishes the sign-in. Otherwise the page will not load: copy the whole\n\
+                 address from the browser's address bar and paste it here.\n"
+            );
+            eprint!("Paste the address (or the code): ");
+        }
         oauth::Step::Note(text) => eprintln!("{text}"),
     }
 }
+
+/// Lines typed at the terminal, for pasting a sign-in's redirect address. None
+/// when standard input is not a terminal.
+fn terminal_lines() -> Option<oauth::Pasted> {
+    use std::io::{BufRead, IsTerminal};
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    Some(receive)
+}
 /// Best effort. The address is printed either way.
 fn open_browser(address: &str) {
-    if !address.starts_with("https://") || std::env::var_os("MA_NO_BROWSER").is_some() {
+    let remote =
+        std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some();
+    let display =
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+    // Over SSH, a browser opened here is not in front of the person signing in.
+    if !address.starts_with("https://")
+        || std::env::var_os("MA_NO_BROWSER").is_some()
+        || remote
+        || !display
+    {
         return;
     }
     let _ = std::process::Command::new("xdg-open")
@@ -110,7 +150,7 @@ async fn login(standard: &Standard, mut args: impl Iterator<Item = String>) -> R
     }
     let vendor = Vendor::parse(&provider)
         .ok_or_else(|| anyhow!("unknown provider {provider}; use openai-codex, xai or claude"))?;
-    let login = oauth::login(vendor, device, &show).await?;
+    let login = oauth::login(vendor, device, terminal_lines(), &show).await?;
     standard.auth().set_login(vendor.id(), Some(login))?;
     eprintln!("Signed in to {} ({}).", vendor.label(), vendor.id());
     Ok(())
