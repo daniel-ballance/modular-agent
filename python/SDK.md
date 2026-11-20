@@ -115,4 +115,10 @@ The SDK binds opaque `providerData` to the producing Provider, hides it from rec
 
 10. **[`placement.md`, Services](../docs/sdk/placement.md#services): native storage versus the opaque record backend.** Proposed addition after the eligibility sentence: “A file-store constructor may select a dedicated opaque-record namespace for `serveHistory`. `serveHistory` does not imply that an existing native store can be exported live. Document which namespace the server uses and whether it can open existing native sessions.” This avoids confusing co-located files with shared lease state.
 
+### Findings from guides 05 and 09
+
+- **[API — Sessions and turns](../docs/sdk/api.md#sessions-and-turns):** Add: “`lastTurn()` returns the latest settled turn as a PromptResult, or no value if none exists; it does not admit input. In Python, `await session.last_turn()` returns `PromptResult | None`.”
+- **[API — The agent](../docs/sdk/api.md#the-agent) and [Actors and rights](../docs/sdk/api.md#actors-and-rights):** For the Python guide, replace the session-options and actor-selection instructions with: “`await agent.session(settings=...)` accepts settings, not `actors` or `tenant`. The embedded actor is `user`; the SDK does not expose actor-selection session methods. ACP authenticates its own actor.”
+- **[Placement — Services](../docs/sdk/placement.md#services):** Use these Python arguments: “`serve_history(file_history(directory), address=(host, port), token_file=path)` blocks; run it in a service process. `http_history(url, token_file)` creates the client store.”
+
 Proposed shared scenarios: **queued-input-after-crash** (a held tool from the first input; queue a second input, crash, reopen and verify the second is handed back); **decline-is-not-text** (ask a text question twice, answer once with the string `declined` and once with a tagged decline, and check distinct tool results in every placement); **tool-refusal-parity** (run a fixture tool that calls `refuse`, and compare its status and reason in every placement).

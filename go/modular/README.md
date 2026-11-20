@@ -164,3 +164,10 @@ ACP lists `invalid_request` for the JSON depth guard; configuration values outsi
 The validation sentence omits when the check happens and what an invalid completed value means. The shared-data and settlement rules require checking the transformed result without misreporting confirmed effects. Replace the validation sentence with:
 
 > The SDK validates input against `parameters` before the function runs; invalid input ends the call `failed` with a readable reason. After `tool.after`, the host requires and validates `value` when the result is `completed` and `returns` is set. On a missing or invalid value, commit a minimal safe result with the confirmed execution status, report the processing error separately and fail the enclosing operation without redispatch.
+
+### Findings from guides 05 and 09
+
+- **[API — Sessions and turns](../../docs/sdk/api.md#sessions-and-turns):** Add: “`lastTurn()` returns the latest settled turn as a PromptResult, or no value if none exists; it does not admit input. In Go, call `LastTurn(ctx)` and check the error and the possibly nil result.”
+- **[API — The agent](../../docs/sdk/api.md#the-agent) and [Actors and rights](../../docs/sdk/api.md#actors-and-rights):** For the Go guide, replace the session-options and actor-selection instructions with: “Call `Agent.Session(ctx)` without options. Set new-session defaults with `WithSettings`. The embedded actor is `user`; the Go SDK does not expose `actors`, `tenant`, or actor-selection session methods. ACP authenticates its own actor.”
+- **[API — The declaration](../../docs/sdk/api.md#the-declaration):** Go accepts an explicit persistent store with `Ephemeral` but does not declare `portableSessions` in that mode. In the guide, say: “Use `Kept` or `Durable` with a persistent store for portable sessions.”
+- **[Placement — Services](../../docs/sdk/placement.md#services):** Use this Go spelling: “`modular.HTTPHistory(url, tokenFile)` creates the client store. `modular.ServeHistory(ctx, store, modular.HistoryOptions{Address: address, TokenFile: tokenFile})` runs the service until its context is cancelled; it does not return a listener address.”
