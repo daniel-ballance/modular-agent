@@ -12,6 +12,31 @@ For the TypeScript build, run `npm ci && npm run build` in `typescript/`, then f
 
 Use `--verbose` before `--` for stderr and passing details. Use `--no-runtime` for the baseline roles alone. The default run also exercises the Runtime tiers; use `--no-runtime` if neither tier is offered. Exit code 0 means all checks run passed.
 
+## Over WebSocket
+
+To check a plugin served over the [WebSocket transport](../../docs/bindings/websocket.md), give the kit the service's address and a file holding its bearer token instead of a command:
+
+```sh
+npm ci --prefix conformance/tools
+node conformance/plugin/run.mjs --connect ws://127.0.0.1:PORT/ --token-file FILE \
+  [--runtime-url URL] [--durable-runtime-url URL]
+```
+
+The kit runs every check that applies to a connection, plus these transport checks: an upgrade with no token or a wrong token is refused with HTTP 401, an upgrade without the subprotocol is refused, a binary message closes with 1003, two connections are independent plugin instances, closing a connection stops a running `env/exec` within the declared containment, and `plugin/shutdown` closes with 1000 while the service keeps accepting connections. It skips the oversized-message check (a real 64 MiB transfer) and the `MODULAR_AGENT_PLUGIN_PARTS=tools` check, because a service chooses its parts when it starts. For the same reason the Runtime tiers need their own services: name them with `--runtime-url` and `--durable-runtime-url`; the kit uses the same token for them.
+
+To serve a stdio plugin over WebSocket for the kit, use the bridge, `conformance/tools/ws-bridge.mjs`. It is a disposable, loopback-only test adapter that starts one plugin process per connection; it is not a service host.
+
+```sh
+P="rust/target/debug/modular-agent --serve-plugin"
+node conformance/tools/ws-bridge.mjs --binding plugin --listen ws://127.0.0.1:39191/ --token-file FILE -- $P &
+MODULAR_AGENT_PLUGIN_PARTS=runtime node conformance/tools/ws-bridge.mjs --binding plugin --listen ws://127.0.0.1:39192/ --token-file FILE -- $P &
+MODULAR_AGENT_PLUGIN_PARTS=durable-runtime node conformance/tools/ws-bridge.mjs --binding plugin --listen ws://127.0.0.1:39193/ --token-file FILE -- $P &
+node conformance/plugin/run.mjs --connect ws://127.0.0.1:39191/ --token-file FILE \
+  --runtime-url ws://127.0.0.1:39192/ --durable-runtime-url ws://127.0.0.1:39193/
+```
+
+Against the Rust fixture plugin this passes 153/153; the same plugin on stdio passes 146/146.
+
 What it checks:
 - Handshake, supported version, selected parts, registration, replacement names, ping, framing, JSON nesting at 64 and 65 levels, error envelopes, shutdown and natural EOF exit.
 - The fixture Provider: stream order, inference using the `provider.request` hook's answer, the complete-response hook, a valid and an unoffered tool directive, and exact truncation to 200 Unicode code points from the first result after the latest user message.
