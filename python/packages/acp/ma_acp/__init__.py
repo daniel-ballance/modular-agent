@@ -192,6 +192,8 @@ class ACP(Plugin):
 
     def __init__(self, project, settings=None, *, actor="user"):
         self.actor = actor
+        self.principal = {"id": actor, "kind": "host", "rights": sorted(PERMISSIONS)}
+        self.network = False
         self.project = str(Path(project).resolve())
         self.settings = settings or {}
         self.client = None
@@ -368,7 +370,7 @@ class ACP(Plugin):
                     "binding": self.binding,
                     "declaration": await self.declaration(),
                     "extensions": EXTENSIONS,
-                    "actor": {"id": self.actor, "kind": "host", "rights": sorted(PERMISSIONS)},
+                    "actor": self.principal,
                 }
             },
             agent_capabilities=s.AgentCapabilities(
@@ -446,20 +448,38 @@ class ACP(Plugin):
     def new_session_settings(self, project):
         return self.settings
 
+    def tenant_allowed(self, tenant):
+        return True
+
+    def session_create_rights(self, tenant, has_mcp):
+        return self.principal["rights"]
+
+    async def visible_sessions(self, project):
+        return await self.api.session("list", project=project)
+
+    async def require_visible_session(self, project, sid):
+        if not any(row["id"] == sid for row in await self.visible_sessions(project)):
+            raise protocol_error("forbidden", "Session inaccessible")
+
     @rpc
     async def new_session(self, cwd, mcp_servers=None, additional_directories=None, **kwargs):
         project = self.cwd(cwd, additional_directories, **kwargs)
+        tenant = (kwargs.get(NAMESPACE) or {}).get("tenant")
+        if not self.tenant_allowed(tenant):
+            raise protocol_error("forbidden", "Tenant outside connection scope")
         async with self.lifecycle:
             await self.select_project(project)
+            authority = self.session_create_rights(tenant, bool(mcp_servers))
             self.creating = True
             try:
                 session = await self.api.session(
                     "create",
                     project=project,
                     actor=self.actor,
-                    actor_kind="host",
+                    actor_kind=self.principal["kind"],
+                    authority=authority,
                     settings=self.new_session_settings(project),
-                    tenant=(kwargs.get(NAMESPACE) or {}).get("tenant"),
+                    tenant=tenant,
                     mcp_servers=[
                         x.model_dump(mode="json", by_alias=True, exclude_none=True)
                         for x in mcp_servers or []
@@ -482,22 +502,26 @@ class ACP(Plugin):
         if self.lifecycle.locked():
             raise protocol_error("busy", "Session lifecycle operation in progress")
         async with self.lifecycle:
+            if self.network:
+                # The service's history and authority decide scope before a
+                # project composition gets to see the request.
+                await self.require_visible_session(project, sid)
             await self.select_project(project, sid)
-            listed = await self.api.session("list", project=project)
-            if not any(row["id"] == sid for row in listed):
-                raise protocol_error("forbidden", "Session inaccessible")
+            if not self.network:
+                await self.require_visible_session(project, sid)
             self.opening = sid
             self.returned_on_open[sid] = []
             try:
+                attachments = [
+                    x.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    for x in mcp_servers or []
+                ]
                 await self.api.session(
                     "open",
                     session=sid,
                     actor=self.actor,
-                    connection_host=True,
-                    mcp_servers=[
-                        x.model_dump(mode="json", by_alias=True, exclude_none=True)
-                        for x in mcp_servers or []
-                    ],
+                    connection_host=not self.network,
+                    **({"mcp_servers": attachments} if attachments or not self.network else {}),
                 )
             finally:
                 self.opening = None
@@ -531,7 +555,7 @@ class ACP(Plugin):
             raise acp.RequestError.invalid_params({"reason": "cwd must be absolute"})
         if cursor is not None:
             raise acp.RequestError.invalid_params({"reason": "Listing has one complete page"})
-        rows = {r["id"]: r for r in await self.api.session("list", project=cwd)}
+        rows = {r["id"]: r for r in await self.visible_sessions(cwd)}
         return s.ListSessionsResponse(
             sessions=[s.SessionInfo(session_id=r["id"], cwd=r["project"]) for r in rows.values()]
         )
@@ -1343,6 +1367,9 @@ class ACP(Plugin):
                 )
             except AgentError:
                 pass
+
+    async def serve_frames(self, frames):
+        await acp.run_agent(self, Stdio(None, None, frames=frames), use_unstable_protocol=True)
 
     async def serve(self):
         try:

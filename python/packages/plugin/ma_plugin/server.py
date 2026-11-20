@@ -1,5 +1,6 @@
 """Reusable method-table server and its deterministic conformance composition."""
 
+import argparse
 import asyncio
 import base64
 import json
@@ -19,6 +20,7 @@ from ma_tools import DEFINITIONS
 from ma_core.wire import tool_out
 from .rpc import MAX_FRAME, Peer, WireError
 from .runtime_server import METHODS, RuntimeServer
+from .websocket import PLUGIN_PROTOCOL, listen_websocket, wait_for_stop
 
 BINDING = "modular-agent-plugin/1"
 DATA = "modular-agent-data/1"
@@ -54,6 +56,23 @@ class PluginServer:
             raise WireError("Method not found: " + method, "method_not_found", -32601)
         return await handler(params, key)
 
+    async def serve_frames(self, frames):
+        self.peer = Peer(
+            None,
+            None,
+            self.dispatch,
+            getattr(self, "notification", None),
+            "host",
+            frames=frames,
+            close_after_shutdown=True,
+        )
+        try:
+            await self.peer.closed.wait()
+        finally:
+            await self.peer.close()
+            if self.stop:
+                await self.stop()
+
     async def serve(self):
         # Official pipe APIs: https://docs.python.org/3.13/library/asyncio-eventloop.html#working-with-pipes
         loop = asyncio.get_running_loop()
@@ -86,7 +105,9 @@ class EnvironmentAPI:
 
 
 class Conformance(PluginServer):
-    def __init__(self, parts):
+    def __init__(self, parts, *, network=False):
+        self.network = network
+        self.project = None
         runtime_parts = parts & {"runtime", "durable-runtime"}
         if len(runtime_parts) > 1:
             raise ValueError("Choose only one Runtime")
@@ -185,6 +206,11 @@ class Conformance(PluginServer):
 
     async def start(self, params):
         if self.registration.get("workingEnvironment"):
+            if self.network:
+                project = Path(params.get("project", ""))
+                if not project.is_absolute() or not project.is_dir():
+                    raise WireError("Service cannot see the host project path", "not_supported")
+                self.project = project.resolve()
             self.local = Local(params["home"])
             await self.local.start(EnvironmentAPI())
 
@@ -360,6 +386,8 @@ class Conformance(PluginServer):
             }:
                 raise WireError("Unknown environment operation", "not_supported", -32601)
             cwd = str(Path(p["cwd"]).resolve())
+            if self.project is not None and not Path(cwd).is_relative_to(self.project):
+                raise WireError("Environment cwd is outside this host project", "forbidden")
             if op == "save":
                 return await self.local.save({"session": sid, "cwd": cwd}, None)
             if op == "checkPoint":
@@ -370,6 +398,8 @@ class Conformance(PluginServer):
                 )
             path = Path(p.get("path", ""))
             path = path if path.is_absolute() else Path(cwd) / path
+            if self.project is not None and not path.resolve().is_relative_to(self.project):
+                raise WireError("Environment path is outside this host project", "forbidden")
             if op == "list":
                 try:
                     return await self.local.list_directory(
@@ -428,6 +458,12 @@ class Conformance(PluginServer):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Serve the Python conformance plugin")
+    parser.add_argument("--listen")
+    parser.add_argument("--token-file", type=Path)
+    args = parser.parse_args()
+    if (args.listen is None) != (args.token_file is None):
+        parser.error("--listen and --token-file must be used together")
     parts = {
         part.strip()
         for part in os.environ.get(
@@ -435,4 +471,19 @@ def main():
         ).split(",")
         if part.strip()
     }
-    asyncio.run(Conformance(parts).serve())
+    if args.listen is None:
+        asyncio.run(Conformance(parts).serve())
+        return
+
+    async def connected(frames, _):
+        await Conformance(parts, network=True).serve_frames(frames)
+
+    async def run():
+        server = await listen_websocket(
+            args.listen, [(args.token_file, None)], PLUGIN_PROTOCOL, connected, None
+        )
+        print(server.url, flush=True)
+        await wait_for_stop(server)
+
+    Conformance(parts)  # Validate the selected composition before accepting connections.
+    asyncio.run(run())

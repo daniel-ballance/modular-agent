@@ -14,19 +14,25 @@ def encode(value):
 
 
 class Stdio:
-    def __init__(self, reader, writer):
+    def __init__(self, reader, writer, *, frames=None):
         self.reader, self.writer = reader, writer
+        self.frames = frames
         self.lock = asyncio.Lock()
         self.requests = set()
 
     async def receive(self):
         while True:
-            try:
-                line = await self.reader.readuntil(b"\n")
-            except (asyncio.LimitOverrunError, asyncio.IncompleteReadError):
-                # Without a complete bounded frame there is no safe id to answer.
-                return None
-            raw = line[:-1].removesuffix(b"\r")
+            if self.frames is not None:
+                raw = await self.frames.receive()
+                if raw is None:
+                    return None
+            else:
+                try:
+                    line = await self.reader.readuntil(b"\n")
+                except (asyncio.LimitOverrunError, asyncio.IncompleteReadError):
+                    # Without a complete bounded frame there is no safe id to answer.
+                    return None
+                raw = line[:-1].removesuffix(b"\r")
             if len(raw) > MAX_FRAME:
                 try:
                     message = decode_message(raw)
@@ -46,10 +52,10 @@ class Stdio:
                     }
                 )
                 continue
-            if not raw.strip():
+            if self.frames is None and not raw.strip():
                 continue
             try:
-                message = decode_message(raw)
+                message = decode_message(raw.decode("utf-8") if self.frames is not None else raw)
             except RequestError as exc:
                 await self.send(error_response(exc))
                 continue
@@ -64,6 +70,9 @@ class Stdio:
                     ):
                         return None
                     self.requests.add(key)
+                    if self.frames is not None and message["method"] == "$/ping":
+                        await self.send({"jsonrpc": "2.0", "id": key, "result": {}})
+                        continue
                 return message
 
     async def send(self, message):
@@ -85,9 +94,15 @@ class Stdio:
                 }
             )
         async with self.lock:
-            self.writer.write(raw + b"\n")
-            await self.writer.drain()
+            if self.frames is not None:
+                await self.frames.send(raw)
+            else:
+                self.writer.write(raw + b"\n")
+                await self.writer.drain()
 
     async def close(self):
         # The SDK stdout pipe protocol does not provide a close waiter.
-        self.writer.close()
+        if self.frames is not None:
+            await self.frames.close()
+        else:
+            self.writer.close()

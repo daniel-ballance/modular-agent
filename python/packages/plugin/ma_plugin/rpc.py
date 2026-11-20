@@ -43,8 +43,22 @@ class WireError(AgentError):
 
 
 class Peer:
-    def __init__(self, reader, writer, dispatch, notification=None, label="plugin"):
+    def __init__(
+        self,
+        reader,
+        writer,
+        dispatch,
+        notification=None,
+        label="plugin",
+        *,
+        frames=None,
+        close_after_shutdown=False,
+    ):
         self.reader, self.writer = reader, writer
+        self.frames = frames
+        self.close_after_shutdown = close_after_shutdown
+        self.last_received = asyncio.get_running_loop().time()
+        self.activity = asyncio.Event()
         self.dispatch, self.notification, self.label = dispatch, notification, label
         self.pending, self.running, self.parents, self.incoming_methods = {}, {}, {}, {}
         self.started, self.cancelled, self.answered = set(), set(), set()
@@ -58,6 +72,34 @@ class Peer:
         self.note_tasks = set()
         self.deliveries = set()
         self.reader_task = asyncio.create_task(self._read())
+        self.liveness_task = None
+
+    def start_liveness(self, interval, deadline):
+        self.liveness_task = asyncio.create_task(self._liveness(interval, deadline))
+
+    async def _liveness(self, interval, deadline):
+        loop = asyncio.get_running_loop()
+        while not self.closed.is_set():
+            self.activity.clear()
+            if not self.pending:
+                await self.activity.wait()
+                continue
+            silence = interval - (loop.time() - self.last_received)
+            if silence > 0:
+                try:
+                    async with asyncio.timeout(silence):
+                        await self.activity.wait()
+                except TimeoutError:
+                    pass
+                continue
+            try:
+                async with asyncio.timeout(deadline):
+                    await self.request("$/ping", {}, cancel_on_interrupt=False)
+            except (TimeoutError, ConnectionError, WireError):
+                # Settle pending work without waiting for a stalled close handshake.
+                self.reader_task.cancel()
+                await self.frames.close()
+                return
 
     async def send(self, message):
         if self.closed.is_set():
@@ -80,20 +122,31 @@ class Peer:
                 }
             ).encode()
         async with self.lock:
-            self.writer.write(raw + b"\n")
-            await self.writer.drain()
+            if self.frames is not None:
+                try:
+                    await self.frames.send(raw)
+                except ConnectionError as exc:
+                    raise WireError(self.label + " disconnected; outcome unknown", "lost") from exc
+            else:
+                self.writer.write(raw + b"\n")
+                await self.writer.drain()
 
     async def notify(self, method, params):
         await self.send({"method": method, "params": params})
 
-    async def request(self, method, params, *, key=None, return_on_cancel=False):
+    async def request(
+        self, method, params, *, key=None, return_on_cancel=False, cancel_on_interrupt=True
+    ):
         self.sequence += 1
         key = key if key is not None else "r" + str(self.sequence)
         if not rpc_id(key) or key in self.sent_ids or len(self.sent_ids) >= MAX_REQUEST_IDS:
             raise WireError("Request id unavailable", "lost")
         self.sent_ids.add(key)
         future = asyncio.get_running_loop().create_future()
+        if not self.pending:
+            self.last_received = asyncio.get_running_loop().time()
         self.pending[key] = future
+        self.activity.set()
         if asyncio.current_task() in self.note_tasks:
             self.note_requests.add(key)
         try:
@@ -101,7 +154,7 @@ class Peer:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
             self.cancelled_outbound.add(key)
-            if not self.closed.is_set():
+            if cancel_on_interrupt and not self.closed.is_set():
                 await self.notify("$/cancel", {"id": key})
                 children = [
                     task
@@ -123,6 +176,7 @@ class Peer:
             raise
         finally:
             self.pending.pop(key, None)
+            self.activity.set()
             self.answered.discard(key)
             self.cancelled_outbound.discard(key)
             self.note_requests.discard(key)
@@ -166,6 +220,12 @@ class Peer:
         self.cancelled.add(key)  # Once answering, a late cancel must not interrupt the write.
         try:
             await self.send({"id": key, **answer})
+            if (
+                self.close_after_shutdown
+                and message["method"] == "plugin/shutdown"
+                and "result" in answer
+            ):
+                await self.frames.close()
         except (ConnectionError, WireError):
             pass
         finally:
@@ -219,14 +279,20 @@ class Peer:
             {"id": key, "error": {"code": number, "message": text, "data": {"code": code}}}
         )
 
+    async def _receive(self):
+        if self.frames is not None:
+            return await self.frames.receive()
+        raw = await self.reader.readline()
+        if not raw.endswith(b"\n"):
+            return None
+        raw = raw[:-1].removesuffix(b"\r")
+        return raw if len(raw) <= MAX_FRAME else None
+
     async def _read(self):
         try:
-            while raw := await self.reader.readline():
-                if (
-                    not raw.endswith(b"\n")
-                    or len(raw.removesuffix(b"\n").removesuffix(b"\r")) > MAX_FRAME
-                ):
-                    break
+            while (raw := await self._receive()) is not None:
+                self.last_received = asyncio.get_running_loop().time()
+                self.activity.set()
                 try:
                     message = json.loads(
                         raw.decode("utf-8"),
@@ -301,6 +367,7 @@ class Peer:
             pass
         finally:
             self.closed.set()
+            self.activity.set()
             for future in self.pending.values():
                 if not future.done():
                     future.set_exception(
@@ -310,10 +377,16 @@ class Peer:
                 self.cancel(key)
 
     async def close(self):
+        if self.liveness_task:
+            self.liveness_task.cancel()
+            await asyncio.gather(self.liveness_task, return_exceptions=True)
         self.reader_task.cancel()
         await asyncio.gather(self.reader_task, return_exceptions=True)
         await asyncio.gather(*list(self.running.values()), return_exceptions=True)
         await asyncio.gather(*list(self.deliveries), return_exceptions=True)
         if self.notes:
             await asyncio.gather(self.notes, return_exceptions=True)
-        self.writer.close()
+        if self.frames is not None:
+            await self.frames.close()
+        else:
+            self.writer.close()

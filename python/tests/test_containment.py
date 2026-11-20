@@ -58,7 +58,8 @@ async def test_watcher_and_agent_die_next_start_cleans_up(tmp_path, runtime_kind
             await until(lambda: dead(pid))
 
 
-async def test_completed_background_double_fork_dies_with_agent(tmp_path, runtime_kind):
+@pytest.mark.parametrize("kill_group", [False, True])
+async def test_completed_background_double_fork_dies_with_agent(tmp_path, runtime_kind, kill_group):
     # Reuse the subprocess fixture, but finish the shell while descendants run.
     # The initial bash waits for a daemonized grandchild through a PID file only.
     home = tmp_path / "store"
@@ -85,16 +86,25 @@ asyncio.run(main())
         code,
         str(home),
         str(tmp_path),
+        start_new_session=True,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     pid = None
     try:
-        await until(lambda: (tmp_path / "returned").exists() or p.returncode is not None)
+        await until(
+            lambda: (
+                ((tmp_path / "returned").exists() and pid_ready(tmp_path / "daemon.pid"))
+                or p.returncode is not None
+            )
+        )
         assert p.returncode is None, (await p.communicate())[1].decode()
         pid = int((tmp_path / "daemon.pid").read_text())
         assert not dead(pid)
-        p.kill()
+        if kill_group:
+            os.killpg(p.pid, signal.SIGKILL)
+        else:
+            p.kill()
         await p.wait()
         await until(lambda: not Path(f"/proc/{pid}").exists())
         await until(lambda: not list((home / "commands").glob("*.json")))

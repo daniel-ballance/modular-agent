@@ -83,6 +83,18 @@ class Harness(Authority):
             await self.unload(plugin.name)
             raise
 
+    async def attach_interface(self, interface):
+        """Attach connection-local callbacks, not a change to the composition."""
+        if interface.role != "interface" or interface.name in self.plugins:
+            raise AgentError("Invalid Interface attachment")
+        interface.connection_local = True
+        self.plugins[interface.name] = interface
+        try:
+            await interface.start(API(self, interface.name, "interface"))
+        except BaseException:
+            await self.unload(interface.name)
+            raise
+
     async def load_named(self, spec):
         """Check before importing executable plugin code from an approved settings plan."""
         if self.sessions:
@@ -192,6 +204,15 @@ class Harness(Authority):
             self.handlers = [h for h in self.handlers if h[0] != name]
             self.commands = {k: v for k, v in self.commands.items() if v[0] != name}
             self.followers = [f for f in self.followers if f[0] != name]
+
+    async def suspend_session(self, sid):
+        self.sessions[sid]["suspending"] = True
+        try:
+            await self.fire("@harness", "session.suspend", {"session": sid})
+        finally:
+            if "history" in self.capabilities:
+                await self.call("@harness", "history", "close", {"session": sid})
+            self.sessions.pop(sid, None)
 
     async def stop(self):
         for s in self.sessions.values():
@@ -524,6 +545,7 @@ class Harness(Authority):
             for name in dict.fromkeys(
                 getattr(plugin, "registration", {}).get("name", key)
                 for key, plugin in self.plugins.items()
+                if not getattr(plugin, "connection_local", False)
             )
         ]
 
@@ -792,10 +814,14 @@ class Harness(Authority):
         parts = {
             name: p.declarations
             for name, p in sorted(self.plugins.items(), key=lambda pair: pair[0] not in active)
-            if name in active
-            or p.role not in {"runtime", "environment"}
-            or not (
-                "parallel_tools" in p.declarations or "stops_commands_on_crash" in p.declarations
+            if not getattr(p, "connection_local", False)
+            and (
+                name in active
+                or p.role not in {"runtime", "environment"}
+                or not (
+                    "parallel_tools" in p.declarations
+                    or "stops_commands_on_crash" in p.declarations
+                )
             )
         }
         if project is not None and "environment" in self.capabilities:

@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from collections.abc import Awaitable, Callable, Coroutine, Generator, Mapping, Sequence
 from contextvars import ContextVar, Token
+from copy import deepcopy
 from dataclasses import dataclass
+from os import PathLike
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import TracebackType
-from typing import Any, Self, cast
+from typing import Any, NotRequired, Self, TypedDict, cast, overload
+from uuid import uuid4
 
 from jsonschema import Draft202012Validator
 from referencing import Registry
 
-from ma_acp import ACP, OUTPUT_SESSION
+from ma_acp import ACP, OUTPUT_SESSION, protocol_error
 from ma_core import Plugin as _NativePlugin
 from ma_acp.binding import declaration as _declaration
 from ma_approval import Approval as _Approval
@@ -24,6 +28,7 @@ from ma_core import plain
 from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
+from ma_harness.authority import PERMISSIONS
 from ma_history import History
 from ma_history.http import HTTPHistory
 from ma_jobs import Jobs
@@ -33,6 +38,13 @@ from ma_fake.conformance import Echo, Nest
 from ma_commands import Commands
 from ma_mcp import MCP
 from ma_plugin.host import External, configure_binding_hooks, load_plugins, wrap_native_providers
+from ma_plugin.websocket import (
+    ACP_PROTOCOL,
+    WebSocketFrames,
+    WebSocketServer,
+    WebSocketTLS,
+    listen_websocket,
+)
 from ma_questions import Questions
 from ma_runtime import Runtime
 from ma_selection import Selection
@@ -50,7 +62,7 @@ from ._native import (
     _question,
     _reply,
 )
-from ._plugin import Plugin, ProcessPlugin, _SUPPORTED_HOOKS
+from ._plugin import Plugin, ProcessPlugin, ServicePlugin, _SUPPORTED_HOOKS
 from ._provider import ModelInfo, Provider, _ProviderAdapter
 from ._serve import _MemoryExternal, _OverWire
 from ._session import Session, _events
@@ -151,6 +163,13 @@ class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
         return await super().recover(data, emit)
 
 
+class AcpActor(TypedDict):
+    token_file: str | PathLike[str]
+    actor: Actor
+    tenants: NotRequired[Sequence[str | None]]
+    projects: NotRequired[Sequence[str | PathLike[str]]]
+
+
 class _AcpProject(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.
     name = "acp"
     role = "interface"
@@ -158,10 +177,23 @@ class _AcpProject(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.
     def __init__(self, agent: Agent, interface: _Interface) -> None:
         self.agent = agent
         self.interface = interface
+        self.name = interface.name
 
     async def start(self, api: Any) -> None:
         await super().start(api)
         self.interface.register_project(self.agent, api)
+
+
+class _AcpConnections:
+    """One writer per session, with independent views on that writer."""
+
+    def __init__(self) -> None:
+        self.busy: dict[str, tuple[asyncio.Task[Any] | None, asyncio.Event]] = {}
+        self.sessions: dict[str, dict[_Interface, Agent]] = {}
+        self.projects: dict[Agent, set[_Interface]] = {}
+
+    def composition(self, sid: str) -> Agent | None:
+        return next(iter(self.sessions.get(sid, {}).values()), None)
 
 
 class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
@@ -172,16 +204,32 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None,
         project_settings: Callable[[Path], JsonObject] | None,
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
+        *,
+        principal: AcpActor | None = None,
+        connections: _AcpConnections | None = None,
     ) -> None:
-        super().__init__(
-            agent._project, agent._settings, actor=os.environ.get("MODULAR_AGENT_ACTOR", "user")
+        actor = (
+            principal["actor"]["id"] if principal else os.environ.get("MODULAR_AGENT_ACTOR", "user")
         )
+        super().__init__(agent._project, agent._settings, actor=actor)
+        self.network = principal is not None
+        self._allowed_projects: set[Path] | None = None
+        self._allowed_tenants: set[str | None] = {None}
+        self._connections = connections
+        if principal is not None:
+            self.name = "acp:" + uuid4().hex
+            self.principal = principal["actor"]
+            if "projects" in principal:
+                self._allowed_projects = {Path(p).resolve() for p in principal["projects"]}
+            self._allowed_tenants = set(principal.get("tenants", [None]))
         self._agent = agent
         self._compose = compose
         self._compose_reopen = compose_reopen
         self._project_settings = project_settings
         self._project_mcp = project_mcp
         self.declarations = {**ACP.declarations, "one_project_per_process": compose is None}
+        if self.network:
+            self.declarations.update(transport="websocket", authentication="bearer token")
         self._scope: ContextVar[Agent | None] = ContextVar("acp_project", default=None)
         self._agents: dict[str, Agent] = {}
         self._apis: dict[Agent, Any] = {}
@@ -208,6 +256,9 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
         def scoped(handler: Callable[[Any], Awaitable[Any]]) -> Callable[[Any], Awaitable[Any]]:
             async def run(payload: Any) -> Any:
+                sid = payload.get("session")
+                if self.network and self._scope.get() is not agent and sid not in self._agents:
+                    return None
                 token = self._scope.set(agent)
                 try:
                     return await handler(payload)
@@ -224,11 +275,98 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
     async def start(self, api: Any) -> None:
         self.register_project(self._agent, api)
-        api.provide("acp", self)
+        if not self.network:
+            api.provide("acp", self)
+
+    def _project_allowed(self, folder: Path) -> bool:
+        return self._allowed_projects is None or folder in self._allowed_projects
+
+    def cwd(self, cwd: str, additional_directories: Any = None, **kwargs: Any) -> str:
+        project = cast(str, super().cwd(cwd, additional_directories, **kwargs))
+        if not self._project_allowed(Path(project)):
+            raise protocol_error("forbidden", "Project outside connection scope")
+        return project
+
+    def tenant_allowed(self, tenant: Any) -> bool:
+        return not self.network or (
+            (tenant is None or isinstance(tenant, str)) and tenant in self._allowed_tenants
+        )
+
+    def session_create_rights(self, tenant: str | None, has_mcp: bool) -> list[str]:
+        if not self.network:
+            return cast(list[str], super().session_create_rights(tenant, has_mcp))
+        harness = self._current()._h
+        rights = set(self.principal["rights"]) & harness.admin & harness.tenant
+        if tenant is not None:
+            rights &= set(harness.tenant_config(tenant)["rights"])
+        if not ({"input", "tools"} if has_mcp else {"input"}) <= rights:
+            raise protocol_error("forbidden", "Actor cannot create this session")
+        return sorted(rights)
+
+    async def visible_sessions(self, project: str | None) -> list[dict[str, Any]]:
+        rows = cast(list[dict[str, Any]], await super().visible_sessions(project))
+        if not self.network:
+            return rows
+        agent = self._current()
+        visible = []
+        for row in rows:
+            if not self._project_allowed(Path(row["project"])):
+                continue
+            if self._compose is None and Path(row["project"]) != self._agent._project:
+                continue
+            owner = self._connections.composition(row["id"]) if self._connections else None
+            session = (owner or agent)._h.sessions.get(row["id"])
+            if session is None:
+                session = await agent._api.call("history", "read", {"session": row["id"]})
+            if (
+                session is not None
+                and self.tenant_allowed(session.get("tenant"))
+                and "watch" in agent._h.permissions(session, self.actor)
+            ):
+                visible.append(row)
+        return visible
+
+    async def require_visible_session(self, project: str, sid: str) -> None:
+        await super().require_visible_session(project, sid)
+        self._claim(sid)
+
+    async def _open(
+        self,
+        cwd: str,
+        sid: str,
+        mcp_servers: Any,
+        replay: bool,
+        additional_directories: Any,
+        kwargs: Any,
+    ) -> Any:
+        try:
+            response = await super()._open(
+                cwd, sid, mcp_servers, replay, additional_directories, kwargs
+            )
+            if self.network:
+                self._bind(sid)
+            return response
+        finally:
+            self._release_claim(sid)
+
+    def _claim(self, sid: str) -> None:
+        if self._connections is not None:
+            if sid in self._connections.busy:
+                raise protocol_error("busy", "Session lifecycle operation in progress")
+            self._connections.busy[sid] = (asyncio.current_task(), asyncio.Event())
+
+    def _release_claim(self, sid: str) -> None:
+        if self._connections is not None:
+            claim = self._connections.busy.get(sid)
+            if claim is not None and claim[0] is asyncio.current_task():
+                del self._connections.busy[sid]
+                claim[1].set()
 
     async def select_project(self, project: str, session_id: str | None = None) -> None:
         folder = Path(project)
         selected = self._agents.get(session_id or "")
+        if selected is None and session_id is not None and self._connections is not None:
+            selected = self._connections.composition(session_id)
         if selected is None:
             if self._compose_reopen is not None and session_id is not None:
                 selected = await self._compose_reopen(folder, session_id)
@@ -239,20 +377,99 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 await selected.close()
             raise ValueError("Session is not in this project")
         if selected not in self._apis:
+            clients = None
+            if self._connections is not None:
+                clients = self._connections.projects.setdefault(selected, set())
+            first = not clients
+            if clients is not None:
+                clients.add(self)
             try:
-                await selected._install_acp_mcp(self._project_mcp)
-                await selected._h.load(_AcpProject(selected, self))
+                if first:
+                    await selected._install_acp_mcp(self._project_mcp)
+                if self.network:
+                    await selected._h.attach_interface(_AcpProject(selected, self))
+                else:
+                    await selected._h.load(_AcpProject(selected, self))
             except BaseException:
-                await selected.close()
+                if clients is not None:
+                    clients.discard(self)
+                if first:
+                    if self._connections is not None:
+                        self._connections.projects.pop(selected, None)
+                    await selected.close()
                 raise
         self._scope.set(selected)
 
     async def session_started(self, payload: JsonObject) -> None:
         sid = cast(str, payload["session"])
-        self._agents[sid] = self._current()
+        self._bind(sid)
         if sid == self.opening:
             await self.api.call("questions", "connect", {"session": sid, "actor": self.actor})
         await super().session_started(payload)
+
+    def _bind(self, sid: str) -> None:
+        agent = self._current()
+        self._agents[sid] = agent
+        if self._connections is not None:
+            self._connections.sessions.setdefault(sid, {})[self] = agent
+
+    def _unbind(self, sid: str) -> None:
+        self._agents.pop(sid, None)
+        if self._connections is not None:
+            refs = self._connections.sessions.get(sid, {})
+            refs.pop(self, None)
+            if not refs:
+                self._connections.sessions.pop(sid, None)
+
+    async def session_ended(self, payload: JsonObject) -> None:
+        sid = cast(str, payload["session"])
+        if self.network and sid not in self._agents:
+            return
+        try:
+            await super().session_ended(payload)
+        finally:
+            if self.network:
+                self._unbind(sid)
+
+    async def close_session(self, session_id: str, **kwargs: Any) -> Any:
+        if session_id not in self.sessions:
+            return await super().close_session(session_id, **kwargs)
+        self._claim(session_id)
+        try:
+            return await super().close_session(session_id, **kwargs)
+        finally:
+            self._release_claim(session_id)
+
+    async def close_connection(self) -> None:
+        self.client = None
+        connections = self._connections
+        assert connections is not None
+        try:
+            await self._cancel_requests()
+            for sid, agent in list(self._agents.items()):
+                while claim := connections.busy.get(sid):
+                    await claim[1].wait()
+                self._claim(sid)
+                try:
+                    refs = connections.sessions.get(sid, {})
+                    if sid in agent._h.sessions and not any(
+                        peer.actor == self.actor for peer in refs if peer is not self
+                    ):
+                        await self._apis[agent].call(
+                            "questions", "disconnect", {"session": sid, "actor": self.actor}
+                        )
+                    self._unbind(sid)
+                    self.sessions.discard(sid)
+                    if sid not in connections.sessions and sid in agent._h.sessions:
+                        await agent._h.suspend_session(sid)
+                finally:
+                    self._release_claim(sid)
+        finally:
+            try:
+                await self.close_projects()
+            finally:
+                if self.name in self._agent._h.plugins:
+                    await self._agent._h.unload(self.name)
 
     def new_session_settings(self, project: str) -> JsonObject:
         defaults = self._current()._settings
@@ -272,8 +489,17 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
     async def close_projects(self) -> None:
         for agent in reversed(list(self._apis)):
-            if agent is not self._agent:
-                await agent.close()
+            if agent is self._agent:
+                continue
+            if self._connections is not None:
+                clients = self._connections.projects[agent]
+                if self.name in agent._h.plugins:
+                    await agent._h.unload(self.name)
+                clients.discard(self)
+                if clients:
+                    continue
+                del self._connections.projects[agent]
+            await agent.close()
 
 
 class Agent:
@@ -298,6 +524,7 @@ class Agent:
         self._lock = asyncio.Lock()
         self._closed = False
         self._plugin_host = False
+        self._acp_server: WebSocketServer | None = None
         self._conformance = False
         self._late_answers = False
         self._several_actors = False
@@ -582,6 +809,7 @@ class Agent:
                 MCP(standard_names=True, project_servers=resolver, prepare_hook="session.prepare")
             )
 
+    @overload
     async def serve_acp(
         self,
         *,
@@ -589,8 +817,33 @@ class Agent:
         compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None = None,
         project_settings: Callable[[Path], JsonObject] | None = None,
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
-    ) -> None:
-        """Serve ACP on stdio, optionally composing agents for named projects."""
+    ) -> None: ...
+
+    @overload
+    async def serve_acp(
+        self,
+        *,
+        listen: str,
+        actors: Sequence[AcpActor],
+        tls: WebSocketTLS | None = None,
+        compose: Callable[[Path], Awaitable[Agent]] | None = None,
+        compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None = None,
+        project_settings: Callable[[Path], JsonObject] | None = None,
+        project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
+    ) -> WebSocketServer: ...
+
+    async def serve_acp(
+        self,
+        *,
+        listen: str | None = None,
+        actors: Sequence[AcpActor] = (),
+        tls: WebSocketTLS | None = None,
+        compose: Callable[[Path], Awaitable[Agent]] | None = None,
+        compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None = None,
+        project_settings: Callable[[Path], JsonObject] | None = None,
+        project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
+    ) -> WebSocketServer | None:
+        """Serve ACP on stdio or start an authenticated WebSocket listener."""
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         if not self._plugin_host:
@@ -598,8 +851,57 @@ class Agent:
         if self._handler is not None:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "ACP answers its own questions")
         async with self._lock:
-            if self._h.sessions or "acp" in self._h.plugins:
+            if self._h.sessions or "acp" in self._h.plugins or self._acp_server is not None:
                 raise AgentError(ErrorCode.BUSY, "ACP must start before any sessions open")
+            if listen is None and (actors or tls is not None):
+                raise ValueError("Network ACP options require listen")
+            if listen is not None:
+                rights: dict[str, set[str]] = {}
+                kinds: dict[str, str] = {}
+                connections = _AcpConnections()
+                principals = deepcopy(actors)
+                for entry in principals:
+                    actor = entry["actor"]
+                    aid, kind, allowed = actor["id"], actor["kind"], set(actor["rights"])
+                    if (
+                        not aid
+                        or kind not in {"user", "host", "agent", "program"}
+                        or not allowed <= PERMISSIONS
+                    ):
+                        raise ValueError("Each WebSocket actor needs an id, kind and valid rights")
+                    if aid in rights and (allowed != rights[aid] or kind != kinds[aid]):
+                        raise ValueError(
+                            "Tokens for the same actor id must agree on kind and rights"
+                        )
+                    rights[aid], kinds[aid] = allowed, kind
+                if not actors:
+                    raise ValueError("WebSocket ACP requires at least one configured actor")
+                await self._install_acp_mcp(project_mcp)
+
+                async def handle(frames: WebSocketFrames, entry: AcpActor) -> None:
+                    interface = _Interface(
+                        self,
+                        compose,
+                        compose_reopen,
+                        project_settings,
+                        project_mcp,
+                        principal=entry,
+                        connections=connections,
+                    )
+                    await self._h.attach_interface(interface)
+                    try:
+                        await interface.serve_frames(frames)
+                    finally:
+                        await interface.close_connection()
+
+                self._acp_server = await listen_websocket(
+                    listen,
+                    [(entry["token_file"], entry) for entry in principals],
+                    ACP_PROTOCOL,
+                    handle,
+                    tls,
+                )
+                return self._acp_server
             await self._install_acp_mcp(project_mcp)
             interface = _Interface(self, compose, compose_reopen, project_settings, project_mcp)
             await self._h.load(interface)
@@ -610,6 +912,7 @@ class Agent:
                 await interface.close_projects()
             finally:
                 await self.close()
+        return None
 
     async def _interrupt_and_restart(self) -> Agent:
         async with self._lock:
@@ -645,6 +948,8 @@ class Agent:
                 return
             failure: Exception | None = None
             try:
+                if self._acp_server is not None:
+                    await self._acp_server.close()
                 for session in list(self._sessions.values()):
                     try:
                         await session.close()
@@ -706,6 +1011,9 @@ def create_agent(
     tools: Sequence[Tool] = (),
     plugins: Sequence[Plugin] = (),
     process_plugins: Sequence[ProcessPlugin | JsonObject] | None = None,
+    service_plugins: Sequence[ServicePlugin] | None = None,
+    service_ping_interval: float = 30.0,
+    service_control_timeout: float = 5.0,
     plugin_host: bool | None = None,
     model: str | ModelRef | None = None,
     settings: JsonObject | None = None,
@@ -745,9 +1053,17 @@ def create_agent(
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Runtime does not match durability")
         if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "History does not match durability")
-        if plugin_host is False and process_plugins is not None:
+        external_placement = process_plugins is not None or service_plugins is not None
+        if plugin_host is False and external_placement:
             raise AgentError(
-                ErrorCode.INVALID_COMPOSITION, "process_plugins requires a plugin host"
+                ErrorCode.INVALID_COMPOSITION,
+                "process_plugins and service_plugins require a plugin host",
+            )
+        if any(
+            not math.isfinite(n) or n <= 0 for n in (service_ping_interval, service_control_timeout)
+        ):
+            raise AgentError(
+                ErrorCode.INVALID_COMPOSITION, "Service deadlines must be finite and positive"
             )
         scratch = TemporaryDirectory(prefix="modular-agent-")
         h = Harness(process_plugins=(), tenants=tenants or {})
@@ -768,7 +1084,7 @@ def create_agent(
             if approval is not None:
                 defaults.update(settings_in({"approval": approval}))
             agent = Agent(h, folder, defaults, on_question, scratch)
-            agent._plugin_host = plugin_host is True or process_plugins is not None
+            agent._plugin_host = plugin_host is True or external_placement
             if history is not None and history._kind == "http":
                 store = HTTPHistory(history._url, history._path)
             elif durability == "ephemeral":
@@ -900,7 +1216,15 @@ def create_agent(
                 env = json.loads(os.environ.get("MODULAR_AGENT_PLUGINS") or "[]")
                 if not isinstance(env, list):
                     raise ValueError("MODULAR_AGENT_PLUGINS must be an array")
-                specs.extend([*processes, *env])
+                services = [
+                    {
+                        "url": p["url"],
+                        "tokenFile": str(Path(p["token_file"]).absolute()),
+                        "config": p.get("config", {}),
+                    }
+                    for p in service_plugins or ()
+                ]
+                specs.extend([*processes, *services, *env])
             if specs:
 
                 def factory(
@@ -909,7 +1233,11 @@ def create_agent(
                     kind = (
                         _MemoryExternal if isinstance(spec.get("_over_wire"), Plugin) else External
                     )
-                    return kind(harness, spec, project, home, index)
+                    plugin = kind(harness, spec, project, home, index)
+                    if "url" in spec:
+                        plugin.ping_interval = service_ping_interval
+                        plugin.control_timeout = service_control_timeout
+                    return plugin
 
                 await load_plugins(h, specs, folder, root, external_factory=factory)
             wrap_native_providers(h)

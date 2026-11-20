@@ -194,6 +194,9 @@ class Local(Plugin):
                         d["command"],
                     ],
                     pass_fds=(read_fd, output.fileno()),
+                    # The lifetime watcher must survive a kill of the agent's
+                    # entire process group, then act on the lifetime pipe's EOF.
+                    start_new_session=True,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -284,6 +287,8 @@ class ProcessGroupLocal(Local):
                     d.get("cwd") or s["project"],
                     d["command"],
                     pass_fds=(read_fd,),
+                    # As with the cgroup watcher, only the lifetime pipe owns it.
+                    start_new_session=True,
                     stdout=output,
                     stderr=asyncio.subprocess.PIPE,
                     stdin=asyncio.subprocess.DEVNULL,

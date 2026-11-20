@@ -3,7 +3,15 @@ name = "ma-plugin"
 version = "0.1.0"
 license = "MIT"
 requires-python = ">=3.13,<3.14"
-dependencies = ["ma-core", "ma-local", "ma-tools", "ma-acp", "ma-runtime", "ma-durable"]
+dependencies = [
+    "ma-core",
+    "ma-local",
+    "ma-tools",
+    "ma-acp",
+    "ma-runtime",
+    "ma-durable",
+    "websockets>=17.4",
+]
 
 [project.scripts]
 modular-agent-plugin = "ma_plugin.server:main"
