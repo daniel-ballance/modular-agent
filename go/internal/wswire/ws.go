@@ -350,7 +350,13 @@ func (c *Conn) Write(p []byte) (int, error) {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 		}
-		if json.Unmarshal(b, &header) != nil || header.Method != "" || len(header.ID) == 0 {
+		if json.Unmarshal(b, &header) != nil {
+			return 0, errors.New("invalid outgoing ACP message")
+		}
+		if header.Method != "" && len(header.ID) == 0 {
+			return len(p), nil // withhold oversized updates without ending the session
+		}
+		if header.Method != "" || len(header.ID) == 0 {
 			return 0, errors.New("ACP message withheld: exceeds 64 MiB")
 		}
 		b = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"Result exceeds 64 MiB","data":{"code":"result_too_large"}}}`, header.ID)

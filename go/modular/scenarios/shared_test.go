@@ -546,7 +546,9 @@ func (r run) crash(ctx context.Context, path string, sc scenario, index int, id 
 	if err = cmd.Start(); err != nil {
 		return "", err
 	}
-	groups = append(groups, cmd)
+	// Kill the agent before the services so it cannot record a graceful
+	// connection-loss settlement in the interval between kill signals.
+	groups = append(fixtureGroups{cmd}, groups...)
 	lines := make(chan string, 1)
 	go func() { line, _ := bufio.NewReader(stdout).ReadString('\n'); lines <- strings.TrimSpace(line) }()
 	select {
