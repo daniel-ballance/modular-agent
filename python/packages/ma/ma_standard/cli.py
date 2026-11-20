@@ -98,6 +98,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--history", action="store_true")
     parser.add_argument("--declaration", action="store_true")
     parser.add_argument("--acp", action="store_true")
+    parser.add_argument("--listen", metavar="ADDR", help="serve ACP on a loopback WebSocket")
+    parser.add_argument(
+        "--token-file", type=Path, metavar="FILE", help="ACP WebSocket bearer token"
+    )
     parser.add_argument("--all", action="store_true", help="list sessions across all projects")
     parser.add_argument("--device", action="store_true", help="use a device code to sign in")
     parser.add_argument(
@@ -454,6 +458,10 @@ async def _run(args: argparse.Namespace) -> int:
     project = args.project.resolve(strict=True)
     if args.provider and args.command not in {"login", "logout"}:
         raise ValueError(f"unknown argument {args.provider}; use --help")
+    if (args.listen is None) != (args.token_file is None) or (
+        args.listen is not None and (not args.acp or args.command)
+    ):
+        raise ValueError("--listen and --token-file must be used together with --acp")
     if args.acp and (args.prompt is not None or args.session or args.trust_project or args.resume):
         raise ValueError("with --acp the client creates sessions and grants trust")
     if args.trust_project:
@@ -522,7 +530,47 @@ async def _run(args: argparse.Namespace) -> int:
                 selected = f"{old['provider']}/{old['id']}" if isinstance(old, dict) else None
                 return await _agent(paths, folder, args, saved_model=selected, acp_session=True)
 
-            await agent.serve_acp(compose=compose, compose_reopen=reopen, project_mcp=paths.mcp)
+            if args.listen is None:
+                await agent.serve_acp(compose=compose, compose_reopen=reopen, project_mcp=paths.mcp)
+            else:
+                listener = await agent.serve_acp(
+                    listen=args.listen,
+                    actors=[
+                        {
+                            "token_file": args.token_file,
+                            "actor": {
+                                "id": "user",
+                                "kind": "host",
+                                "rights": [
+                                    "administer",
+                                    "answer",
+                                    "approve",
+                                    "cancel",
+                                    "delegate",
+                                    "erase",
+                                    "grant",
+                                    "input",
+                                    "jobs",
+                                    "propose",
+                                    "settings",
+                                    "tools",
+                                    "watch",
+                                ],
+                            },
+                        }
+                    ],
+                    compose=compose,
+                    compose_reopen=reopen,
+                    project_mcp=paths.mcp,
+                )
+                stop = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                loop.add_signal_handler(signal.SIGTERM, stop.set)
+                try:
+                    await stop.wait()
+                finally:
+                    loop.remove_signal_handler(signal.SIGTERM)
+                    await listener.close()
             return 0
         if args.command == "models":
             for info in await agent.models():
