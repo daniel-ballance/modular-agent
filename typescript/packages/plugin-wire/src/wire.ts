@@ -70,7 +70,8 @@ export class WirePeer {
 	private frameBytes = 0;
 	private received = new Set<number | string>();
 
-	constructor(private write: (line: string) => void, private onClose?: () => void) {
+	constructor(private write: (line: string) => void, private onClose?: () => void,
+		private afterReply?: (method: string) => void) {
 		this.handle("$/ping", () => ({}));
 		this.onNotification("$/cancel", (p) => this.running.get(p?.id)?.abort());
 	}
@@ -139,6 +140,17 @@ export class WirePeer {
 		return !!this.closedWith;
 	}
 
+	get pending(): boolean { return this.waiting.size > 0; }
+
+	abortRunning(except?: number | string): void {
+		for (const [id, controller] of this.running) if (id !== except) controller.abort();
+	}
+
+	/** Receive exactly one WebSocket text message, including any embedded JSON whitespace. */
+	message(bytes: Buffer): void {
+		if (!this.closed && bytes.length <= MAX_MESSAGE) this.receive(bytes);
+	}
+
 	/** Feed raw bytes as they arrive. */
 	feed(chunk: Buffer | string): void {
 		const data = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
@@ -160,6 +172,7 @@ export class WirePeer {
 	}
 
 	private send(m: Message): void {
+		if (this.closed) return;
 		let line = JSON.stringify(m);
 		if (Buffer.byteLength(line) > MAX_MESSAGE) {
 			if (m.id === undefined || !("result" in m || "error" in m)) throw new WireError("result_too_large", "The message is too large to send");
@@ -226,6 +239,7 @@ export class WirePeer {
 			if (abort.signal.aborted) throw new WireError("cancelled", "Cancelled");
 			const result = await handler(m.params ?? {}, { signal: abort.signal, id: m.id! });
 			this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result });
+			if (!this.closed) this.afterReply?.(m.method!);
 		} catch (error) {
 			const e = abort.signal.aborted && !(error instanceof WireError) ? new WireError("cancelled", "Cancelled") : error;
 			const code = e instanceof WireError ? e.code : "internal";

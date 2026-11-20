@@ -1,5 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
+import { mkdir, realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
+import type WebSocket from "ws";
+import { listenWebSocket, PLUGIN_PROTOCOL, receiveMessages, type ListenOptions } from "./websocket.js";
 import { interruptedCalls, lowerReasoning, pendingToolCalls, restoreAnsweredStep, zeroUsage } from "@modular-agent/harness";
 import type {
 	Answer,
@@ -43,6 +48,16 @@ export interface ServeOptions {
 	output?: (line: string) => void;
 }
 
+export interface PluginListenOptions extends ListenOptions { tokenFile: string }
+
+interface ServiceConnection { ws: WebSocket; stateDir: string }
+
+/** Create fresh plugin registrations and handlers for each authenticated connection. */
+export function servePluginService(makePlugins: () => ServeOptions, options: PluginListenOptions) {
+	return listenWebSocket(options, PLUGIN_PROTOCOL, [{ tokenFile: options.tokenFile, value: undefined }],
+		(ws, _, key) => servePlugins(makePlugins(), { ws, stateDir: join(`${options.tokenFile}.state`, key) }));
+}
+
 async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: InterruptedTurn, runtime: Runtime) {
 	const invalid = () => new WireError("invalid_request", "Interrupted turn does not match its checkpoint");
 	if (interrupted?.turnId !== input.turnId || !Array.isArray(interrupted.calls)) throw invalid();
@@ -68,10 +83,18 @@ async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: 
  * what it provides and the hook points it handles, and reaches the host for the
  * rest. Calls a plugin makes that this binding doesn't carry fail plainly.
  */
-export function servePlugins(options: ServeOptions): Promise<void> {
-	const write = options.output ?? ((line: string) => process.stdout.write(line));
+export function servePlugins(options: ServeOptions, service?: ServiceConnection): Promise<void> {
+	const write = service ? (line: string) => {
+		if (service.ws.readyState === service.ws.OPEN) service.ws.send(line.slice(0, -1));
+	} : options.output ?? ((line: string) => process.stdout.write(line));
 	let closed = () => {};
-	const peer = new WirePeer(write, () => closed());
+	const peer = new WirePeer(write, () => closed(), method => {
+		if (method === "plugin/shutdown") service?.ws.close(1000);
+	});
+	let projectRoot: string | undefined;
+	let setup: Promise<void> | undefined;
+	let shuttingDown = false;
+	const executions = new Set<Promise<ExecResult>>();
 	const providers: Provider[] = [];
 	const toolSources: ToolSource[] = [];
 	let environment: WorkingEnvironment | undefined;
@@ -213,15 +236,31 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	// The host request a provider is serving, so its runHook calls name their parent.
 	const currentParent = new AsyncLocalStorage<number | string>();
 
-	peer.handle("plugin/initialize", async (p) => {
+	peer.handle("plugin/initialize", async (p, ctx) => {
 		if (p.binding !== PLUGIN_BINDING) throw new WireError("not_supported", `This plugin speaks ${PLUGIN_BINDING}, not ${p.binding}`);
 		if (initialized) throw new WireError("invalid_request", "Already initialized");
 		initialized = true;
 		const init = { project: String(p.project), home: String(p.home), config: (p.config ?? {}) as Record<string, unknown> };
-		for (const plugin of options.plugins) {
-			await plugin.setup(apiFor(plugin, init));
-			if (plugin.stop) stops.push(() => plugin.stop!());
-		}
+		if (shuttingDown) throw new WireError("lost", "The plugin instance is stopping");
+		setup = (async () => {
+			if (service) {
+				if (!isAbsolute(init.home) || !isAbsolute(init.project)) throw new WireError("invalid_request", "Expected absolute host paths");
+				init.home = join(service.stateDir, createHash("sha256").update(init.home).digest("hex"));
+				await mkdir(init.home, { recursive: true, mode: 0o700 });
+			}
+			for (const plugin of options.plugins) {
+				ctx.signal.throwIfAborted();
+				if (plugin.stop) stops.push(() => plugin.stop!());
+				await plugin.setup(apiFor(plugin, init));
+			}
+			if (service && environment) {
+				try {
+					projectRoot = await realpath(init.project);
+					if (!(await stat(projectRoot)).isDirectory() || await realpath(environment.cwd) !== projectRoot) throw new Error();
+				} catch { throw new WireError("not_supported", "The served environment must see the host project at the same absolute path"); }
+			}
+		})();
+		await setup;
 		const { inputDuringTurn, waitingThroughRestart, continuesAfterRestart } = runtime?.supports ?? {};
 		return {
 			binding: PLUGIN_BINDING,
@@ -309,6 +348,16 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	};
 	const envAt = async ({ cwd, sessionId }: { cwd: string; sessionId: string }) => {
 		if (typeof sessionId !== "string" || !sessionId) throw new WireError("invalid_request", "A session is required");
+		if (shuttingDown) throw new WireError("lost", "The plugin instance is stopping");
+		if (service) {
+			let target: string;
+			try { if (!isAbsolute(cwd)) throw new Error(); target = await realpath(cwd); }
+			catch { throw new WireError("invalid_request", "Invalid working directory"); }
+			const rel = projectRoot && relative(projectRoot, target);
+			if (rel === undefined || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+				throw new WireError("invalid_request", "Working directory is outside the host project");
+			}
+		}
 		const base = env();
 		const e = await base.forSession?.(sessionId) ?? base;
 		return cwd && e.cwd !== cwd && e.at ? (e.at(cwd) as WorkingEnvironment) : e;
@@ -345,10 +394,14 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 	peer.handle("env/exec", async (p, ctx) => {
 		const env = await envAt(p);
 		ctx.signal.throwIfAborted();
-		const result = await env.exec(String(p.command), { signal: ctx.signal, timeoutMs: p.timeoutMs,
+		const running = env.exec(String(p.command), { signal: ctx.signal, timeoutMs: p.timeoutMs,
 			onOutput: (chunk) => { if (!ctx.signal.aborted) peer.notify("env/output", { parentRequestId: ctx.id, chunk }); } });
-		ctx.signal.throwIfAborted();
-		return result;
+		executions.add(running);
+		try {
+			const result = await running;
+			ctx.signal.throwIfAborted();
+			return result;
+		} finally { executions.delete(running); }
 	});
 
 	peer.handle("env/sessionEnded", async (p) => {
@@ -463,12 +516,26 @@ export function servePlugins(options: ServeOptions): Promise<void> {
 		return outcome(await needRuntime().continueOpenCalls(input, host, ctx.signal, fromWire(p.calls) as InterruptedTurn["calls"]));
 	});
 
-	const shutdown = async () => {
-		for (const stop of stops.reverse()) await Promise.resolve(stop()).catch(() => undefined);
+	let stopping: Promise<void> | undefined;
+	const shutdown = (id?: number | string) => stopping ??= (async () => {
+		shuttingDown = true;
+		peer.abortRunning(id);
+		await setup?.catch(() => {});
+		await Promise.allSettled(executions);
+		for (const stop of stops.reverse()) await Promise.resolve().then(stop).catch(() => undefined);
 		stops.length = 0;
-	};
-	peer.handle("plugin/shutdown", async () => (await shutdown(), {}));
+	})();
+	peer.handle("plugin/shutdown", async (_, { id }) => (await shutdown(id), {}));
 
+	if (service) return new Promise(resolve => {
+		closed = () => {
+			if (service.ws.readyState === service.ws.OPEN) service.ws.close(1002);
+			void shutdown().then(resolve);
+		};
+		receiveMessages(service.ws, bytes => { if (!shuttingDown) peer.message(bytes); });
+		service.ws.once("close", () => peer.close());
+		service.ws.on("error", () => peer.close());
+	});
 	const input = options.input ?? process.stdin;
 	return new Promise((resolve) => {
 		closed = () => { input.pause?.(); void shutdown().then(() => resolve()); };
