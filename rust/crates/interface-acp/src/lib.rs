@@ -466,7 +466,9 @@ impl State {
                     _ => bail!("unknown configuration option"),
                 }
                 let config = sessions::config(session.api.as_ref(), &session.id)?;
-                let declaration = binding::declaration(session.api.as_ref(), Some(&session.id))?;
+                let declaration = self
+                    .factory
+                    .session_declaration(session.api.as_ref(), &session.id)?;
                 let update = session.api.output(&actor_scope(&session.id),Output {
                     recipient:"interface.acp".into(), value:json!({"sessionUpdate":"config_option_update","configOptions":config,"_meta":{"modular-agent":{"declaration":declaration}}}), stream:None, end:true,
                 }).await?;
