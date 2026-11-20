@@ -151,6 +151,7 @@ class MCP(Plugin):
     # A private process placement can restore an older serialized instance.
     standard_names = False
     project_servers = None
+    prepare_hook = "session.start"
     declarations = {
         "transports": ["stdio", "http"],
         "session_tools": True,
@@ -161,9 +162,17 @@ class MCP(Plugin):
         "stdio_crash_cleanup": False,
     }
 
-    def __init__(self, servers=(), http_factory=None, standard_names=False, project_servers=None):
+    def __init__(
+        self,
+        servers=(),
+        http_factory=None,
+        standard_names=False,
+        project_servers=None,
+        prepare_hook="session.start",
+    ):
         self.standard_names = standard_names
         self.project_servers = project_servers
+        self.prepare_hook = prepare_hook
         self.servers = list(servers)
         validate_servers(self.servers)
         self.http_factory = http_factory
@@ -174,7 +183,7 @@ class MCP(Plugin):
         await super().start(api)
         api.provide("mcp", self)
         api.on("tools.list", self.definitions)
-        api.on("session.start", self.attach)
+        api.on(self.prepare_hook, self.attach)
         api.on("session.attach", self.attach)
         api.on("session.end", self.detach, "last")
         api.on("session.suspend", self.detach, "last")

@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from ma_core import API, AgentError, Stop, clone, content, identity, now, silent
-from ma_core.wire import recorded_as
+from ma_core.wire import provider_projection, recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
 from .output import gate
@@ -37,6 +37,7 @@ class Harness(Authority):
         self.output_streams = {}
         self.trace = []
         self.define_hook("@harness", "plugin.load", "gate")
+        self.define_hook("@harness", "session.prepare", "observe")
         self.define_hook("@harness", "session.start", "observe")
         self.define_hook("@harness", "session.end", "observe")
         self.define_hook("@harness", "session.suspend", "observe")
@@ -159,15 +160,14 @@ class Harness(Authority):
                             "data": {"active": self.active_plugins()},
                         }
                     )
-            await self.fire(
-                "@harness",
-                "session.start",
-                {
-                    "session": sid,
-                    "child": bool((s.get("origin") or {}).get("parent")),
-                    **(attachments or {}),
-                },
-            )
+            opening = {
+                "session": sid,
+                "project": s["project"],
+                "child": bool((s.get("origin") or {}).get("parent")),
+                **(attachments or {}),
+            }
+            await self.fire("@harness", "session.prepare", opening)
+            await self.fire("@harness", "session.start", opening)
         except BaseException:
             try:
                 await self.fire("@harness", "session.suspend", {"session": s["id"]})
@@ -755,6 +755,7 @@ class Harness(Authority):
         return await gate(self, sid, recipient, events)
 
     async def _emit(self, event):
+        event = provider_projection(event)
         sid = event.get("session")
         for owner, recipient, handler in list(self.followers):
             try:
@@ -885,7 +886,9 @@ class Harness(Authority):
             return {}
         if op == "view":
             result = await self.fire(
-                "@harness", "output", {"recipient": d.get("recipient", "user"), "value": d["value"]}
+                "@harness",
+                "output",
+                {"recipient": d.get("recipient", "user"), "value": provider_projection(d["value"])},
             )
             if not result or result.get("value") is None or d.get("alreadyGated"):
                 return result.get("value") if result else None

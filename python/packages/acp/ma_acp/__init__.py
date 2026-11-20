@@ -3,6 +3,7 @@
 import asyncio
 from contextvars import ContextVar
 import functools
+from inspect import signature
 import json
 from pathlib import Path
 
@@ -74,13 +75,20 @@ def rpc(fn):
         "initialize": "initialize",
     }
 
+    parameters = signature(fn)
+
     @functools.wraps(fn)
     async def checked(self, *args, **kwargs):
-        params = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
-        token = OUTPUT_SESSION.set(kwargs.get("session_id") or params.get("sessionId"))
+        bound = parameters.bind_partial(self, *args, **kwargs).arguments
+        params = bound.get("params") or {}
+        token = OUTPUT_SESSION.set(
+            bound.get("session_id") or params.get("sessionId") or params.get("session")
+        )
+        scope = self.project_scope()
         try:
             return await gated(self, *args, **kwargs)
         finally:
+            self.reset_project_scope(scope)
             OUTPUT_SESSION.reset(token)
 
     async def gated(self, *args, **kwargs):
@@ -216,14 +224,29 @@ class ACP(Plugin):
         if not self.initialized:
             raise acp.RequestError.invalid_request({"reason": "Initialize first"})
 
+    def project_scope(self):
+        return None
+
+    def reset_project_scope(self, token):
+        pass
+
+    async def select_project(self, project, session_id=None):
+        pass
+
     def cwd(self, cwd, additional_directories=None, **kwargs):
         self.ready()
-        if not Path(cwd).is_absolute() or str(Path(cwd).resolve()) != self.project:
+        project = Path(cwd).resolve()
+        if (
+            not Path(cwd).is_absolute()
+            or (self.declarations["one_project_per_process"] and str(project) != self.project)
+            or not project.is_dir()
+        ):
             raise acp.RequestError.invalid_params({"project": self.project})
         if additional_directories or kwargs.get("system_prompt"):
             raise acp.RequestError.invalid_params(
                 {"reason": "Additional roots and system prompt overrides are not supported"}
             )
+        return str(project)
 
     def check_session(self, sid):
         self.ready()
@@ -359,7 +382,11 @@ class ACP(Plugin):
                 field_meta={
                     NAMESPACE: {
                         "version": 1,
-                        "project": self.project,
+                        **(
+                            {"project": self.project}
+                            if self.declarations["one_project_per_process"]
+                            else {}
+                        ),
                         "methods": ["_modular-agent/" + x for x in EXTENSIONS],
                         "events": "_modular-agent/event",
                         "secretIntake": False,
@@ -421,16 +448,17 @@ class ACP(Plugin):
 
     @rpc
     async def new_session(self, cwd, mcp_servers=None, additional_directories=None, **kwargs):
-        self.cwd(cwd, additional_directories, **kwargs)
+        project = self.cwd(cwd, additional_directories, **kwargs)
         async with self.lifecycle:
+            await self.select_project(project)
             self.creating = True
             try:
                 session = await self.api.session(
                     "create",
-                    project=self.project,
+                    project=project,
                     actor=self.actor,
                     actor_kind="host",
-                    settings=self.new_session_settings(self.project),
+                    settings=self.new_session_settings(project),
                     tenant=(kwargs.get(NAMESPACE) or {}).get("tenant"),
                     mcp_servers=[
                         x.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -450,13 +478,14 @@ class ACP(Plugin):
         )
 
     async def _open(self, cwd, sid, mcp_servers, replay, additional_directories, kwargs):
-        self.cwd(cwd, additional_directories, **kwargs)
+        project = self.cwd(cwd, additional_directories, **kwargs)
         if self.lifecycle.locked():
             raise protocol_error("busy", "Session lifecycle operation in progress")
-        listed = await self.api.session("list", project=self.project)
-        if sid not in self.sessions and sid not in {row["id"] for row in listed}:
-            raise protocol_error("forbidden", "Session inaccessible")
         async with self.lifecycle:
+            await self.select_project(project, sid)
+            listed = await self.api.session("list", project=project)
+            if not any(row["id"] == sid for row in listed):
+                raise protocol_error("forbidden", "Session inaccessible")
             self.opening = sid
             self.returned_on_open[sid] = []
             try:

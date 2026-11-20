@@ -14,10 +14,13 @@ from ma_core.wire import (
     entry_out,
     model_in,
     model_request_fields,
+    provider_projection,
+    request_for_provider,
     request_in,
     request_out,
     response_in,
     response_out,
+    restore_provider_messages,
     result_in,
     result_out,
     tool_in,
@@ -55,12 +58,15 @@ class Provider:
             {
                 "provider": self.id,
                 "model": {"provider": self.id, "id": model},
-                "request": d["_shared_request"] if d.get("exact_replay") else request_out(d),
+                "request": request_for_provider(
+                    d["_shared_request"] if d.get("exact_replay") else request_out(d), self.id
+                ),
                 "sessionId": d.get("session"),
             },
             d,
             emit,
         )
+        r = {**r, "model": {"provider": self.id, "id": model}}
         if d.get("auxiliary_step"):
             await self.plugin.api.session(
                 "append",
@@ -103,20 +109,26 @@ class NativeProvider:
 
     async def generate(self, d, emit):
         model = {"provider": self.target, "id": d["access"]["id"].removeprefix(self.target + "/")}
+        original = d["_shared_request"] if d.get("exact_replay") else request_out(d)
         payload = {
             "sessionId": d["session"],
             "provider": self.target,
             "model": model,
-            "request": request_out(d),
+            "request": provider_projection(original),
         }
-        changed = await self.h.fire("@harness", "provider.request", payload)
-        response = await self.service.generate(request_in(changed["request"], d), emit)
+        if d.get("exact_replay"):
+            changed = payload
+            request = request_for_provider(original, self.target)
+        else:
+            changed = await self.h.fire("@harness", "provider.request", payload)
+            request = restore_provider_messages(changed["request"], original, self.target)
+        response = await self.service.generate(request_in(request, d), emit)
         await self.h.fire(
             "@harness",
             "provider.response",
             {
                 **{k: changed[k] for k in ("sessionId", "provider", "model")},
-                "message": response_out(response),
+                "message": provider_projection(response_out(response)),
             },
         )
         return response
@@ -730,15 +742,21 @@ class External(Plugin):
                 if not parent.get("provider_committed") or "provider_response" in parent:
                     raise WireError("Provider response is out of phase", "invalid_request")
                 parent["provider_response"] = payload["message"]
-                await self.h.fire("@harness", hook, {**scope, "message": payload["message"]})
+                await self.h.fire(
+                    "@harness", hook, {**scope, "message": provider_projection(payload["message"])}
+                )
                 return None
             if parent.get("provider_seen") or payload.get("request") != params["request"]:
                 raise WireError("Provider request is out of phase", "invalid_request")
             parent["provider_seen"] = True
-            changed = (
-                payload if d.get("exact_replay") else await self.h.fire("@harness", hook, payload)
-            )
-            final = changed["request"]
+            if d.get("exact_replay"):
+                final = params["request"]
+            else:
+                public = {**payload, "request": provider_projection(params["request"])}
+                changed = await self.h.fire("@harness", hook, public)
+                final = restore_provider_messages(
+                    changed["request"], params["request"], scope["provider"]
+                )
             offered = {t["name"]: t for t in params["request"]["tools"]}
             if any(offered.get(t["name"]) != t for t in final["tools"]):
                 raise WireError("Provider request expanded the tool offer", "invalid_request")

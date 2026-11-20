@@ -101,6 +101,56 @@ def model_in(m, supports):
     }
 
 
+def provider_projection(value, provider=None):
+    """Project records, messages and requests without disclosing opaque reasoning."""
+    if isinstance(value, list):
+        return [
+            projected
+            for item in value
+            if (projected := provider_projection(item, provider)) is not _OMIT_REASONING
+        ]
+    if not isinstance(value, dict):
+        return value
+    # Each assistant message establishes its own identity, not that of the request.
+    if value.get("role") == "assistant":
+        model = value.get("model")
+        provider = (
+            provider if isinstance(model, dict) and model.get("provider") == provider else None
+        )
+        if provider is not None:
+            return value
+    if value.get("type") == "reasoning" and "providerData" in value and "text" not in value:
+        return _OMIT_REASONING
+    return {
+        key: projected
+        for key, item in value.items()
+        if not (
+            key == "providerData"
+            and (value.get("role") == "assistant" or value.get("type") == "reasoning")
+        )
+        and (projected := provider_projection(item, None)) is not _OMIT_REASONING
+    }
+
+
+_OMIT_REASONING = object()
+
+
+def request_for_provider(request, provider):
+    return {**request, "messages": provider_projection(request.get("messages", []), provider)}
+
+
+def restore_provider_messages(request, original, provider):
+    """A hook sees only public content; only unchanged messages regain opaque data."""
+    original = request_for_provider(original, provider)
+    originals = {m.get("id"): m for m in original["messages"] if m.get("id")}
+    public = provider_projection(request)
+    for index, message in enumerate(public["messages"]):
+        prior = originals.get(message.get("id"))
+        if prior is not None and provider_projection(prior) == message:
+            public["messages"][index] = prior
+    return public
+
+
 def response_out(r):
     parts = [p for p in r.get("content", []) if p.get("type") != "toolCall"]
     parts += [

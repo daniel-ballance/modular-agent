@@ -122,7 +122,7 @@ async def _read(arguments: JsonObject, context: ToolContext) -> str | ToolOutput
     path = _path(arguments["path"])
     offset = int(_num(arguments, "offset", 0))
     limit = int(_num(arguments, "limit", 0)) if "limit" in arguments else None
-    data = await context.environment.read_bytes(path)
+    data = await context.environment.read(path)
     if mime := _mime(data):
         if len(data) > MAX_IMAGE:
             return f"Read image file [{mime}], {_size(len(data))}. It is over the {_size(MAX_IMAGE)} limit for images, so it was not attached."
@@ -138,7 +138,7 @@ async def _read(arguments: JsonObject, context: ToolContext) -> str | ToolOutput
 async def _write(arguments: JsonObject, context: ToolContext) -> str:
     path = _path(arguments["path"])
     data = cast(str, arguments["content"]).encode()
-    await context.environment.write_bytes(path, data)
+    await context.environment.write(path, data)
     return f"Successfully wrote {len(data)} bytes to {path}"
 
 
@@ -191,10 +191,10 @@ async def _edit(arguments: JsonObject, context: ToolContext) -> str:
     path = _path(arguments["path"])
     edits = cast(list[JsonObject], arguments["edits"])
     try:
-        text = (await context.environment.read_bytes(path)).decode()
+        text = (await context.environment.read(path)).decode()
     except UnicodeDecodeError as exc:
         raise ValueError(f"{path} is not UTF-8 text") from exc
-    await context.environment.write_bytes(path, _replace(text, edits, path).encode())
+    await context.environment.write(path, _replace(text, edits, path).encode())
     return f"Successfully replaced {len(edits)} block(s) in {path}."
 
 

@@ -6,6 +6,7 @@ from ._agent import (
     create_agent as create_agent,
     run as run,
 )
+from ._credentials import CredentialStore as CredentialStore
 from ._history import (
     HistoryStore as HistoryStore,
     file_history as file_history,
@@ -29,7 +30,13 @@ from ._provider import (
 )
 from ._serve import serve as serve
 from ._session import Session as Session
-from ._tool import Tool as Tool, ToolContext as ToolContext, ToolOutput as ToolOutput, tool as tool
+from ._tool import (
+    LeftOpen as LeftOpen,
+    Tool as Tool,
+    ToolContext as ToolContext,
+    ToolOutput as ToolOutput,
+    tool as tool,
+)
 from ._types import (
     AgentError as AgentError,
     Answer as Answer,

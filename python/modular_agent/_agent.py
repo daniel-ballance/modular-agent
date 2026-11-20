@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from collections.abc import Awaitable, Callable, Coroutine, Generator, Sequence
+from contextvars import ContextVar, Token
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import TracebackType
@@ -14,16 +15,17 @@ from typing import Any, Self, cast
 from jsonschema import Draft202012Validator
 from referencing import Registry
 
-from ma_acp import ACP
+from ma_acp import ACP, OUTPUT_SESSION
+from ma_core import Plugin as _NativePlugin
 from ma_acp.binding import declaration as _declaration
 from ma_approval import Approval as _Approval
-from ma_context import Context
 from ma_core import plain
 from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
 from ma_history import History
 from ma_history.http import HTTPHistory
+from ma_jobs import Jobs
 from ma_local import Local, ProcessGroupLocal
 from ma_local.containment import delegated_root
 from ma_fake.conformance import Echo, Nest
@@ -34,6 +36,9 @@ from ma_questions import Questions
 from ma_runtime import Runtime
 from ma_selection import Selection
 
+from .compaction import _CompactionPlugin
+from .mcp import _McpPlugin
+from ._credentials import CredentialStore, _CredentialAdapter
 from ._environment import MemoryEnvironment
 from ._history import HistoryStore
 from ._native import (
@@ -95,6 +100,12 @@ class _Questions(Questions):  # type: ignore[misc]  # Untyped base adapter.
 
 
 class _SdkRuntime(Runtime):  # type: ignore[misc]  # Untyped base adapter.
+    def __init__(self, job_reports_start_turns: bool) -> None:
+        super().__init__()
+        self.declarations = dict(Runtime.declarations)
+        if job_reports_start_turns:
+            self.declarations["queued_job_reports_after_restart"] = "run"
+
     async def _safe_to_repeat(self, sid: str, definition: JsonObject | None) -> bool:
         # Containment of environment commands does not prove cleanup of a
         # plugin's effects. This composition offers no separate repeat promise.
@@ -102,7 +113,11 @@ class _SdkRuntime(Runtime):  # type: ignore[misc]  # Untyped base adapter.
 
 
 class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
-    declarations = {**Durable.declarations, "queued_input_after_restart": "handedBack"}
+    def __init__(self, job_reports_start_turns: bool) -> None:
+        super().__init__()
+        self.declarations = {**Durable.declarations, "queued_input_after_restart": "handedBack"}
+        if job_reports_start_turns:
+            self.declarations["queued_job_reports_after_restart"] = "run"
 
     async def _safe_to_repeat(self, sid: str, definition: JsonObject | None) -> bool:
         return False
@@ -110,27 +125,136 @@ class _SdkDurable(Durable):  # type: ignore[misc]  # Untyped base adapter.
     async def recover(self, data: dict[str, Any], emit: Any) -> Any:
         sid = data["session"]
         for queued in await self._pending(sid):
-            await self._return(sid, queued)
+            if not (
+                self.declarations.get("queued_job_reports_after_restart") == "run"
+                and (queued["data"].get("source") or {}).get("job")
+            ):
+                await self._return(sid, queued)
         return await super().recover(data, emit)
 
 
+class _AcpProject(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.
+    name = "acp"
+    role = "interface"
+
+    def __init__(self, agent: Agent, interface: _Interface) -> None:
+        self.agent = agent
+        self.interface = interface
+
+    async def start(self, api: Any) -> None:
+        await super().start(api)
+        self.interface.register_project(self.agent, api)
+
+
 class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
-    def __init__(self, agent: Agent) -> None:
+    def __init__(
+        self,
+        agent: Agent,
+        compose: Callable[[Path], Awaitable[Agent]] | None,
+        compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None,
+        project_settings: Callable[[Path], JsonObject] | None,
+        project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
+    ) -> None:
         super().__init__(
             agent._project, agent._settings, actor=os.environ.get("MODULAR_AGENT_ACTOR", "user")
         )
         self._agent = agent
+        self._compose = compose
+        self._compose_reopen = compose_reopen
+        self._project_settings = project_settings
+        self._project_mcp = project_mcp
+        self.declarations = {**ACP.declarations, "one_project_per_process": compose is None}
+        self._scope: ContextVar[Agent | None] = ContextVar("acp_project", default=None)
+        self._agents: dict[str, Agent] = {}
+        self._apis: dict[Agent, Any] = {}
+
+    @property
+    def api(self) -> Any:
+        return self._apis[self._current()]
+
+    @api.setter
+    def api(self, api: Any) -> None:
+        self._apis[self._agent] = api
+
+    def _current(self) -> Agent:
+        return self._scope.get() or self._agents.get(OUTPUT_SESSION.get() or "", self._agent)
+
+    def project_scope(self) -> Token[Agent | None]:
+        return self._scope.set(None)
+
+    def reset_project_scope(self, token: Token[Agent | None]) -> None:
+        self._scope.reset(token)
+
+    def register_project(self, agent: Agent, api: Any) -> None:
+        self._apis[agent] = api
+
+        def scoped(handler: Callable[[Any], Awaitable[Any]]) -> Callable[[Any], Awaitable[Any]]:
+            async def run(payload: Any) -> Any:
+                token = self._scope.set(agent)
+                try:
+                    return await handler(payload)
+                finally:
+                    self._scope.reset(token)
+
+            return run
+
+        api.follow(self.actor, scoped(self.event))
+        api.on("session.start", scoped(self.session_started), "last")
+        api.on("session.end", scoped(self.session_ended), "last")
+        api.on("session.suspend", scoped(self.session_ended), "last")
+        api.on("session.invalidate", scoped(self.invalidate))
+
+    async def start(self, api: Any) -> None:
+        self.register_project(self._agent, api)
+        api.provide("acp", self)
+
+    async def select_project(self, project: str, session_id: str | None = None) -> None:
+        folder = Path(project)
+        selected = self._agents.get(session_id or "")
+        if selected is None:
+            if self._compose_reopen is not None and session_id is not None:
+                selected = await self._compose_reopen(folder, session_id)
+            else:
+                selected = await self._compose(folder) if self._compose else self._agent
+        if selected is not self._agent and selected._project != folder:
+            if selected not in self._apis:
+                await selected.close()
+            raise ValueError("Session is not in this project")
+        if selected not in self._apis:
+            try:
+                await selected._install_acp_mcp(self._project_mcp)
+                await selected._h.load(_AcpProject(selected, self))
+            except BaseException:
+                await selected.close()
+                raise
+        self._scope.set(selected)
+
+    async def session_started(self, payload: JsonObject) -> None:
+        sid = cast(str, payload["session"])
+        self._agents[sid] = self._current()
+        if sid == self.opening:
+            await self.api.call("questions", "connect", {"session": sid, "actor": self.actor})
+        await super().session_started(payload)
 
     def new_session_settings(self, project: str) -> JsonObject:
-        resolver = self._agent._project_settings
-        if resolver is not None:
-            return cast(JsonObject, settings_in(resolver(Path(project))))
-        return self._agent._settings
+        defaults = self._current()._settings
+        if self._project_settings is not None:
+            return {**defaults, **settings_in(self._project_settings(Path(project)))}
+        return defaults
 
     async def declaration(self, sid: str | None = None) -> JsonObject:
-        if self._agent._conformance:
-            return cast(JsonObject, await super().declaration(sid))
-        return {**self._agent.declaration(), "plugins": self._agent._h.declarations()}
+        agent = self._current()
+        value = agent.declaration()
+        if sid:
+            selected = await super().declaration(sid)
+            for key in ("keepsStateAtProvider", "runsToolsAtProvider", "liveSessions"):
+                value[key] = selected[key]
+        return {**value, "plugins": agent._h.declarations()}
+
+    async def close_projects(self) -> None:
+        for agent in reversed(list(self._apis)):
+            if agent is not self._agent:
+                await agent.close()
 
 
 class Agent:
@@ -156,7 +280,8 @@ class Agent:
         self._closed = False
         self._plugin_host = False
         self._conformance = False
-        self._project_settings: Callable[[Path], JsonObject] | None = None
+        self._late_answers = False
+        self._credentials: CredentialStore | None = None
         self._restart: Callable[[], Awaitable[Agent]] | None = None
         self._memory_store: _MemoryHistory | None = None
 
@@ -207,6 +332,21 @@ class Agent:
             if answer.kind == "value"
             else "declined"
         )
+        if answer.kind == "value" and self._credentials is not None:
+            question = await self._call(
+                "questions", "validate", session=sid, actor="user", request=question_id
+            )
+            if question["kind"] == "secret":
+                try:
+                    await self._h.call(
+                        "embedding",
+                        "credentials",
+                        "answer",
+                        {"session": sid, "actor": "user", "request": question_id, "value": value},
+                    )
+                except Exception as exc:
+                    raise _error(exc) from None
+                return
         await self._call(
             "questions",
             "answer",
@@ -278,8 +418,14 @@ class Agent:
             await self._call("runtime", "wait", session=id)
             return self._attach(id)
 
-    async def sessions(self) -> list[JsonObject]:
-        return cast(list[JsonObject], await self._session("list"))
+    async def sessions(self, *, project: Path | None = None) -> list[JsonObject]:
+        rows = cast(
+            list[JsonObject],
+            await self._session("list", project=str(project.resolve()) if project else None),
+        )
+        return [
+            {**row, "model": settings_out({"model": row.get("model")})["model"]} for row in rows
+        ]
 
     async def session_info(self, id: str) -> JsonObject:
         """Read saved local session settings without starting recovery or taking its lease."""
@@ -292,6 +438,10 @@ class Agent:
             "id": id,
             "project": state["project"],
             "settings": settings_out(state["settings"]),
+            "created": state["created"],
+            "lastActivity": max(
+                (entry["time"] for entry in state["entries"]), default=state["created"]
+            ),
         }
 
     async def models(self) -> list[ModelInfo]:
@@ -327,13 +477,19 @@ class Agent:
         store = parts[self._h.capabilities["history"][0]]
         value.pop("plugins", None)
         value.update(
-            waitingThroughRestart=False,
+            waitingThroughRestart=bool(
+                value["waitingThroughRestart"] and self._late_answers and "questions" in parts
+            ),
             mixedActorInput="refused",
             severalActors=False,
             sessionLimits=False,
             tenants=False,
-            questionsOutlastTurns=False,
-            lateAnswersStartTurns=False,
+            questionsOutlastTurns=bool(
+                self._late_answers and runtime.get("open_calls") and "questions" in parts
+            ),
+            lateAnswersStartTurns=bool(
+                self._late_answers and runtime.get("open_calls") and "questions" in parts
+            ),
             erasure=bool(store.get("erasure")),
             portableSessions=store.get("retention") != "process",
             settingsDuringTurn="refused",
@@ -341,7 +497,9 @@ class Agent:
             commandContainment=environment.get("containment", "none"),
             nestedToolCalls=bool(runtime.get("nested_tools")),
             queuedInputAfterRestart=runtime.get("queued_input_after_restart", "handedBack"),
-            startsTurnsUnasked="never",
+            startsTurnsUnasked=(
+                "jobReports" if parts.get("jobs", {}).get("job_reports_start_turns") else "never"
+            ),
         )
         queued_jobs = runtime.get(
             "queued_job_reports_after_restart", value["queuedInputAfterRestart"]
@@ -350,8 +508,27 @@ class Agent:
             value["queuedJobReportsAfterRestart"] = queued_jobs
         return cast(JsonObject, value)
 
-    async def serve_acp(self) -> None:
-        """Drive this agent over ACP on stdin/stdout until the client disconnects."""
+    async def _install_acp_mcp(
+        self, resolver: Callable[[Path], Sequence[JsonObject]] | None
+    ) -> None:
+        if resolver is None:
+            return
+        if "mcp" in self._h.plugins:
+            self._h.plugins["mcp"].project_servers = resolver
+        else:
+            await self._h.load(
+                MCP(standard_names=True, project_servers=resolver, prepare_hook="session.prepare")
+            )
+
+    async def serve_acp(
+        self,
+        *,
+        compose: Callable[[Path], Awaitable[Agent]] | None = None,
+        compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None = None,
+        project_settings: Callable[[Path], JsonObject] | None = None,
+        project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
+    ) -> None:
+        """Serve ACP on stdio, optionally composing agents for named projects."""
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         if not self._plugin_host:
@@ -361,12 +538,16 @@ class Agent:
         async with self._lock:
             if self._h.sessions or "acp" in self._h.plugins:
                 raise AgentError(ErrorCode.BUSY, "ACP must start before any sessions open")
-            interface = _Interface(self)
+            await self._install_acp_mcp(project_mcp)
+            interface = _Interface(self, compose, compose_reopen, project_settings, project_mcp)
             await self._h.load(interface)
         try:
             await interface.serve()
         finally:
-            await self.close()
+            try:
+                await interface.close_projects()
+            finally:
+                await self.close()
 
     async def _interrupt_and_restart(self) -> Agent:
         async with self._lock:
@@ -457,6 +638,7 @@ def create_agent(
     durability: Durability = "ephemeral",
     history: HistoryStore | None = None,
     environment: MemoryEnvironment | None = None,
+    credentials: CredentialStore | None = None,
     providers: Sequence[Provider] = (),
     tools: Sequence[Tool] = (),
     plugins: Sequence[Plugin] = (),
@@ -467,11 +649,10 @@ def create_agent(
     approval: Approval | None = None,
     on_question: QuestionHandler | None = None,
     local_process_groups: bool = False,
-    mcp_servers: Sequence[JsonObject] = (),
-    project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
-    project_settings: Callable[[Path], JsonObject] | None = None,
     commands: bool = False,
     conformance: bool = False,
+    job_reports_start_turns: bool = False,
+    late_answers_start_turns: bool = False,
 ) -> AgentStart:
     async def build() -> Agent:
         return await build_with_store()
@@ -535,31 +716,56 @@ def create_agent(
             dispatcher.conformance = conformance
             await h.load(dispatcher)
             agent._conformance = conformance
-            agent._project_settings = project_settings
-            await h.load(_SdkDurable() if durability == "durable" else _SdkRuntime())
+            agent._late_answers = late_answers_start_turns
+            await h.load(
+                _SdkDurable(job_reports_start_turns)
+                if durability == "durable"
+                else _SdkRuntime(job_reports_start_turns)
+            )
+            jobs = Jobs()
+            jobs.declarations = {
+                **Jobs.declarations,
+                "job_reports_start_turns": job_reports_start_turns,
+            }
+            await h.load(jobs)
             h.on("embedding", "result.ready", _structured_result, "last")
             if conformance:
                 await h.load(Echo())
                 await h.load(Nest())
             await h.load(Questions() if conformance else _Questions())
+            if credentials is not None:
+                agent._credentials = credentials
+                await h.load(_CredentialAdapter(credentials))
             h.on("embedding", "session.start", agent._present, "first")
             h.follow("embedding", "user", agent._event)
             for provider in providers:
-                await h.load(_ProviderAdapter(provider))
+                await h.load(_ProviderAdapter(provider, credentials))
             await h.load(
                 Selection([p.id for p in providers] + (["conformance"] if conformance else []))
             )
-            await h.load(Context())
+            compaction_parts = [p for p in plugins if isinstance(p, _CompactionPlugin)]
+            mcp_parts = [p for p in plugins if isinstance(p, _McpPlugin)]
+            if len(compaction_parts) > 1 or len(mcp_parts) > 1:
+                raise ValueError("Duplicate official plugin")
+            await h.load(
+                (compaction_parts[0] if compaction_parts else _CompactionPlugin())._native()
+            )
             if commands:
                 await h.load(Commands())
-            if mcp_servers or project_mcp is not None or conformance:
-                await h.load(MCP(mcp_servers, standard_names=True, project_servers=project_mcp))
+            if mcp_parts:
+                await h.load(mcp_parts[0]._native())
+            elif conformance:
+                await h.load(MCP(standard_names=True))
             if approval is not None or conformance:
                 await h.load(_Approval())
             registered_tools: dict[str, _LocalPlugin] = {}
             for plugin in [
                 *(Plugin(t.name, tools=[t]) for t in tools),
-                *(p for p in plugins if not isinstance(p, _OverWire)),
+                *(
+                    p
+                    for p in plugins
+                    if not isinstance(p, (_OverWire, _CompactionPlugin, _McpPlugin))
+                ),
             ]:
                 if plugin.name in h.plugins:
                     raise AgentError(
@@ -585,7 +791,9 @@ def create_agent(
                 except BaseException:
                     await plugin._close()
                     raise
-                adapter = _LocalPlugin(plugin, registrar, folder)
+                adapter = _LocalPlugin(
+                    plugin, registrar, folder, late_answers=late_answers_start_turns
+                )
                 await h.load(adapter)
                 registered_tools.update((name, adapter) for name in registrar._tools)
             specs: list[dict[str, Any]] = [

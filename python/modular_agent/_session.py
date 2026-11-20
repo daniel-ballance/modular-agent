@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from ma_core.wire import entry_out, settings_in, settings_out, turn_end_out, usage_out
+from ma_core.wire import entry_out, result_out, settings_in, settings_out, turn_end_out, usage_out
 
 from ._types import (
     AgentError,
@@ -444,6 +444,31 @@ class Session:
             _question(self.id, q)
             for q in await self._agent._call("questions", "list", session=self.id, actor="user")
         ]
+
+    async def call_tool(self, name: str, input: JsonObject) -> ToolResult:
+        """Call a tool as the local actor through the Runtime's gates."""
+        if self._closed:
+            raise AgentError(ErrorCode.NOT_OPEN, "Session is not open")
+        result = await self._agent._call(
+            "runtime", "run_tool", session=self.id, actor="user", name=name, input=input
+        )
+        public = await self._agent._session(
+            "view",
+            session=self.id,
+            recipient="user",
+            value=result_out(result),
+            type="reply",
+            method="callTool",
+        )
+        if public is None:
+            raise AgentError(ErrorCode.WITHHELD, "Tool result withheld")
+        return ToolResult(
+            name=name,
+            status=ToolStatus(public["status"]),
+            call_id=public["callId"],
+            content=public.get("content", []),
+            value=public.get("value"),
+        )
 
     async def commands(self) -> dict[str, str]:
         await self._state()

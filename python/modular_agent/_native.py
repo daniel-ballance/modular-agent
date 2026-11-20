@@ -15,7 +15,7 @@ from ma_plugin.rpc import WireError
 from ma_tools import Tools
 
 from ._plugin import CommandContext, Plugin, Registrar, _OBSERVERS, _handle_command, _handle_hook
-from ._tool import ToolContext
+from ._tool import LeftOpen, ToolContext
 from ._types import (
     AgentError,
     Answer,
@@ -98,7 +98,11 @@ class _MemoryHistory(_NativePlugin):  # type: ignore[misc]  # Untyped base adapt
 
     async def list(self, d: dict[str, Any], emit: Any) -> list[JsonObject]:
         return [
-            {k: s[k] for k in ("id", "project", "position")}
+            {
+                **{k: s[k] for k in ("id", "project", "position")},
+                "model": s["settings"].get("model"),
+                "lastActivity": max((e["time"] for e in s["entries"]), default=s["created"]),
+            }
             for s in self._sessions.values()
             if not d.get("project") or s["project"] == d["project"]
         ]
@@ -135,6 +139,8 @@ def _read_answer(result: dict[str, Any], kind: str) -> Answer:
     value = result.get("value")
     if result.get("declined") or value == "declined" or value is None:
         return Answer("decline", reason=result.get("reason"))
+    if kind == "secret" and isinstance(value, dict) and isinstance(value.get("credential"), str):
+        return Answer("value", value["credential"])
     if kind == "approval" and value == "allow":
         return Answer("allow")
     return Answer("value", value)
@@ -143,11 +149,14 @@ def _read_answer(result: dict[str, Any], kind: str) -> Answer:
 class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.
     role = "tool_source"
 
-    def __init__(self, plugin: Plugin, registrar: Registrar, project: Path) -> None:
+    def __init__(
+        self, plugin: Plugin, registrar: Registrar, project: Path, *, late_answers: bool
+    ) -> None:
         self.plugin = plugin
         self.name = plugin.name
         self.project = project
         self.registrar = registrar
+        self.late_answers = late_answers
         self.target = "sdk:tools:" + self.name
 
     async def start(self, api: Any) -> None:
@@ -187,8 +196,19 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
 
             def bind_command(item: Any) -> Callable[[dict[str, Any]], Awaitable[JsonObject]]:
                 async def run(d: dict[str, Any]) -> JsonObject:
+                    async def environment(operation: str, params: JsonObject) -> Json:
+                        try:
+                            return cast(
+                                Json,
+                                await self.api.call(
+                                    "environment", operation, {"session": d["session"], **params}
+                                ),
+                            )
+                        except Exception as exc:
+                            raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+
                     reply = await _handle_command(
-                        item, d["args"], CommandContext(d["session"], d["actor"])
+                        item, d["args"], CommandContext(d["session"], d["actor"], environment)
                     )
                     return {"output": reply} if reply is not None else {}
 
@@ -209,7 +229,11 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
     async def run(self, d: dict[str, Any], emit: Any) -> JsonObject:
         call, sid = d["call"], d["session"]
 
-        async def ask(question: QuestionSpec, index: int, wait: float | None) -> Answer:
+        async def ask(
+            question: QuestionSpec, index: int, wait: float | None, leave_open: bool
+        ) -> Answer:
+            if leave_open and not self.late_answers:
+                raise AgentError(ErrorCode.NOT_SUPPORTED, "Leaving tool calls open is not enabled")
             try:
                 params = {
                     **question,
@@ -221,13 +245,16 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                     "step": d.get("step"),
                     "key": f"call:{call['id']}:{index}",
                     "timeout": wait,
-                    "park": False,
+                    "park": leave_open,
+                    "kind": "text" if question["kind"] == "link" else question["kind"],
+                    "name": question.get("credential"),
                 }
                 if question["kind"] == "approval":
                     params["approval_call"] = {"name": call["name"], "input": call["input"]}
-                return _read_answer(
-                    await self.api.call("questions", "ask", params), question["kind"]
-                )
+                response = await self.api.call("questions", "ask", params)
+                if response.get("open"):
+                    raise LeftOpen(response["request"])
+                return _read_answer(response, question["kind"])
             except (_NativeError, WireError) as exc:
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
 
@@ -259,7 +286,10 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
 
         context = ToolContext(sid, call["actor"], call["id"], ask, progress, nested, environment)
-        result = await self.registrar._tools[call["name"]]._run(call["input"], context)
+        try:
+            result = await self.registrar._tools[call["name"]]._run(call["input"], context)
+        except LeftOpen as exc:
+            return {"open": True, "requestIds": [exc.question_id]}
         return cast(JsonObject, result_in(result, call["id"]))
 
     async def stop(self) -> None:

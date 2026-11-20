@@ -50,8 +50,10 @@ async def payload(plugin, hook, d):
             p[new] = d[old]
     if hook == "plugin.load":
         p.update(name=d["plugin"], origin="configured", project=str(plugin.project))
-    elif hook == "session.start":
+    elif hook in {"session.start", "session.prepare"}:
         p["resumed"] = bool(d.get("resumed"))
+        if hook == "session.start":
+            p.pop("project", None)
     elif hook == "input":
         p["when"] = "inTurn" if d.get("when") == "steer" else d.get("when", "now")
     elif hook == "turn.before":
@@ -79,7 +81,9 @@ async def payload(plugin, hook, d):
         p["result"] = {**d.get("shared_result", {}), "text": plain(d["result"])}
     elif hook == "turn.end":
         return {"sessionId": sid, "turnId": d["turn"], **turn_end_out(d)}
-    return p
+    from ma_core.wire import provider_projection
+
+    return provider_projection(p)
 
 
 def answer(hook, d, a):

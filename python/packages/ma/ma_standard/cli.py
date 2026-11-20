@@ -2,18 +2,21 @@
 
 import argparse
 import asyncio
+import getpass
 import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import warnings
 from typing import cast
 
 from modular_agent import (
     Agent,
     AgentError,
     Answer,
+    CredentialStore,
     Durability,
     Event,
     JsonObject,
@@ -28,7 +31,9 @@ from modular_agent import (
     file_history,
     http_history,
 )
+from modular_agent.compaction import compaction
 from modular_agent.files import file_tools
+from modular_agent.mcp import mcp
 from modular_agent.testing import ScriptedProvider
 
 from .auth import AuthFile
@@ -174,16 +179,21 @@ async def _print_turn(session: Session, args: argparse.Namespace) -> int:
 async def _line(session: Session, args: argparse.Namespace) -> int:
     loop = asyncio.get_running_loop()
     active = False
-    pending: dict[str, asyncio.Future[Answer]] = {}
+    pending: dict[str, tuple[Question, asyncio.Future[Answer]]] = {}
     eof = False
 
     async def question(q: Question, context: QuestionContext) -> Answer:
-        if eof or q.kind == "secret":
+        if eof or (q.kind == "secret" and not sys.stdin.isatty()):
             return Answer("decline")
         reply: asyncio.Future[Answer] = loop.create_future()
-        pending[q.id] = reply
+        pending[q.id] = (q, reply)
+        usage = (
+            "/answer REQUEST_ID (hidden input)"
+            if q.kind == "secret"
+            else "/answer REQUEST_ID VALUE"
+        )
         print(
-            f"Question {q.id}: {q.question} {q.options}\nUse /answer REQUEST_ID VALUE",
+            f"Question {q.id}: {q.question} {q.options}\nUse {usage}",
             file=sys.stderr,
             flush=True,
         )
@@ -215,7 +225,7 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
             line = await asyncio.to_thread(sys.stdin.readline)
             if not line:
                 eof = True
-                for outstanding in pending.values():
+                for _, outstanding in pending.values():
                     if not outstanding.done():
                         outstanding.set_result(Answer("decline"))
                 await session.wait_idle()
@@ -230,13 +240,30 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
                 await cancel()
             elif line.startswith("/answer "):
                 id, _, value = line.removeprefix("/answer ").partition(" ")
-                reply = pending.get(id)
-                if reply is None or reply.done() or not value:
+                item = pending.get(id)
+                if item is None or item[1].done():
                     print("Use /answer REQUEST_ID VALUE for an open question", file=sys.stderr)
-                else:
-                    reply.set_result(
-                        Answer("decline") if value == "decline" else Answer("value", value)
-                    )
+                    continue
+                q, reply = item
+                if value == "decline":
+                    reply.set_result(Answer("decline"))
+                elif q.kind == "secret":
+                    if value:
+                        print(
+                            "Do not put the secret on the command line; use /answer REQUEST_ID",
+                            file=sys.stderr,
+                        )
+                        continue
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("error", getpass.GetPassWarning)
+                            secret = getpass.getpass("Secret: ")
+                    except (EOFError, OSError, KeyboardInterrupt, getpass.GetPassWarning):
+                        reply.set_result(Answer("decline"))
+                    else:
+                        reply.set_result(Answer("value", secret))
+                elif value:
+                    reply.set_result(Answer("value", value))
             elif line.startswith("/after "):
                 await session.send(line.removeprefix("/after "), "after")
             elif line.startswith("/") and not line.startswith("/skill:"):
@@ -294,6 +321,7 @@ async def _agent(
     *,
     saved_model: str | None = None,
     history_only: bool = False,
+    acp_session: bool = False,
 ) -> Agent:
     durability: Durability = "durable" if args.runtime == "durable" else "kept"
     url, token = (
@@ -314,6 +342,7 @@ async def _agent(
     script = os.environ.get("MODULAR_AGENT_SCRIPT")
     testing = args.acp and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1"
     settings = paths.settings(project)
+    auth = AuthFile(paths.config / "auth.json")
     providers: list[Provider] = []
     processes = None
     configured_model = settings.pop("model", None)
@@ -322,7 +351,10 @@ async def _agent(
     model = (
         None
         if args.command == "models"
-        else args.model or saved_model or (configured_model if not args.acp else None)
+        else (saved_model if acp_session else args.model)
+        or args.model
+        or saved_model
+        or (configured_model if not args.acp or acp_session else None)
     )
     if script:
         script_data = json.loads(Path(script).read_text(encoding="utf-8"))
@@ -336,7 +368,6 @@ async def _agent(
     else:
         from .responses import Responses
 
-        auth = AuthFile(paths.config / "auth.json")
         providers.extend(
             [
                 Responses(vendor, auth, paths.config / "models.json")
@@ -356,7 +387,9 @@ async def _agent(
                 raise ValueError(
                     "no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`."
                 )
-        if args.command == "models" or args.acp or (model and model.startswith("claude/")):
+        if acp_session and model is None:
+            model = _signed_in_model(paths)
+        if args.command == "models" or (model and model.startswith("claude/")):
             sidecar = claude_launch()
             if model and model.startswith("claude/") and sidecar is None:
                 raise ValueError(
@@ -382,21 +415,7 @@ async def _agent(
                     (level for level in reversed(levels[: asked + 1]) if level in info["thinking"]),
                     "off",
                 )
-    inspecting = args.command == "models" or args.declaration
-
-    def acp_settings(cwd: Path) -> JsonObject:
-        defaults = paths.settings(cwd)
-        if script:
-            defaults.update(model="scripted/script", thinking="off")
-        else:
-            if not testing and args.model is None and not defaults.get("model"):
-                if signed_in := _signed_in_model(paths):
-                    defaults["model"] = signed_in
-            if args.model:
-                defaults["model"] = args.model
-            if args.thinking:
-                defaults["thinking"] = args.thinking
-        return defaults
+    inspecting = args.command == "models" or args.declaration or args.acp
 
     return await create_agent(
         project=project,
@@ -405,16 +424,22 @@ async def _agent(
         durability=durability,
         local_process_groups=True,
         providers=providers,
+        credentials=CredentialStore(auth.answer, auth.set_answer),
         tools=[code_tool()],
-        plugins=[file_tools(paths.state / "output"), prompt_plugin(paths.config, project)],
+        plugins=[
+            file_tools(paths.state / "output"),
+            prompt_plugin(paths.config, project),
+            compaction(),
+            *([] if inspecting else [mcp(project_servers=paths.mcp)]),
+        ],
         model=model,
         settings=settings,
         process_plugins=processes,
         plugin_host=True,
         commands=True,
+        job_reports_start_turns=True,
+        late_answers_start_turns=True,
         conformance=testing,
-        project_mcp=None if inspecting else paths.mcp,
-        project_settings=acp_settings if args.acp and not testing else None,
     )
 
 
@@ -475,7 +500,23 @@ async def _run(args: argparse.Namespace) -> int:
                 saved_model = f"{old['provider']}/{old['id']}"
     async with await _agent(paths, project, args, saved_model=saved_model) as agent:
         if args.acp:
-            await agent.serve_acp()
+
+            async def compose(folder: Path) -> Agent:
+                if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
+                    return agent
+                return await _agent(paths, folder, args, acp_session=True)
+
+            async def reopen(folder: Path, id: str) -> Agent:
+                saved = await agent.session_info(id)
+                if saved["project"] != str(folder):
+                    raise ValueError("Session is not in this project")
+                if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
+                    return agent
+                old = cast(JsonObject, saved["settings"]).get("model")
+                selected = f"{old['provider']}/{old['id']}" if isinstance(old, dict) else None
+                return await _agent(paths, folder, args, saved_model=selected, acp_session=True)
+
+            await agent.serve_acp(compose=compose, compose_reopen=reopen, project_mcp=paths.mcp)
             return 0
         if args.command == "models":
             for info in await agent.models():

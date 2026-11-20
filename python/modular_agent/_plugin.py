@@ -7,8 +7,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
-from ._tool import Tool
-from ._types import AgentError, ErrorCode, JsonObject
+from ._tool import Tool, ToolEnvironment
+from ._types import AgentError, ErrorCode, Json, JsonObject
 
 type Order = Literal["first", "normal", "last"]
 type HookHandler = Callable[[JsonObject], JsonObject | None | Awaitable[JsonObject | None]]
@@ -17,10 +17,21 @@ type Setup = Callable[[Registrar], None | Awaitable[None]]
 type Stop = Callable[[], None | Awaitable[None]]
 
 
-@dataclass(frozen=True)
 class CommandContext:
-    session_id: str
-    actor_id: str
+    def __init__(
+        self,
+        session_id: str,
+        actor_id: str,
+        environment: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
+    ) -> None:
+        self.session_id = session_id
+        self.actor_id = actor_id
+        self._active = True
+        self.environment = ToolEnvironment(self._check, environment)
+
+    def _check(self) -> None:
+        if not self._active:
+            raise AgentError(ErrorCode.INVALID_REQUEST, "The command has settled")
 
 
 @dataclass(frozen=True)
@@ -76,7 +87,9 @@ class Registrar:
     ) -> None:
         if order not in {"first", "normal", "last"}:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid hook order: {order}")
-        self._hooks.append(_Hook(point, handler, order, in_process_only))
+        self._hooks.append(
+            _Hook(point, handler, order, in_process_only or point == "session.prepare")
+        )
 
     def command(
         self,
@@ -194,12 +207,16 @@ async def _handle_hook(hook: _Hook, payload: JsonObject) -> JsonObject | None:
 
 
 async def _handle_command(command: _Command, args: str, context: CommandContext) -> str | None:
-    result = command.handler(args, context)
-    return await result if inspect.isawaitable(result) else result
+    try:
+        result = command.handler(args, context)
+        return await result if inspect.isawaitable(result) else result
+    finally:
+        context._active = False
 
 
 _SUPPORTED_HOOKS = {
     "input",
+    "session.prepare",
     "session.start",
     "session.end",
     "turn.start",
@@ -209,4 +226,4 @@ _SUPPORTED_HOOKS = {
     "tool.before",
     "tool.after",
 }
-_OBSERVERS = {"session.start", "session.end", "turn.start", "turn.end"}
+_OBSERVERS = {"session.prepare", "session.start", "session.end", "turn.start", "turn.end"}
