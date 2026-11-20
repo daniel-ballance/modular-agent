@@ -161,7 +161,7 @@ func (q *questionRouter) event(e api.Event) {
 			_ = decodeInto(portable.Call(*raw.ApprovalCall), &c)
 			question.Call = &c
 		}
-		if raw.Wait > 0 {
+		if raw.Wait > 0 && !raw.Defer {
 			deadline := time.Now().Add(raw.Wait)
 			question.Deadline = &deadline
 			var cancel context.CancelFunc
