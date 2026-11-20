@@ -110,6 +110,15 @@ Replace the Go catalog and readiness descriptions with:
 Replace the Go cell for Provider credentials over the wire with:
 
 > Not supported by the Go SDK server. `ProviderContext.Credential()` reads the Provider's configured environment key locally; in a served Provider it does not route to the host's credential store.
+### Embedded questions and hook registration — `docs/sdk/api.md`, Questions and Hooks
+
+For Go question examples use:
+
+> Register the agent handler with `WithOnQuestion(handler)` or override it with `session.OnQuestion(ctx, handler)`. The embedded Session does not expose `Questions` or `Answer`. Give the UI the question from the handler and return the UI's decision through that handler.
+
+For Go hook examples use:
+
+> Register with `OnToolBefore`, `OnToolAfter`, `OnTurnBefore`, `OnStepAfter` or `OnTurnEnd` and use `HookOrder` for explicit order. Use `Gate{Input: input}` to replace tool input and `StepDecision{End: reason}` to end a turn. The Go registrar does not provide a generic `On` or expose the full hook table. Both `OnSessionPrepare` and `OnSessionEnd` are in-process only in the Go SDK, although the binding carries `session.end`.
 
 ### Local environment declaration — `docs/sdk/concepts.md`, Defaults; `docs/sdk/api.md`, The declaration
 
