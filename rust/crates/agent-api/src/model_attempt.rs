@@ -133,7 +133,11 @@ impl ModelAttempt {
             require(api, scope, "input")?;
         }
         self.validate_tools(request)?;
-        if !request.tools.is_empty() {
+        ensure!(
+            request.provider_tools.is_empty() || (!self.auxiliary && info.runs_tools),
+            "Provider tools are not allowed on this request"
+        );
+        if !request.tools.is_empty() || !request.provider_tools.is_empty() {
             ensure!(
                 work_authority(api, scope)?.has("tools"),
                 "tool offer is no longer authorized"

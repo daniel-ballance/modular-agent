@@ -43,7 +43,7 @@ impl From<Content> for PromptInput {
     }
 }
 impl PromptInput {
-    fn content(self) -> Value {
+    pub(crate) fn content(self) -> Value {
         match self {
             Self::Text(text) => base::wire::text_content(&text),
             Self::Content(parts) => Value::Array(parts),

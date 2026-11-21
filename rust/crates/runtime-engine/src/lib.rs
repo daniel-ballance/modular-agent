@@ -203,6 +203,11 @@ impl Engine {
                 system: input.system.clone(),
                 messages: model_messages(&data.branch(), scope.turn.as_deref())?,
                 tools: offer.clone(),
+                provider_tools: if work_authority(api.as_ref(), scope)?.has("tools") {
+                    input.model.provider_tools()
+                } else {
+                    vec![]
+                },
                 thinking: wire::lower_reasoning(
                     input.settings["thinking"].as_str().unwrap_or(""),
                     &info.thinking,

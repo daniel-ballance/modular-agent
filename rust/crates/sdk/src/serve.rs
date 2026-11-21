@@ -76,6 +76,7 @@ pub(crate) struct Served {
     initializing: tokio::sync::Mutex<()>,
     startup: Mutex<Option<Error>>,
     environment: Mutex<Option<Arc<plugin_stdio::server::EnvironmentServer>>>,
+    environment_project: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl Served {
@@ -86,6 +87,7 @@ impl Served {
             initializing: tokio::sync::Mutex::new(()),
             startup: Mutex::default(),
             environment: Mutex::default(),
+            environment_project: Mutex::default(),
         })
     }
     pub(crate) fn startup_error(&self) -> Option<Error> {
@@ -106,7 +108,9 @@ fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
     if let Some(runtime) = &r.portable_runtime {
         v["runtime"] = runtime.registration.clone();
     }
-    if let Some(env) = &r.environment {
+    if let Some(env) = &r.portable_environment {
+        v["workingEnvironment"] = json!(env.registration);
+    } else if let Some(env) = &r.environment {
         let native = env.declaration();
         let containment = match native["containment"].as_str() {
             Some("strong" | "processGroup") => native["containment"].clone(),
@@ -274,7 +278,17 @@ impl Endpoint for Served {
                     })));
                 }
                 let v = registration(&self.plugin.name, &self.plugin.replaces, &r);
-                if r.environment.is_some() {
+                if r.portable_environment.is_some() {
+                    let project = std::path::PathBuf::from(base::wire::string(&p, "project")?);
+                    if !project.is_absolute() {
+                        return Err(Fault::new(
+                            "invalid_request",
+                            "environment project must be absolute",
+                        ));
+                    }
+                    *self.environment_project.lock().unwrap() = Some(project);
+                }
+                if r.environment.is_some() && r.portable_environment.is_none() {
                     let env = plugin_stdio::server::EnvironmentServer::new(peer, &p).await?;
                     *self.environment.lock().unwrap() = Some(Arc::new(env));
                 }
@@ -285,6 +299,20 @@ impl Endpoint for Served {
             "env/read" | "env/exists" | "env/write" | "env/list" | "env/exec" | "env/save"
             | "env/checkPoint" | "env/restore" | "env/sessionEnded" => {
                 let r = self.registered()?;
+                if let Some(env) = &r.portable_environment {
+                    let project = self
+                        .environment_project
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or_else(|| {
+                            Fault::new("invalid_request", "environment not initialized")
+                        })?;
+                    return env
+                        .serve(peer, id, method, p, &project, cancel)
+                        .await
+                        .map_err(to_fault);
+                }
                 let env = r
                     .environment
                     .as_ref()
@@ -391,6 +419,7 @@ impl Endpoint for Served {
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: call["actorId"].as_str().unwrap_or_default().into(),
                     call_id: call["id"].as_str().unwrap_or_default().into(),
+                    parent_call_id: call["parentCallId"].as_str().map(str::to_owned),
                     turn_id: call["turnId"].as_str().map(str::to_owned),
                     step_id: call["stepId"].as_str().map(str::to_owned),
                     backend: Backend::Remote {
@@ -508,8 +537,9 @@ impl Endpoint for Served {
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: p["actorId"].as_str().unwrap_or_default().into(),
                     call_id: String::new(),
+                    parent_call_id: None,
                     turn_id: None,
-                    step_id: p["stepId"].as_str().map(str::to_owned),
+                    step_id: None,
                     backend: Backend::Remote { peer, parent: id },
                     cancelled: cancel.clone(),
                     settled,

@@ -22,6 +22,7 @@ mod context;
 mod core;
 mod credentials;
 mod data;
+mod environment;
 mod error;
 mod events;
 mod history;
@@ -49,6 +50,10 @@ pub use credentials::{
     environment_credentials, file_credentials,
 };
 pub use data::{HistoryEntry, ToolCall, ToolDefinition, ToolHints, ToolSettlement, TurnOutput};
+pub use environment::{
+    Containment, DirEntry, DirEntryKind, EnvironmentContext, EnvironmentDeclaration,
+    EnvironmentPart, ExecResult,
+};
 pub use error::{Code, Error, Result};
 pub use events::{
     ActorEvent, AudioData, ErasureEvent, Event, EventData, EventPayload, HistoryEvent, InputEvent,

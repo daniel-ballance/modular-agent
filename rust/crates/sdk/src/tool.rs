@@ -280,6 +280,7 @@ pub struct ToolContext {
     pub(crate) session_id: String,
     pub(crate) actor_id: String,
     pub(crate) call_id: String,
+    pub(crate) parent_call_id: Option<String>,
     pub(crate) turn_id: Option<String>,
     pub(crate) step_id: Option<String>,
     pub(crate) project: std::path::PathBuf,
@@ -409,6 +410,15 @@ impl ToolContext {
     pub fn tool_call_id(&self) -> &str {
         &self.call_id
     }
+    pub fn parent_call_id(&self) -> Option<&str> {
+        self.parent_call_id.as_deref()
+    }
+    pub fn job_id(&self) -> Option<&str> {
+        match &self.backend {
+            Backend::Local { scope, .. } => scope.job.as_deref(),
+            Backend::Remote { .. } => None,
+        }
+    }
     pub fn turn_id(&self) -> Option<&str> {
         self.turn_id.as_deref()
     }
@@ -444,19 +454,19 @@ impl ToolContext {
         eprintln!("tool {}: {message}", self.call_id);
     }
 
-    /// Publish live text progress, not a result or history record.
-    pub async fn progress(&self, text: impl Into<String>) -> Result<()> {
+    /// Publish live progress (text or shared Content), not a history record.
+    pub async fn progress(&self, content: impl Into<crate::PromptInput>) -> Result<()> {
         self.check()?;
-        let text = text.into();
+        let content = content.into().content();
         match &self.backend {
             Backend::Local { api, scope } => {
-                api.emit(base::Event::new(scope, "tool.progress", json!(text)))
+                api.emit(base::Event::new(scope, "tool.progress", content))
                     .await?
             }
             Backend::Remote { peer, parent } => peer.notify(
                 "tools/progress",
                 json!({
-                    "parentRequestId": parent, "content": [{"type":"text","text":text}],
+                    "parentRequestId": parent, "content": content,
                 }),
             ),
         }
@@ -535,6 +545,10 @@ impl ToolContext {
 
     /// Ask an actor and wait for the answer.
     pub async fn ask(&self, ask: Ask) -> Result<Answer> {
+        self.ask_inner(ask, None).await
+    }
+
+    pub(crate) async fn ask_inner(&self, ask: Ask, decline_after: Option<u64>) -> Result<Answer> {
         self.check()?;
         let approval = ask.kind == base::RequestKind::Approval;
         match &self.backend {
@@ -546,6 +560,10 @@ impl ToolContext {
                     ));
                 }
                 let mut question = ask.into_question(scope.clone());
+                if let Some(ms) = decline_after {
+                    question.timeout_ms = Some(ms);
+                    question.extra["whenTimeLimit"] = json!("decline");
+                }
                 let n = self.asks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 question.key = scope.call.as_ref().map(|call| format!("call:{call}:{n}"));
                 if approval {
@@ -562,6 +580,7 @@ impl ToolContext {
                         question.extra["approvalCall"] = base::wire::call(&call, scope);
                     }
                 }
+                let request_id = question.id.clone();
                 let requests = base::requests(api.as_ref())?;
                 match requests
                     .ask(api.clone(), question, self.cancelled.clone())
@@ -577,7 +596,19 @@ impl ToolContext {
                             Answer::Value(other["credential"].as_str().unwrap_or_default().into())
                         }
                     }),
-                    base::RequestReply::Declined => Ok(Answer::Declined { reason: None }),
+                    base::RequestReply::Declined => {
+                        let data = api.snapshot(&scope.session)?;
+                        let reason = data
+                            .entries
+                            .iter()
+                            .rev()
+                            .filter(|e| e.kind == "request.closed")
+                            .filter_map(|e| e.content.as_ref())
+                            .find(|v| v["request"] == request_id)
+                            .and_then(|v| v["reason"].as_str())
+                            .map(str::to_owned);
+                        Ok(Answer::Declined { reason })
+                    }
                     base::RequestReply::Waiting => Err(left_open()),
                 }
             }

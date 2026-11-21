@@ -567,6 +567,7 @@ impl TurnWork {
             system: self.input.system.clone(),
             messages: model_messages(&data.branch(), scope.turn.as_deref())?,
             tools: current_model_tools(api, scope, &self.input.tools)?,
+            provider_tools: vec![],
             thinking: wire::lower_reasoning(
                 self.input.settings["thinking"].as_str().unwrap_or(""),
                 &info.thinking,

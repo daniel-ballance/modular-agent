@@ -495,6 +495,7 @@ pub fn parse_request(v: &Value, session: &str) -> Result<ModelRequest> {
             .flatten()
             .map(parse_definition)
             .collect::<Result<_>>()?,
+        provider_tools: vec![],
         thinking: v["settings"]["reasoning"].as_str().unwrap_or("").into(),
         output_limit: v["settings"]["maxOutput"].as_u64().unwrap_or(8192),
         extra: v.clone(),

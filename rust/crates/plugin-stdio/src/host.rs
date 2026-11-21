@@ -591,24 +591,12 @@ impl Plugin for Remote {
             }),
         );
         let shared = self.shared.clone();
-        let peer = self.peer.clone();
-        let owns_environment = registration["workingEnvironment"].is_object();
         r.on(
             "session.end",
             Order::Last,
             handler(move |_api, scope, _| {
                 let shared = shared.clone();
-                let peer = peer.clone();
                 Box::pin(async move {
-                    if owns_environment {
-                        peer.call(
-                            "env/sessionEnded",
-                            json!({"sessionId":scope.session}),
-                            None,
-                            CancellationToken::new(),
-                        )
-                        .await?;
-                    }
                     shared.sessions.lock().unwrap().remove(&scope.session);
                     Ok(HookResult::default())
                 })
@@ -1118,6 +1106,18 @@ impl Environment {
 }
 #[async_trait]
 impl WorkingEnvironment for Environment {
+    async fn session_ended(&self, session: &str) -> Result<()> {
+        self.peer
+            .call(
+                "env/sessionEnded",
+                json!({"sessionId":session}),
+                None,
+                CancellationToken::new(),
+            )
+            .await?;
+        Ok(())
+    }
+
     fn scoped(
         &self,
         api: Api,
@@ -1423,6 +1423,10 @@ impl Handler for RemoteHandler {
             }
             Err(e) => return Err(e.into()),
         };
+        ensure!(
+            self.hook != "step.before" || reply["value"].get("providerTools").is_none(),
+            "a served step.before handler cannot change Provider tools"
+        );
         hook_result(&self.hook, &scope, value, reply)
     }
 }
@@ -1553,7 +1557,33 @@ pub fn hook_result(hook: &str, s: &Scope, mut original: Value, reply: Value) -> 
         }
         "step.before" => {
             let v = &reply["value"];
-            original["request"] = json!(wire::parse_request(&v["request"], &s.session)?);
+            let mut request = wire::parse_request(&v["request"], &s.session)?;
+            let prior: ModelRequest = serde_json::from_value(original["request"].clone())?;
+            request.provider_tools = prior.provider_tools;
+            if let Some(tools) = v.get("providerTools") {
+                // Only the local SDK adapter adds this field to its hook envelope.
+                let offered = request
+                    .provider_tools
+                    .iter()
+                    .map(wire::definition)
+                    .collect::<Vec<_>>();
+                let tools = tools
+                    .as_array()
+                    .ok_or_else(|| anyhow!("invalid Provider-tool allowance"))?;
+                let mut names = std::collections::BTreeSet::new();
+                ensure!(
+                    tools.iter().all(|tool| {
+                        tool["name"].as_str().is_some_and(|name| names.insert(name))
+                            && offered.iter().any(|old| wire::json_eq(old, tool))
+                    }),
+                    "step.before cannot widen the Provider-tool allowance"
+                );
+                request.provider_tools = tools
+                    .iter()
+                    .map(wire::parse_definition)
+                    .collect::<Result<_>>()?;
+            }
+            original["request"] = json!(request);
             Ok(answer(original))
         }
         "tool.before" => {
@@ -1581,7 +1611,10 @@ pub fn hook_result(hook: &str, s: &Scope, mut original: Value, reply: Value) -> 
         "provider.request" => {
             let mut value = reply["value"].clone();
             if original["request"]["system"].is_string() {
-                value["request"] = json!(wire::parse_request(&value["request"], &s.session)?);
+                let prior: ModelRequest = serde_json::from_value(original["request"].clone())?;
+                let mut request = wire::parse_request(&value["request"], &s.session)?;
+                request.provider_tools = prior.provider_tools;
+                value["request"] = json!(request);
                 value["model"] = original["model"].clone();
             }
             Ok(HookResult {
@@ -2068,9 +2101,7 @@ impl Endpoint for Callbacks {
                     p["event"]["delta"].clone(),
                 )
             }
-            "tools/progress" => {
-                Event::new(&scope, "tool.progress", json!(wire::text(&p["content"])))
-            }
+            "tools/progress" => Event::new(&scope, "tool.progress", p["content"].clone()),
             "env/output" => Event::new(&scope, "tool.progress", p["chunk"].clone()),
             "host/emit" => Event::new(
                 &scope,

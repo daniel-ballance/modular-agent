@@ -150,6 +150,7 @@ impl AgentApi for Relay {
                         json!({"parentRequestId":self.id,"chunk":e.content.as_str().unwrap_or("")}),
                     );
                 }
+                return self.inner.emit(e).await;
             }
             Route::RuntimeModel => {
                 let kind = match e.kind.as_str() {
@@ -166,6 +167,5 @@ impl AgentApi for Relay {
                 return self.inner.emit(e).await;
             }
         }
-        Ok(())
     }
 }
