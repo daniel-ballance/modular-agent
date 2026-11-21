@@ -250,9 +250,9 @@ async def test_checks_approval_policy() -> None:
 
 `choose_palette` is read-only, so it runs without an approval question under `ask`. It asks its own choice question with `ask` on the tool context and waits. If the user declines, the tool refuses rather than picking a palette for them.
 
-Register a handler before starting the turn. In TypeScript, Go and Python a session handler overrides the agent's handler for that session; the examples give the agent a default that declines to show the override. Rust has only an agent handler; use the question's session ID to route it to the right UI.
+A session handler overrides the agent handler. The examples show how to pass a question to a UI from a handler. The click can supply the handler's return value or call [`session.answer(id, answer)`](../api.md#questions) directly. If the handler only shows the question, keep it pending until the question settles; returning nothing early declines it.
 
-The [SDK API](../api.md#questions) defines `session.questions()` to list open questions and `session.answer(id, answer)` to send a reply by ID. Python exposes these calls. Its current list also includes closed questions, so the example uses the ID from the handler for the question that just opened. The handler stays waiting while the UI answers; returning nothing early would decline the question. Rust, TypeScript and Go do not expose the list and answer calls on an embedded session yet. Instead, pass the question to the UI and let the click resolve the handler's outstanding answer.
+An app can also start the turn without a handler, read open choice and text questions with `session.questions()`, and answer them by id. For approvals, the embedded actor still needs a handler to count as present. Send a tagged decline to refuse a question; the text `declined` is an ordinary answer value.
 
 **Rust**
 

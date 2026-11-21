@@ -485,11 +485,11 @@ The [core rules](../../contracts.md#hook-execution) treat a raised error or an i
 | Gate | Treat the failure as a refusal. For example, a failed `tool.before` handler prevents dispatch. |
 | Transform, collect, first answer | Fail the operation and identify the failed handler. If `tool.after` fails after the tool ran, keep a safe result with the confirmed status rather than claiming the tool never ran or running it again. See [Settlement](../../contracts.md#settlement). |
 
-A current Rust SDK limitation: an error from an in-process `turn.end` handler can replace the turn's failure reason. Keep diagnostics in that handler from returning errors if you need to preserve the original reason.
+A failed `turn.end` observer is reported without replacing the turn's outcome or failure reason.
 
 ## Keep local hooks local
 
-The [binding's hook table](../../bindings/plugin.md#from-core-hooks-to-wire-hooks) lists what a served plugin can register. The core has some points the binding does not carry: `session.prepare`, `session.join`, `session.leave`, `provider.piece` and plugin-defined points. The SDKs expose different subsets; in Go, even the SDK's `OnSessionEnd` is in-process only.
+The [binding's hook table](../../bindings/plugin.md#from-core-hooks-to-wire-hooks) lists what a served plugin can register. The core has some points the binding does not carry: `session.prepare`, `session.join`, `session.leave`, `provider.piece` and plugin-defined points. `session.end` is servable; it is not the same point as `session.prepare`.
 
 Some points cross the wire with fewer fields or answers:
 

@@ -46,7 +46,7 @@ An agent built with nothing but a Provider behaves like this:
 | Working environment | Local, rooted at the project. Relative paths resolve against the project; it does not refuse paths that lead outside it, and declares `confinesFiles: false`. Commands get the containment its command supervisor provides on this platform, which it declares. Local does not mean sandboxed. | Every tool context has one; the declaration is honest about what it does not confine |
 | Credential store | Environment variables, by the names each Provider documents | `OPENAI_API_KEY` works without setup |
 | Approval | No approval plugin | The app chose its tools. Naming a policy loads the plugin and records that policy ([Approval policy](../contracts.md#approval-policy)). |
-| Plugin host | No | An embedded agent does not start programs named in its environment unless the app gives it process plugins. See [Placement](placement.md#a-plugin-in-another-process). |
+| Plugin host | No | An embedded agent does not start programs named in its environment unless the app enables plugin hosting or supplies process plugins or plugin services. See [Placement](placement.md#a-plugin-in-another-process). |
 | Actors | One local actor, described below | |
 | Questions | Answered by the app's handler if it registered one | See below |
 | Model | None. The developer names one, or the agent uses the only model its Providers offer. | Picking a model silently would pick a cost |

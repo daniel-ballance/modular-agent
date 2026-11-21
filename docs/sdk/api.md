@@ -16,33 +16,32 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | Option | Type | Default |
 |---|---|---|
 | `project` | path | the current directory |
-| `dataDir` | path | none. Required when a part's local bookkeeping must survive a restart, or when `kept` or `durable` uses the default file history. Under `ephemeral` the SDK puts such bookkeeping in a scratch folder it removes with the agent. |
+| `dataDir` | path | none. Required when a part needs a local directory to keep state across restarts, or when `kept` or `durable` uses the default file history. The default local environment under `ephemeral` uses agent-owned scratch for disposable command bookkeeping. |
 | `durability` | `ephemeral`, `kept` or `durable` | `ephemeral`; see [Durability](placement.md#durability) |
 | `history` | a history store | chosen by `durability`: memory, or files under `dataDir` |
 | `runtime` | a Runtime | chosen by `durability` |
 | `environment` | a working environment | local, rooted at `project` |
-| `credentials` | a credential store | environment variables |
+| `credentials` | a credential store | environment variables. To answer a `secret` question, use a writable store that implements [secret staging](#the-other-parts), such as `fileCredentials(path)`. |
 | `providers` | Providers | none |
 | `tools` | tools | none |
 | `plugins` | plugins, in load order | none |
-| `processPlugins` | `{ command: string[], env?: object, config?: object }` | none; see [Placement](placement.md#a-plugin-in-another-process) |
+| `processPlugins` | ordered list of `{ command: string[], env?: object, config?: object }` | none; see [Placement](placement.md#a-plugin-in-another-process) |
 | `model` | ModelRef or `"provider/id"` | the only model offered, if exactly one; otherwise none |
 | `settings` | default settings for new sessions, by [setting key](../bindings/data.md#setting-keys) | none |
 | `approval` | `off`, `ask`, `all` or `never` | absent: no approval plugin. Any value loads the approval plugin and records that policy for new sessions; `off` means the plugin is loaded and its check does not ask ([Approval policy](../contracts.md#approval-policy)). |
 | `onQuestion` | a question handler | none; see [Questions](#questions) |
-| `servicePlugins` | `{ url, tokenFile, config? }` | none; plugin services over the [WebSocket transport](../bindings/websocket.md); see [Placement](placement.md#services) |
-| `pluginHost` | boolean | false, or true when `processPlugins` is given. A plugin host also reads `MODULAR_AGENT_PLUGINS`; see [Placement](placement.md#a-plugin-in-another-process). |
+| `servicePlugins` | ordered list of `{ url, tokenFile, config? }` | none; see [Placement](placement.md#services) |
+| `pluginHost` | boolean | true if either plugin list is nonempty; otherwise false. A plugin host reads `MODULAR_AGENT_PLUGINS` after both lists. See [Placement](placement.md#a-plugin-in-another-process). |
 | `severalActors` | boolean | false. When true, the agent declares `severalActors`, and `session.join`, `leave`, `as` and proposed input work. When false they raise `not_supported` for any actor but the local one, as the [ACP binding](../bindings/acp.md#several-actors) requires. |
 | `sessionLimits` | boolean | false. When true, the agent declares `sessionLimits` and `session.setLimit` works; otherwise it raises `not_supported`. |
 | `tenants` | map of tenant name to `{ rights, tokens? }`, the shape of `MODULAR_AGENT_TENANTS` | none. Given, the agent declares `tenants`, and `session({ tenant })` places a session in one ([Limits and tenants](../contracts.md#limits-and-tenants)). |
-| `credentials` | a credential store | environment variables. A writable store (such as `fileCredentials(path)`) implements the [secret staging operations](#the-other-parts), so a `secret` question can be answered. |
 | `jobReportsStartTurns` | boolean | false: a job's report is parked until released ([Jobs](../contracts.md#jobs)) |
 
 Each SDK provides constructors for the parts it ships: `transientRuntime()`, `durableRuntime()`, `memoryHistory()`, `fileHistory(dir)`, `httpHistory(url, tokenFile)`, `localEnvironment(root?)`, `environmentCredentials()` and `fileCredentials(path)`. `serve(plugin)` and `serveHistory(store, options)` are covered in [Placement](placement.md).
 
 Each option that names a part is shorthand for a plugin that provides it. `providers`, `tools`, `environment` and the rest are added before `plugins`, in the order of this table, so an explicit plugin can [replace](#replacing-a-part) one of them.
 
-`createAgent` raises `invalid_composition` for a combination the [durability](placement.md#durability) rules forbid, `kept` or `durable` with no persistent history store, a part that needs local recovery bookkeeping to survive a restart (such as the local working environment under `kept` or `durable`) with no `dataDir`, `pluginHost: false` together with `processPlugins`, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. A plugin or process plugin that fails to start, including a program that cannot be run or exits before registering, fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
+`createAgent` raises `invalid_composition` for a combination the [durability](placement.md#durability) rules forbid, `kept` or `durable` with no persistent history store, a part that needs local recovery bookkeeping to survive a restart (such as the local working environment under `kept` or `durable`) with no `dataDir`, `pluginHost: false` with a nonempty `processPlugins` or `servicePlugins` list, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. Failure to load, start, connect to, initialize or register a configured plugin fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
 
 ## The agent
 
@@ -54,8 +53,10 @@ Each option that names a part is shorthand for a plugin that provides it. `provi
 | `sessionInfo(id)` | one stored session's project, settings, creation time and last activity, without opening it or starting recovery |
 | `declaration()` | what this agent supports, as a [Declaration](../contracts.md#declaration) |
 | `models()` | the models its Providers offer, as ModelInfo |
-| `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md) on stdio until the client disconnects, or, with `listen`, on a WebSocket until closed ([Placement](placement.md#the-whole-agent)). Options: `compose(project)`, a factory that builds an Agent for each canonical project the client names, so one process can serve several projects with their own trust; without it, an agent bound to one project refuses other project paths. `projectSettings(project)` supplies new-session defaults for that project, and `projectMcp(project)` its configured MCP servers once its trust is checked. |
+| `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md). On stdio it returns when the client disconnects. With `listen`, `actors` and optional `tls`, it returns a listener with `url` and `close()` once ready ([Placement](placement.md#the-whole-agent)). See composition options below. |
 | `close()` | closes open sessions, stops plugins in reverse load order and releases what it holds |
+
+Without a composition factory, ACP serves only the Agent's configured project. A factory builds an Agent for a canonical project and can use the saved session's identity or metadata when reopening. The serving agent needs access to the saved session's history before choosing a composition. Project settings supply defaults for new sessions, not replacements on reopen. Keep trusted project MCP configuration separate from attaching client-supplied servers under the [host MCP policy](../contracts.md#mcp-servers). See [Languages](languages.md) for the factory and callback signatures.
 
 An Agent is safe to use from several tasks at once. Sessions are independent of each other.
 
@@ -68,14 +69,15 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `continuesAfterRestart` | true under `durable`; false otherwise ([Durability](placement.md#durability)) |
 | `waitingThroughRestart` | true only when the chosen durable Runtime and the host re-ask an interrupted in-turn question on recovery ([ACP](../bindings/acp.md#questions)); otherwise false |
 | `queuedInputAfterRestart` | the policy the agent implements for queued input on reopen; `handedBack` with the shipped parts |
-| `queuedJobReportsAfterRestart` | the policy the agent implements for queued job reports on reopen; omitted when it equals `queuedInputAfterRestart` |
+| `queuedJobReportsAfterRestart` | the policy the agent implements for queued job reports on reopen; omit when it equals `queuedInputAfterRestart`, which also supplies the fallback when absent |
 | `portableSessions` | true under `kept` and `durable`, whose stores keep the shared format; false under `ephemeral` |
 | `inputDuringTurn` | true: both Runtimes take steering |
 | `forking` | true |
 | `rewinding` | true only if the working environment declares `points` |
 | `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | from the Providers; false for those the SDK ships |
 | `severalActors`, `sessionLimits`, `tenants` | from the options of the same names; false by default |
-| `holdsOutput`, `outputBypassesAgent` | false |
+| `holdsOutput` | true when the agent guarantees whole-stream holding in the declared scope; otherwise false. Streams covered by a remote output gate require holding and a true declaration, as the [plugin binding](../bindings/plugin.md#the-host-asks-a-hook-handler) specifies. |
+| `outputBypassesAgent` | false |
 | `cancellingTurnCancelsJobs` | false |
 | `pluginsDuringSession` | false |
 | `erasure` | true only if the history store and the agent both implement erasure; false for the memory store until it does |
@@ -89,6 +91,8 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `commandContainment` | the containment the working environment declares for the current platform. `strong` only where it confirms that every descendant of a command stops; `processGroup` where it contains only the command's process group. Never inferred from the environment's name. |
 | `confinesFiles` | from the working environment. False for the local one: it resolves paths against the project but does not refuse ones that lead outside it. True for the testing kit's memory environment, which has no other files. |
 | `nestedToolCalls` | true only if the host and the Runtime path both run nested calls in the chosen placement. For a served Runtime the host decides from its own Runtime bridge, which settles nested calls; the plugin binding's `RuntimeSupports` has no flag for it, and no private wire field may stand in for one. |
+
+The host enforces both queue policies. An in-process Runtime can supply them; `RuntimeSupports` in the plugin binding does not negotiate either policy.
 
 The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check these values.
 
@@ -110,6 +114,7 @@ The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check th
 | `callTool(name, input)` | a ToolResult; a direct call by this actor, through every gate |
 | `events(fromEntry?)` | every event in the session this actor may see, from the start or a cursor, then live |
 | `waitIdle()` | waits until the running turn and every input already admitted have finished, without admitting input or closing the session |
+| `lastTurn()` | the latest settled turn as a PromptResult, or no value if no turn has settled. Does not admit input or wait for a running turn. |
 | `close()` | closes the session; cancels its work as [Jobs](../contracts.md#jobs) says |
 
 `input` is a string or Content. `options` carries `key`, for safe retries ([input admission](../contracts.md#input)), and `actor`, to act as an actor other than the local one.
@@ -172,7 +177,7 @@ onQuestion(question: Question, context) -> Answer
 | `call` | for an approval: the exact tool call, name and input |
 | `deadline` | when it closes, if timed |
 
-An Answer is `allow` (approval), a value (choice, text, link), a secret value (secret) or `decline` with an optional reason. A decline is a tagged answer, not a reserved string: a text answer of `declined` is a value. A handler that raises or returns nothing declines. A secret value goes only to the credential store; nothing records or returns it ([Secrets](../contracts.md#secrets)).
+An Answer is `allow` (approval), a value (choice, text, link), a secret value (secret) or `decline` with an optional reason. A decline is a tagged answer, not a reserved string: a text answer of `declined` is a value. A handler that raises or returns nothing declines. A secret value goes only to the credential store. The asker receives only the stored name, after activation is confirmed and the terminal answer is committed. Staging alone does not answer the question ([Secrets](../contracts.md#secrets)).
 
 The handler can be set on `createAgent` for every session or on one session with `session.onQuestion`, which takes precedence for that session. `session.questions()` lists open questions and `session.answer(questionId, answer)` answers one later, for apps that show questions in their own UI.
 
@@ -274,7 +279,7 @@ A **Tool** has a definition and a function:
 | `presentation` | none |
 | `inProcessOnly` | false; see [Plugins](#plugins) |
 
-`input` and `output` are the SDK's names for the definition's `parameters` and `returns`. On the wire, in history and in every ToolDefinition the SDK exposes, they are `parameters` and `returns`. In a serialized ToolDefinition the four hints are members of `hints`; `parallel` and `callers` are top-level fields. The SDK checks a call's input against `parameters` before the function runs, and, after `tool.after`, a completed result's `value` against `returns`. Invalid input ends the call `failed` with a readable reason. If result processing fails, for example because `tool.after` produced an invalid value, the invalid value is never exposed: the call keeps a minimal safe result with its confirmed status, and the enclosing operation fails ([Settlement](../contracts.md#settlement)).
+`input` and `output` are the SDK's names for the definition's `parameters` and `returns`. On the wire, in history and in every ToolDefinition the SDK exposes, they are `parameters` and `returns`. In a serialized ToolDefinition the four hints are members of `hints`; `parallel` and `callers` are top-level fields. The SDK checks a call's input against `parameters` before the function runs. Invalid input ends the call `failed` with a readable reason. After `tool.after`, if the result is `completed` and `returns` is set, the host requires a `value` and validates it. A missing or invalid value is a result processing error. The host commits a minimal safe result with the confirmed status, reports the error separately and fails the enclosing operation without redispatching the tool ([Settlement](../contracts.md#settlement)).
 
 The function receives the input, already checked against the schema and converted to the language's type, and a [tool context](#contexts). What it returns becomes the ToolResult:
 
@@ -313,11 +318,13 @@ A **Provider** has:
 | Member | |
 |---|---|
 | `id` | unique in the agent; the first half of every ModelRef it offers |
-| `models() -> ModelInfo[]` | the full current catalog; it can call `changed()` when the catalog changes |
+| `models() -> ModelInfo[]` | the full current catalog. In process, call `changed()` after updating it to tell subscribers to read it again. |
 | `supports` | `keepsState` and `safeToRepeat` ([Provider support](../bindings/plugin.md#the-host-asks-a-provider)) |
 | `available() -> boolean` | optional: whether it can take requests now, for example whether it has credentials |
 | `request(model, request, context) -> AssistantMessage` | makes one model request |
 | `discardState(sessionId)` | optional, for a Provider that keeps state |
+
+The [plugin binding](../bindings/plugin.md#the-host-asks-a-provider) has no Provider catalog notification. Before preparing a step, the host queries the served Provider's catalog and readiness with `provider/models` and `provider/available`. Do not send a private catalog notification.
 
 `request` reports output as it arrives with `context.piece(type, delta, toolCallId?)`, then returns the complete AssistantMessage.
 
