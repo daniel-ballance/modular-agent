@@ -57,7 +57,8 @@ scripts/websocket-kits.sh go
 - **Reference checks:** 19/19 in each language, including tool function values and memory failure followed by recovery.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio and 193/193 over WebSocket against Go `ma`. The Go plugin WebSocket kit passed 153/153.
 - **Sandbox regressions:** the Go tests cover imports and aliases, argument binding, structured and failed results, terminal memory and time limits, time waiting on a tool, worker death and cancellation, call and recursion boundaries, print and result limits, malformed worker messages and denied OS operations.
-- **Go checks:** build, vet and formatting pass. The full suite passed 37 packages. The race run for `modular/...` and `cmd/ma/...` passed 7 tested packages. `cmd/modular` takes several minutes; use the default package timeout.
+- **Go checks:** build, vet and formatting pass. The full suite passed 38 tested packages. The race run for `modular/...` and `cmd/ma/...` passed 7 tested packages. `cmd/modular` takes several minutes; use the default package timeout.
+- **No network:** the Go `codemode-tools-values` and `sandbox-memory` reference checks both passed in a separate Linux network namespace.
 - **Claude:** the first pass tested the sidecar over stdio with its scripted SDK. No real sign-ins or model requests were made for any Provider.
 
 ## Known gaps
