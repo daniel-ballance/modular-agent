@@ -20,7 +20,21 @@ type LocalHook<Input, Output> =
 
 /// A session-scoped tool catalog, queried before dispatch.
 pub trait ToolSource: Send + Sync + 'static {
+    /// The full catalog. A session-independent source receives an empty id.
     fn tools(&self, session_id: &str) -> Vec<Tool>;
+    fn per_session(&self) -> bool {
+        true
+    }
+    /// Keep the notifier and call it after changing the catalog, before replying.
+    fn catalog_notifier(&self, _notifier: ToolsChanged) {}
+}
+
+#[derive(Clone)]
+pub struct ToolsChanged(pub(crate) Arc<dyn Fn() + Send + Sync>);
+impl ToolsChanged {
+    pub fn changed(&self) {
+        (self.0)();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -46,10 +60,18 @@ pub struct Registrar {
     pub(crate) tools: Vec<Tool>,
     pub(crate) providers: Vec<Arc<dyn crate::Provider>>,
     pub(crate) hooks: Vec<Hook>,
+    pub(crate) local_hooks: Vec<crate::hooks::LocalRegistration>,
     pub(crate) commands: Vec<Command>,
-    defined: Vec<(String, HookRule)>,
-    sources: Vec<(String, Arc<dyn ToolSource>)>,
+    defined: Vec<(String, HookRule, crate::DefinedHook)>,
+    subscriptions: Vec<(String, crate::Order, crate::hooks::LocalHandle)>,
+    pub(crate) sources: Vec<(String, Arc<dyn ToolSource>)>,
     prepare: Vec<LocalHook<SessionPrepare, ()>>,
+    environment: Option<Arc<dyn base::WorkingEnvironment>>,
+    runtime: Option<Arc<dyn base::Runtime>>,
+    history: Option<crate::History>,
+    credentials: Option<Arc<dyn crate::CredentialStore>>,
+    configuration: Option<Arc<dyn crate::Configuration>>,
+    pub(crate) interfaces: Vec<Arc<dyn crate::Interface>>,
 }
 
 #[derive(Clone)]
@@ -67,6 +89,7 @@ pub struct CommandContext {
     pub actor_id: String,
     pub cancelled: CancellationToken,
     pub(crate) model: Option<Arc<CommandModel>>,
+    pub(crate) local_work: Option<ToolContext>,
 }
 
 pub(crate) struct CommandModel {
@@ -101,6 +124,36 @@ impl CommandContext {
             _ = model.done.cancelled() => Err(Error::new(Code::InvalidRequest, "command context has settled")),
             result = attempt => result,
         }
+    }
+
+    /// Ask an actor from an in-process-only command.
+    pub async fn ask(&self, question: crate::Ask) -> Result<crate::Answer> {
+        let work = self
+            .local_work
+            .as_ref()
+            .ok_or_else(|| cannot_serve("command questions"))?;
+        work.ask(question).await
+    }
+
+    pub async fn call_hook(
+        &self,
+        hook: &crate::DefinedHook,
+        value: Value,
+    ) -> Result<crate::HookReply> {
+        let work = self
+            .local_work
+            .as_ref()
+            .ok_or_else(|| cannot_serve("custom hooks"))?;
+        work.call_hook(hook, value).await
+    }
+
+    /// The working environment scoped to this command.
+    pub fn environment(&self) -> Result<crate::ToolEnvironment<'_>> {
+        let work = self
+            .local_work
+            .as_ref()
+            .ok_or_else(|| cannot_serve("command environment"))?;
+        Ok(work.environment())
     }
 
     pub fn log(&self, message: impl std::fmt::Display) {
@@ -190,12 +243,12 @@ impl Plugin {
             Ok(())
         })
     }
-    /// Register a local source whose catalog may vary by session.
+    /// Register a source whose catalog may change or vary by session.
     pub fn tool_source(self, name: impl Into<String>, source: impl ToolSource) -> Self {
         let name = name.into();
         let source: Arc<dyn ToolSource> = Arc::new(source);
         self.setup(move |r| {
-            r.sources.push((name.clone(), source.clone()));
+            r.add_source(name.clone(), source.clone());
             Ok(())
         })
     }
@@ -235,14 +288,23 @@ impl Plugin {
             tools: vec![],
             providers: vec![],
             hooks: vec![],
+            local_hooks: vec![],
             commands: vec![],
             defined: vec![],
+            subscriptions: vec![],
             sources: vec![],
             prepare: vec![],
+            environment: None,
+            runtime: None,
+            history: None,
+            credentials: None,
+            configuration: None,
+            interfaces: vec![],
         };
         for setup in &self.setups {
             setup(&mut r)?;
         }
+        r.validate_sources()?;
         Ok(r)
     }
 }
@@ -260,12 +322,93 @@ impl Registrar {
     pub fn command(&mut self, command: Command) {
         self.commands.push(command);
     }
-    pub fn define_hook(&mut self, name: impl Into<String>, rule: HookRule) {
-        self.defined.push((name.into(), rule));
+    pub fn define_hook(&mut self, name: impl Into<String>, rule: HookRule) -> crate::DefinedHook {
+        let hook = crate::DefinedHook(Arc::new(std::sync::OnceLock::new()));
+        self.defined.push((name.into(), rule, hook.clone()));
+        hook
     }
+
+    /// Subscribe to an in-process plugin-defined hook.
+    pub fn on_hook<F, Fut>(&mut self, name: impl Into<String>, order: crate::Order, f: F)
+    where
+        F: Fn(Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<crate::HookAnswer>> + Send + 'static,
+    {
+        self.subscriptions.push((
+            name.into(),
+            order,
+            Arc::new(move |value| {
+                let result = f(value);
+                Box::pin(async move { Ok(result.await?.native()) })
+            }),
+        ));
+    }
+    pub fn tools(&mut self, id: impl Into<String>, source: impl ToolSource) {
+        self.add_source(id.into(), Arc::new(source));
+    }
+    fn add_source(&mut self, id: String, source: Arc<dyn ToolSource>) {
+        self.sources.push((id, source));
+    }
+    pub(crate) fn validate_sources(&self) -> Result<()> {
+        let mut unique = std::collections::BTreeSet::new();
+        for (id, _) in &self.sources {
+            if id.is_empty() || id == "tools" || !unique.insert(id) {
+                return Err(Error::new(
+                    Code::InvalidComposition,
+                    format!("invalid or duplicate tool source id: {id}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn environment(&mut self, part: impl base::WorkingEnvironment + 'static) -> Result<()> {
+        set_part(&mut self.environment, Arc::new(part), "working-environment")
+    }
+    pub fn runtime(&mut self, part: impl base::Runtime + 'static) -> Result<()> {
+        set_part(&mut self.runtime, Arc::new(part), "runtime")
+    }
+    pub fn history_store(&mut self, store: crate::History) -> Result<()> {
+        set_part(&mut self.history, store, "history")
+    }
+    pub fn credential_store(&mut self, store: impl crate::CredentialStore) -> Result<()> {
+        set_part(&mut self.credentials, Arc::new(store), "credentials")
+    }
+    pub fn configuration(&mut self, source: impl crate::Configuration) -> Result<()> {
+        set_part(&mut self.configuration, Arc::new(source), "configuration")
+    }
+    pub fn interface(&mut self, interface: impl crate::Interface) {
+        self.interfaces.push(Arc::new(interface));
+    }
+
+    pub(crate) fn history_part(&self) -> Option<&crate::History> {
+        self.history.as_ref()
+    }
+    pub(crate) fn has_credentials(&self) -> bool {
+        self.credentials.is_some()
+    }
+    pub(crate) fn has_configuration(&self) -> bool {
+        self.configuration.is_some()
+    }
+    pub(crate) fn has_environment(&self) -> bool {
+        self.environment.is_some()
+    }
+
     pub(crate) fn check_servable(&self) -> Result<()> {
-        if !self.sources.is_empty() {
-            return Err(cannot_serve("dynamic tool source"));
+        for (registered, name) in [
+            (self.environment.is_some(), "native working-environment"),
+            (self.runtime.is_some(), "native Runtime"),
+            (self.history.is_some(), "history store"),
+            (self.credentials.is_some(), "credential store"),
+            (self.configuration.is_some(), "configuration"),
+            (!self.interfaces.is_empty(), "Interface"),
+        ] {
+            if registered {
+                return Err(cannot_serve(name));
+            }
+        }
+        if let Some(hook) = self.local_hooks.first() {
+            return Err(cannot_serve(hook.point));
         }
         if !self.prepare.is_empty() {
             return Err(cannot_serve("local lifecycle or system hook"));
@@ -276,11 +419,25 @@ impl Registrar {
         if let Some(c) = self.commands.iter().find(|c| c.local) {
             return Err(cannot_serve(&format!("command:{}", c.name)));
         }
-        if let Some((name, _)) = self.defined.first() {
+        if let Some((name, _, _)) = self.defined.first() {
+            return Err(cannot_serve(&format!("hook:{name}")));
+        }
+        if let Some((name, _, _)) = self.subscriptions.first() {
             return Err(cannot_serve(&format!("hook:{name}")));
         }
         Ok(())
     }
+}
+
+fn set_part<T>(slot: &mut Option<T>, part: T, name: &str) -> Result<()> {
+    if slot.is_some() {
+        return Err(Error::new(
+            Code::InvalidComposition,
+            format!("duplicate {name} registration"),
+        ));
+    }
+    *slot = Some(part);
+    Ok(())
 }
 
 pub(crate) fn cannot_serve(item: &str) -> Error {
@@ -322,6 +479,34 @@ impl base::Plugin for InProcess {
     }
 
     fn install(&self, r: &mut base::Registrar<'_>) -> base::Result<()> {
+        if let Some(part) = &self.registered.environment {
+            r.provide::<dyn base::WorkingEnvironment>("environment", part.clone())?;
+        }
+        if let Some(part) = &self.registered.runtime {
+            base::Plugin::install(&crate::parts::RuntimeAdapter(part.clone()), r)?;
+        }
+        if let Some(part) = &self.registered.history {
+            r.provide_over_default::<dyn base::HistoryStore>(
+                "history",
+                "sdk.core",
+                part.0.clone(),
+            )?;
+            r.provide::<crate::History>("sdk.history.part", Arc::new(part.clone()))?;
+        }
+        if let Some(part) = &self.registered.configuration {
+            r.provide_over_default::<dyn base::Configuration>(
+                "configuration",
+                "sdk.core",
+                Arc::new(crate::parts::ConfigurationAdapter(part.clone())),
+            )?;
+        }
+        if let Some(part) = &self.registered.credentials {
+            r.provide_over_default::<dyn base::CredentialStore>(
+                "credentials",
+                "sdk.core",
+                Arc::new(crate::credentials::StoreAdapter(part.clone())),
+            )?;
+        }
         for provider in &self.registered.providers {
             base::Plugin::install(
                 &crate::provider::ProviderPlugin {
@@ -338,6 +523,7 @@ impl base::Plugin for InProcess {
             )?;
         }
         for (name, source) in &self.registered.sources {
+            source.catalog_notifier(ToolsChanged(Arc::new(|| {})));
             r.provide::<dyn base::ToolSource>(
                 &format!("tools.{name}"),
                 Arc::new(Source(source.clone())),
@@ -362,8 +548,35 @@ impl base::Plugin for InProcess {
                 }),
             );
         }
-        for (name, rule) in &self.registered.defined {
-            r.define(name, rule.native())?;
+        for (name, rule, hook) in &self.registered.defined {
+            let point = r.define(name, rule.native())?;
+            base::ensure!(hook.0.set(point).is_ok(), "custom hook already registered");
+        }
+        for (name, order, handle) in &self.registered.subscriptions {
+            let handle = handle.clone();
+            r.on(
+                name,
+                order.native(),
+                base::handler(move |_, _, value| {
+                    let handle = handle.clone();
+                    Box::pin(async move { Ok(handle(value).await?) })
+                }),
+            );
+        }
+        for hook in &self.registered.local_hooks {
+            let handle = hook.handle.clone();
+            let point = hook.point;
+            r.on(
+                point,
+                hook.order.native(),
+                base::handler(move |_, scope, mut value| {
+                    if point == "output" {
+                        value["sessionId"] = json!(scope.session);
+                    }
+                    let handle = handle.clone();
+                    Box::pin(async move { Ok(handle(value).await?) })
+                }),
+            );
         }
         for hook in &self.registered.hooks {
             let handle = hook.handle.clone();
@@ -397,6 +610,7 @@ impl base::Plugin for InProcess {
         for command in &self.registered.commands {
             let run = command.run.clone();
             let uses_model = command.uses_model;
+            let can_ask = command.local;
             r.command(
                 &command.name,
                 base::handler(move |api, scope, args| {
@@ -405,18 +619,35 @@ impl base::Plugin for InProcess {
                         let cancelled = api.cancellation(&scope.session)?;
                         let done = cancelled.child_token();
                         let _guard = done.clone().drop_guard();
+                        let work_scope = base::Scope {
+                            step: Some(base::id()),
+                            turn: None,
+                            ..scope.clone()
+                        };
                         let model = uses_model.then(|| {
                             Arc::new(CommandModel {
-                                api,
-                                scope: base::Scope {
-                                    step: Some(base::id()),
-                                    turn: None,
-                                    ..scope.clone()
-                                },
-                                done,
+                                api: api.clone(),
+                                scope: work_scope.clone(),
+                                done: done.clone(),
                                 sequence: tokio::sync::Mutex::new(()),
                             })
                         });
+                        let local_work = if can_ask {
+                            Some(ToolContext {
+                                backend: Backend::Local {
+                                    api: api.clone(),
+                                    scope: work_scope,
+                                },
+                                session_id: scope.session.clone(),
+                                actor_id: scope.actor.clone(),
+                                project: api.snapshot(&scope.session)?.project,
+                                call_id: String::new(),
+                                cancelled: cancelled.clone(),
+                                settled: done,
+                            })
+                        } else {
+                            None
+                        };
                         let text = run(
                             args["args"].as_str().unwrap_or_default().into(),
                             CommandContext {
@@ -424,6 +655,7 @@ impl base::Plugin for InProcess {
                                 actor_id: scope.actor,
                                 cancelled,
                                 model,
+                                local_work,
                             },
                         )
                         .await?;
@@ -555,7 +787,11 @@ struct Source(Arc<dyn ToolSource>);
 impl base::ToolSource for Source {
     fn tools(&self, session: &base::SessionData) -> Vec<base::ToolDefinition> {
         self.0
-            .tools(&session.id)
+            .tools(if self.0.per_session() {
+                &session.id
+            } else {
+                ""
+            })
             .into_iter()
             .map(|t| t.definition)
             .collect()
@@ -569,7 +805,11 @@ impl base::ToolSource for Source {
     ) -> base::ToolResult {
         let Some(tool) = self
             .0
-            .tools(&scope.session)
+            .tools(if self.0.per_session() {
+                &scope.session
+            } else {
+                ""
+            })
             .into_iter()
             .find(|t| t.definition.name == call.name)
         else {

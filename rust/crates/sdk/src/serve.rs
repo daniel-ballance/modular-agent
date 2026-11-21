@@ -13,6 +13,8 @@ use tokio_util::sync::CancellationToken;
 const BINDING: &str = "modular-agent-plugin/1";
 const SOURCE: &str = "tools";
 
+tokio::task_local! { static CATALOG_PARENT: Value; }
+
 /// Serve a plugin on stdin and stdout until the agent closes the connection. A plugin
 /// program writes nothing else to stdout.
 pub async fn serve(plugin: Plugin) -> Result<()> {
@@ -100,8 +102,21 @@ fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
             json!({"id":p.id(),"models":p.models(),"supports":{"keepsState":support.keeps_state,"runsTools":false,"safeToRepeat":support.safe_to_repeat}})
         }).collect::<Vec<_>>());
     }
+    let mut sources = Vec::new();
     if !r.tools.is_empty() {
-        v["toolSources"] = json!([{"id": SOURCE, "tools": tools(r), "perSession": false}]);
+        sources.push(json!({"id": SOURCE, "tools": definitions(&r.tools), "perSession": false}));
+    }
+    for (id, source) in &r.sources {
+        let per_session = source.per_session();
+        let tools = if per_session {
+            vec![]
+        } else {
+            definitions(&source.tools(""))
+        };
+        sources.push(json!({"id": id, "tools": tools, "perSession": per_session}));
+    }
+    if !sources.is_empty() {
+        v["toolSources"] = json!(sources);
     }
     if !r.hooks.is_empty() {
         v["hooks"] = json!(
@@ -125,8 +140,35 @@ fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
     v
 }
 
-fn tools(r: &Registrar) -> Vec<Value> {
-    r.tools.iter().map(|t| t.definition()).collect()
+fn definitions(tools: &[crate::Tool]) -> Vec<Value> {
+    tools.iter().map(|t| t.definition()).collect()
+}
+
+fn tools(r: &Registrar, params: &Value) -> std::result::Result<Vec<crate::Tool>, Fault> {
+    if params["toolSource"] == SOURCE && !r.tools.is_empty() {
+        return Ok(r.tools.clone());
+    }
+    let (_, source) = r
+        .sources
+        .iter()
+        .find(|(name, _)| params["toolSource"] == *name)
+        .ok_or_else(|| Fault::new("invalid_request", "unknown tool source"))?;
+    let session = if source.per_session() {
+        params["sessionId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| Fault::new("invalid_request", "session required for tool source"))?
+    } else {
+        ""
+    };
+    let list = source.tools(session);
+    if let Some(tool) = list.iter().find(|tool| tool.in_process_only) {
+        return Err(Fault::new(
+            "not_supported",
+            format!("tool:{} is in-process only", tool.name()),
+        ));
+    }
+    Ok(list)
 }
 
 #[async_trait::async_trait]
@@ -182,6 +224,18 @@ impl Endpoint for Served {
                 // re-read provider/models; do not invent a private wire message.
                 for provider in &r.providers {
                     provider.catalog_notifier(crate::CatalogNotifier::default());
+                }
+                for (name, source) in &r.sources {
+                    let (name, peer) = (name.clone(), Arc::downgrade(&peer));
+                    source.catalog_notifier(crate::ToolsChanged(Arc::new(move || {
+                        if let Some(peer) = peer.upgrade() {
+                            let mut params = json!({"toolSource":name});
+                            if let Ok(id) = CATALOG_PARENT.try_with(Clone::clone) {
+                                params["parentRequestId"] = id;
+                            }
+                            peer.notify("tools/changed", params);
+                        }
+                    })));
                 }
                 let v = registration(&self.plugin.name, &self.plugin.replaces, &r);
                 *registered = Some(Arc::new(r));
@@ -257,18 +311,13 @@ impl Endpoint for Served {
             }
             "tools/list" => {
                 let r = self.registered()?;
-                if p["toolSource"] != SOURCE || r.tools.is_empty() {
-                    return Err(Fault::new("invalid_request", "unknown tool source"));
-                }
-                Ok(json!({"tools": tools(&r)}))
+                Ok(json!({"tools": definitions(&tools(&r, &p)?)}))
             }
             "tools/call" => {
                 let r = self.registered()?;
-                if p["toolSource"] != SOURCE {
-                    return Err(Fault::new("invalid_request", "unknown tool source"));
-                }
                 let call = &p["call"];
-                let Some(tool) = r.tools.iter().find(|t| call["name"] == t.name()) else {
+                let available = tools(&r, &p)?;
+                let Some(tool) = available.iter().find(|t| call["name"] == t.name()) else {
                     return Err(Fault::new("invalid_request", "unknown tool"));
                 };
                 let cx = ToolContext {
@@ -276,11 +325,16 @@ impl Endpoint for Served {
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: call["actorId"].as_str().unwrap_or_default().into(),
                     call_id: call["id"].as_str().unwrap_or_default().into(),
-                    backend: Backend::Remote { peer, parent: id },
+                    backend: Backend::Remote {
+                        peer,
+                        parent: id.clone(),
+                    },
                     cancelled: cancel.clone(),
                     settled: Default::default(),
                 };
-                let settled = execute(tool, call["input"].clone(), cx).await;
+                let settled = CATALOG_PARENT
+                    .scope(id, execute(tool, call["input"].clone(), cx))
+                    .await;
                 if settled.status == ToolStatus::Cancelled && cancel.is_cancelled() {
                     return Err(Fault::new("cancelled", "tool cancelled"));
                 }
@@ -329,6 +383,7 @@ impl Endpoint for Served {
                     actor_id: p["actorId"].as_str().unwrap_or_default().into(),
                     cancelled: cancel,
                     model: None,
+                    local_work: None,
                 };
                 let text = (command.run)(p["args"].as_str().unwrap_or_default().into(), cx)
                     .await

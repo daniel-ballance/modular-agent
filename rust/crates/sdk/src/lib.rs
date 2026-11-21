@@ -44,20 +44,25 @@ pub use credentials::{
     environment_credentials, file_credentials,
 };
 pub use error::{Code, Error, Result};
-pub use events::{Event, Question, QuestionKind, QuestionReply};
+pub use events::{Event, EventData, Question, QuestionKind, QuestionReply};
 pub use history::{
-    ErasedEntry, ErasureReport, History, HistoryServer, ServeHistoryOptions, SessionInfo,
-    file_history, http_history, http_history_from_env, listen_history, memory_history,
+    ErasedEntry, ErasureReport, History, HistoryServer, HistoryStore, ServeHistoryOptions,
+    SessionInfo, file_history, http_history, http_history_from_env, listen_history, memory_history,
     serve_history,
 };
 pub use hooks::*;
-pub use parts::{Environment, Runtime, durable_runtime, local_environment, transient_runtime};
-pub use plugin::{Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource};
+pub use parts::{
+    Configuration, Environment, Interface, Runtime, durable_runtime, local_environment, native,
+    transient_runtime,
+};
+pub use plugin::{
+    Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource, ToolsChanged,
+};
 pub use provider::*;
 pub use serve::{ServeOptions, serve, serve_websocket, serve_websocket_factory};
 pub use session::{
-    Actor, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome, PromptOptions,
-    PromptResult, Rights, Session, Timing, ToolResult,
+    Actor, Content, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome,
+    PromptInput, PromptOptions, PromptResult, Proposal, Rights, Session, Timing, ToolResult,
 };
 pub use tool::{
     Answer, Ask, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext, ToolEnvironment,

@@ -69,6 +69,10 @@ pub fn content(parts: &[Part]) -> Vec<Value> {
         })
         .collect()
 }
+pub fn text_content(text: &str) -> Value {
+    json!([{"type":"text","text":text}])
+}
+
 pub fn parts(content: &Value) -> Result<Vec<Part>> {
     content
         .as_array()

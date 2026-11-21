@@ -128,10 +128,13 @@ impl Registry {
             ("session.prepare", Rule::Observe),
             ("session.start", Rule::Observe),
             ("session.end", Rule::Observe),
+            ("session.join", Rule::Observe),
+            ("session.leave", Rule::Observe),
             ("input", Rule::Transform),
             ("before.turn", Rule::Collect),
             ("provider.request", Rule::Transform),
             ("provider.response", Rule::Observe),
+            ("provider.piece", Rule::Observe),
             ("output", Rule::Transform),
             ("output.stream", Rule::Transform),
         ] {
@@ -457,6 +460,24 @@ impl Registrar<'_> {
         );
         Ok(())
     }
+    /// Override a fallback part, not another explicit registration.
+    pub fn provide_over_default<T: ?Sized + Send + Sync + 'static>(
+        &mut self,
+        name: &str,
+        fallback: &str,
+        value: Arc<T>,
+    ) -> Result<()> {
+        if self
+            .registry
+            .capabilities
+            .get(name)
+            .is_some_and(|entry| entry.owner == fallback)
+        {
+            self.registry.capabilities.remove(name);
+        }
+        self.provide(name, value)
+    }
+
     pub fn define(&mut self, name: &str, rule: Rule) -> Result<HookPoint> {
         ensure!(
             !self.registry.hooks.contains_key(name),

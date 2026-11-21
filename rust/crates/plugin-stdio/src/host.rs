@@ -1438,11 +1438,17 @@ pub fn hook_payload(hook: &str, s: &Scope, v: &Value, api: &Api) -> Result<Value
             p["project"] = v["project"].clone();
         }
         "input" => {
-            p["content"] = json!([{"type":"text","text":v["text"]}]);
+            p["content"] = v
+                .get("content")
+                .cloned()
+                .unwrap_or_else(|| json!([{"type":"text","text":v["text"]}]));
             p["when"] = v["timing"].clone();
         }
         "turn.before" => {
-            p["input"] = json!([{"type":"text","text":v["input"]}]);
+            p["input"] = v
+                .get("content")
+                .cloned()
+                .unwrap_or_else(|| json!([{"type":"text","text":v["input"]}]));
         }
         "step.before" => {
             let request: ModelRequest = serde_json::from_value(v["request"].clone())?;
@@ -1563,7 +1569,10 @@ pub fn hook_result(hook: &str, s: &Scope, mut original: Value, reply: Value) -> 
             s.call.as_deref().unwrap_or("")
         )?))),
         "input" => {
-            original["text"] = json!(wire::text(&reply["value"]["content"]));
+            let content = &reply["value"]["content"];
+            wire::parts(content)?;
+            original["text"] = json!(wire::text(content));
+            original["content"] = content.clone();
             Ok(HookResult {
                 stopped: reply["stop"] == true,
                 ..answer(original)

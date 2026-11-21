@@ -98,6 +98,12 @@ impl interface_acp::Factory for ProjectFactory {
             agent.close().await?;
             return Err(base::anyhow!("serve_acp requires a plugin host"));
         }
+        if agent.inner.project != project {
+            agent.close().await?;
+            return Err(base::anyhow!(
+                "ACP composition returned a different project"
+            ));
+        }
         if agent.inner.scratch.lock().unwrap().is_some() {
             agent.close().await?;
             return Err(base::anyhow!(

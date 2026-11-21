@@ -1,6 +1,7 @@
 //! History choices. The HTTP client uses the base's lease and portable-record implementation.
 use crate::{Code, Error, Result, core::MemoryHistory};
 use agent_api as base;
+pub use agent_api::HistoryStore;
 pub use history_http::{HistoryServer, ServeHistoryOptions};
 use serde_json::Value;
 use std::{path::Path, sync::Arc};
@@ -80,6 +81,11 @@ impl From<base::SessionData> for SessionInfo {
 }
 
 impl History {
+    /// Adapt an advanced native snapshot store into an SDK history part.
+    pub fn from_store(store: impl HistoryStore + 'static, persistent: bool) -> Self {
+        Self(Arc::new(store), persistent, "custom")
+    }
+
     pub fn sessions(&self, project: Option<&Path>) -> Result<Vec<SessionInfo>> {
         let project = project.map(Path::canonicalize).transpose()?;
         Ok(self

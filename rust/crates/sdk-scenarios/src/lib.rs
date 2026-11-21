@@ -417,10 +417,7 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
                 if want["code"] == e.code().as_str()
                     && want["messageContains"]
                         .as_str()
-                        .is_some_and(|s| e.message().contains(s)) =>
-            {
-                ()
-            }
+                        .is_some_and(|s| e.message().contains(s)) => {}
             Err(e) => fail(
                 0,
                 format!(

@@ -76,7 +76,7 @@ async fn actor_views_use_current_shared_rights() -> Result<()> {
         guest.prompt("again").await.unwrap_err().code(),
         Code::Forbidden
     );
-    session.leave("guest")?;
+    session.leave("guest").await?;
     assert_eq!(guest.history().await.unwrap_err().code(), Code::Forbidden);
     agent.close().await
 }
