@@ -192,27 +192,85 @@ impl modular_agent::Provider for LocalToolsProvider {
     }
 }
 
+struct OneStep;
+#[async_trait]
+impl modular_agent::RuntimePart for OneStep {
+    fn declaration(&self) -> modular_agent::RuntimeDeclaration {
+        modular_agent::RuntimeDeclaration {
+            id: "one-step".into(),
+            supports: Default::default(),
+        }
+    }
+    async fn run_turn(
+        &self,
+        _: modular_agent::RuntimeTurn,
+        cx: modular_agent::RuntimeContext,
+    ) -> Result<modular_agent::RuntimeOutcome> {
+        let step = cx.new_id().await?;
+        let request = cx.prepare_step(&step, Default::default()).await?;
+        assert!(request.0.get("providerTools").is_none());
+        let response = cx.model(&step, request).await?;
+        cx.record(json!({"kind":"response","stepId":step,"visible":true,"message":response}))
+            .await?;
+        cx.hook("step.after", json!({"stepId":step,"response":response}))
+            .await?;
+        Ok(modular_agent::RuntimeOutcome {
+            outcome: modular_agent::Outcome::Completed,
+            result: json!({"text":response.0["content"][0]["text"],"openToolCalls":[]}),
+            entries: vec![],
+            usage: Default::default(),
+        })
+    }
+    async fn resume_turn(
+        &self,
+        _: modular_agent::RuntimeTurn,
+        _: modular_agent::InterruptedTurn,
+        _: modular_agent::RuntimeContext,
+    ) -> Result<modular_agent::RuntimeOutcome> {
+        unreachable!()
+    }
+    async fn continue_open_calls(
+        &self,
+        _: modular_agent::RuntimeTurn,
+        _: Vec<modular_agent::RuntimeCall>,
+        _: modular_agent::RuntimeContext,
+    ) -> Result<modular_agent::RuntimeOutcome> {
+        unreachable!()
+    }
+}
+
 #[tokio::test]
 async fn local_step_hook_narrows_provider_tool_allowance_without_putting_it_on_the_wire()
 -> Result<()> {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let agent = modular_agent::Agent::builder()
-        .provider(LocalToolsProvider(seen.clone()))
-        .plugin(
-            Plugin::new("step-allowance").on_step_before_change(|step| async move {
-                let mut tools = step.provider_tools.unwrap();
-                assert_eq!(tools.len(), 2);
-                tools.remove(0);
-                Ok(StepChange {
-                    provider_tools: Some(tools),
-                    ..StepChange::default()
-                })
-            }),
-        )
-        .build()
-        .await?;
-    let session = agent.session().await?;
-    assert_eq!(session.prompt("test allowance").await?.text, "answer");
-    assert_eq!(*seen.lock().unwrap(), ["two"]);
-    agent.close().await
+    for bridge in [false, true] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let builder = modular_agent::Agent::builder()
+            .provider(LocalToolsProvider(seen.clone()))
+            .plugin(
+                Plugin::new("step-allowance").on_step_before_change(|step| async move {
+                    let mut tools = step.provider_tools.unwrap();
+                    assert_eq!(tools.len(), 2);
+                    tools.remove(0);
+                    Ok(StepChange {
+                        provider_tools: Some(tools),
+                        ..StepChange::default()
+                    })
+                }),
+            );
+        let builder = if bridge {
+            builder.plugin(
+                Plugin::new("runtime-test")
+                    .replaces("runtime")
+                    .setup(|r| r.runtime(OneStep)),
+            )
+        } else {
+            builder
+        };
+        let agent = builder.build().await?;
+        let session = agent.session().await?;
+        assert_eq!(session.prompt("test allowance").await?.text, "answer");
+        assert_eq!(*seen.lock().unwrap(), ["two"]);
+        agent.close().await?;
+    }
+    Ok(())
 }

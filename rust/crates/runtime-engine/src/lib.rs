@@ -229,7 +229,8 @@ impl Engine {
                 )
                 .await?
                 .value;
-            let request: ModelRequest = serde_json::from_value(value["request"].clone())?;
+            let mut request: ModelRequest = serde_json::from_value(value["request"].clone())?;
+            let provider_tools = std::mem::take(&mut request.provider_tools);
             let request = api
                 .output(
                     scope,
@@ -257,12 +258,14 @@ impl Engine {
                     ..scope.clone()
                 }
             };
+            let mut dispatch: ModelRequest = serde_json::from_value(request.clone())?;
+            dispatch.provider_tools = provider_tools;
             let generated = input
                 .model
                 .generate_attempt(
                     api.clone(),
                     attempt_scope.clone(),
-                    serde_json::from_value(request.clone())?,
+                    dispatch,
                     input.cancel.clone(),
                     ModelAttempt {
                         writer: if self.durable {

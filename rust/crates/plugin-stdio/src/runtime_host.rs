@@ -40,7 +40,7 @@ pub(crate) struct TurnWork {
     commits: tokio::sync::Mutex<()>,
     allowed: Mutex<BTreeMap<String, Allowance>>,
     allocated: Mutex<BTreeSet<String>>,
-    prepared: Mutex<BTreeMap<String, Value>>,
+    prepared: Mutex<BTreeMap<String, PreparedStep>>,
     expected: Mutex<BTreeMap<String, Value>>,
     after: Mutex<BTreeSet<String>>,
     step_refusal: Mutex<Option<String>>,
@@ -58,6 +58,11 @@ fn committed_pending(data: &SessionData, turn: Option<&str>, call: Option<&str>)
             && e.scope.turn.as_deref() == turn
             && e.scope.call.as_deref() == call
     })
+}
+
+struct PreparedStep {
+    wire: Value,
+    provider_tools: Vec<ToolDefinition>,
 }
 
 struct Allowance {
@@ -567,7 +572,11 @@ impl TurnWork {
             system: self.input.system.clone(),
             messages: model_messages(&data.branch(), scope.turn.as_deref())?,
             tools: current_model_tools(api, scope, &self.input.tools)?,
-            provider_tools: vec![],
+            provider_tools: if work_authority(api.as_ref(), scope)?.has("tools") {
+                self.input.model.provider_tools()
+            } else {
+                vec![]
+            },
             thinking: wire::lower_reasoning(
                 self.input.settings["thinking"].as_str().unwrap_or(""),
                 &info.thinking,
@@ -587,18 +596,19 @@ impl TurnWork {
             )
             .await?
             .value;
-        let request = wire::request(
-            &serde_json::from_value(value["request"].clone())?,
-            Some(&api.snapshot(&scope.session)?),
-        );
+        let request: ModelRequest = serde_json::from_value(value["request"].clone())?;
+        let projected = wire::request(&request, Some(&api.snapshot(&scope.session)?));
         ensure!(!token.is_cancelled(), "cancelled");
-        self.prepared
-            .lock()
-            .unwrap()
-            .insert(step.clone(), request.clone());
+        self.prepared.lock().unwrap().insert(
+            step.clone(),
+            PreparedStep {
+                wire: projected.clone(),
+                provider_tools: request.provider_tools,
+            },
+        );
         *self.active_step.lock().unwrap() = scope.step.clone();
         api.emit(Event::new(scope, "step.start", json!({}))).await?;
-        Ok(request)
+        Ok(projected)
     }
     async fn model(
         &self,
@@ -621,9 +631,10 @@ impl TurnWork {
         );
         let prepared = self.prepared.lock().unwrap().remove(step);
         let replacement = self.replacement.lock().unwrap().take();
-        let replay = if prepared
+        let matched = prepared
             .as_ref()
-            .is_some_and(|v| same_json(v, request_wire))
+            .filter(|step| same_json(&step.wire, request_wire));
+        let replay = if matched.is_some()
             || replacement
                 .as_ref()
                 .is_some_and(|v| same_json(v, request_wire))
@@ -668,6 +679,9 @@ impl TurnWork {
                 .await?
                 .ok_or_else(|| anyhow!("model request blocked by output gate"))?;
             request = serde_json::from_value(prepared)?;
+            if let Some(step) = matched {
+                request.provider_tools.clone_from(&step.provider_tools);
+            }
         }
         let branch = api.snapshot(&scope.session)?.branch();
         let sources = if let Some(old) = &replay {
