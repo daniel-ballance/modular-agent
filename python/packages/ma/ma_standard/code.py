@@ -11,11 +11,12 @@ from pydantic_monty import (
     AsyncFunctionSnapshot,
     AsyncMonty,
     AsyncNameLookupSnapshot,
-    CollectString,
     ExternalModule,
     MontyComplete,
     MontyCrashedError,
     MontyError,
+    MontyRuntimeError,
+    MontySyntaxError,
 )
 
 TOOL = "codemode"
@@ -40,6 +41,18 @@ def _kind(schema: Json) -> str:
         "object": "dict",
         "null": "None",
     }.get(str(kind), "Any")
+
+
+def _takes_object(schema: Json) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    kind = schema.get("type")
+    if kind == "object" or (isinstance(kind, list) and "object" in kind):
+        return True
+    return any(
+        isinstance(options := schema.get(key), list) and any(map(_takes_object, options))
+        for key in ("anyOf", "oneOf")
+    )
 
 
 @dataclass(frozen=True)
@@ -80,13 +93,23 @@ class Function:
 
     def bind(self, args: tuple[object, ...], kwargs: dict[str, object]) -> JsonObject:
         params = self.parameters
-        if len(args) > len(params):
-            raise TypeError(f"takes at most {len(params)} arguments, got {len(args)}")
-        inputs = dict(zip(params, args))
-        for key, value in kwargs.items():
-            if key in inputs:
-                raise TypeError(f"got two values for {key}")
-            inputs[key] = value
+        if (
+            len(args) == 1
+            and isinstance(args[0], dict)
+            and not kwargs
+            and not (params and _takes_object(self.properties.get(params[0])))
+        ):
+            if any(not isinstance(key, str) for key in args[0]):
+                raise TypeError("argument names must be strings")
+            inputs = dict(args[0])
+        else:
+            if len(args) > len(params):
+                raise TypeError(f"takes at most {len(params)} arguments, got {len(args)}")
+            inputs = dict(zip(params, args))
+            for key, value in kwargs.items():
+                if key in inputs:
+                    raise TypeError(f"got two values for {key}")
+                inputs[key] = value
         inputs = {k: v for k, v in inputs.items() if v is not None}
         if self.schema.get("additionalProperties") is False:
             for key in inputs.keys() - self.properties.keys():
@@ -133,23 +156,44 @@ def prompt(catalog: dict[str, Function]) -> str:
     )
 
 
-def _bounded(text: str) -> str:
-    lines = text.splitlines()
-    size = len(text.encode())
-    if len(lines) <= 2000 and size <= 51200:
-        return text
-    kept: list[str] = []
-    count = 0
-    for line in lines[:2000]:
-        length = len(line.encode()) + 1
-        if count + length > 51200:
-            break
-        kept.append(line + "\n")
-        count += length
-    return "".join(kept) + (
-        f"\n[Output cut: showing the first {len(kept)} of {len(lines)} lines "
-        f"({count} of {size} bytes). Return or print less, or write the rest to a file.]"
-    )
+def _utf8_prefix(data: bytes, limit: int) -> str:
+    return data[:limit].decode("utf-8", errors="ignore")
+
+
+class _PrintedOutput:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.data = bytearray()
+        self.exceeded = False
+
+    def __call__(self, _stream: str, text: str) -> None:
+        chunk = text.encode("utf-8")
+        remaining = self.limit - len(self.data)
+        if len(chunk) > remaining:
+            self.data.extend(chunk[:remaining])
+            self.exceeded = True
+            # A print callback error aborts the feed, outside the sandbox's try/except.
+            raise RuntimeError(f"printed output exceeded {self.limit} bytes")
+        self.data.extend(chunk)
+
+    @property
+    def output(self) -> str:
+        return _utf8_prefix(bytes(self.data), self.limit)
+
+
+def _bounded(text: str, *, ending: str = "") -> str:
+    marker = "\n[Output cut: return or print less, or write the rest to a file.]\n"
+    joined = text + ending
+    if len(joined.splitlines()) <= 2000 and len(joined.encode()) <= 51200:
+        return joined
+    # Make room for the traceback after the printed prefix, not before it.
+    trailer = marker + ending
+    lines = 2000 - len(trailer.splitlines())
+    size = 51200 - len(trailer.encode())
+    if lines <= 0 or size <= 0:
+        return _bounded(ending)
+    prefix = "".join(text.splitlines(keepends=True)[:lines]).encode()
+    return _utf8_prefix(prefix, size) + trailer
 
 
 def _image(value: object) -> bool:
@@ -193,29 +237,34 @@ def code_tool(
                     inputs = function.bind(args, kwargs)
                 except (TypeError, ValueError) as exc:
                     raise TypeError(f"{function.name}(): {exc}") from exc
-                made += 1
-                if made > calls:
+                if made >= calls:
                     raise RuntimeError(f"this run made more than {calls} function calls")
+                made += 1
                 try:
                     result = await context.tools.call(function.tool, inputs)
                 except AgentError as exc:
                     raise RuntimeError(f"{function.name}() could not run: {exc}") from exc
                 if result.status == ToolStatus.COMPLETED:
+                    if result.value is not None:
+                        return result.value
                     for part in result.content:
                         if _image(part):
                             return {**cast(JsonObject, part), "note": result.text()}
-                    return result.text() if result.value is None else result.value
+                    return result.text()
                 if (
                     function.tool == "exec"
-                    and isinstance(result.value, dict)
                     and result.status == ToolStatus.FAILED
+                    and isinstance(result.value, dict)
+                    and result.value.get("timed_out") is not True
+                    and type(code := result.value.get("exit_code")) is int
+                    and code != 0
                 ):
                     return result.value
                 raise RuntimeError(f"{function.name}() {result.status}: {result.text()}")
 
             return invoke
 
-        collector = CollectString(max_bytes=printed)
+        collector = _PrintedOutput(printed)
 
         def no_os(*args: object, **kwargs: object) -> Json:
             raise RuntimeError(
@@ -225,14 +274,23 @@ def code_tool(
         try:
             # One pool and checkout per call. Never feed a session again after
             # a memory or time limit, when Monty no longer trusts its heap.
-            async with AsyncMonty(max_processes=1, max_checkouts_per_worker=1) as pool:
+            async with AsyncMonty(
+                execution_clock="wall", max_processes=1, max_checkouts_per_worker=1
+            ) as pool:
                 module = ExternalModule(dict.fromkeys(catalog, lambda: None))
                 handlers = {f"tools.{name}": callback(f) for name, f in catalog.items()}
                 async with pool.checkout(
                     external_modules={"tools": module},
-                    os_policy={"datetime": "call_host", "sleep": "call_host"},
+                    os_policy={
+                        "datetime": "call_host",
+                        "sleep": "call_host",
+                        "process_time": "zero",
+                        "random_start": "call_host",
+                    },
+                    print_flush_interval=0,
                     limits={
                         "max_memory": 256 * 1024 * 1024,
+                        # Monty 1.6.0 restarts this clock on every resume, not just tools.
                         "max_turn_duration_secs": compute,
                         "max_recursion_depth": recursion,
                         # The pool counts lookups too. Leave the product call budget to invoke().
@@ -268,23 +326,27 @@ def code_tool(
                             raise RuntimeError("awaited something that never resolves")
                     result: object = snapshot.output
         except (MontyError, MemoryError) as exc:
-            if isinstance(exc, MontyCrashedError):
-                kind = "TimeoutError: " if exc.timed_out else ""
-                error = f"{kind}Sandbox worker process died: {exc}"
-            elif isinstance(exc, MemoryError):
-                error = f"MemoryError: {exc}"
+            if collector.exceeded:
+                text = _bounded(
+                    f"RuntimeError: printed output exceeded {printed} bytes\n" + collector.output
+                )
             else:
-                error = str(exc)
-            combined = collector.output + error
-            text = _bounded(combined)
-            if text != combined:
-                # Keep the error even if the run filled the output budget first.
-                text = _bounded(error + "\n" + collector.output)
+                if isinstance(exc, MontyCrashedError):
+                    kind = "TimeoutError: " if exc.timed_out else ""
+                    error = f"{kind}Sandbox worker process died: {exc}"
+                elif isinstance(exc, MemoryError):
+                    error = f"MemoryError: {exc}"
+                elif isinstance(exc, (MontyRuntimeError, MontySyntaxError)):
+                    error = exc.display("traceback")
+                else:
+                    error = str(exc)
+                output = collector.output
+                if output and not output.endswith("\n"):
+                    output += "\n"
+                text = _bounded(output, ending=error)
             return ToolOutput([{"type": "text", "text": text}], "failed")
 
         notes = collector.output
-        if notes and not notes.endswith("\n"):
-            notes += "\n"
         images: list[JsonObject] = []
         if _image(result):
             images, result = [cast(JsonObject, result)], None
@@ -295,7 +357,8 @@ def code_tool(
                     images.append(cast(JsonObject, item))
                 else:
                     rest.append(item)
-            result = rest if rest or not images else None
+            if images:
+                result = rest or None
         for image in images:
             if isinstance(note := image.pop("note", None), str):
                 notes += note + "\n"
@@ -304,10 +367,10 @@ def code_tool(
                 notes += (
                     result
                     if isinstance(result, str)
-                    else json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True)
+                    else json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False)
                 )
             except (TypeError, ValueError):
-                notes += str(result)
+                notes += repr(result)
         return ToolOutput(
             [{"type": "text", "text": _bounded(notes or "(no output)")}, *images],
             value={"calls": made},

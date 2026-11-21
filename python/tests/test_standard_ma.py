@@ -15,10 +15,21 @@ import stat
 from urllib.parse import parse_qs, urlsplit
 
 from httpx2 import AsyncClient
-from pydantic_monty import AsyncMontySession
+from pydantic_monty import AsyncFunctionSnapshot, AsyncMontySession, AsyncNameLookupSnapshot
 import pytest
 
-from modular_agent import Answer, ModelRef, ProviderContext, Tool, create_agent, file_credentials
+from modular_agent import (
+    Answer,
+    ModelRef,
+    ProviderContext,
+    Tool,
+    ToolContext,
+    ToolOutput,
+    ToolResult,
+    create_agent,
+    file_credentials,
+    local_environment,
+)
 from modular_agent.files import file_tools
 from modular_agent.testing import memory_environment, scripted_provider, test_agent as offline_agent
 from ma_standard import oauth, prompt, responses
@@ -431,7 +442,12 @@ async def test_responses_refresh_retry_and_stream(
             "failed",
             "more than 1 function calls",
         ),
-        ("print('x' * 1000)", {"printed": 30}, "failed", "1001 bytes > 30 bytes"),
+        (
+            "print('x' * 1000)",
+            {"printed": 30},
+            "failed",
+            "RuntimeError: printed output exceeded 30 bytes",
+        ),
         ("while True:\n    pass", {"compute": 0.1}, "failed", "TimeoutError"),
         (
             "import time\ntime.time()",
@@ -461,6 +477,199 @@ async def test_monty(tmp_path: Path, code: str, limits: dict, status: str, conta
     [tool] = result.tool_results()
     assert tool.status == status, tool.text()
     assert contains.lower() in tool.text().lower()
+
+
+async def _run_code(tmp_path: Path, source: str, **limits) -> ToolResult:
+    (tmp_path / "in").write_text("example")
+    script = [{"toolCalls": [{"name": "codemode", "input": {"code": source}}]}, {"text": "ok"}]
+    async with offline_agent(
+        project=tmp_path,
+        environment=local_environment(tmp_path),
+        plugins=[file_tools(tmp_path)],
+        tools=[code_tool(**limits)],
+        script=script,
+    ) as agent:
+        [result] = (await (await agent.session()).prompt("run code")).tool_results()
+    return result
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("tools.read({'path': 'in', 'offset': None})", "example"),
+        (
+            "{'z': 1.0, 'a': ('é', 2**70)}",
+            '{\n  "z": 1.0,\n  "a": [\n    "é",\n    1180591620717411303424\n  ]\n}',
+        ),
+        ("(b'hi', float('nan'))", "(b'hi', nan)"),
+        ("float('nan')", "nan"),
+        ("'é'", "é"),
+        ("None", "(no output)"),
+    ],
+)
+async def test_codemode_value(tmp_path: Path, source: str, expected: str) -> None:
+    result = await _run_code(tmp_path, source)
+    assert result.status == "completed"
+    assert result.text() == expected
+
+
+def test_codemode_single_object_parameter() -> None:
+    [function] = functions(
+        [
+            {
+                "name": "echo",
+                "description": "echo",
+                "parameters": {
+                    "required": ["value"],
+                    "properties": {"value": {"type": "object"}},
+                },
+            },
+        ]
+    ).values()
+    assert function.bind(({"x": 1},), {}) == {"value": {"x": 1}}
+
+
+async def test_codemode_raises_for_exec_timeout_with_structured_result(tmp_path: Path) -> None:
+    environment = memory_environment()
+    environment.on_exec("slow", lambda _: {"timed_out": True, "exit_code": -15})
+    code = "try:\n    tools.exec('slow', timeout=1)\nexcept RuntimeError:\n    print('timed out')"
+    async with offline_agent(
+        project=tmp_path,
+        environment=environment,
+        tools=[code_tool()],
+        plugins=[file_tools(tmp_path)],
+        script=[{"toolCalls": [{"name": "codemode", "input": {"code": code}}]}, {"text": "ok"}],
+    ) as agent:
+        [result] = (await (await agent.session()).prompt("run code")).tool_results()
+    assert result.status == "completed", result.text()
+    assert result.text() == "timed out\n"
+
+
+async def test_codemode_uncaught_exception_includes_monty_traceback(tmp_path: Path) -> None:
+    result = await _run_code(
+        tmp_path, "def fail():\n    raise ValueError('stop')\nprint('before')\nfail()"
+    )
+    assert result.status == "failed"
+    assert result.text().startswith("before\nTraceback (most recent call last):\n")
+    assert "line 2, in fail" in result.text()
+    assert result.text().endswith("ValueError: stop")
+
+
+async def test_codemode_print_limit_cuts_utf8_and_stops_before_next_tool(tmp_path: Path) -> None:
+    result = await _run_code(
+        tmp_path,
+        "print('ab')\ntry:\n    print('é😀zzz', end='')\nexcept RuntimeError:\n    print('caught')\ntools.write('after', 'should not run')",
+        printed=8,
+    )
+    assert result.status == "failed"
+    assert result.text() == "RuntimeError: printed output exceeded 8 bytes\nab\né"
+    assert not (tmp_path / "after").exists()
+
+
+@pytest.mark.parametrize(("depth", "status"), [(200, "completed"), (201, "failed")])
+async def test_codemode_recursion_boundary(tmp_path: Path, depth: int, status: str) -> None:
+    result = await _run_code(
+        tmp_path, f"def f(n):\n    return 1 if n == 1 else 1 + f(n - 1)\nf({depth})"
+    )
+    assert result.status == status
+    if status == "completed":
+        assert result.text() == "200"
+    else:
+        assert result.text().endswith("RecursionError: maximum recursion depth exceeded")
+
+
+async def test_codemode_denies_ambient_access_but_allows_seeded_random(tmp_path: Path) -> None:
+    result = await _run_code(
+        tmp_path,
+        """\
+import os
+import time
+import random
+from pathlib import Path
+
+def attempt(name, action):
+    try:
+        action()
+        print(name, 'allowed')
+    except Exception:
+        print(name, 'denied')
+
+def network():
+    import socket
+    socket.socket()
+
+def process():
+    import subprocess
+    subprocess.run(['true'])
+
+attempt('file', lambda: open('in'))
+attempt('path', lambda: Path('in').read_text())
+attempt('network', network)
+attempt('process', process)
+attempt('clock', lambda: time.time())
+attempt('sleep', lambda: time.sleep(0))
+attempt('system entropy', lambda: os.urandom(1))
+attempt('module random', lambda: random.random())
+attempt('unseeded generator', lambda: random.Random().random())
+print(random.Random(7).random())
+""",
+    )
+    assert result.status == "completed", result.text()
+    assert result.text().splitlines() == [
+        f"{name} denied"
+        for name in (
+            "file",
+            "path",
+            "network",
+            "process",
+            "clock",
+            "sleep",
+            "system entropy",
+            "module random",
+            "unseeded generator",
+        )
+    ] + ["0.32383276483316237"]
+
+
+async def test_codemode_host_waits_do_not_spend_execution_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compute = 0.2
+    snapshots = []
+    resume_call = AsyncFunctionSnapshot.resume_auto
+    resume_name = AsyncNameLookupSnapshot.resume_auto
+
+    async def delayed_call(snapshot):
+        snapshots.append(str(snapshot.function_name))
+        await asyncio.sleep(compute + 0.01)
+        return await resume_call(snapshot)
+
+    async def delayed_name(snapshot):
+        snapshots.append(snapshot.variable_name)
+        await asyncio.sleep(compute + 0.01)
+        return await resume_name(snapshot)
+
+    async def wait(arguments, context):
+        snapshots.append("wait")
+        await asyncio.sleep(compute + 0.01)
+        return ToolOutput([{"type": "text", "text": "waited"}])
+
+    monkeypatch.setattr(AsyncFunctionSnapshot, "resume_auto", delayed_call)
+    monkeypatch.setattr(AsyncNameLookupSnapshot, "resume_auto", delayed_name)
+    source = "import tools\ndescribe = describe_tool\ndescribe('wait')\nsearch_tools('wait')\ntools.wait()"
+    script = [{"toolCalls": [{"name": "codemode", "input": {"code": source}}]}, {"text": "ok"}]
+    async with offline_agent(
+        project=tmp_path,
+        tools=[
+            code_tool(compute=compute),
+            Tool.from_schema("wait", "wait", {"type": "object"}, wait),
+        ],
+        script=script,
+    ) as agent:
+        [result] = (await (await agent.session()).prompt("run code")).tool_results()
+    assert result.status == "completed", result.text()
+    assert result.text() == "waited"
+    assert snapshots == ["import", "describe_tool", "describe_tool", "search_tools", "wait"]
 
 
 async def test_codemode_memory_limit_discards_session(tmp_path: Path) -> None:
@@ -550,30 +759,56 @@ async def test_codemode_prints_started_call_on_stderr(tmp_path: Path, capsys) ->
     assert capsys.readouterr().err == "codemode\n  | n = 1\n  | print(n)\n"
 
 
-async def test_codemode_lookups_do_not_spend_nested_calls(tmp_path: Path) -> None:
-    script = [
+async def test_codemode_only_nested_calls_count_toward_500() -> None:
+    calls = []
+
+    async def unexpected(*args):
+        pytest.fail(f"unexpected callback: {args}")
+
+    read = Tool.from_schema(
+        "read",
+        "Read a file",
+        {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}},
+        unexpected,
+    )
+
+    async def nested(operation, params):
+        if operation == "list":
+            return [read.definition]
+        assert operation == "call"
+        calls.append(params)
+        return {
+            "status": "completed",
+            "content": [{"type": "text", "text": "example"}],
+            "callId": str(len(calls)),
+        }
+
+    # Exercise the real worker at the SDK tool boundary without writing 1000 history entries.
+    context = ToolContext("session", "user", "call", unexpected, unexpected, nested)
+    result = await code_tool()._run(
         {
-            "toolCalls": [
-                {
-                    "name": "codemode",
-                    "input": {
-                        "code": "for i in range(501):\n    describe_tool('read')\n    search_tools('read')\nfor i in range(3):\n    tools.read('in', None, 1)\ntools.read('in')"
-                    },
-                }
-            ]
+            "code": """\
+import tools
+for i in range(501):
+    describe_tool('read')
+    search_tools('read')
+try:
+    tools.read()
+except TypeError:
+    pass
+for i in range(500):
+    tools.read('in')
+print('made 500 calls')
+tools.read('after')
+"""
         },
-        {"text": "done"},
-    ]
-    async with offline_agent(
-        project=tmp_path,
-        script=script,
-        tools=[code_tool(calls=3)],
-        plugins=[file_tools(tmp_path)],
-        environment=memory_environment({"in": "example\n"}),
-    ) as agent:
-        result = (await (await agent.session()).prompt("read")).tool_results()[0]
-        assert result.status == "failed"
-        assert "this run made more than 3 function calls" in result.text()
+        context,
+    )
+    assert calls == [{"name": "read", "input": {"path": "in"}}] * 500
+    assert result["status"] == "failed"
+    text = result["content"][0]["text"]
+    assert text.startswith("made 500 calls\nTraceback")
+    assert text.endswith("RuntimeError: this run made more than 500 function calls")
 
 
 def test_codemode_large_catalog_keeps_every_signature_and_shortens_descriptions() -> None:
