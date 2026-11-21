@@ -114,7 +114,16 @@ func (s *Server) serveRegistry(w http.ResponseWriter, r *http.Request) {
 	state.Revision = api.ID()
 	state.Intents = next.Intents
 	b := raw(state)
-	if len(b) > registryLimit || atomicFile(s.dir, s.registryFile(), b) != nil {
+	if len(b) > registryLimit {
+		unavailable(w)
+		return
+	}
+	if err := atomicFile(s.dir, s.registryFile(), b); err != nil {
+		if errors.Is(err, uncertainCommit) {
+			_ = s.lock.Close()
+			s.lock = nil
+			panic(http.ErrAbortHandler)
+		}
 		unavailable(w)
 		return
 	}

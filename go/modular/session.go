@@ -7,6 +7,7 @@ import (
 	"iter"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
@@ -163,7 +164,9 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 		return PromptResult{}, appError(err, NotOpen)
 	}
 	interruption := make(chan api.Event, 1)
-	eventBuf := make(chan api.Event, 256)
+	eventBuf := make(chan api.BufferedEvent, 256)
+	var outputMu sync.Mutex
+	outputStopped := false
 	overflow := make(chan struct{}, 1)
 	wake := make(chan struct{}, 1)
 	subscribe := s.agent.a.(interface {
@@ -187,16 +190,34 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 			}
 			return
 		}
-		select {
-		case eventBuf <- e:
-		default:
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		if outputStopped {
+			return
+		}
+		if event, ok := api.BufferEvent(s.agent.a, e); ok {
 			select {
-			case overflow <- struct{}{}:
+			case eventBuf <- event:
+				return
 			default:
+				event.Release()
 			}
 		}
+		select {
+		case overflow <- struct{}{}:
+		default:
+		}
 	})
-	defer stop()
+	defer func() {
+		stop()
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		outputStopped = true
+		close(eventBuf)
+		for event := range eventBuf {
+			event.Release()
+		}
+	}()
 	r, err := s.Send(ctx, input, Now, opts...)
 	if err != nil {
 		return PromptResult{}, err
@@ -268,7 +289,9 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 					return *result, nil
 				}
 			}
-		case raw := <-eventBuf:
+		case event := <-eventBuf:
+			raw := event.Event
+			event.Release()
 			if raw.Turn == "" {
 				continue
 			}
@@ -278,6 +301,10 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 			}
 			if turnFor(snap, r.InputID) != raw.Turn {
 				continue
+			}
+			epoch, err := s.agent.a.(interface{ ErasureEpoch(string) (int, error) }).ErasureEpoch(s.id)
+			if err != nil || epoch != raw.ErasureEpoch {
+				return PromptResult{}, appError(api.ErrErasureUnavailable, Unavailable)
 			}
 			e := sdkEvent(raw)
 			if e != nil {
