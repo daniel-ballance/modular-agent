@@ -333,6 +333,9 @@ impl Interface for TestInterface {
             .unwrap()
             .push(session.settings()?["title"].as_str().unwrap().into());
         session.set_setting("title", json!("stored"))?;
+        session
+            .send("Keep this session", modular_agent::Timing::Propose)
+            .await?;
         session.close().await
     }
     async fn stop(&self) -> Result<()> {
@@ -366,6 +369,7 @@ async fn registrar_supplies_history_configuration_environment_and_interface() ->
     assert!(rejected.message().contains("kept"));
     let agent = Agent::builder()
         .durability(Durability::Kept)
+        .several_actors(true)
         .plugin(plugin)
         .build()
         .await?;

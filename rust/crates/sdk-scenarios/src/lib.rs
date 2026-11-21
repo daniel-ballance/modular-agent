@@ -867,7 +867,9 @@ fn group_can_run(pgid: i32) -> std::io::Result<bool> {
         }
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // A task may exit between listing /proc, opening stat, and
+            // reading it. The kernel returns ESRCH if it dies after open.
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => continue,
             Err(e) => return Err(e),
         };
         // The command in parentheses may itself contain spaces and parens.
