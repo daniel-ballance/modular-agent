@@ -1,6 +1,7 @@
 """Containment survives SIGKILL, setsid, double forks and watcher loss."""
 
 import asyncio
+import errno
 import json
 import os
 import signal
@@ -174,6 +175,28 @@ async def test_recovery_leaves_live_other_agent_journal_alone(tmp_path):
     journal(record, {"owner": owner_identity(), "group": str(tmp_path / "no-group")})
     await recover(root)
     assert record.exists()
+
+
+async def test_recovery_accepts_a_cgroup_removed_during_kill(tmp_path, monkeypatch):
+    cgroups = tmp_path / "cgroups"
+    cgroups.mkdir()
+    (cgroups / "cgroup.controllers").touch()
+    group = cgroups / "ma-py-0-0-orphan"
+    group.mkdir()
+    (group / "cgroup.procs").touch()
+    monkeypatch.setenv("MA_CGROUP_ROOT", str(cgroups))
+    write_text = Path.write_text
+
+    def write(path, *args, **kwargs):
+        if path == group / "cgroup.kill":
+            (group / "cgroup.procs").unlink()
+            group.rmdir()
+            raise OSError(errno.ENODEV, os.strerror(errno.ENODEV))
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write)
+    await recover(tmp_path / "commands")
+    assert not group.exists()
 
 
 async def test_cleanup_waits_for_process_exit_after_group_removal(tmp_path, monkeypatch):

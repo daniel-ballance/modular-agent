@@ -505,6 +505,11 @@ async def _run_code(tmp_path: Path, source: str, **limits) -> ToolResult:
         ("float('nan')", "nan"),
         ("'é'", "é"),
         ("None", "(no output)"),
+        (
+            "class P:\n    def __init__(self):\n        self.x = 1\n        self.y = 'a'\n"
+            "    def __repr__(self):\n        return 'custom'\n[P(), (P(),)]",
+            "[P(x=1, y='a'), (P(x=1, y='a'),)]",
+        ),
     ],
 )
 async def test_codemode_value(tmp_path: Path, source: str, expected: str) -> None:
@@ -527,6 +532,39 @@ def test_codemode_single_object_parameter() -> None:
         ]
     ).values()
     assert function.bind(({"x": 1},), {}) == {"value": {"x": 1}}
+
+
+async def test_codemode_rejects_lossy_json_arguments_without_dispatch(tmp_path: Path) -> None:
+    result = await _run_code(
+        tmp_path,
+        """\
+for value in ({1: 'would become a string key'}, float('nan'), b'not JSON', 2**20000):
+    try:
+        tools.write('after', value)
+    except TypeError:
+        print('rejected')
+""",
+    )
+    assert result.status == "completed", result.text()
+    assert result.text() == "rejected\n" * 4
+    assert result.value == {"calls": 0}
+    assert not (tmp_path / "after").exists()
+
+
+@pytest.mark.parametrize("source", ["image", "[image, image]", "(image, image)"])
+async def test_codemode_attaches_images(tmp_path: Path, source: str) -> None:
+    result = await _run_code(
+        tmp_path,
+        "image = {'type': 'image', 'mimeType': 'image/png', 'data': 'aW1hZ2U=', 'note': 'look'}\n"
+        + source,
+    )
+    assert result.status == "completed", result.text()
+    count = 1 if source == "image" else 2
+    assert result.text() == "look\n" * count
+    assert (
+        list(result.content[1:])
+        == [{"type": "image", "mimeType": "image/png", "data": "aW1hZ2U="}] * count
+    )
 
 
 async def test_codemode_raises_for_exec_timeout_with_structured_result(tmp_path: Path) -> None:
@@ -553,6 +591,16 @@ async def test_codemode_uncaught_exception_includes_monty_traceback(tmp_path: Pa
     assert result.text().startswith("before\nTraceback (most recent call last):\n")
     assert "line 2, in fail" in result.text()
     assert result.text().endswith("ValueError: stop")
+
+
+async def test_codemode_cut_keeps_whole_lines_and_leads_with_error(tmp_path: Path) -> None:
+    result = await _run_code(tmp_path, "print('before')\nprint('é' * 30000)\nraise ValueError()")
+    assert result.status == "failed"
+    assert result.text().splitlines() == [
+        "ValueError",
+        "before",
+        "[Output cut: return or print less, or write the rest to a file.]",
+    ]
 
 
 async def test_codemode_print_limit_cuts_utf8_and_stops_before_next_tool(tmp_path: Path) -> None:
@@ -611,6 +659,7 @@ attempt('sleep', lambda: time.sleep(0))
 attempt('system entropy', lambda: os.urandom(1))
 attempt('module random', lambda: random.random())
 attempt('unseeded generator', lambda: random.Random().random())
+print(time.process_time(), time.process_time_ns(), time.thread_time(), time.thread_time_ns())
 print(random.Random(7).random())
 """,
     )
@@ -628,7 +677,41 @@ print(random.Random(7).random())
             "module random",
             "unseeded generator",
         )
-    ] + ["0.32383276483316237"]
+    ] + ["0.0 0 0.0 0", "0.32383276483316237"]
+
+
+async def test_codemode_compute_budget_spans_describe_calls(tmp_path: Path) -> None:
+    result = await _run_code(
+        tmp_path,
+        """\
+for i in range(500):
+    for j in range(50000):
+        x = j * j
+    describe_tool('read')
+tools.write('after', 'should not run')
+""",
+        compute=0.1,
+    )
+    assert result.status == "failed"
+    assert result.text() == "TimeoutError: sandbox exceeded its active time limit"
+    assert not (tmp_path / "after").exists()
+
+
+async def test_codemode_dispatched_calls_reset_compute_budget(tmp_path: Path) -> None:
+    result = await _run_code(
+        tmp_path,
+        """\
+for i in range(40):
+    for j in range(500000):
+        x = j * j
+    tools.read('in')
+'finished'
+""",
+        compute=0.125,
+    )
+    assert result.status == "completed", result.text()
+    assert result.value == {"calls": 40}
+    assert result.text() == "finished"
 
 
 async def test_codemode_host_waits_do_not_spend_execution_time(
@@ -689,7 +772,7 @@ async def test_codemode_memory_limit_discards_session(tmp_path: Path) -> None:
     assert completed.text() == "still here\n3"
 
 
-@pytest.mark.parametrize("stop", ["kill", "cancel"])
+@pytest.mark.parametrize("stop", ["kill", "cancel", "watchdog"])
 async def test_codemode_worker_stops_and_next_run_works(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
 ) -> None:
@@ -717,23 +800,28 @@ async def test_codemode_worker_stops_and_next_run_works(
         {"toolCalls": [{"name": "codemode", "input": {"code": "print('fresh'); 42"}}]},
         {"text": "done"},
     ]
-    async with offline_agent(project=tmp_path, tools=[code_tool()], script=script) as agent:
+    tool = code_tool(compute=1) if stop == "watchdog" else code_tool()
+    async with offline_agent(project=tmp_path, tools=[tool], script=script) as agent:
         session = await agent.session()
         async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
             running = tasks.create_task(session.prompt("run code"))
             pid = await entered
             if stop == "kill":
                 os.kill(pid, signal.SIGKILL)
+            elif stop == "watchdog":
+                os.kill(pid, signal.SIGSTOP)
             else:
                 await session.cancel()
             result = await running
             # Monty's native runtime reaps the child, independently of asyncio.
             while Path(f"/proc/{pid}").exists():
                 await asyncio.sleep(0.01)
-        if stop == "kill":
+        if stop != "cancel":
             failed, completed = result.tool_results()
             assert failed.status == "failed"
             assert "worker process died" in failed.text()
+            if stop == "watchdog":
+                assert "TimeoutError" in failed.text()
         else:
             assert result.outcome.kind == "cancelled"
             [cancelled] = result.tool_results()

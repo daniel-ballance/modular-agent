@@ -1,23 +1,28 @@
 """Monty sandbox, with all effects dispatched as nested SDK calls."""
 
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 import json
 import re
 from typing import cast
 
 from modular_agent import AgentError, Json, JsonObject, Tool, ToolContext, ToolOutput, ToolStatus
+from opentelemetry.trace import use_span
 from pydantic_monty import (
     AsyncFunctionSnapshot,
     AsyncMonty,
     AsyncNameLookupSnapshot,
     ExternalModule,
+    MontyClassProxy,
     MontyComplete,
     MontyCrashedError,
     MontyError,
     MontyRuntimeError,
     MontySyntaxError,
 )
+
+from .code_clock import ComputeBudget, ComputeLimit, WorkerClockError
 
 TOOL = "codemode"
 DESCRIPTION = 'Run Python in a sandbox. The functions listed under "Functions in codemode" in the system prompt are the only way to reach files, commands and other tools. Call them on `tools`, for example `text = tools.read(path="README.md")`. The value of the last expression and anything printed come back as the result. Each run starts fresh: no variables carry over. The sandbox runs a subset of Python: no classes with inheritance, no third-party packages, and no direct file, network or process access.'
@@ -53,6 +58,17 @@ def _takes_object(schema: Json) -> bool:
         isinstance(options := schema.get(key), list) and any(map(_takes_object, options))
         for key in ("anyOf", "oneOf")
     )
+
+
+def _check_json_keys(value: object) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("JSON object keys must be strings")
+            _check_json_keys(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _check_json_keys(item)
 
 
 @dataclass(frozen=True)
@@ -117,6 +133,9 @@ class Function:
         for key in self.required:
             if key not in inputs:
                 raise TypeError(f"missing argument {key}; the signature is {self.signature}")
+        # json.dumps silently stringifies some dict keys. Reject that loss
+        # before letting it check scalars and turn tuples into JSON arrays.
+        _check_json_keys(inputs)
         return cast(JsonObject, json.loads(json.dumps(inputs, allow_nan=False)))
 
 
@@ -182,18 +201,22 @@ class _PrintedOutput:
 
 
 def _bounded(text: str, *, ending: str = "") -> str:
-    marker = "\n[Output cut: return or print less, or write the rest to a file.]\n"
+    marker = "[Output cut: return or print less, or write the rest to a file.]\n"
     joined = text + ending
-    if len(joined.splitlines()) <= 2000 and len(joined.encode()) <= 51200:
+    if joined.count("\n") + (not joined.endswith("\n")) <= 2000 and len(joined.encode()) <= 51200:
         return joined
-    # Make room for the traceback after the printed prefix, not before it.
-    trailer = marker + ending
-    lines = 2000 - len(trailer.splitlines())
-    size = 51200 - len(trailer.encode())
-    if lines <= 0 or size <= 0:
-        return _bounded(ending)
-    prefix = "".join(text.splitlines(keepends=True)[:lines]).encode()
-    return _utf8_prefix(prefix, size) + trailer
+    if ending:
+        # The traceback would be cut. Keep its last line visible before the prefix.
+        frames, sep, reason = ending.rstrip("\n").rpartition("\n")
+        joined = reason + "\n" + text + frames + sep
+    size = 0
+    lines = []
+    for line in joined.split("\n", 2000)[:2000]:
+        size += len(line.encode()) + 1
+        if size > 51200:
+            break
+        lines.append(line + "\n")
+    return "".join(lines) + marker
 
 
 def _image(value: object) -> bool:
@@ -205,12 +228,32 @@ def _image(value: object) -> bool:
     )
 
 
+def _value_repr(value: object) -> str:
+    if isinstance(value, MontyClassProxy):
+        attributes = ", ".join(f"{k}={_value_repr(v)}" for k, v in value.attributes.items())
+        return f"{value.name}({attributes})"
+    if type(value) is list:
+        return "[" + ", ".join(map(_value_repr, value)) + "]"
+    if type(value) is tuple:
+        return "(" + ", ".join(map(_value_repr, value)) + ("," if len(value) == 1 else "") + ")"
+    if type(value) is dict:
+        return (
+            "{" + ", ".join(f"{_value_repr(k)}: {_value_repr(v)}" for k, v in value.items()) + "}"
+        )
+    if type(value) is set and value:
+        return "{" + ", ".join(map(_value_repr, value)) + "}"
+    if type(value) is frozenset and value:
+        return "frozenset({" + ", ".join(map(_value_repr, value)) + "})"
+    return repr(value)
+
+
 def code_tool(
     *, compute: float = 30, calls: int = 500, recursion: int = 200, printed: int = 1048576
 ) -> Tool:
     async def execute(arguments: JsonObject, context: ToolContext) -> ToolOutput:
         catalog = functions(await context.tools.list())
         made = 0
+        budget = ComputeBudget(compute)
 
         def describe_tool(name: str) -> JsonObject:
             if not isinstance(name, str):
@@ -235,11 +278,12 @@ def code_tool(
                 nonlocal made
                 try:
                     inputs = function.bind(args, kwargs)
-                except (TypeError, ValueError) as exc:
+                except (TypeError, ValueError, RecursionError) as exc:
                     raise TypeError(f"{function.name}(): {exc}") from exc
                 if made >= calls:
                     raise RuntimeError(f"this run made more than {calls} function calls")
                 made += 1
+                budget.reset()  # Only a dispatched nested call starts a new interval.
                 try:
                     result = await context.tools.call(function.tool, inputs)
                 except AgentError as exc:
@@ -274,30 +318,42 @@ def code_tool(
         try:
             # One pool and checkout per call. Never feed a session again after
             # a memory or time limit, when Monty no longer trusts its heap.
-            async with AsyncMonty(
-                execution_clock="wall", max_processes=1, max_checkouts_per_worker=1
-            ) as pool:
+            async with AsyncExitStack() as stack:
+                clock_span = stack.enter_context(budget.capture())
+                pool = await stack.enter_async_context(
+                    AsyncMonty(
+                        execution_clock="wall",
+                        max_processes=1,
+                        max_checkouts_per_worker=1,
+                        request_timeout=compute + 0.25,  # Only while waiting on the worker.
+                    )
+                )
                 module = ExternalModule(dict.fromkeys(catalog, lambda: None))
                 handlers = {f"tools.{name}": callback(f) for name, f in catalog.items()}
-                async with pool.checkout(
-                    external_modules={"tools": module},
-                    os_policy={
-                        "datetime": "call_host",
-                        "sleep": "call_host",
-                        "process_time": "zero",
-                        "random_start": "call_host",
-                    },
-                    print_flush_interval=0,
-                    limits={
-                        "max_memory": 256 * 1024 * 1024,
-                        # Monty 1.6.0 restarts this clock on every resume, not just tools.
-                        "max_turn_duration_secs": compute,
-                        "max_recursion_depth": recursion,
-                        # The pool counts lookups too. Leave the product call budget to invoke().
-                        "max_suspensions": 2**31 - 1,
-                    },
-                ) as worker:
-                    await worker.feed_run("import tools", print_callback=collector)
+                with use_span(clock_span):
+                    worker = await stack.enter_async_context(
+                        pool.checkout(
+                            external_modules={"tools": module},
+                            os_policy={
+                                "datetime": "call_host",
+                                "sleep": "call_host",
+                                "process_time": "zero",
+                                "random_start": "call_host",
+                            },
+                            print_flush_interval=0,
+                            limits={
+                                "max_memory": 256 * 1024 * 1024,
+                                # The turn clock restarts on every resume, not just tools.
+                                "max_turn_duration_secs": compute,
+                                "max_recursion_depth": recursion,
+                                # Only dispatch in invoke() counts toward the nested-call limit.
+                                "max_suspensions": 2**31 - 1,
+                            },
+                        )
+                    )
+                await worker.feed_run("import tools", print_callback=collector)
+                budget.reset()  # Exclude the setup feed, before any user code runs.
+                try:
                     snapshot = await worker.feed_start(
                         cast(str, arguments["code"]),
                         external_lookup={
@@ -307,7 +363,11 @@ def code_tool(
                         print_callback=collector,
                         os=no_os,
                     )
-                    while not isinstance(snapshot, MontyComplete):
+                    while True:
+                        budget.check()
+                        if isinstance(snapshot, MontyComplete):
+                            result: object = snapshot.output
+                            break
                         if isinstance(snapshot, AsyncNameLookupSnapshot) or (
                             isinstance(snapshot, AsyncFunctionSnapshot)
                             and str(snapshot.function_name) not in handlers
@@ -324,8 +384,13 @@ def code_tool(
                                 snapshot = await snapshot.resume({"return_value": answer})
                         else:
                             raise RuntimeError("awaited something that never resolves")
-                    result: object = snapshot.output
-        except (MontyError, MemoryError) as exc:
+                except MontyRuntimeError as exc:
+                    # Keep native limit errors and their tracebacks.
+                    if not isinstance(exc.exception(), (TimeoutError, MemoryError)):
+                        # The binding can also raise before the worker replies.
+                        budget.check(require_report=False)
+                    raise
+        except (MontyError, MemoryError, ComputeLimit, WorkerClockError) as exc:
             if collector.exceeded:
                 text = _bounded(
                     f"RuntimeError: printed output exceeded {printed} bytes\n" + collector.output
@@ -335,7 +400,9 @@ def code_tool(
                     kind = "TimeoutError: " if exc.timed_out else ""
                     error = f"{kind}Sandbox worker process died: {exc}"
                 elif isinstance(exc, MemoryError):
-                    error = f"MemoryError: {exc}"
+                    error = f"MemoryError: {exc}" if str(exc) else "MemoryError"
+                elif isinstance(exc, ComputeLimit):
+                    error = f"TimeoutError: {exc}"
                 elif isinstance(exc, (MontyRuntimeError, MontySyntaxError)):
                     error = exc.display("traceback")
                 else:
@@ -347,6 +414,8 @@ def code_tool(
             return ToolOutput([{"type": "text", "text": text}], "failed")
 
         notes = collector.output
+        if notes and not notes.endswith("\n"):
+            notes += "\n"
         images: list[JsonObject] = []
         if _image(result):
             images, result = [cast(JsonObject, result)], None
@@ -358,9 +427,9 @@ def code_tool(
                 else:
                     rest.append(item)
             if images:
-                result = rest or None
+                result = (tuple(rest) if isinstance(result, tuple) else rest) if rest else None
         for image in images:
-            if isinstance(note := image.pop("note", None), str):
+            if isinstance(note := image.get("note"), str):
                 notes += note + "\n"
         if result is not None:
             try:
@@ -370,9 +439,12 @@ def code_tool(
                     else json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False)
                 )
             except (TypeError, ValueError):
-                notes += repr(result)
+                notes += _value_repr(result)
         return ToolOutput(
-            [{"type": "text", "text": _bounded(notes or "(no output)")}, *images],
+            [
+                {"type": "text", "text": _bounded(notes or "(no output)")},
+                *[{k: image[k] for k in ("type", "mimeType", "data")} for image in images],
+            ],
             value={"calls": made},
         )
 
