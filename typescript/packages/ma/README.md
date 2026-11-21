@@ -34,11 +34,13 @@ Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modul
 
 ## Code sandbox
 
-`codemode` runs Python in a subprocess from the native [Monty 1.6.0 pool](https://github.com/pydantic/monty/blob/v1.6.0/docs/quickstart/javascript.md#configuring-the-pool), not in the agent's process. Each run gets a fresh session and worker. Calls to `tools` still go through the agent as nested calls.
+`codemode` uses the native [Monty 1.6.0 worker protocol](https://github.com/pydantic/monty/blob/v1.6.0/crates/monty-proto/proto/monty/v1/monty.proto). Each run gets a fresh subprocess and session. `tools` is prebound and importable. Calls to its functions go through the agent as nested calls. The worker sends typed Python values, so result text keeps floats such as `1.0`, large integers, dictionary order and the Python representations of non-JSON values.
 
-Each run has a [256 MiB Monty memory budget](https://github.com/pydantic/monty/blob/v1.6.0/docs/resource-limits.md#memory), not an RSS limit. It has 30 seconds of computation between host calls, a recursion limit of 200, and up to 500 nested tool calls. `describe_tool` and `search_tools` do not count as nested calls. Printed output is limited to 1 MiB, and result text is cut to 2,000 lines or 50 KB.
+The worker measures active wall time. `ma` allows 30 seconds between nested tool calls. Waiting on the host does not count, and only a dispatched nested tool call resets the budget. The run allows 500 nested tool calls and 200 recursive frames. It has a [256 MiB Monty memory budget](https://github.com/pydantic/monty/blob/v1.6.0/docs/resource-limits.md#memory), not an RSS limit. At 1 MiB of printed output, `ma` stops the worker when it receives excess output and keeps the UTF-8 prefix. Result text is cut to 2,000 lines or 50 KB, including the cut note.
 
-A memory or time limit ends the run with `MemoryError` or `TimeoutError`, and the session is discarded. If the worker dies, the call reports the death. Cancelling a call stops its worker. In each case the next run gets a fresh worker.
+The sandbox has no direct file, network or process access. Wall clocks, sleep and system entropy are denied. Process and thread clocks return zero. `random.Random(7)` works without system entropy.
+
+A memory or time limit ends the run with `MemoryError` or `TimeoutError`. If the worker dies, the call reports the death. Cancelling a call stops its worker. No run reuses a worker.
 
 ## What is checked
 
@@ -56,9 +58,9 @@ scripts/websocket-kits.sh typescript
 git diff --check
 ```
 
-- Reference checks: **18/18**, including `sandbox-memory` and both crash-recovery modes.
+- Reference checks: **22/22**, including all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
 - ACP with crash, probe and job checks: **188/188** on stdio and **193/193** on WebSocket. The WebSocket plugin kit passed **153/153** checks.
-- TypeScript workspace: **253/253** offline checks in both normal and `MA_REMOTE` configurations, with two live checks skipped. That includes **42/42** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- TypeScript workspace: **336/336** offline checks in both normal and `MA_REMOTE` configurations, with two live checks skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
 - Claude sidecar: **44/44**. No real sign-ins, credentials or models were used.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
@@ -71,6 +73,32 @@ git diff --check
 ## Findings for docs/reference and docs/sdk
 
 Proposed replacement text; the shared documents are unchanged in this branch.
+
+**Reference — Tools, last value.** Monty 1.6.0 exports a sandbox class instance as its type and attributes, not its custom `__repr__`. For example, `print(repr(C()))` can print `custom repr` while a final `C()` is exported as `C()`. The image result also needs an exception to text rendering. Replace the paragraph starting “The result is everything printed” with:
+
+> Return everything printed, then the value of the last expression unless it is `None`, or `(no output)` if both are empty. Return strings unchanged. Format other values as `json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)` would, with tuples as lists, when the exported value can be encoded as JSON. Otherwise use the Python representation of Monty's exported value. This need not call a sandbox object's custom `__repr__`. Attach image dicts returned alone or in a list or tuple as image content instead of printing their encoded data. Each run starts fresh.
+
+**Reference — Tools, traceback.** Monty omits the colon and message if the exception has no message. Replace the exception bullet with:
+
+> An uncaught exception ends the run. Return what was printed, then Monty's traceback, ending in `Type: message` or just `Type` when the exception has no message.
+
+**Reference — Tools, execution and print limits.** Monty 1.6.0 reports active time at suspensions and feed completion. It cannot accept a different time limit on a resume. Its print events can arrive after Python has run more instructions; the host cannot stop it at the exact byte inside `print`. Replace the time and printed-output limit sentences with:
+
+> Allow 30 seconds of active interpreter wall time between nested tool calls, as reported by Monty. Waiting on the host does not count. Check the accumulated time at each suspension and at completion; reset it only for a dispatched nested tool call. A host watchdog may stop a worker that has not replied within the remaining time plus a bounded delivery allowance.
+
+> Allow 1 MiB of printed output. When a print event crosses the limit, retain only the UTF-8 prefix that fits and terminate the worker without servicing another call or using its final value. Start the result with `RuntimeError: printed output exceeded 1048576 bytes`, then the retained prefix.
+
+**Reference — Tools, worker message size.** The worker exports a whole typed value before `ma` cuts the result text. A large value can exceed the separate protocol frame and decode budgets. Add after the result text limit:
+
+> The host may refuse a worker message that exceeds its protocol frame or decode budget, before rendering and cutting the result text.
+
+**Reference — Tools, tool arguments.** TypeScript tool inputs are JSON values in the SDK. Python integers outside the JavaScript safe integer range cannot be carried reliably as JSON numbers through that SDK. Add after the argument binding rules:
+
+> Tool inputs must fit the host's JSON representation. If conversion would lose an integer's precision or cannot encode a value, raise `TypeError` without dispatching the call. This does not limit the integers that sandbox code can compute or return as its last value.
+
+**Reference — Tools, OS policy.** Monty 1.6.0 initializes `random.Random()` lazily; constructing it requests no system entropy. Its process and thread clocks return zero. Replace the OS policy bullet with:
+
+> The sandbox has no ambient file, network or process access, no wall clock, no sleep and no system entropy. Process and thread clocks return zero. A draw from an unseeded generator, or a request to seed it from system entropy, raises. A generator the script seeds itself, such as `random.Random(7)`, works.
 
 **ACP declarations.** The base Interface called the session API for proposals, actor joins, limits and tenant queries regardless of the SDK's session declaration. Its extension dispatcher now returns `not_supported` for disabled operations, while leaving `proposals`, `release` and `withdraw` available for parked job reports. The base declares all three features true and still passes the positive checks.
 

@@ -15,6 +15,8 @@ import { createAgent, fileHistory, serveHistory, tool, type HistoryEntry } from 
 import { scriptedProvider } from "@modular-agent/core/testing";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
 import { codemode } from "../src/codemode.js";
+import { PRINT_BYTES, PrintedOutput } from "../src/codemode-output.js";
+import { ComputeBudget } from "../src/monty-worker.js";
 import { paths } from "../src/configuration.js";
 
 const exec = promisify(execFile);
@@ -32,10 +34,10 @@ async function project(t: TestContext) {
   return { dir, home, config, work, script, log, env, put, run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env }) };
 }
 const scripted = (code: string) => [{ toolCalls: [{ name: "codemode", input: { code } }] }, { text: "done" }];
-async function sandbox(t: TestContext, code: string, fixture: () => number | Promise<number> = () => 7) {
+async function sandbox(t: TestContext, code: string, fixture: () => number | Promise<number> = () => 7, computeMs?: number) {
   const p = await project(t);
   const agent = await createAgent({ project: p.work, providers: [scriptedProvider(scripted(code))], settings: { modelTools: ["codemode"] },
-    plugins: [standardFileTools({ spill: join(p.dir, "output") }), codemode()],
+    plugins: [standardFileTools({ spill: join(p.dir, "output") }), codemode({ computeMs })],
     tools: [tool({ name: "fixture", description: "Fixture returns a number", input: { type: "object", properties: {}, additionalProperties: false }, run: fixture })] });
   t.after(() => agent.close());
   const session = await agent.session();
@@ -60,28 +62,72 @@ except TypeError as e:
 'ending'`);
   const r = await result();
   assert.equal(r.status, "completed", r.text());
-  assert.equal(r.text(), "harbour\n3\ntools.read(path: str, limit: float = None, offset: float = None)\nfixture\n7\nread() failed: File not found: missing\nread(): got two values for path\nending");
+  assert.equal(r.text(), "harbour\n3\ntools.read(path: str, limit: float = None, offset: float = None)\nfixture\n7\nFile not found: missing\nread(): got two values for path\nending");
   assert.equal(await readFile(join(p.work, "a.txt"), "utf8"), "harbour");
 });
 
-test("codemode filters host OS calls and reports recursion errors", async t => {
-  const { result } = await sandbox(t, `from pathlib import Path
-try:
-    Path('/etc/passwd').read_text()
-except RuntimeError as e:
-    print(str(e))
+test("codemode renders Python values before converting them to JavaScript", async t => {
+  const { session } = await sandbox(t, "");
+  const cases = [
+    ["1.0", "1.0"], ["-0.0", "-0.0"], ["2**70", "1180591620717411303424"],
+    ["b'hi'", "b'hi'"], ["{1}", "{1}"], ["float('nan')", "nan"],
+    ["[1.0, b'hi', {1}, float('nan')]", "[1.0, b'hi', {1}, nan]"],
+    ["{'2': (1.0, 2**70), '1': 'é'}", '{\n  "2": [\n    1.0,\n    1180591620717411303424\n  ],\n  "1": "é"\n}'],
+  ] as const;
+  for (const [code, want] of cases) {
+    const r = await session.callTool("codemode", { code });
+    assert.equal(r.status, "completed", r.text());
+    assert.equal(r.text(), want, code);
+  }
+});
+
+test("codemode denies ambient OS access and allows explicitly seeded randomness", async t => {
+  const { p, result } = await sandbox(t, `from pathlib import Path
 import time
-try:
-    time.time()
-except RuntimeError as e:
-    print(str(e))
-def recurse():
-    return recurse()
-recurse()`);
+import random
+import os
+
+def denied(name, probe):
+    try:
+        probe()
+    except Exception:
+        print(name)
+
+def network():
+    import socket
+    return socket.socket()
+
+def process():
+    import subprocess
+    return subprocess.run(['true'])
+
+denied('open', lambda: open('present.txt'))
+denied('path', lambda: Path('present.txt').read_text())
+denied('network', network)
+denied('process', process)
+denied('wall clock', lambda: time.time())
+denied('monotonic clock', lambda: time.monotonic())
+denied('sleep', lambda: time.sleep(0))
+denied('entropy', lambda: os.urandom(1))
+denied('unseeded random', lambda: random.random())
+denied('unseeded generator', lambda: random.Random().random())
+print(time.process_time(), time.thread_time())
+random.Random(7).random() == random.Random(7).random()`);
+  await p.put(join(p.work, "present.txt"), "not visible");
   const r = await result();
-  assert.equal(r.status, "failed");
-  assert.match(r.text(), /no direct access to files, the network, the clock or the environment/);
-  assert.match(r.text(), /RecursionError/);
+  assert.equal(r.status, "completed", r.text());
+  assert.equal(r.text(), "open\npath\nnetwork\nprocess\nwall clock\nmonotonic clock\nsleep\nentropy\nunseeded random\nunseeded generator\n0.0 0.0\ntrue");
+});
+
+test("codemode allows 200 recursive frames and rejects 201", async t => {
+  const { session } = await sandbox(t, "");
+  const code = (frames: number) => `def recurse(n):\n    return recurse(n - 1) if n > 1 else 7\nrecurse(${frames})`;
+  const allowed = await session.callTool("codemode", { code: code(200) });
+  assert.equal(allowed.status, "completed", allowed.text());
+  assert.equal(allowed.text(), "7");
+  const denied = await session.callTool("codemode", { code: code(201) });
+  assert.equal(denied.status, "failed");
+  assert.match(denied.text(), /RecursionError/);
 });
 
 test("codemode allows more than 32 MiB but ends a growing allocation with MemoryError", async t => {
@@ -172,29 +218,85 @@ test("codemode ends a turn at the computation time limit", { timeout: 40_000 }, 
   assert.equal(next.text(), "42");
 });
 
-test("codemode dispatches no more than 500 nested calls", async t => {
+test("a dispatched tool starts a fresh 30-second active wall clock interval", () => {
+  const budget = new ComputeBudget(30_000_000);
+  budget.observe(25_000_000);
+  assert.equal(budget.remaining, 5_000_000);
+  budget.dispatchedTool();
+  assert.equal(budget.remaining, 30_000_000);
+  budget.observe(54_999_999);
+  assert.equal(budget.remaining, 1);
+  assert.throws(() => budget.observe(55_000_000), /^Error: TimeoutError:/);
+});
+
+test("waiting longer than the computation budget for a nested tool does not use it", async t => {
+  const { result } = await sandbox(t, "tools.fixture()", async () => {
+    await delay(600);
+    return 7;
+  }, 300);
+  const r = await result();
+  assert.equal(r.status, "completed", r.text());
+  assert.equal(r.text(), "7");
+});
+
+for (const [kind, lookup] of Object.entries({
+  import: "    import tools\n",
+  "name lookup": "    try:\n        unknown_name\n    except NameError:\n        pass\n",
+  describe_tool: "    describe_tool('fixture')\n",
+  search_tools: "    search_tools('fixture')\n",
+})) {
+  test(`codemode carries active time across ${kind} suspensions`, async t => {
+    // Spend time in the interpreter, not measuring a fixed number of quick
+    // pipe round trips. Each slice is small, but 20 million steps exceed 50 ms.
+    const { result } = await sandbox(t, `print('started')\nfor block in range(2000):\n    for i in range(10000):\n        pass\n${lookup}    if block == 1:\n        print('resumed')`, undefined, 50);
+    const r = await result();
+    assert.equal(r.status, "failed");
+    assert.match(r.text(), /^started\nresumed\nTimeoutError:/);
+  });
+}
+
+test("codemode dispatches exactly 500 nested calls without counting lookups or rejected arguments", async t => {
+  let calls = 0;
   const { result } = await sandbox(t, `for _ in range(500):
+    import tools
     describe_tool('fixture')
     search_tools('fixture')
+    try:
+        tools.fixture('invalid')
+    except TypeError:
+        pass
     tools.fixture()
 print('reached exactly 500')
-tools.fixture()`);
+tools.fixture()`, () => ++calls);
   const r = await result();
   assert.equal(r.status, "failed");
+  assert.equal(calls, 500);
   assert.match(r.text(), /reached exactly 500\n/);
   assert.match(r.text(), /more than 500 function calls/);
 });
 
-test("codemode cuts result lines and rejects printed output over 1 MiB", async t => {
+test("printed output keeps the UTF-8 prefix of the segment that crosses 1 MiB", () => {
+  const printed = new PrintedOutput(PRINT_BYTES);
+  const start = "a".repeat(PRINT_BYTES - 4);
+  printed.append(start);
+  assert.throws(() => printed.append("é🙂not kept"), { message: "RuntimeError: printed output exceeded 1048576 bytes" });
+  assert.ok(printed.text() === start + "é");
+});
+
+test("codemode stops on print overflow before a nested call and cuts the whole result", async t => {
   const cut = await sandbox(t, "print('hi\\n' * 2100, end='')");
   const r = await cut.result();
   assert.equal(r.status, "completed");
-  assert.match(r.text(), /showing the first 2000 of 2100 lines/);
-  const over = await sandbox(t, "print('x' * 1_100_000)");
+  assert.equal(r.text().split("\n").length, 2000);
+  assert.match(r.text(), /showing the first 1999 of 2100 lines/);
+  let called = false;
+  const over = await sandbox(t, "print('é🙂' * 200_000)\ntools.fixture()", () => { called = true; return 7; });
   const out = await over.result();
   assert.equal(out.status, "failed");
-  assert.match(out.text(), /printed output exceeded/);
-  assert.ok(Buffer.byteLength(out.text()) < 52_000);
+  assert.match(out.text(), /^RuntimeError: printed output exceeded 1048576 bytes\né🙂é🙂/);
+  assert.doesNotMatch(out.text(), /�/);
+  assert.ok(Buffer.byteLength(out.text()) <= 50 * 1024);
+  assert.equal(called, false);
 });
 
 test("file tools preserve BOM and CRLF, respect .gitignore, and attach images", async t => {
@@ -414,13 +516,14 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
 test("ma composes only the public SDK and official SDK plugin entry points", async () => {
   const pkg = join(root, "typescript/packages/ma");
   const manifest = JSON.parse(await readFile(join(pkg, "package.json"), "utf8"));
-  const allowed = ["@modular-agent/core", "@modular-agent/tools-files", "@modular-agent/tools-mcp", "@pydantic/monty"];
+  const allowed = ["@modular-agent/core", "@modular-agent/tools-files", "@modular-agent/tools-mcp", "@pydantic/monty", "protobufjs"]; // Monty's worker wire codec
   assert.deepEqual(Object.keys(manifest.dependencies).sort(), allowed.slice().sort());
   for (const file of await readdir(join(pkg, "src"))) if (file.endsWith(".ts")) {
     const source = await readFile(join(pkg, "src", file), "utf8");
     for (const entry of source.matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*)["']([^"']+)/g)) {
       const spec = entry[1];
       assert.ok(spec.startsWith("node:") || /^\.\/[\w-]+\.(js|json)$/.test(spec) ||
+        (file === "monty-worker.ts" && spec === "protobufjs") ||
         ["@modular-agent/core", "@modular-agent/core/testing", "@modular-agent/tools-files/sdk", "@modular-agent/tools-mcp/sdk", "@pydantic/monty"].includes(spec), `${file}: ${spec}`);
     }
   }

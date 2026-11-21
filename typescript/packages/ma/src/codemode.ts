@@ -1,145 +1,154 @@
 import { addAbortListener } from "node:events";
-import { ExternalModule, FunctionSnapshot, Monty, MontyComplete, MontyCrashedError, MontyRuntimeError, MontySyntaxError, NameLookupSnapshot } from "@pydantic/monty";
 import { definePlugin, tool, type ContentPart, type ImagePart, type ToolContext } from "@modular-agent/core";
 import { catalog } from "./catalog.js";
+import { bounded, PRINT_BYTES, PrintedOutput, PythonError } from "./codemode-output.js";
+import { ValueBuilder, Values } from "./monty-values.js";
+import { ComputeBudget, MontyWorker } from "./monty-worker.js";
 
 const description = 'Run Python in a sandbox. The functions listed under "Functions in codemode" in the system prompt are the only way to reach files, commands and other tools. Call them on `tools`, for example `text = tools.read(path="README.md")`. The value of the last expression and anything printed come back as the result. Each run starts fresh: no variables carry over. The sandbox runs a subset of Python: no classes with inheritance, no third-party packages, and no direct file, network or process access.';
 const noOs = "the sandbox has no direct access to files, the network, the clock or the environment; use the provided functions";
-const utf8 = Buffer.byteLength;
-const CAP = 1024 * 1024;
-function bounded(text: string) {
-  const lines = text.replace(/\n$/, "").split("\n");
-  if (lines.length <= 2000 && utf8(text) <= 51200) return text;
-  let kept = "", count = 0;
-  for (const line of lines.slice(0, 2000)) {
-    if (utf8(kept) + utf8(line) + 1 > 51200) break;
-    kept += line + "\n";
-    count++;
-  }
-  return `${kept}\n[Output cut: showing the first ${count} of ${lines.length} lines (${utf8(kept)} of ${utf8(text)} bytes). Return or print less, or write the rest to a file.]`;
-}
-const isImage = (v: unknown): v is ImagePart => !!v && typeof v === "object" && "type" in v && v.type === "image" && "mimeType" in v && typeof v.mimeType === "string" && "data" in v && typeof v.data === "string";
+const isImage = (p: ContentPart): p is ImagePart => p.type === "image";
 const note = (content: ContentPart[]) => content.filter(p => p.type === "text").map(p => p.text).join("");
-type PythonJson = null | boolean | number | string | PythonJson[] | { [name: string]: PythonJson };
-function pythonJson(value: unknown): PythonJson {
-  if (value == null) return null;
-  if (typeof value === "bigint") return Number.isSafeInteger(Number(value)) ? Number(value) : value.toString();
-  if (typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
-  if (Array.isArray(value)) return value.map(pythonJson);
-  if (value instanceof Map) return Object.fromEntries([...value].map(([key, val]) => [String(key), pythonJson(val)]));
-  if (typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, val]) => [key, pythonJson(val)]));
-  return String(value);
-}
+const exception = (excType: string, message: string) => ({ excType, message });
+const error = (excType: string, message: string) => new PythonError(exception(excType, message));
+const messageOf = (err: unknown) => err instanceof Error ? err.message : String(err);
 
-async function run(pool: Monty, code: string, ctx: ToolContext) {
+async function run(code: string, ctx: ToolContext, computeMs: number) {
   const available = catalog(await ctx.tools.list());
   ctx.cancelled.throwIfAborted();
-  const modules = Object.fromEntries([...available.functions.keys()].map(name => [name, () => {}]));
-  // The SDK counts nested tool calls below. Monty's suspension counter also
-  // includes lookups and must not cut off a run before its 500th tool call.
-  await using sandbox = await pool.checkout({ scriptName: "main.py", limits: { maxTurnDurationSecs: 30, maxRecursionDepth: 200,
-    maxMemory: 256 * 1024 * 1024, maxSuspensions: Number.MAX_SAFE_INTEGER },
-    externalModules: { tools: new ExternalModule(modules) }, osPolicy: { datetime: "call_host", sleep: "call_host", randomStart: "call_host" } });
-  ctx.cancelled.throwIfAborted();
-  // Monty 1.6.0 closes a session only after its current turn replies. Capture
-  // the PID before starting a turn so cancellation can stop the subprocess.
-  const pid = sandbox.workerPid;
-  if (pid === undefined) throw new Error("No sandbox worker process was checked out");
-  using abort = addAbortListener(ctx.cancelled, () => {
-    try { process.kill(pid, "SIGKILL"); }
-    catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ESRCH") console.error("Could not stop the sandbox worker process:", err);
-    }
-  });
-  let printed = "", bytes = 0, over = false, calls = 0;
-  const error = (kind: string, message: string) => new MontyRuntimeError(kind, message);
-  const toText = () => printed && !printed.endsWith("\n") ? printed + "\n" : printed;
+  const tools = new ValueBuilder();
+  const pairs = [...available.functions.keys()].map(name => ({ key: tools.add(name), value: tools.node({ function: { name: `tools.${name}` } }) }));
+  const module = tools.node({ module: { name: "tools", id: { data: Uint8Array.of(...Array(15).fill(0), 1) }, attrs: { pairs } } });
+  const printed = new PrintedOutput(PRINT_BYTES);
+  const toText = () => { const text = printed.text(); return text && !text.endsWith("\n") ? `${text}\n` : text; };
   try {
-    await sandbox.feedRun("import tools");
-    let next = await sandbox.feedStart(code, { printCallback(_stream, text) {
-      if (over) return;
-      if (bytes + utf8(text) > CAP) { over = true; return; }
-      bytes += utf8(text); printed += text;
-    } });
-    while (!(next instanceof MontyComplete)) {
-      ctx.cancelled.throwIfAborted();
-      if (over) throw error("RuntimeError", "printed output exceeded 1048576 bytes");
-      if (next instanceof NameLookupSnapshot) {
-        next = await next.resume(["describe_tool", "search_tools"].includes(next.variableName) ? next.variableName : undefined);
+    await using worker = new MontyWorker(ctx.cancelled);
+    await worker.configure(computeMs);
+    let request: object = { feed: { code, inputs: [{ name: "tools", value: module }], values: tools.values } };
+    let calls = 0;
+    const budget = new ComputeBudget(computeMs * 1000);
+    while (true) {
+      const next = await worker.turn(request, budget.remaining, printed);
+      if (next.kind === "error" && ["TimeoutError", "MemoryError"].includes(next.error.exception.excType)) throw new PythonError(next.error.exception);
+      budget.observe(next.feedExecutionMicros.toNumber());
+      if (next.kind === "error") throw new PythonError(next.error.exception);
+      if (next.kind === "complete") {
+        const { values, value } = next.complete;
+        const result = new Values(values);
+        const { images, rest, skip } = result.images(value);
+        const output = rest ? result.render(value, 50 * 1024, skip) : { text: "", more: false };
+        let text = toText();
+        for (const image of images) if (typeof image.note === "string") text += `${image.note}\n`;
+        text += output.text;
+        return { content: [{ type: "text" as const, text: bounded(text || "(no output)", output.more) },
+          ...images.map(({ type, mimeType, data }) => ({ type, mimeType, data }))], value: { calls } };
+      }
+      if (next.kind === "nameLookup") {
+        const lookup = next.nameLookup;
+        const name = lookup.name;
+        if (!lookup.objectId && (name === "describe_tool" || name === "search_tools")) {
+          const builder = new ValueBuilder();
+          const value = builder.node({ function: { name } });
+          request = { resumeNameLookup: { value, values: builder.values } };
+        } else request = { resumeNameLookup: { undefined: {} } };
         continue;
       }
-      if (!(next instanceof FunctionSnapshot)) throw error("RuntimeError", "awaited something that never resolves");
-      if (next.isOsFunction) {
-        next = next.functionName === "import" && next.args[0] === "tools" ? await next.resumeAuto() : await next.resumeError(error("RuntimeError", noOs));
+      if (next.kind === "osCall") {
+        const call = next.osCall;
+        const result = call.import?.module === "tools" ? { returnValue: module } : { error: exception("RuntimeError", noOs) };
+        const values = "returnValue" in result ? tools.values : undefined;
+        request = call.allowEagerAwait
+          ? { resumeFutures: { results: [{ callId: call.callId, result }], values } }
+          : { resumeCall: { callId: call.callId, result, values } };
         continue;
       }
-      const { functionName: raw, args, kwargs } = next;
+      if (next.kind !== "functionCall") throw new Error("RuntimeError: awaited something that never resolves");
+      const call = next.functionCall;
+      const raw = call.functionName;
       const name = raw.replace(/^tools\./, "");
-      let value: unknown;
+      const fn = raw.startsWith("tools.") ? available.functions.get(name) : undefined;
       try {
-        if (raw === "describe_tool" || raw === "search_tools") {
-          const key = args[0] ?? kwargs[raw === "describe_tool" ? "name" : "query"];
-          if (typeof key !== "string") throw error("TypeError", `${raw}() takes one string`);
-          if (raw === "search_tools") value = available.search(key);
-          else {
-            value = available.functions.get(key)?.describe;
-            if (!value) throw error("KeyError", `no function named ${key}`);
-          }
+        if (call.objectId || (!fn && raw !== "describe_tool" && raw !== "search_tools")) throw error("NameError", `name '${raw}' is not defined`);
+        let args, kwargs;
+        try { ({ args, kwargs } = new Values(call.values).arguments(call)); }
+        catch (err) { throw error("TypeError", `${name}(): ${messageOf(err)}`); }
+        let value: unknown;
+        if (!fn) {
+          const param = raw === "describe_tool" ? "name" : "query";
+          const keys = Object.keys(kwargs);
+          const key = args[0] ?? kwargs[param];
+          if (typeof key !== "string" || args.length + keys.length !== 1 || keys.some(k => k !== param)) throw error("TypeError", `${raw}() takes one string`);
+          value = raw === "search_tools" ? available.search(key) : available.functions.get(key)?.describe;
+          if (value === undefined) throw error("KeyError", `no function named ${key}`);
         } else {
-          const fn = available.functions.get(name);
-          if (!raw.startsWith("tools.") || !fn) throw error("NameError", `name '${raw}' is not defined`);
           let input: Record<string, unknown>;
-          try { input = fn.bind(args.map(pythonJson), Object.fromEntries(Object.entries(kwargs).map(([k, v]) => [k, pythonJson(v)]))); }
-          catch (err) { throw error("TypeError", `${name}(): ${(err as Error).message}`); }
-          if (++calls > 500) throw error("RuntimeError", "this run made more than 500 function calls");
+          try { input = fn.bind(args, kwargs); }
+          catch (err) { throw error("TypeError", `${name}(): ${messageOf(err)}`); }
+          if (calls === 500) throw error("RuntimeError", "this run made more than 500 function calls");
+          calls++;
+          // The worker clock is paused during host work. Only a dispatched tool
+          // moves the checkpoint, even if the tool fails or is refused.
+          budget.dispatchedTool();
           let result;
           try { result = await ctx.tools.call(fn.original, input); }
-          catch (err) { throw error("RuntimeError", `${name}() could not run: ${(err as Error).message}`); }
+          catch (err) { throw error("RuntimeError", messageOf(err)); }
           const text = note(result.content);
           if (result.status === "completed") {
             const image = result.content.find(isImage);
             value = result.value !== undefined ? result.value : image ? { ...image, note: text } : text;
-          } else if (name === "exec" && result.status === "failed" && result.value && typeof result.value === "object" && !(result.value as { timed_out?: boolean }).timed_out) value = result.value;
-          else throw error("RuntimeError", `${name}() ${result.status === "outcomeUnknown" ? "outcome unknown" : result.status}: ${text}`);
+          } else {
+            const exec = name === "exec" && result.status === "failed" ? result.value as { exit_code?: number; timed_out?: boolean } | undefined : undefined;
+            if (exec && typeof exec.exit_code === "number" && exec.exit_code !== 0 && !exec.timed_out) value = exec;
+            else throw error("RuntimeError", text);
+          }
         }
+        ctx.cancelled.throwIfAborted();
+        const builder = new ValueBuilder();
+        const result = { returnValue: builder.add(value) };
+        request = { resumeCall: { callId: call.callId, result, values: builder.values } };
       } catch (err) {
         ctx.cancelled.throwIfAborted();
-        next = await next.resumeError(err);
-        continue;
+        const result = { error: err instanceof PythonError ? err.exception : exception("RuntimeError", messageOf(err)) };
+        request = { resumeCall: { callId: call.callId, result } };
       }
-      ctx.cancelled.throwIfAborted();
-      next = await next.resume(value);
     }
-    if (over) throw error("RuntimeError", "printed output exceeded 1048576 bytes");
-    const output: unknown = pythonJson(next.output);
-    const images = (Array.isArray(output) ? output : [output]).filter(isImage);
-    const rest = Array.isArray(output) ? output.filter(x => !isImage(x)) : isImage(output) ? null : output;
-    let text = toText();
-    for (const image of images) if (typeof image.note === "string") text += `${image.note}\n`;
-    if (rest != null && !(images.length && Array.isArray(rest) && !rest.length)) text += typeof rest === "string" ? rest : JSON.stringify(rest, null, 2);
-    return { content: [{ type: "text", text: bounded(text || "(no output)") }, ...images.map(({ type, mimeType, data }) => ({ type, mimeType, data }))], value: { calls } };
   } catch (err) {
     ctx.cancelled.throwIfAborted();
-    const message = err instanceof MontyCrashedError
-      ? err.timedOut ? `TimeoutError: ${err.message}` : `The sandbox worker process died: ${err.message}`
-      : err instanceof MontyRuntimeError || err instanceof MontySyntaxError ? err.display("traceback") : (err as Error).message;
-    const terminal = err instanceof MontyCrashedError || err instanceof MontyRuntimeError && ["MemoryError", "TimeoutError"].includes(err.exception.typeName);
+    const message = messageOf(err);
     const combined = toText() + message;
     const cut = bounded(combined);
-    const text = over && !terminal ? `RuntimeError: printed output exceeded ${CAP} bytes\n${bounded(printed).trimEnd()}`.trimEnd()
-      : terminal && cut !== combined ? bounded(message + "\n" + toText()) : cut;
-    return { status: "failed" as const, content: [{ type: "text", text }] };
+    const reason = err instanceof PythonError ? err.exception.excType : message.split(":", 1)[0];
+    const text = message.startsWith("RuntimeError: printed output exceeded")
+      ? bounded(`${message}\n${printed.text()}`)
+      : cut !== combined && (reason === "MemoryError" || reason === "TimeoutError")
+        ? bounded(`${message.split("\n").at(-1)}\n${combined}`)
+        : cut;
+    return { status: "failed" as const, content: [{ type: "text" as const, text }] };
   }
 }
 
-export function codemode() {
-  let pool: Promise<Monty> | undefined;
+export function codemode({ computeMs = 30_000 } = {}) {
+  // Keep the same per-plugin worker cap as the native pool. Queue outside the
+  // interpreter clock and remove cancelled calls before they can start a worker.
+  let free = 4;
+  const waiting = new Set<(granted: boolean) => void>();
+  async function acquire(signal: AbortSignal) {
+    signal.throwIfAborted();
+    if (free > 0) { free--; return; }
+    let ready!: (granted: boolean) => void;
+    const slot = new Promise<boolean>(resolve => { ready = resolve; });
+    using listener = addAbortListener(signal, () => { if (waiting.delete(ready)) ready(false); });
+    waiting.add(ready);
+    if (!(await slot)) signal.throwIfAborted();
+  }
   return definePlugin({ name: "tools.codemode", tools: [tool({ name: "codemode", description,
     input: { type: "object", properties: { code: { type: "string", description: "Python source to run" } }, required: ["code"], additionalProperties: false },
     inProcessOnly: true, async run({ code }, ctx) {
-      // The native Node pool runs Python in subprocesses and retires each
-      // worker after one checkout, including after a terminal resource error.
-      pool ??= Monty.create({ requestTimeout: 32, maxProcesses: 4, maxCheckoutsPerWorker: 1 });
-      return run(await pool, code, ctx);
-    } })], async stop() { if (pool) await (await pool).close(); } });
+      await acquire(ctx.cancelled);
+      try { return await run(code, ctx, computeMs); }
+      finally {
+        const next = waiting.values().next().value;
+        if (next) { waiting.delete(next); next(true); } else free++;
+      }
+    } })] });
 }
