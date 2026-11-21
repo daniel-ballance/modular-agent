@@ -88,6 +88,7 @@ if $all; then
   step "scenarios: Go runner, every placement" bash -c "cd go && mise exec -- go test -count=1 ./modular/scenarios/"
   step "scenarios: Python runner, every placement" bash -c "cd python && uv run --offline python -m modular_agent._scenarios"
   step "reference checks: all four ma" node conformance/reference/run.mjs --all
+  step "demo: project notes, including crash recovery" bash -c 'demos/project-notes/build.sh --sdk-built && demos/project-notes/run.py'
   if ! $quick; then
     for language in rust typescript go python; do
       command=$(node -e "const a=require('./conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")

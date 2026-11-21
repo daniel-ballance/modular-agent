@@ -145,7 +145,9 @@ The project has five layers, each made only from the layers below it; a gap foun
 | 2. SDK specification | What a developer sees, in each language | [`docs/sdk/`](docs/sdk/README.md); [shared scenarios](conformance/sdk/) |
 | 3. SDKs | One SDK in Rust, TypeScript, Go and Python | each language's directory |
 | 4. Reference implementations | `ma`, the same coding agent in each language | [`docs/reference/`](docs/reference/README.md); [reference checks](conformance/reference/) |
-| 5. Demonstrative implementations | Agents that show the ecosystem across languages and placements | none yet |
+| 5. Demonstrative implementations | Agents that combine SDKs and placements | [`demos/`](demos/) |
+
+The [project notes demo](demos/project-notes/README.md) runs one agent with parts from all four SDKs and reopens its session after a crash.
 
 Each language is a peer directory with its own toolchain: [`rust/`](rust/README.md), [`typescript/`](typescript/README.md), [`go/`](go/README.md) and [`python/`](python/README.md). Each also holds the clean-room build its SDK wraps. Background, such as the research and pressure tests that shaped the design, is in [`docs/research/`](docs/research/), [`docs/pressure-test/`](docs/pressure-test/), [`docs/build-notes.md`](docs/build-notes.md) and [`docs/one-pager.html`](docs/one-pager.html).
 

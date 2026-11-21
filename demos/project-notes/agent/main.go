@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
@@ -40,7 +41,8 @@ func run(ctx context.Context) (err error) {
 	environmentToken := flag.String("environment-token", "", "environment token file")
 	python := flag.String("python", "", "absolute path to the plugin's Python interpreter")
 	tools := flag.String("tools", "", "absolute path to the notes plugin")
-	model := flag.String("model", "scripted/script", "scripted/script or an openai model reference")
+	model := flag.String("model", "scripted/script", "scripted/script, openai/ID or claude/ID")
+	claude := flag.String("claude-sidecar", "", "absolute path to the built Claude Provider program")
 	pause := flag.Bool("pause-after-write", false, "pause the add_note tool after its write (crash check)")
 	reopen := flag.String("reopen", "", "resume an existing session without a new prompt")
 	flag.Parse()
@@ -52,9 +54,21 @@ func run(ctx context.Context) (err error) {
 	if *pause {
 		toolPlugin.Env = map[string]string{"NOTES_DEMO_PAUSE_AFTER_WRITE": "1"}
 	}
-	provider := modular.WithProvider(openai.New())
-	if *model == "scripted/script" {
+	var provider modular.Option
+	switch {
+	case *model == "scripted/script":
 		provider = modulartest.Script(script)
+	case strings.HasPrefix(*model, "openai/"):
+		provider = modular.WithProvider(openai.New())
+	case strings.HasPrefix(*model, "claude/") && filepath.IsAbs(*claude):
+		// Load the Provider through the SDK's plugin API. Claude Code owns the login.
+		env := map[string]string{"HOME": os.Getenv("HOME")}
+		if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+			env["CLAUDE_CONFIG_DIR"] = dir
+		}
+		provider = modular.WithProcessPlugin(modular.ProcessPlugin{Command: []string{"node", *claude}, Env: env})
+	default:
+		return errors.New("choose scripted/script, openai/ID or claude/ID with a sidecar path")
 	}
 	agent, err := modular.New(ctx,
 		modular.WithProject(*project), modular.WithDataDir(*data),
@@ -68,7 +82,7 @@ func run(ctx context.Context) (err error) {
 	)
 	if err != nil {
 		if *model != "scripted/script" {
-			return errors.New("could not compose the agent for the requested OpenAI model")
+			return errors.New("could not compose the agent for the requested live model")
 		}
 		return err
 	}
@@ -92,7 +106,7 @@ func run(ctx context.Context) (err error) {
 		result, err := session.Prompt(ctx, prompt)
 		if err != nil {
 			if *model != "scripted/script" {
-				return errors.New("could not run the OpenAI prompt")
+				return errors.New("could not run the live prompt")
 			}
 			return err
 		}
