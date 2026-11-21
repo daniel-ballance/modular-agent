@@ -51,7 +51,7 @@ step "kits: npm ci (conformance/acp, conformance/tools)" bash -c "cd conformance
 # ---------- builds ----------
 want rust && step "rust: build ma and fixture program" bash -c "cd rust && mise exec -- cargo build -q -p standard --bin ma && mise exec -- cargo build -q -p agent-base && mise exec -- cargo build -q -p sdk-scenarios --bin modular-agent-fixtures"
 want typescript && step "typescript: npm ci and build" bash -c "cd typescript && npm ci --silent && npm run -s build"
-want go && step "go: build ma and fixture program" bash -c "cd go && mkdir -p .bin && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures"
+want go && step "go: build ma and fixture program" bash -c "cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures"
 want python && step "python: uv sync" bash -c "cd python && uv sync --python 3.13 -q"
 
 # ---------- lint and formatting ----------

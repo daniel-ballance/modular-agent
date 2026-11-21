@@ -37,11 +37,12 @@ mkdir -p "$TMPDIR"
 npm ci --prefix conformance/tools
 npm ci --prefix conformance/acp
 # Build the four fixture programs per conformance/sdk/fixtures/*.json.
+(cd go && ./scripts/build-monty.sh)
 export MODULAR_AGENT_SDK_REQUIRE=all
 (cd go && mise exec -- go build ./... && mise exec -- go vet ./... && test -z "$(mise exec -- gofmt -l .)")
 (cd go && mise exec -- go test -json -count=1 ./... > "$TMPDIR/go-test.json" 2>&1)
 (cd go && mise exec -- go test -race -json -count=1 ./modular/... ./cmd/ma/... > "$TMPDIR/go-race.json" 2>&1)
-(cd go && mkdir -p .bin && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures)
+(cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures)
 node conformance/reference/run.mjs --agent go
 ma="$PWD/go/.bin/ma"
 (cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- "$ma" --acp)
