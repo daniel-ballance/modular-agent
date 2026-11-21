@@ -79,8 +79,9 @@ type ToolCallData struct {
 	Call ToolCall `json:"call"`
 }
 type ToolOutputData struct {
-	ToolCallID string `json:"toolCallId"`
-	Chunk      string `json:"chunk"`
+	ToolCallID string  `json:"toolCallId"`
+	Chunk      string  `json:"chunk"`
+	Content    Content `json:"content,omitempty"`
 }
 type EntryData struct {
 	Entry HistoryEntry `json:"entry"`
@@ -215,11 +216,13 @@ func sdkEvent(e api.Event) Event {
 		result := api.Decode[api.ToolResult](e.Data)
 		data = api.JSON(map[string]any{"callId": result.Call, "toolCallId": result.Call, "status": portable.StatusOut(result.Status), "content": portable.Content(result.Content)})
 	case "tool.progress":
-		var content api.Content
-		if json.Unmarshal(e.Data, &content) != nil {
-			content = api.Text(api.Decode[string](e.Data))
-		}
-		data = api.JSON(map[string]any{"toolCallId": e.Call, "chunk": content.Text()})
+		data = api.JSON(portable.ToolOutput(e.Call, e.Data))
+	case "job.progress":
+		p := api.Decode[struct {
+			JobID   string
+			Content api.Content
+		}](e.Data)
+		data = api.JSON(map[string]any{"jobId": p.JobID, "content": portable.Content(p.Content)})
 	}
 	if h.Type == "" {
 		if !strings.HasPrefix(e.Kind, "plugin.") {

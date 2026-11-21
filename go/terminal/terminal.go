@@ -6,10 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/daniel-ballance/modular-agent/go/api"
 	"io"
 	"strings"
 	"sync"
+
+	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 type Terminal struct{ a api.API }
@@ -72,7 +74,7 @@ func (t *Terminal) Run(ctx context.Context, opt Options, input io.ReadCloser, st
 				}
 			}
 		case "tool.progress":
-			_, _ = fmt.Fprint(stderr, api.Decode[string](e.Data))
+			_, _ = fmt.Fprint(stderr, portable.ToolOutput(e.Call, e.Data)["chunk"])
 		case "turn.end":
 			if opt.Mode == "line" {
 				out := api.Decode[api.Outcome](e.Data)
