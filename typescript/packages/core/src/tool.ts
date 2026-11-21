@@ -92,7 +92,6 @@ export class Tool {
           throw new AgentError("invalid_request", "Invalid tool status");
         }
         if (!out.content.every(p => p && typeof p.type === "string")) throw new AgentError("invalid_request", "Invalid tool result content");
-        if (out.status === "completed" && output) await output.parse(out.value);
         if (out.status !== "completed" && !out.content.length) out.content = [text({
           failed: "Tool failed", refused: "Tool refused", cancelled: "Cancelled", outcomeUnknown: "The tool outcome is unknown",
         }[out.status as "failed" | "refused" | "cancelled" | "outcomeUnknown"])];
@@ -192,14 +191,18 @@ async function ask(base: BaseContext, question: Parameters<BaseContext["ask"]>[0
     const a = await base.ask({
       ...question, toolCallId: base.call.id,
     });
-    if (a.pending) throw new LeftOpen("Waiting for an answer");
-    if (a.declined) return { declined: true, reason: a.reason };
-    if (question.kind === "secret") {
-      return a.stored ? { stored: a.stored } : { declined: true, reason: "The secret was not stored" };
-    }
-    return question.kind === "approval" && a.value === "allow" ? "allow" : { value: a.value ?? "" };
+    return questionReply(question.kind, a);
   } catch (error) {
     if (error instanceof LeftOpen) throw error;
     throw sdkError(error, "invalid_request");
   }
+}
+
+export function questionReply(kind: QuestionDraft["kind"], answer: Awaited<ReturnType<BaseContext["ask"]>>): QuestionReply {
+  if (answer.pending) throw new LeftOpen("Waiting for an answer");
+  if (answer.declined) return { declined: true, reason: answer.reason };
+  if (kind === "secret") {
+    return answer.stored ? { stored: answer.stored } : { declined: true, reason: "The secret was not stored" };
+  }
+  return kind === "approval" && answer.value === "allow" ? "allow" : { value: answer.value ?? "" };
 }

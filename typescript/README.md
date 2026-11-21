@@ -4,7 +4,7 @@ This directory contains the TypeScript base, the public SDK, and [`ma`](packages
 
 | Path | Holds |
 |---|---|
-| `packages/` | The edition 3 base and SDK, as npm workspaces |
+| `packages/` | The edition 4 base and SDK, as npm workspaces |
 | `packages/core/` | Public SDK and testing kit |
 | `packages/ma/` | The standard configuration, with the `ma` executable |
 | `packages/fixtures/` | SDK fixture program and shared-scenario runner |
@@ -24,7 +24,7 @@ npm test
 MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test
 ```
 
-`npm test` includes runs of the ACP kit against the agent, with history kept locally and in a history service, and of the history kit against its own service. It also runs the SDK tests and shared scenarios against each built fixture program. Until all fixture programs support `--listen`, set `MODULAR_AGENT_SDK_SERVICE=typescript` to limit the service placements without skipping any built stdio fixtures. [Status](../docs/status.md) records what the build exercises.
+`npm test` includes runs of the ACP kit against the agent, with history kept locally and in a history service, and of the history kit against its own service. It also runs the SDK tests and shared scenarios in process, over stdio and over WebSocket against each built fixture program. Set `MODULAR_AGENT_SDK_REQUIRE=all` after building the four fixture programs to require the full matrix. [Status](../docs/status.md) records what the build exercises.
 
 ## Run
 

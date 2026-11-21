@@ -50,7 +50,8 @@ test("composition checks the effective history, environment and plugin-host choi
   const dir = await mkdtemp(join(tmpdir(), "ma-parts-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const history = fileHistory(join(dir, "history"));
-  await assert.rejects(createAgent({ pluginHost: false, processPlugins: [] }), { code: "invalid_composition" });
+  await (await createAgent({ pluginHost: false, processPlugins: [], servicePlugins: [] })).close();
+  await assert.rejects(createAgent({ pluginHost: false, processPlugins: [{ command: ["unused"] }] }), { code: "invalid_composition" });
   await assert.rejects(createAgent({ durability: "kept", history }), { code: "invalid_composition", message: /bookkeeping/ });
   await assert.rejects(testAgent({ script: [], durability: "kept", dataDir: dir, history: memoryHistory() }), { code: "invalid_composition" });
   const kept = await createAgent({ durability: "kept", history, environment: memoryEnvironment() });
@@ -139,6 +140,16 @@ for (const placement of ["local", "wire"] as const) {
     const turn = await (await a.session()).prompt("Measure");
     assert.deepEqual(turn.outcome, { kind: "failed", error: "step denied" });
     assert.deepEqual(turn.toolResults().map(r => [r.status, r.value, r.text()]), [["completed", 3, "changed"]]);
+  });
+
+  test(`${placement}: tool.after can repair a completed value before validation`, async t => {
+    const measured = tool({ name: "measure", description: "Measure", input, output: { type: "number" }, run: () => "temporary" });
+    const plugin = place(definePlugin({ name: "repair-result", tools: [measured], hooks: {
+      "tool.after": ({ result }) => { assert.equal(result.status, "completed"); return { change: { value: 4 } }; },
+    } }));
+    const agent = await testAgent({ script, plugins: [plugin] });
+    t.after(() => agent.close());
+    assert.equal((await (await agent.session()).prompt("Measure")).toolResults()[0].value, 4);
   });
 
   test(`${placement}: an invalid transformed tool value fails the turn without redispatch`, async t => {

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { relative, isAbsolute, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -213,6 +214,7 @@ interface Parent {
 	jobs?: string[];
 	runtime?: boolean;
 	command?: boolean;
+	commandEnvironment?: () => Promise<WorkingEnvironment>;
 	provider?: ProviderAttempt;
 	sessionId?: string;
 	tool?: ToolContext;
@@ -264,14 +266,14 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				const parent = parentOf(p);
 				if (parent.runtime) throw new WireError("invalid_request", "A Runtime uses host/runtime/runToolCall");
 				const sessionId = sessionOf(p);
-				if ((!parent.tool && !parent.actors?.length) || !api.workMay(sessionId, "tools", parent.actors ?? [], parent.jobs)) {
+				if ((!parent.tool && !parent.commandEnvironment) || !parent.commandEnvironment && !api.workMay(sessionId, "tools", parent.actors ?? [], parent.jobs)) {
 					throw new WireError("invalid_request", "The parent does not have tools rights");
 				}
 				const project = api.projectOf(sessionId);
 				const path = typeof p.cwd === "string" ? relative(project, p.cwd) : "..";
 				if (!isAbsolute(p.cwd ?? "") || path === ".." || path.startsWith(".." + sep) || isAbsolute(path)) throw new WireError("invalid_request", "cwd is outside the session project");
 				const base = api.use<WorkingEnvironment>("working-environment");
-				const env = parent.tool?.environment ?? (await base?.forSession?.(sessionId)) ?? base;
+				const env = await parent.commandEnvironment?.() ?? parent.tool?.environment ?? (await base?.forSession?.(sessionId)) ?? base;
 				if (!env) throw new WireError("not_supported", "There is no working environment");
 				return env.cwd !== p.cwd && env.at ? env.at(p.cwd) : env;
 			};
@@ -500,7 +502,10 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			for (const c of reg.commands ?? []) {
 				api.registerCommand(c.name, {
 					description: c.description,
-					run: async (args, ctx) => (await track(peer.request<{ output?: string }>("command/run", { name: c.name, args, sessionId: ctx.sessionId, actorId: ctx.actorId }), { sessionId: ctx.sessionId, actors: [ctx.actorId], command: true }))?.output,
+					run: async (args, ctx) => (await track(peer.request<{ output?: string }>("command/run", { name: c.name, args, sessionId: ctx.sessionId, actorId: ctx.actorId }, ctx.signal), {
+						sessionId: ctx.sessionId, actors: [ctx.actorId], command: true, signal: ctx.signal,
+						commandEnvironment: AsyncLocalStorage.bind(ctx.environment),
+					}))?.output,
 				});
 			}
 		},

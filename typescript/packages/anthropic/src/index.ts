@@ -1,14 +1,16 @@
 import { AgentError, type Provider } from "@modular-agent/core";
-import { apiKeyModelAdapter } from "@modular-agent/provider-pi-ai";
+import { apiKeyModelAdapter, type ApiKeyModelEnrollment } from "@modular-agent/provider-pi-ai";
 
 export interface AnthropicOptions {
   /** Override the default service address, for example for a loopback test. */
   baseUrl?: string;
+  /** Additional model IDs with explicit limits and input types; no reasoning levels. */
+  models?: readonly ApiKeyModelEnrollment[];
 }
 
 /** Anthropic Messages API with `ANTHROPIC_API_KEY` from the agent's credential store. */
-export function anthropic({ baseUrl }: AnthropicOptions = {}): Provider {
-  const { models, provider } = apiKeyModelAdapter("anthropic");
+export function anthropic({ baseUrl, models: enrolled }: AnthropicOptions = {}): Provider {
+  const { models, provider } = apiKeyModelAdapter("anthropic", enrolled);
   return {
     id: "anthropic", models: () => structuredClone(models),
     supports: { keepsState: false, safeToRepeat: true },

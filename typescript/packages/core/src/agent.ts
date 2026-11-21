@@ -64,6 +64,8 @@ export interface ServeAcpOptions {
   projectSettings?(project: string): Settings | Promise<Settings>;
   projectMcp?(project: string): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
   showApproval?: boolean;
+  /** Permit client-supplied MCP servers. Defaults to stdio only. */
+  hostMcpServers?: boolean;
 }
 export function defaultAcpActor(): Actor {
   const { id, kind, authority } = localAcpActor();
@@ -75,7 +77,10 @@ export interface AcpActorToken {
   tenants?: readonly (string | null)[];
   projects?: readonly string[];
 }
-export interface ServeAcpServiceOptions extends ServeAcpOptions, ListenOptions { actors: readonly AcpActorToken[] }
+export interface ServeAcpServiceOptions extends ServeAcpOptions, ListenOptions {
+  actors: readonly AcpActorToken[];
+  controlTimeoutMs?: number;
+}
 export interface SessionSummary { id: string; project: string; updated: number; model?: ModelRef; title?: string }
 export interface SessionInfo { id: string; project: string; created: number; updated: number; settings: Settings; tenant?: string }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
@@ -139,6 +144,7 @@ export class Agent {
   #questions = new Map<string, AbortController>();
   #close?: Promise<void>;
   #hostEnabled = false;
+  #defaults: Settings;
   #acp = false;
   #stopAcp?: () => Promise<void>;
   #project: string;
@@ -154,11 +160,12 @@ export class Agent {
   #interruption = new AbortController();
   #rebuild?: () => Promise<Agent>;
 
-  private constructor(harness: Harness, scratch: string, project: string, onQuestion?: QuestionHandler) {
+  private constructor(harness: Harness, scratch: string, project: string, settings: Settings, onQuestion?: QuestionHandler) {
     this.#h = harness;
     this.#api = harness.api("sdk.host");
     this.#scratch = scratch;
     this.#project = project;
+    this.#defaults = settings;
     this.#defaultHandler = onQuestion;
   }
   static {
@@ -183,11 +190,14 @@ export class Agent {
 
   static async #create(options: AgentOptions): Promise<Agent> {
     const durability = options.durability ?? "ephemeral";
-    const configuredHost = options.processPlugins !== undefined || options.servicePlugins !== undefined;
+    const configuredHost = !!(options.processPlugins?.length || options.servicePlugins?.length);
     if (options.pluginHost === false && configuredHost) {
       throw new AgentError("invalid_composition", "Loading processPlugins or servicePlugins requires a plugin host");
     }
     if (!["ephemeral", "kept", "durable"].includes(durability)) throw new AgentError("invalid_params", "Unknown durability");
+    if (durability === "ephemeral" && (options.history instanceof FileHistory || options.history instanceof HttpHistory)) {
+      throw new AgentError("invalid_composition", "Persistent history requires durability: kept or durable");
+    }
     if (options.approval !== undefined && !["off", "ask", "all", "never"].includes(options.approval)) {
       throw new AgentError("invalid_params", "Unknown approval policy");
     }
@@ -202,11 +212,11 @@ export class Agent {
       const h = new Harness({ project, home, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
         jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn",
         rejectUnknownModel: true, tenants: options.tenants ?? (options.conformance ? undefined : null) });
-      agent = new Agent(h, scratch, project, options.onQuestion);
+      const settings = structuredClone(options.settings ?? {});
+      agent = new Agent(h, scratch, project, settings, options.onQuestion);
       agent.#authority = { severalActors: options.severalActors ?? false, sessionLimits: options.sessionLimits ?? false, tenants: options.tenants !== undefined };
       agent.#conformance = options.conformance ?? false;
       agent.#approval = options.approval !== undefined || agent.#conformance;
-      const settings = structuredClone(options.settings ?? {});
       if (options.approval !== undefined) settings.approval = options.approval;
       const history = options.history ?? (durability === "ephemeral" || !options.dataDir ? memoryHistory() : undefined);
       agent.#rebuild = () => Agent.#create({ ...options, history });
@@ -228,7 +238,7 @@ export class Agent {
         // The public memory environment is rooted at its virtual root, not the host project.
         await agent.#load({ name: "sdk.environment", setup: api => api.provide("working-environment", env) });
       } else {
-        await agent.#load(localEnvironment({ cwd: project }));
+        await agent.#load(localEnvironment({ cwd: project, stateDir: durability === "ephemeral" ? scratch : undefined }));
         defaultEnvironment = h.use<WorkingEnvironment>("working-environment");
       }
       const explicitRuntime = options.runtime;
@@ -256,6 +266,7 @@ export class Agent {
       const persistent = effectiveStore === store
         ? !(history instanceof MemoryHistory)
         : effectiveStore?.supports.persistent === true || effectiveStore?.supports.portableSessions === true;
+      if (durability === "ephemeral" && persistent) throw new Error("Persistent history requires durability: kept or durable");
       if ((durability !== "ephemeral" || effectiveRuntime?.supports.continuesAfterRestart === true) && !persistent) {
         throw new Error("Kept history or a durable Runtime needs a persistent history store");
       }
@@ -495,10 +506,18 @@ export class Agent {
     if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
     this.#acp = true;
     const agents = new Map<string, Promise<Agent>>();
+    const sessions = new Map<string, Agent>();
     const attachments = new Map<PluginApi, ReturnType<typeof standardMcpTools>>();
-    const ceilings = new Map<string, ReadonlySet<Right>>();
     const installMcp = async (agent: Agent) => {
-      agent.#h.setActorCeilings(ceilings);
+      if (!agent.#hostEnabled) {
+        await agent.#loadRemotes(pluginSpecsFromEnv());
+        agent.#hostEnabled = true;
+        const models = agent.models();
+        if (agent.#defaults.model == null && models.length === 1) {
+          const { id, provider } = models[0];
+          agent.#defaults.model = { id, provider };
+        }
+      }
       const mcp = standardMcpTools({ servers: async project => await options.projectMcp?.(project) ?? {} });
       await agent.#plugin(mcp);
       attachments.set(agent.#api, mcp);
@@ -510,7 +529,6 @@ export class Agent {
       }));
     };
     const prepareConnection = (scope?: { actor: Actor; allowTenant(tenant: string | null): boolean; allowProject(project: string): boolean }) => {
-      const sessions = new Map<string, Agent>();
       const attached = new Map<PluginApi, { detach(): void; agent: Agent }>();
       let disconnected = false;
       const attach = (agent: Agent) => {
@@ -520,13 +538,17 @@ export class Agent {
         const off = binding.acp.attach(agent.#api, agent === this);
         attached.set(agent.#api, { agent, detach() { off(); remove(); } });
       };
+      const actor = scope && { id: scope.actor.id, kind: scope.actor.kind, authority: scope.actor.rights };
       const binding = acpInterface({
-        ...(scope ? {
-          actor: { id: scope.actor.id, kind: scope.actor.kind, authority: scope.actor.rights },
+        ...(scope && actor ? {
+          actor,
+          connectionScope: run => this.#h.withConnectionActor(actor, run),
           allowTenant: scope.allowTenant,
-          allowSession: async (id, project) => scope.allowProject(project) && scope.allowTenant((await this.sessionInfo(id)).tenant ?? null),
+          allowSession: async (id, project) => scope.allowProject(project) && scope.allowTenant((await this.sessionInfo(id)).tenant ?? null) &&
+            await this.#h.canDiscoverSession(id, actor, this.#authority.severalActors),
         } : { actorId: options.actorId ?? process.env.MODULAR_AGENT_ACTOR }),
         showApproval: options.showApproval ?? this.#approval,
+        hostMcpServers: options.hostMcpServers ?? !scope,
         declaration: id => (id && sessions.get(id) || this).declaration(),
         projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,
         associate: (id, api) => { sessions.set(id, attached.get(api)?.agent ?? this); },
@@ -534,13 +556,17 @@ export class Agent {
           const project = await checked(() => realpath(cwd), "invalid_params");
           if (!(await stat(project)).isDirectory()) throw new AgentError("invalid_params", "Project must be a directory");
           if (scope && !scope.allowProject(project)) throw new AgentError("forbidden", "Project is outside the actor's scope");
-          const saved = id ? await this.sessionInfo(id) : undefined;
-          if (saved && scope && !scope.allowTenant(saved.tenant ?? null)) throw new AgentError("forbidden", "Tenant is outside the actor's scope");
+          const inaccessible = () => new AgentError("forbidden", "Session is inaccessible");
+          const saved = id ? await this.sessionInfo(id).catch(error => {
+            if (scope && error instanceof AgentError && error.code === "not_found") throw inaccessible();
+            throw error;
+          }) : undefined;
+          if (saved && scope && actor && (!scope.allowTenant(saved.tenant ?? null) || !scope.allowProject(saved.project) ||
+              !await this.#h.canDiscoverSession(id!, actor, this.#authority.severalActors))) throw inaccessible();
           if (saved && saved.project !== project || !options.compose && project !== this.#project) {
             throw new AgentError("invalid_params", "Session belongs to a different project");
           }
-          const ref = parseModel(saved?.settings.model);
-          const key = JSON.stringify([project, ref?.provider]);
+          const key = JSON.stringify([project, saved?.id]);
           let selected = id ? sessions.get(id) : undefined;
           if (!selected && options.compose) {
             let pending = agents.get(key);
@@ -577,7 +603,6 @@ export class Agent {
         disconnected = true;
         for (const part of attached.values()) part.detach();
         attached.clear();
-        sessions.clear();
       } };
     };
     let serving = false;
@@ -588,6 +613,8 @@ export class Agent {
         try { await binding.acp.serveStdio(); } finally { detach(); }
         return;
       }
+      const controlTimeoutMs = options.controlTimeoutMs ?? 5000;
+      if (!Number.isSafeInteger(controlTimeoutMs) || controlTimeoutMs <= 0) throw new AgentError("invalid_params", "Invalid control timeout");
       const actors = await Promise.all(options.actors.map(async ({ tokenFile, actor, tenants, projects }) => {
         if (!actor.id || !["host", "user", "agent", "program"].includes(actor.kind) || !actor.rights.every(r => ALL_AUTHORITY.includes(r))) {
           throw new AgentError("invalid_params", "Invalid ACP actor");
@@ -595,17 +622,9 @@ export class Agent {
         const allowedTenants = tenants && new Set(tenants);
         const allowedProjects = projects && new Set(await Promise.all(projects.map(project => realpath(project))));
         return { tokenFile, value: { actor: structuredClone(actor),
-          allowTenant: (tenant: string | null) => !allowedTenants || allowedTenants.has(tenant),
-          allowProject: (project: string) => !allowedProjects || allowedProjects.has(project) } };
+          allowTenant: (tenant: string | null) => allowedTenants ? allowedTenants.has(tenant) : tenant === null,
+          allowProject: (project: string) => (!!options.compose || project === this.#project) && (!allowedProjects || allowedProjects.has(project)) } };
       }));
-      for (const { value: { actor } } of actors) {
-        const rights = new Set(actor.rights), prior = ceilings.get(actor.id);
-        if (prior && (prior.size !== rights.size || [...rights].some(right => !prior.has(right)))) {
-          throw new AgentError("invalid_params", "Tokens for the same actor must configure the same rights");
-        }
-        ceilings.set(actor.id, rights);
-      }
-      this.#h.setActorCeilings(ceilings);
       const server = await listenWebSocket(options, ACP_PROTOCOL, actors, async (ws, scope) => {
         const { binding, detach } = prepareConnection(scope);
         try {
@@ -613,6 +632,7 @@ export class Agent {
             receive: receive => receiveMessages(ws, receive),
             closed: close => { ws.once("close", close); ws.once("error", close); },
             send: text => new Promise((resolve, reject) => ws.send(text, error => error ? reject(error) : resolve())),
+            controlTimeoutMs, lose: () => ws.terminate(),
           });
         } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
       });

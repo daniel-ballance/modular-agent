@@ -1,13 +1,13 @@
 import { mapOutput } from "@modular-agent/plugin-wire";
 import type { Configuration, CredentialStore, ModelStreamEvent, OutputPayload, HistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
 import type { Agent } from "./agent.js";
-import { AgentError } from "./errors.js";
-import { toolSource, type Tool } from "./tool.js";
+import { AgentError, checked } from "./errors.js";
+import { questionReply, toolSource, type Tool, type ToolEnvironment } from "./tool.js";
 import { adaptProvider, type Provider } from "./provider.js";
 import { sdkJob, type JobOwner, type JobRecovery, type JobStarter } from "./jobs.js";
 import type {
-  Actor, AssistantMessage, Content, HistoryEntry, ModelError, ModelRef, ModelRequest, Outcome, QuestionDraft, Settings,
-  ToolCall, ToolDefinition, ToolStatus, TurnResult,
+  Actor, AssistantMessage, Content, HistoryEntry, ModelError, ModelInfo, ModelRef, ModelRequest, Outcome, QuestionDraft, QuestionReply, Settings,
+  ToolCall, ToolDefinition, ToolStatus, TurnResult, Usage,
 } from "./data.js";
 
 type Awaitable<T> = T | Promise<T>;
@@ -26,7 +26,7 @@ type Hooks = {
   input: [{ sessionId: string; actorId: string; content: Content; when: string }, { change: Content } | { handle: true | { command: string } }];
   "turn.before": [Observe & { input: Content; project?: string; tools?: ToolDefinition[] }, { add: { system?: string; context?: Content } }];
   "turn.start": [Observe, void];
-  "step.before": [Observe & { stepId: string; request: ModelRequest }, { change: ModelRequest }];
+  "step.before": [Observe & { stepId: string; request: ModelRequest; model?: ModelInfo; history?: HistoryEntry[]; usage?: Usage }, { change: ModelRequest }];
   "step.after": [Observe & { stepId: string; response: AssistantMessage }, "continue" | { end: string }];
   "tool.before": [Before, "allow" | { refuse: string } | { change: ToolCall["input"] } | { pending: QuestionDraft }];
   "tool.after": [After, { change: Partial<ResultFields> }];
@@ -34,7 +34,7 @@ type Hooks = {
   "turn.result": [Observe & { result: Pick<TurnResult, "text" | "value">; shape?: Record<string, unknown> }, "accept" | { refuse: string }];
   "turn.end": [Observe & { outcome: Outcome; result: TurnResult }, void];
   "provider.request": [{ sessionId: string | null; provider: string; model: ModelRef; request: ModelRequest }, { change: ModelRequest }];
-  "provider.piece": [{ sessionId: string; provider: string; model: ModelRef; turnId: string; stepId: string; piece: ModelStreamEvent }, void];
+  "provider.piece": [{ sessionId: string; provider: string; model: ModelRef; turnId?: string; stepId: string; piece: ModelStreamEvent }, void];
   "provider.response": [{ sessionId: string | null; provider: string; model: ModelRef; message: AssistantMessage }, void];
 };
 export interface OutputEvent { type: string; data: unknown }
@@ -55,7 +55,14 @@ export interface CallContext {
   history(cursor?: string): Promise<{ entries: HistoryEntry[]; next?: string }>;
   emit(type: string, data: unknown): void;
 }
-export interface CommandContext extends Omit<CallContext, "jobs"> { sessionId: string; actorId: string; jobs: JobStarter }
+export interface CommandContext extends Omit<CallContext, "jobs"> {
+  sessionId: string;
+  actorId: string;
+  jobs: JobStarter;
+  environment: ToolEnvironment;
+  ask(question: QuestionDraft, wait?: { wait: number }): Promise<QuestionReply>;
+  requestModel(request: ModelRequest): Promise<AssistantMessage>;
+}
 export type HookHandler<P extends HookPoint> =
   (payload: Readonly<Hooks[P][0]>, context: CallContext) => Awaitable<Hooks[P][1] | void>;
 export type CommandHandler = (args: string, context: CommandContext) => Awaitable<string | void>;
@@ -68,7 +75,7 @@ export interface Registrar {
   runtime(runtime: Runtime): void;
   historyStore(store: HistoryStore): void;
   credentialStore(store: CredentialStore): void;
-  configuration(source: Configuration): void;
+  configuration(source: ProjectConfiguration | Configuration): void;
   interface(part: AgentInterface): void;
   provider(provider: Provider): void;
   jobs(owner: JobOwner): void;
@@ -76,12 +83,20 @@ export interface Registrar {
     options?: { inProcessOnly?: boolean }): void;
   command(name: string, description: string, handler: CommandHandler,
     options?: { usesModel?: boolean; inProcessOnly?: boolean }): void;
+  onHook<P, A>(hook: CustomHook<P, A, unknown>, handler: (payload: P) => Awaitable<A | void>, order?: HookOrder): void;
   defineHook<P = unknown, A = unknown, R = unknown>(name: string, rule: "observe" | "gate" | "transform" | "collect" | "firstAnswer"): CustomHook<P, A, R>;
 }
 
 export interface CustomHook<P, A, R> {
   on(handler: (payload: P) => Awaitable<A | void>, order?: HookOrder): void;
   call(payload: P): Promise<R>;
+}
+
+const customHooks = new WeakMap<object, string>();
+
+export interface ProjectConfiguration {
+  settings(project: string): Awaitable<Settings>;
+  trusted(project: string): Awaitable<boolean>;
 }
 
 export interface AgentInterface {
@@ -93,6 +108,15 @@ export interface ToolCatalog {
   id: string;
   tools(sessionId?: string): readonly Tool[];
   onChange?(handler: () => void): () => void;
+}
+
+/** A tool source supplies a new snapshot after each changed() notification. */
+export function defineToolSource<T extends ToolCatalog>(source: T): T & { changed(): void } {
+  const listeners = new Set<() => void>();
+  return Object.assign(source, {
+    changed() { for (const listener of listeners) listener(); },
+    onChange(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+  });
 }
 
 export interface Plugin {
@@ -238,7 +262,16 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
     runtime: runtime => part("runtime", runtime, true),
     historyStore: store => part("history-store", store, false),
     credentialStore: store => part("credential-store", store, false),
-    configuration: source => part("configuration", source, false),
+    configuration(source) {
+      add("configuration");
+      if (served) unavailable("configuration");
+      registrations.push(async api => {
+        if ("get" in source) { api.provide("configuration", source); return; }
+        const defaults = await source.trusted(api.project) ? structuredClone(await source.settings(api.project)) : {};
+        const adapter: Configuration = { get: <T>(key: string) => key === "session" ? defaults as T : undefined, plugin: () => ({}) };
+        api.provide("configuration", adapter);
+      });
+    },
     interface(part) {
       check();
       if (served) unavailable("interface");
@@ -335,9 +368,9 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
     command(name, description, handler, options) {
       add(`command:${name}`);
       if (served && (options?.usesModel || options?.inProcessOnly)) unavailable(`command ${name}`);
-      if (options?.usesModel) throw new AgentError("not_supported", `Model-using command ${name}`);
-      registrations.push(api => api.registerCommand(name, { description, async run(args, ids) {
-        const { cx, finish, assert } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId }, ids as Work, options?.inProcessOnly);
+      if (options?.usesModel && !options.inProcessOnly) throw new AgentError("invalid_composition", `Model-using command ${name} must declare inProcessOnly`);
+      registrations.push(api => api.registerCommand(name, { description, usesModel: options?.usesModel, async run(args, ids) {
+        const { cx, finish, assert } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId, stepId: ids.stepId }, ids as Work, options?.inProcessOnly);
         const jobs: JobStarter = { async start(kind, detail, key) {
           assert();
           const handle = served
@@ -346,25 +379,62 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
           await handle.ready;
           return sdkJob(handle);
         } };
-        try { return await handler(args, { ...cx, sessionId: ids.sessionId, actorId: ids.actorId, jobs }); }
+        const env = async () => {
+          assert();
+          if (!ids.environment) throw new AgentError("not_supported", "The host does not provide a command environment");
+          return ids.environment();
+        };
+        const environment: ToolEnvironment = {
+          read: path => checked(async () => (await env()).readFile(path)),
+          exists: path => checked(async () => (await env()).exists(path)),
+          write: (path, data) => checked(async () => (await env()).writeFile(path, typeof data === "string" ? data : Buffer.from(data))),
+          list: path => checked(async () => {
+            const scoped = await env();
+            if (!scoped.list) throw new AgentError("not_supported", "The environment does not list directories");
+            return scoped.list(path);
+          }),
+          exec: (command, opts) => checked(async () => (await env()).exec(command, { signal: cx.cancelled, timeoutMs: opts?.timeout })),
+        };
+        const command: CommandContext = { ...cx, sessionId: ids.sessionId, actorId: ids.actorId, jobs, environment,
+          async ask(question, wait) {
+            assert();
+            if (served) throw new AgentError("not_supported", "A served command cannot ask questions");
+            if (wait && (!Number.isSafeInteger(wait.wait) || wait.wait < 0)) throw new AgentError("invalid_request", "Invalid question wait");
+            const answer = await checked(() => ids.ask({ ...question, timeLimitMs: wait?.wait ?? question.timeLimitMs }));
+            assert();
+            return questionReply(question.kind, answer);
+          },
+          async requestModel(request) {
+            assert();
+            if (served || !options?.usesModel) throw new AgentError("not_supported", "Command did not declare usesModel");
+            return checked(() => ids.requestModel(request));
+          },
+        };
+        try { return await handler(args, command); }
         finally { finish(); }
       } }));
+    },
+    onHook<P, A>(hook: CustomHook<P, A, unknown>, handler: (payload: P) => Awaitable<A | void>, order?: HookOrder) {
+      check();
+      const name = customHooks.get(hook);
+      if (!name) throw new AgentError("invalid_composition", "Expected a hook returned by defineHook");
+      if (served) unavailable(`hook ${name}`);
+      registrations.push(api => api.on(name, payload => handler(structuredClone(payload)), order));
     },
     defineHook<P, A, R>(name: string, rule: Parameters<Registrar["defineHook"]>[1]): CustomHook<P, A, R> {
       check();
       if (served) unavailable(`hook ${name}`);
       let defined: PluginApi | undefined;
       registrations.push(api => { api.defineHook(name, rule === "firstAnswer" ? "first" : rule); defined = api; });
-      return {
-        on(handler, order) {
-          check();
-          registrations.push(api => api.on(name, payload => handler(structuredClone(payload)), order));
-        },
+      const hook: CustomHook<P, A, R> = {
+        on(handler, order) { r.onHook(hook, handler, order); },
         async call(payload) {
           if (!defined) throw new AgentError("invalid_request", `Hook ${name} is not installed`);
           return defined.runHook<R>(name, structuredClone(payload));
         },
       };
+      customHooks.set(hook, name);
+      return hook;
     },
   };
   try { await plugin.setup(r); }
@@ -373,9 +443,9 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
   if (new Set(replaces).size !== replaces.length || replaces.some(key => !items.has(key))) {
     throw new AgentError("invalid_composition", `Invalid replacements in ${plugin.name}`);
   }
-  const base: BasePlugin = { name: plugin.name, stop: plugin.stop?.bind(plugin), setup(api) {
+  const base: BasePlugin = { name: plugin.name, stop: plugin.stop?.bind(plugin), async setup(api) {
     if (tools.length) api.provide("tool-source", toolSource(plugin.name, tools));
-    for (const register of registrations) register(api);
+    for (const register of registrations) await register(api);
     if (jobOwner) {
       const owner = jobOwner;
       api.onJobCancel(async id => {

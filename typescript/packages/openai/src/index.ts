@@ -1,14 +1,16 @@
 import { AgentError, type Provider } from "@modular-agent/core";
-import { apiKeyModelAdapter } from "@modular-agent/provider-pi-ai";
+import { apiKeyModelAdapter, type ApiKeyModelEnrollment } from "@modular-agent/provider-pi-ai";
 
 export interface OpenAIOptions {
   /** Override the default service address, for example for a loopback test. */
   baseUrl?: string;
+  /** Additional model IDs with explicit limits and input types; no reasoning levels. */
+  models?: readonly ApiKeyModelEnrollment[];
 }
 
 /** OpenAI Responses API with `OPENAI_API_KEY` from the agent's credential store. */
-export function openai({ baseUrl }: OpenAIOptions = {}): Provider {
-  const { models, provider } = apiKeyModelAdapter("openai");
+export function openai({ baseUrl, models: enrolled }: OpenAIOptions = {}): Provider {
+  const { models, provider } = apiKeyModelAdapter("openai", enrolled);
   return {
     id: "openai", models: () => structuredClone(models),
     supports: { keepsState: false, safeToRepeat: true },

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
 	type AssistantMessage as PiAssistantMessage,
 	type Context,
@@ -29,7 +30,8 @@ import type {
 /** One pi-ai provider (one vendor) as one Provider. */
 export class PiAiProvider implements Provider {
 	readonly supports = { keepsState: false, runsTools: false, liveSessions: false, lateAnswers: false };
-	constructor(readonly id: string, private collection: MutableModels, private api?: Pick<PluginApi, "runHook">) {}
+	constructor(readonly id: string, private collection: MutableModels, private api?: Pick<PluginApi, "runHook">,
+		private apiKeyModels?: ReadonlyMap<string, ApiKeyModel>) {}
 
 	models(): ModelInfo[] {
 		return this.collection.getModels(this.id).map(toInfo);
@@ -44,7 +46,9 @@ export class PiAiProvider implements Provider {
 	}
 
 	async request(ref: ModelRef, request: ModelRequest, options: RequestOptions & { apiKey?: string; baseUrl?: string }): Promise<AssistantMessage> {
-		const found = this.collection.getModel(this.id, ref.id);
+		const entry = this.apiKeyModels?.get(ref.id);
+		const builtin = this.collection.getModel(this.id, ref.id);
+		const found = this.apiKeyModels ? entry && apiKeyPiModel(entry, builtin) : builtin;
 		const model = found && (options.baseUrl ? { ...found, baseUrl: options.baseUrl } : found);
 		if (!model) return failed(`Unknown model ${this.id}/${ref.id}`, "other");
 		// "Before a model request": Provider middleware may change the request.
@@ -57,7 +61,10 @@ export class PiAiProvider implements Provider {
 		const reasoning = lowerReasoning(req.settings.reasoning, toInfo(model));
 		let final: PiAssistantMessage;
 		try {
-			const stream = this.collection.streamSimple(model, context, {
+			const common = { signal: options.signal, apiKey: options.apiKey, sessionId: options.sessionId, maxTokens: req.settings.maxOutput };
+			const stream = entry ? this.collection.stream(model, context, {
+				...common, onPayload: payload => reasoningPayload(payload as Record<string, unknown>, entry, req.settings.reasoning),
+			}) : this.collection.streamSimple(model, context, {
 				signal: options.signal,
 				apiKey: options.apiKey,
 				sessionId: options.sessionId,
@@ -155,12 +162,50 @@ function failed(message: string, kind: ModelError["kind"]): AssistantMessage {
 	return { role: "assistant", content: [], stop: "failed", error: { kind, message } };
 }
 
-/** The SDK APIs reuse the base adapter, but supply API-key auth per call. */
-export function apiKeyModelAdapter(id: "openai" | "anthropic") {
-	const collection = builtinModels();
-	const api = id === "openai" ? "openai-responses" : "anthropic-messages";
-	const models = collection.getModels(id).filter(m => m.api === api);
-	return { models: models.map(toInfo), provider: new PiAiProvider(id, collection) };
+export type ApiKeyModelEnrollment = Omit<ModelInfo, "provider" | "thinking" | "reasoning"> & { reasoning?: boolean };
+type ApiKeyVendor = "openai" | "anthropic";
+type ReasoningFields = { reasoning?: object; thinking?: { type: string; budget_tokens?: number }; output_config?: { effort?: string } };
+type ApiKeyModel = Omit<ModelInfo, "thinking"> & { provider: ApiKeyVendor; levels: Record<string, ReasoningFields> };
+const table: { models: ApiKeyModel[] } = JSON.parse(readFileSync(new URL("../../api-key-models.json", import.meta.url), "utf8"));
+
+function apiKeyPiModel(entry: ApiKeyModel, builtin?: Model<Api>): Model<Api> {
+	const openai = entry.provider === "openai";
+	return {
+		id: entry.id, name: entry.name ?? entry.id, provider: entry.provider,
+		api: openai ? "openai-responses" : "anthropic-messages",
+		baseUrl: openai ? "https://api.openai.com/v1" : "https://api.anthropic.com",
+		contextWindow: entry.contextWindow, maxTokens: entry.maxOutput,
+		input: entry.input as Model<Api>["input"], reasoning: entry.reasoning,
+		cost: builtin?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	};
+}
+
+function reasoningPayload(payload: Record<string, unknown>, model: ApiKeyModel, requested?: string) {
+	// Pi AI supplies vendor-specific defaults for other consumers. API-key Providers
+	// strip just the reasoning controls and use the shared table instead.
+	const { reasoning: _reasoning, thinking: _thinking, output_config, ...rest } = payload;
+	const { effort: _effort, ...output } = (output_config ?? {}) as Record<string, unknown>;
+	const level = lowerReasoning(requested, { ...model, thinking: Object.keys(model.levels) });
+	let fields = level === undefined ? undefined : model.levels[level];
+	if (fields?.thinking?.type === "enabled") {
+		const budget = Math.min(fields.thinking.budget_tokens!, Number(rest.max_tokens) - 1);
+		fields = budget < 1024 ? model.levels.off : { ...fields, thinking: { type: "enabled", budget_tokens: budget } };
+	}
+	const config = { ...output, ...fields?.output_config };
+	return { ...rest, ...fields, ...(Object.keys(config).length ? { output_config: config } : {}) };
+}
+
+/** The SDK APIs reuse the streaming adapter, but use the SDK's catalog and call-scoped API keys. */
+export function apiKeyModelAdapter(id: ApiKeyVendor, enrolled: readonly ApiKeyModelEnrollment[] = []) {
+	const catalog = new Map(table.models.filter(m => m.provider === id).map(m => [m.id, m]));
+	for (const m of enrolled) if (!catalog.has(m.id)) {
+		catalog.set(m.id, { ...structuredClone(m), provider: id, reasoning: m.reasoning ?? false, levels: {} });
+	}
+	const models: ModelInfo[] = [...catalog.values()].map(({ levels, ...info }) => {
+		const thinking = Object.keys(levels);
+		return thinking.length ? { ...info, thinking } : info;
+	});
+	return { models, provider: new PiAiProvider(id, builtinModels(), undefined, catalog) };
 }
 
 export interface PiAiProviderOptions {

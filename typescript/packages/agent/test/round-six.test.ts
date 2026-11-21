@@ -192,7 +192,11 @@ test("a changed model gets the nearest supported reasoning level below the old o
 	const base = { provider: "reason", contextWindow: 100_000, maxOutput: 100, reasoning: true, input: ["text"] };
 	const plugin: Plugin = { name: "reason", setup(api) {
 		api.provide("provider", {
-			id: "reason", models: () => [{ ...base, id: "wide" }, { ...base, id: "narrow", thinking: ["off", "low", "xhigh"] }],
+			id: "reason", models: () => [
+				{ ...base, id: "wide", thinking: ["off", "low", "medium", "high", "xhigh"] },
+				{ ...base, id: "narrow", thinking: ["off", "low", "xhigh"] },
+				{ ...base, id: "unspecified" },
+			],
 			supports: { keepsState: false, runsTools: false },
 			async request(_model, request) { levels.push(request.settings.reasoning); return { role: "assistant", stop: "finished", content: [text("ok")] }; },
 		} satisfies Provider);
@@ -204,7 +208,10 @@ test("a changed model gets the nearest supported reasoning level below the old o
 	await api.setSetting(s, "model", "reason/narrow", "user");
 	await api.input(s, { actorId: "user", content: "second" });
 	await api.waitForIdle(s);
-	assert.deepEqual(levels, ["high", "low"]);
+	await api.setSetting(s, "model", "reason/unspecified", "user");
+	await api.input(s, { actorId: "user", content: "third" });
+	await api.waitForIdle(s);
+	assert.deepEqual(levels, ["high", "low", undefined]);
 });
 
 test("a cancel wins over a Runtime callback failure", async (t) => {
