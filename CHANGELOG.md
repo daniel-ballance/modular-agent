@@ -9,10 +9,12 @@ The four SDKs share one version, the revision of the [SDK specification](docs/sd
 - **SDK options for several actors, session limits and tenants,** off unless chosen, and app-side questions: list the waiting ones, answer later, decline as distinct from text. In all four SDKs.
 - **Crash-safe secrets.** A secret answer is staged, then selected, then activated, so a crash at any point leaves the old value or the new one. In the SDKs' file credential stores and `ma`'s `auth.json`.
 - **Developer Providers** report catalog changes and readiness, in process and served over the plugin binding.
-- **Three more shared scenarios** (`question-answered-later`, `decline-is-not-text`, `actor-rights`): 14 scenarios, 280 runs, all passed.
+- **Six more shared scenarios** (`question-answered-later`, `decline-is-not-text`, `actor-rights`, and three for `ephemeral`), and a WebSocket service placement for each SDK: 17 scenarios in 9 placements, 612 runs, all passed.
+- **The SDK specification revised from four builds:** 22 findings applied and 30 rejected ([findings](docs/research/sdk-findings.md)), then the gaps each SDK still listed closed: custom parts through the Registrar, changing tool sources, job owners with recovery, typed hooks and events, commands that ask or call a model, proposals, Content input and progress, and one shared table of API-key models and their reasoning levels.
 - **WebSocket transport** for the plugin and ACP bindings ([ADR 0028](docs/adr/0028-websocket-transport.md)), in all four SDKs: `serve` with `listen`, `servicePlugins`, `serveAcp` with `listen`, and `ma --acp --listen`. The plugin and ACP kits check a service with `--connect`; `scripts/check.sh` runs both against each language's own servers. The shared scenarios gain a service placement for each SDK: 504 runs, all passed.
 - **Live checks** pass against OpenAI and Anthropic in all four SDKs.
 - **`ma`'s code sandbox runs in a worker process** with a 256 MiB memory limit, in all four languages. A limit that fires, or a worker that dies, fails that run and the agent carries on; a new reference check, `sandbox-memory`, checks it. Go's served environment now lists directories.
+- **Fixed in all four SDKs:** a new session wrote its setup to persistent history before its first input; a plugin host could deadlock, or deliver progress out of order, when a plugin's own hook answered a callback; a served command used the wrong project (it now asks `host/session`).
 - **Fixed:** the TypeScript local environment could lose its record of running commands if the agent was killed while saving it, leaving those commands running. Python `ma` now shows codemode calls on stderr instead of `tool(null)`.
 
 ## 0.1.0

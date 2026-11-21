@@ -28,16 +28,16 @@ A scenario that turns out to be wrong is fixed here first, then in the SDKs.
 
 These results are from before [ADR 0029](../../docs/adr/0029-sdk-decisions-after-four-builds.md) and do not include its three ephemeral scenarios.
 
-SDK specification 0.1 after the fourth build round. Each runner ran all fourteen scenarios in process, served by each SDK's fixture program on stdio, and served by each as a WebSocket service, with `MODULAR_AGENT_SDK_REQUIRE=all`:
+SDK specification 0.1 after the fifth build round. Each runner ran all seventeen scenarios in process, served by each SDK's fixture program on stdio, and served by each as a WebSocket service, with `MODULAR_AGENT_SDK_REQUIRE=all`:
 
 | Runner | In process | Rust | TypeScript | Go | Python | Rust service | TypeScript service | Go service | Python service |
 |---|---|---|---|---|---|---|---|---|---|
-| Rust | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
-| TypeScript | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
-| Go | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
-| Python | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
+| Rust | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 |
+| TypeScript | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 |
+| Go | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 |
+| Python | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 |
 
-504 runs, all passed. The crash scenarios killed the agent's whole process group, and each service's group, with `SIGKILL` in every cell. Earlier rounds passed the same matrix with fewer scenarios or placements: 140 runs with the first seven scenarios, 220 with eleven, 280 with fourteen and no services.
+612 runs, all passed. The crash scenarios killed the agent's whole process group, and each service's group, with `SIGKILL` in every cell. Earlier rounds passed the same matrix with fewer scenarios or placements: 140 runs with the first seven scenarios, 220 with eleven, 280 with fourteen and no services, 504 with fourteen and services.
 
 ## Proposed, not yet written
 
