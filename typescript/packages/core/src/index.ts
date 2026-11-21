@@ -5,15 +5,15 @@ export { durableRuntime, transientRuntime, localEnvironment, environmentCredenti
 export { advanceSecretSlot, secretStaging, withCredentialLock } from "@modular-agent/harness";
 export type * from "./parts.js";
 export { Session } from "./session.js";
-export type { Event, PromptOptions, PromptResult, ToolResult } from "./session.js";
+export type { Event, EventData, PromptOptions, PromptResult, Proposal, ToolResult } from "./session.js";
 export { AgentError } from "./errors.js";
 export type { ErrorCode } from "./errors.js";
 export { LeftOpen, Tool, tool } from "./tool.js";
 export { standardMcpTools, type McpServerConfig } from "./mcp.js";
 export type { ToolContext, ToolEnvironment, ToolOutput } from "./tool.js";
 export type { JSONSchema, Schema, StandardSchema } from "./schema.js";
-export { definePlugin } from "./plugin.js";
-export type { AgentInterface, ToolCatalog, CallContext, CustomHook, CommandContext, CommandHandler, HookPoint, HookHandler, HookOrder, OutputEvent, Plugin, Registrar } from "./plugin.js";
+export { definePlugin, defineToolSource } from "./plugin.js";
+export type { AgentInterface, ToolCatalog, CallContext, CustomHook, CommandContext, CommandHandler, HookPoint, HookHandler, HookOrder, OutputEvent, Plugin, ProjectConfiguration, Registrar } from "./plugin.js";
 export type * from "./data.js";
 export type { Job, JobOutcome, JobOwner, JobRecovery, JobStarter, UnfinishedJob } from "./jobs.js";
 export { defineProvider, ModelFailure } from "./provider.js";

@@ -113,6 +113,7 @@ export interface AcpOptions {
 	associate?(sessionId: string, api: PluginApi): void;
 	attachMcp?(sessionId: string, project: string, servers: Record<string, AcpMcpServer>, api: PluginApi): Promise<unknown>;
 	showApproval?: boolean;
+	hostMcpServers?: boolean;
 }
 
 export class AcpInterface implements InterfaceCapability {
@@ -183,7 +184,9 @@ export class AcpInterface implements InterfaceCapability {
 	/** Give the session the MCP servers the client passed. They are not recorded: their headers and env may hold secrets. */
 	private async attachMcp(api: PluginApi, sessionId: string, servers: acp.McpServer[] | undefined, cwd: string | undefined): Promise<void> {
 		const mcp = this.mcp(api);
-		if ((!mcp && !this.options.attachMcp) || !servers?.length || !this.hasRight(sessionId, this.actorId, "tools")) return;
+		if (!servers?.length) return;
+		if (this.options.hostMcpServers === false || !this.hasRight(sessionId, this.actorId, "tools")) throw bindingError("forbidden");
+		if (!mcp && !this.options.attachMcp) throw bindingError("not_supported");
 		const configs = Object.fromEntries(servers.flatMap((s): [string, AcpMcpServer][] => {
 			if ("command" in s) return [[s.name, { command: s.command, args: s.args, env: Object.fromEntries(s.env.map((e) => [e.name, e.value])) }]];
 			if (s.type === "http") return [[s.name, { url: s.url, headers: Object.fromEntries(s.headers.map((h) => [h.name, h.value])) }]];
@@ -212,7 +215,7 @@ export class AcpInterface implements InterfaceCapability {
 					promptCapabilities: { image: true, embeddedContext: true },
 					sessionCapabilities: { list: {}, resume: {}, close: {} },
 					// MCP servers the client passes are served only if a plugin can connect them.
-					mcpCapabilities: { http: !!this.mcp() || !!this.options.attachMcp, sse: false },
+					mcpCapabilities: { http: this.options.hostMcpServers !== false && (!!this.mcp() || !!this.options.attachMcp), sse: false },
 				},
 				agentInfo: { name: "modular-agent", title: "Modular Agent", version: "0.1.0" },
 				authMethods: [],
@@ -228,6 +231,7 @@ export class AcpInterface implements InterfaceCapability {
 			const tenant = (params._meta?.[NS] as { tenant?: unknown } | undefined)?.tenant;
 			if (tenant !== undefined && typeof tenant !== "string") throw RequestError.invalidParams();
 			if (this.options.allowTenant && (!this.options.allowTenant(tenant ?? null) || !this.actor().authority.includes("input"))) throw bindingError("forbidden");
+			if (params.mcpServers?.length && (this.options.hostMcpServers === false || !this.actor().authority.includes("tools"))) throw bindingError("forbidden");
 			const sessionId = await this.checked(async () => {
 				const { api, cwd } = await this.options.project?.(params.cwd) ?? { api: this.api, cwd: params.cwd };
 				const overrides = await this.options.projectSettings?.(cwd);
@@ -281,7 +285,7 @@ export class AcpInterface implements InterfaceCapability {
 			else if (params.configId === "thinking") {
 				const model = this.apiFor(params.sessionId).modelAccess(params.sessionId)?.model;
 				if (value !== "default" && !thinkingLevels(model).includes(String(value))) throw RequestError.invalidParams(undefined, "Reasoning level is not offered");
-				await this.apiFor(params.sessionId).setSetting(params.sessionId, "thinking", value === "default" ? "off" : String(value), this.actorId);
+				await this.apiFor(params.sessionId).setSetting(params.sessionId, "thinking", String(value), this.actorId);
 			}
 			else if (params.configId === "approval" && this.options.showApproval !== false) {
 				if (!APPROVAL.includes(String(value))) throw RequestError.invalidParams(undefined, `approval must be one of ${APPROVAL.join(", ")}`);
@@ -826,10 +830,11 @@ export class AcpInterface implements InterfaceCapability {
 		const options = usable.flatMap((p) => p?.models().map((m) => ({ value: `${m.provider}/${m.id}`, name: m.name ?? m.id })) ?? []);
 		const model = this.apiFor(sessionId).modelAccess(sessionId)?.model;
 		const levels = thinkingLevels(model);
-		const thinking = lowerReasoning(settings.reasoning, model) ?? (levels.includes("off") ? "off" : levels[0] ?? "off");
+		const thinking = lowerReasoning(settings.reasoning, model) ?? "default";
 		return [
 			{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options },
-			{ id: "thinking", name: "Reasoning", category: "thought_level", type: "select", currentValue: thinking, options: levels.map((v) => ({ value: v, name: v })) },
+			...(levels.length ? [{ id: "thinking", name: "Reasoning", category: "thought_level", type: "select" as const,
+				currentValue: thinking, options: [{ value: "default", name: "Default" }, ...levels.map(value => ({ value, name: value }))] }] : []),
 			...(this.options.showApproval === false ? [] : [{ id: "approval", name: "Approval", type: "select" as const, currentValue: APPROVAL.includes(String(settings.approval)) ? String(settings.approval) : "all", options: APPROVAL.map((v) => ({ value: v, name: v })) }]),
 		];
 	}

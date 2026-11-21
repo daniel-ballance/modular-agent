@@ -968,8 +968,16 @@ export class Harness {
 			s.apply(e);
 			const ids = { turnId: e.turnId, stepId: e.stepId, toolCallId: e.toolCallId, actorId: e.actorId };
 			this.emit(s.id, "entry.added", e, e.writer, ids);
+			if (e.kind === "response" && e.turnId && e.modelVisible && e.message?.role === "assistant") {
+				for (const part of e.message.content.filter(isToolCall)) {
+					const call: ToolCall = { id: part.id, name: part.name, input: part.arguments, startedBy: "model", stepId: e.stepId };
+					this.emit(s.id, "tool.call", { call }, e.writer, { ...ids, toolCallId: part.id });
+				}
+			}
 			if (e.kind === "toolResult" && e.toolCallId && e.message?.role === "toolResult") {
-				this.emit(s.id, "tool.result.delivered", { status: (e.data as { status?: string } | undefined)?.status ?? "failed", content: e.message.content }, "harness", ids);
+				const data = e.data as { status?: string; value?: unknown } | undefined;
+				this.emit(s.id, "tool.result.delivered", { status: data?.status ?? "failed", content: e.message.content,
+					...(data && "value" in data ? { value: data.value } : {}) }, "harness", ids);
 			}
 		}
 		return entries;
@@ -1373,7 +1381,7 @@ export class Harness {
 		return this.admit(s, async () => {
 			this.requireAuthority(s, actorId, "input");
 			const q = s.proposals.get(inputId);
-			if (!q) throw new Error(`No proposed input ${inputId}`);
+			if (!q) throw Object.assign(new Error(`No open proposal ${inputId}`), { code: "conflict" });
 			const receipt = declined
 				? (await this.handBack(s, [q], "declined"), { inputId, taken: "handedBack" as const })
 				: await this.acceptInput(s, { ...q, when, releasedBy: actorId,
@@ -1386,7 +1394,7 @@ export class Harness {
 	private withdrawProposal(s: Session, id: string, actorId: string, delegatedBy?: string): Promise<void> {
 		return this.admit(s, async () => {
 			const q = s.proposals.get(id);
-			if (!q) throw new Error(`No proposed input ${id}`);
+			if (!q) throw Object.assign(new Error(`No open proposal ${id}`), { code: "conflict" });
 			if (!s.actors.has(actorId) || (delegatedBy && !s.actors.has(delegatedBy))) throw new Error("Actor is not part of this session");
 			if (q.actorId !== actorId) {
 				this.requireAuthority(s, actorId, "input");
@@ -1399,7 +1407,8 @@ export class Harness {
 	private async handBack(s: Session, queued: QueuedInput[], reason: string): Promise<void> {
 		const inputIds = queued.filter((q) => s.admissions.has(q.id)).map((q) => q.id);
 		if (inputIds.length) await this.commit(s, inputIds.map((inputId) => ({ kind: "inputHandedBack", writer: "harness", modelVisible: false, inputId, data: { inputId, reason } })));
-		for (const q of queued) this.emit(s.id, "input.withdrawn", { inputId: q.id, content: q.content, reason }, "harness");
+		for (const q of queued) this.emit(s.id, reason === "withdrawn" ? "input.withdrawn" : "input.handedBack",
+			{ inputId: q.id, content: q.content, reason }, "harness");
 	}
 
 	private withdraw(sessionId: string, inputId: string): QueuedInput | undefined {
@@ -3006,7 +3015,7 @@ function readRequest(entry: HistoryEntry): InputRequest {
 export const REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 
 export function thinkingLevels(model?: ModelInfo): string[] {
-	return REASONING_LEVELS.filter((level) => model?.thinking ? model.thinking.includes(level) : model?.reasoning || level === "off");
+	return REASONING_LEVELS.filter(level => model?.thinking?.includes(level) === true);
 }
 
 export function lowerReasoning(value: unknown, model?: ModelInfo): string | undefined {

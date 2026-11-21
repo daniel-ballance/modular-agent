@@ -90,6 +90,8 @@ test("ACP service selects each connection's actor and enforces token scope", asy
     await assert.rejects(request(b, "session/new", { ...team, cwd: dir }), { code: "forbidden" });
     await assert.rejects(request(b, "session/load", { sessionId, cwd: dir, mcpServers: [] }), { code: "forbidden" });
     assert.deepEqual((await request(b, "session/list")).sessions, []);
+    await assert.rejects(request(b, "session/new", { cwd: dir,
+      mcpServers: [{ name: "untrusted", command: "/not-executed", args: [], env: [] }] }), { code: "forbidden" });
     const own = await request(b, "session/new", { cwd: dir, mcpServers: [] });
     assert.notEqual(own.sessionId, sessionId);
     assert.equal((await request(b, "session/prompt", { sessionId: own.sessionId, prompt: [{ type: "text", text: "Yes" }] })).stopReason, "end_turn");
@@ -136,6 +138,57 @@ test("ACP token rights are independent ceilings and never change recorded grants
   const grants = (await (await reopened.openSession(sessionId)).history()).filter(e => e.kind === "actorJoined");
   assert.equal(grants.length, 1);
   assert.match(JSON.stringify(grants[0].data), /settings/);
+});
+
+test("an ACP composition shares an open session between connections without replacing its saved settings", async t => {
+  const { dir, tokenFile } = await token(t);
+  const project = join(dir, "project");
+  await mkdir(project);
+  const history = memoryHistory();
+  const agent = await testAgent({ project: dir, history, script: [] });
+  const calls: string[] = [];
+  const composed = await testAgent({ project, history, script: [{ text: "From the project" }] });
+  t.after(() => composed.close());
+  const service = await agent.serveAcp({ listen: "127.0.0.1:0", actors: [
+    { tokenFile, actor: { id: "user", kind: "user", rights: ["input", "watch"] }, projects: [project] },
+  ],
+    compose: async (cwd, saved) => { assert.equal(saved, undefined); calls.push(cwd); return composed; },
+    projectSettings: async cwd => ({ title: cwd }),
+  });
+  t.after(() => service.close());
+  const connect = async () => {
+    const ws = await connectWebSocket(service.url, tokenFile, ACP_PROTOCOL, 5000);
+    await request(ws, "initialize", { protocolVersion: 1 });
+    return ws;
+  };
+  const a = await connect(), b = await connect();
+  const location = { cwd: project, mcpServers: [] };
+  const { sessionId } = await request(a, "session/new", location);
+  await request(b, "session/load", { ...location, sessionId });
+  assert.equal((await request(b, "session/prompt", { sessionId, prompt: [{ type: "text", text: "Hello" }] })).stopReason, "end_turn");
+  assert.equal((await composed.sessionInfo(sessionId)).settings.title, project);
+  assert.deepEqual(calls, [project]);
+});
+
+test("a plugin service factory registers and stops a fresh instance with each connection's config", async t => {
+  const { tokenFile } = await token(t);
+  const stopped: string[] = [];
+  const service = await serve(() => {
+    let label = "unset";
+    return definePlugin({ name: "scoped", stop() { stopped.push(label); }, setup(r) {
+      label = String(r.config().label);
+      r.tool(tool({ name: "label", description: "Instance label", input: { type: "object" }, run: () => label }));
+    } });
+  }, { listen: "127.0.0.1:0", tokenFile });
+  t.after(() => service.close());
+  const connect = (label: string) => testAgent({ script: [], servicePlugins: [{ url: service.url, tokenFile, config: { label } }] });
+  const a = await connect("A"), b = await connect("B");
+  try {
+    assert.equal((await (await a.session()).callTool("label", {})).text(), "A");
+    assert.equal((await (await b.session()).callTool("label", {})).text(), "B");
+  } finally { await Promise.all([a.close(), b.close()]); }
+  await service.close();
+  assert.deepEqual(stopped.sort(), ["A", "B"]);
 });
 
 test("loss of a plugin service settles its dispatched tool once as outcomeUnknown", async t => {

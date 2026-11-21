@@ -99,6 +99,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		if (method === "plugin/shutdown") service?.ws.close(1000);
 	}, service ? method => registered || startup.has(method) : undefined);
 	let projectRoot: string | undefined;
+	let hostProject: string;
 	let setup: Promise<void> | undefined;
 	let shuttingDown = false;
 	const executions = new Set<Promise<ExecResult>>();
@@ -249,6 +250,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		if (initialized) throw new WireError("invalid_request", "Already initialized");
 		initialized = true;
 		const init = { project: String(p.project), home: String(p.home), config: (p.config ?? {}) as Record<string, unknown> };
+		hostProject = init.project;
 		if (shuttingDown) throw new WireError("lost", "The plugin instance is stopping");
 		setup = (async () => {
 			if (service) {
@@ -460,7 +462,8 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	peer.handle("command/run", async (p, ctx) => {
 		const c = commands.get(String(p.name));
 		if (!c) throw new WireError("invalid_request", `No command ${p.name}`);
-		const output = await currentParent.run(ctx.id, () => c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId, ...work(ctx, p.sessionId), startJob: startJob(ctx.id, ctx.signal, p.sessionId, p.actorId) }));
+		const output = await currentParent.run(ctx.id, () => c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId, ...work(ctx, p.sessionId),
+			environment: async () => hostEnvironment(ctx.id, hostProject, p.sessionId), startJob: startJob(ctx.id, ctx.signal, p.sessionId, p.actorId) }));
 		return typeof output === "string" ? { output } : {};
 	});
 

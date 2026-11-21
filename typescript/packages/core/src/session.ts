@@ -24,41 +24,75 @@ export interface PromptResult {
   toolResults(): ToolResult[];
 }
 
-type Scope = { time: number; sessionId: string; turnId?: string; stepId?: string; toolCallId?: string; actorId?: string };
-export type Event = Scope & (
-  | { type: "text" | "reasoning" | "toolInput"; data: { delta: string } }
-  | { type: "turnEnded"; data: { turnId: string; outcome: Outcome; result: TurnResult } }
-  | { type: "entry"; data: HistoryEntry }
-  | { type: StandardEvent | `${string}.${string}`; data: unknown }
-);
-type StandardEvent = "sessionStarted" | "sessionEnded" | "actorJoined" | "actorLeft" | "inputAccepted"
-  | "inputWithdrawn" | "inputHandedBack" | "turnStarted" | "stepStarted" | "stepEnded" | "toolCall"
-  | "toolStarted" | "toolOutput" | "toolResult" | "questionOpened" | "questionAnswered" | "questionClosed"
-  | "questionNoLongerAnswerable" | "jobStarted" | "jobProgress" | "jobEnded" | "positionMoved"
-  | "entriesErased" | "settingChanged" | "pluginLoaded" | "pluginReplaced" | "pluginUnloaded" | "audio";
+type Scope = { time: number; sessionId: string; turnId?: string; stepId?: string; toolCallId?: string; actorId?: string; jobId?: string };
+type Empty = Record<string, never>;
+export interface EventData {
+  sessionStarted: { meta: { id: string; created: number; project: string }; resumed?: boolean };
+  sessionEnded: Empty;
+  actorJoined: { actor: Actor };
+  actorLeft: { actorId: string };
+  inputAccepted: { inputId: string; taken: InputReceipt["taken"] };
+  inputWithdrawn: { inputId: string; content: Content; reason: string };
+  inputHandedBack: { inputId: string; content: Content; reason: string };
+  turnStarted: { startedBy: { kind: "actor" | "job" | "plugin" | "answer"; id: string } };
+  turnEnded: { turnId: string; outcome: Outcome; result: TurnResult };
+  stepStarted: Empty;
+  stepEnded: { usage?: Usage };
+  text: { delta: string };
+  reasoning: { delta: string };
+  toolInput: { delta: string; toolCallId?: string };
+  audio: { data: string; mimeType: string };
+  toolCall: { call: ToolCall };
+  toolStarted: { call: ToolCall };
+  toolOutput: { content: Content };
+  toolResult: { status: ToolStatus; content: Content; value?: unknown };
+  questionOpened: { request: InputRequest; waiting?: boolean };
+  questionAnswered: { requestId: string; actorId: string; value?: string; stored?: string; declined?: boolean; reason?: string };
+  questionClosed: EventData["questionAnswered"];
+  questionNoLongerAnswerable: { requestId: string };
+  jobStarted: { job: { id: string; kind: string; actorId: string; sessionId: string } };
+  jobProgress: { content: Content };
+  jobEnded: { state: string; result: Content };
+  entry: HistoryEntry;
+  positionMoved: { to: string | null };
+  entriesErased: { count: number };
+  settingChanged: { key: string; value: unknown; appliesFrom: string };
+  pluginLoaded: { plugin: string };
+  pluginReplaced: { plugin: string };
+  pluginUnloaded: { plugin: string };
+}
+type StandardEvent = keyof EventData;
+export type Event = Scope & ({ [K in StandardEvent]: { type: K; data: EventData[K] } }[StandardEvent]
+  | { type: `${string}.${string}`; data: unknown });
 
 const names: Record<string, StandardEvent> = {
   "session.started": "sessionStarted", "session.ended": "sessionEnded", "session.joined": "actorJoined",
   "session.left": "actorLeft", "input.accepted": "inputAccepted", "input.withdrawn": "inputWithdrawn",
   "turn.started": "turnStarted", "step.started": "stepStarted", "step.ended": "stepEnded",
   "tool.call": "toolCall", "tool.started": "toolStarted", "tool.progress": "toolOutput",
-  "tool.result": "toolResult", "input.request.opened": "questionOpened", "input.request.closed": "questionClosed",
+  "tool.result.delivered": "toolResult", "input.request.opened": "questionOpened", "input.request.closed": "questionClosed",
   "input.request.answered": "questionAnswered", "input.request.unanswerable": "questionNoLongerAnswerable",
   "job.started": "jobStarted", "job.progress": "jobProgress", "job.ended": "jobEnded",
-  "history.position": "positionMoved", "history.erased": "entriesErased", "setting.changed": "settingChanged",
+  "position.moved": "positionMoved", "entries.erased": "entriesErased", "setting.changed": "settingChanged", "input.handedBack": "inputHandedBack",
   "plugin.loaded": "pluginLoaded", "plugin.replaced": "pluginReplaced", "plugin.unloaded": "pluginUnloaded",
 };
 function eventOf(e: AgentEvent): Event | undefined {
-  const { type, time, sessionId, turnId, stepId, toolCallId, actorId, data } = e;
-  const scope = { time, sessionId, turnId, stepId, toolCallId, actorId };
+  const { type, time, sessionId, turnId, stepId, toolCallId, actorId, jobId, data } = e;
+  const scope = { time, sessionId, turnId, stepId, toolCallId, actorId, jobId };
   if (type === "model.output") {
     const { type, ...piece } = data;
     return { ...scope, type, data: piece };
   }
   if (type === "entry" || type === "entry.added") return { ...scope, type: "entry", data };
   if (type === "turn.ended" && turnId) return { ...scope, type: "turnEnded", data: { turnId, outcome: data.outcome, result: data.result } };
-  if (names[type]) return { ...scope, type: names[type], data };
-  if (!["model.streamEnd", "tool.ended"].includes(type) && type.includes(".")) return { ...scope, type: type as `${string}.${string}`, data };
+  if (type === "session.joined" && data.actor) {
+    const { authority, ...actor } = data.actor;
+    return { ...scope, type: "actorJoined", data: { actor: { ...actor, rights: authority } } };
+  }
+  if (Object.hasOwn(names, type)) return { ...scope, type: names[type], data } as Event;
+  if (!/^(session|input|actor|turn|step|tool|model|provider|job|position|entries|plugin|capability)\./.test(type) && type.includes(".")) {
+    return { ...scope, type: type as `${string}.${string}`, data };
+  }
 }
 
 function readTurn(entries: HistoryEntry[], end: HistoryEntry): PromptResult {
@@ -92,6 +126,7 @@ const noTurn = (inputId: string, disposition: "handled" | "handedBack"): PromptR
   ({ inputId, disposition, text: "", openToolCalls: [], toolResults: () => [] });
 
 export interface PromptOptions { key?: string; actor?: string; result?: import("./schema.js").Schema }
+export interface Proposal { inputId: string; actorId: string; content: Content; time: number }
 type Owner = { enabled: { severalActors: boolean; sessionLimits: boolean }; isOpen(): boolean; interruption: AbortSignal; fork(entry?: string): Promise<Session>; close(actor: string, delegatedBy?: string): Promise<void>; handler(handler?: QuestionHandler): void };
 const local = "user";
 
@@ -201,10 +236,15 @@ export class Session {
       for (;;) {
         if (this.#owner.interruption.aborted) throw new AgentError("lost", "Agent was interrupted");
         const changed = new Promise<void>(r => { wake = r; });
+        const raw = this.#api.history(this.id, { all: true });
         const entries = await view.history();
         const turn = entries.find(e => e.kind === "input" && inputIdOf(e) === id)?.turnId;
         const end = turn && entries.find(e => e.kind === "turnEnd" && e.turnId === turn && !e.erased);
         if (end) { await off.idle(); return readTurn(entries, end); }
+        const rawTurn = raw.find(e => e.kind === "input" && inputIdOf(e) === id)?.turnId;
+        if (rawTurn && raw.some(e => e.kind === "turnEnd" && e.turnId === rawTurn && !e.erased)) {
+          throw new AgentError("withheld", "Turn result was withheld");
+        }
         if (entries.some(e => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(id))) return noTurn(id, "handedBack");
         if (!this.#api.session(this.id).busy && this.#api.history(this.id, { all: true }).length === entries.length) {
           throw new AgentError("lost", "Input did not settle");
@@ -228,6 +268,7 @@ export class Session {
     let cursor: string | null = null;
     let admission: string | undefined;
     let turn: string | undefined;
+    let terminal: Extract<Event, { type: "turnEnded" }> | undefined;
     const run = this.#run(input, options, {
       event(e) {
         if (queue.length >= 1024) overflow = true;
@@ -248,19 +289,18 @@ export class Session {
           const event = eventOf(e);
           if (overflow) throw new AgentError("lost", "Prompt event reader fell behind", { fromEntry: cursor });
           if (event?.type === "entry") cursor = event.data.id;
-          if (event && event.type !== "turnEnded") yield event;
+          if (event?.type === "turnEnded") terminal = event;
+          else if (event) yield event;
         }
       } else if (settled) break;
       if (!settled && (!turn || !queue.length)) await new Promise<void>(r => { wake = r; });
     }
     await run;
     if (failure) throw sdkError(failure);
-    if (result?.turnId && result.outcome) yield {
-      type: "turnEnded", time: Date.now(), sessionId: this.id, turnId: result.turnId,
-      data: { turnId: result.turnId, outcome: result.outcome, result: {
-        text: result.text, value: result.value, openToolCalls: result.openToolCalls,
-      } },
-    };
+    if (result?.turnId && result.outcome) {
+      if (!terminal) throw new AgentError("withheld", "Turn outcome was withheld");
+      yield terminal;
+    }
   }
 
   async *events(fromEntry?: string | null): AsyncIterable<Event> {
@@ -324,7 +364,11 @@ export class Session {
     const name = /^\/(\S+)/.exec(line.trim())?.[1];
     if (!name) throw new AgentError("invalid_params", "A command starts with /");
     if (!this.commands().some(c => c.name === name)) throw new AgentError("not_found", `Unknown command /${name}`);
-    return checked(() => this.#api.runCommand(this.id, line, this.actor));
+    const result = await checked(() => this.#api.runCommand(this.id, line, this.actor));
+    if (result === undefined) return;
+    const view = await this.#api.gateOutput(this.id, this.actor, "command.result", result);
+    if (view === undefined) throw new AgentError("withheld", "Command result was withheld");
+    return view;
   }
 
   async lastTurn(): Promise<PromptResult | undefined> {
@@ -351,6 +395,25 @@ export class Session {
     this.#require("erase");
     if (this.#api.declaration(this.id).erasure !== true) throw new AgentError("not_supported", "This store does not support erasure");
     return checked(() => this.#api.erase(this.id, entryIds, this.actor));
+  }
+  async proposals(): Promise<Proposal[]> {
+    this.#require("watch");
+    if (!this.#owner.enabled.severalActors) throw new AgentError("not_supported", "Several actors are disabled");
+    const proposals = await this.#api.gateOutput(this.id, this.actor, "input.proposals", this.#api.proposals(this.id, this.actor));
+    if (!proposals) throw new AgentError("withheld", "Proposals were withheld");
+    return structuredClone(proposals);
+  }
+  async release(inputId: string, timing: Exclude<InputTiming, "propose"> = "now"): Promise<InputReceipt> {
+    this.#require("input");
+    if (!this.#owner.enabled.severalActors) throw new AgentError("not_supported", "Several actors are disabled");
+    if (!inputId || !["now", "steer", "after"].includes(timing)) throw new AgentError("invalid_params", "Invalid proposal or timing");
+    return checked(() => this.#api.releaseInput(this.id, inputId, timing, this.actor));
+  }
+  async withdraw(inputId: string): Promise<void> {
+    this.#check();
+    if (!this.#owner.enabled.severalActors) throw new AgentError("not_supported", "Several actors are disabled");
+    if (!inputId) throw new AgentError("invalid_params", "A proposal id is required");
+    await checked(() => this.#api.withdrawProposal(this.id, inputId, this.actor, this.actor === local ? undefined : local));
   }
   async cancel(): Promise<{ inputId: string; content: Content }[]> {
     this.#require("cancel");

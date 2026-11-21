@@ -60,22 +60,26 @@ export const loadScenario = load<Scenario>;
 export const applies = (s: Scenario, p: Placement) => !s.placements || s.placements.includes(p.name) || p.name.startsWith("process:") && s.placements.includes("process") || p.name.startsWith("service:") && s.placements.includes("service");
 const countFile = (dir: string) => join(dir, "count");
 
-async function fixtureHistory(s: Scenario, dir: string) {
+type HistoryFixture = { dir: string } | { url: string; tokenFile: string };
+
+async function fixtureHistory(s: Scenario, dir: string): Promise<{ descriptor?: HistoryFixture; stop?: () => Promise<void> }> {
   if (!s.agent.history) return {};
-  const history = fileHistory(join(dir, "history"));
-  if (s.agent.history === "file") return { history };
+  const storeDir = join(dir, "history");
+  await mkdir(storeDir, { recursive: true });
+  if (s.agent.history === "file") return { descriptor: { dir: storeDir } };
   if (s.agent.history !== "service") throw new Error(`Unknown history fixture ${s.agent.history}`);
   const tokenFile = join(dir, "history-token");
   if (!existsSync(tokenFile)) await writeFile(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600, flag: "wx" });
-  const service = await serveHistory(history, { address: "127.0.0.1:0", tokenFile });
-  return { history: httpHistory(service.url, tokenFile), stop: service.close };
+  const service = await serveHistory(fileHistory(storeDir), { address: "127.0.0.1:0", tokenFile });
+  return { descriptor: { url: service.url, tokenFile }, stop: service.close };
 }
 
 export async function scenarioAgent(s: Scenario, dir: string, p: Placement,
-  handler = s.agent.answers && answers(s.agent.answers), history?: AgentOptions["history"]) {
+  handler = s.agent.answers && answers(s.agent.answers), store?: HistoryFixture) {
   const project = join(dir, "project");
   await mkdir(project, { recursive: true });
   const { plugins = [], answers: _answers, actors: _actors, history: _history, ...options } = s.agent;
+  const history = store && ("dir" in store ? fileHistory(store.dir) : httpHistory(store.url, store.tokenFile));
   const config = { path: countFile(dir) };
   return testAgent({ ...options, script: s.model, project, dataDir: join(dir, "data"),
     onQuestion: handler, history,
@@ -160,10 +164,11 @@ async function servicesFor(s: Scenario, dir: string, p: Placement) {
   } catch (error) { await stop(); throw error; }
 }
 
-async function crashRun(path: string, dir: string, p: Placement, i: number, when: Crash, previous?: string) {
+async function crashRun(path: string, dir: string, p: Placement, i: number, when: Crash, previous?: string, history?: HistoryFixture) {
   const services = await servicesFor(loadScenario(path), dir, p);
   const child = spawn(process.execPath, [fileURLToPath(new URL("./scenario-agent.js", import.meta.url)),
-    path, dir, String(i), JSON.stringify(services.placement), previous ?? ""], { detached: true, stdio: ["ignore", "pipe", "inherit"] });
+    path, dir, String(i), JSON.stringify(services.placement), previous ?? "", JSON.stringify(history ?? null)],
+    { detached: true, stdio: ["ignore", "pipe", "inherit"] });
   // Node has reaped the direct child by the time it emits close, even if
   // orphaned grandchildren in the group are still awaiting reaping.
   const reaped = new Promise<void>(resolve => child.once("close", () => resolve()));
@@ -209,7 +214,7 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
   };
   const start = async () => {
     services = await servicesFor(s, dir, p);
-    try { return await scenarioAgent(s, dir, services.placement, handler, history.history); }
+    try { return await scenarioAgent(s, dir, services.placement, handler, history.descriptor); }
     catch (error) { await stop(); throw error; }
   };
   try {
@@ -219,7 +224,7 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
       services = await servicesFor(s, dir, p);
       const want = s.expectCreateError;
       let actual: unknown = "success";
-      try { a = await scenarioAgent(s, dir, services.placement, handler, history.history); }
+      try { a = await scenarioAgent(s, dir, services.placement, handler, history.descriptor); }
       catch (error) {
         if (error instanceof AgentError && error.code === want.code && error.message.includes(want.messageContains)) return failures;
         actual = { code: error instanceof AgentError ? error.code : undefined, message: String(error) };
@@ -237,7 +242,7 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
       try {
         if ("prompt" in step && step.crashWhen) {
           await stop();
-          id = await crashRun(path, dir, p, i, step.crashWhen, id);
+          id = await crashRun(path, dir, p, i, step.crashWhen, id, history.descriptor);
         } else if ("reopen" in step) {
           await stop();
           if (!id) throw new Error("No session to reopen");

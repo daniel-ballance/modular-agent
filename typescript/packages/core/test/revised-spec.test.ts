@@ -142,6 +142,16 @@ for (const placement of ["local", "wire"] as const) {
     assert.deepEqual(turn.toolResults().map(r => [r.status, r.value, r.text()]), [["completed", 3, "changed"]]);
   });
 
+  test(`${placement}: tool.after can repair a completed value before validation`, async t => {
+    const measured = tool({ name: "measure", description: "Measure", input, output: { type: "number" }, run: () => "temporary" });
+    const plugin = place(definePlugin({ name: "repair-result", tools: [measured], hooks: {
+      "tool.after": ({ result }) => { assert.equal(result.status, "completed"); return { change: { value: 4 } }; },
+    } }));
+    const agent = await testAgent({ script, plugins: [plugin] });
+    t.after(() => agent.close());
+    assert.equal((await (await agent.session()).prompt("Measure")).toolResults()[0].value, 4);
+  });
+
   test(`${placement}: an invalid transformed tool value fails the turn without redispatch`, async t => {
     let calls = 0;
     const measured = tool({ name: "measure", description: "Measure", input, output: { type: "number" }, run: () => ++calls });

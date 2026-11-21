@@ -64,6 +64,8 @@ export interface ServeAcpOptions {
   projectSettings?(project: string): Settings | Promise<Settings>;
   projectMcp?(project: string): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
   showApproval?: boolean;
+  /** Permit client-supplied MCP servers. Defaults to stdio only. */
+  hostMcpServers?: boolean;
 }
 export function defaultAcpActor(): Actor {
   const { id, kind, authority } = localAcpActor();
@@ -142,6 +144,7 @@ export class Agent {
   #questions = new Map<string, AbortController>();
   #close?: Promise<void>;
   #hostEnabled = false;
+  #defaults: Settings;
   #acp = false;
   #stopAcp?: () => Promise<void>;
   #project: string;
@@ -157,11 +160,12 @@ export class Agent {
   #interruption = new AbortController();
   #rebuild?: () => Promise<Agent>;
 
-  private constructor(harness: Harness, scratch: string, project: string, onQuestion?: QuestionHandler) {
+  private constructor(harness: Harness, scratch: string, project: string, settings: Settings, onQuestion?: QuestionHandler) {
     this.#h = harness;
     this.#api = harness.api("sdk.host");
     this.#scratch = scratch;
     this.#project = project;
+    this.#defaults = settings;
     this.#defaultHandler = onQuestion;
   }
   static {
@@ -208,11 +212,11 @@ export class Agent {
       const h = new Harness({ project, home, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
         jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn",
         rejectUnknownModel: true, tenants: options.tenants ?? (options.conformance ? undefined : null) });
-      agent = new Agent(h, scratch, project, options.onQuestion);
+      const settings = structuredClone(options.settings ?? {});
+      agent = new Agent(h, scratch, project, settings, options.onQuestion);
       agent.#authority = { severalActors: options.severalActors ?? false, sessionLimits: options.sessionLimits ?? false, tenants: options.tenants !== undefined };
       agent.#conformance = options.conformance ?? false;
       agent.#approval = options.approval !== undefined || agent.#conformance;
-      const settings = structuredClone(options.settings ?? {});
       if (options.approval !== undefined) settings.approval = options.approval;
       const history = options.history ?? (durability === "ephemeral" || !options.dataDir ? memoryHistory() : undefined);
       agent.#rebuild = () => Agent.#create({ ...options, history });
@@ -502,8 +506,18 @@ export class Agent {
     if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
     this.#acp = true;
     const agents = new Map<string, Promise<Agent>>();
+    const sessions = new Map<string, Agent>();
     const attachments = new Map<PluginApi, ReturnType<typeof standardMcpTools>>();
     const installMcp = async (agent: Agent) => {
+      if (!agent.#hostEnabled) {
+        await agent.#loadRemotes(pluginSpecsFromEnv());
+        agent.#hostEnabled = true;
+        const models = agent.models();
+        if (agent.#defaults.model == null && models.length === 1) {
+          const { id, provider } = models[0];
+          agent.#defaults.model = { id, provider };
+        }
+      }
       const mcp = standardMcpTools({ servers: async project => await options.projectMcp?.(project) ?? {} });
       await agent.#plugin(mcp);
       attachments.set(agent.#api, mcp);
@@ -515,7 +529,6 @@ export class Agent {
       }));
     };
     const prepareConnection = (scope?: { actor: Actor; allowTenant(tenant: string | null): boolean; allowProject(project: string): boolean }) => {
-      const sessions = new Map<string, Agent>();
       const attached = new Map<PluginApi, { detach(): void; agent: Agent }>();
       let disconnected = false;
       const attach = (agent: Agent) => {
@@ -535,6 +548,7 @@ export class Agent {
             await this.#h.canDiscoverSession(id, actor, this.#authority.severalActors),
         } : { actorId: options.actorId ?? process.env.MODULAR_AGENT_ACTOR }),
         showApproval: options.showApproval ?? this.#approval,
+        hostMcpServers: options.hostMcpServers ?? !scope,
         declaration: id => (id && sessions.get(id) || this).declaration(),
         projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,
         associate: (id, api) => { sessions.set(id, attached.get(api)?.agent ?? this); },
@@ -552,8 +566,7 @@ export class Agent {
           if (saved && saved.project !== project || !options.compose && project !== this.#project) {
             throw new AgentError("invalid_params", "Session belongs to a different project");
           }
-          const ref = parseModel(saved?.settings.model);
-          const key = JSON.stringify([project, ref?.provider]);
+          const key = JSON.stringify([project, saved?.id]);
           let selected = id ? sessions.get(id) : undefined;
           if (!selected && options.compose) {
             let pending = agents.get(key);
@@ -590,7 +603,6 @@ export class Agent {
         disconnected = true;
         for (const part of attached.values()) part.detach();
         attached.clear();
-        sessions.clear();
       } };
     };
     let serving = false;
