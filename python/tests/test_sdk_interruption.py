@@ -85,6 +85,7 @@ async def test_idle_session_is_interrupted_when_custom_store_reports_revocation(
             project=tmp_path, durability="kept", plugins=[plugin], environment=memory_environment()
         ) as agent:
             session = await agent.session()
+            await session.prompt("Materialize the session before revoking its idle writer.")
             async with aclosing(session.events()) as events, asyncio.timeout(5):
                 assert (await anext(events)).type == "entry"
                 await watching.wait()

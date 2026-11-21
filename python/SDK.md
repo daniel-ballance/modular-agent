@@ -54,14 +54,15 @@ The two [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_liv
 
 - **Shared scenarios:** 153/153 with `MODULAR_AGENT_SDK_REQUIRE=all`: all 17 in process, all 17 with each SDK's fixture programs on stdio, and all 17 with each SDK's fixtures over WebSocket.
 - **Reference `ma`:** 18/18. The stderr regression checks the actual dispatched `codemode` call, not `tool(null)`.
-- **ACP kit against `ma`:** 188/188 on stdio with crash, probe and job checks. The WebSocket run passed 177/179: the background prompt timed out, and the following reconnect check could not change a setting while the session was busy. An instrumented run passed the job and reconnect checks but missed an approval fixture deadline (191/192). The standard declaration keeps several actors, limits and tenants off.
+- **ACP kit against `ma`:** 188/188 on stdio and 193/193 over WebSocket, with crash, probe and job checks. The standard declaration keeps several actors, limits and tenants off.
 - **Plugin kit:** 146/146 on stdio and 153/153 over WebSocket, with both Runtime tiers.
 - **History kit:** 42/42 through a custom `HistoryPort` served by `serve_history`, including acknowledged commits and lease exclusion after a restart with a shorter TTL.
+- **Session publication:** six SDK cases cover file, HTTP and Registrar history with in-process and served Runtimes. Unused sessions leave no records on close or process loss. The first admission flushes setup in order, and forks publish the copied prefix and fresh setup together. A separate ACP case checks that `session/new` and close do not create an HTTP history record.
 - **Session interruption:** seven public API cases cover failed appends and revoked leases. Embedded `prompt`, embedded `prompt_stream` and WebSocket ACP each settle with `lost`; a follower sees the live interruption and reopening recovers from the kept journal. A custom store's revocation notice interrupts an idle session before any renewal or write.
 - **SDK API regressions:** four follower cases preserve image progress through local and served tools and Runtimes. Three proposal cases check conflicts after release, decline and withdrawal. A history port case checks metadata and both page cursors; two Provider cases check the declaration in both placements.
 - **Command lifetime:** the WebSocket plugin kit checks disconnect cleanup. A regression also kills the agent's entire process group while a background descendant is still running; the separate lifetime watcher must survive the group kill and stop it on pipe EOF.
 - **Secret crash recovery:** three actual SIGKILL cutoffs: after staging, after committing the selection, and after activation. A separate test checks idempotence and generations.
-- **Python suites:** 511 passed and 2 live checks skipped in transient/native, durable/native and durable/process. Transient/process reported 505 passed, 2 skipped and 6 failures: one parked-child question timeout followed by five offline process-cleanup timeouts. Ruff lint, Ruff format (194 files) and strict mypy (38 source files) passed.
+- **Python suites:** 518 passed and 2 live checks skipped in each of transient/native, transient/process, durable/native and durable/process. Ruff lint, Ruff format (195 files) and strict mypy (38 source files) passed.
 
 ## Built so far
 
@@ -91,8 +92,6 @@ Both WebSocket servers return a listener with `url` (the bound address including
 A plugin value gets a new registration and copy per connection. If the plugin carries state in function closures or holds noncopyable resources, pass a zero-argument factory to `serve` so each connection gets fresh state. ACP's `actors` entries are `{"token_file": path, "actor": {"id": ..., "kind": ..., "rights": [...]}, "tenants": [...], "projects": [...]}`. Tenant scope defaults to no tenant; include `None` to allow it alongside named tenants. An explicit project list contains canonical project roots; omitting it allows the projects the serving composition admits. Tokens for the same actor id must agree on kind, but can impose different rights ceilings on the same recorded grants. An authorized second connection can attach to an open session's existing writer without sharing the first connection's ACP handshake or leaving the session suspended on its disconnect.
 
 ## Remaining Python implementation gaps
-
-The embedded `Agent.session()` still publishes setup to persistent history immediately; the [history binding](../docs/bindings/history-http.md#sessions) defers the initial create until first admission. This is separate from the custom port's metadata and paging contract checked in this pass.
 
 Provider-owned tool dispatch, live sessions and late answers are outside the SDK 0.1 Provider port ([API, Providers](../docs/sdk/api.md#providers)).
 

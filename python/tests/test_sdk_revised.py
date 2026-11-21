@@ -82,10 +82,13 @@ async def test_session_prepare_installs_resources_before_start(tmp_path):
         project=tmp_path,
         data_dir=tmp_path / "state",
         durability="durable",
+        providers=[scripted_provider([{"text": "ready"}])],
         plugins=[Plugin("resource", setup=setup)],
     )
     async with create_agent(**options) as agent:
-        sid = (await agent.session()).id
+        session = await agent.session()
+        sid = session.id
+        await session.prompt("Keep this session.")
     async with create_agent(**options) as agent:
         await agent.session_info(sid)
         assert seen == [(str(tmp_path), False), "start"]

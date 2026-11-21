@@ -63,11 +63,13 @@ async def test_owner_resumes_unfinished_job_on_reopen(tmp_path):
     agent = await make_agent(
         script=[],
         durability="kept",
+        several_actors=True,
         data_dir=tmp_path / "state",
         plugins=[Plugin("offline", setup=setup)],
     )
     async with agent:
         session = await agent.session()
+        await session.send("Keep this session.", "propose")
         jid = await session.run_command("/offline")
         async with await restart(agent) as next_agent:
             reopened = await next_agent.open_session(session.id)
@@ -117,6 +119,7 @@ def wire_agent(path, resumed):
         project=path,
         history=file_history(path / "history"),
         durability="kept",
+        several_actors=True,
         environment=memory_environment(),
         plugins=[over_wire(wire_owner(resumed))],
     )
@@ -149,6 +152,7 @@ async def test_wire_owner_resumes_after_host_crash(tmp_path):
 async def crash_fixture(path):
     async with wire_agent(path, []) as agent:
         session = await agent.session()
+        await session.send("Keep this session.", "propose")
         job = await session.run_command("/offline")
         print(session.id, job, flush=True)
         await asyncio.Future()

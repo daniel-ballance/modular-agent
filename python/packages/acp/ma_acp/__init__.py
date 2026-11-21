@@ -480,6 +480,7 @@ class ACP(Plugin):
                 session = await self.api.session(
                     "create",
                     project=project,
+                    defer_setup=True,
                     actor=self.actor,
                     actor_kind=self.principal["kind"],
                     authority=authority,

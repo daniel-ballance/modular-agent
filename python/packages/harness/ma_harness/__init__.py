@@ -122,7 +122,7 @@ class Harness(Authority):
         self.sessions[sid] = s
         try:
             self.tenant_config(s.get("tenant"))
-            if s.get("tenant") is not None and not s["entries"]:
+            if not s["entries"] and (s.get("provisional") or s.get("tenant") is not None):
                 await self._append(
                     {
                         "session": sid,
@@ -327,7 +327,15 @@ class Harness(Authority):
         )
         if target != "tools" or operation != "run" or "call" not in data:
             if effect:
-                return clone(await self._effect(sid, method, data, emit))
+                return clone(
+                    await self._effect(
+                        sid,
+                        method,
+                        data,
+                        emit,
+                        allow_provisional=target == "environment" and operation == "read",
+                    )
+                )
             return clone(await method(data, emit))
         call = data["call"]
         if call.get("parentCallId") and (definition := data.get("definition")):
@@ -497,7 +505,9 @@ class Harness(Authority):
                 silent,
             )
 
-    async def _effect(self, sid, callback, *args):
+    async def _effect(self, sid, callback, *args, allow_provisional=False):
+        if not allow_provisional:
+            self._require_materialized(self.sessions[sid])
         await self._assert_writable(sid)
         tasks = self.effects.setdefault(sid, {})
         task = asyncio.current_task()
@@ -567,7 +577,20 @@ class Harness(Authority):
             raise AgentError("Actor is not enrolled in the session", "forbidden")
         return s
 
+    @staticmethod
+    def _require_materialized(session):
+        if session.get("provisional"):
+            raise AgentError("Session has not admitted its first input", "unavailable")
+
     async def _keep(self, session, entries):
+        if session.get("provisional"):
+            if not any(e["kind"] == "input_queued" for e in entries):
+                # Keep the original IDs, timestamps and parent links in memory.
+                self.sessions[session["id"]] = session
+                return
+            del session["provisional"]
+            entries = session["entries"]
+
         cancellation = None
         if "history" in self.capabilities:
             sid = session["id"]
@@ -691,6 +714,16 @@ class Harness(Authority):
         # An entry may attribute an effect to a historical actor who has left.
         s = self._session(d, check_actor=False)
         sid = s["id"]
+        if d["kind"] not in {
+            "input_queued",
+            "setting",
+            "plugins",
+            "actor_joined",
+            "actor_left",
+            "authority",
+            "limit",
+        }:
+            self._require_materialized(s)
         if d["kind"] in {"question_answer", "question_closed", "secret_answer_accepted"} and any(
             (
                 entry["kind"] in {"question_answer", "question_closed"}
@@ -923,11 +956,22 @@ class Harness(Authority):
             settings = {}
             if "config" in self.capabilities:
                 settings = await self.call("@harness", "config", "load", {"project": project})
+            history = self.capabilities.get("history")
+            provisional = (
+                d.get("defer_setup")
+                and history is not None
+                and self.plugins[history[0]].declarations.get("retention") != "process"
+            )
             s = {
                 "id": d.get("id", identity()),
                 "project": project,
                 "created": __import__("time").time_ns() // 1_000_000,
-                **({"setup_pending": True} if getattr(self, "lazy_setup", False) else {}),
+                **(
+                    {"setup_pending": True}
+                    if provisional or getattr(self, "lazy_setup", False)
+                    else {}
+                ),
+                **({"provisional": True} if provisional else {}),
                 "settings": {"approval": "off", **settings, **d.get("settings", {})},
                 "actor": d.get("actor", "user"),
                 "entries": [],
@@ -1021,6 +1065,7 @@ class Harness(Authority):
                 d["session"],
                 self.commands[name][2],
                 {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()},
+                allow_provisional=True,
             )
         if op == "event":
             if d.get("kind") == "plugin_failed" and "session" not in d and self.sessions:
@@ -1162,6 +1207,7 @@ class Harness(Authority):
             s["busy"] = d["value"]
             return {}
         if op == "move":
+            self._require_materialized(s)
             if s.get("busy"):
                 raise AgentError("Cannot move during a turn", "busy")
             if d.get("rewind"):
@@ -1353,6 +1399,7 @@ class Harness(Authority):
             )
             return child
         if op == "erase":
+            self._require_materialized(s)
             ids = d.get("entries")
             if (
                 not isinstance(ids, list)

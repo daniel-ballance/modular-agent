@@ -18,13 +18,14 @@ async def test_command_reads_reopened_sessions_project(tmp_path: Path, served: b
     (second / "message").write_text("second")
     history = file_history(data)
     async with create_agent(
-        project=first, data_dir=data, history=history, durability="kept"
+        project=first, data_dir=data, history=history, durability="kept", several_actors=True
     ) as agent:
-        sid = (await agent.session()).id
+        session = await agent.session()
+        await session.send("Keep this session.", "propose")
+        sid = session.id
 
     async def who(_: str, context: CommandContext) -> str:
-        assert context.project == first
-        return (await context.environment.read("message")).decode()
+        return f"{context.project.name}: {(await context.environment.read('message')).decode()}"
 
     def setup(r: Registrar) -> None:
         r.command("who", "Read the session's message", who)
@@ -37,4 +38,7 @@ async def test_command_reads_reopened_sessions_project(tmp_path: Path, served: b
         durability="kept",
         plugins=[over_wire(plugin) if served else plugin],
     ) as agent:
-        assert await (await agent.open_session(sid)).run_command("/who") == "first"
+        empty = await agent.session()
+        assert await empty.run_command("/who") == "second: second"
+        assert {row["id"] for row in await agent.sessions()} == {sid}
+        assert await (await agent.open_session(sid)).run_command("/who") == "first: first"
