@@ -120,7 +120,15 @@ func (c *client) Tenant(ctx context.Context, id string) (map[string]any, error) 
 // branches and sessions opened by a different process. A running step counts
 // as soon as its response is recorded. Turn totals can include other work.
 func (c *client) tenantUsage(name string) (int64, error) {
-	sessions, err := c.List("")
+	var sessions []api.Session
+	var err error
+	if v, e := c.Get("history"); e == nil {
+		// Accounting is internal and must include affected sessions, even
+		// while delivery of their history views is withheld.
+		sessions, err = v.(api.Store).List("")
+	} else {
+		sessions, err = c.List("")
+	}
 	if err != nil {
 		return 0, err
 	}

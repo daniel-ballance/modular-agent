@@ -2,6 +2,7 @@ package subagents_test
 
 import (
 	"context"
+	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/credentials"
 	"github.com/daniel-ballance/modular-agent/go/fake"
@@ -300,9 +301,11 @@ func TestChildCannotWidenAuthorityAndParentRevocationApplies(t *testing.T) {
 		if err := a.Grant(ctx, id, api.Actor{ID: "limited", Rights: []string{"watch"}}); err != nil {
 			t.Fatal(err)
 		}
-		r, err := a.CallTool(api.AsActor(ctx, child.Actor), child.ID, api.Call{Name: "write", Input: api.JSON(map[string]string{"path": "bad", "content": "bad"})})
-		if err != nil || r.Status != "refused" {
-			t.Fatal(r, err)
+		_, err = a.CallTool(api.AsActor(ctx, child.Actor), child.ID, api.Call{Name: "write", Input: api.JSON(map[string]string{"path": "bad", "content": "bad"})})
+		// The Harness checks current ancestor rights before handing a call
+		// to the Runtime, so this is an authority error, not a tool result.
+		if !errors.Is(err, api.ErrAuthority) {
+			t.Fatalf("revoked ancestor rights did not refuse the call: %v", err)
 		}
 	})
 }

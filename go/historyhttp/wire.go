@@ -31,15 +31,10 @@ func validLease(s string) bool {
 
 // appendBody uses the same encoding for the size check and the wire.
 func appendBody(lease string, entries []json.RawMessage) json.RawMessage {
-	return guardedAppendBody(lease, entries, "")
-}
-
-func guardedAppendBody(lease string, entries []json.RawMessage, guard string) json.RawMessage {
 	return raw(struct {
 		Lease   string            `json:"lease"`
 		Entries []json.RawMessage `json:"entries"`
-		Guard   string            `json:"goErasureGuard,omitempty"`
-	}{lease, entries, guard})
+	}{lease, entries})
 }
 
 type fields map[string]json.RawMessage
