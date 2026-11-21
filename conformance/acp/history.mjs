@@ -11,7 +11,7 @@ export function historyService(raw, tokenFile) {
 	if (url.username || url.password || url.search || url.hash || (url.protocol !== "https:" && !(url.protocol === "http:" && (url.hostname.startsWith("127.") || url.hostname === "[::1]")))) throw new Error("use a disposable service with HTTPS or loopback HTTP");
 	const token = readFileSync(tokenFile, "utf8").trim();
 	const path = (id) => `/v1/sessions/${encodeURIComponent(id)}`;
-	const request = (route, init = {}) => fetch(url.href.replace(/\/$/, "") + route, { ...init, redirect: "error", signal: AbortSignal.timeout(15000), headers: { authorization: `Bearer ${token}`, ...(init.body ? { "content-type": "application/json" } : {}) } });
+	const request = (route, init = {}) => fetch(url.href.replace(/\/$/, "") + route, { ...init, redirect: "error", signal: AbortSignal.timeout(15000), headers: { authorization: `Bearer ${token}`, ...(init.body ? { "content-type": "application/json" } : {}), ...(init.headers ?? {}) } });
 	return {
 		async json(route, method = "GET", body) {
 			const r = await request(route, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -48,13 +48,15 @@ export function historyService(raw, tokenFile) {
 					const body = chunks.length ? Buffer.concat(chunks) : undefined;
 					const fixture = fixtureReply?.(info);
 					if (fixture) return res.writeHead(fixture.status, { "content-type": "application/json" }).end(JSON.stringify(fixture.body));
-					const r = await request(req.url, { method: req.method, body });
+					// Pass the pending-erasure profile's revision through unchanged, so appends stay fenced (history-http.md).
+					const revision = req.headers["history-revision"];
+					const r = await request(req.url, { method: req.method, body, ...(revision === undefined ? {} : { headers: { "history-revision": revision } }) });
 					const entries = r.ok && req.method === "POST" && req.url.endsWith("/entries") && body ? JSON.parse(body).entries : undefined;
 					if (entries) {
 						const events = entries.filter((e) => (e.kind === "jobEnded" && e.data?.report === true) || (e.kind === "inputAccepted" && e.data?.key?.startsWith("job:"))).map((e) => ({ kind: e.kind, jobId: e.jobId, key: e.data?.key }));
 						if (events.length) batches.push(events);
 					}
-					const headers = Object.fromEntries(["content-type", "www-authenticate"].flatMap((k) => r.headers.has(k) ? [[k, r.headers.get(k)]] : []));
+					const headers = Object.fromEntries(["content-type", "www-authenticate", "cache-control"].flatMap((k) => r.headers.has(k) ? [[k, r.headers.get(k)]] : []));
 					const bytes = Buffer.from(await r.arrayBuffer());
 					await beforeReply?.({ method: req.method, path: req.url, ok: r.ok, entries });
 					res.writeHead(r.status, headers).end(bytes);
