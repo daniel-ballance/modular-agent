@@ -98,7 +98,26 @@ class Authority:
             tokens = {"budget": budget, "used": used}
         return {"tenant": name, "rights": config.get("rights"), "tokens": tokens}
 
+    def connection_allows(self, s):
+        connection = CONNECTION_AUTHORITY.get()
+        return connection is None or connection[3](s)
+
+    def can_open(self, s, actor, *, local=False):
+        if not self.connection_allows(s):
+            return False
+        if actor in s.get("actors", {}):
+            return "watch" in self.permissions(s, actor)
+        # Local stdio retains the operator fallback for an unrecorded principal.
+        if not local or actor in s.get("departed", []):
+            return False
+        connection = CONNECTION_AUTHORITY.get()
+        ceiling = connection[1] if connection else None
+        rights = self.session_ceiling(s)
+        return "watch" in rights and (ceiling is None or "watch" in ceiling)
+
     def permissions(self, s, actor, ceiling=None):
+        if not self.connection_allows(s):
+            return set()
         actors = s.get("actors", {s["actor"]: {"authority": sorted(PERMISSIONS)}})
         if actor not in actors:
             return set()
@@ -110,8 +129,8 @@ class Authority:
                 return set()
             allowed &= self.permissions(parent, origin["actor"], origin.get("authority"))
         if connection := CONNECTION_AUTHORITY.get():
-            principal, token_rights, grants = connection
-            if actor == principal:
+            principal, token_rights, grants, _ = connection
+            if actor == principal and token_rights is not None:
                 allowed &= grants.get(s["id"], token_rights)
         if ceiling is not None:
             allowed &= set(ceiling)

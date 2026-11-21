@@ -122,6 +122,10 @@ class Harness(Authority):
         self.sessions[sid] = s
         try:
             self.tenant_config(s.get("tenant"))
+            if not self.connection_allows(s) or (
+                actor is not None and not self.can_open(s, actor, local=connection_host)
+            ):
+                raise AgentError("Session inaccessible", "forbidden")
             if not s["entries"] and (s.get("provisional") or s.get("tenant") is not None):
                 await self._append(
                     {
@@ -573,6 +577,8 @@ class Harness(Authority):
             raise AgentError("Session is not open")
         s = self.sessions[sid]
         actor = data.get("actor", s["actor"])
+        if not self.connection_allows(s):
+            raise AgentError("Session inaccessible", "forbidden")
         if check_actor and "actor" in data and actor not in s.get("actors", {s["actor"]: {}}):
             raise AgentError("Actor is not enrolled in the session", "forbidden")
         return s
@@ -953,6 +959,8 @@ class Harness(Authority):
             tenant = parent.get("tenant") if parent else d.get("tenant")
             self.tenant_config(tenant)
             project = str(Path(d["project"]).resolve())
+            if not self.connection_allows({"project": project, "tenant": tenant}):
+                raise AgentError("Session inaccessible", "forbidden")
             settings = {}
             if "config" in self.capabilities:
                 settings = await self.call("@harness", "config", "load", {"project": project})
@@ -996,6 +1004,8 @@ class Harness(Authority):
                 await self._end_interrupted(sid)
             if sid in self.sessions:
                 s = self._session(d)
+                if d.get("actor") is not None:
+                    self.require(s, d["actor"], "watch")
                 if "mcp_servers" in d:
                     self.require(s, d.get("actor", s["actor"]), "settings")
                     if s.get("busy"):

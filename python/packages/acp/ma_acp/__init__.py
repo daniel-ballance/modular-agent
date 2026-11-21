@@ -103,7 +103,11 @@ def rpc(fn):
                 if hasattr(result, "model_dump")
                 else result
             )
-            view = await self.view(raw, method=method)
+            sid = OUTPUT_SESSION.get()
+            if method == "session/new":
+                sid = raw["sessionId"]
+            await self.check_delivery(sid, method)
+            view = await self.view(raw, sid, method=method)
             if view is None:
                 raise withheld()
             try:
@@ -124,6 +128,7 @@ def rpc(fn):
                     sid = OUTPUT_SESSION.get()
                     if sid and sid not in self.sessions:
                         await self.attach(sid, replay=method == "session/load")
+                await self.check_delivery(sid, method)
                 return outgoing
             except ValueError:
                 raise withheld() from None
@@ -148,11 +153,21 @@ def rpc(fn):
             error = protocol_error("invalid_params", "Invalid parameters")
         except Exception as exc:
             error = acp.RequestError.internal_error({"reason": type(exc).__name__})
+        if isinstance(error.data, dict) and error.data.get("code") in {
+            "forbidden",
+            "not_open",
+            "wrong_project",
+        }:
+            raise error from None
         try:
+            await self.check_delivery(OUTPUT_SESSION.get(), method)
             view = await self.view(error.to_error_obj(), method=method)
+            await self.check_delivery(OUTPUT_SESSION.get(), method)
             if view is None:
                 raise ValueError("Blocked error")
             outgoing = acp.RequestError(view["code"], view["message"], view.get("data"))
+        except acp.RequestError as exc:
+            outgoing = exc
         except Exception:
             outgoing = withheld()
         raise outgoing from None
@@ -195,12 +210,14 @@ class ACP(Plugin):
         self.actor = actor
         self.principal = {"id": actor, "kind": "host", "rights": sorted(PERMISSIONS)}
         self.network = False
+        self.represents = frozenset()
         self.project = str(Path(project).resolve())
         self.settings = settings or {}
         self.client = None
         self.initialized = False
         self.client_capabilities = s.ClientCapabilities()
         self.sessions = set()
+        self.presence = {}
         self.requests = {}
         self.approval_views = set()
         self.streamed = set()
@@ -251,13 +268,16 @@ class ACP(Plugin):
             )
         return str(project)
 
-    def check_session(self, sid):
+    async def check_session(self, sid):
         self.ready()
         if sid not in self.sessions:
-            raise acp.RequestError.resource_not_found(sid)
+            await self.require_visible_session(None, sid)
+            raise protocol_error("not_open", "Session is not open on this connection")
+        if "watch" not in await self.rights(sid):
+            raise protocol_error("forbidden", "Session inaccessible")
 
     async def get(self, sid):
-        self.check_session(sid)
+        await self.check_session(sid)
         return await self.api.session("get", session=sid, actor=self.actor)
 
     async def rights(self, sid):
@@ -276,6 +296,29 @@ class ACP(Plugin):
             **({"type": event_type} if event_type else {}),
         )
 
+    async def check_delivery(self, sid, method=None):
+        if sid is None or method in {"session/close", "_modular-agent/leave"}:
+            return
+        if (
+            sid not in self.sessions
+            and sid != self.opening
+            and method
+            not in {
+                "session/load",
+                "session/resume",
+            }
+        ):
+            # Errors for unattached sessions carry no session content.
+            if method is not None:
+                return
+            raise protocol_error("not_open", "Session is not open on this connection")
+        try:
+            allowed = "watch" in await self.rights(sid)
+        except AgentError:
+            allowed = False
+        if not allowed:
+            raise protocol_error("forbidden", "Session inaccessible")
+
     async def update(self, sid, update, *, stream=False):
         # Event-derived updates are already gated, but configuration and other
         # directly constructed protocol updates must pass the same gate too.
@@ -291,6 +334,12 @@ class ACP(Plugin):
             already_gated=stream,
         )
         if value is not None:
+            try:
+                await self.check_delivery(sid)
+            except acp.RequestError:
+                return
+            if not self.client:
+                return
             await self.client.session_update(
                 session_id=value["sessionId"],
                 update=type(update).model_validate(value["update"]),
@@ -301,14 +350,14 @@ class ACP(Plugin):
             await self.attach(d["session"], replay=False)
 
     async def attach(self, sid, *, replay):
+        self.sessions.add(sid)
         if replay and "watch" in await self.rights(sid):
             # Replay is part of opening, BEFORE the Harness schedules recovery.
             for entry in await self.api.session("branch", session=sid, actor=self.actor):
                 value = await self.view(entry, sid, event_type="entry")
                 if value is not None:
                     await self.entry(sid, value, replay=True)
-        self.sessions.add(sid)
-        await self.api.call("questions", "connect", {"session": sid, "actor": self.actor})
+        await self.set_presence(sid, self.actor, True)
         if replay:
             for q in await self.api.call(
                 "questions", "list", {"session": sid, "actor": self.actor}
@@ -323,6 +372,7 @@ class ACP(Plugin):
     async def session_ended(self, d):
         sid = d["session"]
         self.sessions.discard(sid)
+        self.presence.pop(sid, None)
         self.approval_views = {key for key in self.approval_views if key[0] != sid}
         await self._cancel_requests(sid)
         if d.get("interrupted"):
@@ -508,13 +558,9 @@ class ACP(Plugin):
         if self.lifecycle.locked():
             raise protocol_error("busy", "Session lifecycle operation in progress")
         async with self.lifecycle:
-            if self.network:
-                # The service's history and authority decide scope before a
-                # project composition gets to see the request.
-                await self.require_visible_session(project, sid)
+            # Authorize stored scope before giving a project factory the ID.
+            await self.require_visible_session(project, sid)
             await self.select_project(project, sid)
-            if not self.network:
-                await self.require_visible_session(project, sid)
             self.opening = sid
             self.returned_on_open[sid] = []
             try:
@@ -579,7 +625,7 @@ class ACP(Plugin):
 
     @rpc
     async def set_config_option(self, config_id, session_id, value, **kwargs):
-        self.check_session(session_id)
+        await self.check_session(session_id)
         option = next((o for o in await self.options(session_id) if o.id == config_id), None)
         if option is None or value not in {o.value for o in option.options}:
             raise acp.RequestError.invalid_params(
@@ -809,7 +855,10 @@ class ACP(Plugin):
             cls = s.AgentThoughtChunk if stream_type == "reasoning" else s.AgentMessageChunk
             await self.update(sid, cls(content=text_block(e["text"])), stream=True)
         elif e["kind"] == "history_entry":
-            await self.entry(sid, e["entry"])
+            entry = e["entry"]
+            if entry["kind"] == "actor_left":
+                self.presence.get(sid, set()).discard(entry["data"]["actorId"])
+            await self.entry(sid, entry)
         elif e["kind"] == "tool_progress" and e.get("text"):
             key = sid, e["call"]
             self.tool_output[key] = self.tool_output.get(key, "") + e["text"]
@@ -849,7 +898,8 @@ class ACP(Plugin):
             if task and task is not asyncio.current_task():
                 task.cancel()
         meta = self.client_capabilities.field_meta or {}
-        if meta.get(NAMESPACE, {}).get("events"):
+        if meta.get(NAMESPACE, {}).get("events") and self.client:
+            await self.check_delivery(sid)
             await self.client.ext_notification("modular-agent/event", e)
 
     async def answer_request(self, sid, q):
@@ -892,6 +942,9 @@ class ACP(Plugin):
                         },
                     )
                     return
+                await self.check_delivery(sid)
+                if "approve" not in await self.rights(sid):
+                    return
                 self.approval_views.add((sid, q["id"]))
                 response = await self.client.request_permission(
                     session_id=sid,
@@ -913,9 +966,12 @@ class ACP(Plugin):
                     if q["kind"] == "choice":
                         prop["enum"] = q["options"]
                     # Form mode is for non-sensitive data only, never secret questions.
-                    # https://agentclientprotocol.com/protocol/v1/elicitation
+                    view = await self.view(q, sid)
+                    await self.check_delivery(sid)
+                    if view is None or "answer" not in await self.rights(sid):
+                        return
                     response = await self.client.create_elicitation(
-                        message=q["question"],
+                        message=view["question"],
                         mode=s.ElicitationFormSessionMode(
                             session_id=sid,
                             tool_call_id=q.get("call"),
@@ -930,12 +986,13 @@ class ACP(Plugin):
                             q["kind"] == "text" or submitted in q["options"]
                         ):
                             value = submitted
+            await self.check_delivery(sid)
             await self.api.call(
                 "questions",
                 "answer",
                 {"session": sid, "actor": self.actor, "request": q["id"], "value": value},
             )
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, acp.RequestError):
             raise
         except (ConnectionError, EOFError):
             if q["kind"] == "approval":
@@ -1043,7 +1100,7 @@ class ACP(Plugin):
 
     async def bound_extension(self, operation, params):
         sid = params["sessionId"]
-        self.check_session(sid)
+        await self.check_session(sid)
         # Proposals, release and withdraw also serve parked job reports.
         feature = {"limit": "sessionLimits", "tenant": "tenants"}.get(operation)
         actor = params.get("actorId", self.actor)
@@ -1138,16 +1195,15 @@ class ACP(Plugin):
                         kind=actor["kind"],
                         authority=actor["rights"],
                     )
-                    if actor["id"] == base["actor"]:
-                        await self.api.call(
-                            "questions",
-                            "connect" if present else "disconnect",
-                            {**base, "actor": actor["id"]},
-                        )
+                    if actor["id"] == self.actor or actor["id"] in self.represents:
+                        await self.set_presence(sid, actor["id"], present)
                 else:
                     await self.api.session("leave", **base, subject=params["actorId"])
+                    self.presence.get(sid, set()).discard(params["actorId"])
                     await self.api.call(
-                        "questions", "disconnect", {**base, "actor": params["actorId"]}
+                        "questions",
+                        "disconnect",
+                        {**base, "actor": params["actorId"], "all_routes": True},
                     )
             except AgentError as exc:
                 raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
@@ -1190,8 +1246,7 @@ class ACP(Plugin):
             if params["when"] not in {"now", "steer", "after", "propose"}:
                 raise ValueError("Unknown input timing")
             actor = params.get("actorId", self.actor)
-            if actor != base["actor"]:
-                raise protocol_error("forbidden", "Connection does not represent that actor")
+            attribution = await self.attribution(sid, actor)
             try:
                 rights = await self.api.session("authority", **base)
                 receipt = await self.api.call(
@@ -1199,7 +1254,7 @@ class ACP(Plugin):
                     "submit",
                     {
                         **base,
-                        "actor": actor,
+                        **attribution,
                         "authority": rights,
                         "content": parts,
                         "commands": False,
@@ -1208,6 +1263,8 @@ class ACP(Plugin):
                     },
                 )
             except AgentError as exc:
+                if exc.code != "invalid_request":
+                    raise
                 raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
             if receipt.get("erased"):
                 return receipt
@@ -1223,13 +1280,13 @@ class ACP(Plugin):
             requests = [binding.question(q) for q in questions if q["answerable"]]
             return {"requests": requests}
         if operation == "answer":
-            if params.get("actorId", base["actor"]) != base["actor"]:
-                raise protocol_error("forbidden", "Connection does not represent that actor")
+            attribution = await self.attribution(sid, actor)
+            answer_base = {**base, **attribution}
             try:
                 question = next(
                     (
                         q
-                        for q in await self.api.call("questions", "list", base)
+                        for q in await self.api.call("questions", "list", answer_base)
                         if q["id"] == params["requestId"] and q["answerable"]
                     ),
                     None,
@@ -1245,8 +1302,7 @@ class ACP(Plugin):
                     "questions",
                     "answer",
                     {
-                        **base,
-                        "actor": params.get("actorId", self.actor),
+                        **answer_base,
                         "authority": await self.api.session("authority", **base),
                         "request": params["requestId"],
                         "value": params.get("value"),
@@ -1300,6 +1356,15 @@ class ACP(Plugin):
                 },
             )
         )["value"]
+
+    async def attribution(self, sid, actor):
+        if actor == self.actor:
+            return {"actor": actor}
+        if not isinstance(actor, str) or actor not in self.represents:
+            raise protocol_error("forbidden", "Connection does not represent that actor")
+        if actor not in (await self.get(sid))["actors"]:
+            raise protocol_error("forbidden", "Connection does not represent that actor")
+        return {"actor": actor, "acting_for": self.actor}
 
     async def finish_question_view(self, method, raw, view):
         sid = OUTPUT_SESSION.get()
@@ -1372,13 +1437,23 @@ class ACP(Plugin):
 
     async def disconnect(self):
         await self._cancel_requests()
-        for sid in list(self.sessions):
-            try:
-                await self.api.call(
-                    "questions", "disconnect", {"session": sid, "actor": self.actor}
-                )
-            except AgentError:
-                pass
+        for sid, actors in list(self.presence.items()):
+            for actor in actors.copy():
+                try:
+                    await self.set_presence(sid, actor, False)
+                except AgentError:
+                    pass
+
+    async def set_presence(self, sid, actor, present):
+        await self.api.call(
+            "questions",
+            "connect" if present else "disconnect",
+            {"session": sid, "actor": actor, "route": self.name},
+        )
+        if present:
+            self.presence.setdefault(sid, set()).add(actor)
+        else:
+            self.presence.get(sid, set()).discard(actor)
 
     async def serve_frames(self, frames):
         await acp.run_agent(self, Stdio(None, None, frames=frames), use_unstable_protocol=True)
