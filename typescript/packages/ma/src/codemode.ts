@@ -1,4 +1,5 @@
-import { ExternalModule, FunctionSnapshot, Monty, MontyComplete, MontyRuntimeError, MontySyntaxError, NameLookupSnapshot } from "@pydantic/monty";
+import { addAbortListener } from "node:events";
+import { ExternalModule, FunctionSnapshot, Monty, MontyComplete, MontyCrashedError, MontyRuntimeError, MontySyntaxError, NameLookupSnapshot } from "@pydantic/monty";
 import { definePlugin, tool, type ContentPart, type ImagePart, type ToolContext } from "@modular-agent/core";
 import { catalog } from "./catalog.js";
 
@@ -32,12 +33,24 @@ function pythonJson(value: unknown): PythonJson {
 
 async function run(pool: Monty, code: string, ctx: ToolContext) {
   const available = catalog(await ctx.tools.list());
+  ctx.cancelled.throwIfAborted();
   const modules = Object.fromEntries([...available.functions.keys()].map(name => [name, () => {}]));
   // The SDK counts nested tool calls below. Monty's suspension counter also
   // includes lookups and must not cut off a run before its 500th tool call.
   await using sandbox = await pool.checkout({ scriptName: "main.py", limits: { maxTurnDurationSecs: 30, maxRecursionDepth: 200,
-    maxMemory: 32 * 1024 * 1024, maxSuspensions: Number.MAX_SAFE_INTEGER },
+    maxMemory: 256 * 1024 * 1024, maxSuspensions: Number.MAX_SAFE_INTEGER },
     externalModules: { tools: new ExternalModule(modules) }, osPolicy: { datetime: "call_host", sleep: "call_host", randomStart: "call_host" } });
+  ctx.cancelled.throwIfAborted();
+  // Monty 1.6.0 closes a session only after its current turn replies. Capture
+  // the PID before starting a turn so cancellation can stop the subprocess.
+  const pid = sandbox.workerPid;
+  if (pid === undefined) throw new Error("No sandbox worker process was checked out");
+  using abort = addAbortListener(ctx.cancelled, () => {
+    try { process.kill(pid, "SIGKILL"); }
+    catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ESRCH") console.error("Could not stop the sandbox worker process:", err);
+    }
+  });
   let printed = "", bytes = 0, over = false, calls = 0;
   const error = (kind: string, message: string) => new MontyRuntimeError(kind, message);
   const toText = () => printed && !printed.endsWith("\n") ? printed + "\n" : printed;
@@ -89,7 +102,12 @@ async function run(pool: Monty, code: string, ctx: ToolContext) {
           } else if (name === "exec" && result.status === "failed" && result.value && typeof result.value === "object" && !(result.value as { timed_out?: boolean }).timed_out) value = result.value;
           else throw error("RuntimeError", `${name}() ${result.status === "outcomeUnknown" ? "outcome unknown" : result.status}: ${text}`);
         }
-      } catch (err) { next = await next.resumeError(err); continue; }
+      } catch (err) {
+        ctx.cancelled.throwIfAborted();
+        next = await next.resumeError(err);
+        continue;
+      }
+      ctx.cancelled.throwIfAborted();
       next = await next.resume(value);
     }
     if (over) throw error("RuntimeError", "printed output exceeded 1048576 bytes");
@@ -101,8 +119,15 @@ async function run(pool: Monty, code: string, ctx: ToolContext) {
     if (rest != null && !(images.length && Array.isArray(rest) && !rest.length)) text += typeof rest === "string" ? rest : JSON.stringify(rest, null, 2);
     return { content: [{ type: "text", text: bounded(text || "(no output)") }, ...images.map(({ type, mimeType, data }) => ({ type, mimeType, data }))], value: { calls } };
   } catch (err) {
-    const message = err instanceof MontyRuntimeError || err instanceof MontySyntaxError ? err.display("traceback") : (err as Error).message;
-    const text = over ? `RuntimeError: printed output exceeded ${CAP} bytes\n${bounded(printed).trimEnd()}`.trimEnd() : bounded(toText() + message);
+    ctx.cancelled.throwIfAborted();
+    const message = err instanceof MontyCrashedError
+      ? err.timedOut ? `TimeoutError: ${err.message}` : `The sandbox worker process died: ${err.message}`
+      : err instanceof MontyRuntimeError || err instanceof MontySyntaxError ? err.display("traceback") : (err as Error).message;
+    const terminal = err instanceof MontyCrashedError || err instanceof MontyRuntimeError && ["MemoryError", "TimeoutError"].includes(err.exception.typeName);
+    const combined = toText() + message;
+    const cut = bounded(combined);
+    const text = over && !terminal ? `RuntimeError: printed output exceeded ${CAP} bytes\n${bounded(printed).trimEnd()}`.trimEnd()
+      : terminal && cut !== combined ? bounded(message + "\n" + toText()) : cut;
     return { status: "failed" as const, content: [{ type: "text", text }] };
   }
 }
@@ -112,6 +137,8 @@ export function codemode() {
   return definePlugin({ name: "tools.codemode", tools: [tool({ name: "codemode", description,
     input: { type: "object", properties: { code: { type: "string", description: "Python source to run" } }, required: ["code"], additionalProperties: false },
     inProcessOnly: true, async run({ code }, ctx) {
+      // The native Node pool runs Python in subprocesses and retires each
+      // worker after one checkout, including after a terminal resource error.
       pool ??= Monty.create({ requestTimeout: 32, maxProcesses: 4, maxCheckoutsPerWorker: 1 });
       return run(await pool, code, ctx);
     } })], async stop() { if (pool) await (await pool).close(); } });

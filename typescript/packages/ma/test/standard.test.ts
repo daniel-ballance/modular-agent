@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
@@ -30,13 +31,14 @@ async function project(t: TestContext) {
   return { dir, home, config, work, script, log, env, put, run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env }) };
 }
 const scripted = (code: string) => [{ toolCalls: [{ name: "codemode", input: { code } }] }, { text: "done" }];
-async function sandbox(t: TestContext, code: string) {
+async function sandbox(t: TestContext, code: string, fixture: () => number | Promise<number> = () => 7) {
   const p = await project(t);
   const agent = await createAgent({ project: p.work, providers: [scriptedProvider(scripted(code))], settings: { modelTools: ["codemode"] },
     plugins: [standardFileTools({ spill: join(p.dir, "output") }), codemode()],
-    tools: [tool({ name: "fixture", description: "Fixture returns a number", input: { type: "object", properties: {}, additionalProperties: false }, run: () => 7 })] });
+    tools: [tool({ name: "fixture", description: "Fixture returns a number", input: { type: "object", properties: {}, additionalProperties: false }, run: fixture })] });
   t.after(() => agent.close());
-  return { p, result: async () => (await (await agent.session()).prompt("Run the code.")).toolResults()[0] };
+  const session = await agent.session();
+  return { p, session, result: async () => (await session.prompt("Run the code.")).toolResults()[0] };
 }
 
 test("codemode runs calls through the SDK, handles non-zero exit, and looks up tool schemas", async t => {
@@ -79,6 +81,92 @@ recurse()`);
   assert.equal(r.status, "failed");
   assert.match(r.text(), /no direct access to files, the network, the clock or the environment/);
   assert.match(r.text(), /RecursionError/);
+});
+
+test("codemode allows more than 32 MiB but ends a growing allocation with MemoryError", async t => {
+  const { session, result } = await sandbox(t, `x = []
+for i in range(200000):
+    x.append('y' * 10000)
+    if i == 6000:
+        print('allocated more than 32 MiB')
+print('finished allocating')`);
+  const r = await result();
+  assert.equal(r.status, "failed");
+  assert.match(r.text(), /^allocated more than 32 MiB\n/);
+  assert.match(r.text(), /MemoryError/);
+  assert.doesNotMatch(r.text(), /finished allocating/);
+  const next = await session.callTool("codemode", { code: "print('still here')\n6 * 7" });
+  assert.equal(next.status, "completed", next.text());
+  assert.equal(next.text(), "still here\n42");
+});
+
+// A nested call gives the test a barrier before the worker enters the loop.
+// Observe CPU time increasing after the barrier to test a live interpreter turn.
+async function spinningSandbox(t: TestContext) {
+  let markStarted!: () => void, release!: (value: number) => void;
+  const started = new Promise<void>(resolve => { markStarted = resolve; });
+  const released = new Promise<number>(resolve => { release = resolve; });
+  const { session, result } = await sandbox(t, "tools.fixture()\nwhile True: pass", () => {
+    markStarted();
+    return released;
+  });
+  const running = result();
+  let pid: number;
+  const ticks = async () => {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[11]); // utime
+  };
+  try {
+    await Promise.race([started, running.then(r => { throw new Error(r?.text() ?? "No tool result"); })]);
+    const { stdout } = await exec("ps", ["--ppid", String(process.pid), "-o", "pid=,comm="]);
+    const workers = stdout.trim().split("\n").map(line => line.trim().split(/\s+/)).filter(([, name]) => name === "monty");
+    assert.equal(workers.length, 1, stdout);
+    pid = Number(workers[0][0]);
+    const before = await ticks();
+    release(7);
+    while (await ticks() <= before) await delay(10, undefined, { signal: t.signal });
+  } finally {
+    release(7);
+  }
+  return { session, running, pid };
+}
+
+test("codemode reports when its worker dies and the next run works", { timeout: 10_000, skip: process.platform !== "linux" }, async t => {
+  const { session, running, pid } = await spinningSandbox(t);
+  process.kill(pid, "SIGKILL");
+  const r = await running;
+  assert.equal(r.status, "failed");
+  assert.match(r.text(), /sandbox worker process died/);
+  const next = await session.callTool("codemode", { code: "tools.fixture()" });
+  assert.equal(next.status, "completed", next.text());
+  assert.equal(next.text(), "7");
+});
+
+test("cancelling codemode ends an active turn and frees its worker", { timeout: 10_000, skip: process.platform !== "linux" }, async t => {
+  const { session, running, pid } = await spinningSandbox(t);
+  try {
+    await Promise.race([session.cancel(), delay(5_000, undefined, { ref: false, signal: t.signal }).then(() => {
+      assert.fail("Cancellation did not stop the active worker");
+    })]);
+    assert.equal((await running).status, "cancelled");
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    const next = await session.callTool("codemode", { code: "print('after cancellation')" });
+    assert.equal(next.status, "completed", next.text());
+    assert.equal(next.text(), "after cancellation\n");
+  } finally {
+    if (await readFile(`/proc/${pid}/stat`).catch(() => undefined)) process.kill(pid, "SIGKILL");
+  }
+});
+
+test("codemode ends a turn at the computation time limit", { timeout: 40_000 }, async t => {
+  const { session, result } = await sandbox(t, "print('started')\nwhile True: pass");
+  const r = await result();
+  assert.equal(r.status, "failed");
+  assert.match(r.text(), /^started\n/);
+  assert.match(r.text(), /TimeoutError/);
+  const next = await session.callTool("codemode", { code: "21 * 2" });
+  assert.equal(next.status, "completed", next.text());
+  assert.equal(next.text(), "42");
 });
 
 test("codemode dispatches no more than 500 nested calls", async t => {
