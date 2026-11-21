@@ -391,6 +391,8 @@ impl Endpoint for Served {
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: call["actorId"].as_str().unwrap_or_default().into(),
                     call_id: call["id"].as_str().unwrap_or_default().into(),
+                    turn_id: call["turnId"].as_str().map(str::to_owned),
+                    step_id: call["stepId"].as_str().map(str::to_owned),
                     backend: Backend::Remote {
                         peer,
                         parent: id.clone(),
@@ -495,6 +497,8 @@ impl Endpoint for Served {
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: p["actorId"].as_str().unwrap_or_default().into(),
                     call_id: String::new(),
+                    turn_id: None,
+                    step_id: p["stepId"].as_str().map(str::to_owned),
                     backend: Backend::Remote { peer, parent: id },
                     cancelled: cancel.clone(),
                     settled,

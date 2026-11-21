@@ -280,6 +280,8 @@ pub struct ToolContext {
     pub(crate) session_id: String,
     pub(crate) actor_id: String,
     pub(crate) call_id: String,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) step_id: Option<String>,
     pub(crate) project: std::path::PathBuf,
     pub(crate) cancelled: CancellationToken,
     pub(crate) settled: CancellationToken,
@@ -404,6 +406,15 @@ impl ToolContext {
     pub fn actor_id(&self) -> &str {
         &self.actor_id
     }
+    pub fn tool_call_id(&self) -> &str {
+        &self.call_id
+    }
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+    pub fn step_id(&self) -> Option<&str> {
+        self.step_id.as_deref()
+    }
     pub fn call_id(&self) -> &str {
         &self.call_id
     }
@@ -450,6 +461,15 @@ impl ToolContext {
             ),
         }
         Ok(())
+    }
+
+    /// Read a non-Provider named credential. This operation is in-process only.
+    pub async fn credential(&self, name: &str) -> Result<String> {
+        self.check()?;
+        let Backend::Local { api, .. } = &self.backend else {
+            return Err(crate::plugin::cannot_serve("named credentials"));
+        };
+        crate::context::named_credential(api, name)
     }
 
     /// The session's working environment, scoped to this call and project.

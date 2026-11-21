@@ -21,6 +21,7 @@ mod configuration;
 mod context;
 mod core;
 mod credentials;
+mod data;
 mod error;
 mod events;
 mod history;
@@ -47,8 +48,14 @@ pub use credentials::{
     Activation, CredentialStore, SecretJournal, SecretRequest, StagingReceipt,
     environment_credentials, file_credentials,
 };
+pub use data::{HistoryEntry, ToolCall, ToolDefinition, ToolHints, ToolSettlement, TurnOutput};
 pub use error::{Code, Error, Result};
-pub use events::{Event, EventData, Question, QuestionKind, QuestionReply};
+pub use events::{
+    ActorEvent, AudioData, ErasureEvent, Event, EventData, EventPayload, HistoryEvent, InputEvent,
+    Interruption, InterruptionReason, JobEndedData, JobStartedData, PluginEvent, PositionEvent,
+    Question, QuestionKind, QuestionReply, QuestionResponse, SessionEvent, SettingEvent, StepEvent,
+    ToolCallData, ToolInputData, ToolOutputData, TurnEndedData, TurnStartedData,
+};
 pub use history::{
     EntryPage, ErasedEntry, ErasureReport, History, HistoryFault, HistoryResult, HistoryServer,
     HistoryStore, LeaseGrant, PortableHistoryStore, ServeHistoryOptions, SessionInfo, SessionPage,

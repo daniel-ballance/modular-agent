@@ -129,6 +129,13 @@ impl CommandContext {
         }
     }
 
+    pub fn project(&self) -> &std::path::Path {
+        &self.work.project
+    }
+    pub fn step_id(&self) -> Option<&str> {
+        self.work.step_id()
+    }
+
     /// Ask an actor from an in-process-only command.
     pub async fn ask(&self, question: crate::Ask) -> Result<crate::Answer> {
         if !self.can_ask {
@@ -722,6 +729,19 @@ impl base::Plugin for InProcess {
                     Box::pin(async move {
                         let mut payload =
                             plugin_stdio::hook_payload(point, &scope, &original, &api)?;
+                        if point == "step.before" {
+                            let data = api.snapshot(&scope.session)?;
+                            payload["history"] = json!(
+                                data.entries
+                                    .iter()
+                                    .filter(|e| e.writer != "rust.derived")
+                                    .map(|e| base::wire::entry(e, &data))
+                                    .collect::<base::Result<Vec<_>>>()?
+                            );
+                            let usage: base::Usage =
+                                serde_json::from_value(original["usage"].clone())?;
+                            payload["usage"] = json!(crate::Usage::from(usage));
+                        }
                         if point == "turn.before" {
                             let data = api.snapshot(&scope.session)?;
                             payload["project"] = json!(data.project);
@@ -827,6 +847,8 @@ impl base::Plugin for InProcess {
                             actor_id: scope.actor.clone(),
                             project: api.snapshot(&scope.session)?.project,
                             call_id: String::new(),
+                            turn_id: None,
+                            step_id: scope.step.clone(),
                             cancelled: cancelled.clone(),
                             settled: done,
                             asks: Default::default(),
@@ -1019,6 +1041,8 @@ impl base::ToolSource for Source {
             session_id: scope.session.clone(),
             actor_id: scope.actor.clone(),
             call_id: call.id.clone(),
+            turn_id: scope.turn.clone(),
+            step_id: scope.step.clone(),
             backend: Backend::Local { api, scope },
             cancelled: cancel,
             settled: Default::default(),

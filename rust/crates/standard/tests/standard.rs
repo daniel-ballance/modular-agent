@@ -83,7 +83,7 @@ impl Rig {
         let seen = Arc::new(Mutex::new(vec![]));
         let probe = seen.clone();
         plugins.push(Plugin::new("probe").on_step_before(move |p| {
-            probe.lock().unwrap().push(p.request);
+            probe.lock().unwrap().push(p.request.0);
             async { Ok(None) }
         }));
         let mut b = standard::builder(&standard, project.path(), &Mcp::default(), plugins).unwrap();

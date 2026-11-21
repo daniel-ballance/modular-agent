@@ -96,6 +96,17 @@ impl HookContext {
     }
 }
 
+pub(crate) fn named_credential(api: &base::Api, name: &str) -> Result<String> {
+    if api.provider_credential(name) {
+        return Err(Error::new(
+            Code::InvalidRequest,
+            "a Provider owns this credential",
+        ));
+    }
+    let store = base::capability::<dyn base::CredentialStore>(api.as_ref(), "credentials")?;
+    Ok(store.get(name)?)
+}
+
 pub(crate) async fn history(
     backend: &Backend,
     session: &str,

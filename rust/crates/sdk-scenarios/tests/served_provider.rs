@@ -13,7 +13,7 @@ async fn serves_a_provider_over_stdio_and_streams_through_both_callbacks() -> Re
     let hooks = Plugin::new("provider-hooks")
         .on_provider_request(|mut p| async move {
             assert_eq!(p.provider, "scripted");
-            assert_eq!(p.model["id"], "script");
+            assert_eq!(p.model.id, "script");
             // Add a preceding assistant message so the Provider picks the second script item.
             p.request["messages"].as_array_mut().unwrap().push(json!({
                 "role":"assistant","content":[{"type":"text","text":"prior answer"}],"stop":"finished"

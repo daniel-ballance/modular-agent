@@ -27,10 +27,34 @@ pub struct EventData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     pub data: Value,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// A standard event's typed data and its unmodified wire envelope.
+#[derive(Clone, Debug)]
+pub struct EventPayload<T> {
+    pub data: T,
+    info: EventData,
+}
+impl<T> std::ops::Deref for EventPayload<T> {
+    type Target = EventData;
+    fn deref(&self) -> &Self::Target {
+        &self.info
+    }
+}
+fn typed<T: serde::de::DeserializeOwned>(
+    info: EventData,
+    event: impl FnOnce(EventPayload<T>) -> Event,
+) -> Event {
+    match serde_json::from_value(info.data.clone()) {
+        Ok(data) => event(EventPayload { data, info }),
+        Err(_) => Event::Custom(info),
+    }
 }
 
 macro_rules! event_types {
-    ($($variant:ident: $name:literal),* $(,)?) => {
+    ($($variant:ident: $name:literal => $ty:ty),* $(,)?) => {
         /// A standard event, or an extension retained in its original shape.
         #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
         #[serde(from = "EventData", into = "EventData")]
@@ -38,7 +62,7 @@ macro_rules! event_types {
         pub enum Event {
             Text { delta: String, info: EventData },
             Reasoning { delta: String, info: EventData },
-            $($variant(EventData),)*
+            $($variant(Box<EventPayload<$ty>>),)*
             Custom(EventData),
         }
 
@@ -47,7 +71,7 @@ macro_rules! event_types {
                 match info.event_type.as_str() {
                     "text" => Self::Text { delta: info.data["delta"].as_str().unwrap_or_default().into(), info },
                     "reasoning" => Self::Reasoning { delta: info.data["delta"].as_str().unwrap_or_default().into(), info },
-                    $($name => Self::$variant(info),)*
+                    $($name => typed(info, |payload| Self::$variant(Box::new(payload))),)*
                     _ => Self::Custom(info),
                 }
             }
@@ -56,7 +80,7 @@ macro_rules! event_types {
             fn from(event: Event) -> Self {
                 match event {
                     Event::Text { info, .. } | Event::Reasoning { info, .. } => info,
-                    $(Event::$variant(info) => info,)*
+                    $(Event::$variant(payload) => payload.info,)*
                     Event::Custom(info) => info,
                 }
             }
@@ -66,7 +90,7 @@ macro_rules! event_types {
             fn deref(&self) -> &Self::Target {
                 match self {
                     Event::Text { info, .. } | Event::Reasoning { info, .. } => info,
-                    $(Event::$variant(info) => info,)*
+                    $(Event::$variant(payload) => &payload.info,)*
                     Event::Custom(info) => info,
                 }
             }
@@ -74,18 +98,68 @@ macro_rules! event_types {
     };
 }
 
+macro_rules! event_data {
+    ($name:ident { $($field:ident: $ty:ty),* $(,)? }) => {
+        #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct $name {
+            $(pub $field: $ty,)*
+            #[serde(flatten)]
+            pub extra: serde_json::Map<String, Value>,
+        }
+    };
+}
+
+event_data!(SessionEvent { reopened: Option<bool> });
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InterruptionReason {
+    CommitFailed,
+    WriterLost,
+}
+event_data!(Interruption {
+    reason: InterruptionReason
+});
+event_data!(ActorEvent { actor_id: Option<String>, id: Option<String>, kind: Option<String>, changed_by: Option<String>, rights: Option<crate::Rights> });
+event_data!(InputEvent { input_id: Option<String>, input: Option<String>, timing: Option<crate::Timing>, content: Option<crate::Content> });
+event_data!(TurnStartedData { input_id: Option<String>, system: Option<String>, started_by: Option<Value> });
+event_data!(TurnEndedData { outcome: crate::Outcome, result: crate::TurnOutput, usage: Option<crate::Usage> });
+event_data!(StepEvent { usage: Option<crate::Usage>, response: Option<crate::AssistantMessage> });
+event_data!(ToolInputData { delta: String, tool_call_id: Option<String> });
+event_data!(AudioData { delta: Value });
+event_data!(ToolCallData {
+    call: crate::ToolCall
+});
+event_data!(ToolOutputData {
+    tool_call_id: String,
+    chunk: String
+});
+event_data!(QuestionResponse { request_id: Option<String>, request: Option<String>, actor_id: Option<String>, declined: Option<bool>, reason: Option<String> });
+event_data!(JobStartedData { id: String, owner: String, kind: String, detail: Value, key: Option<String> });
+event_data!(JobEndedData { job_id: String, outcome: Option<Value> });
+event_data!(HistoryEvent {
+    entry: crate::HistoryEntry
+});
+event_data!(PositionEvent { from: Option<String>, to: Option<String> });
+event_data!(ErasureEvent { entry_ids: Vec<String> });
+event_data!(SettingEvent { key: Option<String>, value: Option<Value> });
+event_data!(PluginEvent { plugin: Option<String>, name: Option<String> });
+
 event_types!(
-    SessionStarted: "sessionStarted", SessionEnded: "sessionEnded", SessionInterrupted: "sessionInterrupted",
-    ActorJoined: "actorJoined", ActorLeft: "actorLeft",
-    InputAccepted: "inputAccepted", InputWithdrawn: "inputWithdrawn", InputHandedBack: "inputHandedBack",
-    TurnStarted: "turnStarted", TurnEnded: "turnEnded", StepStarted: "stepStarted", StepEnded: "stepEnded",
-    ToolInput: "toolInput", Audio: "audio", ToolCall: "toolCall", ToolStarted: "toolStarted",
-    ToolOutput: "toolOutput", ToolResult: "toolResult", QuestionOpened: "questionOpened",
-    QuestionAnswered: "questionAnswered", QuestionClosed: "questionClosed",
-    QuestionNoLongerAnswerable: "questionNoLongerAnswerable", JobStarted: "jobStarted",
-    JobProgress: "jobProgress", JobEnded: "jobEnded", Entry: "entry", PositionMoved: "positionMoved",
-    EntriesErased: "entriesErased", SettingChanged: "settingChanged", PluginLoaded: "pluginLoaded",
-    PluginReplaced: "pluginReplaced", PluginUnloaded: "pluginUnloaded",
+    SessionStarted: "sessionStarted" => SessionEvent, SessionEnded: "sessionEnded" => SessionEvent,
+    SessionInterrupted: "sessionInterrupted" => Interruption,
+    ActorJoined: "actorJoined" => ActorEvent, ActorLeft: "actorLeft" => ActorEvent,
+    InputAccepted: "inputAccepted" => InputEvent, InputWithdrawn: "inputWithdrawn" => InputEvent,
+    InputHandedBack: "inputHandedBack" => InputEvent, TurnStarted: "turnStarted" => TurnStartedData,
+    TurnEnded: "turnEnded" => TurnEndedData, StepStarted: "stepStarted" => StepEvent, StepEnded: "stepEnded" => StepEvent,
+    ToolInput: "toolInput" => ToolInputData, Audio: "audio" => AudioData, ToolCall: "toolCall" => ToolCallData,
+    ToolStarted: "toolStarted" => ToolCallData, ToolOutput: "toolOutput" => ToolOutputData, ToolResult: "toolResult" => crate::ToolSettlement,
+    QuestionOpened: "questionOpened" => Question, QuestionAnswered: "questionAnswered" => QuestionResponse,
+    QuestionClosed: "questionClosed" => QuestionResponse, QuestionNoLongerAnswerable: "questionNoLongerAnswerable" => QuestionResponse,
+    JobStarted: "jobStarted" => JobStartedData, JobProgress: "jobProgress" => crate::Content, JobEnded: "jobEnded" => JobEndedData,
+    Entry: "entry" => HistoryEvent, PositionMoved: "positionMoved" => PositionEvent, EntriesErased: "entriesErased" => ErasureEvent,
+    SettingChanged: "settingChanged" => SettingEvent, PluginLoaded: "pluginLoaded" => PluginEvent,
+    PluginReplaced: "pluginReplaced" => PluginEvent, PluginUnloaded: "pluginUnloaded" => PluginEvent,
 );
 
 impl Event {
@@ -99,6 +173,7 @@ impl Event {
             tool_call_id: scope.call.clone(),
             job_id: scope.job.clone(),
             data,
+            extra: Default::default(),
         }
         .into()
     }
@@ -111,6 +186,13 @@ impl Event {
         let (kind, data) = match e.kind.as_str() {
             // Internal stream/turn markers; the final gated result ends the turn.
             "model.end" | "turn.end" => return None,
+            "turn.result" => {
+                let result: base::TurnResult = serde_json::from_value(e.content.clone()).ok()?;
+                let mut data = base::wire::turn_outcome(&result);
+                data["turnId"] = json!(e.scope.turn);
+                data["usage"] = json!(crate::Usage::from(result.usage));
+                ("turnEnded", data)
+            }
             "model.tool_input" | "model.audio" => {
                 let kind = if e.kind == "model.audio" {
                     "audio"
@@ -125,10 +207,12 @@ impl Event {
                     "call":base::wire::call(&serde_json::from_value(e.content.clone()).ok()?, &e.scope)
                 }),
             ),
-            "request.opened" => (
-                "questionOpened",
-                interface_acp::shared_question(serde_json::from_value(e.content.clone()).ok()?),
-            ),
+            "request.opened" => ("questionOpened", {
+                let mut q =
+                    interface_acp::shared_question(serde_json::from_value(e.content.clone()).ok()?);
+                q["sessionId"] = json!(e.scope.session);
+                q
+            }),
             "request.answered" => ("questionAnswered", e.content.clone()),
             "input.accepted" => ("inputAccepted", e.content.clone()),
             "input.withdrawn" => ("inputWithdrawn", e.content.clone()),
@@ -159,7 +243,8 @@ impl Event {
 }
 
 /// What kind of answer a question wants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum QuestionKind {
     Approval,
     Choice,
@@ -169,12 +254,14 @@ pub enum QuestionKind {
 }
 
 /// A question the agent needs an actor to answer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Question {
     pub id: String,
     pub session_id: String,
     pub kind: QuestionKind,
     pub question: String,
+    #[serde(default)]
     pub options: Vec<String>,
     pub details: Option<Value>,
     pub deadline: Option<u64>,

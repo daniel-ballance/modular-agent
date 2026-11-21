@@ -44,6 +44,19 @@ pub struct Usage {
     pub extra: serde_json::Map<String, Value>,
 }
 
+impl From<base::Usage> for Usage {
+    fn from(usage: base::Usage) -> Self {
+        Self {
+            input: usage.input_tokens,
+            output: usage.output_tokens,
+            cache_read: usage.cached_tokens,
+            cache_write: usage.cache_write_tokens,
+            cost: usage.cost,
+            extra: Default::default(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ProviderSupport {
     pub keeps_state: bool,
@@ -85,6 +98,25 @@ pub struct ModelRequest(pub Value);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AssistantMessage(pub Value);
+
+macro_rules! shared_json {
+    ($name:ident) => {
+        impl std::ops::Deref for $name {
+            type Target = Value;
+            fn deref(&self) -> &Value {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut Value {
+                &mut self.0
+            }
+        }
+    };
+}
+shared_json!(ModelRequest);
+shared_json!(AssistantMessage);
+
 impl AssistantMessage {
     pub fn text(text: impl Into<String>) -> Self {
         Self(
@@ -167,6 +199,48 @@ impl ProviderContext {
     }
     pub fn session_id(&self) -> &str {
         &self.session
+    }
+    pub fn actor_id(&self) -> Option<&str> {
+        match &self.backend {
+            ProviderBackend::Local { scope, .. } => Some(&scope.actor),
+            _ => None,
+        }
+    }
+    pub fn turn_id(&self) -> Option<&str> {
+        match &self.backend {
+            ProviderBackend::Local { scope, .. } => scope.turn.as_deref(),
+            _ => None,
+        }
+    }
+    pub fn step_id(&self) -> Option<&str> {
+        match &self.backend {
+            ProviderBackend::Local { scope, .. } => scope.step.as_deref(),
+            _ => None,
+        }
+    }
+    pub fn log(&self, message: impl std::fmt::Display) {
+        eprintln!("Provider {}: {message}", self.name);
+    }
+    pub async fn emit(&self, kind: &str, data: Value) -> Result<()> {
+        self.check()?;
+        let backend = match &self.backend {
+            ProviderBackend::Local { api, scope, .. } => crate::tool::Backend::Local {
+                api: api.clone(),
+                scope: scope.as_ref().clone(),
+            },
+            ProviderBackend::Remote { peer, parent } => crate::tool::Backend::Remote {
+                peer: peer.clone(),
+                parent: parent.clone(),
+            },
+        };
+        crate::context::emit(&backend, &self.session, kind, data).await
+    }
+    pub async fn named_credential(&self, name: &str) -> Result<String> {
+        self.check()?;
+        let ProviderBackend::Local { api, .. } = &self.backend else {
+            return Err(crate::plugin::cannot_serve("named credentials"));
+        };
+        crate::context::named_credential(api, name)
     }
     pub fn cancelled(&self) -> &CancellationToken {
         &self.cancelled

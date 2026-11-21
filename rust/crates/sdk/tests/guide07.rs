@@ -45,10 +45,8 @@ fn tide_preview(ended: mpsc::UnboundedSender<String>) -> Plugin {
             })
         })
         .on_tool_after(|call| async move {
-            if call.call["name"] == "preview_tide" && call.result["status"] == "completed" {
-                let text = call.result["content"][0]["text"]
-                    .as_str()
-                    .unwrap_or_default();
+            if call.call.name == "preview_tide" && call.result.status == ToolStatus::Completed {
+                let text = call.result.content[0]["text"].as_str().unwrap_or_default();
                 return Ok(ToolChange {
                     content: Some(json!([{"type": "text", "text": format!("Preview: {text}")}])),
                     ..Default::default()
@@ -60,7 +58,7 @@ fn tide_preview(ended: mpsc::UnboundedSender<String>) -> Plugin {
         .on_turn_end(move |turn| {
             let ended = ended.clone();
             async move {
-                let _ = ended.send(turn.outcome["kind"].as_str().unwrap_or_default().into());
+                let _ = ended.send(turn.outcome.kind().into());
                 Ok(())
             }
         })

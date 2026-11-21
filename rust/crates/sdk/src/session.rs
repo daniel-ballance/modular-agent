@@ -225,7 +225,7 @@ pub struct PromptResult {
     pub value: Option<Value>,
     pub turn_id: Option<String>,
     pub open_tool_calls: Vec<String>,
-    pub usage: Option<Value>,
+    pub usage: Option<crate::Usage>,
     tool_results: Vec<ToolResult>,
 }
 
@@ -1273,7 +1273,7 @@ fn from_turn(
         value: result.value.clone(),
         turn_id: turn,
         open_tool_calls: result.open_calls.iter().map(|c| c.id.clone()).collect(),
-        usage: Some(base::wire::turn_outcome(result)["usage"].clone()),
+        usage: Some(result.usage.clone().into()),
         tool_results,
     }
 }
