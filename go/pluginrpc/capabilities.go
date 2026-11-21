@@ -11,7 +11,12 @@ import (
 	"time"
 )
 
-func runtimePlatform() string { return runtime.GOOS }
+func runtimePlatform() string {
+	if runtime.GOOS == "windows" {
+		return "win32"
+	}
+	return runtime.GOOS
+}
 
 type remoteProvider struct {
 	remote    *remote

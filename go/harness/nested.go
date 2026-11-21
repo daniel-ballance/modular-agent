@@ -192,7 +192,7 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 		if err := p.CheckWriter(); err != nil {
 			return api.ToolResult{}, err
 		}
-		p.Emit(ctx, api.Event{Kind: "tool.started", Step: call.Step, Call: call.ID})
+		p.Emit(ctx, api.Event{Kind: "tool.started", Step: call.Step, Call: call.ID, Data: api.JSON(final)})
 		if ctx.Err() != nil || p.CheckWriter() != nil || !p.canRunTools(call.Actor) {
 			fail("not_started", "Nested dispatch is no longer authorized.")
 			break

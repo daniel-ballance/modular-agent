@@ -96,6 +96,35 @@ type PositionData struct {
 type InputData struct {
 	InputID string `json:"inputId"`
 }
+type InputHandedBackData struct {
+	InputIDs []string `json:"inputIds"`
+}
+type TurnStartedData struct {
+	TurnID string `json:"turnId"`
+}
+type StepStartedData struct {
+	StepID string `json:"stepId"`
+}
+type StepEndedData struct {
+	StepID string `json:"stepId"`
+	Usage  Usage  `json:"usage"`
+}
+type SettingData struct {
+	Key   string `json:"key"`
+	Value any    `json:"value"`
+}
+type QuestionAnsweredData struct {
+	QuestionID string `json:"questionId"`
+	Answer     Answer `json:"answer"`
+}
+type QuestionClosedData struct {
+	QuestionID string `json:"questionId"`
+	Reason     string `json:"reason,omitempty"`
+}
+type PluginData struct {
+	Name     string   `json:"name"`
+	Replaces []string `json:"replaces,omitempty"`
+}
 type SessionData struct {
 	SessionID string `json:"sessionId"`
 	Reopened  bool   `json:"reopened,omitempty"`
@@ -117,6 +146,7 @@ var eventNames = map[string]string{
 	"question.open": "questionOpened", "question.answered": "questionAnswered", "question.closed": "questionClosed",
 	"session.join": "actorJoined", "session.leave": "actorLeft", "job.ended": "jobEnded", "job.started": "jobStarted",
 	"session.ready": "sessionStarted", "session.end": "sessionEnded", "position.moved": "positionMoved", "entries.erased": "entriesErased", "setting.changed": "settingChanged", "input.accepted": "inputAccepted", "input.withdrawn": "inputWithdrawn", "question.unanswerable": "questionNoLongerAnswerable",
+	"plugin.loaded": "pluginLoaded", "plugin.replaced": "pluginReplaced", "plugin.unloaded": "pluginUnloaded",
 	"input.returned": "inputHandedBack", "history.added": "entry", "job.start": "jobStarted", "job.end": "jobEnded", "job.progress": "jobProgress",
 }
 
@@ -145,13 +175,33 @@ func sdkEvent(e api.Event) Event {
 			open = append(open, c.ID)
 		}
 		return EndEvent{EventHeader: h, Outcome: *outcome(out), Result: TurnResult{Text: out.Result.Text(), Value: out.Value, OpenToolCalls: open}}
+	case "turn.start":
+		data = api.JSON(TurnStartedData{TurnID: e.Turn})
+	case "step.start":
+		data = api.JSON(StepStartedData{StepID: e.Step})
+	case "step.end":
+		u := api.Decode[api.Usage](data)
+		data = api.JSON(StepEndedData{StepID: e.Step, Usage: Usage{Input: u.Input, Output: u.Output, CacheRead: u.Cached, CacheWrite: u.CacheWrite, Cost: u.Cost}})
+	case "question.open":
+		data = api.JSON(sdkQuestion(api.Decode[api.Question](data)))
+	case "question.answered":
+		a := api.Decode[api.Answer](data)
+		data = api.JSON(QuestionAnsweredData{QuestionID: a.Request, Answer: Answer{Value: a.Value, Declined: a.Declined, Reason: a.Reason, Stored: a.Stored}})
+	case "input.returned":
+		var ids []string
+		if json.Unmarshal(data, &ids) != nil {
+			for _, in := range api.Decode[[]api.Input](data) {
+				ids = append(ids, in.ID)
+			}
+		}
+		data = api.JSON(InputHandedBackData{InputIDs: ids})
 	case "history.added":
 		data = api.JSON(map[string]any{"entry": portable.Entry(api.Decode[api.Entry](e.Data))})
 	case "tool.requested", "tool.started":
 		data = api.JSON(map[string]any{"call": portable.Call(api.Decode[api.Call](e.Data))})
 	case "tool.end":
 		result := api.Decode[api.ToolResult](e.Data)
-		data = api.JSON(map[string]any{"toolCallId": result.Call, "status": portable.StatusOut(result.Status), "content": portable.Content(result.Content)})
+		data = api.JSON(map[string]any{"callId": result.Call, "toolCallId": result.Call, "status": portable.StatusOut(result.Status), "content": portable.Content(result.Content)})
 	case "tool.progress":
 		var content api.Content
 		if json.Unmarshal(e.Data, &content) != nil {
@@ -192,6 +242,24 @@ func sdkEvent(e api.Event) Event {
 		return typedEvent[InputReceipt](h, data)
 	case "inputWithdrawn":
 		return typedEvent[InputData](h, data)
+	case "inputHandedBack":
+		return typedEvent[InputHandedBackData](h, data)
+	case "turnStarted":
+		return typedEvent[TurnStartedData](h, data)
+	case "stepStarted":
+		return typedEvent[StepStartedData](h, data)
+	case "stepEnded":
+		return typedEvent[StepEndedData](h, data)
+	case "questionOpened":
+		return typedEvent[Question](h, data)
+	case "questionAnswered":
+		return typedEvent[QuestionAnsweredData](h, data)
+	case "questionClosed", "questionNoLongerAnswerable":
+		return typedEvent[QuestionClosedData](h, data)
+	case "settingChanged":
+		return typedEvent[SettingData](h, data)
+	case "pluginLoaded", "pluginReplaced", "pluginUnloaded":
+		return typedEvent[PluginData](h, data)
 	}
 	return DataEvent{EventHeader: h, Data: data}
 }

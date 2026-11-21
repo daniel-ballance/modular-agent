@@ -143,6 +143,16 @@ func (s *server) addProjectMCP(ctx context.Context, id string) error {
 	if s.resources.MCP == nil {
 		return nil
 	}
+	// Use the selected project composition, not the listener's configuration.
+	// Legacy callers without a trust source supply only already-trusted MCP.
+	if c, err := s.a.Get("configuration"); err == nil {
+		if trust, ok := c.(interface{ Trusted(string) (bool, error) }); ok {
+			allowed, err := trust.Trusted(s.project)
+			if err != nil || !allowed {
+				return err
+			}
+		}
+	}
 	specs, err := s.resources.MCP(s.project)
 	if err != nil {
 		return err

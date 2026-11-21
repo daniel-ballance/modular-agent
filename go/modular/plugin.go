@@ -44,12 +44,12 @@ type hookRegistration struct {
 	handle func(context.Context, pluginrpc.Object) (any, error)
 }
 type CommandContext struct {
-	SessionID, ActorID, StepID string
-	requestModel               func(context.Context, ModelRequest) (AssistantMessage, error)
-	work                       *ToolContext
-	Environment                ToolEnvironment
-	Jobs                       JobCalls
-	active                     *atomic.Bool
+	SessionID, ActorID, StepID, Project string
+	requestModel                        func(context.Context, ModelRequest) (AssistantMessage, error)
+	work                                *ToolContext
+	Environment                         ToolEnvironment
+	Jobs                                JobCalls
+	active                              *atomic.Bool
 }
 type Command struct {
 	Name, Description        string
@@ -186,8 +186,12 @@ func (r *Registrar) OnToolBefore(fn func(context.Context, ToolBefore) (Gate, err
 			return pluginrpc.Object{"refuse": g.Refuse}, nil
 		}
 		if g.Input != nil {
-			in.Call.Input = g.Input
-			return pluginrpc.Object{"change": pluginrpc.Object{"call": in.Call}}, nil
+			var call pluginrpc.Object
+			if err := decodeInto(p["call"], &call); err != nil {
+				return nil, err
+			}
+			call["input"] = g.Input
+			return pluginrpc.Object{"change": pluginrpc.Object{"call": call}}, nil
 		}
 		return nil, nil
 	}}, opts)
@@ -302,9 +306,10 @@ func (r *Registrar) OnStepAfter(fn func(context.Context, StepAfter) (StepDecisio
 }
 
 type TurnEnd struct {
-	SessionID string  `json:"sessionId"`
-	TurnID    string  `json:"turnId"`
-	Outcome   Outcome `json:"outcome"`
+	SessionID string     `json:"sessionId"`
+	TurnID    string     `json:"turnId"`
+	Outcome   Outcome    `json:"outcome"`
+	Result    TurnResult `json:"result"`
 }
 
 func (r *Registrar) OnTurnEnd(fn func(context.Context, TurnEnd) error, opts ...HookOption) error {
@@ -435,7 +440,7 @@ func loadPlugin(h *harness.Harness, p Plugin, defaults *api.Settings, durability
 			}
 		}
 		if r.environment != nil {
-			if err := a.Provide("working-environment", r.environment); err != nil {
+			if err := setupEnvironment(a, r.environment); err != nil {
 				return err
 			}
 		}
@@ -474,7 +479,16 @@ func loadPlugin(h *harness.Harness, p Plugin, defaults *api.Settings, durability
 		}
 		for _, hook := range r.hooks {
 			run := func(ctx context.Context, payload pluginrpc.Object) (any, error) {
-				return withHookContext(ctx, a, nil, p.Name, payload, hook.handle)
+				answer, err := withHookContext(ctx, a, nil, p.Name, payload, hook.handle)
+				if err != nil {
+					return nil, fmt.Errorf("%s at %s: %w", p.Name, hook.point, err)
+				}
+				if hook.point == "turn.before" || hook.point == "session.end" {
+					if err := pluginrpc.ValidateHookAnswer(hook.point, payload, answer, true); err != nil {
+						return nil, fmt.Errorf("%s: %w", p.Name, err)
+					}
+				}
+				return answer, nil
 			}
 			order := string(hook.order)
 			if hook.order == Normal {

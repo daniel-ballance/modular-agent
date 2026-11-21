@@ -11,6 +11,28 @@ import (
 // commit of the complete ordered record and must keep its opaque entries.
 type HistoryBackend = api.Store
 type HistoryLease = api.Lease
+
+// ServiceHistoryLease is the lease required to serve a custom backend.
+// SaveErasure atomically installs the exact tombstoned snapshot the adapter
+// supplies. Load and List must return committed snapshots including Wire.
+type ServiceHistoryLease interface {
+	HistoryLease
+	SaveErasure(SessionRecord) error
+}
+
+// ServiceHistoryBackend declares that every acquired lease can commit exact
+// tombstones. Persistent backends must durably commit before acknowledging.
+type ServiceHistoryBackend interface {
+	HistoryBackend
+	AcquireService(string) (ServiceHistoryLease, error)
+}
+
+type serviceHistoryBackend struct{ ServiceHistoryBackend }
+
+func (b serviceHistoryBackend) Acquire(id string) (HistoryLease, error) {
+	return b.AcquireService(id)
+}
+
 type SessionRecord = api.Session
 type HistoryRecord = api.Entry
 
@@ -20,7 +42,11 @@ func NewHistoryStore(backend HistoryBackend, persistent, erasure bool) HistorySt
 	if backend == nil {
 		return HistoryStore{}
 	}
-	return HistoryStore{make: func() (api.Store, error) { return backend, nil }, persistent: persistent, erasure: erasure}
+	store := HistoryStore{make: func() (api.Store, error) { return backend, nil }, persistent: persistent, erasure: erasure}
+	if capable, ok := backend.(ServiceHistoryBackend); ok {
+		store.serviceBackend = serviceHistoryBackend{capable}
+	}
+	return store
 }
 
 // Configuration provides operator-controlled settings and project trust.

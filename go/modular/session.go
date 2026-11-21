@@ -457,26 +457,34 @@ func sessionSettings(b api.Settings) Settings {
 	return out
 }
 func (s *Session) SetSetting(ctx context.Context, key string, value any) error {
+	actual, err := s.setSetting(ctx, key, value)
+	if err == nil {
+		s.emitOperation(ctx, "setting.changed", SettingData{Key: key, Value: actual})
+	}
+	return err
+}
+
+func (s *Session) setSetting(ctx context.Context, key string, value any) (_ any, err error) {
 	s.agent.settingsMu.Lock()
 	defer s.agent.settingsMu.Unlock()
 	ctx = s.ctx(ctx)
 	if err := ctx.Err(); err != nil {
-		return appError(err, CancelledCode)
+		return nil, appError(err, CancelledCode)
 	}
 	snap, err := s.agent.a.Snapshot(s.id)
 	if err != nil {
-		return appError(err, NotOpen)
+		return nil, appError(err, NotOpen)
 	}
 	if err := s.require(ctx, "settings"); err != nil {
-		return err
+		return nil, err
 	}
 	if err = applySetting(&snap.Settings, key, value); err != nil {
-		return err
+		return nil, err
 	}
 	if key == "model" && !s.agent.offersModel(snap.Settings.Model) {
-		return &Error{Code: InvalidRequest, Message: "model is not offered"}
+		return nil, &Error{Code: InvalidRequest, Message: "model is not offered"}
 	}
-	return appError(s.agent.a.SetSettings(ctx, s.id, snap.Settings), Busy)
+	return sessionSettings(snap.Settings)[key], appError(s.agent.a.SetSettings(ctx, s.id, snap.Settings), Busy)
 }
 func (s *Session) Fork(ctx context.Context, entryID ...string) (*Session, error) {
 	if err := ctx.Err(); err != nil {

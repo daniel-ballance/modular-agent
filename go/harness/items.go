@@ -166,6 +166,7 @@ func (h *Harness) loadItems(p api.Plugin, replaces []string, external bool) erro
 			h.API().Emit(context.Background(), api.Event{Kind: "plugin.problem", Data: api.JSON(map[string]string{"where": "working-environment", "message": err.Error()})})
 		}
 	}
+	h.emitPluginChange(p.Name, replaces)
 	return nil
 }
 

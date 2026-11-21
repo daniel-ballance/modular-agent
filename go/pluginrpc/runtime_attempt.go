@@ -203,6 +203,9 @@ func (w *runtimeWork) model(ctx context.Context, id any, p *Peer, step string, r
 	}
 	res, err := t.Access.Generate(ctx, requestIn(req), func(part api.Part) {
 		t.IO.Emit(ctx, api.Event{Kind: "model.delta", Step: step, Data: api.JSON(part)})
+		if emit, _ := ctx.Value(modelEventKey{}).(func(api.Part)); p == nil && emit != nil {
+			emit(part)
+		}
 		if p != nil && (part.Type == "text" || part.Type == "reasoning" || part.Type == "toolInput") {
 			_ = p.Send("host/runtime/modelEvent", object{"parentRequestId": id, "event": object{"type": part.Type, "delta": part.Text}})
 		}

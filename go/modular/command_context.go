@@ -16,14 +16,24 @@ func runSDKCommand(ctx context.Context, a api.API, server *pluginrpc.Server, plu
 	ctx, cancel := context.WithCancel(ctx)
 	active.Store(true)
 	defer func() { active.Store(false); cancel() }()
-	step := api.Executing(ctx).Step
+	execution := api.Executing(ctx)
+	execution.Session = id
+	ctx = api.WithExecution(ctx, execution)
+	step := execution.Step
 	work := &ToolContext{SessionID: id, ActorID: actor, ctx: ctx, host: a, server: server, plugin: plugin, only: command.InProcessOnly}
 	defer work.settled.Store(true)
 	cx := &CommandContext{SessionID: id, ActorID: actor, StepID: step, active: &active, work: work, Jobs: JobCalls{work: work, jobs: owner}}
 	cx.Environment.tc = work
 	if server != nil {
 		cx.Environment.port = server.HostEnvironment()
-		cx.Environment.project = server.Project()
+		var session struct{ Project string }
+		if err := server.Callback(ctx, "host/session", pluginrpc.Object{"sessionId": id}, &session); err != nil {
+			return "", appError(err, InvalidRequest)
+		}
+		if session.Project == "" {
+			return "", &Error{Code: InvalidRequest, Message: "host/session returned no project"}
+		}
+		cx.Environment.project = session.Project
 	} else {
 		if snap, err := a.Snapshot(id); err == nil {
 			cx.Environment.project = snap.Project
@@ -32,6 +42,7 @@ func runSDKCommand(ctx context.Context, a api.API, server *pluginrpc.Server, plu
 			cx.Environment.port = env.(api.WorkingEnvironment)
 		}
 	}
+	cx.Project = cx.Environment.Project()
 	if command.UsesModel && server == nil {
 		cx.requestModel = func(other context.Context, req ModelRequest) (AssistantMessage, error) {
 			ctx, cancel := context.WithCancel(ctx)

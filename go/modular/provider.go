@@ -43,6 +43,7 @@ type ModelRequest struct {
 	Messages     []Message        `json:"messages"`
 	Tools        []ToolDefinition `json:"tools"`
 	Settings     Settings         `json:"settings"`
+	runtimeWire  json.RawMessage
 }
 type Message struct {
 	Role         string          `json:"role"`
@@ -60,6 +61,7 @@ type AssistantMessage struct {
 	Usage        Usage           `json:"usage"`
 	Error        *ModelError     `json:"error,omitempty"`
 	ProviderData json.RawMessage `json:"providerData,omitempty"`
+	runtimeWire  json.RawMessage
 }
 type ProviderContext struct {
 	piece      func(Part)

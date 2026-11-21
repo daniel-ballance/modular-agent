@@ -124,7 +124,15 @@ func (s *Session) Release(ctx context.Context, id string, timing Timing, decline
 		ReleaseInput(context.Context, string, string, string, bool) (api.Receipt, error)
 	})
 	r, err := a.ReleaseInput(s.ctx(ctx), s.id, id, string(timing), declined)
-	return InputReceipt{InputID: r.ID, Disposition: r.When}, appError(err, Conflict)
+	receipt := InputReceipt{InputID: r.ID, Disposition: r.When}
+	if err == nil {
+		if declined {
+			s.emitOperation(ctx, "input.returned", []string{id})
+		} else {
+			s.emitOperation(ctx, "input.accepted", receipt)
+		}
+	}
+	return receipt, appError(err, Conflict)
 }
 
 // Withdraw removes a pending proposal without running it.

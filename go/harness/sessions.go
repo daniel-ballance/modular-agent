@@ -175,6 +175,7 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		return "", err
 	}
 	_, _ = c.h.API().Invoke(ctx, "session.ready", clone(s.data))
+	c.Emit(ctx, api.Event{Kind: "session.ready", Session: id, Data: api.JSON(map[string]any{"sessionId": id})})
 	return id, nil
 }
 func (c *client) registerNew(s *session, commit bool) error {
@@ -305,6 +306,9 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	}
 	s.mu.Unlock()
 	_, err = c.h.API().Invoke(ctx, "session.ready", snap)
+	if err == nil {
+		c.Emit(ctx, api.Event{Kind: "session.ready", Session: id, Data: api.JSON(map[string]any{"sessionId": id, "reopened": true})})
+	}
 	return err
 }
 
@@ -1397,15 +1401,19 @@ func (c *client) stopSessionAs(id string, closing bool, who string, via ...strin
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.lease != nil {
 		if err = s.lease.Close(); err != nil {
+			s.mu.Unlock()
 			return err
 		}
 	}
+	s.mu.Unlock()
 	c.h.mu.Lock()
 	delete(c.h.sessions, id)
 	c.h.mu.Unlock()
+	if closing {
+		c.Emit(context.Background(), api.Event{Kind: "session.end", Session: id, Data: api.JSON(map[string]any{"sessionId": id})})
+	}
 	return nil
 }
 func (c *client) Emit(ctx context.Context, e api.Event) {
@@ -1491,6 +1499,17 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 			return nil
 		}
 		return check, nil
+	}
+	if name == "runtime.result" {
+		check := v.(api.ResultCheck)
+		check.Shape = p.input.ResultSchema
+		if len(check.Shape) != 0 && len(check.Value) == 0 {
+			text := json.RawMessage(check.Result.Text())
+			if json.Valid(text) {
+				check.Value = text
+			}
+		}
+		v = check
 	}
 	changed, err := p.c.Invoke(ctx, name, v)
 	if name == "runtime.tool.after" {
@@ -1606,6 +1625,8 @@ func (p *turnPorts) CheckTenantBudget() error {
 	p.s.mu.Unlock()
 	return p.c.checkBudget(name)
 }
+
+func (p *turnPorts) ResultShape() json.RawMessage { return p.input.ResultSchema }
 
 func (p *turnPorts) Snapshot() (api.Session, error) {
 	p.s.mu.Lock()

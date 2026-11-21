@@ -352,12 +352,15 @@ type Model struct {
 	SafeToRepeatRequests bool // explicit promise, including Providers with outside effects
 }
 type Request struct {
-	Wire      json.RawMessage
-	System    string
-	Messages  []Message
-	Tools     []Tool
-	Thinking  string
-	MaxOutput int
+	// ProviderTools is the host's separate in-process Provider-run allowance.
+	// It is never part of a binding ModelRequest.
+	ProviderTools []Tool
+	Wire          json.RawMessage
+	System        string
+	Messages      []Message
+	Tools         []Tool
+	Thinking      string
+	MaxOutput     int
 }
 type Message struct {
 	Wire    json.RawMessage
@@ -483,6 +486,7 @@ type AfterStep struct {
 	End      bool
 }
 type ResultCheck struct {
+	Shape    json.RawMessage
 	Value    json.RawMessage
 	Result   Content
 	Continue string

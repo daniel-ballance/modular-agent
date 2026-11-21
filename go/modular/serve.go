@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -124,14 +123,8 @@ func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 			server.Runtime = r.runtime
 		}
 		if r.environment != nil {
-			env := r.environment
-			c := "none"
-			if v, ok := env.(interface{ Containment() string }); ok {
-				c = v.Containment()
-			}
-			_, points := api.Points(env)
-			reg.Environment = &pluginrpc.EnvironmentRegistration{Containment: c, Platforms: []string{runtime.GOOS}, Points: points}
-			server.Environment = env
+			reg.Environment = environmentRegistration(r.environment)
+			server.Environment = r.environment
 		}
 		if len(r.tools) > 0 {
 			source := &toolSource{tools: r.tools, server: server, plugin: plugin.Name, jobs: owner}
@@ -270,5 +263,6 @@ func serveFault(err error) error {
 	e := appError(err, Internal).(*Error)
 	fault := &pluginrpc.RPCError{Message: e.Message}
 	fault.Data.Code = string(e.Code)
+	fault.Data.Limit, _ = e.Data["limit"].(string)
 	return fault
 }

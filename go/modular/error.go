@@ -64,7 +64,11 @@ func appError(err error, fallback Code) error {
 		}
 		return e
 	case errors.As(err, &rpc):
-		return &Error{Code: Code(rpc.Data.Code), Message: rpc.Message}
+		e := &Error{Code: Code(rpc.Data.Code), Message: rpc.Message}
+		if e.Code == TurnLimit && rpc.Data.Limit != "" {
+			e.Data = map[string]any{"limit": rpc.Data.Limit}
+		}
+		return e
 	}
 	return &Error{Code: fallback, Message: err.Error()}
 }
