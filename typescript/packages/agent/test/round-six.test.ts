@@ -136,6 +136,7 @@ test("ACP replies withheld by a blocking or failing gate return an error without
 test("rewind commits intent before touching files, reports open-world calls, and refuses another branch", async (t) => {
 	const { api, h, dirs } = await agent(t);
 	const s = await api.startSession();
+	await api.input(s, { actorId: "user", when: "propose", content: "Keep this session" });
 	const mark = api.session(s).position!;
 	const note = join(dirs.project, "note");
 	writeFileSync(note, "before");
@@ -170,6 +171,7 @@ test("a job records its starting rights and accepts its report before the waitin
 	} }]);
 	const s = await api.startSession();
 	await api.join(s, { id: "worker", kind: "plugin", authority: ["watch", "jobs", "input"] }, "user");
+	await api.input(s, { actorId: "user", when: "propose", content: "Keep this session" });
 	const job = api.startJob(s, { kind: "check", actorId: "worker" });
 	await job.ready;
 	assert.deepEqual((api.history(s).find((e) => e.kind === "jobStarted")!.data as { rights: string[] }).rights, ["watch", "input", "jobs"]);

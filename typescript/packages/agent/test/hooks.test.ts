@@ -85,6 +85,7 @@ test("a UI starts a tool call itself: the same checks apply, and it is recorded"
 	const h = await agent([], [tools]);
 	const api = h.api("t");
 	const s = await api.startSession();
+	await api.input(s, { actorId: "user", when: "propose", content: "Keep this session" });
 	const ok = await api.callTool(s, { name: "refresh", input: {}, startedBy: "ui", actorId: "user" });
 	assert.equal(ok.status, "completed");
 	assert.equal(textOf(ok.content), "refreshed");

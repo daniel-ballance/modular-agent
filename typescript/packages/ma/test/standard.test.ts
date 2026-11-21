@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { createInterface } from "node:readline";
@@ -10,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
-import { createAgent, tool } from "@modular-agent/core";
+import { createAgent, fileHistory, serveHistory, tool, type HistoryEntry } from "@modular-agent/core";
 import { scriptedProvider } from "@modular-agent/core/testing";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
 import { codemode } from "../src/codemode.js";
@@ -346,6 +347,68 @@ test("ACP attaches a client MCP server to its own project and honors project set
   assert.ok(requests[0].tools.includes("mcp_project__echo"));
   assert.ok(requests[2].system.includes(`<cwd>\n${untrusted}\n</cwd>`));
   assert.ok(!requests[2].tools.includes("mcp_project__echo") && !requests[2].tools.includes("mcp_host__echo"));
+});
+
+for (const remote of [false, true]) test(`ma ACP session/new is provisional with ${remote ? "HTTP" : "local file"} history`, { timeout: 10_000 }, async t => {
+  const p = await project(t);
+  const token = randomBytes(32).toString("hex");
+  const tokenFile = join(p.dir, "history-token");
+  await writeFile(tokenFile, token, { mode: 0o600 });
+  const service = remote ? await serveHistory(fileHistory(join(p.dir, "history")), { address: "127.0.0.1:0", tokenFile }) : undefined;
+  const env = { ...p.env, MODULAR_AGENT_CONFORMANCE: "1", TMPDIR: process.env.TMPDIR,
+    MODULAR_AGENT_TENANTS: JSON.stringify({ demo: { rights: ["watch", "input", "settings"] } }),
+    ...(service && { MODULAR_AGENT_HISTORY_URL: service.url, MODULAR_AGENT_HISTORY_TOKEN_FILE: tokenFile }) };
+  const child = spawn(process.execPath, [cli, "--acp"], { cwd: p.work, env, stdio: ["pipe", "pipe", "inherit"] });
+  const done = once(child, "exit");
+  const lines = createInterface({ input: child.stdout });
+  const replies = lines[Symbol.asyncIterator]();
+  let id = 0;
+  async function request(method: string, params: object) {
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }) + "\n");
+    for (;;) {
+      const line = await replies.next();
+      assert.ok(!line.done, `ACP disconnected during ${method}`);
+      const message = JSON.parse(line.value);
+      if (message.id !== id) continue;
+      assert.equal(message.error, undefined, JSON.stringify(message));
+      return message.result;
+    }
+  }
+  async function assertUnpublished(sessionId: string) {
+    const listed = await request("session/list", { cwd: p.work });
+    assert.deepEqual(listed.sessions, []);
+    if (service) {
+      const response = await fetch(`${service.url}/v1/sessions/${sessionId}`, { headers: { authorization: `Bearer ${token}` } });
+      assert.equal(response.status, 404, "a metadata-only record would return 200");
+      await response.arrayBuffer();
+    }
+  }
+  try {
+    await request("initialize", { protocolVersion: 1 });
+    const location = { cwd: p.work, mcpServers: [], _meta: { "modular-agent": { tenant: "demo" } } };
+    const unused = await request("session/new", location);
+    await assertUnpublished(unused.sessionId);
+    await request("session/close", { sessionId: unused.sessionId });
+    await assertUnpublished(unused.sessionId);
+
+    const { sessionId } = await request("session/new", location);
+    await assertUnpublished(sessionId);
+    const initial = (await request("_modular-agent/history", { sessionId })).entries as HistoryEntry[];
+    assert.equal(initial[0]?.kind, "tenant");
+    assert.equal((await request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Hello" }] })).stopReason, "end_turn");
+    await request("session/close", { sessionId });
+    const listed = await request("session/list", { cwd: p.work });
+    assert.deepEqual(listed.sessions.map((s: { sessionId: string }) => s.sessionId), [sessionId]);
+    await request("session/load", { sessionId, cwd: p.work, mcpServers: [] });
+    const kept = (await request("_modular-agent/history", { sessionId })).entries as HistoryEntry[];
+    assert.deepEqual(kept.slice(0, initial.length), initial);
+    assert.deepEqual(kept.slice(initial.length, initial.length + 3).map(e => e.kind), ["inputAccepted", "turnStart", "input"]);
+  } finally {
+    lines.close();
+    child.kill();
+    await done;
+    await service?.close();
+  }
 });
 
 test("ma composes only the public SDK and official SDK plugin entry points", async () => {

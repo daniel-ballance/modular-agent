@@ -209,6 +209,7 @@ test("plugin binding: refreshes before completing the parent, gates split output
 	const harness = await wireHarness(t);
 	const api = harness.api("test");
 	const sid = await api.startSession();
+	await api.input(sid, { actorId: "user", when: "propose", content: "Keep this session" });
 	const seen: unknown[] = [];
 	const stop = api.follow(sid, { recipient: "wire-test" }, (event) => { if (event.type === "model.output") seen.push(event.data.delta); });
 	t.after(stop);
@@ -228,6 +229,7 @@ test("plugin binding: the history cursor counts toward the exact 4 MiB result li
 	const harness = await wireHarness(t);
 	const api = harness.api("test");
 	const sid = await api.startSession();
+	await api.input(sid, { actorId: "user", when: "propose", content: "Keep this session" });
 	const empty = await api.append(sid, draft("foreign.pad", { id: "dummy", data: "" }));
 	const max = 4 * 1024 * 1024;
 	const overhead = Buffer.byteLength(JSON.stringify({ entries: [{ ...empty, id: "edge1", parentId: empty.id }], next: "edge1" }));

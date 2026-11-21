@@ -104,7 +104,7 @@ export class JsonlHistoryStore implements HistoryStore {
 		const pending = this.unsaved.get(id);
 		if (pending) {
 			pending.batches.push(batch);
-			if (batch.some((e) => !SETUP_KINDS.has(e.kind))) this.save(id);
+			if (pending.meta.forkedFrom || batch.some((e) => !SETUP_KINDS.has(e.kind))) this.save(id);
 			return;
 		}
 		this.write(id, batch);

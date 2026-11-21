@@ -123,6 +123,7 @@ test("permission grants and revocations cannot be erased", async (t) => {
 	const sid = await api.startSession();
 	await api.join(sid, { id: "viewer", kind: "user", authority: ["watch"] }, "user");
 	await api.leave(sid, "viewer");
+	await api.input(sid, { actorId: "user", when: "propose", content: "Keep this session" });
 	for (const entry of api.history(sid).filter((e) => ["actorJoined", "actorLeft"].includes(e.kind))) {
 		await assert.rejects(api.erase(sid, [entry.id], "user"), /authority/);
 	}
@@ -134,6 +135,7 @@ test("changing any part of a keyed question does not reuse its answer", async (t
 	const ui: Plugin = { name: "question-ui", setup(api) { api.provide("interface", { id: "question-ui", actorId: "user", onInputRequest: (r: InputRequest) => seen.push(r) }); } };
 	const { api } = await start(t, { plugins: [ui] });
 	const sid = await api.startSession();
+	await api.input(sid, { actorId: "user", when: "propose", content: "Keep this session" });
 	const base: InputRequestDraft = { key: "same", kind: "choice", question: "Which?", options: ["a", "b"], toolCallId: "first" };
 	let index = 0;
 	const ask = async (draft: InputRequestDraft) => {
@@ -186,6 +188,7 @@ test("closing a session stops its background work, not another session's", async
 	const { api, home } = await start(t);
 	const active = async (file: string) => {
 		const sid = await api.startSession();
+		await api.input(sid, { actorId: "user", when: "propose", content: "Keep this session" });
 		const result = await api.callTool(sid, { name: "bash", input: { command: `sleep 30 >/dev/null 2>&1 & echo $! > ${file}` }, actorId: "user", startedBy: "ui" });
 		assert.equal(result.status, "completed");
 		return { sid, pid: +readFileSync(join(home, file), "utf8") };

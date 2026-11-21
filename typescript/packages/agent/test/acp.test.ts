@@ -50,10 +50,11 @@ test("ACP: withheld history entries are omitted before the page reply gate", asy
 			}
 		});
 	} };
-	const { d, harness, ctx, connection } = await setup([], { plugins: [gate] });
+	const { d, harness, ctx, connection } = await setup([fauxAssistantMessage([fauxText("Ready")])], { plugins: [gate] });
 	t.after(async () => { connection.close(); await harness.stop(); });
 	await ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: d.project, mcpServers: [] });
+	await ctx.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "Start" }] });
 	const api = harness.api("test");
 	const after = api.history(sessionId).at(-1)!.id;
 	await api.append(sessionId, { kind: "hidden.entry", modelVisible: false, writer: "test" });
