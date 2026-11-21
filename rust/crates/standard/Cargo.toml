@@ -19,7 +19,6 @@ provider-responses = { path = "../provider-responses" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-transport-websocket = { path = "../transport-websocket" }
 tokio.workspace = true
 futures-util.workspace = true
 jiff = "=0.2.46"

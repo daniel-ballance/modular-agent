@@ -121,8 +121,7 @@ impl Policy {
             }
             if let Some(actors) = &mut policy.actors {
                 ensure!(!actors.is_empty(), "actors is empty");
-                let mut distinct = std::collections::BTreeSet::new();
-                for network in actors {
+                for network in actors.iter_mut() {
                     network.actor.validate()?;
                     validate_scope(
                         network.projects.as_mut(),
@@ -133,12 +132,11 @@ impl Policy {
                         .parent()
                         .unwrap_or(Path::new("."))
                         .join(&network.token_file);
-                    let token = transport_token(&network.token_file).await?;
-                    ensure!(
-                        distinct.insert(token),
-                        "token files contain duplicate credentials"
-                    );
                 }
+                modular_agent::validate_acp_token_files(
+                    actors.iter().map(|actor| actor.token_file.as_path()),
+                )
+                .await?;
             }
             Ok(policy)
         };
@@ -201,13 +199,6 @@ impl Policy {
         }
         Ok(bounds)
     }
-}
-
-async fn transport_token(path: &Path) -> Result<String> {
-    // Apply the same file validation as the SDK before opening a listener.
-    transport_websocket::read_token_file(path)
-        .await
-        .with_context(|| format!("invalid token file {}", path.display()))
 }
 
 #[derive(Clone, Serialize)]

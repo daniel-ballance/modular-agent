@@ -87,6 +87,28 @@ impl AcpActor {
     }
 }
 
+/// Check operator token files without exposing credentials or starting a listener.
+pub async fn validate_acp_token_files<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Result<()> {
+    let mut distinct = std::collections::BTreeSet::new();
+    for path in paths {
+        let token = transport_websocket::read_token_file(path)
+            .await
+            .map_err(|error| {
+                Error::new(
+                    Code::InvalidComposition,
+                    format!("invalid token file {}: {error:#}", path.display()),
+                )
+            })?;
+        if !distinct.insert(token) {
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "token files contain duplicate credentials",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_actor(actor: &crate::Actor) -> Result<()> {
     if actor.id.is_empty()
         || actor.id.starts_with("job:")

@@ -4778,7 +4778,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tools-code",
- "transport-websocket",
 ]
 
 [[package]]

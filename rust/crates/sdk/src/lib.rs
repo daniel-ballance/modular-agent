@@ -37,7 +37,7 @@ mod session;
 pub mod testing;
 mod tool;
 
-pub use acp::{AcpActor, AcpComposition, AcpOptions, AcpServiceOptions};
+pub use acp::{AcpActor, AcpComposition, AcpOptions, AcpServiceOptions, validate_acp_token_files};
 pub use agent::{
     Agent, AgentBuilder, Approval, Capacity, Durability, ProcessPlugin, ResourceLimits,
     ServicePlugin, SessionOptions,
