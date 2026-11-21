@@ -103,7 +103,7 @@ The other languages' builds are in [`typescript/packages/ma`](typescript/package
 
 ## Known gaps
 
-- **Linux only.** Command containment uses Linux namespaces, ptrace and cgroups. macOS and Windows are not supported yet.
+- **Command containment varies by OS.** Linux uses namespaces, ptrace and cgroups. macOS supports local commands and Git rewind points with process-group containment, not strong containment: processes that leave their group are not stopped. Windows is unsupported.
 - **`ma` names itself `pi` to OpenAI and xAI,** Pi's client identity, because it is the only one known to be accepted. If you build an agent from this code, change it in the one place each implementation keeps it ([client identity](docs/reference/standard-configuration.md#providers)).
 - **Few real requests.** The test suites use scripted models and local fakes. The ChatGPT, Grok and Claude subscription Providers have answered real requests through all four `ma` builds, each reading a file through `codemode`, and the `openai` and `anthropic` API-key Providers pass the [live checks](docs/sdk/testing.md#live-checks) in all four SDKs.
 - **`ma` turns off several actors, session limits and tenants.** The SDKs offer them as options.
@@ -145,7 +145,9 @@ The project has five layers, each made only from the layers below it; a gap foun
 | 2. SDK specification | What a developer sees, in each language | [`docs/sdk/`](docs/sdk/README.md); [shared scenarios](conformance/sdk/) |
 | 3. SDKs | One SDK in Rust, TypeScript, Go and Python | each language's directory |
 | 4. Reference implementations | `ma`, the same coding agent in each language | [`docs/reference/`](docs/reference/README.md); [reference checks](conformance/reference/) |
-| 5. Demonstrative implementations | Agents that show the ecosystem across languages and placements | none yet |
+| 5. Demonstrative implementations | Agents that combine SDKs and placements | [`demos/`](demos/) |
+
+The [project notes demo](demos/project-notes/README.md) runs one agent with parts from all four SDKs and reopens its session after a crash.
 
 Each language is a peer directory with its own toolchain: [`rust/`](rust/README.md), [`typescript/`](typescript/README.md), [`go/`](go/README.md) and [`python/`](python/README.md). Each also holds the clean-room build its SDK wraps. Background, such as the research and pressure tests that shaped the design, is in [`docs/research/`](docs/research/), [`docs/pressure-test/`](docs/pressure-test/), [`docs/build-notes.md`](docs/build-notes.md) and [`docs/one-pager.html`](docs/one-pager.html).
 

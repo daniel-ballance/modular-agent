@@ -1,0 +1,9 @@
+{
+  "name": "project-notes-environment",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "tsc" },
+  "dependencies": { "@modular-agent/core": "file:../../../typescript/packages/core" },
+  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^6.0.3" }
+}

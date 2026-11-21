@@ -32,8 +32,7 @@ from ma_harness.authority import CONNECTION_AUTHORITY, PERMISSIONS
 from ma_history import History
 from ma_history.http import HTTPHistory
 from ma_jobs import Jobs
-from ma_local import Local, ProcessGroupLocal
-from ma_local.containment import delegated_root
+from ma_local import local_for_platform
 from ma_fake.conformance import Echo, Nest
 from ma_commands import Commands
 from ma_mcp import MCP
@@ -1255,13 +1254,14 @@ def create_agent(
                 store = History(store_root)
             await h.load(store)
             local_root = Path(scratch.name) if durability == "ephemeral" else root
-            local = Local(local_root, point_store="git")
-            if not isinstance(environment, MemoryEnvironment) and local_process_groups:
-                try:
-                    delegated_root()
-                except Exception:
-                    local = ProcessGroupLocal(local_root, point_store="git")
-            await h.load(environment if isinstance(environment, MemoryEnvironment) else local)
+            local = None
+            if isinstance(environment, MemoryEnvironment):
+                await h.load(environment)
+            else:
+                local = local_for_platform(
+                    local_root, point_store="git", linux_process_groups=local_process_groups
+                )
+                await h.load(local)
             dispatcher = _SdkTools()
             dispatcher.conformance = conformance
             await h.load(dispatcher)

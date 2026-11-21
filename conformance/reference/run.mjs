@@ -272,7 +272,7 @@ const checks = [
         lateAnswersStartTurns: true, startsTurnsUnasked: "jobReports", queuedInputAfterRestart: "handedBack",
         queuedJobReportsAfterRestart: "run", settingsDuringTurn: "refused", erasureDuringTurn: "refused",
         movingWithUnfinishedWork: "refused", mixedActorInput: "refused", forking: true, erasure: true,
-        portableSessions: true, nestedToolCalls: true, rewinding: true, inputKeys: true, commandContainment: "strong", confinesFiles: false,
+        portableSessions: true, nestedToolCalls: true, rewinding: true, inputKeys: true, commandContainment: process.platform === "darwin" ? "processGroup" : "strong", confinesFiles: false,
         severalActors: false, sessionLimits: false, tenants: false, holdsOutput: false, outputBypassesAgent: false,
         cancellingTurnCancelsJobs: false, pluginsDuringSession: false, keepsStateAtProvider: false,
         runsToolsAtProvider: false, liveSessions: false,

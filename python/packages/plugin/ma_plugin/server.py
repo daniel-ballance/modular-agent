@@ -15,7 +15,7 @@ from ma_core import AgentError, content, identity, plain
 from ma_core.conformance import NEST
 from ma_durable import Durable
 from ma_runtime import Runtime
-from ma_local import Local
+from ma_local import local_for_platform, local_type
 from ma_tools import DEFINITIONS
 
 from ma_core.wire import tool_out
@@ -181,9 +181,10 @@ class Conformance(PluginServer):
             registration["replaces"] += ["tool:bash", "tool:read", "tool:nest"]
             methods.update({"tools/list": self.list_tools, "tools/call": self.call_tool})
         if "environment" in parts:
+            support = local_type().declarations
             registration["workingEnvironment"] = {
-                "containment": "strong",
-                "platforms": ["linux"],
+                "containment": support["containment"],
+                "platforms": support["platforms"],
                 "points": True,
             }
             registration["replaces"].append("working-environment")
@@ -219,7 +220,7 @@ class Conformance(PluginServer):
                     raise WireError("Service cannot see the host project path", "not_supported")
                 self.project = project.resolve()
                 self.scratch = TemporaryDirectory(prefix="ma-plugin-")
-            self.local = Local(self.scratch.name if self.scratch else params["home"])
+            self.local = local_for_platform(self.scratch.name if self.scratch else params["home"])
             await self.local.start(EnvironmentAPI())
 
     async def close(self):

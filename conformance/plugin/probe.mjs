@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Host-side fixtures for docs/bindings/plugin.md. The ACP kit loads these with --probe-checks.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, outcome, rpcError, serve } from "./peer.mjs";
@@ -21,6 +21,21 @@ const QUESTION = fixtureTool("probe-question", "Ask one fixture question.", { la
 const REFRESH = fixtureTool("probe-refresh", "Change the fixture tool list.", { fail: { type: "boolean" } });
 const currentTools = () => [PROBE, QUESTION, REFRESH, fixtureTool(refreshed ? "probe-added" : "probe-retired", "A tool from the current view.")];
 let failRefresh = false;
+async function untilFile(path, signal) {
+	if (signal.aborted) throw rpcError("cancelled");
+	let observer;
+	let onAbort;
+	try {
+		await new Promise((resolve, reject) => {
+			const check = () => { if (existsSync(path)) resolve(); };
+			onAbort = () => reject(rpcError("cancelled"));
+			signal.addEventListener("abort", onAbort, { once: true });
+			observer = watch(dirname(path), check);
+			observer.on("error", reject);
+			check();
+		});
+	} finally { observer?.close(); signal.removeEventListener("abort", onAbort); }
+}
 const points = new Map();
 let pointProject, pointDir;
 function registration() {
@@ -32,6 +47,10 @@ function registration() {
 		case "refuse-duplicate": return { ...base, name: "probe-probe" };
 		case "refuse-duplicate-replacement": return { ...base, replaces: ["tool:probe", "tool:probe"], toolSources: [{ id: "probe-tools", tools: [PROBE] }] };
 		case "refuse-collision": return { ...base, toolSources: [{ id: "probe-tools", tools: [PROBE] }] };
+		case "project-observer": return base;
+		case "capacity-provider": return { ...base, toolSources: [{ id: "probe-tools", tools: [EFFECT] }],
+			providers: [{ id: model.provider, models, supports: { keepsState: false, runsTools: false } }] };
+		case "delivery-barrier":
 		case "output-observer": return { ...base, hooks: [{ hook: "output", handlerId: 1, order: "last" }] };
 		case "runtime": return { ...base, replaces: ["runtime"], runtime: { id: "probe-runtime", supports: {} }, toolSources: [{ id: "probe-tools", tools: [EFFECT] }],
 			providers: [{ id: model.provider, models, supports: { keepsState: false, runsTools: false } }],
@@ -110,7 +129,7 @@ async function runtime(m, { ask }) {
 		const input = (await history()).find((e) => e.kind === "input" && e.turnId === turn.turnId);
 		const text = input?.message?.content?.find((p) => p.type === "text")?.text;
 		test = text?.match(/^tool:probe-effect \{"value":"(omitted|changed|exact|refusal)"\}$/)?.[1] ??
-			text?.match(/^fixture (unoffered|latched|post-intent|burner|extra-response-member)$/)?.[1];
+			text?.match(/^fixture (unoffered|latched|post-intent|burner|extra-response-member|oversize calls)$/)?.[1];
 		if (!test) throw rpcError("invalid_request", "unknown Runtime fixture input");
 		await callHost("hook", { hook: "turn.start", payload: {} });
 		const { id: stepId } = await callHost("newId");
@@ -138,6 +157,16 @@ async function runtime(m, { ask }) {
 		checks.hostKind = fake.error?.code === -32602 && codeOf(fake.error) === "invalid_request";
 		if (!["omitted", "changed", "exact", "unoffered", "refusal"].includes(test)) {
 			await callHost("hook", { hook: "step.after", payload: { stepId, response } });
+			if (test === "oversize calls") {
+				const next = await callHost("newId");
+				const denied = await outcome(callHost("prepareStep", { stepId: next.id, usage }));
+				const kept = (await history()).filter((e) => e.stepId === stepId && e.turnId === turn.turnId);
+				checks.capacity = response.stop === "failed" && !response.content.some((p) => p.type === "toolCall") &&
+					usage.input === 2 && usage.output === 1 && equal(kept.map((e) => e.kind), ["modelRequest", "response", "modular-agent.stepAfter"]) &&
+					equal(kept[1].message, response) && denied.error?.code === -32000 && codeOf(denied.error) === "turn_limit" &&
+					denied.error.data.limit === "capacity" && !(await history()).some((e) => e.stepId === next.id);
+				if (checks.capacity) terminal = { kind: "limit", limit: "capacity" };
+			}
 			if (test === "latched") {
 				const next = await callHost("newId");
 				const denied = await outcome(callHost("prepareStep", { stepId: next.id, usage }));
@@ -270,6 +299,7 @@ serve("probe", async (m, ctx) => {
 		case "plugin/initialize":
 			if (p.binding !== BINDING || p.data !== DATA) throw rpcError("not_supported");
 			config = p.config ?? {};
+			if (config.role === "project-observer") trace({ projectSetup: p.project });
 			if (config.role === "remote-points") {
 				pointProject = p.project;
 				pointDir = mkdtempSync(join(p.home, "kit-remote-points-"));
@@ -281,13 +311,21 @@ serve("probe", async (m, ctx) => {
 			return {};
 		case "hook/handle": {
 			if (config.role === "runtime" && p.handlerId === 2 && p.hook === "step.before") {
-				if (p.payload.model?.provider !== model.provider) return null;
+				if (p.payload.model?.provider !== model.provider || config.capacityCase) return null;
 				const request = p.payload.request;
 				return { value: { ...p.payload, request: { ...request, tools: request.tools.filter((t) => t.name !== EFFECT.name) } } };
 			}
 			if (config.role === "runtime" && p.handlerId === 3 && p.hook === "tool.before") {
 				trace({ gate: p.payload.call.id });
 				return p.payload.call.input?.value === "refusal" ? { refuse: "fixture gate refused" } : null;
+			}
+			if (config.role === "delivery-barrier" && p.handlerId === 1 && p.hook === "output") {
+				if (p.payload.recipient === config.recipient && p.payload.events.some((e) => e.type === "reply" &&
+					e.data.method === "_modular-agent/history" && e.data.result)) {
+					trace({ beforeDelivery: p.payload.sessionId });
+					await untilFile(config.release, ctx.signal);
+				}
+				return null;
 			}
 			if (config.role !== "output-observer" || p.handlerId !== 1 || p.hook !== "output") throw rpcError("unknown_handler");
 			trace(p.payload);
@@ -340,7 +378,7 @@ serve("probe", async (m, ctx) => {
 		case "provider/available":
 		case "provider/discard":
 		case "provider/request": {
-			if (config.role !== "runtime" || p.provider !== model.provider) throw rpcError("invalid_request");
+			if (!["runtime", "capacity-provider"].includes(config.role) || p.provider !== model.provider) throw rpcError("invalid_request");
 			if (m.method === "provider/models") return { models };
 			if (m.method === "provider/available") return { available: true };
 			if (m.method === "provider/discard") { if (p.erase) throw rpcError("not_supported"); return {}; }
@@ -350,8 +388,14 @@ serve("probe", async (m, ctx) => {
 			const last = request.messages.findLast((m) => m.role === "user");
 			const unoffered = last?.content?.some((p) => p.text === "fixture unoffered");
 			const extra = last?.content?.some((p) => p.text === "fixture extra-response-member");
+			const oversize = (config.role === "capacity-provider" || config.capacityCase) && last?.content?.some((p) => p.text === "fixture oversize calls") &&
+				!request.messages.slice(request.messages.lastIndexOf(last) + 1).some((m) => m.role === "toolResult");
 			const message = { role: "assistant", stop: unoffered ? "toolUse" : "finished", usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
 				content: unoffered ? [{ type: "toolCall", id: "probe-unoffered-call", name: EFFECT.name, arguments: { value: "unoffered" } }] : [{ type: "text", text: "fixture limit" }] };
+			if (oversize) {
+				message.stop = "toolUse";
+				message.content = [1, 2].map((n) => ({ type: "toolCall", id: `capacity-call-${n}`, name: EFFECT.name, arguments: { value: String(n) } }));
+			}
 			// The host asks a Provider: additive-field compatibility probe, not a normal sender fixture.
 			await hook("provider.response", { message, ...(extra ? { fixtureExtra: { data: "inert" } } : {}) });
 			if (extra) trace({ extraResponseAccepted: p.sessionId, message });
@@ -379,6 +423,10 @@ serve("probe", async (m, ctx) => {
 			return { tools: registration().toolSources[0].tools };
 		case "tools/call": {
 			if (p.toolSource !== "probe-tools" || !p.sessionId || !p.project) throw rpcError("invalid_request");
+			if (config.role === "capacity-provider" && p.call?.name === EFFECT.name) {
+				trace({ effect: p.call.id });
+				return { status: "completed", content: [{ type: "text", text: "unexpected capacity fixture effect" }] };
+			}
 			if (config.role === "runtime" && p.call?.name === EFFECT.name) {
 				// Authority: the live invocation has already consumed its allowance.
 				const r = await ctx.ask("host/env/exec", { sessionId: p.sessionId, parentRequestId: m.id, cwd: p.project, command: "printf fixture-env" });

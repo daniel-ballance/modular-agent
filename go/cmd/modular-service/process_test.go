@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -134,6 +135,9 @@ func stable(t *testing.T, path string) {
 	}
 }
 func TestSeparateServicesOwnershipSIGKILLAndRecovery(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux strong containment and the setsid utility")
+	}
 	root := t.TempDir()
 	bin := filepath.Join(root, "modular-service")
 	if out, err := exec.Command("go", "build", "-race", "-o", bin, ".").CombinedOutput(); err != nil {

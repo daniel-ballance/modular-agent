@@ -113,8 +113,11 @@ impl Conformance {
             replaces.extend(["tool:bash", "tool:read", "tool:nest"]);
         }
         if self.has("environment") {
-            r["workingEnvironment"] =
-                json!({"containment":"strong","platforms":["linux"],"points":true});
+            r["workingEnvironment"] = if cfg!(target_os = "macos") {
+                json!({"containment":"processGroup","platforms":["darwin"],"points":true})
+            } else {
+                json!({"containment":"strong","platforms":["linux"],"points":true})
+            };
             replaces.push("working-environment");
         }
         if self.has("hooks") {

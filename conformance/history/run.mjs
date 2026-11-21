@@ -8,13 +8,19 @@ import { request as httpsRequest } from "node:https";
 import { isDeepStrictEqual as equal } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const [url, tokenFile, restartFlag, ...restartCommand] = process.argv.slice(2);
-if (!url || !tokenFile || (restartFlag !== undefined && (!["--restart", "--restart-ttl"].includes(restartFlag) || restartCommand[0] !== "--" || !restartCommand[1]))) {
-	console.error("Usage: node run.mjs <service url> <token file> [--restart|--restart-ttl -- <service command> [args...]]");
+const [url, tokenFile, flag, ...extra] = process.argv.slice(2);
+const isolation = flag === "--isolation-checks";
+const [otherUrl, otherTokenFile] = isolation ? extra : [];
+const restartFlag = isolation ? undefined : flag;
+const restartCommand = extra;
+if (!url || !tokenFile || (isolation && extra.length !== 2) || (restartFlag !== undefined && (!["--restart", "--restart-ttl"].includes(restartFlag) || restartCommand[0] !== "--" || !restartCommand[1]))) {
+	console.error("Usage: node run.mjs <service url> <token file> [--restart|--restart-ttl -- <service command> [args...] | --isolation-checks <second URL> <second token file>]");
 	process.exit(2);
 }
 const base = new URL(url);
-if (base.username || base.password || base.search || base.hash || (base.protocol !== "https:" && !(base.protocol === "http:" && (base.hostname.startsWith("127.") || base.hostname === "[::1]")))) {
+const otherBase = isolation ? new URL(otherUrl) : undefined;
+const safe = (u) => !u.username && !u.password && !u.search && !u.hash && (u.protocol === "https:" || (u.protocol === "http:" && (u.hostname.startsWith("127.") || u.hostname === "[::1]")));
+if (!safe(base) || (isolation && (!safe(otherBase) || otherBase.origin === base.origin))) {
 	console.error("Use a disposable service. Plain HTTP is allowed only on loopback.");
 	process.exit(2);
 }
@@ -22,10 +28,10 @@ const token = readFileSync(tokenFile, "utf8").trim();
 const results = [];
 const check = (name, ok) => { results.push(!!ok); console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); };
 const run = async (name, fn) => {
-	try { await fn(); } catch (e) { check(`${name}: ${e.name}`, false); }
+	try { await fn(); } catch (e) { check(`${name}: ${e.message}`, false); }
 };
-const req = async (method, path, body, { auth = token, raw = false, media = "application/json" } = {}) => {
-	const res = await fetch(base.href.replace(/\/$/, "") + path, {
+const req = async (method, path, body, { auth = token, raw = false, media = "application/json", endpoint = base } = {}) => {
+	const res = await fetch(endpoint.href.replace(/\/$/, "") + path, {
 		method, redirect: "error", signal: AbortSignal.timeout(15000),
 		headers: { ...(auth ? { authorization: `Bearer ${auth}` } : {}), ...(body !== undefined ? { "content-type": media } : {}) },
 		body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
@@ -303,6 +309,35 @@ if (restartFlag) {
 	});
 	await stopService();
 } else console.log("SKIP  restart hold (use --restart with a disposable service command)");
+
+if (isolation) await run("deployment isolation", async () => {
+	const otherToken = readFileSync(otherTokenFile, "utf8").trim();
+	if (token === otherToken) throw Error("deployment isolation needs distinct credentials");
+	const second = (method, route, body) => req(method, route, body, { endpoint: otherBase, auth: otherToken });
+	const sid = id(), entry = { id: id(), parentId: null, payload: id() };
+	const isolatedProject = `/tmp/${id()}`;
+	const meta = { project: isolatedProject, created: Date.now() };
+	const route = path(sid);
+	if (!ok(await second("PUT", route, meta), {}) ||
+		!await second("POST", route + "/lease", { owner: id() }).then(async ({ body }) => {
+			const lease = body?.lease;
+			return lease && ok(await second("POST", route + "/entries", { lease, entries: [entry] }), { kept: 1 }) &&
+				ok(await second("DELETE", `${route}/lease/${encodeURIComponent(lease)}`), {});
+		})) throw Error("could not seed isolated namespace");
+	check("deployment isolation: credentials are refused by the other service",
+		err(await req("GET", "/v1", undefined, { auth: otherToken }), 401, "unauthorized") &&
+		err(await req("GET", "/v1", undefined, { endpoint: otherBase }), 401, "unauthorized"));
+	const filter = `/v1/sessions?project=${encodeURIComponent(isolatedProject)}`;
+	check("deployment isolation: project and foreign ID do not route reads to the other service",
+		ok(await req("GET", filter), { sessions: [] }) &&
+		ok(await second("GET", filter), { sessions: [{ id: sid, ...meta }] }) &&
+		err(await read(sid), 404, "unknown_session"));
+	check("deployment isolation: acquire, append and erase in the wrong store cannot affect the foreign session",
+		err(await acquire(sid, id()), 404, "unknown_session") &&
+		err(await append(sid, id(), [{ id: id(), parentId: null }]), 404, "unknown_session") &&
+		err(await erase(sid, undefined, [entry.id]), 404, "unknown_session") &&
+		ok(await second("GET", route), { session: { id: sid, ...meta }, entries: [entry] }));
+});
 
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} checks passed`);
