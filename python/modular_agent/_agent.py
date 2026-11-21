@@ -852,6 +852,10 @@ class Agent:
             for row in catalog
         ]
 
+    def reservation_limits(self) -> dict[str, dict[str, int]]:
+        """Return the operator's limits, never live use or another session's state."""
+        return cast(dict[str, dict[str, int]], deepcopy(self._h.capacity.limits))
+
     def declaration(self) -> JsonObject:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")

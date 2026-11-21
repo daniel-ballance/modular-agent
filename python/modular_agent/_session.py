@@ -19,6 +19,7 @@ from ma_core.wire import (
 )
 
 from ._event_types import EntryEvent, Event, InputHandedBackEvent, SessionInterruptedEvent, _event
+from ._native import _error
 from ._types import (
     Actor,
     AgentError,
@@ -486,10 +487,21 @@ class Session:
 
         return stream, unsubscribe
 
+    async def _erasure_revision(self) -> int:
+        try:
+            return int(await self._agent._h.erasure_revision(self.id))
+        except Exception as exc:
+            raise _error(exc) from exc
+
+    async def _check_revision(self, revision: int) -> None:
+        if revision != await self._erasure_revision():
+            raise AgentError(ErrorCode.UNAVAILABLE, "Session view changed during erasure")
+
     async def events(self, from_entry: str | None = None) -> AsyncIterator[Event]:
         stream, unsubscribe = await self._subscribe()
         try:
             snapshot = (await self._state())["entries"]
+            revision = await self._erasure_revision()
             entry_ids = {e["id"] for e in snapshot}
             if from_entry is not None and from_entry not in entry_ids:
                 raise AgentError(ErrorCode.NOT_FOUND, "Unknown history cursor")
@@ -516,10 +528,12 @@ class Session:
                         raw.get("step"),
                         raw.get("call"),
                     )
+                    await self._check_revision(revision)
                     stream.delivered(event)
                     yield event
             while not self._root._closed:
                 event = await stream.next()
+                await self._check_revision(revision)
                 if (
                     isinstance(event, EntryEvent)
                     and (entry := event.data.fields["entry"])
@@ -559,6 +573,7 @@ class Session:
 
     async def history(self) -> list[JsonObject]:
         state = await self._state()
+        revision = await self._erasure_revision()
         result = []
         for entry in state["entries"]:
             visible = await self._agent._session(
@@ -566,6 +581,7 @@ class Session:
             )
             if visible is not None:
                 result.append(visible)
+        await self._check_revision(revision)
         return result
 
     async def wait_idle(self) -> None:
