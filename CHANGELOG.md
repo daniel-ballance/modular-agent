@@ -10,6 +10,7 @@ The four SDKs share one version, the revision of the [SDK specification](docs/sd
 - **Three more shared scenarios** (`question-answered-later`, `decline-is-not-text`, `actor-rights`): 14 scenarios, 280 runs, all passed.
 - **WebSocket transport** for the plugin and ACP bindings ([ADR 0028](docs/adr/0028-websocket-transport.md)), in all four SDKs: `serve` with `listen`, `servicePlugins`, `serveAcp` with `listen`, and `ma --acp --listen`. The plugin and ACP kits check a service with `--connect`; `scripts/check.sh` runs both against each language's own servers. The shared scenarios gain a service placement for each SDK: 504 runs, all passed.
 - **Live checks** pass against OpenAI and Anthropic in all four SDKs.
+- **`ma`'s code sandbox runs in a worker process** with a 256 MiB memory limit, in all four languages. A limit that fires, or a worker that dies, fails that run and the agent carries on; a new reference check, `sandbox-memory`, checks it. Go's served environment now lists directories.
 - **Fixed:** the TypeScript local environment could lose its record of running commands if the agent was killed while saving it, leaving those commands running. Python `ma` now shows codemode calls on stderr instead of `tool(null)`.
 
 ## 0.1.0
