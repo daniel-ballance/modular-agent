@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { addAbortListener } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -39,6 +40,7 @@ import {
 	type Provider,
 	type Runtime,
 	type RuntimeHost,
+	type SessionInterruptionReason,
 	type StoredSession,
 	type ToolCall,
 	type ToolDefinition,
@@ -148,6 +150,7 @@ export interface PluginApi {
 	listSessions(project?: string | null): Promise<StoredSession[]>;
 	forkSession(sessionId: string, entryId: string): Promise<string>;
 	closeSession(sessionId: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void>;
+	sessionInterruption(sessionId: string): AbortSignal;
 	session(sessionId: string): { id: string; project: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
 	// input and turns
 	input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }>;
@@ -392,7 +395,7 @@ export class Harness {
 				if (!s.actors.has(actorId)) throw new Error(`Actor ${actorId} is not part of this session`);
 				await this.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
 				await this.hooks.observe("session.leave", { sessionId, actorId, requestedBy });
-				this.emit(s.id, "session.left", { actorId }, pluginName, { actorId });
+				this.emit(s, "session.left", { actorId }, pluginName, { actorId });
 				this.closeUnanswerable(s);
 			},
 			presentActors: (id) => this.presentActors(this.session(id)),
@@ -461,6 +464,7 @@ export class Harness {
 				return this.runningJobs(s).map(({ job }) => ({ ...job, state: cleanup.has(job.id) ? "cleanupUnconfirmed" as const : s.jobs.has(job.id) ? "running" as const : "unfinished" as const }));
 			},
 			cancelJob: (sessionId, jobId) => this.cancelJob(this.session(sessionId), jobId),
+			sessionInterruption: id => this.session(id).interruption.signal,
 			follow: (sessionId, options, listener) => this.follow(this.session(sessionId), options, listener),
 			flushOutput: async (id, recipient) => {
 				const followers = [...(this.sessions.get(id)?.followers ?? [])].filter((f) => f.recipient === recipient);
@@ -532,10 +536,13 @@ export class Harness {
 
 	// ---------- events ----------
 
-	private emit(sessionId: string, type: string, data: any, source: string, ids?: Partial<AgentEvent>): void {
+	private emit(session: string | Session, type: string, data: any, source: string, ids?: Partial<AgentEvent>): void {
+		const sessionId = typeof session === "string" ? session : session.id;
+		const s = this.sessions.get(sessionId);
+		if (typeof session !== "string" && session !== s) return; // An old writer must not publish to a reopened session.
 		const event: AgentEvent = { type, time: this.now(), sessionId, source, ...ids, data };
-		const s = sessionId ? this.sessions.get(sessionId) : undefined;
-		s?.remember(event);
+		if (s?.interruption.signal.aborted && type !== "session.ended") return;
+		if (type !== "session.interrupted") s?.remember(event);
 		for (const l of [...this.listeners]) {
 			try {
 				l.fn(event);
@@ -574,13 +581,11 @@ export class Harness {
 		if (!match) throw failure("invalid_params", "Not a command");
 		const session = this.session(sessionId);
 		this.requireAuthority(session, actorId, "input");
-		const store = this.use<HistoryStore>("history-store");
-		store?.checkWriter?.(sessionId);
+		this.checkWriter(session);
 		const command = this.commandTable.get(match[1]);
 		if (!command) throw failure("not_found", `Unknown command /${match[1]}`);
 		const abort = new AbortController();
-		const writer = store?.writerSignal?.(sessionId);
-		const signal = writer ? AbortSignal.any([abort.signal, writer]) : abort.signal;
+		const signal = AbortSignal.any([abort.signal, session.interruption.signal]);
 		const stepId = this.newId();
 		const live = () => {
 			if (abort.signal.aborted || session.closed || session.closing || session.suspended) {
@@ -690,6 +695,7 @@ export class Harness {
 			const jobs = work?.sessionId === ancestor?.id && work ? [...work.jobs] : [];
 			if (actors.length || jobs.length) drafts.push({ kind: "harness.parentAuthority", writer: "harness", modelVisible: false, data: { actors, jobs } });
 		}
+		this.watchWriter(s);
 		try {
 			if (options.forkFrom) {
 				const departed = new Set(ancestor?.order.map((id) => ancestor.entries.get(id)!).flatMap((e) => e.kind === "actorLeft" ? [(e.data as { actorId: string }).actorId] : []));
@@ -703,7 +709,7 @@ export class Harness {
 					return entry;
 				});
 				const batch = [...copies, ...setup];
-				await store?.append(s.id, batch);
+				await this.write(s, () => store?.append(s.id, batch));
 				for (const e of batch) s.apply(e);
 			} else {
 				await this.commit(s, drafts);
@@ -711,12 +717,12 @@ export class Harness {
 			}
 		} catch (error) {
 			this.sessions.delete(meta.id);
-			await store?.close(meta.id);
+			await this.closeWriter(s);
 			throw error;
 		}
 		await this.prepareSession(s, false, options.prepare);
 		await this.hooks.observe("session.start", { sessionId: s.id, resumed: false });
-		this.emit(s.id, "session.started", { meta }, "harness");
+		this.emit(s, "session.started", { meta }, "harness");
 		return s.id;
 	}
 
@@ -741,7 +747,7 @@ export class Harness {
 		} catch (error) {
 			await this.hooks.observe("session.end", { sessionId: s.id });
 			this.sessions.delete(s.id);
-			await this.use<HistoryStore>("history-store")?.close(s.id);
+			await this.closeWriter(s);
 			throw error;
 		}
 	}
@@ -757,10 +763,14 @@ export class Harness {
 
 	private async openStoredSession(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string> {
 		const opened = this.sessions.get(id);
-		if (opened) {
+		if (opened && !opened.interruption.signal.aborted) {
 			if (actor) await this.authorizeOpeningActor(opened, actor);
 			await prepare?.(id);
 			return id;
+		}
+		if (opened) {
+			if (actor && !await this.canDiscoverSession(id, actor, true)) throw failure("forbidden", "Session is inaccessible");
+			await this.retireSession(opened);
 		}
 		const store = this.use<HistoryStore>("history-store");
 		if (!store) throw failure("not_supported", "No history store: sessions can't be reopened");
@@ -774,9 +784,10 @@ export class Harness {
 		try { await this.authorizeOpeningActor(s, a); }
 		catch (error) { await store.close(id); throw error; }
 		this.sessions.set(id, s);
+		this.watchWriter(s);
 		s.reopening = true;
 		try { await this.recoverSecrets(s); }
-		catch (error) { this.sessions.delete(id); await store.close(id); throw error; }
+		catch (error) { this.sessions.delete(id); await this.closeWriter(s); throw error; }
 		await this.prepareSession(s, true, prepare);
 		const latest = s.entries.get(s.order.at(-1) ?? "");
 		if (latest?.kind === "position") {
@@ -787,7 +798,7 @@ export class Harness {
 				const undoing = !!prior && prior.point === data.restore.undo && prior.undo === data.restore.point && before?.parentId === data.to;
 				try { await this.completeRewind(s, data.to, latest.parentId, data.restore, undoing); }
 				catch (error) {
-					if (s.suspended || (error as { code?: string }).code !== "conflict") { this.sessions.delete(id); await store.close(id); throw error; }
+					if (s.suspended || (error as { code?: string }).code !== "conflict") { this.sessions.delete(id); await this.closeWriter(s); throw error; }
 				}
 			}
 		}
@@ -807,10 +818,10 @@ export class Harness {
 		await this.recoverReports(s);
 		s.reopening = false;
 		this.startQueued(s);
-		this.emit(s.id, "session.started", { meta: s.meta, resumed: true }, "harness");
+		this.emit(s, "session.started", { meta: s.meta, resumed: true }, "harness");
 		// Questions left open past their turn are still answerable after a restart.
 		for (const request of this.waitingRequests(s)) {
-			this.emit(s.id, "input.request.opened", { request, waiting: true }, "harness", { toolCallId: request.toolCallId });
+			this.emit(s, "input.request.opened", { request, waiting: true }, "harness", { toolCallId: request.toolCallId });
 			for (const i of this.viewersFor(s, request)) i.onInputRequest?.(request);
 		}
 		this.maybeContinueOpenCalls(s);
@@ -872,7 +883,7 @@ export class Harness {
 		const settled = new Set(s.order.map((id) => s.entries.get(id)!).filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
 		const calls = [...pending.values()].filter((c) => !settled.has(c.id)).map((c) => ({ ...c, safeToRepeat: false }));
 		const interrupted: InterruptedTurn = { turnId: lastStart.turnId, calls };
-		this.emit(s.id, "turn.interrupted", { pending: interrupted.calls.length }, "harness", { turnId: interrupted.turnId });
+		this.emit(s, "turn.interrupted", { pending: interrupted.calls.length }, "harness", { turnId: interrupted.turnId });
 		// Not awaited: the resumed turn may wait for an answer that only an Interface opened after this can give.
 		void connectionRights.exit(() => this.launch(s, interrupted.turnId, (signal) => this.resumeTurn(s, interrupted, startedBy, signal, lastStart.data as Partial<TurnSnapshot>)));
 	}
@@ -900,19 +911,76 @@ export class Harness {
 		return id;
 	}
 
-	private async suspendSession(id: string): Promise<void> {
-		const s = this.sessions.get(id);
-		if (!s) return;
+	private stopSessionWork(s: Session): void {
 		s.suspended = true;
 		s.steering = [];
 		s.followUps = [];
 		s.running?.abort.abort();
-		for (const r of s.requests.values()) r.resolve({ requestId: r.request.id, declined: true, actorId: "harness", reason: "the process stopped" });
+		for (const r of s.requests.values()) void r.resolve({ requestId: r.request.id, declined: true, actorId: "harness", reason: "the process stopped" });
 		s.requests.clear();
+	}
+
+	private async suspendSession(id: string): Promise<void> {
+		const s = this.sessions.get(id);
+		if (!s) return;
+		this.stopSessionWork(s);
 		// A stopping process doesn't wait for its work to finish. Nothing more is recorded once suspended.
+		await this.retireSession(s);
+	}
+
+	private async retireSession(s: Session): Promise<void> {
 		await s.committing;
-		await this.use<HistoryStore>("history-store")?.close(id);
-		this.sessions.delete(id);
+		await this.closeWriter(s);
+		this.sessions.delete(s.id);
+	}
+
+	private async closeWriter(s: Session): Promise<void> {
+		s.unwatchWriter?.();
+		await this.use<HistoryStore>("history-store")?.close(s.id);
+	}
+
+	private watchWriter(s: Session): void {
+		if (s.ephemeral) return;
+		const signal = this.use<HistoryStore>("history-store")?.writerSignal?.(s.id);
+		if (!signal) return;
+		const subscription = addAbortListener(signal, () => this.interruptSession(s, "writerLost", signal.reason));
+		s.unwatchWriter = () => subscription[Symbol.dispose]();
+	}
+
+	private interruptSession(s: Session, reason: SessionInterruptionReason, cause: unknown): void {
+		if (s.suspended || s.closed) return;
+		// Stop admission synchronously, before notifying anyone or waking a waiting call.
+		s.suspended = true;
+		this.emit(s, "session.interrupted", { reason }, "harness");
+		s.interruption.abort(Object.assign(failure("lost", "Session was interrupted; reopen it to recover"), { cause }));
+		this.stopSessionWork(s);
+		for (const record of s.jobs.values()) void this.cancelJob(s, record.job.id).catch(error => this.problem(record.job.plugin, "cancel interrupted job", error));
+	}
+
+	private checkWriter(s: Session): void {
+		s.interruption.signal.throwIfAborted();
+		if (s.ephemeral) return;
+		const store = this.use<HistoryStore>("history-store");
+		try {
+			store?.writerSignal?.(s.id)?.throwIfAborted();
+			store?.checkWriter?.(s.id);
+		} catch (error) {
+			this.interruptSession(s, "writerLost", error);
+			s.interruption.signal.throwIfAborted();
+			throw error;
+		}
+	}
+
+	private async write(s: Session, mutation: () => Promise<void> | undefined): Promise<void> {
+		this.checkWriter(s);
+		try { await mutation(); }
+		catch (error) {
+			const writerLost = this.use<HistoryStore>("history-store")?.writerSignal?.(s.id)?.aborted || (error as { code?: string })?.code === "lost";
+			this.interruptSession(s, writerLost ? "writerLost" : "commitFailed", error);
+			s.interruption.signal.throwIfAborted();
+			throw error;
+		}
+		s.interruption.signal.throwIfAborted();
 	}
 
 	async closeSession(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void> {
@@ -927,16 +995,17 @@ export class Harness {
 			}
 			s.closing = true;
 		});
-		await this.cancel(id);
-		for (const { job } of this.runningJobs(s)) await this.cancelJob(s, job.id);
+		if (!s.interruption.signal.aborted) {
+			await this.cancel(id);
+			for (const { job } of this.runningJobs(s)) await this.cancelJob(s, job.id);
+		}
 		for (const r of s.requests.values()) r.resolve({ requestId: r.request.id, declined: true, actorId: "harness", reason: "session closed" });
 		s.requests.clear();
 		await this.hooks.observe("session.end", { sessionId: id });
 		await this.use<WorkingEnvironment>("working-environment")?.sessionEnded?.(id);
 		this.emit(id, "session.ended", {}, "harness");
 		s.closed = true;
-		await this.use<HistoryStore>("history-store")?.close(id);
-		this.sessions.delete(id);
+		await this.retireSession(s);
 	}
 
 	// ---------- the record ----------
@@ -944,13 +1013,14 @@ export class Harness {
 	/** Commit drafts to the session. All are kept, or none are. */
 	commit(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]> {
 		// A suspended session's process has stopped: nothing more is recorded for it here.
-		if (s.suspended) return Promise.resolve([]);
 		const run = s.committing.then(() => this.commitNow(s, drafts));
 		s.committing = run.catch(() => undefined);
 		return run;
 	}
 
 	private async commitNow(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]> {
+		s.interruption.signal.throwIfAborted();
+		if (s.suspended) return [];
 		let position = s.position;
 		const entries: HistoryEntry[] = drafts.map((d) => {
 			const entry: HistoryEntry = { ...d, id: d.id ?? this.newId(), parentId: position, sessionId: s.id, time: this.now() };
@@ -961,25 +1031,21 @@ export class Harness {
 		});
 		if (!s.ephemeral) {
 			const store = this.use<HistoryStore>("history-store");
-			try { await store?.append(s.id, entries); }
-			catch (error) {
-				if (store?.writerSignal?.(s.id)?.aborted) { s.suspended = true; s.running?.abort.abort(); }
-				throw error;
-			}
+			await this.write(s, () => store?.append(s.id, entries));
 		}
 		for (const e of entries) {
 			s.apply(e);
 			const ids = { turnId: e.turnId, stepId: e.stepId, toolCallId: e.toolCallId, actorId: e.actorId };
-			this.emit(s.id, "entry.added", e, e.writer, ids);
+			this.emit(s, "entry.added", e, e.writer, ids);
 			if (e.kind === "response" && e.turnId && e.modelVisible && e.message?.role === "assistant") {
 				for (const part of e.message.content.filter(isToolCall)) {
 					const call: ToolCall = { id: part.id, name: part.name, input: part.arguments, startedBy: "model", stepId: e.stepId };
-					this.emit(s.id, "tool.call", { call }, e.writer, { ...ids, toolCallId: part.id });
+					this.emit(s, "tool.call", { call }, e.writer, { ...ids, toolCallId: part.id });
 				}
 			}
 			if (e.kind === "toolResult" && e.toolCallId && e.message?.role === "toolResult") {
 				const data = e.data as { status?: string; value?: unknown } | undefined;
-				this.emit(s.id, "tool.result.delivered", { status: data?.status ?? "failed", content: e.message.content,
+				this.emit(s, "tool.result.delivered", { status: data?.status ?? "failed", content: e.message.content,
 					...(data && "value" in data ? { value: data.value } : {}) }, "harness", ids);
 			}
 		}
@@ -1003,7 +1069,7 @@ export class Harness {
 		if (actorId) this.requireAuthority(s, actorId, "settings");
 		if (this.settingsDuringTurn === "refused" && s.isBusy()) throw Object.assign(new Error("Cannot change settings during a turn"), { code: "busy" });
 		await this.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
-		this.emit(s.id, "setting.changed", { key, value, appliesFrom: this.settingsDuringTurn === "nextTurn" ? "next turn" : "next step" }, writer, { actorId });
+		this.emit(s, "setting.changed", { key, value, appliesFrom: this.settingsDuringTurn === "nextTurn" ? "next turn" : "next step" }, writer, { actorId });
 	}
 
 	private async moveTo(sessionId: string, entryId: string, options: { rewind?: boolean; actorId?: string }, writer: string): Promise<{ outOfReach?: string[] }> {
@@ -1056,7 +1122,7 @@ export class Harness {
 				if (!journal) await this.commit(s, [{ kind: "position", writer, actorId: options.actorId, modelVisible: false, data: { to: entryId } }]);
 				const provider = this.providerFor(s);
 				if (provider?.supports.keepsState === true) await provider.discardState?.(s.id).catch((e) => this.problem(writer, "discard provider state on move", e));
-				this.emit(s.id, "position.moved", { to: entryId }, writer);
+				this.emit(s, "position.moved", { to: entryId }, writer);
 				return outOfReach.length ? { outOfReach: [...new Set(outOfReach)] } : {};
 			} finally { s.moving = false; }
 		});
@@ -1072,7 +1138,7 @@ export class Harness {
 			} catch (error) { s.suspended = true; throw error; }
 		};
 		await verify(restore.point);
-		const check = () => this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
+		const check = () => this.checkWriter(s);
 		try {
 			check();
 			await env.restore(restore.point);
@@ -1146,7 +1212,7 @@ export class Harness {
 					});
 					const reservations = [...new Map(inputKeys.map((k) => [k.inputId, k])).values()];
 					await this.commit(session, [{ kind: "erasure", writer, actorId, modelVisible: false, data: { entryIds, ...(reservations.length ? { inputKeys: reservations } : {}) } }]);
-					if (!session.ephemeral) await store!.erase!(session.id, entryIds);
+					if (!session.ephemeral) await this.write(session, () => store!.erase!(session.id, entryIds));
 					report.erased.push(...entryIds);
 					if (session === s || this.actorRights(session, actorId).includes("watch")) report.erasedPairs.push(...entryIds.map((id) => ({ sessionId: session.id, id })));
 					else if (!report.outOfReach.includes("copies in other sessions")) report.outOfReach.push("copies in other sessions");
@@ -1155,6 +1221,7 @@ export class Harness {
 					report.pending.push(...entryIds);
 					if (session === s || this.actorRights(session, actorId).includes("watch")) report.pendingPairs.push(...entryIds.map((id) => ({ sessionId: session.id, id })));
 					else if (!report.outOfReach.includes("copies in other sessions")) report.outOfReach.push("copies in other sessions");
+					s.interruption.signal.throwIfAborted();
 					this.problem(writer, "local erasure", error);
 					continue;
 				}
@@ -1185,7 +1252,7 @@ export class Harness {
 		if (beyond.length) throw Object.assign(new Error(`${grantedBy} can't grant ${beyond.join(", ")}`), { code: "forbidden" });
 		await this.commit(s, [actorJoined(actor, writer, grantedBy)]);
 		await this.hooks.observe("session.join", { sessionId: s.id, actorId: actor.id, actor, grantedBy });
-		this.emit(s.id, "session.joined", { actor }, writer, { actorId: actor.id });
+		this.emit(s, "session.joined", { actor }, writer, { actorId: actor.id });
 		this.closeUnanswerable(s);
 	}
 
@@ -1293,6 +1360,7 @@ export class Harness {
 
 	private async input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }> {
 		const s = this.session(sessionId);
+		this.checkWriter(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		const right = options.when === "propose" ? "propose" : "input";
 		if (options.startedBy?.kind !== "job") {
@@ -1378,7 +1446,7 @@ export class Harness {
 			if (taken === "now") this.startTurn(s, q);
 			else (taken === "inTurn" ? s.steering : s.followUps).push(q);
 		}
-		this.emit(s.id, "input.accepted", { inputId: q.id, taken }, "harness", { actorId: q.actorId });
+		this.emit(s, "input.accepted", { inputId: q.id, taken }, "harness", { actorId: q.actorId });
 		return receipt;
 	}
 
@@ -1412,7 +1480,7 @@ export class Harness {
 	private async handBack(s: Session, queued: QueuedInput[], reason: string): Promise<void> {
 		const inputIds = queued.filter((q) => s.admissions.has(q.id)).map((q) => q.id);
 		if (inputIds.length) await this.commit(s, inputIds.map((inputId) => ({ kind: "inputHandedBack", writer: "harness", modelVisible: false, inputId, data: { inputId, reason } })));
-		for (const q of queued) this.emit(s.id, reason === "withdrawn" ? "input.withdrawn" : "input.handedBack",
+		for (const q of queued) this.emit(s, reason === "withdrawn" ? "input.withdrawn" : "input.handedBack",
 			{ inputId: q.id, content: q.content, reason }, "harness");
 	}
 
@@ -1449,10 +1517,12 @@ export class Harness {
 
 	private async waitForIdle(sessionId: string): Promise<void> {
 		const s = this.session(sessionId);
-		while (s.running || s.settling) {
-			if (s.settling) await s.settling;
-			if (s.running) await s.running.done;
-		}
+		await untilAborted(s.interruption.signal, async () => {
+			while (!s.suspended && (s.running || s.settling)) {
+				if (s.settling) await s.settling;
+				if (s.running && !s.suspended) await s.running.done;
+			}
+		});
 	}
 
 	private runtime(): Runtime | undefined {
@@ -1466,8 +1536,7 @@ export class Harness {
 	/** Run a turn as the session's running turn, then start any queued input. */
 	private launch(s: Session, turnId: string, body: (signal: AbortSignal, turnId: string) => Promise<void>): Promise<void> {
 		const abort = new AbortController();
-		const writer = this.use<HistoryStore>("history-store")?.writerSignal?.(s.id);
-		const signal = writer ? AbortSignal.any([abort.signal, writer]) : abort.signal;
+		const signal = AbortSignal.any([abort.signal, s.interruption.signal]);
 		const done = body(signal, turnId)
 			.catch((error) => this.problem("harness", "turn", error))
 			.finally(() => {
@@ -1525,7 +1594,7 @@ export class Harness {
 			{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, data: { ...snapshot, startedBy: queued.startedBy, resultShape, point, ...(continuing ? { authorityActors: inputActors(queued), authorityJobs: queued.authorityJobs } : {}) } },
 			...(continuing ? [] : [this.inputEntry(s, queued, turnId)]),
 		]);
-		this.emit(s.id, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
+		this.emit(s, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
 		let outcome: TurnOutcome;
 		if (limited) outcome = this.tenantLimitOutcome();
 		else if (failure) outcome = this.failedOutcome(failure);
@@ -1549,7 +1618,7 @@ export class Harness {
 	private async finishTurn(s: Session, turnId: string, outcome: TurnOutcome, state?: TurnState, signal?: AbortSignal, resultShape?: Record<string, unknown>): Promise<void> {
 		// The process stopped: the turn is interrupted, not ended. Nothing is recorded or announced here;
 		// reopening the session finds the turn and hands it to the Runtime.
-		if (s.suspended || this.use<HistoryStore>("history-store")?.writerSignal?.(s.id)?.aborted) return;
+		if (s.suspended) return;
 		if (state?.toolResultError && outcome.outcome.kind !== "limit" && outcome.outcome.kind !== "cancelled") {
 			outcome = { ...outcome, outcome: { kind: "failed", error: state.toolResultError }, result: { openToolCalls: [] } };
 		}
@@ -1596,7 +1665,7 @@ export class Harness {
 		const sources = s.branch().filter((e) => e.turnId === turnId && (e.kind === "response" || e.kind === "toolResult")).map((e) => e.id);
 		await this.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId, sources, data: { outcome: outcome.outcome, result: outcome.result, usage: outcome.usage } }]);
 		if (!state?.endedHook) await this.hooks.observe("turn.end", { sessionId: s.id, turnId, outcome: outcome.outcome, result: outcome.result });
-		this.emit(s.id, "turn.ended", outcome, "harness", { turnId });
+		this.emit(s, "turn.ended", outcome, "harness", { turnId });
 		if (open.size) this.maybeContinueOpenCalls(s);
 	}
 
@@ -1797,7 +1866,7 @@ export class Harness {
 				return this.commit(s, items.map((q) => this.inputEntry(s, q, turnId)));
 			}),
 			hasSteering: async () => s.steering.length > 0,
-			report: (type, data, ids) => { if (type !== "model.output") this.emit(s.id, type, data, "runtime", { turnId, ...ids }); },
+			report: (type, data, ids) => { if (type !== "model.output") this.emit(s, type, data, "runtime", { turnId, ...ids }); },
 		};
 	}
 
@@ -1819,7 +1888,7 @@ export class Harness {
 					if (await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 					options.signal.throwIfAborted();
 					authorize?.();
-					this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
+					this.checkWriter(s);
 				};
 				const prepareDispatch = async () => {
 					await check();
@@ -1850,7 +1919,7 @@ export class Harness {
 					}]);
 					try { await check(); }
 					catch (error) {
-						if (intent && !s.suspended && !this.use<HistoryStore>("history-store")?.writerSignal?.(s.id)?.aborted) {
+						if (intent && !s.suspended) {
 							await this.commit(s, [{ kind: "response", writer: "harness", turnId, stepId, modelVisible: false,
 								message: { role: "assistant", stop: "aborted", content: [] }, sources: [intent.id], data: { recovery: true } }]);
 						}
@@ -1863,7 +1932,7 @@ export class Harness {
 				let observed = Promise.resolve();
 				const onEvent = (event: import("./types.js").ModelStreamEvent) => {
 					observed = observed.then(() => this.hooks.observe("provider.piece", { ...scope, turnId, stepId, piece: structuredClone(event) }));
-					if (turnId) this.emit(s.id, "model.output", event, "harness", { turnId, stepId });
+					if (turnId) this.emit(s, "model.output", event, "harness", { turnId, stepId });
 					options.onEvent?.(event);
 				};
 				try {
@@ -1880,7 +1949,7 @@ export class Harness {
 					if (!turnId && intentId) await this.commit(s, [{ kind: "response", writer: "harness", stepId,
 						actorId: [...state.actors][0], message, modelVisible: false, sources: [intentId] }]);
 					return message;
-				} finally { await observed; if (turnId) this.emit(s.id, "model.streamEnd", {}, "harness", { turnId, stepId }); }
+				} finally { await observed; if (turnId) this.emit(s, "model.streamEnd", {}, "harness", { turnId, stepId }); }
 			});
 		} };
 	}
@@ -1980,16 +2049,16 @@ export class Harness {
 			sameRegistration(current, found) && (!nested || nested.approval === s.settings.approval);
 		if (!eligible(this.findTool(s, call.name))) return refused();
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
-		this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
+		this.checkWriter(s);
 		const [start] = await this.commit(s, [{ kind: "toolStarted", writer: "harness", modelVisible: false, turnId, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs), toolCallId: call.id, stepId: call.stepId,
 			sources: nested ? s.branch().filter(e => e.kind === "modular-agent.nestedCall" && e.toolCallId === call.id).map(e => e.id) : undefined,
 			data: { call: { ...call, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs) }, source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition, safeToRepeat, point, openWorld: found.definition.hints?.openWorld ?? true,
 				authorizers: owners.map((actorId) => ({ sessionId: s.id, actorId })), rights: this.workRights(s, owners, state?.jobs) } }]);
 		const current = this.findTool(s, call.name);
 		if (!eligible(current)) return refused();
-		this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
+		this.checkWriter(s);
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
-		this.emit(s.id, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
+		this.emit(s, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
 		let asked = 0;
 		const pendingQuestions: string[] = [];
 		const children = new Set<Promise<ToolResult>>();
@@ -1999,7 +2068,7 @@ export class Harness {
 			if (!live) throw Object.assign(new Error("There is no live parent"), { code: "invalid_request" });
 			if (signal.aborted) throw Object.assign(new Error("The parent was cancelled"), { code: "cancelled" });
 			if (!allowed() || s.erasing || s.suspended) throw Object.assign(new Error("The parent cannot run tools"), { code: "invalid_request" });
-			this.use<HistoryStore>("history-store")?.checkWriter?.(s.id);
+			this.checkWriter(s);
 		};
 		const drain = async () => {
 			live = false;
@@ -2018,7 +2087,7 @@ export class Harness {
 					return job;
 				} },
 				progress: (content) => {
-					for (const part of content) this.emit(s.id, "tool.progress", { content: [part] }, found.source.id, { turnId, toolCallId: call.id });
+					for (const part of content) this.emit(s, "tool.progress", { content: [part] }, found.source.id, { turnId, toolCallId: call.id });
 				},
 				environment: env,
 				tools: this.runtime()?.supports.nestedToolCalls === true ? {
@@ -2049,17 +2118,17 @@ export class Harness {
 				if (nested) return { callId: call.id, status: "refused", content: [text("A nested call cannot be left open")] };
 				if (!turnId || !pendingQuestions.length) return { callId: call.id, status: "failed", content: [text("No qualifying question for a pending result")] };
 				await this.commit(s, [{ kind: "toolPending", writer: "harness", modelVisible: false, turnId, stepId: call.stepId, toolCallId: call.id, data: { requestIds: [...new Set(pendingQuestions)], toolStartedId: start.id } }]);
-				this.emit(s.id, "tool.ended", { status: "open", reason: result.pending }, found.source.id, { turnId, toolCallId: call.id });
+				this.emit(s, "tool.ended", { status: "open", reason: result.pending }, found.source.id, { turnId, toolCallId: call.id });
 				return { callId: call.id, pending: result.pending };
 			}
 			const out: ToolResult = { ...result, callId: call.id };
-			this.emit(s.id, "tool.ended", { status: out.status }, found.source.id, { turnId, toolCallId: call.id });
+			this.emit(s, "tool.ended", { status: out.status }, found.source.id, { turnId, toolCallId: call.id });
 			return out;
 		} catch (error) {
 			await drain();
 			const status = (error as { code?: string })?.code === "lost" ? "outcomeUnknown" : signal.aborted ? "cancelled" : "failed";
 			const message = error instanceof Error ? error.message : String(error);
-			this.emit(s.id, "tool.ended", { status }, found.source.id, { turnId, toolCallId: call.id });
+			this.emit(s, "tool.ended", { status }, found.source.id, { turnId, toolCallId: call.id });
 			return { callId: call.id, status, content: [text(status === "cancelled" ? "Cancelled" : `Tool failed: ${message}`)] };
 		}
 	}
@@ -2131,7 +2200,7 @@ export class Harness {
 			await this.recordAnswer(s, request, answer, s.order.map(id => s.entries.get(id)!).find(e => e.kind === "inputRequest" && e.requestId === request.id)?.stepId);
 			s.waiting.delete(request.id);
 			for (const viewer of this.viewersFor(s, request)) viewer.onInputRequestClosed?.(request.id);
-			this.emit(s.id, "input.request.closed", answer, "harness", { turnId: request.turnId, toolCallId: callId });
+			this.emit(s, "input.request.closed", answer, "harness", { turnId: request.turnId, toolCallId: callId });
 		}
 	}
 
@@ -2178,9 +2247,11 @@ export class Harness {
 		if (s.closed) throw failure("not_open", "Session is closed");
 		if (s.suspended) throw failure("lost", "Session has lost its writer");
 		if (s.moving || s.closing || s.erasing) throw failure("busy", "Session cannot run tools right now");
-		s.outsideTools++;
-		try { return await this.callOutsideTurn(s, call); }
-		finally { s.outsideTools--; }
+		return untilAborted(s.interruption.signal, async () => {
+			s.outsideTools++;
+			try { return await this.callOutsideTurn(s, call); }
+			finally { s.outsideTools--; }
+		});
 	}
 
 	private async callOutsideTurn(s: Session, call: ToolCall): Promise<ToolResult> {
@@ -2191,7 +2262,7 @@ export class Harness {
 		let result: ToolResult;
 		if (gate.refused) result = { callId: call.id, status: "refused", content: [text(gate.refused)] };
 		else {
-			const ran = await this.executeTool(s, gate.value.call, new AbortController().signal);
+			const ran = await this.executeTool(s, gate.value.call, s.interruption.signal);
 			// Only a turn can carry an open call forward, so outside a turn it fails instead.
 			result = isPending(ran) ? { callId: call.id, status: "failed", content: [text(`${call.name} can't wait for an answer outside a turn`)] } : ran;
 		}
@@ -2407,7 +2478,7 @@ export class Harness {
 			request = { ...request, key };
 			const recorded = this.recordedAnswer(s, draft, approval);
 			if (recorded?.answer) {
-				this.emit(s.id, "input.request.reused", { requestId: recorded.request.id, key: draft.key }, "harness", { toolCallId: request.toolCallId });
+				this.emit(s, "input.request.reused", { requestId: recorded.request.id, key: draft.key }, "harness", { toolCallId: request.toolCallId });
 				return recorded.answer;
 			}
 			if (recorded) {
@@ -2454,14 +2525,14 @@ export class Harness {
 					signal?.removeEventListener("abort", cancel);
 					s.requests.delete(request.id);
 					s.waiting.add(request.id);
-					this.emit(s.id, "input.request.waiting", { requestId: request.id }, "harness", { toolCallId: request.toolCallId });
+					this.emit(s, "input.request.waiting", { requestId: request.id }, "harness", { toolCallId: request.toolCallId });
 					resolve({ requestId: request.id, actorId: "harness", pending: true });
 				}, request.timeLimitMs);
 			}
 			s.requests.set(request.id, open);
 			if (signal?.aborted) return cancel();
 			signal?.addEventListener("abort", cancel, { once: true });
-			this.emit(s.id, "input.request.opened", { request, reopened }, askedBy, { toolCallId: request.toolCallId });
+			this.emit(s, "input.request.opened", { request, reopened }, askedBy, { toolCallId: request.toolCallId });
 			for (const i of viewers) i.onInputRequest?.(request);
 		});
 	}
@@ -2553,9 +2624,9 @@ export class Harness {
 
 	private emitAnswer(s: Session, request: InputRequest, answer: Answer, late = false): void {
 		const ids = { actorId: answer.actorId, toolCallId: request.toolCallId, turnId: request.turnId };
-		if (answer.reason === "noLongerAnswerable") this.emit(s.id, "input.request.unanswerable", { requestId: request.id }, "harness", ids);
-		if (answer.actorId !== "harness") this.emit(s.id, "input.request.answered", { requestId: request.id, declined: answer.declined ?? false }, "harness", ids);
-		this.emit(s.id, "input.request.closed", { requestId: request.id, declined: answer.declined ?? false, value: answer.value, late }, "harness", ids);
+		if (answer.reason === "noLongerAnswerable") this.emit(s, "input.request.unanswerable", { requestId: request.id }, "harness", ids);
+		if (answer.actorId !== "harness") this.emit(s, "input.request.answered", { requestId: request.id, declined: answer.declined ?? false }, "harness", ids);
+		this.emit(s, "input.request.closed", { requestId: request.id, declined: answer.declined ?? false, value: answer.value, late }, "harness", ids);
 	}
 
 	private async submitAnswer(s: Session, answer: Answer): Promise<{ accepted: boolean; reason?: string }> {
@@ -2643,7 +2714,7 @@ export class Harness {
 			id: startEntryId, kind: "jobStarted", writer: plugin, modelVisible: false, turnId: job.turnId,
 			toolCallId: options.toolCallId ?? this.toolWork.getStore()?.id, jobId: job.id, actorId,
 			data: { kind: job.kind, key, detail: detail ?? null, actors, rights },
-		}]).then(() => this.emit(s.id, "job.started", { job }, plugin, { jobId: job.id }));
+		}]).then(() => this.emit(s, "job.started", { job }, plugin, { jobId: job.id }));
 		void ready.catch((error) => { s.jobs.delete(job.id); this.problem(plugin, "record job", error); });
 		return this.jobHandle(s, { job, key, detail, actors, rights }, startEntryId, ready);
 	}
@@ -2674,7 +2745,7 @@ export class Harness {
 		const handle: JobHandle = {
 			id: job.id, started: true, ready, startEntryId,
 			progress: (content) => {
-				if (!record.ending && !s.suspended && !s.closed) this.emit(s.id, "job.progress", { content: typeof content === "string" ? [text(content)] : content }, plugin, { jobId: job.id });
+				if (!record.ending && !s.suspended && !s.closed) this.emit(s, "job.progress", { content: typeof content === "string" ? [text(content)] : content }, plugin, { jobId: job.id });
 			},
 			finish: (state, result, options) => {
 				if (record.ending) return Promise.reject(new Error("Job already ended"));
@@ -2701,7 +2772,7 @@ export class Harness {
 						await this.commit(s, drafts);
 						job.state = state;
 						job.result = content;
-						this.emit(s.id, "job.ended", { state, result: content }, plugin, { jobId: job.id });
+						this.emit(s, "job.ended", { state, result: content }, plugin, { jobId: job.id });
 						if (queued?.when === "after") { s.followUps.push(queued); this.startQueued(s); }
 					});
 				};
@@ -2847,6 +2918,11 @@ class Follower {
 			} };
 		}
 		const handlers = this.raw ? [] : this.hooks.raw("output");
+		if (event.type === "session.interrupted") {
+			// An incomplete stream must not be released because its writer stopped.
+			this.held = [];
+			this.streams.clear();
+		}
 		const modelEnd = event.type === "model.streamEnd";
 		if (handlers.some((h) => h.stream)) {
 			const stream = event.type === "model.output" || modelEnd
@@ -2947,6 +3023,18 @@ function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () =>
 }
 
 /** Walk copy links to a fixed point, without following parentId (which is just position). */
+/** Wait for work against one writer generation, independently of event delivery. */
+export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
+	signal.throwIfAborted();
+	return new Promise<T>((resolve, reject) => {
+		const subscription = addAbortListener(signal, () => reject(signal.reason));
+		void Promise.resolve().then(() => {
+			signal.throwIfAborted();
+			return work();
+		}).then(resolve, reject).finally(() => subscription[Symbol.dispose]());
+	});
+}
+
 function failure(code: "invalid_params" | "invalid_request" | "not_open" | "not_found" | "forbidden" | "not_supported" | "busy" | "lost" | "conflict", message: string) {
 	return Object.assign(new Error(message), { code });
 }

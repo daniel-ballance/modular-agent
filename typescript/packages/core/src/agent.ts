@@ -186,7 +186,7 @@ export class Agent {
       }
       const rebuild = agent.#rebuild;
       agent.#close = (async () => {
-        agent.#interruption.abort();
+        agent.#interruption.abort(new AgentError("lost", "Agent was interrupted"));
         await Promise.allSettled(agent.#opening.values());
         for (const q of agent.#questions.values()) q.abort();
         await agent.#h.interrupt();

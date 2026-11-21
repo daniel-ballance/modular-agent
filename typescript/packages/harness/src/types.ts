@@ -332,6 +332,7 @@ export interface HistoryStore {
 	/** Refuses if the session is already open for writing elsewhere. */
 	openForWriting(sessionId: string, options?: { wait?: boolean }): Promise<void>;
 	checkWriter?(sessionId: string): void;
+	/** Stable for this writer's lifetime, including any transition from staged creation to a lease. */
 	writerSignal?(sessionId: string): AbortSignal | undefined;
 	close(sessionId: string): Promise<void>;
 	/** Keep these entries. All of them are kept, or none are. */
@@ -402,6 +403,8 @@ export interface Answer {
 }
 
 // ---------- Events ----------
+
+export type SessionInterruptionReason = "commitFailed" | "writerLost";
 
 export interface AgentEvent {
 	type: string;

@@ -215,6 +215,7 @@ export class TuiInterface implements InterfaceCapability {
 				if (view) view.header.setText(yellow("… ") + cyan(view.name + " ") + dim(`${view.input}  (waiting for an answer)`));
 				break;
 			}
+			case "session.interrupted":
 			case "turn.ended": {
 				if (this.loader) {
 					this.loader.stop();
@@ -222,6 +223,10 @@ export class TuiInterface implements InterfaceCapability {
 					this.loader = undefined;
 				}
 				this.endStream();
+				if (event.type === "session.interrupted") {
+					this.note(red(`Session interrupted (${event.data.reason}); reopen it to recover.`));
+					break;
+				}
 				const outcome = event.data.outcome;
 				if (outcome.kind === "failed") this.note(red(`Turn failed: ${outcome.error}`));
 				else if (outcome.kind === "limit") this.note(yellow(`Stopped at the ${outcome.limit} limit`));
