@@ -1,15 +1,19 @@
 """Build agents, tools and plugins without importing the underlying Harness."""
 
 from ._agent import (
+    ACP_RIGHTS as ACP_RIGHTS,
     AcpActor as AcpActor,
     Agent as Agent,
     AgentStart as AgentStart,
     RuntimeChoice as RuntimeChoice,
     create_agent as create_agent,
     durable_runtime as durable_runtime,
+    read_service_token as read_service_token,
     run as run,
+    tenants_from_environment as tenants_from_environment,
     transient_runtime as transient_runtime,
 )
+from ._acp_policy import AcpPolicy as AcpPolicy
 from ._context import CallContext as CallContext, HookContext as HookContext
 from ._credentials import (
     CredentialStore as CredentialStore,

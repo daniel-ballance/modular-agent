@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
+from threading import Lock, Thread
 from typing import Literal
 
 from ._history_port import HistoryPort, _route
@@ -16,6 +19,8 @@ class HistoryStore:
     _kind: Literal["memory", "file", "http"]
     _path: Path | None = None
     _url: str | None = None
+    _coordination: Path | None = None
+    _witness: Path | None = None
 
 
 def memory_history() -> HistoryStore:
@@ -26,8 +31,38 @@ def file_history(dir: str | PathLike[str]) -> HistoryStore:
     return HistoryStore("file", Path(dir))
 
 
-def http_history(url: str, token_file: str | PathLike[str]) -> HistoryStore:
-    return HistoryStore("http", Path(token_file), url)
+def http_history(
+    url: str,
+    token_file: str | PathLike[str],
+    *,
+    coordination: str | PathLike[str] | None = None,
+    witness: str | PathLike[str] | None = None,
+) -> HistoryStore:
+    if (coordination is None) != (witness is None):
+        raise AgentError(
+            ErrorCode.INVALID_PARAMS, "Set both erasure coordination and witness paths"
+        )
+    return HistoryStore(
+        "http",
+        Path(token_file),
+        url,
+        Path(coordination) if coordination is not None else None,
+        Path(witness) if witness is not None else None,
+    )
+
+
+class HistoryListener:
+    def __init__(self, url: str, stop: Callable[[], None], thread: Thread) -> None:
+        self.url = url
+        self._stop = stop
+        self._thread = thread
+        self._lock = Lock()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._thread.is_alive():
+                self._stop()
+                self._thread.join()
 
 
 def serve_history(
@@ -36,11 +71,13 @@ def serve_history(
     address: tuple[str, int],
     token_file: str | PathLike[str],
     ttl: float = 2.5,
-) -> None:
-    """Serve a dedicated opaque record store under the file store directory."""
+    witness: str | PathLike[str] | None = None,
+) -> HistoryListener | None:
+    """Serve opaque history. Port zero starts a listener and returns its handle."""
     import asyncio
     import math
 
+    from ma_core import AgentError as NativeError
     from ma_history.service import serve
 
     if isinstance(store, HistoryStore) and (store._kind != "file" or store._path is None):
@@ -49,15 +86,60 @@ def serve_history(
         raise AgentError(ErrorCode.NOT_SUPPORTED, f"Cannot serve {type(store).__name__} history")
     if not math.isfinite(ttl) or ttl < 0.001:
         raise AgentError(ErrorCode.INVALID_PARAMS, "History TTL must be at least one millisecond")
-    try:
-        if isinstance(store, HistoryStore):
-            serve(store._path, address, token_file, round(ttl * 1000))
-        else:
-            with asyncio.Runner() as runner:
 
-                def dispatch(*args: object) -> object:
-                    return runner.run(_route(store, *args))  # type: ignore[arg-type]
+    if witness is not None and not isinstance(store, HistoryStore):
+        raise AgentError(ErrorCode.NOT_SUPPORTED, "A custom history port owns its freshness checks")
 
-                serve(None, address, token_file, store.ttl_ms, custom_route=dispatch)
-    except (OSError, ValueError) as exc:
-        raise AgentError(ErrorCode.INVALID_PARAMS, str(exc)) from exc
+    def run(started: Callable[[tuple[str, int], Callable[[], None]], None] | None) -> None:
+        try:
+            if isinstance(store, HistoryStore):
+                serve(
+                    store._path,
+                    address,
+                    token_file,
+                    round(ttl * 1000),
+                    started=started,
+                    witness=witness,
+                )
+            else:
+                with asyncio.Runner() as runner:
+
+                    def dispatch(*args: object) -> object:
+                        return runner.run(_route(store, *args))  # type: ignore[arg-type]
+
+                    serve(
+                        None,
+                        address,
+                        token_file,
+                        store.ttl_ms,
+                        custom_route=dispatch,
+                        started=started,
+                    )
+        except NativeError as exc:
+            raise AgentError(ErrorCode.UNAVAILABLE, str(exc)) from exc
+        except (OSError, ValueError) as exc:
+            raise AgentError(ErrorCode.INVALID_PARAMS, str(exc)) from exc
+
+    if address[1] != 0:
+        run(None)
+        return None
+
+    ready: Future[tuple[str, Callable[[], None]]] = Future()
+
+    def started(bound: tuple[str, int], stop: Callable[[], None]) -> None:
+        host, port = bound[:2]
+        authority = f"[{host}]" if ":" in host else host
+        ready.set_result((f"http://{authority}:{port}", stop))
+
+    def background() -> None:
+        try:
+            run(started)
+        except Exception as exc:
+            if ready.done():
+                raise
+            ready.set_exception(exc)
+
+    thread = Thread(target=background, name="history-service", daemon=True)
+    thread.start()
+    url, stop = ready.result()
+    return HistoryListener(url, stop, thread)

@@ -7,13 +7,17 @@ from ma_core import API, AgentError, Stop, clone, content, identity, now, silent
 from ma_core.wire import provider_projection, recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
+from .erasure import Erasure
 from .output import gate
+from .reservations import Reservations, size
 
 
-class Harness(Authority):
+class Harness(Authority, Erasure):
     MAX_TOOL_DEPTH = 4
 
-    def __init__(self, admin=None, tenant=None, process_plugins=None, *, tenants=None):
+    def __init__(
+        self, admin=None, tenant=None, process_plugins=None, *, tenants=None, reservations=None
+    ):
         import os
 
         placement = (
@@ -42,6 +46,8 @@ class Harness(Authority):
         self.tool_dispatches = {}
         self.followers = []
         self.output_streams = {}
+        self.erasure_locks = {}
+        self.capacity = Reservations(reservations)
         self.trace = []
         self.define_hook("@harness", "plugin.load", "gate")
         self.define_hook("@harness", "session.prepare", "observe")
@@ -122,6 +128,10 @@ class Harness(Authority):
         self.sessions[sid] = s
         try:
             self.tenant_config(s.get("tenant"))
+            if not self.connection_allows(s) or (
+                actor is not None and not self.can_open(s, actor, local=connection_host)
+            ):
+                raise AgentError("Session inaccessible", "forbidden")
             if not s["entries"] and (s.get("provisional") or s.get("tenant") is not None):
                 await self._append(
                     {
@@ -160,6 +170,7 @@ class Harness(Authority):
                 # admitted connection for local defaults, not a synthetic user.
                 self.sessions[sid]["actor"] = actor
             self._session({"session": sid, "actor": actor or s["actor"]})
+            await self.guard_erasure(sid, reconcile=True)
             await self._resume_rewind(sid)
             if s["entries"] and not any(
                 e["kind"] == "plugins" and e["data"]["active"] == self.active_plugins()
@@ -321,7 +332,11 @@ class Harness(Authority):
             and sid in self.sessions
             and (
                 operation in {"run", "bash", "write", "restore", "save", "generate"}
-                or (target == "environment" and operation == "read")
+                or (
+                    target == "environment"
+                    and operation
+                    in {"read", "read_bytes", "write_bytes", "list_directory", "exists"}
+                )
             )
             and (target != "runtime" and target != "history")
         )
@@ -333,7 +348,8 @@ class Harness(Authority):
                         method,
                         data,
                         emit,
-                        allow_provisional=target == "environment" and operation == "read",
+                        allow_provisional=target == "environment"
+                        and operation in {"read", "read_bytes", "list_directory", "exists"},
                     )
                 )
             return clone(await method(data, emit))
@@ -509,13 +525,18 @@ class Harness(Authority):
         if not allow_provisional:
             self._require_materialized(self.sessions[sid])
         await self._assert_writable(sid)
+        await self.guard_erasure(sid, reconcile=True)
+        revision = await self.erasure_revision(sid)
         tasks = self.effects.setdefault(sid, {})
         task = asyncio.current_task()
         own = task not in tasks
         if own:
             tasks[task] = asyncio.Event()
         try:
-            return await callback(*args)
+            result = await callback(*args)
+            if revision != await self.erasure_revision(sid):
+                raise AgentError("Session content changed during an effect", "unavailable")
+            return result
         except asyncio.CancelledError as exc:
             if self.sessions.get(sid, {}).get("writer_lost"):
                 raise AgentError("Session interrupted", "lost") from exc
@@ -573,6 +594,8 @@ class Harness(Authority):
             raise AgentError("Session is not open")
         s = self.sessions[sid]
         actor = data.get("actor", s["actor"])
+        if not self.connection_allows(s):
+            raise AgentError("Session inaccessible", "forbidden")
         if check_actor and "actor" in data and actor not in s.get("actors", {s["actor"]: {}}):
             raise AgentError("Actor is not enrolled in the session", "forbidden")
         return s
@@ -592,10 +615,13 @@ class Harness(Authority):
             entries = session["entries"]
 
         cancellation = None
+        sid = session["id"]
+        await self.capacity.rebuild(self)
+        if sid in self.sessions:
+            await self._assert_writable(sid)
+        response = next(((sid, e.get("step")) for e in entries if e["kind"] == "response"), None)
+        charged = self.capacity.stage(session, entries, response=response)
         if "history" in self.capabilities:
-            sid = session["id"]
-            if sid in self.sessions:
-                await self._assert_writable(sid)
             commit = asyncio.create_task(
                 self.call("@harness", "history", "keep", {"session": session, "entries": entries})
             )
@@ -616,6 +642,7 @@ class Harness(Authority):
                 raise AgentError(
                     "Cannot confirm the session commit; reopen to recover", "lost"
                 ) from exc
+        self.capacity.finish(sid, session.get("tenant"), charged, response=response)
         # Calls to an out-of-process store yield. Preserve flags changed by a
         # concurrent cancellation/close while that durable write was in flight.
         current = self.sessions.get(session["id"], {})
@@ -883,7 +910,16 @@ class Harness(Authority):
         return any(h[1] == "binding.output" for h in self.handlers)
 
     async def output(self, sid, recipient, events):
-        return await gate(self, sid, recipient, events)
+        if sid is None:
+            return await gate(self, sid, recipient, events)
+        try:
+            before = await self.erasure_revision(sid)
+            result = await gate(self, sid, recipient, events)
+            return result if before == await self.erasure_revision(sid) else []
+        except AgentError as exc:
+            if exc.code == "unavailable":
+                return []
+            raise
 
     async def _emit(self, event):
         event = provider_projection(event)
@@ -894,10 +930,20 @@ class Harness(Authority):
                 events = [{"type": kind, "data": event}]
                 if self.holds_output() and kind in {"model_output", "tool_progress"}:
                     key = (owner, recipient, sid, kind, event.get("step"), event.get("call"))
-                    self.output_streams.setdefault(key, []).extend(events)
-                    if not event.get("final"):
+                    if not event.get("final") and sid in self.sessions:
+                        buffered = self.output_streams.setdefault(key, [])
+                        try:
+                            reservation = self.capacity.hold(
+                                self.sessions[sid], bufferedBytes=size(events)
+                            )
+                        except AgentError:
+                            continue  # Optional output never spends settlement capacity.
+                        buffered.append((reservation, events[0]))
                         continue
-                    events = self.output_streams.pop(key)
+                    buffered = self.output_streams.pop(key, [])
+                    for reservation, _ in buffered:
+                        self.capacity.release(reservation)
+                    events = [piece for _, piece in buffered] + events
                 for item in await self.output(sid, recipient, events):
                     view = await self.fire(
                         "@harness", "output", {"recipient": recipient, "value": item["data"]}
@@ -934,6 +980,8 @@ class Harness(Authority):
         return parts
 
     async def handle(self, op, d, emit):
+        if op == "bound_model_response":
+            return self.capacity.model_response(self._session(d), d["response"], d["step"])
         if op == "prepare_model_request":
             _, provider = self.capabilities[d["access"]["target"]]
             if prepare := getattr(type(provider), "prepare_request", None):
@@ -949,10 +997,13 @@ class Harness(Authority):
             await self._assert_writable(d["session"])
             return {}
         if op == "create":
+            await self.capacity.rebuild(self)
             parent = self.sessions.get((d.get("origin") or {}).get("parent"))
             tenant = parent.get("tenant") if parent else d.get("tenant")
             self.tenant_config(tenant)
             project = str(Path(d["project"]).resolve())
+            if not self.connection_allows({"project": project, "tenant": tenant}):
+                raise AgentError("Session inaccessible", "forbidden")
             settings = {}
             if "config" in self.capabilities:
                 settings = await self.call("@harness", "config", "load", {"project": project})
@@ -990,12 +1041,15 @@ class Harness(Authority):
             await self._start_session(s, {"mcp_servers": d.get("mcp_servers", [])})
             return self.sessions[s["id"]]
         if op == "open":
+            await self.capacity.rebuild(self)
             sid = d["session"]
             if sid in self.interruptions:
                 self._session(d)
                 await self._end_interrupted(sid)
             if sid in self.sessions:
                 s = self._session(d)
+                if d.get("actor") is not None:
+                    self.require(s, d["actor"], "watch")
                 if "mcp_servers" in d:
                     self.require(s, d.get("actor", s["actor"]), "settings")
                     if s.get("busy"):
@@ -1009,6 +1063,7 @@ class Harness(Authority):
             s = await self.call("@harness", "history", "open", d)
             if s is None:
                 raise AgentError("Unknown session", "unknown_session")
+            self.capacity.restore(s)
             s["plugins"] = list(self.plugins)
             s.setdefault("authority", sorted(self.admin & self.tenant))
             s.setdefault("actors", {s["actor"]: {"kind": "user", "authority": s["authority"]}})
@@ -1061,12 +1116,16 @@ class Harness(Authority):
             name, _, args = d["text"].removeprefix("/").partition(" ")
             if name not in self.commands:
                 raise AgentError("Unknown command: /" + name)
-            return await self._effect(
-                d["session"],
-                self.commands[name][2],
-                {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()},
-                allow_provisional=True,
-            )
+            reservation = self.capacity.hold(command_session, calls=1, storageBytes=65536)
+            try:
+                return await self._effect(
+                    d["session"],
+                    self.commands[name][2],
+                    {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()},
+                    allow_provisional=True,
+                )
+            finally:
+                self.capacity.release(reservation)
         if op == "event":
             if d.get("kind") == "plugin_failed" and "session" not in d and self.sessions:
                 for sid in list(self.sessions):
@@ -1294,6 +1353,7 @@ class Harness(Authority):
             await self.fire("@harness", "session.invalidate", {"session": sid, "reason": "move"})
             return {**e, "outOfReach": list(dict.fromkeys(out_of_reach))}
         if op == "fork":
+            await self.guard_erasure(sid)
             if s.get("busy"):
                 raise AgentError("Cannot fork during a turn")
             branch = await self.handle("branch", d, emit)
@@ -1399,147 +1459,7 @@ class Harness(Authority):
             )
             return child
         if op == "erase":
-            self._require_materialized(s)
-            ids = d.get("entries")
-            if (
-                not isinstance(ids, list)
-                or not ids
-                or any(not isinstance(i, str) or not i for i in ids)
-            ):
-                raise AgentError("Erasure requires entry IDs", "invalid_request")
-            kept = {e["id"]: e for e in s["entries"]}
-            if not set(ids) <= kept.keys():
-                raise AgentError("Unknown erasure entry", "not_found")
-            protected = {
-                "tenant",
-                "limit",
-                "authority",
-                "actor_joined",
-                "actor_left",
-                "position_move",
-                "erase",
-                "job_cleanup_unconfirmed",
-            }
-            if any(e["kind"] in protected and e["id"] in d["entries"] for e in s["entries"]):
-                raise AgentError("Cannot erase records of authority", "forbidden")
-            for opened in self.sessions.values():
-                started = {e["job"] for e in opened["entries"] if e["kind"] == "job_start"}
-                ended = {e["job"] for e in opened["entries"] if e["kind"] == "job_end"}
-                if started - ended:
-                    raise AgentError("Erasure requires all jobs to be idle")
-            if any(x.get("busy") for x in self.sessions.values()):
-                raise AgentError("Erasure requires all turns to be idle", "busy")
-            # Reserve the source's erased input keys before the store destroys its payload.
-            targets = set(ids)
-            while True:
-                more = targets | {
-                    e["id"] for e in s["entries"] if targets.intersection(e.get("copies", []))
-                }
-                for eid in targets:
-                    row = kept[eid]
-                    receipt = row.get("data", {}).get("input")
-                    if row["kind"] == "input" and receipt in kept:
-                        more.add(receipt)
-                if more == targets:
-                    break
-                targets = more
-            if any(kept[eid]["kind"] in protected for eid in targets):
-                raise AgentError("Cannot erase records of authority or topology", "forbidden")
-            reservations = [
-                {
-                    "inputId": row["data"].get("input", row["id"]),
-                    "key": row["data"]["key"],
-                    "actorId": row["actor"],
-                    "submittedBy": row["data"].get("submittedBy", row["actor"]),
-                }
-                for row in s["entries"]
-                if row["id"] in targets and row["kind"] == "input_queued" and row["data"].get("key")
-            ]
-            await self.handle(
-                "append",
-                {
-                    "session": sid,
-                    "writer": "@harness",
-                    "kind": "erase",
-                    "data": {
-                        "entryIds": [e["id"] for e in s["entries"] if e["id"] in targets],
-                        "inputKeys": reservations,
-                    },
-                },
-                emit,
-            )
-            by_session = {
-                opened["id"]: {e["id"]: e for e in opened["entries"]}
-                for opened in self.sessions.values()
-            }
-            result = await self.call("@harness", "history", "erase", d)
-            for open_id in list(self.sessions):
-                loaded = await self.call("@harness", "history", "read", {"session": open_id})
-                if loaded:
-                    self.sessions[open_id] = loaded
-                    previous = by_session[open_id]
-                    ids = [eid for eid in result["erased"] if eid in previous]
-                    if ids:
-                        tags = {
-                            "turn": "turnId",
-                            "step": "stepId",
-                            "call": "toolCallId",
-                            "job": "jobId",
-                        }
-                        identities = {
-                            eid: {
-                                wire: previous[eid][native]
-                                for native, wire in tags.items()
-                                if previous[eid].get(native) is not None
-                            }
-                            for eid in ids
-                        }
-                        await self.handle(
-                            "append",
-                            {
-                                "session": open_id,
-                                "kind": "erase",
-                                "writer": "@harness",
-                                "data": {"entryIds": ids, "identities": identities},
-                            },
-                            emit,
-                        )
-                        for e in self.sessions[open_id]["entries"]:
-                            for native, wire in tags.items():
-                                if wire in identities.get(e["id"], {}):
-                                    e[native] = identities[e["id"]][wire]
-                await self.fire(
-                    "@harness", "session.invalidate", {"session": open_id, "reason": "erasure"}
-                )
-            result.setdefault("pending", [])
-            origin = {eid: open_id for open_id, rows in by_session.items() for eid in rows}
-            origin.update(
-                {pair["id"]: pair["sessionId"] for pair in result.get("affectedPairs", [])}
-            )
-            for category in ("erased", "pending"):
-                result[category + "Pairs"] = [
-                    {"sessionId": origin[eid], "id": eid}
-                    for eid in dict.fromkeys(result[category])
-                    if eid in origin
-                    and origin[eid] in self.sessions
-                    and "watch"
-                    in self.permissions(self.sessions[origin[eid]], d.get("actor", s["actor"]))
-                ]
-            result["out_of_reach"] = ["Output already delivered to recipients"]
-            for plugin in self.plugins.values():
-                erase_provider = getattr(plugin, "erase_provider", None)
-                if erase_provider:
-                    for erased_sid in result.get("sessions", [sid]):
-                        ids = [
-                            eid for eid in result["erased"] if eid in by_session.get(erased_sid, {})
-                        ]
-                        if not ids and erased_sid == sid:
-                            ids = d["entries"]
-                        report = await erase_provider(erased_sid, ids)
-                        result["pending"].extend(report["pending"])
-                        result["out_of_reach"].extend(report["outOfReach"])
-            result["pending"] = list(dict.fromkeys(result["pending"]))
-            return result
+            return await self.erase_entries(s, d)
         if op == "close":
             # Closing an idle attachment is not cancellation. A close that
             # would stop work still needs cancel, just like an explicit cancel.

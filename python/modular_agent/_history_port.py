@@ -120,14 +120,17 @@ class _SQLitePort:
     persistent = True
 
     def __init__(self, store: Any) -> None:
+        from threading import Lock
+
         self._store = store
+        self._lock = Lock()
         self.ttl_ms: int = store.ttl_ms
 
     def _call(
         self, method: str, route: str, sid: str = "", lease: str = "", **params: Any
     ) -> JsonObject:
         try:
-            with self._store.db:
+            with self._lock, self._store.db:
                 return cast(
                     JsonObject,
                     self._store.route(
@@ -190,7 +193,7 @@ def sqlite_history_port(
     """Open the built-in opaque SQLite records and leases for custom adapters."""
     if type(ttl_ms) is not int or not 0 < ttl_ms <= 2**53 - 1:
         raise ValueError("History TTL must be positive milliseconds")
-    with sqlite_store(Path(directory), ttl_ms) as store:
+    with sqlite_store(Path(directory), ttl_ms, check_same_thread=False) as store:
         yield _SQLitePort(store)
 
 

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from .output import redact
 
@@ -33,17 +34,22 @@ class PluginServer:
         self.registration, self.methods = registration, methods
         self.initialize, self.stop = initialize, stop
         self.ready = False
+        self.initializing = False
         self.peer = None
 
     async def dispatch(self, method, params, key):
         if method == "plugin/initialize":
-            if self.ready:
+            if self.ready or self.initializing:
                 raise WireError("Already initialized", "invalid_request")
             if params.get("binding") != BINDING or params.get("data") != DATA:
                 raise WireError("Unsupported binding or data version", "not_supported")
-            if self.initialize:
-                await self.initialize(params)
-            self.ready = True
+            self.initializing = True
+            try:
+                if self.initialize:
+                    await self.initialize(params)
+                self.ready = True
+            finally:
+                self.initializing = False
             return self.registration
         if not self.ready:
             raise WireError("Initialize first", "invalid_request")
@@ -108,6 +114,7 @@ class Conformance(PluginServer):
     def __init__(self, parts, *, network=False):
         self.network = network
         self.project = None
+        self.scratch = None
         runtime_parts = parts & {"runtime", "durable-runtime"}
         if len(runtime_parts) > 1:
             raise ValueError("Choose only one Runtime")
@@ -212,12 +219,17 @@ class Conformance(PluginServer):
                 if not project.is_absolute() or not project.is_dir():
                     raise WireError("Service cannot see the host project path", "not_supported")
                 self.project = project.resolve()
-            self.local = local_for_platform(params["home"])
+                self.scratch = TemporaryDirectory(prefix="ma-plugin-")
+            self.local = local_for_platform(self.scratch.name if self.scratch else params["home"])
             await self.local.start(EnvironmentAPI())
 
     async def close(self):
-        if self.local:
-            await self.local.stop()
+        try:
+            if self.local:
+                await self.local.stop()
+        finally:
+            if self.scratch:
+                self.scratch.cleanup()
 
     async def notification(self, method, p):
         if method == "host/env/output" and p.get("parentRequestId") in self.output_handlers:
@@ -387,8 +399,10 @@ class Conformance(PluginServer):
             }:
                 raise WireError("Unknown environment operation", "not_supported", -32601)
             cwd = str(Path(p["cwd"]).resolve())
-            if self.project is not None and not Path(cwd).is_relative_to(self.project):
-                raise WireError("Environment cwd is outside this host project", "forbidden")
+            if self.project is not None and (
+                not Path(p["cwd"]).is_absolute() or Path(cwd) != self.project
+            ):
+                raise WireError("Environment cwd is outside this host project", "invalid_request")
             if op == "save":
                 return await self.local.save({"session": sid, "cwd": cwd}, None)
             if op == "checkPoint":

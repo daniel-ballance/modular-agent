@@ -816,19 +816,24 @@ class External(Plugin):
                     or (p["report"] and "result" not in p)
                 ):
                     raise WireError("Invalid job outcome", "invalid_request")
-                await self.api.call(
-                    "jobs",
-                    "report",
-                    {
-                        **args,
-                        "state": outcome["kind"],
-                        "error": outcome.get("error"),
-                        "result": p.get("result") or [],
-                        "report": p["report"],
-                        "usage": p.get("usage", {}),
-                        "strict": True,
-                    },
-                )
+                try:
+                    await self.api.call(
+                        "jobs",
+                        "report",
+                        {
+                            **args,
+                            "state": outcome["kind"],
+                            "error": outcome.get("error"),
+                            "result": p.get("result") or [],
+                            "report": p["report"],
+                            "usage": p.get("usage", {}),
+                            "strict": True,
+                        },
+                    )
+                except AgentError as exc:
+                    if exc.code != "result_too_large":
+                        raise
+                    raise WireError(str(exc), "result_too_large") from exc
             elif method == "host/jobs/progress":
                 await self.api.call("jobs", "progress", {**args, "content": p["content"]})
                 return None
@@ -1010,20 +1015,25 @@ class External(Plugin):
                 p.get("key") is not None and not isinstance(p["key"], str)
             ):
                 raise WireError("Invalid job kind or key", "invalid_request")
-            j = await self.api.call(
-                "jobs",
-                "create",
-                {
-                    "session": sid,
-                    "actor": actor,
-                    "authority": authority,
-                    "turn": d.get("turn"),
-                    "call": d.get("call", {}).get("id"),
-                    "key": p.get("key"),
-                    "kind": p["kind"],
-                    "detail": p["detail"],
-                },
-            )
+            try:
+                j = await self.api.call(
+                    "jobs",
+                    "create",
+                    {
+                        "session": sid,
+                        "actor": actor,
+                        "authority": authority,
+                        "turn": d.get("turn"),
+                        "call": d.get("call", {}).get("id"),
+                        "key": p.get("key"),
+                        "kind": p["kind"],
+                        "detail": p["detail"],
+                    },
+                )
+            except AgentError as exc:
+                if exc.code != "busy":
+                    raise
+                raise WireError(str(exc), "busy") from exc
             return {"jobId": j["id"], "started": j["started"]}
         if method in {"host/tools/list", "host/tools/call"}:
             if not parent or parent["method"] != "tools/call" or not d.get("dispatch"):
@@ -1139,6 +1149,10 @@ class External(Plugin):
                 ),
             }
         if method == "host/history":
+            try:
+                await self.api._harness.guard_erasure(sid)
+            except AgentError as exc:
+                raise WireError("History pending state is unavailable", "internal") from exc
             if runtime_parent:
                 scope = d["runtime"]
                 if scope.ended:

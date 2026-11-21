@@ -59,15 +59,23 @@ class Questions(Plugin):
     async def connect(self, d, emit):
         s = await self.api.session("get", session=d["session"], actor=d.get("actor", "user"))
         actor = d.get("actor", s["actor"])
-        self.connected.setdefault(s["id"], set()).add(actor)
+        self.connected.setdefault(s["id"], {}).setdefault(actor, set()).add(d.get("route"))
         return {}
 
     async def present(self, d, emit):
-        return sorted(self.connected.get(d["session"], set()))
+        return sorted(self.connected.get(d["session"], {}))
 
     async def disconnect(self, d, emit):
         sid = d["session"]
-        self.connected.get(sid, set()).discard(d.get("actor", "user"))
+        actor = d.get("actor", "user")
+        routes = self.connected.get(sid, {}).get(actor)
+        if routes is not None:
+            if d.get("all_routes"):
+                routes.clear()
+            else:
+                routes.discard(d.get("route"))
+            if not routes:
+                del self.connected[sid][actor]
         for q in (await self._state(sid)).values():
             if (
                 not q.get("answer")

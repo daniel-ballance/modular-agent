@@ -1,6 +1,7 @@
 """Journalled turn engine shared by the two independently installed Runtimes."""
 
 import asyncio
+import json
 
 from jsonschema import Draft202012Validator, ValidationError
 from referencing import Registry
@@ -25,22 +26,38 @@ UNKNOWN = "Call did not finish. Its outcome is unknown. Check outside state befo
 
 def checked_tool_result(definition, result):
     schema = (definition or {}).get("returns")
-    if result["status"] != "completed" or schema is None:
-        return result
-    error = "Completed tool result is missing its value"
-    if "value" in result:
-        try:
-            Draft202012Validator(schema, registry=Registry()).validate(result["value"])
-        except ValidationError as exc:
-            error = "Invalid completed tool value: " + exc.message
+    error = None
+    if result["status"] == "completed" and schema is not None:
+        if "value" not in result:
+            error = "Completed tool result is missing its value"
         else:
-            return result
-    return {"call": result["call"], "status": "completed", "content": [], "_result_error": error}
+            try:
+                Draft202012Validator(schema, registry=Registry()).validate(result["value"])
+            except ValidationError as exc:
+                error = "Invalid completed tool value: " + exc.message[:512]
+    if error:
+        return {
+            "call": result["call"],
+            "status": "completed",
+            "content": [],
+            "_result_error": error,
+        }
+    # A local Runtime records both the receipt and the terminal result. Leave
+    # room in the call's 64 KiB obligation for both envelopes and bookkeeping.
+    if len(json.dumps(result, ensure_ascii=True, separators=(",", ":"))) > 16 * 1024:
+        return {
+            "call": result["call"],
+            "status": result["status"],
+            "content": [],
+            "resultUnavailable": "result_too_large",
+            "_result_error": "Tool result exceeds reserved space",
+        }
+    return result
 
 
 def require_processed_result(result):
     if error := result.get("_result_error"):
-        raise AgentError(error, "internal")
+        raise AgentError(error, result.get("resultUnavailable", "internal"))
 
 
 async def ordered_tools(calls, parallel, execute, record):
@@ -172,7 +189,7 @@ class Turns:
                 },
             )
         result, usage, structured = [], {}, {}
-        tenant_limit = False
+        tenant_limit = capacity_limit = False
         start = next(
             e
             for e in await self._entries(sid)
@@ -320,6 +337,8 @@ class Turns:
                         )
                 open_calls = await self._tools(sid, turn, step, calls, tools)
                 decision = await self._step_after(sid, turn, response_entry)
+                if response.get("hostLimit") == "capacity":
+                    raise AgentError("Resource reservation capacity exhausted", "capacity")
                 if await self.api.session("tenant_exhausted", session=sid):
                     raise AgentError("Tenant token budget reached", "tenantTokens")
                 if open_calls and not decision.get("refused"):
@@ -395,7 +414,11 @@ class Turns:
         except Exception as exc:
             tenant_limit = isinstance(exc, AgentError) and exc.code == "tenantTokens"
             step_limit = isinstance(exc, AgentError) and exc.code == "stepLimit"
-            outcome, error = ("limit" if tenant_limit or step_limit else "failed"), str(exc)
+            capacity_limit = isinstance(exc, AgentError) and exc.code in {"capacity", "busy"}
+            outcome, error = (
+                ("limit" if tenant_limit or step_limit or capacity_limit else "failed"),
+                str(exc),
+            )
             if not tenant_limit:
                 await self.api.session("invalidate", session=sid, reason="failure")
         finally:
@@ -427,8 +450,13 @@ class Turns:
             "open_calls": open_calls,
             **(structured if outcome == "completed" else {}),
             **(
-                {"shared_outcome": {"kind": "limit", "limit": "tenantTokens"}}
-                if tenant_limit
+                {
+                    "shared_outcome": {
+                        "kind": "limit",
+                        "limit": "capacity" if capacity_limit else "tenantTokens",
+                    }
+                }
+                if tenant_limit or capacity_limit
                 else {}
             ),
             "actor": actor,
@@ -659,6 +687,9 @@ class Turns:
             exact_replay = False
             retries += 1
             step = await self._retry_step(sid, turn, step, settings)
+        response = await self.api.session(
+            "bound_model_response", session=sid, step=step, response=response
+        )
         calls = response.get("calls", [])
         ids = [c["id"] for c in calls]
         existing = {e["call"] for e in await self._entries(sid) if e["kind"] == "tool_call"}

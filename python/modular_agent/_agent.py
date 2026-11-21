@@ -28,7 +28,7 @@ from ma_core import plain
 from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
-from ma_harness.authority import CONNECTION_AUTHORITY, PERMISSIONS
+from ma_harness.authority import CONNECTION_AUTHORITY, PERMISSIONS, read_tenants
 from ma_history import History
 from ma_history.http import HTTPHistory
 from ma_jobs import Jobs
@@ -43,6 +43,7 @@ from ma_plugin.websocket import (
     WebSocketServer,
     WebSocketTLS,
     listen_websocket,
+    read_token,
 )
 from ma_questions import Questions
 from ma_runtime import Runtime
@@ -82,6 +83,22 @@ from ._types import (
     QuestionHandler,
     Tenant,
 )
+
+
+ACP_RIGHTS = tuple(sorted(PERMISSIONS))
+
+
+def read_service_token(path: str | PathLike[str]) -> str:
+    """Read an operator-owned service token with the binding's file checks."""
+    return read_token(path)
+
+
+def tenants_from_environment() -> dict[str, Tenant]:
+    """Read the operator's tenant configuration, outside client settings."""
+    try:
+        return cast(dict[str, Tenant], read_tenants(os.getenv("MODULAR_AGENT_TENANTS", "{}")))
+    except Exception as exc:
+        raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
 
 
 def run[T](coro: Coroutine[Any, Any, T]) -> T:
@@ -171,6 +188,46 @@ class AcpActor(TypedDict):
     actor: Actor
     tenants: NotRequired[Sequence[str | None]]
     projects: NotRequired[Sequence[str | PathLike[str]]]
+    represents: NotRequired[Sequence[str]]
+
+
+def _acp_list(value: Any, check: Callable[[Any], bool], name: str) -> list[Any]:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes))
+        or not all(check(item) for item in value)
+    ):
+        raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid ACP {name} list")
+    return list(value)
+
+
+def _actor_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _acp_scope(options: Mapping[str, Any]) -> dict[str, Any]:
+    scope: dict[str, Any] = {}
+    if "projects" in options:
+        paths = _acp_list(
+            options["projects"], lambda path: isinstance(path, (str, PathLike)), "projects"
+        )
+        try:
+            if any(not Path(path).is_absolute() or not Path(path).is_dir() for path in paths):
+                raise ValueError("Expected absolute project directories")
+            scope["projects"] = frozenset(Path(path).resolve(strict=True) for path in paths)
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Invalid ACP project path") from exc
+    scope["tenants"] = frozenset(
+        _acp_list(options.get("tenants", [None]), lambda t: t is None or _actor_id(t), "tenants")
+    )
+    scope["represents"] = frozenset(
+        _acp_list(options.get("represents", []), _actor_id, "represents")
+    )
+    return scope
+
+
+def _acp_rights(value: Any) -> frozenset[str]:
+    return frozenset(_acp_list(value, lambda r: _actor_id(r) and r in PERMISSIONS, "rights"))
 
 
 class _AcpProject(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.
@@ -209,25 +266,26 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
         *,
         principal: AcpActor | None = None,
+        stdio_actor: Actor | None = None,
         connections: _AcpConnections | None = None,
+        scope: Mapping[str, Any],
+        rights: frozenset[str] | None = None,
     ) -> None:
-        actor = (
-            principal["actor"]["id"] if principal else os.environ.get("MODULAR_AGENT_ACTOR", "user")
-        )
+        configured = principal["actor"] if principal else stdio_actor
+        actor = configured["id"] if configured else os.environ.get("MODULAR_AGENT_ACTOR", "user")
         super().__init__(agent._project, agent._settings, actor=actor)
+        if configured is not None:
+            self.principal = configured
         self.network = principal is not None
-        self._allowed_projects: set[Path] | None = None
-        self._allowed_tenants: set[str | None] = {None}
+        self._allowed_projects: frozenset[Path] | None = scope.get("projects")
+        self._allowed_tenants: frozenset[str | None] = scope["tenants"]
+        self.represents = scope["represents"]
         self._connections = connections
-        self._token_rights: set[str] = set()
+        self._token_rights = rights
         self._connection_grants: dict[str, set[str]] = {}
         if principal is not None:
             self.name = "acp:" + uuid4().hex
             self.principal = principal["actor"]
-            self._token_rights = set(self.principal["rights"])
-            if "projects" in principal:
-                self._allowed_projects = {Path(p).resolve() for p in principal["projects"]}
-            self._allowed_tenants = set(principal.get("tenants", [None]))
         self._agent = agent
         self._compose = compose
         self._compose_reopen = compose_reopen
@@ -253,7 +311,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
     def _authority_scope(self) -> Any:
         return CONNECTION_AUTHORITY.set(
-            (self.actor, self._token_rights, self._connection_grants) if self.network else None
+            (self.actor, self._token_rights, self._connection_grants, self._scope_allows)
         )
 
     def project_scope(self) -> tuple[Token[Agent | None], Any]:
@@ -291,7 +349,14 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             api.provide("acp", self)
 
     def _project_allowed(self, folder: Path) -> bool:
-        return self._allowed_projects is None or folder in self._allowed_projects
+        return (self._compose is not None or folder == self._agent._project) and (
+            self._allowed_projects is None or folder in self._allowed_projects
+        )
+
+    def _scope_allows(self, session: Mapping[str, Any]) -> bool:
+        return self._project_allowed(Path(session["project"])) and self.tenant_allowed(
+            session.get("tenant")
+        )
 
     def cwd(self, cwd: str, additional_directories: Any = None, **kwargs: Any) -> str:
         project = cast(str, super().cwd(cwd, additional_directories, **kwargs))
@@ -300,15 +365,13 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         return project
 
     def tenant_allowed(self, tenant: Any) -> bool:
-        return not self.network or (
-            (tenant is None or isinstance(tenant, str)) and tenant in self._allowed_tenants
-        )
+        return (tenant is None or isinstance(tenant, str)) and tenant in self._allowed_tenants
 
     def session_create_rights(self, tenant: str | None, has_mcp: bool) -> list[str]:
-        if not self.network:
-            return cast(list[str], super().session_create_rights(tenant, has_mcp))
         harness = self._current()._h
         rights = set(self.principal["rights"]) & harness.admin & harness.tenant
+        if self._token_rights is not None:
+            rights &= self._token_rights
         if tenant is not None:
             rights &= set(harness.tenant_config(tenant)["rights"])
         if not ({"input", "tools"} if has_mcp else {"input"}) <= rights:
@@ -316,9 +379,8 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         return sorted(rights)
 
     async def visible_sessions(self, project: str | None) -> list[dict[str, Any]]:
-        rows = cast(list[dict[str, Any]], await super().visible_sessions(project))
-        if not self.network:
-            return rows
+        canonical = str(Path(project).resolve()) if project is not None else None
+        rows = cast(list[dict[str, Any]], await super().visible_sessions(canonical))
         agent = self._current()
         visible = []
         for row in rows:
@@ -332,25 +394,35 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 session = await agent._api.call("history", "read", {"session": row["id"]})
             if (
                 session is not None
-                and self.tenant_allowed(session.get("tenant"))
-                and "watch" in agent._h.permissions(session, self.actor)
+                and self._scope_allows(session)
+                and agent._h.can_open(session, self.actor, local=not self.network)
             ):
                 visible.append(row)
         return visible
 
-    async def require_visible_session(self, project: str, sid: str) -> None:
-        await super().require_visible_session(project, sid)
+    async def require_visible_session(self, project: str | None, sid: str) -> None:
+        owner = self._connections.composition(sid) if self._connections else None
+        agent = owner or self._agent
+        session = agent._h.sessions.get(sid)
+        if session is None:
+            session = await self._agent._api.call("history", "read", {"session": sid})
+        if (
+            session is None
+            or (not session["entries"] and sid not in agent._h.sessions)
+            or not self._scope_allows(session)
+            or not agent._h.can_open(session, self.actor, local=not self.network)
+        ):
+            raise protocol_error("forbidden", "Session inaccessible")
+        if project is None:
+            return
+        if session["project"] != project:
+            raise protocol_error("wrong_project", "Session is in a different project")
         self._claim(sid)
-        if self.network and sid not in self._connection_grants:
-            owner = self._connections.composition(sid) if self._connections else None
-            session = (owner or self._agent)._h.sessions.get(sid)
-            if session is None:
-                session = await self._agent._api.call("history", "read", {"session": sid})
-            if session is not None:
-                grant = session.get("actors", {}).get(self.actor)
-                self._connection_grants[sid] = self._token_rights & set(
-                    grant["authority"] if grant else ()
-                )
+        if self.network and sid not in self._connection_grants and self._token_rights is not None:
+            grant = session.get("actors", {}).get(self.actor)
+            self._connection_grants[sid] = set(self._token_rights) & set(
+                grant["authority"] if grant else ()
+            )
 
     async def _open(
         self,
@@ -420,13 +492,15 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                         self._connections.projects.pop(selected, None)
                     await selected.close()
                 raise
+        if selected is not self._agent:
+            selected._h.capacity = self._agent._h.capacity
         self._scope.set(selected)
 
     async def session_started(self, payload: JsonObject) -> None:
         sid = cast(str, payload["session"])
         self._bind(sid)
         if sid == self.opening:
-            await self.api.call("questions", "connect", {"session": sid, "actor": self.actor})
+            await self.set_presence(sid, self.actor, True)
         await super().session_started(payload)
 
     def _bind(self, sid: str) -> None:
@@ -472,19 +546,17 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 while claim := connections.busy.get(sid):
                     await claim[1].wait()
                 self._claim(sid)
+                scope = self._scope.set(agent)
                 try:
-                    refs = connections.sessions.get(sid, {})
-                    if sid in agent._h.sessions and not any(
-                        peer.actor == self.actor for peer in refs if peer is not self
-                    ):
-                        await self._apis[agent].call(
-                            "questions", "disconnect", {"session": sid, "actor": self.actor}
-                        )
+                    if sid in agent._h.sessions:
+                        for actor in self.presence.get(sid, set()).copy():
+                            await self.set_presence(sid, actor, False)
                     self._unbind(sid)
                     self.sessions.discard(sid)
                     if sid not in connections.sessions and sid in agent._h.sessions:
                         await agent._h.suspend_session(sid)
                 finally:
+                    self._scope.reset(scope)
                     self._release_claim(sid)
         finally:
             try:
@@ -798,6 +870,10 @@ class Agent:
             for row in catalog
         ]
 
+    def reservation_limits(self) -> dict[str, dict[str, int]]:
+        """Return the operator's limits, never live use or another session's state."""
+        return cast(dict[str, dict[str, int]], deepcopy(self._h.capacity.limits))
+
     def declaration(self) -> JsonObject:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
@@ -824,7 +900,8 @@ class Agent:
             lateAnswersStartTurns=bool(
                 self._late_answers and runtime.get("open_calls") and "questions" in parts
             ),
-            erasure=bool(store.get("erasure")),
+            erasure=self._h.supports_erasure(),
+            resourceReservations=self._h.capacity.declaration(),
             portableSessions=store.get("retention") != "process",
             settingsDuringTurn="refused",
             confinesFiles=bool(environment.get("confines_files")),
@@ -862,6 +939,11 @@ class Agent:
         compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None = None,
         project_settings: Callable[[Path], JsonObject] | None = None,
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
+        projects: Sequence[str | PathLike[str]] | None = None,
+        tenants: Sequence[str | None] | None = None,
+        rights: Sequence[str] | None = None,
+        represents: Sequence[str] | None = None,
+        actor: Actor | None = None,
     ) -> None: ...
 
     @overload
@@ -887,8 +969,44 @@ class Agent:
         compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None = None,
         project_settings: Callable[[Path], JsonObject] | None = None,
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
+        projects: Sequence[str | PathLike[str]] | None = None,
+        tenants: Sequence[str | None] | None = None,
+        rights: Sequence[str] | None = None,
+        represents: Sequence[str] | None = None,
+        actor: Actor | None = None,
     ) -> WebSocketServer | None:
         """Serve ACP on stdio or start an authenticated WebSocket listener."""
+        options = {
+            name: value
+            for name, value in (
+                ("projects", projects),
+                ("tenants", tenants),
+                ("represents", represents),
+            )
+            if value is not None
+        }
+        if listen is not None and (options or rights is not None or actor is not None):
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Set network ACP scope on each token")
+        stdio_scope = _acp_scope(options)
+        stdio_rights = _acp_rights(rights) if rights is not None else None
+        if actor is not None:
+            try:
+                if not _actor_id(actor["id"]) or actor["kind"] not in (
+                    "user",
+                    "host",
+                    "agent",
+                    "program",
+                ):
+                    raise ValueError("Invalid stdio principal")
+                maximum = _acp_rights(actor["rights"])
+                stdio_rights = maximum if stdio_rights is None else stdio_rights & maximum
+                stdio_actor = deepcopy(actor)
+            except (ValueError, TypeError, KeyError) as exc:
+                raise AgentError(ErrorCode.INVALID_COMPOSITION, "Invalid stdio principal") from exc
+        else:
+            stdio_actor = None
+            if listen is None and not _actor_id(os.environ.get("MODULAR_AGENT_ACTOR", "user")):
+                raise AgentError(ErrorCode.INVALID_COMPOSITION, "Invalid MODULAR_AGENT_ACTOR")
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         if self._handler is not None:
@@ -908,20 +1026,23 @@ class Agent:
                 kinds: dict[str, str] = {}
                 connections = _AcpConnections()
                 principals = deepcopy(actors)
-                for entry in principals:
-                    actor = entry["actor"]
-                    aid, kind, allowed = actor["id"], actor["kind"], set(actor["rights"])
-                    if (
-                        not aid
-                        or kind not in {"user", "host", "agent", "program"}
-                        or not allowed <= PERMISSIONS
-                    ):
-                        raise ValueError("Each WebSocket actor needs an id, kind and valid rights")
-                    if aid in kinds and kind != kinds[aid]:
-                        raise ValueError("Tokens for the same actor id must agree on kind")
-                    kinds[aid] = kind
-                if not actors:
-                    raise ValueError("WebSocket ACP requires at least one configured actor")
+                scopes = {}
+                try:
+                    for entry in principals:
+                        actor = entry["actor"]
+                        aid, kind = actor["id"], actor["kind"]
+                        if not _actor_id(aid) or kind not in ("user", "host", "agent", "program"):
+                            raise ValueError(
+                                "Each WebSocket actor needs an id, kind and valid rights"
+                            )
+                        if aid in kinds and kind != kinds[aid]:
+                            raise ValueError("Tokens for the same actor id must agree on kind")
+                        kinds[aid] = kind
+                        scopes[id(entry)] = _acp_scope(entry), _acp_rights(actor["rights"])
+                    if not principals:
+                        raise ValueError("WebSocket ACP requires at least one configured actor")
+                except (TypeError, ValueError, KeyError) as exc:
+                    raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
                 await self._install_acp_mcp(project_mcp)
 
                 async def handle(frames: WebSocketFrames, entry: AcpActor) -> None:
@@ -933,6 +1054,8 @@ class Agent:
                         project_mcp,
                         principal=entry,
                         connections=connections,
+                        scope=scopes[id(entry)][0],
+                        rights=scopes[id(entry)][1],
                     )
                     await self._h.attach_interface(interface)
                     try:
@@ -949,7 +1072,16 @@ class Agent:
                 )
                 return self._acp_server
             await self._install_acp_mcp(project_mcp)
-            interface = _Interface(self, compose, compose_reopen, project_settings, project_mcp)
+            interface = _Interface(
+                self,
+                compose,
+                compose_reopen,
+                project_settings,
+                project_mcp,
+                scope=stdio_scope,
+                rights=stdio_rights,
+                stdio_actor=stdio_actor,
+            )
             await self._h.load(interface)
         try:
             await interface.serve()
@@ -1073,6 +1205,7 @@ def create_agent(
     tenants: Mapping[str, Tenant] | None = None,
     job_reports_start_turns: bool = False,
     late_answers_start_turns: bool = False,
+    resource_reservations: Mapping[str, Mapping[str, int]] | None = None,
 ) -> AgentStart:
     async def build() -> Agent:
         return await build_with_store()
@@ -1116,7 +1249,17 @@ def create_agent(
                 ErrorCode.INVALID_COMPOSITION, "Service deadlines must be finite and positive"
             )
         scratch = TemporaryDirectory(prefix="modular-agent-")
-        h = Harness(process_plugins=(), tenants=tenants or {})
+        try:
+            h = Harness(
+                process_plugins=(),
+                tenants=tenants or {},
+                reservations={k: dict(v) for k, v in resource_reservations.items()}
+                if resource_reservations is not None
+                else None,
+            )
+        except Exception as exc:
+            scratch.cleanup()
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
         h.lazy_setup = True
         try:
             root = Path(data_dir).resolve() if data_dir is not None else Path(scratch.name)
@@ -1138,7 +1281,9 @@ def create_agent(
             if history is not None and not isinstance(history, HistoryStore):
                 store = _PortHistory(history)
             elif isinstance(history, HistoryStore) and history._kind == "http":
-                store = HTTPHistory(history._url, history._path)
+                store = HTTPHistory(
+                    history._url, history._path, history._coordination, history._witness
+                )
             elif durability == "ephemeral" or (history is None and data_dir is None):
                 store = agent._memory_store = memory_store or _MemoryHistory()
             else:

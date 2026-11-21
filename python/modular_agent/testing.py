@@ -138,6 +138,7 @@ class _Options(TypedDict, total=False):
     process_plugins: Sequence[ProcessPlugin | JsonObject] | None
     service_plugins: Sequence[ServicePlugin] | None
     plugin_host: bool | None
+    resource_reservations: dict[str, dict[str, int]] | None
     settings: JsonObject
     approval: Approval | None
     on_question: QuestionHandler | None

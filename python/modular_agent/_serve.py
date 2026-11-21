@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextvars import ContextVar
 from copy import deepcopy
 from os import PathLike
@@ -46,7 +46,9 @@ async def _serve(
     streams: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None,
     *,
     frames: WebSocketFrames | None = None,
+    projects: frozenset[Path] = frozenset(),
 ) -> None:
+    environment_project: Path | None = None
     registrar: Registrar | None = None
     attempted = False
     stopped = False
@@ -167,7 +169,7 @@ async def _serve(
     }
 
     async def initialize(p: dict[str, Any]) -> None:
-        nonlocal registrar
+        nonlocal registrar, environment_project
         config = p.get("config", {})
         if not isinstance(config, dict):
             raise WireError("Plugin config must be an object", "invalid_request")
@@ -224,6 +226,15 @@ async def _serve(
         if registrar._runtime is not None:
             registration["runtime"] = registrar._runtime[0].declaration()
         if registrar._environment is not None:
+            if frames is not None:
+                project = p.get("project")
+                if not isinstance(project, str) or not Path(project).is_absolute():
+                    raise WireError("Environment needs an absolute project path", "not_supported")
+                environment_project = Path(project).resolve()
+                if environment_project not in projects:
+                    raise WireError(
+                        "Environment project is outside operator scope", "not_supported"
+                    )
             registration["workingEnvironment"] = registrar._environment.supports
         registration["hooks"] = [
             {"hook": h.point, "handlerId": n, "order": h.order}
@@ -623,6 +634,22 @@ async def _serve(
         async def progress(chunk: str) -> None:
             await server.peer.notify("env/output", {"parentRequestId": key, "chunk": chunk})
 
+        if environment_project is not None and method != "sessionEnded":
+            cwd = params.get("cwd")
+            if (
+                not isinstance(cwd, str)
+                or not Path(cwd).is_absolute()
+                or Path(cwd).resolve() != environment_project
+            ):
+                raise WireError("Environment cwd is outside this host project", "invalid_request")
+            if method in {"read", "exists", "write", "list"}:
+                path = params.get("path")
+                if not isinstance(path, str) or not (
+                    (environment_project / path).resolve().is_relative_to(environment_project)
+                ):
+                    raise WireError(
+                        "Environment path is outside this host project", "invalid_request"
+                    )
         return await _dispatch_environment(environment, method, params, progress)
 
     model_contexts: dict[str, RuntimeContext] = {}
@@ -781,6 +808,7 @@ def serve(
     listen: str,
     token_file: str | PathLike[str],
     tls: WebSocketTLS | None = None,
+    projects: Sequence[str | PathLike[str]] = (),
 ) -> Coroutine[Any, Any, WebSocketServer]: ...
 
 
@@ -790,23 +818,33 @@ def serve(
     listen: str | None = None,
     token_file: str | PathLike[str] | None = None,
     tls: WebSocketTLS | None = None,
+    projects: Sequence[str | PathLike[str]] = (),
 ) -> None | Coroutine[Any, Any, WebSocketServer]:
     """Serve on stdio, or await a WebSocket listener with a fresh instance per host."""
     if isinstance(plugin, Plugin):
         _check_servable(plugin)
     if listen is None:
-        if not isinstance(plugin, Plugin) or token_file is not None or tls is not None:
+        if not isinstance(plugin, Plugin) or token_file is not None or tls is not None or projects:
             raise ValueError("WebSocket options require listen")
         asyncio.run(_serve(plugin))
         return None
     if token_file is None:
         raise ValueError("WebSocket serving requires token_file")
 
+    try:
+        roots = frozenset(Path(p).resolve(strict=True) for p in projects)
+        if isinstance(projects, (str, bytes)) or any(
+            not Path(p).is_absolute() or not Path(p).is_dir() for p in projects
+        ):
+            raise ValueError("Expected absolute project directories")
+    except (OSError, ValueError, RuntimeError, TypeError) as exc:
+        raise AgentError(ErrorCode.INVALID_COMPOSITION, "Invalid plugin service projects") from exc
+
     async def connected(frames: WebSocketFrames, _: None) -> None:
         # Ordinary Plugin values can keep per-connection state in setup's
         # registrar. Use a factory for external resources or stateful closures.
         instance = deepcopy(plugin) if isinstance(plugin, Plugin) else plugin()
         _check_servable(instance)
-        await _serve(instance, frames=frames)
+        await _serve(instance, frames=frames, projects=roots)
 
     return listen_websocket(listen, [(token_file, None)], PLUGIN_PROTOCOL, connected, tls)

@@ -41,6 +41,46 @@ async def test_command_can_start_a_job_and_owner_confirms_cancel(served):
         assert [e["kind"] for e in history if e["kind"] == "jobEnded"] == ["jobEnded"]
 
 
+@pytest.mark.parametrize("served", [False, True])
+async def test_report_uses_reserved_input_and_bounds_result(served):
+    class Owner:
+        async def cancel(self, job, cx):
+            await job.end("cancelled")
+
+    async def command(_, cx):
+        job = await cx.jobs.start("bounded", {})
+        with pytest.raises(AgentError) as refused:
+            await cx.jobs.start("over capacity", {})
+        assert refused.value.code is ErrorCode.BUSY
+        with pytest.raises(AgentError) as oversized:
+            await job.end("completed", "large" * 4000, report=True)
+        assert oversized.value.code is ErrorCode.RESULT_TOO_LARGE
+        return job.id
+
+    def setup(r):
+        r.jobs(Owner())
+        r.command("bounded", "Start a reporting job", command)
+
+    plugin = Plugin("bounded-job", setup=setup)
+    async with make_agent(
+        script=[],
+        plugins=[over_wire(plugin) if served else plugin],
+        resource_reservations={"session": {"inputs": 1, "jobs": 1}},
+    ) as agent:
+        session = await agent.session()
+        jid = await session.run_command("/bounded")
+        rows = await session.history()
+        assert len([row for row in rows if row["kind"] == "jobStarted"]) == 1
+        [end] = [row for row in rows if row["kind"] == "jobEnded" and row["jobId"] == jid]
+        [report] = [
+            row for row in rows if row["kind"] == "inputAccepted" and row.get("jobId") == jid
+        ]
+        assert end["data"]["result"] == report["data"]["content"]
+        assert end["data"]["result"] == [
+            {"type": "text", "text": "Job result exceeded reserved space"}
+        ]
+
+
 async def test_owner_resumes_unfinished_job_on_reopen(tmp_path):
     resumed = []
 

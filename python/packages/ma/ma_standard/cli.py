@@ -13,6 +13,7 @@ import warnings
 from typing import cast
 
 from modular_agent import (
+    ACP_RIGHTS,
     Agent,
     AgentError,
     Answer,
@@ -40,6 +41,7 @@ from .auth import AuthFile
 from .code import code_tool
 from .config import Paths, claude_launch
 from .prompt import discover, prompt_plugin
+from modular_agent import AcpPolicy
 
 
 class Script(ScriptedProvider):
@@ -99,6 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--declaration", action="store_true")
     parser.add_argument("--acp", action="store_true")
     parser.add_argument("--listen", metavar="ADDR", help="serve ACP on a loopback WebSocket")
+    parser.add_argument("--policy", type=Path, metavar="FILE", help="operator policy JSON")
     parser.add_argument(
         "--token-file", type=Path, metavar="FILE", help="ACP WebSocket bearer token"
     )
@@ -337,7 +340,17 @@ async def _agent(
     )
     if bool(url) != bool(token):
         raise ValueError("set both MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE")
-    history = http_history(url, token) if url and token else file_history(paths.state / "sessions")
+    history = (
+        http_history(
+            url,
+            token,
+            coordination=os.environ.get("MODULAR_AGENT_HISTORY_COORDINATION"),
+            witness=os.environ.get("MODULAR_AGENT_HISTORY_WITNESS"),
+        )
+        if url and token
+        else file_history(paths.state / "sessions")
+    )
+    policy: AcpPolicy = args.operator_policy
     if history_only:
         return await create_agent(
             project=project,
@@ -345,10 +358,14 @@ async def _agent(
             history=history,
             durability=durability,
             local_process_groups=True,
+            resource_reservations=policy.limits,
+            tenants=policy.tenants,
         )
     script = os.environ.get("MODULAR_AGENT_SCRIPT")
     testing = args.acp and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1"
-    settings = paths.settings(project)
+    settings: JsonObject = (
+        {"thinking": "off"} if args.acp and not acp_session else paths.settings(project)
+    )
     auth = AuthFile(paths.config / "auth.json")
     providers: list[Provider] = []
     processes = None
@@ -445,6 +462,8 @@ async def _agent(
         model=model,
         settings=settings,
         process_plugins=processes,
+        resource_reservations=policy.limits,
+        tenants=policy.tenants,
         plugin_host=True,
         commands=True,
         job_reports_start_turns=True,
@@ -455,13 +474,21 @@ async def _agent(
 
 async def _run(args: argparse.Namespace) -> int:
     paths = Paths.from_env()
+    policy = args.operator_policy = AcpPolicy(
+        args.policy or paths.config / "policy.json", required=args.policy is not None
+    )
     project = args.project.resolve(strict=True)
     if args.provider and args.command not in {"login", "logout"}:
         raise ValueError(f"unknown argument {args.provider}; use --help")
-    if (args.listen is None) != (args.token_file is None) or (
-        args.listen is not None and (not args.acp or args.command)
-    ):
-        raise ValueError("--listen and --token-file must be used together with --acp")
+    if args.token_file is not None and args.listen is None:
+        raise ValueError("--token-file requires --listen")
+    if args.listen is not None:
+        if not args.acp or args.command:
+            raise ValueError("--listen requires --acp")
+        if (args.token_file is None) == (policy.actors is None):
+            raise ValueError(
+                f"policy {policy.path}: use either policy actors or --token-file with --listen"
+            )
     if args.acp and (args.prompt is not None or args.session or args.trust_project or args.resume):
         raise ValueError("with --acp the client creates sessions and grants trust")
     if args.trust_project:
@@ -516,7 +543,7 @@ async def _run(args: argparse.Namespace) -> int:
         if args.acp:
 
             async def compose(folder: Path) -> Agent:
-                if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
+                if folder == project and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
                     return agent
                 return await _agent(paths, folder, args, acp_session=True)
 
@@ -524,39 +551,27 @@ async def _run(args: argparse.Namespace) -> int:
                 saved = await agent.session_info(id)
                 if saved["project"] != str(folder):
                     raise ValueError("Session is not in this project")
-                if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
+                if folder == project and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
                     return agent
                 old = cast(JsonObject, saved["settings"]).get("model")
                 selected = f"{old['provider']}/{old['id']}" if isinstance(old, dict) else None
                 return await _agent(paths, folder, args, saved_model=selected, acp_session=True)
 
             if args.listen is None:
-                await agent.serve_acp(compose=compose, compose_reopen=reopen, project_mcp=paths.mcp)
+                await agent.serve_acp(
+                    compose=compose,
+                    compose_reopen=reopen,
+                    project_mcp=paths.mcp,
+                    **(policy.stdio or {}),
+                )
             else:
                 listener = await agent.serve_acp(
                     listen=args.listen,
-                    actors=[
+                    actors=policy.actors
+                    or [
                         {
                             "token_file": args.token_file,
-                            "actor": {
-                                "id": "user",
-                                "kind": "host",
-                                "rights": [
-                                    "administer",
-                                    "answer",
-                                    "approve",
-                                    "cancel",
-                                    "delegate",
-                                    "erase",
-                                    "grant",
-                                    "input",
-                                    "jobs",
-                                    "propose",
-                                    "settings",
-                                    "tools",
-                                    "watch",
-                                ],
-                            },
+                            "actor": {"id": "user", "kind": "host", "rights": list(ACP_RIGHTS)},
                         }
                     ],
                     compose=compose,
@@ -580,7 +595,7 @@ async def _run(args: argparse.Namespace) -> int:
                 )
             return 0
         if args.declaration:
-            _json(agent.declaration())
+            _json({**agent.declaration(), "limits": agent.reservation_limits()})
             return 0
         session = await agent.open_session(args.session) if args.session else await agent.session()
         if args.session:

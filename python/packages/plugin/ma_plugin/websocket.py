@@ -134,6 +134,7 @@ async def listen_websocket[T](
     if len({digest for digest, _ in principals}) != len(principals):
         raise ValueError("Duplicate WebSocket token")
     authenticated: WeakKeyDictionary[ServerConnection, T] = WeakKeyDictionary()
+    active: set[ServerConnection] = set()
 
     def authenticate(ws: ServerConnection, request: Request) -> Response | None:
         headers = request.headers.get_all("Authorization")
@@ -144,11 +145,20 @@ async def listen_websocket[T](
         if ws not in authenticated:
             return ws.respond(HTTPStatus.UNAUTHORIZED, "Unauthorized\n")
         if request.path != path:
+            authenticated.pop(ws)
             return ws.respond(HTTPStatus.NOT_FOUND, "Not Found\n")
+        if len(active) + len(authenticated) > 128:
+            authenticated.pop(ws)
+            return ws.respond(HTTPStatus.SERVICE_UNAVAILABLE, "Connection limit\n")
         return None  # websockets requires a match when server subprotocols are given.
 
     async def serve_connection(ws: ServerConnection) -> None:
-        await handle(WebSocketFrames(ws), authenticated.pop(ws))
+        who = authenticated.pop(ws)
+        active.add(ws)
+        try:
+            await handle(WebSocketFrames(ws), who)
+        finally:
+            active.remove(ws)
 
     server = await serve(
         serve_connection,

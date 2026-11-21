@@ -14,11 +14,12 @@ def encode(value):
 
 
 class Stdio:
-    def __init__(self, reader, writer, *, frames=None):
+    def __init__(self, reader, writer, *, frames=None, authorize=None):
         self.reader, self.writer = reader, writer
         self.frames = frames
         self.lock = asyncio.Lock()
-        self.requests = set()
+        self.requests = {}
+        self.authorize = authorize
 
     async def receive(self):
         while True:
@@ -69,7 +70,13 @@ class Stdio:
                         or key in self.requests
                     ):
                         return None
-                    self.requests.add(key)
+                    params = message.get("params") or {}
+                    self.requests[key] = (
+                        (params.get("sessionId") or params.get("session"))
+                        if isinstance(params, dict)
+                        else None,
+                        message["method"],
+                    )
                     if self.frames is not None and message["method"] == "$/ping":
                         try:
                             async with asyncio.timeout(5):
@@ -98,6 +105,31 @@ class Stdio:
                 }
             )
         async with self.lock:
+            if self.authorize is not None:
+                if "method" in message:
+                    method = message["method"]
+                    params = message.get("params") or {}
+                    sid = params.get("sessionId") or params.get("session")
+                else:
+                    sid, method = self.requests.pop(message.get("id"), (None, None))
+                    result = message.get("result")
+                    if method == "session/new" and isinstance(result, dict):
+                        sid = result.get("sessionId")
+                try:
+                    if isinstance(sid, str):
+                        reduced = await self.authorize(sid, method, message)
+                        if reduced is not None:
+                            raw = encode(reduced)
+                except RequestError as exc:
+                    if "method" in message:
+                        if "id" in message:
+                            raise
+                        return  # Do not disclose an already queued update.
+                    raw = encode(
+                        {"jsonrpc": "2.0", "id": message.get("id"), "error": exc.to_error_obj()}
+                    )
+            elif "method" not in message:
+                self.requests.pop(message.get("id"), None)
             if self.frames is not None:
                 await self.frames.send(raw)
             else:

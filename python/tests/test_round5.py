@@ -178,6 +178,8 @@ async def test_foreign_job_report_runs_as_a_turn(
     async def exchange(self, method, path, body=None):
         if path == "/v1":
             return {"binding": "modular-agent-history/1", "ttlMs": 60000}
+        if path.split("?", 1)[0] == "/v1/sessions":
+            return {"sessions": [meta]}
         if method == "GET":
             return {"session": meta, "entries": records}
         if path.endswith("/lease"):

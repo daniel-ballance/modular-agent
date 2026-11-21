@@ -206,6 +206,10 @@ class HostedRuntime(Runtime):
                 error=None,
                 shared_outcome={"kind": "limit", "limit": "tenantTokens"},
             )
+        if scope.capacity_limited and answer["outcome"] != "cancelled":
+            answer.update(
+                outcome="limit", error=None, shared_outcome={"kind": "limit", "limit": "capacity"}
+            )
         answer = await scope.finish(answer)
         if answer["open_calls"]:
             await self.wake({"session": sid}, None)
@@ -623,10 +627,17 @@ class TurnHost:
         )
 
     tenant_limited = False
+    capacity_limited = False
 
     async def check_tenant(self):
         if self.sid in self.runtime.cancelled:
             raise WireError("Turn cancelled", "cancelled")
+        if self.capacity_limited:
+            raise WireError(
+                "Resource reservation capacity exhausted",
+                "turn_limit",
+                details={"limit": "capacity"},
+            )
         if self.tenant_limited or await self.api.session("tenant_exhausted", session=self.sid):
             self.tenant_limited = True
             raise WireError(
@@ -735,13 +746,19 @@ class TurnHost:
             d = await self.api.session("prepare_model_request", **d)
             request = d.get("_shared_request", request)
             model = self.runtime._model_record(self.access)
-            await self.append(
-                "model_started",
-                step=step,
-                id=d["attempt_id"],
-                **({"close_attempt": d["close_attempt"]} if replay else {}),
-                **model_request_fields(model["model"], request, model["safeToRepeat"]),
-            )
+            try:
+                await self.append(
+                    "model_started",
+                    step=step,
+                    id=d["attempt_id"],
+                    **({"close_attempt": d["close_attempt"]} if replay else {}),
+                    **model_request_fields(model["model"], request, model["safeToRepeat"]),
+                )
+            except AgentError as exc:
+                if exc.code != "busy":
+                    raise
+                self.capacity_limited = True
+                raise WireError(str(exc), "turn_limit", details={"limit": "capacity"}) from exc
         try:
             await self.check_tenant()
         except WireError:
@@ -757,6 +774,9 @@ class TurnHost:
         try:
             response = await self.api.call(self.access["target"], "generate", d, emit)
         except AgentError as exc:
+            if exc.code == "busy":
+                self.capacity_limited = True
+                raise WireError(str(exc), "turn_limit", details={"limit": "capacity"}) from exc
             if exc.code == "turn_limit":
                 await self.check_tenant()
                 raise
@@ -777,6 +797,11 @@ class TurnHost:
             }
         finally:
             await self.api.event("model_output", **self.scope, step=step, text="", final=True)
+        response = await self.api.session(
+            "bound_model_response", session=self.sid, step=step, response=response
+        )
+        if response.get("hostLimit") == "capacity":
+            self.capacity_limited = True
         wire = response_out(response)
         self.model_answers[step] = (wire, d["attempt_id"])
         return wire

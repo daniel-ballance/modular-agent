@@ -74,7 +74,7 @@ async def test_acp_joins_foreign_session_before_replay(tmp_path, monkeypatch):
     async def exchange(self, method, path, body=None):
         if path == "/v1":
             return {"binding": "modular-agent-history/1", "ttlMs": 60000}
-        if method == "GET" and "?" in path:
+        if path.split("?", 1)[0] == "/v1/sessions":
             return {"sessions": [meta]}
         if method == "GET":
             return {"session": meta, "entries": records}
@@ -211,6 +211,8 @@ async def test_recover_foreign_standard_record(tmp_path, monkeypatch):
     async def exchange(self, method, path, body=None):
         if path == "/v1":
             return {"binding": "modular-agent-history/1", "ttlMs": 60000}
+        if path.split("?", 1)[0] == "/v1/sessions":
+            return {"sessions": [{"id": sid, "project": str(tmp_path), "created": 0}]}
         if method == "GET":
             return {
                 "session": {"id": sid, "project": str(tmp_path), "created": 0},

@@ -14,6 +14,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
+from ma_core import AgentError
+
+from . import freshness, pending
+
 PAGE = 4 * 1024 * 1024
 BODY = 64 * 1024 * 1024
 LEASE = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
@@ -152,8 +156,9 @@ def page(envelope, field, rows, query, cursor_error):
 
 
 class Store:
-    def __init__(self, db, ttl_ms):
+    def __init__(self, db, ttl_ms, witness=None):
         self.db, self.ttl_ms = db, ttl_ms
+        self.witness = witness
         self.leases = {}
         self.db.executescript(
             "PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;"
@@ -162,6 +167,11 @@ class Store:
             "CREATE TABLE IF NOT EXISTS entries (session TEXT, id TEXT, record BLOB NOT NULL,"
             " UNIQUE(session, id));"
         )
+        pending.schema(self.db)
+        if witness is not None:
+            with self.db:
+                self.db.execute("BEGIN IMMEDIATE")
+                freshness.provision(self.db, witness)
         prior = self.db.execute("SELECT ttl FROM bound").fetchone()
         self.hold = time.monotonic() + max(ttl_ms, prior[0]) / 1000 if prior else 0
         with self.db:
@@ -246,6 +256,13 @@ class Store:
         if route == "renew":
             self.leases[sid] = (current[0], current[1], clock + self.ttl_ms / 1000)
             return {"ttlMs": self.ttl_ms}
+        if route in {"erase", "append"}:
+            self.db.execute("BEGIN IMMEDIATE")
+            if self.witness is not None:
+                try:
+                    freshness.check(self.db, self.witness)
+                except (AgentError, OSError) as exc:
+                    raise Refusal(503, "unavailable") from exc
         if route == "erase":
             erased = []
             for key in dict.fromkeys(body["entryIds"]):
@@ -261,6 +278,21 @@ class Store:
                             (encode(tombstone(row)), sid, key),
                         )
             return {"erased": erased}
+        # The write transaction serializes publication with the coordinator's intent.
+        try:
+            pending.check_batch(
+                self.db,
+                [
+                    {
+                        "kind": row.get("kind"),
+                        "copies": row.get("sources") or [],
+                        "fork_source": row.get("fork_source"),
+                    }
+                    for row in body["entries"]
+                ],
+            )
+        except AgentError as exc:
+            raise Refusal(409, "unavailable") from exc
         kept = 0
         for row in body["entries"]:
             key = row["id"]
@@ -324,18 +356,32 @@ def shape(route, method, body):
 
 
 @contextmanager
-def sqlite_store(directory, ttl_ms):
+def sqlite_store(directory, ttl_ms, *, check_same_thread=True, witness=None):
     root = Path(directory) / "history-service"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     # One service instance per store: monotonic lease state is local. No other
     # instance may serve the same records until the prior instance loses its lock.
     with (root / "service.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with sqlite3.connect(root / "records.db") as db:
-            yield Store(db, ttl_ms)
+        from contextlib import closing
+
+        with closing(
+            sqlite3.connect(root / "records.db", check_same_thread=check_same_thread)
+        ) as db:
+            yield Store(db, ttl_ms, witness)
 
 
-def serve(directory, address, token_file, ttl_ms, *, ready=None, custom_route=None):
+def serve(
+    directory,
+    address,
+    token_file,
+    ttl_ms,
+    *,
+    ready=None,
+    custom_route=None,
+    started=None,
+    witness=None,
+):
     ip = ipaddress.ip_address(address[0])
     if not ip.is_loopback or type(ttl_ms) is not int or not 0 < ttl_ms <= 2**53 - 1:
         raise ValueError("History service requires a numeric loopback address and positive TTL")
@@ -466,7 +512,11 @@ def serve(directory, address, token_file, ttl_ms, *, ready=None, custom_route=No
             route_handler = store.route if store is not None else custom_route
             return route_handler(method, route, sid, generation, q, body)
 
-    with sqlite_store(directory, ttl_ms) if custom_route is None else nullcontext() as store:
+    with (
+        sqlite_store(directory, ttl_ms, witness=witness)
+        if custom_route is None
+        else nullcontext() as store
+    ):
         if ip.version == 6:
             import socket
 
@@ -477,4 +527,6 @@ def serve(directory, address, token_file, ttl_ms, *, ready=None, custom_route=No
         with Server(address, Handler) as server:
             if ready is not None:
                 ready(server.server_address)
+            if started is not None:
+                started(server.server_address, server.shutdown)
             server.serve_forever()
