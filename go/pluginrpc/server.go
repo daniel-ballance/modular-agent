@@ -75,15 +75,18 @@ type Server struct {
 	Commands     map[string]func(context.Context, object) (any, error)
 	JobCancel    api.JobCanceller
 	Initialize   func(object) error
-	peer         *Peer
-	service      bool
-	mu           sync.Mutex
-	initialized  bool
-	project      string // canonical project for environment requests
-	stopping     bool
-	envMu        sync.Mutex
-	ownedEnv     api.WorkingEnvironment
-	envClosed    bool
+	// Projects and RequireEnvironmentScope are trusted listener settings.
+	Projects                []string
+	RequireEnvironmentScope bool
+	peer                    *Peer
+	service                 bool
+	mu                      sync.Mutex
+	initialized             bool
+	project                 string // canonical project for environment requests
+	stopping                bool
+	envMu                   sync.Mutex
+	ownedEnv                api.WorkingEnvironment
+	envClosed               bool
 }
 
 func (s *Server) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) error {
@@ -254,6 +257,9 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		if !filepath.IsAbs(str(v, "project")) || !filepath.IsAbs(str(v, "home")) {
 			return nil, fault("invalid_request", "project and home must be absolute")
 		}
+		if s.service && s.Projects != nil && !slices.Contains(s.Projects, str(v, "project")) {
+			return nil, fault("invalid_request", "project is outside the service scope")
+		}
 		if s.Initialize != nil {
 			err := s.Initialize(v)
 			s.ownEnvironment(s.Environment)
@@ -263,6 +269,9 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		}
 		s.project = str(v, "project")
 		if s.Environment != nil {
+			if s.service && s.RequireEnvironmentScope && s.Projects == nil {
+				return nil, fault("not_supported", "working environment requires operator project scope")
+			}
 			project, err := filepath.EvalSymlinks(s.project)
 			if err != nil || !cwdInProject(project, project) || (s.service && project != str(v, "project")) {
 				code := "invalid_request"
@@ -473,6 +482,9 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		}
 		if !cwdInProject(s.project, str(v, "cwd")) {
 			return nil, fault("invalid_request", "cwd must resolve within the initialized project")
+		}
+		if s.service && method != "env/exec" && !pathInProject(s.project, str(v, "cwd"), str(v, "path")) {
+			return nil, fault("invalid_request", "path must resolve within the initialized project")
 		}
 		return environmentRequest(ctx, s.Environment, method, v, func(chunk string) { _ = s.peer.Send("env/output", object{"parentRequestId": id, "chunk": chunk}) })
 	case "hook/handle":

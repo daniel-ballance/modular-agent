@@ -43,6 +43,9 @@ type Service = wswire.Server
 type ServeOptions struct {
 	Listen, TokenFile string
 	TLS               *TLSOptions
+	// Projects is the exact operator-assigned reach of a served environment.
+	// It may be omitted for plugins that do not provide an environment.
+	Projects []string
 }
 
 // ServeService listens for plugin connections. Setup runs separately for every
@@ -61,8 +64,16 @@ func ServeServiceFactory(ctx context.Context, factory func() Plugin, options Ser
 	if err != nil {
 		return nil, appError(err, InvalidParams)
 	}
+	policy, err := acpPolicy(options.Projects, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
 	service, err := wswire.Listen(ctx, options.Listen, options.TLS, wswire.Plugin, map[string]struct{}{token: {}}, func(ctx context.Context, conn *wswire.Conn, _ struct{}) {
-		_ = servePlugin(factory(), func(s *pluginrpc.Server) error { return s.ServeServiceConnection(ctx, conn) })
+		_ = servePlugin(factory(), func(s *pluginrpc.Server) error {
+			s.Projects = policy.Projects
+			s.RequireEnvironmentScope = true
+			return s.ServeServiceConnection(ctx, conn)
+		})
 	})
 	return service, appError(err, InvalidParams)
 }

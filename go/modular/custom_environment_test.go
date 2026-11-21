@@ -3,6 +3,9 @@ package modular_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
@@ -21,6 +24,39 @@ func (e demoEnvironment) Read(_ context.Context, p modular.EnvironmentPath) ([]b
 	return []byte(p.SessionID + " " + p.Cwd + " " + p.Path), nil
 }
 func (e demoEnvironment) SessionEnded(_ context.Context, id string) error { e.ended <- id; return nil }
+
+func TestServedEnvironmentRejectsUnassignedProjectBeforeSetup(t *testing.T) {
+	allowed, denied := t.TempDir(), t.TempDir()
+	file := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(file, []byte("test-token-at-least-128-bits-long"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var setups atomic.Int32
+	p := modular.Plugin{Name: "scoped-environment", Replaces: []string{"working-environment"}, Setup: func(r *modular.Registrar) error {
+		setups.Add(1)
+		return r.Environment(modular.NewEnvironment(demoEnvironment{ended: make(chan string, 1)}))
+	}}
+	svc, err := modular.ServeService(t.Context(), p, modular.ServeOptions{Listen: "127.0.0.1:0", TokenFile: file, Projects: []string{allowed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+	opt := modular.WithServicePlugin(modular.ServicePlugin{URL: svc.URL, TokenFile: file})
+	if a, err := modular.New(t.Context(), modular.WithProject(denied), opt); err == nil {
+		_ = a.Close(t.Context())
+		t.Fatal("unassigned project initialized the environment")
+	}
+	if setups.Load() != 0 {
+		t.Fatal("setup ran before project authorization")
+	}
+	a, err := modular.New(t.Context(), modular.WithProject(allowed), opt)
+	if err != nil || setups.Load() != 1 {
+		t.Fatal(setups.Load(), err)
+	}
+	if err := a.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCustomEnvironmentAndServedCommandProject(t *testing.T) {
 	for _, wire := range []bool{false, true} {
