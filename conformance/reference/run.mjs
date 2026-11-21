@@ -30,6 +30,8 @@ const CODEMODE_VALUES = [
   ["{'k': 'é'}", '{\n  "k": "é"\n}'],
   ["'text'", "text"],
   ["None", "(no output)"],
+  ["[(1,), {2}]", "[(1,), {2}]"],
+  ["class P:\n    def __init__(self):\n        self.x = 1\n        self.y = 'a'\n    def __repr__(self):\n        return 'custom'\n[P(), {1}]", "[P(x=1, y='a'), {1}]"],
 ];
 const SIX = ["read", "exec", "edit", "write", "find", "list"];
 
