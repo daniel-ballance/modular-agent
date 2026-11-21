@@ -372,6 +372,7 @@ async fn start() -> Result<()> {
                 settings: terminal.settings,
                 mcp,
             })),
+            ..Default::default()
         };
         let served = if let Some(service) = service {
             async {

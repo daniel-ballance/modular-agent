@@ -483,7 +483,10 @@ pub(crate) async fn extension(
             .transpose()?
             .unwrap_or(connection_actor.as_str());
         let represented = represented_actors();
-        if actor != connection_actor.as_str() && !represented.iter().any(|id| id == actor) {
+        if actor != connection_actor.as_str()
+            && (!represented.iter().any(|id| id == actor)
+                || !actors(&session.api.snapshot(&session.id)?).contains_key(actor))
+        {
             return Err(
                 request_error("forbidden", "connection does not represent this actor").into(),
             );

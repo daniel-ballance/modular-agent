@@ -18,6 +18,24 @@ pub(crate) struct Session {
     pub approval_views: Mutex<std::collections::BTreeSet<(String, String)>>,
 }
 impl Session {
+    pub fn check_view(&self) -> Result<()> {
+        let data = self.api.snapshot(&self.id)?;
+        let allowed = PRINCIPAL
+            .try_with(|identity| {
+                self.factory.serves_project(&data.project) && in_scope(identity, &data)
+            })
+            .unwrap_or(false);
+        ensure!(
+            allowed
+                && self
+                    .api
+                    .authority(&self.id, &connection_actor())?
+                    .has("watch"),
+            request_error("forbidden", "session inaccessible")
+        );
+        Ok(())
+    }
+
     pub async fn flush(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -289,20 +307,23 @@ fn recorded_rights(data: &SessionData, id: &str) -> Option<Option<Authority>> {
     })
 }
 
-pub(crate) fn discoverable(identity: &Identity, data: &SessionData) -> bool {
+fn in_scope(identity: &Identity, data: &SessionData) -> bool {
     let tenant = data
         .entries
         .iter()
         .find(|e| e.kind == "tenant")
         .and_then(|e| e.content.as_ref())
         .and_then(|v| v["tenant"].as_str());
-    identity.allows_project(&data.project)
-        && identity.allows_tenant(tenant)
+    identity.allows_project(&data.project) && identity.allows_tenant(tenant)
+}
+
+pub(crate) fn discoverable(identity: &Identity, data: &SessionData) -> bool {
+    in_scope(identity, data)
         && identity.rights.has("watch")
         && match recorded_rights(data, &identity.id) {
             Some(rights) => rights.is_some_and(|rights| {
                 rights.has("watch")
-                    && (identity.network
+                    && (identity.has_ceiling()
                         || identity
                             .rights
                             .contains(&rights.intersect(&Authority::full())))
@@ -320,11 +341,15 @@ pub(crate) fn join_host(api: &dyn AgentApi, session: &str) -> Result<()> {
             identity
         });
     let data = api.snapshot(session)?;
+    ensure!(
+        in_scope(&identity, &data),
+        request_error("forbidden", "session inaccessible")
+    );
     let latest = recorded_rights(&data, &identity.id);
     if let Some(rights) = latest {
         ensure!(
             rights.is_some_and(|r| r.has("watch")
-                && (if identity.network {
+                && (if identity.has_ceiling() {
                     identity.rights.has("watch")
                 } else {
                     identity.rights.contains(&r.intersect(&Authority::full()))
@@ -396,7 +421,7 @@ impl State {
     ) -> Result<Value> {
         let api = &session.api;
         let id = &session.id;
-        require(api.as_ref(), &actor_scope(id), "watch")?;
+        session.check_view()?;
         let mut response = json!({
             "configOptions": config(api.as_ref(), id)?,
             "_meta": {"modular-agent": {"declaration": self.factory.session_declaration(api.as_ref(), id)?}},
@@ -426,6 +451,7 @@ impl State {
             events::replay(api.clone(), id, cx).await?;
         }
         session.flush().await?;
+        session.check_view()?;
         Ok(gated)
     }
 
@@ -466,7 +492,7 @@ impl State {
             .map(|v| v.as_str().ok_or_else(|| anyhow!("tenant must be a string")))
             .transpose()?;
         let reopening = method != "session/new";
-        if self.principal.network {
+        {
             let has_servers = p["mcpServers"]
                 .as_array()
                 .is_some_and(|servers| !servers.is_empty());
@@ -495,9 +521,10 @@ impl State {
         let existing = if let Some(Opening(_, id)) = &_opening {
             let opened = self.sessions.lock().unwrap().get(id).cloned();
             if let Some(session) = opened {
+                session.check_view()?;
                 ensure!(
                     session.project == project,
-                    "cwd differs from recorded session project"
+                    request_error("wrong_project", "cwd differs from recorded session project")
                 );
                 ensure!(
                     !session.closing.load(std::sync::atomic::Ordering::SeqCst),
@@ -510,12 +537,14 @@ impl State {
                 .list(None)?
                 .into_iter()
                 .find(|s| {
-                    &s.id == id && (!self.principal.network || discoverable(&self.principal, s))
+                    &s.id == id
+                        && self.factory.serves_project(&s.project)
+                        && discoverable(&self.principal, s)
                 })
                 .ok_or_else(|| request_error("forbidden", "session inaccessible"))?;
             ensure!(
                 data.project == project,
-                "cwd differs from recorded session project"
+                request_error("wrong_project", "cwd differs from recorded session project")
             );
             Some(data)
         } else {
@@ -615,7 +644,11 @@ impl State {
         }
         .await;
         if setup.is_ok() {
-            *session.driver.lock().unwrap() = Some(tokio::spawn(session.clone().drive(reopening)));
+            *session.driver.lock().unwrap() = Some(tokio::spawn(with_principal(
+                self.principal.clone(),
+                self.ceiling.clone(),
+                session.clone().drive(reopening),
+            )));
             self.sessions.lock().unwrap().insert(id, session);
         } else {
             // Release the writer even if an error after installation stranded an

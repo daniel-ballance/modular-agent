@@ -46,6 +46,10 @@ pub trait AcpComposition: Send + Sync + 'static {
 #[derive(Default)]
 pub struct AcpOptions {
     pub compose: Option<Arc<dyn AcpComposition>>,
+    pub projects: Option<Vec<std::path::PathBuf>>,
+    pub tenants: Option<Vec<Option<String>>>,
+    pub rights: Option<crate::Rights>,
+    pub represents: Vec<String>,
 }
 
 /// A bearer-token principal. Omitted projects use the composition's scope.
@@ -56,6 +60,7 @@ pub struct AcpActor {
     pub actor: crate::Actor,
     pub tenants: Option<Vec<Option<String>>>,
     pub projects: Option<Vec<std::path::PathBuf>>,
+    pub represents: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,8 +81,45 @@ impl AcpActor {
             },
             tenants: None,
             projects: None,
+            represents: vec![],
         }
     }
+}
+
+fn validate_scope(
+    projects: Option<Vec<std::path::PathBuf>>,
+    tenants: &Option<Vec<Option<String>>>,
+    represents: &[String],
+) -> Result<Option<Vec<std::path::PathBuf>>> {
+    if tenants.iter().flatten().flatten().any(String::is_empty)
+        || represents
+            .iter()
+            .any(|id| id.is_empty() || id.starts_with("job:"))
+    {
+        return Err(Error::new(
+            Code::InvalidComposition,
+            "invalid ACP tenant or represented actor",
+        ));
+    }
+    projects
+        .map(|projects| {
+            projects
+                .into_iter()
+                .map(|path| {
+                    path.is_absolute()
+                        .then(|| path.canonicalize().ok())
+                        .flatten()
+                        .filter(|p| p.is_dir())
+                        .ok_or_else(|| {
+                            Error::new(
+                                Code::InvalidComposition,
+                                format!("invalid ACP project path: {}", path.display()),
+                            )
+                        })
+                })
+                .collect()
+        })
+        .transpose()
 }
 
 struct ProjectFactory(
@@ -198,13 +240,24 @@ impl Agent {
     /// Start the Interface before opening embedded sessions; stdout belongs to ACP.
     pub async fn serve_acp(&self, options: AcpOptions) -> Result<()> {
         self.check_acp_host()?;
+        let mut identity = interface_acp::Identity::local();
+        identity.projects =
+            validate_scope(options.projects, &options.tenants, &options.represents)?;
+        identity.tenants = options.tenants;
+        identity.represents = options.represents;
+        if let Some(rights) = options.rights {
+            identity.rights = rights;
+            identity.explicit_rights = true;
+        }
+        let identity = interface_acp::stdio_identity(identity)
+            .map_err(|e| Error::new(Code::InvalidComposition, e.to_string()))?;
         let routes = self.acp_routes();
         let _serving = routes
             .serving
             .try_lock()
             .map_err(|_| Error::new(Code::Busy, "ACP is already serving"))?;
         let factory = self.acp_factory(options.compose, routes.clone()).await?;
-        Ok(interface_acp::run(factory).await?)
+        Ok(interface_acp::run_stdio(factory, identity).await?)
     }
 
     /// Serve ACP over WebSocket, with a new connection and actor scope per upgrade.
@@ -226,15 +279,7 @@ impl Agent {
             {
                 return Err(Error::new(Code::InvalidComposition, "invalid ACP actor"));
             }
-            let projects = token
-                .projects
-                .map(|projects| {
-                    projects
-                        .iter()
-                        .map(std::fs::canonicalize)
-                        .collect::<std::io::Result<Vec<_>>>()
-                })
-                .transpose()?;
+            let projects = validate_scope(token.projects, &token.tenants, &token.represents)?;
             let join_on_open = actor.id == base::ACP_HOST_ACTOR && actor.kind == "host";
             entries.push((
                 token.token_file,
@@ -244,6 +289,8 @@ impl Agent {
                     rights: actor.rights,
                     tenants: token.tenants,
                     projects,
+                    represents: token.represents,
+                    explicit_rights: true,
                     join_on_open,
                     network: true,
                 },
