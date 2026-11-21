@@ -791,7 +791,7 @@ impl Session {
         })
     }
 
-    fn drive(&self) -> tokio::task::JoinHandle<Result<()>> {
+    pub(crate) fn drive(&self) -> tokio::task::JoinHandle<Result<()>> {
         let me = self.clone();
         self.driver
             .scheduled

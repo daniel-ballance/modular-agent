@@ -66,6 +66,7 @@ pub struct Error {
     data: Option<Value>,
     /// Set only by `ToolContext::refuse`: the call ends `refused`, not `failed`.
     pub(crate) refusal: bool,
+    pub(crate) left_open: bool,
 }
 
 impl Error {
@@ -75,6 +76,7 @@ impl Error {
             message: message.into(),
             data: None,
             refusal: false,
+            left_open: false,
         }
     }
     /// A failure with code `internal`, for a tool or plugin to raise.
@@ -93,6 +95,10 @@ impl Error {
     }
     pub fn data(&self) -> Option<&Value> {
         self.data.as_ref()
+    }
+    /// True when a timed ask suspended this invocation, rather than failing it.
+    pub fn is_left_open(&self) -> bool {
+        self.left_open
     }
     pub(crate) fn refusal(reason: impl Into<String>) -> Self {
         Self {
@@ -119,6 +125,7 @@ impl From<anyhow::Error> for Error {
                 message: e.message.clone(),
                 data: e.data.clone(),
                 refusal: e.refusal,
+                left_open: e.left_open,
             };
         }
         if let Some(held) = error.downcast_ref::<agent_api::HistoryHeld>() {

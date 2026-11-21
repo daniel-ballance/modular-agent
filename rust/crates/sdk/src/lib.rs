@@ -69,7 +69,7 @@ pub use session::{
     PromptInput, PromptOptions, PromptResult, Proposal, Rights, Session, Timing, ToolResult,
 };
 pub use tool::{
-    Answer, Ask, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext, ToolEnvironment,
-    ToolOutput, ToolStatus,
+    Answer, Ask, AskWait, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext,
+    ToolEnvironment, ToolOutput, ToolStatus,
 };
 pub use transport_websocket::{Server as WebSocketServer, TlsOptions};

@@ -782,6 +782,7 @@ impl base::Plugin for InProcess {
                             call_id: String::new(),
                             cancelled: cancelled.clone(),
                             settled: done,
+                            asks: Default::default(),
                         };
                         let text = run(
                             args["args"].as_str().unwrap_or_default().into(),
@@ -974,8 +975,11 @@ impl base::ToolSource for Source {
             backend: Backend::Local { api, scope },
             cancelled: cancel,
             settled: Default::default(),
+            asks: Default::default(),
         };
-        let settled = execute(&tool, call.input.clone(), cx).await;
+        let Some(settled) = execute(&tool, call.input.clone(), cx).await else {
+            return base::ToolResult::new(&call, base::ToolStatus::Waiting, "question left open");
+        };
         // ToolResult::new words a refusal itself.
         let mut result = base::ToolResult::new(&call, settled.status.to_base(), settled.text);
         // Preserve the distinction between an omitted value and JSON null, and

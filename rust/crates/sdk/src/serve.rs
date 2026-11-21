@@ -380,10 +380,14 @@ impl Endpoint for Served {
                     },
                     cancelled: cancel.clone(),
                     settled: Default::default(),
+                    asks: Default::default(),
                 };
-                let settled = CATALOG_PARENT
+                let Some(settled) = CATALOG_PARENT
                     .scope(id, execute(tool, call["input"].clone(), cx))
-                    .await;
+                    .await
+                else {
+                    return Ok(json!({"pending":"question left open"}));
+                };
                 if settled.status == ToolStatus::Cancelled && cancel.is_cancelled() {
                     return Err(Fault::new("cancelled", "tool cancelled"));
                 }
@@ -469,6 +473,7 @@ impl Endpoint for Served {
                     backend: Backend::Remote { peer, parent: id },
                     cancelled: cancel.clone(),
                     settled,
+                    asks: Default::default(),
                 };
                 let cx = CommandContext {
                     session_id: work.session_id.clone(),

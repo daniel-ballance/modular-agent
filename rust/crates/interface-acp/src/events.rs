@@ -72,6 +72,7 @@ pub(crate) async fn pump(
                             "job.ended" => { session.wake.notify_one(); Ok(()) },
                             "request.answered" => {
                                 session.approval_views.lock().unwrap().retain(|(_, id)| c["request"] != *id);
+                                session.wake.notify_one();
                                 Ok(())
                             },
                             "turn.result" => {

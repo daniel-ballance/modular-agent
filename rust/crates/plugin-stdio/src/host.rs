@@ -1866,6 +1866,12 @@ impl Callbacks {
                         q.options=serde_json::from_value(wire::optional(draft,"options").cloned().unwrap_or(json!([])))?;
                         q.credential=draft["credential"].as_str().map(str::to_string);
                         q.timeout_ms=draft["timeLimitMs"].as_u64();
+                        if draft["whenTimeLimit"] == "leaveOpen" {
+                            if api.declaration()?["questions_outlast_turn"] != true {
+                                return Err(Fault::new("not_supported", "this agent does not leave questions open").into());
+                            }
+                            ensure!(q.kind != RequestKind::Approval && q.timeout_ms.is_some_and(|ms| ms > 0 && ms <= 9_007_199_254_740_991), "leaveOpen needs a positive wait and a non-approval question");
+                        }
                         let n = work.asks.fetch_add(1,Ordering::Relaxed) + 1;
                         q.key = draft["key"].as_str().map(str::to_owned)
                             .or_else(||scope.call.as_ref().map(|call|format!("call:{call}:{n}")));

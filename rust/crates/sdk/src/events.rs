@@ -234,6 +234,7 @@ pub(crate) struct Hub {
     pub on_question: Option<QuestionHandler>,
     pub session_handlers: std::sync::Mutex<std::collections::HashMap<String, QuestionHandler>>,
     pub harness: OnceLock<Weak<Harness>>,
+    pub inner: OnceLock<Weak<crate::agent::Inner>>,
     crash: tokio_util::sync::CancellationToken,
     workers: tokio_util::task::TaskTracker,
 }
@@ -249,6 +250,7 @@ impl Hub {
             on_question,
             session_handlers: Default::default(),
             harness: OnceLock::new(),
+            inner: OnceLock::new(),
             crash,
             workers,
         })
@@ -311,6 +313,7 @@ impl base::EventSink for Hub {
                 .cloned();
             if let Some(handler) = handler {
                 let crash = self.crash.clone();
+                let inner = self.inner.get().cloned();
                 let mut events = self.events.subscribe();
                 self.workers.spawn(async move {
                     let watch = async {
@@ -341,12 +344,29 @@ impl base::EventSink for Hub {
                     // If the handler supplied an invalid reply, decline instead of
                     // stranding the tool with a waiting question. A competing
                     // manual reply or pending secret activation is unaffected.
-                    if let Err(error) = self::answer(h.clone(), &session, LOCAL, &q, answer).await
-                        && error.code() == crate::Code::InvalidParams
+                    let mut answered = self::answer(h.clone(), &session, LOCAL, &q, answer).await;
+                    if answered
+                        .as_ref()
+                        .is_err_and(|error| error.code() == crate::Code::InvalidParams)
                     {
-                        let _ =
+                        answered =
                             self::answer(h, &session, LOCAL, &q, Answer::Declined { reason: None })
                                 .await;
+                    }
+                    if answered.is_ok()
+                        && q.scope.call.is_some()
+                        && let Some(inner) = inner.and_then(|inner| inner.upgrade())
+                    {
+                        // If the asking turn is still running, its driver holds the same lock.
+                        let embedded = inner
+                            .drivers
+                            .lock()
+                            .unwrap()
+                            .get(&session)
+                            .is_some_and(|driver| driver.strong_count() != 0);
+                        if embedded {
+                            drop(crate::Session::new(inner, session).drive());
+                        }
                     }
                 });
             }

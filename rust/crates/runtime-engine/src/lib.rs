@@ -422,10 +422,26 @@ impl Engine {
         let waiting = questions(&api.snapshot(&scope.session)?)?
             .iter()
             .any(|q| q.scope.call == scope.call && q.answerable);
-        // Settle an unrepeatable start without asking whether a new call is allowed.
-        if started.is_some_and(|e| {
-            !still_safe || e.content.as_ref().is_none_or(|v| v["safeToRepeat"] != true)
-        }) && (interrupted || !waiting)
+        let relinquished = started.is_some_and(|start| {
+            entries.iter().any(|e| {
+                e.kind == "tool.pending"
+                    && e.scope.call == scope.call
+                    && e.content
+                        .as_ref()
+                        .is_some_and(|v| v["toolStartedId"] == start.id)
+            }) && start.content.as_ref().is_some_and(|v| {
+                registration.as_ref().is_some_and(|(source, def)| {
+                    same_json(&v["source"], source)
+                        && same_json(&v["definition"], &wire::registered_definition(def))
+                })
+            })
+        });
+        // Only a committed pending reply confirms that the invocation relinquished execution.
+        if !relinquished
+            && started.is_some_and(|e| {
+                !still_safe || e.content.as_ref().is_none_or(|v| v["safeToRepeat"] != true)
+            })
+            && (interrupted || !waiting)
         {
             return Ok(unknown());
         }
@@ -515,7 +531,7 @@ impl Engine {
                     )
                 } else {
                     api.check_writer(&scope.session)?;
-                    self.record(
+                    let started = self.record(
                         api,
                         scope,
                         "tool.started",
@@ -534,8 +550,36 @@ impl Engine {
                             "registration or authority changed before dispatch",
                         )
                     } else {
-                        api.dispatch_tool(scope, changed, input.cancel.child_token())
-                            .await
+                        let result = api
+                            .dispatch_tool(scope, changed, input.cancel.child_token())
+                            .await;
+                        if result.status == ToolStatus::Waiting {
+                            let data = api.snapshot(&scope.session)?;
+                            let request_ids: Vec<_> = data
+                                .entries
+                                .iter()
+                                .filter(|e| {
+                                    e.kind == "request.suspended"
+                                        && e.scope.turn == scope.turn
+                                        && e.scope.call == scope.call
+                                })
+                                .filter_map(|e| e.content.as_ref()?.get("request")?.as_str())
+                                .collect();
+                            ensure!(
+                                !request_ids.is_empty(),
+                                "pending call has no committed leaveOpen expiry"
+                            );
+                            api.append(
+                                scope,
+                                &started.writer,
+                                Draft::new(
+                                    "tool.pending",
+                                    false,
+                                    json!({"toolStartedId":started.id,"requestIds":request_ids}),
+                                ),
+                            )?;
+                        }
+                        result
                     }
                 }
             }
