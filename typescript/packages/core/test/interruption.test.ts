@@ -13,6 +13,32 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+test("an idle kept session reports a revoked writer before another write", { timeout: 5000 }, async t => {
+  const { store, revoke } = interruptedHistory();
+  const agent = await testAgent({ durability: "kept", history: undefined,
+    plugins: [definePlugin({ name: "idle-lease", replaces: ["history-store"], setup: r => r.historyStore(store) })],
+    script: [{ text: "Finished" }],
+  });
+  t.after(() => agent.close());
+  const session = await agent.session();
+  assert.equal((await session.prompt("Keep this session")).text, "Finished");
+  await session.waitIdle();
+  const entries = await session.history();
+  const cursor = entries.at(-1)!.id;
+  const follower = session.events(cursor)[Symbol.asyncIterator]();
+  try {
+    const pending = follower.next(); // Subscribes before the store signals loss.
+    revoke(session.id);
+    const next = await pending;
+    assert.equal(next.done, false);
+    assert.equal(next.value?.type, "sessionInterrupted");
+    assert.equal(next.value?.sessionId, session.id);
+    assert.deepEqual(next.value?.data, { reason: "writerLost" });
+    assert.equal((await follower.next()).done, true);
+    assert.deepEqual(await session.history(), entries);
+  } finally { await follower.return?.(); }
+});
+
 for (const reason of ["writerLost", "commitFailed"] as const) {
   test(`a session follower sees ${reason} and both waiting prompts fail with lost`, { timeout: 10_000 }, async t => {
     const dir = await mkdtemp(join(tmpdir(), "ma-interruption-"));

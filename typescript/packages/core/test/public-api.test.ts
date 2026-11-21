@@ -1,14 +1,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createAgent, definePlugin, defineToolSource, environmentCredentials, tool, transientRuntime,
-  type CommandContext, type Content, type CustomHook, type HistoryStore } from "@modular-agent/core";
+  type CommandContext, type Content, type CustomHook, type WriterHistoryStore } from "@modular-agent/core";
 import { answers, memoryEnvironment, overWire, scriptedProvider, testAgent } from "@modular-agent/core/testing";
 
 const empty = { type: "object" } as const;
 
+for (const served of [false, true]) {
+  test(`the ${served ? "served" : "local"} SDK Provider port declares state but not Provider-run tools or live sessions`, async t => {
+    const provider = { ...scriptedProvider([]), supports: {
+      keepsState: true, safeToRepeat: false, runsTools: true, liveSessions: true,
+    } };
+    const plugin = definePlugin({ name: "provider-declaration", setup: r => r.provider(provider) });
+    const agent = await createAgent({ plugins: [served ? overWire(plugin) : plugin], environment: memoryEnvironment() });
+    t.after(() => agent.close());
+    const { keepsStateAtProvider, runsToolsAtProvider, liveSessions } = agent.declaration();
+    assert.deepEqual({ keepsStateAtProvider, runsToolsAtProvider, liveSessions }, {
+      keepsStateAtProvider: true, runsToolsAtProvider: false, liveSessions: false,
+    });
+  });
+}
+
 test("a custom Runtime, history, configuration, credential store and Interface work through registration", async t => {
-  const kept = new Map<string, Awaited<ReturnType<HistoryStore["load"]>>>();
-  const store: HistoryStore = {
+  const kept = new Map<string, Awaited<ReturnType<WriterHistoryStore["load"]>>>();
+  const store: WriterHistoryStore = {
     supports: { erasure: false },
     async create(meta) { kept.set(meta.id, { meta, entries: [] }); },
     async openForWriting() {}, async close() {},
@@ -108,12 +123,20 @@ test("proposals, generic Content, typed tool events and history movement use the
   const content: Content = [{ type: "text", text: "Find the tide" }, { type: "application.example", label: "keep this" }];
   const drop = await visitor.send("Withdraw this", "propose");
   await visitor.withdraw(drop.inputId);
+  await assert.rejects(visitor.withdraw(drop.inputId), { code: "conflict" });
+  const decline = await visitor.send("Decline this", "propose");
+  assert.deepEqual(await s.release(decline.inputId, "after", { declined: true }), { inputId: decline.inputId, taken: "handedBack" });
+  await assert.rejects(s.release(decline.inputId, "now"), { code: "conflict" });
+  await assert.rejects(visitor.withdraw(decline.inputId), { code: "conflict" });
+  assert.equal(await s.lastTurn(), undefined);
   const next = await visitor.send(content, "propose");
   assert.deepEqual((await s.proposals()).map(p => [p.inputId, p.content]), [[next.inputId, content]]);
   await assert.rejects(visitor.release(next.inputId), { code: "forbidden" });
   const cursor = (await s.history()).at(-1)!.id;
   const read = s.events(cursor)[Symbol.asyncIterator]();
-  await s.release(next.inputId);
+  assert.deepEqual(await s.release(next.inputId, "now"), { inputId: next.inputId, taken: "now" });
+  await assert.rejects(visitor.withdraw(next.inputId), { code: "conflict" });
+  assert.deepEqual(await s.proposals(), []);
   const observed: string[] = [];
   try {
     for (;;) {

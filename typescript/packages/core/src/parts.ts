@@ -93,4 +93,5 @@ export function fileCredentials(path: string): CredentialStore {
 
 /** Helpers for writable credential stores with an existing private file format. */
 export { advanceSecretSlot, secretStaging, withCredentialLock } from "@modular-agent/harness";
-export type { Configuration, CredentialStore, HistoryStore, Runtime, RuntimeHost, SecretFile, SecretReceipt, SecretScope, SecretSubmission, WorkingEnvironment } from "@modular-agent/harness";
+export type { LeasedHistoryStore as HistoryStore, HistoryMetadata } from "@modular-agent/services";
+export type { Configuration, CredentialStore, HistoryStore as WriterHistoryStore, Runtime, RuntimeHost, SecretFile, SecretReceipt, SecretScope, SecretSubmission, WorkingEnvironment } from "@modular-agent/harness";

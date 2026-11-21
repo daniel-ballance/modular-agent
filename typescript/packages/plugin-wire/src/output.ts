@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type { AgentEvent } from "@modular-agent/harness";
+import { isText, text, textOf, type AgentEvent, type ContentPart } from "@modular-agent/harness";
 import { WireError } from "./wire.js";
 
 type WireEvent = { type: string; data: any };
@@ -25,8 +25,26 @@ export function mapOutput(event: AgentEvent): MappedOutput {
 		return mapped(data.type, { delta: data.delta, stepId }, (d) => ({ data: { ...data, delta: d.delta }, stepId: d.stepId }));
 	}
 	if (type === "tool.started") return mapped("toolCall", { call: data.call }, (d) => ({ data: { ...data, call: d.call }, toolCallId: d.call.id }));
-	if (type === "tool.progress" && data?.content?.length === 1 && data.content[0].type === "text") {
-		return mapped("toolOutput", { toolCallId, chunk: data.content[0].text }, (d) => ({ toolCallId: d.toolCallId, data: { content: [{ ...data.content[0], text: d.chunk }] } }));
+	if (type === "tool.progress") {
+		const content: ContentPart[] = data.content;
+		const chunk = textOf(content);
+		return mapped("toolOutput", { toolCallId, chunk, content }, (d) => {
+			let parts: ContentPart[] = d.content;
+			const changedText = textOf(parts);
+			if (d.chunk !== chunk && changedText !== d.chunk) {
+				if (changedText !== chunk) throw new WireError("invalid_request", "Inconsistent tool progress redaction");
+				// Older gates redact only chunk. Never deliver the original text alongside it.
+				let first = true;
+				parts = parts.flatMap<ContentPart>(part => {
+					if (!isText(part)) return [part];
+					if (!first) return [];
+					first = false;
+					return [{ ...part, text: d.chunk }];
+				});
+				if (first) parts.unshift(text(d.chunk));
+			}
+			return { toolCallId: d.toolCallId, data: { content: parts } };
+		});
 	}
 	if (type === "tool.result.delivered") return mapped("toolResult", { toolCallId, ...data }, (d) => {
 		const { toolCallId, ...result } = d;
