@@ -516,12 +516,12 @@ func (s *session) publishInitialLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
-	return s.withErasureCheck(next, func() error {
-		return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next) })
+	return s.withErasureCheck(next, func(guard string) error {
+		return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next, guard) })
 	})
 }
 
-func (s *session) publishReservedInitialLocked(next api.Session) error {
+func (s *session) publishReservedInitialLocked(next api.Session, guard string) error {
 	l, err := acquireNew(s.pendingStore, s.id)
 	if err != nil {
 		return s.stopWriterLocked(err)
@@ -531,7 +531,7 @@ func (s *session) publishReservedInitialLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
-	if err := l.Save(next); err != nil {
+	if err := guardedSave(l, next, guard); err != nil {
 		return s.stopWriterLocked(err)
 	}
 	s.pendingStore, s.data = nil, next
@@ -539,12 +539,12 @@ func (s *session) publishReservedInitialLocked(next api.Session) error {
 }
 
 func (s *session) commitSnapshotLocked(next api.Session) error {
-	return s.withErasureCheck(next, func() error {
-		return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next) })
+	return s.withErasureCheck(next, func(guard string) error {
+		return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next, guard) })
 	})
 }
 
-func (s *session) commitReservedSnapshotLocked(next api.Session) error {
+func (s *session) commitReservedSnapshotLocked(next api.Session, guard string) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
@@ -558,7 +558,7 @@ func (s *session) commitReservedSnapshotLocked(next api.Session) error {
 	// Outside the public persistent lifecycle, keep the original lazy
 	// save rule. An attached public persistent lease saves all changes.
 	if s.lease != nil && (s.h.deferHistory || next.ForkedFrom != "" || slices.ContainsFunc(next.Entries, startsLegacyHistory)) {
-		if err := s.lease.Save(next); err != nil {
+		if err := guardedSave(s.lease, next, guard); err != nil {
 			if s.rewindBlocked && !errors.Is(err, api.ErrWriterLost) && s.reconcileRewindCommit(next) {
 				return nil
 			}

@@ -23,7 +23,7 @@ func (c *Client) Relay(token string) http.Handler {
 			failure(w, 401, "unauthorized", "authentication required")
 			return
 		}
-		if r.URL.Path != "/v1" && !strings.HasPrefix(r.URL.Path, "/v1/") {
+		if r.URL.Path != registryPath && r.URL.Path != "/v1" && !strings.HasPrefix(r.URL.Path, "/v1/") {
 			failure(w, 404, "not_found", "unknown operation")
 			return
 		}

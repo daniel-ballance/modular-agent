@@ -12,8 +12,8 @@ import (
 // ErasureEpoch lets a delivery discard a view captured before the cutoff.
 func (c *client) ErasureEpoch(id string) (int, error) {
 	v, _ := c.Get("history")
-	registry, ok := v.(api.ErasureCoordinator)
-	if !ok || id == "" {
+	registry := api.PendingRegistry(v)
+	if registry == nil || id == "" {
 		return 0, nil
 	}
 	var epoch int
@@ -42,8 +42,7 @@ func (c *client) SupportsErasure() bool {
 	if err != nil {
 		return false
 	}
-	_, ok := v.(api.ErasureCoordinator)
-	return ok
+	return api.PendingRegistry(v) != nil
 }
 
 func (c *client) Erase(ctx context.Context, id string, ids []string) error {
@@ -58,8 +57,8 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 		return report, api.ErrErasureUnsupported
 	}
 	store := v.(api.Store)
-	registry, ok := store.(api.ErasureCoordinator)
-	if !ok {
+	registry := api.PendingRegistry(store)
+	if registry == nil {
 		return report, api.ErrErasureUnsupported
 	}
 	source, err := c.find(id)
@@ -174,7 +173,7 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 			current.mu.Lock()
 			_ = current.reconcileErasureLocked()
 			current.mu.Unlock()
-		} else if lease, e := store.Acquire(sessionID); e == nil {
+		} else if lease, e := tryAcquireErasure(store, sessionID); e == nil {
 			_ = registry.PendingErasures(func(intents *[]api.ErasureIntent) error {
 				row, err := lease.Load()
 				if err != nil {
@@ -230,6 +229,15 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 	return report, nil
 }
 
+func tryAcquireErasure(store api.Store, id string) (api.Lease, error) {
+	if store, ok := store.(interface {
+		TryAcquire(string) (api.Lease, error)
+	}); ok {
+		return store.TryAcquire(id)
+	}
+	return store.Acquire(id)
+}
+
 func erasable(e api.Entry) bool {
 	return !e.AuthorityRecord() && e.Kind != "position" && (e.Kind != "erasure" || e.IsErased())
 }
@@ -239,8 +247,7 @@ func (s *session) erasureCoordinator() api.ErasureCoordinator {
 		return nil
 	}
 	v, _ := s.h.API().Get("history")
-	registry, _ := v.(api.ErasureCoordinator)
-	return registry
+	return api.PendingRegistry(v)
 }
 
 // Called with the session lock before use. Existing live work cannot continue
@@ -365,22 +372,22 @@ func reconcileCopies(lease api.Lease, snap api.Session, intents *[]api.ErasureIn
 
 // Prevent publication of a stale fork or new copy after the erasure cutoff.
 // The check and the save are ordered by the same registry lock as publication.
-func (s *session) withErasureCheck(next api.Session, save func() error) error {
+func (s *session) withErasureCheck(next api.Session, save func(string) error) error {
 	registry := s.erasureCoordinator()
 	if registry == nil {
-		return save()
+		return save("")
 	}
-	return registry.PendingErasures(func(intents *[]api.ErasureIntent) error {
-		if needsErasure(s.data, *intents) {
+	check := func(intents []api.ErasureIntent, guard string) error {
+		if needsErasure(s.data, intents) {
 			return api.ErrErasureUnavailable
 		}
-		if len(*intents) != 0 {
+		if len(intents) != 0 {
 			start := len(s.data.Entries)
 			if next.ForkedFrom != s.data.ForkedFrom {
 				start = 0
 			}
 			for _, entry := range next.Entries[min(start, len(next.Entries)):] {
-				for _, intent := range *intents {
+				for _, intent := range intents {
 					for _, copy := range intent.Copies {
 						if slices.Contains(entry.Copies, copy.ID) {
 							return api.ErrErasureUnavailable
@@ -389,6 +396,20 @@ func (s *session) withErasureCheck(next api.Session, save func() error) error {
 				}
 			}
 		}
-		return save()
-	})
+		return save(guard)
+	}
+	if remote, ok := registry.(api.RemoteErasureCoordinator); ok {
+		return remote.GuardErasure(check)
+	}
+	return registry.PendingErasures(func(intents *[]api.ErasureIntent) error { return check(*intents, "") })
+}
+
+func guardedSave(lease api.Lease, next api.Session, guard string) error {
+	if guard == "" {
+		return lease.Save(next)
+	}
+	if lease, ok := lease.(api.GuardedErasureLease); ok {
+		return lease.SaveGuarded(next, guard)
+	}
+	return api.ErrErasureUnavailable
 }

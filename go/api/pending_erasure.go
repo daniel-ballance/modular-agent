@@ -25,6 +25,25 @@ type ErasureCoordinator interface {
 	PendingErasures(func(*[]ErasureIntent) error) error
 }
 
+// RemoteErasureCoordinator advertises a discovered service capability. Guard
+// obtains a revision that the service checks atomically with the append.
+type RemoteErasureCoordinator interface {
+	ErasureCoordinated() bool
+	GuardErasure(func([]ErasureIntent, string) error) error
+}
+
+func PendingRegistry(store any) ErasureCoordinator {
+	if r, ok := store.(RemoteErasureCoordinator); ok && !r.ErasureCoordinated() {
+		return nil
+	}
+	r, _ := store.(ErasureCoordinator)
+	return r
+}
+
+type GuardedErasureLease interface {
+	SaveGuarded(Session, string) error
+}
+
 // ExactErasureLease installs tombstones without touching another session.
 type ExactErasureLease interface {
 	SaveErasure(Session) error
