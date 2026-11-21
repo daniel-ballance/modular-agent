@@ -294,6 +294,8 @@ async fn portable_registrar_store_receives_metadata_and_binding_pagination() -> 
         assert_eq!(
             db.lists,
             [
+                // Reservation reconstruction scans the backend at startup.
+                (None, 500),
                 (None, 500),
                 (
                     Some(first_listed.metadata["id"].as_str().unwrap().into()),
