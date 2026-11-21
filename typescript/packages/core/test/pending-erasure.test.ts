@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { definePlugin, fileHistory, httpHistory, serveHistory } from "@modular-agent/core";
 import { testAgent } from "@modular-agent/core/testing";
+import { historyService } from "@modular-agent/services";
 
 test("pending marks follow forks across held writers and survive restart", async t => {
   const dir = await mkdtemp(join(tmpdir(), "sdk-pending-"));
@@ -89,6 +90,76 @@ test("HTTP erasure refuses a history delivery waiting at its output gate", async
     assert.equal(plans[0].copies[0].complete, false);
   } finally { resume(); }
   await refused;
+});
+
+test("a repeated HTTP erasure recovers a destination that expired after publication", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-http-erasure-expiry-"));
+  const cleanup: (() => Promise<void>)[] = [() => rm(dir, { recursive: true, force: true })];
+  t.after(async () => { for (const close of cleanup.reverse()) await close(); });
+  const token = randomBytes(32).toString("hex"), tokenFile = join(dir, "token");
+  await writeFile(tokenFile, token, { mode: 0o600 });
+  const retention = 60_000;
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const service = await historyService({ dir: join(dir, "store"), token, retention });
+  cleanup.push(() => new Promise<void>((resolve, reject) => service.server.close(error => error ? reject(error) : resolve())));
+  const config = { durability: "kept" as const, history: httpHistory(service.url, tokenFile), script: [{ text: "private answer" }] };
+  const first = await testAgent(config);
+  cleanup.push(() => first.close());
+  const source = await first.session();
+  await source.prompt("private input");
+  const target = (await source.history()).find(e => e.kind === "input")!.id;
+  const dest = await source.fork();
+  await dest.close();
+  now += retention / 2;
+  await source.prompt("keep the source session live");
+  const sourcePath = `${service.url}/v1/sessions/${source.id}`;
+  const destPath = `${service.url}/v1/sessions/${dest.id}`;
+  const publishPath = sourcePath + "/pending-erasure";
+  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+  const fetchHistory = globalThis.fetch;
+  type Publication = { lease: string; revision: string; intentId: string; entryIds: string[]; copies: { sessionId: string }[] };
+  let publication: Publication | undefined;
+  let published: unknown;
+  const fault = t.mock.method(globalThis, "fetch", async (...args: Parameters<typeof fetch>) => {
+    const reply = await fetchHistory(...args);
+    if (args[0] !== publishPath || args[1]?.method !== "POST") return reply;
+    assert.equal(reply.status, 200);
+    publication = JSON.parse(args[1].body as string) as Publication;
+    published = await reply.json();
+    // Stop the first client after the mark commits but before it begins completion.
+    return Response.json({ error: "Publication reply lost", code: "unavailable" }, { status: 503 });
+  });
+  try { await assert.rejects(source.erase([target]), { code: "lost", message: "Publication reply lost" }); }
+  finally { fault.mock.restore(); }
+  assert.ok(publication);
+  const expected = { intentId: publication.intentId, sessionIds: [source.id, dest.id] };
+  assert.deepEqual(published, expected);
+
+  now += retention / 2;
+  const expired = await fetch(destPath, { headers });
+  assert.equal(expired.status, 404);
+  assert.equal((await expired.json() as { code: string }).code, "unknown_session");
+  // Even with stale revision and reversed copy sets, the original order survives.
+  const duplicate = await fetch(publishPath, { method: "POST", headers,
+    body: JSON.stringify({ ...publication, copies: [...publication.copies].reverse() }) });
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), expected);
+  await first.close();
+
+  const recovered = await testAgent(config);
+  cleanup.push(() => recovered.close());
+  const reopened = await recovered.openSession(source.id);
+  const report = await reopened.erase([target]);
+  assert.ok(report.erased.some(copy => copy.sessionId === source.id && copy.id === target));
+  assert.equal(report.pending.length, 0); // The expired session's authority records are unavailable.
+  assert.ok(report.outOfReach.includes("copies in other sessions"));
+  const registry = await fetch(destPath + "/pending-erasure", { headers });
+  assert.equal(registry.status, 200);
+  const { plans } = await registry.json() as { plans: { intentId: string; copies: { complete: boolean }[] }[] };
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].intentId, expected.intentId);
+  assert.ok(plans[0].copies.every(copy => !copy.complete));
 });
 
 test("a previously declared HTTP registry does not recreate missing storage", async t => {

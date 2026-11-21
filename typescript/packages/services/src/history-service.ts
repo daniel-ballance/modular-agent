@@ -134,7 +134,7 @@ class Records {
 			if ((declared || profile) && profile?.value !== 1) this.registryFailed = true;
 			if (!declared && !profile) {
 				this.db.exec(`CREATE TABLE registry_revision (revision TEXT NOT NULL);
-					CREATE TABLE registry_intents (seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, operation TEXT UNIQUE NOT NULL, copies TEXT NOT NULL);
+					CREATE TABLE registry_intents (seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, operation TEXT UNIQUE NOT NULL, copies TEXT NOT NULL, session_ids TEXT NOT NULL);
 					CREATE TABLE registry_plans (session TEXT NOT NULL, intent INTEGER NOT NULL, record TEXT NOT NULL, json TEXT NOT NULL,
 						PRIMARY KEY (session,intent), UNIQUE (session,record));
 					INSERT INTO settings VALUES ('pending-erasure-profile',1);`);
@@ -144,6 +144,14 @@ class Records {
 				this.revision();
 				this.db.prepare("SELECT seq,id,operation,copies FROM registry_intents LIMIT 1").get();
 				this.db.prepare("SELECT session,intent,record,json FROM registry_plans LIMIT 1").get();
+				if (!this.db.prepare("SELECT 1 FROM pragma_table_info('registry_intents') WHERE name='session_ids'").get()) {
+					// Older stores inserted plans in publication order, which their rowids preserve.
+					this.db.exec(`ALTER TABLE registry_intents ADD COLUMN session_ids TEXT;
+						WITH published AS (
+							SELECT intent, json_group_array(session ORDER BY rowid) AS session_ids FROM registry_plans GROUP BY intent
+						)
+						UPDATE registry_intents SET session_ids=published.session_ids FROM published WHERE seq=published.intent;`);
+				}
 			} catch { this.registryFailed = true; }
 			const prior = this.db.prepare("SELECT value FROM settings WHERE key='ttl-bound'").get()?.value;
 			if (prior === undefined && this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get()) throw new Error("Stored TTL bound is missing");
@@ -310,8 +318,12 @@ class Records {
 			const sameId = this.db.prepare("SELECT operation,copies FROM registry_intents WHERE id=?").get(intentId);
 			const key = copyKey(copies);
 			if (sameId && (sameId.operation !== operation || sameId.copies !== key)) throw conflict();
-			const prior = this.db.prepare("SELECT id FROM registry_intents WHERE operation=?").get(operation);
-			if (prior) return { intentId: prior.id };
+			const prior = this.db.prepare("SELECT id,session_ids FROM registry_intents WHERE operation=?").get(operation);
+			if (prior) {
+				const sessionIds = JSON.parse(prior.session_ids as string) as Json;
+				if (!distinctIds(sessionIds) || !sessionIds.includes(sid)) throw unavailable();
+				return { intentId: prior.id, sessionIds };
+			}
 			this.requireRevision(revision);
 			const select = this.db.prepare("SELECT * FROM sessions WHERE id=? AND NOT expired");
 			for (const copy of copies) {
@@ -329,12 +341,14 @@ class Records {
 				if (!fits(planFrame("x".repeat(MAX_LEASE_BYTES)), json, intentId)) throw new BindingError(413, "request_too_large", "Erasure plan cannot fit a read page");
 				return json;
 			});
-			const { lastInsertRowid } = this.db.prepare("INSERT INTO registry_intents (id,operation,copies) VALUES (?,?,?)").run(intentId, operation, key);
+			const sessionIds = copies.map(copy => copy.sessionId);
+			const { lastInsertRowid } = this.db.prepare("INSERT INTO registry_intents (id,operation,copies,session_ids) VALUES (?,?,?,?)")
+				.run(intentId, operation, key, JSON.stringify(sessionIds));
 			const insert = this.db.prepare("INSERT INTO registry_plans VALUES (?,?,?,?)");
 			copies.forEach((copy, i) => insert.run(copy.sessionId, lastInsertRowid, copy.recordId, plans[i]));
 			authorize();
 			this.advanceRevision();
-			return { intentId };
+			return { intentId, sessionIds };
 		});
 	}
 	complete(sid: string, intentId: string, entryIds: string[], authorize: () => void) {
