@@ -927,8 +927,13 @@ class ACP(Plugin):
         return None
 
     async def answer_request(self, sid, q):
-        value = "declined"
-        attribution = await self.question_route(sid, q)
+        if q["kind"] not in {"approval", "text", "choice"}:
+            return
+        value = None
+        try:
+            attribution = await self.question_route(sid, q)
+        except (AgentError, acp.RequestError):
+            return
         if attribution is None:
             return
         answer = {"session": sid, "request": q["id"], **attribution}
@@ -1009,7 +1014,9 @@ class ACP(Plugin):
                         ):
                             value = submitted
             if await current_route():
-                await self.api.call("questions", "answer", {**answer, "value": value})
+                await self.api.call(
+                    "questions", "answer", {**answer, "value": value, "declined": value is None}
+                )
         except asyncio.CancelledError:
             raise
         except (AgentError, acp.RequestError, ConnectionError, EOFError):

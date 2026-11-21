@@ -2,7 +2,7 @@ import json
 import secrets
 
 import pytest
-from modular_agent import AgentError, ErrorCode, create_agent
+from modular_agent import AgentError, ErrorCode, ToolContext, create_agent, tool
 from modular_agent.testing import scripted_provider
 from websockets.asyncio.client import connect
 
@@ -30,9 +30,19 @@ async def test_join_does_not_add_representation(tmp_path):
     (root / "nested").mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(root, target_is_directory=True)
-    rights = ["watch", "input", "grant", "propose", "answer"]
+    rights = ["watch", "input", "grant", "propose", "answer", "tools"]
+
+    @tool(read_only=True)
+    async def ask_member(cx: ToolContext) -> str:
+        """Ask the represented member for a value."""
+        answer = await cx.ask(
+            {"kind": "text", "question": "Member only?", "answerers": ["represented"]}
+        )
+        return str(answer.value)
+
+    script = [{"toolCalls": [{"name": "ask_member", "input": {}}]}, {"text": "answered"}]
     async with create_agent(
-        project=root, several_actors=True, providers=[scripted_provider([{"text": "no tools"}])]
+        project=root, several_actors=True, providers=[scripted_provider(script)], tools=[ask_member]
     ) as agent:
         listener = await agent.serve_acp(
             listen="127.0.0.1:0",
@@ -60,11 +70,29 @@ async def test_join_does_not_add_representation(tmp_path):
                         {"jsonrpc": "2.0", "id": counter, "method": method, "params": params}
                     )
                 )
-                while (message := json.loads(await client.recv())).get("id") != counter:
-                    pass
-                return message
+                while True:
+                    message = json.loads(await client.recv())
+                    if message.get("method") == "elicitation/create":
+                        assert message["params"]["message"] == "Member only?"
+                        await client.send(
+                            json.dumps(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": message["id"],
+                                    "result": {
+                                        "action": "accept",
+                                        "content": {"answer": "declined"},
+                                    },
+                                }
+                            )
+                        )
+                    elif message.get("id") == counter:
+                        return message
 
-            await rpc("initialize", {"protocolVersion": 1})
+            await rpc(
+                "initialize",
+                {"protocolVersion": 1, "clientCapabilities": {"elicitation": {"form": {}}}},
+            )
             created = await rpc("session/new", {"cwd": str(alias), "mcpServers": []})
             scope = {"sessionId": created["result"]["sessionId"]}
             for name in ("represented", "unrepresented"):
@@ -89,3 +117,14 @@ async def test_join_does_not_add_representation(tmp_path):
             [admission] = [row for row in records if row["kind"] == "inputAccepted"]
             assert admission["actorId"] == "represented"
             assert admission["data"]["submittedBy"] == "principal"
+            result = await rpc(
+                "session/prompt", {**scope, "prompt": [{"type": "text", "text": "Ask"}]}
+            )
+            assert result["result"]["stopReason"] == "end_turn"
+            records = (await rpc("_modular-agent/history", {**scope, "all": True}))["result"][
+                "entries"
+            ]
+            [answer] = [row["data"] for row in records if row["kind"] == "inputAnswer"]
+            assert answer["actorId"] == "represented"
+            assert answer["actingFor"] == "principal"
+            assert answer["value"] == "declined"
