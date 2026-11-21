@@ -1,4 +1,4 @@
-package operatorpolicy
+package modular
 
 import (
 	"bytes"
@@ -12,11 +12,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/daniel-ballance/modular-agent/go/configuration"
-	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 type policyScope struct {
-	Actor      modular.Actor   `json:"actor"`
+	Actor      Actor           `json:"actor"`
 	Projects   json.RawMessage `json:"projects"`
 	Tenants    json.RawMessage `json:"tenants"`
 	Represents []string        `json:"represents"`
@@ -27,23 +26,24 @@ type aclPolicy struct {
 	policyScope
 }
 
-type Policy struct {
-	Stdio   *modular.ACPActor
-	Actors  []modular.ACPActor
-	Tenants map[string]modular.Tenant
-	Limits  modular.CapacityLimits
+type ACPPolicy struct {
+	Stdio   *ACPActor
+	Actors  []ACPActor
+	Tenants map[string]Tenant
+	Limits  CapacityLimits
 }
 
-func defaultLimits() modular.CapacityLimits {
-	return modular.CapacityLimits{
-		Session: modular.CapacityBounds{Inputs: 32, Calls: 64, Jobs: 16, BufferedBytes: 16 << 20, StorageBytes: 1 << 30, ControlBytes: 8 << 20},
-		Tenant:  modular.CapacityBounds{Inputs: 128, Calls: 256, Jobs: 64, BufferedBytes: 64 << 20, StorageBytes: 8 << 30, ControlBytes: 32 << 20},
-		Agent:   modular.CapacityBounds{Inputs: 512, Calls: 1024, Jobs: 256, BufferedBytes: 256 << 20, StorageBytes: 32 << 30, ControlBytes: 128 << 20},
+func defaultPolicyLimits() CapacityLimits {
+	return CapacityLimits{
+		Session: CapacityBounds{Inputs: 32, Calls: 64, Jobs: 16, BufferedBytes: 16 << 20, StorageBytes: 1 << 30, ControlBytes: 8 << 20},
+		Tenant:  CapacityBounds{Inputs: 128, Calls: 256, Jobs: 64, BufferedBytes: 64 << 20, StorageBytes: 8 << 30, ControlBytes: 32 << 20},
+		Agent:   CapacityBounds{Inputs: 512, Calls: 1024, Jobs: 256, BufferedBytes: 256 << 20, StorageBytes: 32 << 30, ControlBytes: 128 << 20},
 	}
 }
 
-func Read(path string, optional, representation bool) (policy Policy, err error) {
-	policy.Limits = defaultLimits()
+// ReadACPPolicy reads an operator file. representation allows the file to name represented actors.
+func ReadACPPolicy(path string, optional, representation bool) (policy ACPPolicy, err error) {
+	policy.Limits = defaultPolicyLimits()
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("policy %s: %w", path, err)
@@ -66,9 +66,9 @@ func Read(path string, optional, representation bool) (policy Policy, err error)
 		return policy, errors.New("file must be UTF-8 JSON of at most 1 MiB")
 	}
 	var parsed struct {
-		Stdio  *policyScope           `json:"stdio"`
-		Actors []aclPolicy            `json:"actors"`
-		Limits modular.CapacityLimits `json:"limits"`
+		Stdio  *policyScope   `json:"stdio"`
+		Actors []aclPolicy    `json:"actors"`
+		Limits CapacityLimits `json:"limits"`
 	}
 	parsed.Limits = policy.Limits
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -82,7 +82,7 @@ func Read(path string, optional, representation bool) (policy Policy, err error)
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return policy, errors.New("expected one policy object")
 	}
-	for _, b := range []modular.CapacityBounds{parsed.Limits.Session, parsed.Limits.Tenant, parsed.Limits.Agent} {
+	for _, b := range []CapacityBounds{parsed.Limits.Session, parsed.Limits.Tenant, parsed.Limits.Agent} {
 		for _, v := range []int64{b.Inputs, b.Calls, b.Jobs, b.BufferedBytes, b.StorageBytes, b.ControlBytes} {
 			if v < 0 || v > 9007199254740991 {
 				return policy, errors.New("limits must be nonnegative safe integers")
@@ -93,13 +93,13 @@ func Read(path string, optional, representation bool) (policy Policy, err error)
 		}
 	}
 	policy.Limits = parsed.Limits
-	convert := func(s policyScope) (modular.ACPActor, error) {
-		r := modular.ACPActor{Actor: s.Actor}
+	convert := func(s policyScope) (ACPActor, error) {
+		r := ACPActor{Actor: s.Actor}
 		if !representation && len(s.Represents) != 0 {
 			return r, errors.New("represents must be empty in ma")
 		}
 		r.Represents = s.Represents
-		if s.Actor.ID == "" || !slices.Contains([]string{"host", "user", "agent", "program"}, s.Actor.Kind) || s.Actor.Rights == nil || slices.ContainsFunc(s.Actor.Rights, func(right string) bool { return !slices.Contains(modular.LocalACPActor().Rights, right) }) {
+		if s.Actor.ID == "" || !slices.Contains([]string{"host", "user", "agent", "program"}, s.Actor.Kind) || s.Actor.Rights == nil || slices.ContainsFunc(s.Actor.Rights, func(right string) bool { return !slices.Contains(LocalACPActor().Rights, right) }) {
 			return r, errors.New("actor requires an ID, known kind and a rights list")
 		}
 		if s.Projects != nil {
@@ -135,9 +135,9 @@ func Read(path string, optional, representation bool) (policy Policy, err error)
 				}
 				r.Tenants[i] = *name
 				if policy.Tenants == nil {
-					policy.Tenants = map[string]modular.Tenant{}
+					policy.Tenants = map[string]Tenant{}
 				}
-				policy.Tenants[*name] = modular.Tenant{Rights: modular.LocalACPActor().Rights}
+				policy.Tenants[*name] = Tenant{Rights: LocalACPActor().Rights}
 			}
 		}
 		return r, nil
@@ -150,7 +150,7 @@ func Read(path string, optional, representation bool) (policy Policy, err error)
 		policy.Stdio = &s
 	}
 	if parsed.Actors != nil {
-		policy.Actors = make([]modular.ACPActor, 0, len(parsed.Actors))
+		policy.Actors = make([]ACPActor, 0, len(parsed.Actors))
 	}
 	for i, row := range parsed.Actors {
 		actor, err := convert(row.policyScope)
@@ -167,5 +167,5 @@ func Read(path string, optional, representation bool) (policy Policy, err error)
 		actor.TokenFile = path
 		policy.Actors = append(policy.Actors, actor)
 	}
-	return policy, modular.ValidateACPActorTokens(policy.Actors)
+	return policy, ValidateACPActorTokens(policy.Actors)
 }

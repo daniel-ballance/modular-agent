@@ -15,7 +15,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/harness"
 	"github.com/daniel-ballance/modular-agent/go/history"
 	"github.com/daniel-ballance/modular-agent/go/historyhttp"
-	"github.com/daniel-ballance/modular-agent/go/internal/operatorpolicy"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 	"github.com/daniel-ballance/modular-agent/go/terminal"
@@ -174,9 +174,9 @@ func run(ctx context.Context, args []string, input io.ReadCloser, stdout, stderr
 		return fmt.Errorf("subagents must be transient or durable")
 	}
 	conformance := os.Getenv("MODULAR_AGENT_CONFORMANCE") == "1"
-	var policy *operatorpolicy.Policy
+	var policy *modular.ACPPolicy
 	if path := os.Getenv("MODULAR_AGENT_CONFORMANCE_POLICY"); conformance && opt.Mode == "acp" && path != "" {
-		config, err := operatorpolicy.Read(path, false, true)
+		config, err := modular.ReadACPPolicy(path, false, true)
 		if err != nil {
 			return err
 		}

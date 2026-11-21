@@ -1,9 +1,9 @@
 package main
 
-import "github.com/daniel-ballance/modular-agent/go/internal/operatorpolicy"
+import "github.com/daniel-ballance/modular-agent/go/modular"
 
-type operatorPolicy = operatorpolicy.Policy
+type operatorPolicy = modular.ACPPolicy
 
 func readPolicy(path string, optional bool) (operatorPolicy, error) {
-	return operatorpolicy.Read(path, optional, false)
+	return modular.ReadACPPolicy(path, optional, false)
 }
