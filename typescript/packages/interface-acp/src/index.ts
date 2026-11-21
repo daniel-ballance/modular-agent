@@ -47,7 +47,7 @@ interface Waiter {
 /** A turn's outcome as an ACP prompt response, with the binding's _meta. */
 function promptResponse(inputId: string, outcome: Outcome, extra: Record<string, unknown> = {}): acp.PromptResponse {
 	const stopReason: acp.StopReason =
-		outcome.kind === "cancelled" ? "cancelled" : outcome.kind === "limit" ? (outcome.limit === "steps" ? "max_turn_requests" : "max_tokens") : outcome.kind === "failed" ? "refusal" : "end_turn";
+		outcome.kind === "cancelled" ? "cancelled" : outcome.kind === "limit" ? (["output", "tenantTokens", "sessionTokens"].includes(outcome.limit ?? "") ? "max_tokens" : "max_turn_requests") : outcome.kind === "failed" ? "refusal" : "end_turn";
 	return { stopReason, _meta: { [NS]: { inputId, outcome, ...extra } } };
 }
 

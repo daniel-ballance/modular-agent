@@ -13,6 +13,7 @@ import { codemode } from "./codemode.js";
 import { loadScript } from "./script.js";
 import { line, print } from "./terminal.js";
 import { HELP } from "./help.js";
+import { loadPolicy } from "./policy.js";
 import { AuthFile, expired } from "./auth.js";
 import { labels, oauth, vendors, type Step, type Vendor } from "./oauth.js";
 import { responses } from "./responses.js";
@@ -20,7 +21,7 @@ import { responses } from "./responses.js";
 function parse(argv: string[]) {
   const opts: { command?: string; project: string; runtime: "durable" | "transient"; session?: string; prompt?: string;
     resume?: boolean; verbose?: boolean; json?: boolean; history?: boolean; declaration?: boolean; acp?: boolean;
-    listen?: string; tokenFile?: string;
+    listen?: string; tokenFile?: string; policy?: string;
     trust?: boolean; all?: boolean; help?: boolean; version?: boolean; settings: Settings } = { project: process.cwd(), runtime: "durable", settings: {} };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -38,6 +39,7 @@ function parse(argv: string[]) {
       case "--acp": opts.acp = true; break;
       case "--listen": opts.listen = value(); break;
       case "--token-file": opts.tokenFile = value(); break;
+      case "--policy": opts.policy = value(); break;
       case "--all": opts.all = true; break;
       case "--project": opts.project = value(); break;
       case "--session": opts.session = value(); break;
@@ -141,9 +143,9 @@ async function main(argv: string[]) {
   const opts = parse(argv);
   if (opts.help) { console.log(HELP); return 0; }
   if (opts.version) { console.log("ma 0.1.0 (typescript)"); return 0; }
-  if ((opts.listen !== undefined || opts.tokenFile !== undefined) && (!opts.acp || !opts.listen || !opts.tokenFile || opts.command || opts.declaration)) {
-    throw new Error("--listen and --token-file must be used together with --acp");
-  }
+  if (opts.listen !== undefined && (!opts.acp || !opts.listen || opts.command || opts.declaration)) throw new Error("--listen requires --acp");
+  if (opts.tokenFile !== undefined && !opts.listen) throw new Error("--token-file requires --listen");
+  const policy = await loadPolicy(p.config, opts);
   if (opts.acp && (opts.prompt !== undefined || opts.session || opts.trust || opts.resume)) throw new Error("with --acp the client creates sessions and grants trust");
   let project = await realpath(opts.project);
   if (opts.command === "skills") {
@@ -158,8 +160,11 @@ async function main(argv: string[]) {
     return 0;
   }
   const conformance = opts.acp && process.env.MODULAR_AGENT_CONFORMANCE === "1";
-  const history = process.env.MODULAR_AGENT_HISTORY_URL ? httpHistory(process.env.MODULAR_AGENT_HISTORY_URL, process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "") : undefined;
-  const base = { durability: opts.runtime === "durable" ? "durable" as const : "kept" as const, history, dataDir: p.state };
+  const history = process.env.MODULAR_AGENT_HISTORY_URL ? httpHistory(process.env.MODULAR_AGENT_HISTORY_URL,
+    process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "", { pendingErasureDir: process.env.MODULAR_AGENT_PENDING_ERASURE_DIR ??
+      (conformance ? process.env.MODULAR_AGENT_CONFORMANCE_ERASURE_DIR : undefined) }) : undefined;
+  const base = { durability: opts.runtime === "durable" ? "durable" as const : "kept" as const, history, dataDir: p.state,
+    resourceReservations: policy.resourceReservations };
   const script = await loadScript(process.env.MODULAR_AGENT_SCRIPT, process.env.MODULAR_AGENT_SCRIPT_LOG);
   let savedModel: string | undefined;
   if (opts.command === "sessions" || opts.session || opts.resume) {
@@ -190,8 +195,9 @@ async function main(argv: string[]) {
     if (await auth.login("openai-codex")) defaultModel = "openai-codex/gpt-6.1-sol";
     else if (await auth.login("xai")) defaultModel = "xai/grok-4.7";
   }
-  const build = async (cwd: string, saved?: string) => {
-    const settings = { ...standardSettings(await settingsFor(p, cwd)), ...opts.settings };
+  const build = async (cwd: string, saved?: string, projectSettings = true) => {
+    const source = projectSettings ? await settingsFor(p, cwd) : await optionalJson(join(p.config, "settings.json"));
+    const settings = { ...standardSettings(source), ...opts.settings };
     let model = script ? "scripted/script" : conformance ? "conformance/echo" :
       saved ?? modelRef(settings.model) ?? defaultModel;
     if (!model && !inspecting && launch && claudeSignedIn().status === 0) model = "claude/claude-sonnet-5-5";
@@ -207,7 +213,8 @@ async function main(argv: string[]) {
       compaction: !conformance, conformance, questionsOutlastTurns: true, jobReportsStartTurns: true, settingsDuringTurn: "refused",
       pluginHost: opts.acp || !!claude, ...(claude ? { processPlugins: [claude] } : {}) });
   };
-  const agent = await build(project, modelRef(opts.settings.model) ?? savedModel);
+  const scoped = opts.listen ? policy.actors?.some(actor => actor.projects !== undefined) : policy.stdio?.projects !== undefined;
+  const agent = await build(project, modelRef(opts.settings.model) ?? savedModel, !opts.acp || !scoped);
   try { return await run(agent); } finally { await agent.close(); }
 
   async function run(agent: Agent) {
@@ -215,16 +222,21 @@ async function main(argv: string[]) {
       for (const m of agent.models()) console.log(`${`${m.provider}/${m.id}`.padEnd(34)} context ${String(m.contextWindow).padStart(7)}  thinking ${(m.thinking ?? (m.reasoning ? ["off", "minimal", "low", "medium", "high", "xhigh"] : ["off"])).join(",")}`);
       return 0;
     }
-    if (opts.declaration) { console.log(JSON.stringify(agent.declaration(), null, 2)); return 0; }
+    if (opts.declaration) {
+      const { session, tenant, agent: overall } = agent.resourceLimits();
+      console.log(JSON.stringify({ ...agent.declaration(), limits: { session, tenant, agent: overall } }, null, 2));
+      return 0;
+    }
     if (opts.acp) {
       const acp = { projectMcp, compose: (cwd: string, saved?: import("@modular-agent/core").SessionInfo) => {
-        if (cwd === project && (!saved || agent.models().some(m => `${m.provider}/${m.id}` === modelRef(saved.settings.model)))) {
+        if (!scoped && cwd === project && (!saved || agent.models().some(m => `${m.provider}/${m.id}` === modelRef(saved.settings.model)))) {
           return Promise.resolve(agent);
         }
         return build(cwd, modelRef(saved?.settings.model));
       } };
-      if (opts.listen && opts.tokenFile) {
-        const server = await agent.serveAcp({ ...acp, listen: opts.listen, actors: [{ tokenFile: opts.tokenFile, actor: defaultAcpActor() }] });
+      if (opts.listen) {
+        const actors = policy.actors ?? [{ tokenFile: opts.tokenFile!, actor: defaultAcpActor() }];
+        const server = await agent.serveAcp({ ...acp, listen: opts.listen, actors });
         process.stdout.write(server.url + "\n");
         await new Promise<void>((resolve, reject) => {
           const stop = () => {
@@ -235,7 +247,7 @@ async function main(argv: string[]) {
           process.once("SIGINT", stop);
           process.once("SIGTERM", stop);
         });
-      } else await agent.serveAcp(acp);
+      } else await agent.serveAcp({ ...acp, ...policy.stdio });
       return 0;
     }
     const session = opts.session ? await agent.openSession(opts.session) : await agent.session();

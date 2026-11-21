@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
+import { ALL_AUTHORITY, Harness, filePendingErasure, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
 import { contextCompaction } from "@modular-agent/context-compaction";
@@ -61,6 +61,7 @@ export interface SessionOptions { settings?: Settings; tenant?: string; actors?:
 export interface ServeAcpOptions {
   /** Trusted operator identity; never taken from a client request. */
   actorId?: string;
+  actor?: Actor;
   projects?: readonly string[];
   tenants?: readonly (string | null)[];
   rights?: readonly Right[];
@@ -102,13 +103,18 @@ export class FileHistory {
 export class HttpHistory {
   #url: string;
   #tokenFile: string;
-  constructor(url: string, tokenFile: string) { this.#url = url; this.#tokenFile = tokenFile; }
+  #pendingErasureDir?: string;
+  constructor(url: string, tokenFile: string, options?: { pendingErasureDir?: string }) {
+    this.#url = url;
+    this.#tokenFile = tokenFile;
+    this.#pendingErasureDir = options?.pendingErasureDir;
+  }
   static {
     httpUpstream = async store => historyClientOptions(store.#url, await tokenFrom(store.#tokenFile)) as { url: string; token: string };
     openHttpHistory = async store => {
       const client = new HttpHistoryStore(await httpUpstream(store));
       await client.initialize();
-      return client;
+      return Object.assign(client, store.#pendingErasureDir === undefined ? {} : { pendingErasure: filePendingErasure(store.#pendingErasureDir) });
     };
   }
 }
@@ -117,7 +123,7 @@ async function tokenFrom(file: string): Promise<string> {
   if (!info.isFile() || (info.mode & 0o077) !== 0) throw new AgentError("invalid_params", "The token file must be private");
   return (await readFile(file, "utf8")).trim();
 }
-export const httpHistory = (url: string, tokenFile: string): HttpHistory => new HttpHistory(url, tokenFile);
+export const httpHistory = (url: string, tokenFile: string, options?: { pendingErasureDir?: string }): HttpHistory => new HttpHistory(url, tokenFile, options);
 const historyMethods = ["create", "list", "read", "acquire", "renew", "release", "append", "erase"] as const;
 
 export async function serveHistory(store: FileHistory | MemoryHistory | HttpHistory | HistoryServiceStore,
@@ -656,9 +662,12 @@ export class Agent {
     let serving = false;
     try {
       if (options.listen === undefined) {
-        const localActor = { ...defaultAcpActor(), id: options.actorId ?? process.env.MODULAR_AGENT_ACTOR ?? "acp-user",
+        if (options.actor !== undefined && (options.actorId !== undefined || options.rights !== undefined)) {
+          throw new AgentError("invalid_composition", "ACP actor cannot be combined with actorId or rights");
+        }
+        const localActor = options.actor ?? { ...defaultAcpActor(), id: options.actorId ?? process.env.MODULAR_AGENT_ACTOR ?? "acp-user",
           rights: list(options.rights, r => ALL_AUTHORITY.includes(r), "rights") ?? [...ALL_AUTHORITY] };
-        const scope = await makeScope(localActor, options, options.rights !== undefined);
+        const scope = await makeScope(localActor, options, options.actor !== undefined || options.rights !== undefined);
         await installMcp(this);
         const { binding, detach } = prepareConnection(scope, false);
         try { await binding.acp.serveStdio(); } finally { detach(); }

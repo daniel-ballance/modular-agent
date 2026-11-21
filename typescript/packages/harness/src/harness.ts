@@ -700,11 +700,11 @@ export class Harness {
 		})();
 	}
 
-	private reserveInput(s: Session, q: QueuedInput, rebuilding = false) {
+	private reserveInput(s: Session, q: QueuedInput, rebuilding = false, startsNow = false) {
 		const size = resourceBytes(q);
 		const unit = this.reservations.limits.settlementBytes;
 		if (!rebuilding && size + 2048 > this.reservations.limits.entryBytes ||
-			!this.reservations.reserve(s, `input:${q.id}`, { inputs: 1, bufferedBytes: size, storageBytes: 3 * size + 4 * unit }, rebuilding)) {
+			!this.reservations.reserve(s, `input:${q.id}`, { inputs: startsNow ? 0 : 1, bufferedBytes: size, storageBytes: 3 * size + 4 * unit }, rebuilding)) {
 			throw failure("busy", "No capacity for input");
 		}
 	}
@@ -1661,7 +1661,9 @@ export class Harness {
 		}
 		const steer = q.when === "steer" && this.runtime()?.supports.inputDuringTurn === true && !s.running?.steeringClosed;
 		const taken = q.when === "propose" ? "proposed" : !s.isBusy() && !s.reopening && !s.followUps.length ? "now" : steer && !s.reopening ? "inTurn" : "after";
-		this.reserveInput(s, q);
+		// A selected turn already owns this input; only input still waiting for
+		// disposition takes a slot in the pending queue.
+		this.reserveInput(s, q, false, taken === "now");
 		try { await this.commit(s, [{
 			kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: q.actorId, inputId: q.id, sources: q.sources,
 			jobId: q.startedBy.kind === "job" ? q.startedBy.id : undefined,
