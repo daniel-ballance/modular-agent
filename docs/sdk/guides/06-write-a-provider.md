@@ -6,7 +6,7 @@ Build a Provider with one model, stream its reply, and test a rejected credentia
 
 A Provider has an id and returns its full current catalog from `models()`. Each model has its own id within that Provider, so the model below is `beacon/demo`. List the model's real input types and limits; the agent uses them to prepare the request. See [Models](../../bindings/data.md#models).
 
-Where implemented, `available()` is a readiness check, not a promise that a request will succeed. Use it to report whether you can accept requests now. The example is always ready to simulate a reply. Rust exposes the check on the trait and in its plugin server, but the embedded adapter does not use it to gate requests. TypeScript uses it for the ACP model offer and forwards it over the plugin binding. Go exposes an `Available` callback but its adapters don't consult it. Python's SDK Provider protocol has no readiness callback. Handle unavailable or rejected credentials inside `request` in every language.
+The optional `available()` check reports whether the Provider can take requests now. It does not promise the next request will succeed. Handle unavailable or rejected credentials inside `request` in every language. After changing an in-process catalog, notify readers with `changed()`; see [Languages](../languages.md) for the helper each SDK exposes.
 
 `request` receives the selected model, the prepared request (including messages, tools and settings) and a call-scoped context. A real Provider passes the context's cancellation signal to its client and sends the prepared request to the selected model. It gets the key through the context, not from plugin config or the prompt. The dummy below ignores the model and request and simulates a reply instead.
 
@@ -357,7 +357,7 @@ async def test_beacon_streams_and_records_failures(
 
 Wrap a request/response Provider in a plugin, register it at setup, and run `serve` on stdio, just as for [a tool in another process](03-tool-in-another-process.md). The host loads the program as a process plugin and selects a model from its catalog. Keep stdout for the binding. Choose the executable and arguments yourself; model output and project files should not choose what you launch.
 
-Rust and TypeScript can fetch the Provider's own credentials through the host with the same context call. Go can serve a Provider but its served SDK context does not fetch credentials from the host: keep a Provider that needs that lookup in process. Python's SDK can use a Provider in process, but its SDK server cannot register one. See [Placement](../placement.md#a-plugin-in-another-process) and [the Provider binding](../../bindings/plugin.md#the-host-asks-a-provider).
+Use the same credential context call in either placement. For a served Provider, the SDK reads the Provider's own credential through the host's `host/credentials/read` callback; it does not use plugin configuration to pass the key. See [Placement](../placement.md#a-plugin-in-another-process) and [the Provider binding](../../bindings/plugin.md#the-host-asks-a-provider).
 
 These offline process tests use the testing kit's keyless scripted Provider. Rust's existing fixture program reads the script from registrar config, calls `r.provider(scripted_provider(script))` in setup, then runs `modular_agent::serve(plugin).await`. In TypeScript the test gives Node the plugin program inline; in Go the same test executable runs the plugin in a separate process. Add `fmt` and `os` to the Go imports for this block.
 

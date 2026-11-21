@@ -318,11 +318,13 @@ A **Provider** has:
 | Member | |
 |---|---|
 | `id` | unique in the agent; the first half of every ModelRef it offers |
-| `models() -> ModelInfo[]` | the full current catalog; it can call `changed()` when the catalog changes |
+| `models() -> ModelInfo[]` | the full current catalog. In process, call `changed()` after updating it to tell subscribers to read it again. |
 | `supports` | `keepsState` and `safeToRepeat` ([Provider support](../bindings/plugin.md#the-host-asks-a-provider)) |
 | `available() -> boolean` | optional: whether it can take requests now, for example whether it has credentials |
 | `request(model, request, context) -> AssistantMessage` | makes one model request |
 | `discardState(sessionId)` | optional, for a Provider that keeps state |
+
+The [plugin binding](../bindings/plugin.md#the-host-asks-a-provider) has no Provider catalog notification. Before preparing a step, the host queries the served Provider's catalog and readiness with `provider/models` and `provider/available`. Do not send a private catalog notification.
 
 `request` reports output as it arrives with `context.piece(type, delta, toolCallId?)`, then returns the complete AssistantMessage.
 

@@ -32,7 +32,7 @@ See [The agent](../api.md#the-agent), [ACP Sessions](../../bindings/acp.md#sessi
 
 ## Know who is acting
 
-On stdio, the launcher and its child are the authenticated peers. Keep their pipe private. The Interface takes the connection's actor from server-side configuration, not from a client-supplied actor id or the embedded session's local actor. The actor reported by `initialize` is not a grant in any session. Rust, Go and Python read an operator-set `MODULAR_AGENT_ACTOR`; the TypeScript SDK uses its default `acp-user` in ordinary mode and reads that variable only in conformance mode.
+On stdio, the launcher and its child are the authenticated peers. Keep their pipe private. The Interface takes the connection's actor from server-side configuration, not from a client-supplied actor id or the embedded session's local actor. The actor reported by `initialize` is not a grant in any session. See [Languages](../languages.md) for the TypeScript option and fallback order.
 
 The agent checks the connection actor's effective rights for each session operation. For example, `input` permits prompting, `watch` permits receiving updates, and only a present, eligible actor with `approve` can answer a tool permission request. Reopening a saved session does not reset its recorded rights. A host may show a permission dialog or answer it according to its own policy; the agent still checks the right and runs its own tool gates. Tools run in the agent's working environment, not through the client's editor file or terminal methods. See [ACP Authorization](../../bindings/acp.md#authorization), [Authority](../../contracts.md#authority) and [Stdio authentication](../../security.md#authentication-on-each-wire).
 

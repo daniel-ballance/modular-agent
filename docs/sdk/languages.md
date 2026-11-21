@@ -14,6 +14,7 @@ How each language expresses the [API](api.md). The rule is the same throughout: 
 | Cancellation | `CancellationToken` | `AbortSignal` | `context.Context` | task cancellation, plus `context.cancelled` |
 | Errors | `Result<T, modular_agent::Error>` | thrown `AgentError` | returned `*modular.Error` | raised `AgentError` |
 | Error code | `error.code()`, an enum | `error.code`, a string union | `err.Code`, typed string constants | `error.code`, a `StrEnum` |
+| `lastTurn()` | `session.last_turn(): Result<Option<PromptResult>>` | `session.lastTurn(): Promise<PromptResult \| undefined>` | `session.LastTurn(ctx): (*PromptResult, error)` | `await session.last_turn()`; `None` if absent |
 | Optional arguments | builder methods | an options object | functional options (`WithX`) | keyword arguments |
 | Closed sets of values | enums with an `Unknown(String)` variant where shared data keeps unknown values | string unions | typed string constants | `StrEnum` |
 | Tool input | a type deriving `Deserialize` and `JsonSchema` | a [Standard Schema](https://standardschema.dev) or JSON Schema | a struct with `json` tags | type hints or a Pydantic model |
@@ -34,8 +35,10 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - The core crate is `modular-agent`, imported as `modular_agent`. It requires Tokio.
 - A tool is built with `Tool::new(name, description).run(|input: T, cx| async move { … })`. Hints are builder methods: `.read_only()`, `.safe_to_repeat()`.
 - A plugin is built with `Plugin::new(name)` and chained registrations: `.tool(tool)`, `.on_tool_before(handler)`, `.replaces(item)`, `.config(settings)`, and `.setup(|r| …)` for items that depend on settings.
-- Each hook point is its own typed method, `on_tool_before` rather than `on("tool.before", …)`, so the payload and answer types are checked at compile time. A gate answers `Gate::Allow` or `Gate::Refuse(reason)`; returning an error is a refusal.
-- A plugin program is `#[tokio::main] async fn main() { modular_agent::serve(plugin).await }`.
+- Each hook point is its own typed method, `on_tool_before` rather than `on("tool.before", …)`, with `on_<point>_with(Order::First, handler)` or `Order::Last` for explicit order. A gate answers `Gate::Allow` or `Gate::Refuse(reason)`; `Gate::Refuse` is also the `step.after` end decision.
+- A plugin program awaits `modular_agent::serve(plugin)` for stdio. To listen on a WebSocket, call `serve_websocket(plugin, ServeOptions { listen, token_file, tls })`.
+- For ACP use `agent.serve_acp(AcpOptions { compose })` on stdio, or `agent.serve_acp_websocket(options, AcpServiceOptions { listen, actors, tls })`. `compose` is an optional `Arc<dyn AcpComposition>`; the trait takes a canonical project and optional saved session id, supplies history, trust and new-session settings, and attaches client-supplied MCP servers through `project_mcp(session, project, servers)`.
+- Use `session.r#as(actor_id)?` to act for a joined actor.
 - Public errors are `modular_agent::Error`, not `anyhow::Error`. Plugin code can return any error that converts into it.
 - An operation with options has a plain form and a `_with` form: `session()` and `session_with(SessionOptions { … })`.
 - A tool refuses with `return Err(cx.refuse("reason"))`: the call ends `refused`, where any other error ends it `failed`.
@@ -51,6 +54,9 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - `run` may return a value or a Promise. Streams are async iterables, used with `for await`. A tool refuses by calling `cx.refuse(reason)`, which throws and does not return.
 - Standard Schema validators must expose the Standard JSON Schema input export, for example Zod 4. For plain JSON Schema assigned to a variable, use `as const` so its keywords keep their literal types for inference.
 - `registrar.on("tool.before", handler)` infers the payload and answer from the point. A gate can return `"allow"` or `{ refuse: reason }`.
+- A service can take `serve(() => makePlugin(), options)` for fresh plugin state per connection. `serveHistory(fileHistory(dir), { address, tokenFile })` resolves to `{ url, close }`; tests can ask for port `0` and await `close()` when done.
+- Use `defineProvider` to get `changed()`. `agent.refreshModels()` explicitly refreshes served catalogs.
+- ACP's `compose(project, saved?)` takes an optional `SessionInfo`. `projectSettings(project)` and `projectMcp(project)` may be async. The stdio actor id comes from `actorId`, then `MODULAR_AGENT_ACTOR`, then `acp-user`.
 - No default exports.
 
 ## Go
@@ -60,6 +66,10 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - A tool is `modular.NewTool(name, description, func(ctx context.Context, in T, tc *modular.ToolContext) (Out, error), opts…)`, with type parameters for input and output.
 - A plugin is a `modular.Plugin` value with `Name`, `Replaces` and `Setup func(*modular.Registrar) error`.
 - Streams are `iter.Seq2[Event, error]`, used with `range`.
+- Use `agent.Session(ctx, modular.SessionOptions{Settings: settings, Tenant: tenant, Actors: actors})` for per-session options.
+- `ServeACP(ctx, options ...ServeACPOptions)` accepts at most one options value; `Input` and `Output` can replace stdin and stdout. `Compose(ctx, project)` gets the saved id on reopen through `modular.ACPReopeningSession(ctx)`. `ProjectSettings` supplies new-session defaults and `ProjectMCP` supplies trusted server configs. Use `ListenACP(ctx, options)` for the WebSocket listener handle.
+- Use `modular.HTTPHistory(url, tokenFile)` for the client store and `modular.ServeHistory(ctx, store, modular.HistoryOptions{Address: address, TokenFile: tokenFile})` for the service. It runs until the context is cancelled and does not return a listener address.
+- Set `Provider.CatalogChanges` to a `*modular.CatalogChanges` and call `Changed()` after updating the catalog. Register hooks with `Registrar.On(point, handler, options...)` or the typed methods; use `HookOrder` for explicit order.
 - Errors are values. `errors.As(err, &modularErr)` gives the code.
 - Minimum Go version: the one pinned in `go/mise.toml`.
 
@@ -69,7 +79,11 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Attributes and keyword arguments are `snake_case`. A dictionary that is shared wire data, such as a raw history entry, a hook payload or a Provider request, keeps the shared field names; passing or returning it never renames its keys.
 - Durations are seconds, as `float`, the Python convention; the SDK converts them to the binding's integer milliseconds.
 - The API is `async`. `modular_agent.run(coro)` runs a coroutine for scripts that are not already async.
-- `create_agent(…)` can be awaited, or used with `async with`, which closes the agent at the end of the block. `serve(plugin)` is an ordinary function that runs until the agent closes the connection.
+- `create_agent(…)` can be awaited, or used with `async with`, which closes the agent at the end of the block. `serve(plugin)` is an ordinary function for stdio. For WebSocket use `await serve(plugin_or_factory, listen=..., token_file=...)`; the factory returns a fresh plugin per connection. Set `service_ping_interval` and `service_control_timeout` in `create_agent` to configure plugin-service liveness in seconds.
+- Use `await agent.session(settings=..., actors=..., tenant=...)` for per-session options and `session.as_actor(actor_id)` for `session.as(actorId)` (`as` is reserved).
+- ACP's async `compose(project)` and optional `compose_reopen(project, id)` take a canonical `Path`; `project_settings` and `project_mcp` are synchronous callbacks.
+- In the history service process, call `serve_history(file_history(directory), address=(host, port), token_file=path)`. The client uses `http_history(url, token_file)`.
+- Inherit `ProviderCatalog` to call `changed()`. `r.on(point, handler, order='normal')` takes a shared dictionary payload. Return `{'change': {'input': new_input}}` to rewrite `tool.before`, `{'change': {'content': content}}` to rewrite `tool.after`, `{'add': {'system': text}}` to contribute a prompt, or `{'end': reason}` to end at `step.after`.
 - A tool is an `async` function with the `@tool` decorator. The docstring's summary is the description and its `Args:` entries describe the fields; type hints are the input schema; hints are decorator arguments: `@tool(read_only=True)`.
 - A plugin is a `Plugin(name, tools=[…], hooks={…})` or a subclass overriding `setup`.
 - Every public function and type is fully type-annotated and passes a strict type checker.
