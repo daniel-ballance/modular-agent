@@ -24,6 +24,7 @@ EXTENSIONS = [
     "input",
     "requests",
     "cancel-job",
+    "interrupted",
     "actors",
     "join",
     "leave",
@@ -796,14 +797,9 @@ class ACP(Plugin):
             return
         # This event is already a gated view, never retrieve the raw event here.
         if e["kind"] == "session_interrupted":
+            # The binding's projection (docs/bindings/acp.md, Updates); the library adds the "_".
             await self.client.ext_notification(
-                "modular-agent/event",
-                {
-                    "type": "sessionInterrupted",
-                    "sessionId": sid,
-                    "time": e["time"],
-                    "data": {"reason": e["reason"]},
-                },
+                "modular-agent/interrupted", {"sessionId": sid, "reason": e["reason"]}
             )
             return
         if e["kind"] == "model_output" and e.get("text"):

@@ -129,11 +129,9 @@ async def _exercise(tmp_path, reason, placement, backend, provider, entered, can
                     observed = set()
                     while observed != {"event", "lost"}:
                         frame = json.loads(await ws.recv())
-                        if frame.get("method") == "_modular-agent/event":
-                            event = frame["params"]
-                            if event.get("type") == "sessionInterrupted":
-                                assert event["data"] == {"reason": reason}
-                                observed.add("event")
+                        if frame.get("method") == "_modular-agent/interrupted":
+                            assert frame["params"] == {"sessionId": sid, "reason": reason}
+                            observed.add("event")
                         if frame.get("id") == 3:
                             assert frame["error"]["data"]["code"] == "lost"
                             observed.add("lost")
