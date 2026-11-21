@@ -76,14 +76,14 @@ test("tenant usage is charged across sessions and processes and stops after the 
 	const one = await agent(t, [plugin], dirs, "metered/echo");
 	const first = await one.api.startSession({ tenant: "team" });
 	assert.equal(one.api.history(first)[0].kind, "tenant");
-	await assert.rejects(one.api.startSession({ tenant: "unknown" }), /Unknown tenant/);
+	await assert.rejects(one.api.startSession({ tenant: "unknown" }), { code: "invalid_params" });
 	await one.api.input(first, { actorId: "user", content: "first" });
 	await one.api.waitForIdle(first);
 	assert.deepEqual((await one.api.tenant(first)).tokens, { budget: 5, used: 3 });
 	await one.h.stop();
 	delete process.env.MODULAR_AGENT_TENANTS;
 	const unknown = await agent(t, [plugin], dirs, "metered/echo");
-	await assert.rejects(unknown.api.openSession(first), /Unknown tenant/);
+	await assert.rejects(unknown.api.openSession(first), { code: "forbidden" });
 	process.env.MODULAR_AGENT_TENANTS = tenants;
 	const two = await agent(t, [plugin], dirs, "metered/echo");
 	const second = await two.api.startSession({ tenant: "team" });
