@@ -1,6 +1,6 @@
 # `ma` in TypeScript
 
-This is the TypeScript implementation of the [standard configuration](../../../docs/reference/standard-configuration.md). It composes `@modular-agent/core`, the SDK's file and MCP plugins, and a crash-isolated Monty worker for `codemode`. It does not import the TypeScript base or its CLI.
+This is the TypeScript implementation of the [standard configuration](../../../docs/reference/standard-configuration.md). It composes `@modular-agent/core`, the SDK's file and MCP plugins, and Monty for `codemode`. It does not import the TypeScript base or its CLI.
 
 ## Build, install and run
 
@@ -32,6 +32,14 @@ Subscription credential writes and refreshes require a `flock` command that supp
 
 Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`. State is kept in `$XDG_STATE_HOME/modular-agent/typescript`, or `~/.local/state/modular-agent/typescript`. `MODULAR_AGENT_DATA_DIR` sets the configuration directory and puts state under its `state/` subdirectory. Use `--runtime transient` to keep history without resuming a turn cut off by a crash.
 
+## Code sandbox
+
+`codemode` runs Python in a subprocess from the native [Monty 1.6.0 pool](https://github.com/pydantic/monty/blob/v1.6.0/docs/quickstart/javascript.md#configuring-the-pool), not in the agent's process. Each run gets a fresh session and worker. Calls to `tools` still go through the agent as nested calls.
+
+Each run has a [256 MiB Monty memory budget](https://github.com/pydantic/monty/blob/v1.6.0/docs/resource-limits.md#memory), not an RSS limit. It has 30 seconds of computation between host calls, a recursion limit of 200, and up to 500 nested tool calls. `describe_tool` and `search_tools` do not count as nested calls. Printed output is limited to 1 MiB, and result text is cut to 2,000 lines or 50 KB.
+
+A memory or time limit ends the run with `MemoryError` or `TimeoutError`, and the session is discarded. If the worker dies, the call reports the death. Cancelling a call stops its worker. In each case the next run gets a fresh worker.
+
 ## What is checked
 
 From the repository root:
@@ -39,18 +47,18 @@ From the repository root:
 ```sh
 npm ci --prefix conformance/acp
 npm ci --prefix conformance/tools
-(cd typescript && npm ci && npm run build && MODULAR_AGENT_SDK_SERVICE=typescript npm test)
-(cd typescript && MODULAR_AGENT_SDK_SERVICE=typescript MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test)
+(cd typescript && npm ci && npm run build && npm test)
+(cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test)
 (cd typescript/sidecars/claude && npm ci && npm test)
 node conformance/reference/run.mjs --agent typescript
-MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
-MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
+scripts/websocket-kits.sh typescript
+git diff --check
 ```
 
-- Reference checks: **17/17**, including declaration, JSON events, prompt tail and both crash-recovery modes.
-- ACP with crash, probe and job checks together: **188/188** for `ma` on stdio and **193/193** directly on WebSocket. The expanded run includes late answers and job take-up after a crash.
-- TypeScript workspace: **291/291** offline checks in both normal and `MA_REMOTE` configurations, with two live checks skipped. That includes **84/84** shared scenarios across embedded, stdio in all four SDKs, and TypeScript WebSocket placement. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- Reference checks: **18/18**, including `sandbox-memory` and both crash-recovery modes.
+- ACP with crash, probe and job checks: **188/188** on stdio and **193/193** on WebSocket. The WebSocket plugin kit passed **153/153** checks.
+- TypeScript workspace: **253/253** offline checks in both normal and `MA_REMOTE` configurations, with two live checks skipped. That includes **42/42** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
 - Claude sidecar: **44/44**. No real sign-ins, credentials or models were used.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
