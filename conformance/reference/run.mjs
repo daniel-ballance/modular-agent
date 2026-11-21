@@ -359,19 +359,42 @@ function runOnce(command, t, run) {
   return new Promise((done) => {
     const child = spawn(command[0], [...command.slice(1), ...run.args], { cwd: t.project, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     let stdout = "", stderr = "", killed = false, timer, poll;
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
+    const started = performance.now();
+    const elapsed = () => Math.round(performance.now() - started);
+    const lifecycle = {};
+    child.stdout.on("data", (d) => { stdout += d; lifecycle.lastStdoutMs = elapsed(); });
+    child.stderr.on("data", (d) => { stderr += d; lifecycle.lastStderrMs = elapsed(); });
+    child.stdout.on("end", () => { lifecycle.stdoutEndMs = elapsed(); });
+    child.stderr.on("end", () => { lifecycle.stderrEndMs = elapsed(); });
+    child.on("exit", (code, signal) => Object.assign(lifecycle, { exitMs: elapsed(), code, signal }));
     const kill = () => { try { process.kill(-child.pid, "SIGKILL"); } catch {} };
     if (run.crashWhenFile) {
       poll = setInterval(() => { if (existsSync(join(t.dir, run.crashWhenFile))) { killed = true; kill(); } }, 20);
     }
-    timer = setTimeout(() => { kill(); stderr += "\n[run.mjs: timed out after 60 s]"; }, 60_000);
+    let timeoutDetail;
+    timer = setTimeout(() => {
+      // An exited agent and a descendant still holding a pipe can delay 'close'.
+      // Capture process names and states, not command arguments.
+      const ps = spawnSync("ps", ["-axo", "pid=,ppid=,pgid=,stat=,comm="], { encoding: "utf8", timeout: 1000 });
+      const table = (ps.stdout ?? "").split("\n").map((line) => line.trim().split(/\s+/, 5));
+      const related = new Set([String(child.pid)]);
+      for (let size = -1; size !== related.size;) {
+        size = related.size;
+        for (const [pid, ppid, pgid] of table) if (related.has(ppid) || pgid === String(child.pid)) related.add(pid);
+      }
+      const processes = table.filter(([pid]) => related.has(pid)).map((fields) => fields.join(" "));
+      timeoutDetail = JSON.stringify({ pid: child.pid, elapsedMs: elapsed(), ...lifecycle, processes });
+      kill();
+      // A child that left the process group can still hold these pipes open.
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }, 60_000);
     child.on("error", (e) => { clearTimeout(timer); clearInterval(poll); done({ exit: -1, stdout, stderr: String(e), killed }); });
     child.on("close", (code) => {
       clearTimeout(timer); clearInterval(poll);
       // Wait for the whole group to be gone before the next run reopens the session.
       for (let i = 0; i < 250; i++) { try { process.kill(-child.pid, 0); } catch { break; } spawnSync("sleep", ["0.02"]); }
-      done({ exit: code, stdout, stderr, killed });
+      done({ exit: code, stdout, stderr, killed, timeoutDetail });
     });
   });
 }
@@ -391,6 +414,7 @@ async function runCheck(command, check) {
   for (const [i, run] of check.runs.entries()) {
     const r = await runOnce(command, t, run);
     const where = `run ${i + 1} (ma ${run.args.join(" ")})`;
+    ok(!r.timeoutDetail, `${where}: timed out after 60 s`, r.timeoutDetail);
     if (run.crashWhenFile) { ok(r.killed, `${where}: was killed once ${run.crashWhenFile} appeared`, r.stderr.slice(-500)); continue; }
     const e = run.expect ?? {};
     const out = r.stdout.replace(/\n$/, "");
