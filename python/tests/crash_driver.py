@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import socket
 import sys
 from pathlib import Path
@@ -33,12 +34,17 @@ async def main():
         ),
         call("write", path="never", text="ran"),
     ]
-    fake = (
-        Fake([reply(calls=calls), reply("continued")])
-        if phase != "reopen"
-        else Fake([reply("continued")])
-    )
-    h = await build(home, fake, runtime=runtime)
+    # A step end needs no tool effects. Keep the Runtime placement but don't
+    # start unrelated process workers on the checkpoint's critical path.
+    processes = None
+    if phase == "step_end":
+        placement = os.environ.get("MA_PLUGIN_PROCESSES", "").split(",")
+        processes = ["runtime"] if {"all", "runtime", runtime.name}.intersection(placement) else []
+    script = [reply("continued")]
+    if phase not in {"step_end", "reopen"}:
+        script.insert(0, reply(calls=calls))
+    fake = Fake(script)
+    h = await build(home, fake, runtime=runtime, process_plugins=processes)
     a = h.api()
     paused = False
 

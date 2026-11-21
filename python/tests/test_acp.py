@@ -206,11 +206,13 @@ async def test_acp_cancel_pending_permission_cannot_authorize_later(tmp_path, ru
 async def test_acp_session_mcp_isolation_and_private_connection_data(tmp_path, runtime_kind):
     spec = stdio()
     spec["env"] = [{"name": "OFFLINE_TEST_PRIVATE", "value": "not-in-history-9182"}]
-    async with running(tmp_path, [], runtime_kind) as (conn, _, _):
+    async with running(tmp_path, [reply("ready")], runtime_kind) as (conn, _, _):
         sid = (
             await conn.new_session(cwd=str(tmp_path), mcp_servers=[s.McpServerStdio(**spec)])
         ).session_id
         other = (await conn.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
+        await prompt(conn, sid)
+        await prompt(conn, other)
         tool = tool_name("local", "echo")
         result = await extension(conn, "tool", sid, name=tool, input={"text": "host tool"})
         assert result["status"] == "completed"
@@ -229,13 +231,14 @@ async def test_acp_bad_requests_refuse_before_changes(tmp_path, runtime_kind):
         with pytest.raises(acp.RequestError):
             await conn.new_session(cwd=str(tmp_path / "other"), mcp_servers=[])
         sid = (await conn.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
+        setup = (await extension(conn, "follow", sid))["entries"]
         with pytest.raises(acp.RequestError):
             await conn.set_config_option(session_id=sid, config_id="model", value="not-allowed")
         with pytest.raises(acp.RequestError):
             await extension(conn, "move", sid, point="unknown-point", rewind=True)
         with pytest.raises(acp.RequestError):
             await conn.ext_method("not-implemented", {})
-        assert (await extension(conn, "follow", sid))["entries"] == []
+        assert (await extension(conn, "follow", sid))["entries"] == setup
 
 
 async def test_acp_async_submit_steering_withdraw_and_close(tmp_path, runtime_kind):

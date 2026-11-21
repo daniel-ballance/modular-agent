@@ -33,6 +33,7 @@ async def test_history_port_create_and_paging(tmp_path):
             script=[{"text": "first"}, {"text": "second"}],
         ) as agent:
             first, second = await agent.session(), await agent.session()
+            assert not creates
             await first.prompt("one")
             await second.prompt("two")
             assert creates.keys() == {first.id, second.id}

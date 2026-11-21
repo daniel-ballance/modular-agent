@@ -70,14 +70,7 @@ async def test_sigkill_at_committed_boundaries(tmp_path, runtime_kind, phase):
     p = await spawn_driver(home, tmp_path, runtime_kind, phase)
     command_pids = []
     try:
-        marker = tmp_path / (
-            "escaped.pid" if phase in {"bash_effect", "step_end"} else "checkpoint"
-        )
-        # step_end would otherwise wait for a long bash command. This checkpoint
-        # runs quickly when the resume marker is present.
-        if phase == "step_end":
-            (tmp_path / "resume").touch()
-            marker = tmp_path / "checkpoint"
+        marker = tmp_path / ("escaped.pid" if phase == "bash_effect" else "checkpoint")
         await until(
             lambda: (
                 (pid_ready(marker) if phase == "bash_effect" else marker.exists())

@@ -711,7 +711,11 @@ class Agent:
         async with self._lock:
             defaults = {**self._settings, **settings_in(settings or {})}
             data = await self._session(
-                "create", project=str(self._project), settings=defaults, tenant=tenant
+                "create",
+                project=str(self._project),
+                settings=defaults,
+                tenant=tenant,
+                defer_setup=True,
             )
             session = self._attach(data["id"])
             try:
@@ -720,15 +724,15 @@ class Agent:
             except BaseException:
                 await session.close()
                 raise
-            # Persist empty sessions too; lazy setup writes the actor and settings with this entry.
-            await self._session(
-                "append",
-                session=data["id"],
-                kind="plugins",
-                writer="@harness",
-                data={"active": self._h.active_plugins()},
-            )
-            return self._attach(data["id"])
+            if not data["entries"]:
+                await self._session(
+                    "append",
+                    session=session.id,
+                    kind="plugins",
+                    writer="@harness",
+                    data={"active": self._h.active_plugins()},
+                )
+            return session
 
     async def open_session(self, id: str) -> Session:
         if not id or not id.isalnum():
