@@ -6,6 +6,21 @@ import { answers, memoryEnvironment, overWire, scriptedProvider, testAgent } fro
 
 const empty = { type: "object" } as const;
 
+for (const served of [false, true]) {
+  test(`the ${served ? "served" : "local"} SDK Provider port declares state but not Provider-run tools or live sessions`, async t => {
+    const provider = { ...scriptedProvider([]), supports: {
+      keepsState: true, safeToRepeat: false, runsTools: true, liveSessions: true,
+    } };
+    const plugin = definePlugin({ name: "provider-declaration", setup: r => r.provider(provider) });
+    const agent = await createAgent({ plugins: [served ? overWire(plugin) : plugin], environment: memoryEnvironment() });
+    t.after(() => agent.close());
+    const { keepsStateAtProvider, runsToolsAtProvider, liveSessions } = agent.declaration();
+    assert.deepEqual({ keepsStateAtProvider, runsToolsAtProvider, liveSessions }, {
+      keepsStateAtProvider: true, runsToolsAtProvider: false, liveSessions: false,
+    });
+  });
+}
+
 test("a custom Runtime, history, configuration, credential store and Interface work through registration", async t => {
   const kept = new Map<string, Awaited<ReturnType<WriterHistoryStore["load"]>>>();
   const store: WriterHistoryStore = {
