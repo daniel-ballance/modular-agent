@@ -280,9 +280,10 @@ func Dial(ctx context.Context, address, tokenFile, protocol string) (*Conn, erro
 }
 
 type Conn struct {
-	wire    *websocket.Conn
-	write   sync.Mutex
-	pending []byte // newline adapter, consumed only by the binding reader
+	wire       *websocket.Conn
+	write      sync.Mutex
+	pending    []byte // newline adapter, consumed only by the binding reader
+	acpControl time.Duration
 }
 
 func wrap(c *websocket.Conn) *Conn { c.SetReadLimit(MaxFrame); return &Conn{wire: c} }
@@ -309,22 +310,72 @@ func (c *Conn) ReadMessage() ([]byte, error) {
 	return b, err
 }
 func (c *Conn) WriteMessage(b []byte) error {
+	return c.writeBefore(b, time.Now().Add(handshakeTimeout))
+}
+
+func (c *Conn) writeBefore(b []byte, deadline time.Time) error {
 	if len(b) > MaxFrame {
 		return errors.New("WebSocket message exceeds 64 MiB")
 	}
 	c.write.Lock()
 	defer c.write.Unlock()
-	_ = c.wire.SetWriteDeadline(time.Now().Add(handshakeTimeout))
+	_ = c.wire.SetWriteDeadline(deadline)
 	return c.wire.WriteMessage(websocket.TextMessage, b)
 }
 
 // Read and Write adapt the maintained ACP SDK's one-line-per-write API. Only
 // this adapter compacts whitespace: the plugin Peer reads messages natively.
+// EnableACPControl handles WebSocket-only control messages before the ACP parser.
+// The ACP SDK intentionally does not dispatch non-extension methods it does not know.
+func (c *Conn) EnableACPControl(deadline time.Duration) {
+	if deadline <= 0 {
+		deadline = handshakeTimeout
+	}
+	c.acpControl = deadline
+}
+
+func (c *Conn) ping(b []byte) (bool, error) {
+	if c.acpControl == 0 || !bytes.Contains(b, []byte("ping")) && !bytes.ContainsRune(b, '\\') {
+		return false, nil
+	}
+	var req struct {
+		Version string                     `json:"jsonrpc"`
+		ID      json.RawMessage            `json:"id"`
+		Method  string                     `json:"method"`
+		Params  map[string]json.RawMessage `json:"params"`
+	}
+	if json.Unmarshal(b, &req) != nil || req.Method != "$/ping" || req.Version != "2.0" || len(req.ID) == 0 {
+		return false, nil
+	}
+	var id any
+	_ = json.Unmarshal(req.ID, &id)
+	switch id.(type) {
+	case string, float64:
+	default:
+		return false, nil
+	}
+	result := fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%s,"result":{}}`, req.ID)
+	if req.Params == nil || len(req.Params) != 0 {
+		result = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"Invalid params"}}`, req.ID)
+	}
+	err := c.writeBefore(result, time.Now().Add(c.acpControl))
+	if err != nil {
+		_ = c.Close()
+	}
+	return true, err
+}
+
 func (c *Conn) Read(p []byte) (int, error) {
-	if len(c.pending) == 0 {
+	for len(c.pending) == 0 {
 		b, err := c.ReadMessage()
 		if err != nil {
 			return 0, err
+		}
+		if handled, err := c.ping(b); handled {
+			if err != nil {
+				return 0, err
+			}
+			continue
 		}
 		frame := bytes.TrimSpace(b)
 		if len(frame) == 0 || frame[0] != '{' || !json.Valid(b) {

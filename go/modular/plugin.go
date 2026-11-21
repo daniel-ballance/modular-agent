@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/harness"
@@ -41,7 +42,11 @@ type hookRegistration struct {
 	only   bool
 	handle func(context.Context, pluginrpc.Object) (any, error)
 }
-type CommandContext struct{ SessionID, ActorID string }
+type CommandContext struct {
+	SessionID, ActorID, StepID string
+	requestModel               func(context.Context, ModelRequest) (AssistantMessage, error)
+	active                     *atomic.Bool
+}
 type Command struct {
 	Name, Description        string
 	Run                      func(context.Context, string, *CommandContext) (string, error)
@@ -116,6 +121,9 @@ func (r *Registrar) Provider(p Provider) error {
 func (r *Registrar) Command(c Command) error {
 	if c.Name == "" || strings.ContainsAny(c.Name, "/ \t\r\n") || c.Description == "" || c.Run == nil {
 		return r.fail(fmt.Errorf("invalid command %q", c.Name))
+	}
+	if c.UsesModel {
+		c.InProcessOnly = true
 	}
 	if err := r.add("command:" + c.Name); err != nil {
 		return err
@@ -364,7 +372,7 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 		}
 		for _, c := range r.commands {
 			if err := a.RegisterCommand(c.Name, func(ctx context.Context, s string, args []string) (string, error) {
-				return c.Run(ctx, strings.Join(args, " "), &CommandContext{SessionID: s, ActorID: api.Acting(ctx)})
+				return runSDKCommand(ctx, a, s, c, strings.Join(args, " "))
 			}); err != nil {
 				return err
 			}

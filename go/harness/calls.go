@@ -12,6 +12,10 @@ func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.To
 		return api.ToolResult{}, err
 	}
 	s.mu.Lock()
+	if !c.authorizedBy(s.data, ctx, "tools") {
+		s.mu.Unlock()
+		return api.ToolResult{}, api.ErrAuthority
+	}
 	if s.rewindBlocked {
 		s.mu.Unlock()
 		return api.ToolResult{}, errRewindUnresolved
@@ -71,7 +75,7 @@ func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.To
 	c.h.mu.RLock()
 	owner := c.h.caps["runtime"].owner
 	c.h.mu.RUnlock()
-	ports := &turnPorts{c: &client{h: c.h, owner: owner}, s: s, actor: call.Actor, tools: tools}
+	ports := &turnPorts{c: &client{h: c.h, owner: owner}, s: s, actor: call.Actor, tools: tools, input: api.Input{ConnectionRights: api.ConnectionRights(ctx)}}
 	canRepeat := true
 	if env, e := c.Get("working-environment"); e == nil {
 		canRepeat = env.(api.WorkingEnvironment).StopsOnCrash()

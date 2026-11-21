@@ -74,6 +74,7 @@ func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, e
 	}
 	declared, projects := a.acpResources(opt)
 	service, err := wswire.Listen(ctx, opt.Listen, opt.TLS, wswire.ACP, actors, func(ctx context.Context, c *wswire.Conn, p acpinterface.Principal) {
+		c.EnableACPControl(opt.ControlDeadline)
 		_ = iface.ServePrincipal(ctx, c, c, declared, projects, p)
 	})
 	return service, appError(err, InvalidParams)

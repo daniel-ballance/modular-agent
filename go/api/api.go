@@ -194,12 +194,13 @@ func (s Session) Branch() []Entry {
 type Input struct {
 	ResultSchema         json.RawMessage `json:"resultSchema,omitempty"`
 	ID, Key, Actor, When string
-	Answer               string   `json:",omitempty"`
-	ReleasedBy           string   `json:",omitempty"`
-	Taken                string   `json:",omitempty"`
-	Parked               *bool    `json:",omitempty"`
-	JobRights            []string `json:",omitempty"`
-	ViaActor             string   `json:",omitempty"`
+	Answer               string    `json:",omitempty"`
+	ReleasedBy           string    `json:",omitempty"`
+	Taken                string    `json:",omitempty"`
+	Parked               *bool     `json:",omitempty"`
+	JobRights            []string  `json:",omitempty"`
+	ConnectionRights     *[]string `json:",omitempty"`
+	ViaActor             string    `json:",omitempty"`
 	Content              Content
 	Calls                []Call
 	Copies               []string

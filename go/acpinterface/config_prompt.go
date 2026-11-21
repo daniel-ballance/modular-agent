@@ -88,7 +88,7 @@ func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionCon
 	case "approval":
 		snap.Settings.Approval = api.ApprovalInternal(string(v.Value))
 	}
-	if err = s.a.SetSettings(api.AsActor(ctx, st.actor), id, snap.Settings); err != nil {
+	if err = s.a.SetSettings(s.acting(ctx, id, st.actor), id, snap.Settings); err != nil {
 		return acp.SetSessionConfigOptionResponse{}, outputReplyError(err)
 	}
 	opts, err = s.config(id)
@@ -142,7 +142,7 @@ func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptRes
 	if s.principal != nil && !s.authorize(id, st.actor, "input") {
 		return acp.PromptResponse{}, acpError("forbidden")
 	}
-	receipt, err := s.a.Submit(api.AsActor(ctx, st.actor), id, api.Input{Key: meta.Key, When: "after", Content: content})
+	receipt, err := s.a.Submit(s.acting(ctx, id, st.actor), id, api.Input{Key: meta.Key, When: "after", Content: content})
 	if err != nil {
 		return acp.PromptResponse{}, outputReplyError(err)
 	}
@@ -168,7 +168,9 @@ func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptRes
 					return acp.PromptResponse{}, ctx.Err()
 				default:
 				}
-				_ = s.a.CancelAs(api.AsActor(context.Background(), st.actor), id)
+				if s.authorize(id, st.actor, "cancel") {
+					_ = s.a.CancelAs(s.acting(context.Background(), id, st.actor), id)
+				}
 				out, err = s.a.Wait(api.AsActor(context.Background(), st.actor), id)
 			}
 			if err != nil {

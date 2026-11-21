@@ -12,6 +12,9 @@ func (c *client) canAdmit(s api.Session, in api.Input) bool {
 	if in.When == "propose" {
 		right = "propose"
 	}
+	if in.ConnectionRights != nil && !slices.Contains(*in.ConnectionRights, right) {
+		return false
+	}
 	if in.Job != "" && in.JobRights != nil && !slices.Contains(in.JobRights, right) {
 		return false
 	}
@@ -102,7 +105,7 @@ func (c *client) ReleaseInput(ctx context.Context, id, input, when string, decli
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	by := api.Acting(ctx)
-	if s.closing || !c.authorized(s.data, by, "input") {
+	if s.closing || !c.authorizedBy(s.data, ctx, "input") {
 		return api.Receipt{}, errors.New("input release refused")
 	}
 	for _, e := range pendingProposals(s.data) {
@@ -118,6 +121,7 @@ func (c *client) ReleaseInput(ctx context.Context, id, input, when string, decli
 			return api.Receipt{}, errors.New("proposer no longer has authority")
 		}
 		in.When, in.ReleasedBy = when, by
+		in.ConnectionRights = api.IntersectConnectionRights(in.ConnectionRights, api.ConnectionRights(ctx))
 		in.Copies = append(in.Copies, e.ID)
 		return c.admitLocked(s, in)
 	}
@@ -131,7 +135,7 @@ func (c *client) Proposals(ctx context.Context, id string) ([]api.Entry, error) 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !c.authorized(s.data, api.Acting(ctx), "watch") {
+	if !c.authorizedBy(s.data, ctx, "watch") {
 		return nil, errors.New("watch refused")
 	}
 	return pendingProposals(s.data), nil
@@ -166,7 +170,9 @@ func (c *client) WithdrawProposal(ctx context.Context, id, input, who string) er
 		if in.ID != input {
 			continue
 		}
-		can := func(right string) bool { return c.authorized(s.data, by, right) && c.authorized(s.data, who, right) }
+		can := func(right string) bool {
+			return api.ConnectionAllows(ctx, right) && c.authorized(s.data, by, right) && c.authorized(s.data, who, right)
+		}
 		if !can("input") && !(who == in.Actor && can("propose")) {
 			return errors.New("withdraw refused")
 		}
@@ -199,6 +205,9 @@ func turnAdmission(s api.Session, start api.Entry) api.Input {
 }
 
 func (p *turnPorts) canRunTools(actor string) bool {
+	if p.input.ConnectionRights != nil && !slices.Contains(*p.input.ConnectionRights, "tools") {
+		return false
+	}
 	if p.input.Job != "" && p.input.JobRights != nil && !slices.Contains(p.input.JobRights, "tools") {
 		return false
 	}

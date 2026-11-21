@@ -184,6 +184,7 @@ func Entry(e api.Entry) map[string]any {
 		set(d, "key", in.Key, in.Key != "")
 		set(d, "releasedBy", in.ReleasedBy, in.ReleasedBy != "")
 		set(d, "submittedBy", in.ViaActor, in.ViaActor != "")
+		set(d, "go.connectionRights", in.ConnectionRights, in.ConnectionRights != nil)
 		delete(d, "go.viaActor")
 		set(d, "go.answer", in.Answer, in.Answer != "")
 		set(d, "go.calls", in.Calls, len(in.Calls) > 0)
@@ -474,6 +475,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		if str(v, "kind") == "input.accepted" {
 			in = api.Decode[api.Input](api.JSON(v["data"]))
 		}
+		in.ConnectionRights = api.Decode[*[]string](api.JSON(d["go.connectionRights"]))
 		if !has(d, "submittedBy") && in.ViaActor == "" {
 			in.ViaActor = str(d, "go.viaActor")
 		}

@@ -62,7 +62,14 @@ func TestACPServiceTokenSelectsIndependentScopedPrincipal(t *testing.T) {
 	}
 	one, two := dial(0), dial(1)
 	for i, c := range []*websocket.Conn{one, two} {
+		ping := `{"jsonrpc":"2.0","id":9,"method":"$/ping","params":{}}`
+		if result, ok := call(c, ping)["result"].(map[string]any); !ok || len(result) != 0 {
+			t.Fatalf("ping: %v", result)
+		}
 		msg := call(c, "{\n\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1}\n}")
+		if result, ok := call(c, ping)["result"].(map[string]any); !ok || len(result) != 0 {
+			t.Fatalf("ping: %v", result)
+		}
 		want := []Actor{first.Actor, second.Actor}[i]
 		var got struct {
 			Result struct {

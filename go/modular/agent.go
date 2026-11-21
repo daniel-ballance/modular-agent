@@ -228,6 +228,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if o.host != nil && !*o.host && (len(o.process) > 0 || len(o.services) > 0) {
 		return nil, &Error{Code: InvalidComposition, Message: "process and service plugins require a plugin host"}
 	}
+	if o.durability == Ephemeral && (o.history.persistent || o.history.serviceDir != "") {
+		return nil, &Error{Code: InvalidComposition, Message: "ephemeral history cannot survive a restart; choose kept or durable"}
+	}
 	if o.history.serviceDir != "" {
 		return nil, &Error{Code: InvalidComposition, Message: "use HTTPHistory to connect to a history service"}
 	}
@@ -253,7 +256,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err != nil || !info.IsDir() {
 		return nil, &Error{Code: InvalidParams, Message: "project must be a directory"}
 	}
-	defaults := api.Settings{Thinking: "off", MaxSteps: 12, MaxOutput: 1024}
+	defaults := api.Settings{MaxSteps: 12, MaxOutput: 1024}
 	if o.conformance {
 		defaults.Model, defaults.Approval = conformancemodel.ID, "off"
 	}
@@ -638,6 +641,7 @@ type ServeACPOptions struct {
 	Listen          string
 	Actors          []ACPActor
 	TLS             *TLSOptions
+	ControlDeadline time.Duration
 }
 
 // ServeACP serves stdio (or the supplied streams), or blocks until its
@@ -658,7 +662,7 @@ func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error 
 		<-service.Done()
 		return service.Close()
 	}
-	if opt.TLS != nil || opt.Actors != nil {
+	if opt.TLS != nil || opt.Actors != nil || opt.ControlDeadline != 0 {
 		return &Error{Code: InvalidParams, Message: "ACP actors and TLS require Listen"}
 	}
 	if opt.Input == nil {

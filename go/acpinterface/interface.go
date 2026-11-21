@@ -52,25 +52,26 @@ type attachment struct {
 	polled     map[questionRecipient]bool
 }
 type server struct {
-	declared     func() map[string]any
-	projects     *projectHosts
-	resources    Projects
-	a            api.API
-	project      string
-	actor        string
-	principal    *Principal
-	ctx          context.Context
-	peer         *acp.AgentSideConnection
-	mu           sync.Mutex
-	lifecycle    sync.Mutex
-	shared       *connectionAttachments
-	closed       bool
-	initialized  bool
-	binding      string
-	capabilities acp.ClientCapabilities
-	represents   map[string]bool
-	sessions     map[string]*attachment
-	wg           sync.WaitGroup
+	declared         func() map[string]any
+	projects         *projectHosts
+	resources        Projects
+	a                api.API
+	project          string
+	actor            string
+	principal        *Principal
+	connectionRights sync.Map // session id -> connection ceiling; never writes recorded grants
+	ctx              context.Context
+	peer             *acp.AgentSideConnection
+	mu               sync.Mutex
+	lifecycle        sync.Mutex
+	shared           *connectionAttachments
+	closed           bool
+	initialized      bool
+	binding          string
+	capabilities     acp.ClientCapabilities
+	represents       map[string]bool
+	sessions         map[string]*attachment
+	wg               sync.WaitGroup
 }
 
 // Serve owns the connection streams. EOF interrupts, rather than explicitly
@@ -259,8 +260,15 @@ func (s *server) attach(id string, loading bool, identity ...string) *attachment
 	if len(identity) > 0 && identity[0] != "" {
 		who = identity[0]
 	}
+	if s.principal != nil {
+		rights := s.principal.Actor.Rights
+		if snap, err := s.a.Snapshot(id); err == nil {
+			rights = s.intersectRecorded(snap)
+		}
+		s.connectionRights.LoadOrStore(id, rights)
+	}
 	ctx, cancel := context.WithCancel(s.ctx)
-	st := &attachment{actor: who, ctx: api.AsActor(ctx, who), cancel: cancel, loading: loading, streamed: map[string]bool{}, models: map[string]api.Content{}, progress: map[string]string{}, requests: map[questionRecipient]context.CancelFunc{}, polled: map[questionRecipient]bool{}, joined: map[string]func(){}}
+	st := &attachment{actor: who, ctx: s.acting(ctx, id, who), cancel: cancel, loading: loading, streamed: map[string]bool{}, models: map[string]api.Content{}, progress: map[string]string{}, requests: map[questionRecipient]context.CancelFunc{}, polled: map[questionRecipient]bool{}, joined: map[string]func(){}}
 	st.disconnect = s.questions().Connect(id, who)
 	s.mu.Lock()
 	s.sessions[id] = st
@@ -273,6 +281,7 @@ func (s *server) detach(id string, st *attachment) bool {
 	delete(s.sessions, id)
 	s.mu.Unlock()
 	st.disconnect()
+	s.connectionRights.Delete(id)
 	for _, disconnect := range st.joined {
 		disconnect()
 	}
@@ -398,6 +407,9 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 		return result, err
 	}
 	if st, err := s.attached(id); err == nil {
+		if !s.authorize(id, st.actor, "watch") {
+			return result, acpError("forbidden")
+		}
 		if len(servers) != 0 {
 			return result, acpError("conflict")
 		}
@@ -410,6 +422,9 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 	found := false
 	for _, snap := range list {
 		if snap.ID == id && s.discoverable(snap) {
+			if s.principal != nil {
+				s.connectionRights.Store(id, s.intersectRecorded(snap))
+			}
 			found = true
 			break
 		}
@@ -641,7 +656,7 @@ func (s *server) Cancel(ctx context.Context, p acp.CancelNotification) error {
 	if st == nil || !s.authorize(string(p.SessionId), st.actor, "cancel") {
 		return acpError("forbidden")
 	}
-	err := s.a.CancelAs(api.AsActor(ctx, st.actor), string(p.SessionId))
+	err := s.a.CancelAs(s.acting(ctx, string(p.SessionId), st.actor), string(p.SessionId))
 	for _, cancel := range cancels {
 		cancel()
 	}

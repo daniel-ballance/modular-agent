@@ -62,7 +62,7 @@ func TestProvidersOffline(t *testing.T) {
 						}
 					}))
 					defer server.Close()
-					a := modulartest.Agent(t, modular.WithProvider(test.provider(server.URL, server.Client())))
+					a := modulartest.Agent(t, modular.WithProvider(test.provider(server.URL, server.Client())), modular.WithModel(test.name+"/"+test.model))
 					session, err := a.Session(t.Context())
 					if err != nil {
 						t.Fatal(err)

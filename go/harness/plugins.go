@@ -64,7 +64,7 @@ func NewWithLocalActor(actor string) *Harness {
 	h := &Harness{external: map[string]bool{}, externalPlugins: map[string]bool{}, plugins: map[string]api.Plugin{}, caps: map[string]registration{}, hooks: map[string]*hook{}, commands: map[string]registration{}, sessions: map[string]*session{}, listeners: map[int]outputListener{}, outputStreams: map[outputStream][]api.Event{}}
 	h.localActor = actor
 	h.tenants, h.tenantConfigErr = readTenants()
-	for name, rule := range map[string]api.Rule{"plugin.load": api.Gate, "process.stop": api.Observe, "session.recoverQuestions": api.Collect, "session.prepare": api.Observe, "session.start": api.Observe, "session.ready": api.Observe, "session.stop": api.Observe, "session.end": api.Observe, "session.fork": api.Transform, "input": api.Transform, "turn.prepare": api.Transform, "output": api.Transform, "output.batch": api.Gate, "binding.provider.request": api.Transform, "binding.provider.response": api.Observe} {
+	for name, rule := range map[string]api.Rule{"plugin.load": api.Gate, "process.stop": api.Observe, "session.recoverQuestions": api.Collect, "session.prepare": api.Observe, "session.start": api.Observe, "session.ready": api.Observe, "session.stop": api.Observe, "session.end": api.Observe, "session.fork": api.Transform, "input": api.Transform, "turn.prepare": api.Transform, "output": api.Transform, "output.batch": api.Gate, "binding.provider.request": api.Transform, "binding.provider.response": api.Observe, "provider.piece": api.Observe} {
 		h.hooks[name] = &hook{owner: "harness", rule: rule}
 	}
 	return h
@@ -410,6 +410,7 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("unknown command /%s", fields[0])
 	}
+	ctx = api.WithExecution(ctx, api.Execution{Session: id, Step: api.ID()})
 	result, err := r.value.(api.Command)(ctx, id, fields[1:])
 	if err != nil {
 		return "", err
