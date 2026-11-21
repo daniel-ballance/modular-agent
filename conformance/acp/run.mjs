@@ -6,7 +6,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual as equal } from "node:util";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -15,6 +15,7 @@ import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { historyService } from "./history.mjs";
 import { portableProblems } from "./portable.mjs";
 import { manageServices } from "./service.mjs";
+import { capacity, erasure, isolation } from "./production.mjs";
 import { ACP_PROTOCOL, checkUpgrades, CONTROL_MS, readToken, socketPeer, websocketOptions } from "../tools/websocket.mjs";
 
 const args = process.argv.slice(2);
@@ -60,6 +61,18 @@ if (argv.includes("--job-checks") && !jobChecks) console.log("SKIP  --job-checks
 // With --portable-checks, sample the persisted fixture sessions against the shared shapes
 // (docs/bindings/data.md#portable-sessions). It needs MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE.
 const portableChecks = argv.includes("--portable-checks");
+const productionChecks = [
+	["--isolation-checks", isolation], ["--capacity-checks", capacity], ["--erasure-checks", erasure],
+].filter(([flag]) => argv.includes(flag));
+const productionOnly = argv.includes("--production-only");
+if (productionOnly && !productionChecks.length) {
+	console.error("--production-only needs an ADR 0030 check option");
+	process.exit(2);
+}
+if (productionChecks.length && !canConfigure) {
+	console.error("ADR 0030 checks on WebSocket require --service-command");
+	process.exit(2);
+}
 // With --then, load and recovery reopenings use the second stdio agent.
 const rest = network ? [] : args.slice(dash + 1);
 const then = rest.indexOf("--then");
@@ -88,7 +101,7 @@ const otherActor = "kit-portable-reopener";
 const home = mkdtempSync(join(tmpdir(), "ma-conf-home-"));
 const env = Object.fromEntries(["PATH", "MODULAR_AGENT_HISTORY_URL", "MODULAR_AGENT_HISTORY_TOKEN_FILE"].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 let store, observer;
-if (env.MODULAR_AGENT_HISTORY_URL || env.MODULAR_AGENT_HISTORY_TOKEN_FILE || portableChecks || then >= 0) {
+if (env.MODULAR_AGENT_HISTORY_URL || env.MODULAR_AGENT_HISTORY_TOKEN_FILE || portableChecks || then >= 0 || argv.includes("--erasure-checks")) {
 	try { store = historyService(env.MODULAR_AGENT_HISTORY_URL, env.MODULAR_AGENT_HISTORY_TOKEN_FILE); }
 	catch (e) { console.error(e.message); process.exit(2); }
 	if (jobChecks) observer = await store.observe();
@@ -145,10 +158,10 @@ async function attempt(name, fn) {
 const agentEnv = (which, extraEnv) => ({ ...env, ...(observer ? { MODULAR_AGENT_HISTORY_URL: observer.url } : {}), HOME: home, XDG_CONFIG_HOME: home, XDG_DATA_HOME: home, LANG: "C.UTF-8", ...pluginEnv, ...(!network && portablePair ? { MODULAR_AGENT_ACTOR: portableActor } : {}), MODULAR_AGENT_TENANTS: TENANTS, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: which === command ? dataDir : dataDir2, ...extraEnv });
 const managed = serviceCommand && manageServices(network, serviceCommand, project, (extraEnv) => agentEnv(command, extraEnv), verbose);
 
-function spawnAgent(which, extraEnv) {
+function spawnAgent(which, extraEnv, captureStderr = false) {
 	const child = spawn(which[0], which.slice(1), {
 		cwd: project,
-		stdio: ["pipe", "pipe", verbose ? "inherit" : "ignore"],
+		stdio: ["pipe", "pipe", captureStderr ? "pipe" : verbose ? "inherit" : "ignore"],
 		env: agentEnv(which, extraEnv),
 	});
 	children.push(child);
@@ -189,10 +202,10 @@ function webTransport(service, token) {
 }
 
 /** Connect the official ACP client to a process or service. */
-function connect(which = command, extraEnv = {}, token = network?.token) {
+function connect(which = command, extraEnv = {}, token = network?.token, sharedListener) {
 	const child = network ? null : spawnAgent(which, extraEnv);
-	const variant = !!managed && Object.keys(extraEnv).length > 0;
-	const service = variant ? managed.variant(extraEnv) : Promise.resolve(managed ? managed.primary() : null);
+	const variant = !sharedListener && !!managed && Object.keys(extraEnv).length > 0;
+	const service = sharedListener ?? (variant ? managed.variant(extraEnv) : Promise.resolve(managed ? managed.primary() : null));
 	const wire = network && webTransport(service, token);
 	const updates = [];
 	const permissions = [];
@@ -290,6 +303,10 @@ function validateDeclaration(label, d) {
 }
 let decl = {};
 let extensions = [];
+if (productionOnly) {
+	await runProduction();
+	await finish();
+}
 let agent = connect();
 
 await attempt("initialize", async () => {
@@ -1840,14 +1857,56 @@ if (portableChecks) {
 }
 
 
-await managed?.stopAll();
-observer?.stop();
-for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
-rmSync(dataDir, { recursive: true, force: true });
-rmSync(dataDir2, { recursive: true, force: true });
-rmSync(probeDir, { recursive: true, force: true });
-rmSync(project, { recursive: true, force: true });
-rmSync(home, { recursive: true, force: true });
-const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
-process.exit(failed.length ? 1 : 0);
+if (productionChecks.length) await runProduction();
+await finish();
+
+async function runProduction() {
+	const root = join(probeDir, "production");
+	mkdirSync(root);
+	const profile = (policy, extraEnv = {}, dir = mkdtempSync(join(root, "profile-"))) => {
+		const path = join(dir, "policy.json");
+		writeFileSync(path, JSON.stringify(policy), { mode: 0o600 });
+		return { MODULAR_AGENT_DATA_DIR: dir, MODULAR_AGENT_CONFORMANCE_POLICY: path, ...extraEnv };
+	};
+	const invalid = async (policy) => {
+		const extraEnv = profile(policy);
+		const service = network && await managed.variant(extraEnv, { captureStderr: true });
+		const child = service ? service.child : spawnAgent(command, extraEnv, true);
+		const exited = service ? service.exited : new Promise((resolve, reject) => {
+			child.once("exit", (code, signal) => resolve({ code, signal }));
+			child.once("error", reject);
+		});
+		let stderr = "";
+		child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr = (stderr + chunk).slice(-4096); });
+		const drained = new Promise((resolve) => child.stderr.once("end", resolve));
+		const successfulInit = !service && new Promise((resolve) => {
+			const lines = createInterface({ input: child.stdout });
+			lines.on("line", (line) => {
+				let reply;
+				try { reply = JSON.parse(line); } catch { return; }
+				if (reply.id === 1 && reply.result) resolve({ code: 0 });
+			});
+			child.stdin.on("error", () => {});
+			child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1, clientCapabilities: {} } }) + "\n");
+		});
+		try {
+			const exit = Promise.all([exited, drained]).then(([status]) => status);
+			const { code } = await within(CONTROL_MS, successfulInit ? Promise.race([exit, successfulInit]) : exit, "invalid policy startup refusal");
+			return { code, stderr };
+		} finally { if (service) await managed.stop(service); else await stop({ child }); }
+	};
+	for (const [flag, run] of productionChecks) await attempt(flag, () => run({
+		root, project, command, second, store, network, managed, profile, invalid, connect, stop, crash,
+		within, check, attempt, reopenWatchdog, prompt, history, closeSession, probePlugin,
+	}));
+}
+
+async function finish() {
+	await managed?.stopAll();
+	observer?.stop();
+	for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+	for (const dir of new Set([dataDir, dataDir2, probeDir, project, home])) rmSync(dir, { recursive: true, force: true });
+	const failed = results.filter((r) => !r.ok);
+	console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+	process.exit(failed.length ? 1 : 0);
+}

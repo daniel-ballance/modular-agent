@@ -412,6 +412,10 @@ The fixture MUST select the last user message and concatenate its text parts wit
 
 An agent that declares `nestedToolCalls` MUST also offer the fixture tool `nest` (`{ name: string, input: object }`). `nest` MUST start one nested call with that name and input and settle with the nested result's status and content unchanged.
 
+For the opt-in production checks, a conformance launcher without `ma`'s policy file MUST accept `MODULAR_AGENT_CONFORMANCE_POLICY` as an absolute path to an operator file in the [reference policy format](../reference/standard-configuration.md#connection-policy-and-limits). It MUST apply the policy and limits through the normal serving options and fail startup with a diagnostic for an invalid file. The launcher MUST NOT honor this test option outside conformance mode. `ma` uses its normal policy path or `--policy`.
+
+An agent participating in the shared-erasure check MUST take its authoritative test registry location from the operator. A launcher MAY use `MODULAR_AGENT_CONFORMANCE_ERASURE_DIR` for this location in conformance mode. All participants in the check MUST use the same authoritative state. The directory does not define a registry format or allow a composition without coordination to claim `erasure`.
+
 The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 
 ## Changes

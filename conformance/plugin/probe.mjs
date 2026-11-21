@@ -32,6 +32,9 @@ function registration() {
 		case "refuse-duplicate": return { ...base, name: "probe-probe" };
 		case "refuse-duplicate-replacement": return { ...base, replaces: ["tool:probe", "tool:probe"], toolSources: [{ id: "probe-tools", tools: [PROBE] }] };
 		case "refuse-collision": return { ...base, toolSources: [{ id: "probe-tools", tools: [PROBE] }] };
+		case "project-observer": return base;
+		case "capacity-provider": return { ...base, toolSources: [{ id: "probe-tools", tools: [EFFECT] }],
+			providers: [{ id: model.provider, models, supports: { keepsState: false, runsTools: false } }] };
 		case "output-observer": return { ...base, hooks: [{ hook: "output", handlerId: 1, order: "last" }] };
 		case "runtime": return { ...base, replaces: ["runtime"], runtime: { id: "probe-runtime", supports: {} }, toolSources: [{ id: "probe-tools", tools: [EFFECT] }],
 			providers: [{ id: model.provider, models, supports: { keepsState: false, runsTools: false } }],
@@ -270,6 +273,7 @@ serve("probe", async (m, ctx) => {
 		case "plugin/initialize":
 			if (p.binding !== BINDING || p.data !== DATA) throw rpcError("not_supported");
 			config = p.config ?? {};
+			if (config.role === "project-observer") trace({ projectSetup: p.project });
 			if (config.role === "remote-points") {
 				pointProject = p.project;
 				pointDir = mkdtempSync(join(p.home, "kit-remote-points-"));
@@ -340,7 +344,7 @@ serve("probe", async (m, ctx) => {
 		case "provider/available":
 		case "provider/discard":
 		case "provider/request": {
-			if (config.role !== "runtime" || p.provider !== model.provider) throw rpcError("invalid_request");
+			if (!["runtime", "capacity-provider"].includes(config.role) || p.provider !== model.provider) throw rpcError("invalid_request");
 			if (m.method === "provider/models") return { models };
 			if (m.method === "provider/available") return { available: true };
 			if (m.method === "provider/discard") { if (p.erase) throw rpcError("not_supported"); return {}; }
@@ -350,8 +354,14 @@ serve("probe", async (m, ctx) => {
 			const last = request.messages.findLast((m) => m.role === "user");
 			const unoffered = last?.content?.some((p) => p.text === "fixture unoffered");
 			const extra = last?.content?.some((p) => p.text === "fixture extra-response-member");
+			const oversize = config.role === "capacity-provider" && last?.content?.some((p) => p.text === "fixture oversize calls") &&
+				!request.messages.slice(request.messages.lastIndexOf(last) + 1).some((m) => m.role === "toolResult");
 			const message = { role: "assistant", stop: unoffered ? "toolUse" : "finished", usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
 				content: unoffered ? [{ type: "toolCall", id: "probe-unoffered-call", name: EFFECT.name, arguments: { value: "unoffered" } }] : [{ type: "text", text: "fixture limit" }] };
+			if (oversize) {
+				message.stop = "toolUse";
+				message.content = [1, 2].map((n) => ({ type: "toolCall", id: `capacity-call-${n}`, name: EFFECT.name, arguments: { value: String(n) } }));
+			}
 			// The host asks a Provider: additive-field compatibility probe, not a normal sender fixture.
 			await hook("provider.response", { message, ...(extra ? { fixtureExtra: { data: "inert" } } : {}) });
 			if (extra) trace({ extraResponseAccepted: p.sessionId, message });
@@ -379,6 +389,10 @@ serve("probe", async (m, ctx) => {
 			return { tools: registration().toolSources[0].tools };
 		case "tools/call": {
 			if (p.toolSource !== "probe-tools" || !p.sessionId || !p.project) throw rpcError("invalid_request");
+			if (config.role === "capacity-provider" && p.call?.name === EFFECT.name) {
+				trace({ effect: p.call.id });
+				return { status: "completed", content: [{ type: "text", text: "unexpected capacity fixture effect" }] };
+			}
 			if (config.role === "runtime" && p.call?.name === EFFECT.name) {
 				// Authority: the live invocation has already consumed its allowance.
 				const r = await ctx.ask("host/env/exec", { sessionId: p.sessionId, parentRequestId: m.id, cwd: p.project, command: "printf fixture-env" });
