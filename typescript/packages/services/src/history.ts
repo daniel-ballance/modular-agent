@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { addAbortListener } from "node:events";
 import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
+import { isDeepStrictEqual } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
-import { erasedEntry, untilAborted, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
+import { erasedEntry, untilAborted, type ErasurePlan, type ErasurePublication, type HistoryErasureRegistry, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
 import { HistoryServiceError, historyStorageStatuses, type HistoryReadOptions } from "./history-backend.js";
 import { call, type ClientOptions, ServiceError } from "./http.js";
 import { HISTORY_BINDING, MAX_LEASE_BYTES, validLease } from "./history-service.js";
@@ -72,7 +73,7 @@ export interface LeasedHistoryStore {
 }
 
 type Grant = { lease: string; ttlMs: number };
-type Caps = { ttlMs: number; retention?: number | null };
+type Caps = { ttlMs: number; retention?: number | null; pendingErasure?: unknown };
 interface HistoryPort {
 	readonly remote?: boolean;
 	initialize(signal: AbortSignal): Promise<Caps>;
@@ -80,7 +81,10 @@ interface HistoryPort {
 	acquire(id: string, owner: string, signal: AbortSignal): Promise<Grant>;
 	renew(id: string, lease: string, signal: AbortSignal): Promise<{ ttlMs: number }>;
 	release(id: string, lease: string, signal: AbortSignal): Promise<unknown>;
-	append(id: string, lease: string, entries: HistoryEntry[], signal: AbortSignal): Promise<unknown>;
+	append(id: string, lease: string, entries: HistoryEntry[], signal: AbortSignal, revision?: string): Promise<unknown>;
+	plans?(id: string, after: string | undefined, signal: AbortSignal): Promise<unknown>;
+	publish?(id: string, lease: string, intent: ErasurePublication, signal: AbortSignal): Promise<unknown>;
+	complete?(id: string, lease: string, intentId: string, entryIds: string[], signal: AbortSignal): Promise<unknown>;
 	erase?(id: string, entryIds: string[], lease: string | undefined, signal: AbortSignal): Promise<unknown>;
 	writerSignal?: LeasedHistoryStore["writerSignal"];
 	read(id: string, options: HistoryReadOptions, signal: AbortSignal): Promise<ReadPage>;
@@ -89,6 +93,7 @@ interface HistoryPort {
 
 class HistoryWriter implements HistoryStore {
 	readonly supports: { erasure: boolean; retention: boolean; persistent: boolean };
+	historyErasure?: HistoryErasureRegistry;
 	private owner = randomUUID();
 	private leases = new Map<string, Lease>();
 	private unsent = new Map<string, Pending>();
@@ -96,7 +101,7 @@ class HistoryWriter implements HistoryStore {
 	private clock: ReturnType<typeof writerClock>;
 
 	constructor(private port: HistoryPort, persistent: boolean, margin?: number) {
-		this.supports = { erasure: !!port.erase, retention: false, persistent };
+		this.supports = { erasure: false, retention: false, persistent };
 		const configured = process.env.MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS;
 		this.clock = writerClock(margin ?? (configured === undefined ? undefined : Number(configured)));
 	}
@@ -105,6 +110,27 @@ class HistoryWriter implements HistoryStore {
 		if (!positive(caps.ttlMs) || (caps.retention != null && !positive(caps.retention))) throw new Error("Unsupported history store declaration");
 		this.ttl = caps.ttlMs;
 		this.supports.retention = caps.retention != null;
+		if (caps.pendingErasure === 1 && this.port.plans && this.port.publish && this.port.complete) {
+			this.historyErasure = {
+				read: id => this.plans(id),
+				publish: async (id, intent) => {
+					const lease = this.leases.get(id);
+					if (!lease) throw new ServiceError(409, "Erasure requires a source lease", "lost");
+					let reply: unknown;
+					await this.mutate(id, async signal => { reply = await this.port.publish!(id, lease.value, intent, signal); }, lease);
+					if (!shape(reply, ["intentId"]) || !pathName(reply.intentId)) throw unavailable("Invalid erasure publication reply");
+					return reply.intentId;
+				},
+				complete: async (id, intentId, entryIds) => {
+					const lease = this.leases.get(id);
+					if (!lease) throw new ServiceError(409, "Erasure requires a destination lease", "lost");
+					await this.mutate(id, async signal => {
+						if (!shape(await this.port.complete!(id, lease.value, intentId, entryIds, signal), [])) throw unavailable("Invalid erasure completion reply");
+					}, lease);
+				},
+			};
+			this.supports.erasure = true;
+		}
 	}
 	async create(meta: StoredSession): Promise<void> {
 		this.unsent.set(meta.id, { meta, entries: [], abort: new AbortController() });
@@ -191,7 +217,7 @@ class HistoryWriter implements HistoryStore {
 		this.leases.delete(id);
 		await this.port.release(id, lease.value, timeout(1000)).catch(() => undefined);
 	}
-	async append(id: string, batch: HistoryEntry[]): Promise<void> {
+	async append(id: string, batch: HistoryEntry[], options?: { forkErasureView?: string }): Promise<void> {
 		if (!batch.length) return;
 		const pending = this.unsent.get(id);
 		if (pending) {
@@ -212,7 +238,72 @@ class HistoryWriter implements HistoryStore {
 		}
 		const lease = this.leases.get(id);
 		this.checkWriter(id);
-		await this.mutate(id, signal => this.port.append(id, lease!.value, batch, signal), lease);
+		if (this.historyErasure) await this.guardedAppend(id, lease!, batch, pending?.meta.forkedFrom?.sessionId, options?.forkErasureView);
+		else await this.mutate(id, signal => this.port.append(id, lease!.value, batch, signal), lease);
+	}
+	private async plans(id: string) {
+		try {
+			let revision: string | undefined, after: string | undefined;
+			const plans: ErasurePlan[] = [];
+			const seen = new Set<string>();
+			do {
+				const page = await this.port.plans!(id, after, timeout(10_000));
+				if (!shape(page, ["revision", "plans"], ["next"]) || !validLease(page.revision) ||
+					(revision !== undefined && revision !== page.revision) || !Array.isArray(page.plans) || page.plans.length > 500 || (after !== undefined && page.plans.length === 0)) throw unavailable("Invalid erasure plan page");
+				revision = page.revision;
+				for (const plan of page.plans) {
+					if (!isPlan(plan) || seen.has(plan.intentId)) throw unavailable("Invalid erasure plan");
+					seen.add(plan.intentId);
+					plans.push(plan);
+				}
+				if (Object.hasOwn(page, "next") && (!pathName(page.next) || page.next === after || page.next !== page.plans.at(-1)?.intentId)) throw unavailable("Invalid erasure plan cursor");
+				after = page.next as string | undefined;
+			} while (after !== undefined);
+			return { revision: revision!, plans };
+		} catch (error) { throw unavailable("Pending erasure state is unavailable", error); }
+	}
+	private async guardedAppend(id: string, lease: Lease, batch: HistoryEntry[], forkSource?: string, forkErasureView?: string) {
+		const sources = new Set(batch.flatMap(entry => entry.sources ?? []));
+		const isBookkeeping = batch.every(entry => entry.kind === "erasure");
+		for (;;) {
+			this.checkWriter(id);
+			const dest = await this.plans(id);
+			const sourceId = forkSource ?? id;
+			const source = forkSource === undefined ? dest : await this.plans(sourceId);
+			if (source.revision !== dest.revision) continue; // Read both scopes again before checking the data.
+			if (forkSource !== undefined && forkErasureView !== JSON.stringify(source.plans.map(p => p.intentId))) throw unavailable("Erasure changed the fork source");
+			if (!isBookkeeping && [...dest.plans, ...(forkSource === undefined ? [] : source.plans)].some(p => p.copies.some(c => !c.complete))) {
+				throw unavailable("Cannot append to or copy from history with pending erasure");
+			}
+			if (sources.size) {
+				const kept = new Map((await this.readAll(sourceId)).entries.map(e => [e.id, e]));
+				for (const entry of batch) kept.set(entry.id, entry);
+				if ([...sources].some(id => !kept.has(id) || kept.get(id)!.erased)) throw unavailable("Append would copy erased or unknown history");
+			}
+			this.checkWriter(id);
+			try {
+				await this.port.append(id, lease.value, batch, AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - this.clock.now())]), dest.revision);
+				this.checkWriter(id);
+				return;
+			} catch (error) {
+				if (error instanceof ServiceError) {
+					if (error.code === "stale_revision") continue;
+					if (error.code === "lost") this.lose(lease);
+					throw error;
+				}
+				// A committed append moves the revision. Reconcile the exact batch, rather than
+				// treating the stale revision on an identical resend as proof of failure.
+				try {
+					this.checkWriter(id);
+					const kept = new Map((await this.readAll(id)).entries.map(e => [e.id, e]));
+					this.checkWriter(id);
+					if (batch.every(e => isDeepStrictEqual(JSON.parse(JSON.stringify(e)), kept.get(e.id)))) return;
+					if (batch.every(e => !kept.has(e.id))) continue;
+				} catch (failure) { this.lose(lease); throw failure; }
+				this.lose(lease);
+				throw error;
+			}
+		}
 	}
 	private async mutate(id: string, work: (signal: AbortSignal) => Promise<unknown>, lease?: Lease) {
 		for (let attempt = 0; ; attempt++) {
@@ -233,6 +324,11 @@ class HistoryWriter implements HistoryStore {
 	async load(id: string): Promise<{ meta: StoredSession; entries: HistoryEntry[] }> {
 		const pending = this.unsent.get(id);
 		if (pending) return { meta: pending.meta, entries: [...pending.entries] };
+		const result = await this.readAll(id);
+		if (!result.entries.length) throw new ServiceError(404, "Session was not published", "unknown_session");
+		return result;
+	}
+	private async readAll(id: string) {
 		const entries: HistoryEntry[] = [];
 		let meta!: StoredSession, after: string | undefined;
 		do {
@@ -241,7 +337,6 @@ class HistoryWriter implements HistoryStore {
 			entries.push(...r.entries);
 			after = this.next(r.entries, r.next, after);
 		} while (after !== undefined);
-		if (!entries.length) throw new ServiceError(404, "Session was not published", "unknown_session");
 		return { meta, entries };
 	}
 	async list(filter?: { project?: string }): Promise<StoredSession[]> {
@@ -299,6 +394,17 @@ export async function customHistoryWriter(store: LeasedHistoryStore): Promise<Hi
 	return writer;
 }
 
+const name = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+const pathName = (v: unknown): v is string => name(v) && v !== "." && v !== "..";
+const shape = (v: unknown, required: string[], optional: string[] = []): v is Record<string, unknown> =>
+	!!v && typeof v === "object" && !Array.isArray(v) && required.every(key => Object.hasOwn(v, key)) && Object.keys(v).every(key => required.includes(key) || optional.includes(key));
+const unavailable = (message: string, cause?: unknown) => Object.assign(new ServiceError(503, message, "unavailable"), { cause });
+function isPlan(p: unknown): p is ErasurePlan {
+	return shape(p, ["intentId", "sourceSessionId", "recordId", "copies"]) && pathName(p.intentId) && pathName(p.sourceSessionId) && name(p.recordId) &&
+		Array.isArray(p.copies) && p.copies.length > 0 && p.copies.every(c => shape(c, ["entryId", "complete"]) && name(c.entryId) && typeof c.complete === "boolean") &&
+		new Set(p.copies.map(c => c.entryId)).size === p.copies.length;
+}
+
 export class HttpHistoryStore extends HistoryWriter {
 	constructor(options: HistoryClientOptions) {
 		const client = historyClientOptions(options.url, options.token);
@@ -321,7 +427,10 @@ export class HttpHistoryStore extends HistoryWriter {
 			acquire: (id, owner, signal) => call(client, "POST", path(id, "/lease"), { body: { owner }, signal }),
 			renew: (id, lease, signal) => call(client, "POST", path(id, `/lease/${pathId(lease)}/renew`), { signal }),
 			release: (id, lease, signal) => call(client, "DELETE", path(id, `/lease/${pathId(lease)}`), { signal }),
-			append: (id, lease, entries, signal) => call(client, "POST", path(id, "/entries"), { body: { lease, entries }, signal }),
+			append: (id, lease, entries, signal, historyRevision) => call(client, "POST", path(id, "/entries"), { body: { lease, entries }, signal, historyRevision }),
+			plans: (id, after, signal) => call(client, "GET", path(id, "/pending-erasure") + query({ after, limit: 500 }), { signal, noStore: true }),
+			publish: (id, lease, intent, signal) => call(client, "POST", path(id, "/pending-erasure"), { body: { ...intent, lease }, signal }),
+			complete: (id, lease, intentId, entryIds, signal) => call(client, "POST", path(id, `/pending-erasure/${pathId(intentId)}/complete`), { body: { lease, entryIds }, signal }),
 			erase: (id, entryIds, lease, signal) => call(client, "POST", path(id, "/erase"), { body: { entryIds, ...(lease ? { lease } : {}) }, signal }),
 			read: (id, opts, signal) => call(client, "GET", path(id) + query(opts), { retry: true, signal }),
 			list: (opts, signal) => call(client, "GET", "/v1/sessions" + query(opts), { retry: true, signal }),

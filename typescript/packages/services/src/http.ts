@@ -67,7 +67,7 @@ export class ServiceError extends Error {
  * connection, a dropped response) is sent again, a few times, with a growing
  * wait. Only requests that are safe to send twice may set retry.
  */
-export async function call<T>(client: ClientOptions, method: string, path: string, options: { body?: unknown; signal?: AbortSignal; retry?: boolean } = {}): Promise<T> {
+export async function call<T>(client: ClientOptions, method: string, path: string, options: { body?: unknown; signal?: AbortSignal; retry?: boolean; historyRevision?: string; noStore?: boolean } = {}): Promise<T> {
 	const waits = options.retry ? [50, 200, 500, 1000] : [];
 	for (let attempt = 0; ; attempt++) {
 		let res: Response;
@@ -75,7 +75,9 @@ export async function call<T>(client: ClientOptions, method: string, path: strin
 			res = await fetch(client.url + path, {
 				method,
 				redirect: "error",
-				headers: { authorization: `Bearer ${client.token}`, ...(options.body !== undefined ? { "content-type": "application/json" } : {}) },
+				cache: options.noStore ? "no-store" : undefined,
+				headers: { authorization: `Bearer ${client.token}`, ...(options.body !== undefined ? { "content-type": "application/json" } : {}),
+					...(options.historyRevision !== undefined ? { "History-Revision": options.historyRevision } : {}) },
 				body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
 				signal: options.signal,
 			});

@@ -56,16 +56,18 @@ export async function historyRelay({ upstream, token, port }: {
       req.resume();
       return fail(res, 404, "not_found", "Unknown path");
     }
-    const headers = { authorization: bearer(validated.token!) } as Record<string, string>;
+    const headers = { authorization: bearer(validated.token!) } as Record<string, string | string[]>;
     for (const key of ["content-length", "content-type", "content-encoding"]) {
       const value = req.headers[key];
       if (typeof value === "string") headers[key] = value;
     }
+    const revisions = req.headersDistinct["history-revision"];
+    if (revisions) headers["history-revision"] = revisions;
     const request = send(target, { method: req.method, path: target.pathname.replace(/\/$/, "") + path, headers,
       signal: AbortSignal.timeout(30_000) }, reply => {
       if (!reply.statusCode || reply.statusCode >= 300 && reply.statusCode < 400) { reply.destroy(); res.destroy(); return; }
       const headers: Record<string, string> = {};
-      for (const key of ["content-type", "content-length", "allow", "www-authenticate"]) {
+      for (const key of ["content-type", "content-length", "allow", "www-authenticate", "cache-control"]) {
         const value = reply.headers[key];
         if (typeof value === "string") headers[key] = value;
       }

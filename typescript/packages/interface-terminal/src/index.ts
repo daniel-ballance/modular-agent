@@ -299,7 +299,7 @@ export class TerminalInterface implements InterfaceCapability {
 			case "/fork":
 			case "/back": {
 				const n = Number(arg || 1);
-				const inputs = this.api.history(this.sessionId).filter((e) => e.kind === "input");
+				const inputs = (await this.api.readHistory(this.sessionId)).filter((e) => e.kind === "input");
 				const target = inputs[inputs.length - n];
 				if (!target) return this.line("Nothing to go back to."), true;
 				if (name === "/back") {

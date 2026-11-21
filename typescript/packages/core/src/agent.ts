@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { ALL_AUTHORITY, Harness, filePendingErasure, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
+import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
 import { contextCompaction } from "@modular-agent/context-compaction";
@@ -105,18 +105,16 @@ export class FileHistory {
 export class HttpHistory {
   #url: string;
   #tokenFile: string;
-  #pendingErasureDir?: string;
-  constructor(url: string, tokenFile: string, options?: { pendingErasureDir?: string }) {
+  constructor(url: string, tokenFile: string) {
     this.#url = url;
     this.#tokenFile = tokenFile;
-    this.#pendingErasureDir = options?.pendingErasureDir;
   }
   static {
     httpUpstream = async store => historyClientOptions(store.#url, await tokenFrom(store.#tokenFile)) as { url: string; token: string };
     openHttpHistory = async store => {
       const client = new HttpHistoryStore(await httpUpstream(store));
       await client.initialize();
-      return Object.assign(client, store.#pendingErasureDir === undefined ? {} : { pendingErasure: filePendingErasure(store.#pendingErasureDir) });
+      return client;
     };
   }
 }
@@ -125,7 +123,7 @@ async function tokenFrom(file: string): Promise<string> {
   if (!info.isFile() || (info.mode & 0o077) !== 0) throw new AgentError("invalid_params", "The token file must be private");
   return (await readFile(file, "utf8")).trim();
 }
-export const httpHistory = (url: string, tokenFile: string, options?: { pendingErasureDir?: string }): HttpHistory => new HttpHistory(url, tokenFile, options);
+export const httpHistory = (url: string, tokenFile: string): HttpHistory => new HttpHistory(url, tokenFile);
 const historyMethods = ["create", "list", "read", "acquire", "renew", "release", "append", "erase"] as const;
 
 export async function serveHistory(store: FileHistory | MemoryHistory | HttpHistory | HistoryServiceStore,
@@ -405,8 +403,10 @@ export class Agent {
               request.answerers.length && !request.answerers.includes(local.id)) return;
           const controller = new AbortController();
           this.#questions.set(request.id, controller);
-          const q = questionOf(api, request);
-          void Promise.resolve().then(() => handler(q, { sessionId, actorId: local.id, cancelled: controller.signal }))
+          void questionOf(api, request).then(async q => {
+            await api.checkPending(sessionId);
+            if (!controller.signal.aborted) return handler(q, { sessionId, actorId: local.id, cancelled: controller.signal });
+          })
             .catch(() => undefined).then(async answer => {
               if (!controller.signal.aborted) await submitAnswer(api, request, local.id, answer ?? "decline");
             }).catch(async () => {
@@ -429,7 +429,7 @@ export class Agent {
       fork: async entry => {
         this.#check();
         const at = entry ?? this.#api.session(id).position;
-        if (!at || !this.#api.history(id, { all: true }).some(e => e.id === at)) throw new AgentError("not_found", "No entry to fork");
+        if (!at || !(await this.#api.readHistory(id, { all: true })).some(e => e.id === at)) throw new AgentError("not_found", "No entry to fork");
         const fork = await checked(() => this.#api.forkSession(id, at));
         return this.openSession(fork);
       },

@@ -42,11 +42,11 @@ export function contextCompaction(options: CompactionOptions = {}): Plugin {
 			const keep = (options.keepRecentTokens ?? (api.config().keepRecentTokens as number | undefined)) ?? 20_000;
 
 			api.on("step.before", async (payload: { sessionId: string; turnId: string; model?: { contextWindow: number }; request: ModelRequest }) => {
-				let messages = view(api.history(payload.sessionId), payload.turnId);
+				let messages = view(await api.readHistory(payload.sessionId), payload.turnId);
 				const window = payload.model?.contextWindow ?? Infinity;
 				if (estimate(messages) > window - Math.min(reserve, Math.floor(window / 2))) {
 					await compact(api, payload.sessionId, keep);
-					messages = view(api.history(payload.sessionId), payload.turnId);
+					messages = view(await api.readHistory(payload.sessionId), payload.turnId);
 				}
 				return { value: { ...payload, request: { ...payload.request, messages } } };
 			});
@@ -55,7 +55,7 @@ export function contextCompaction(options: CompactionOptions = {}): Plugin {
 				if (payload.error.kind !== "contextTooLarge") return undefined;
 				const done = await compact(api, payload.sessionId, keep);
 				if (!done) return undefined;
-				return { retry: true, request: { ...payload.request, messages: view(api.history(payload.sessionId), payload.turnId) } };
+				return { retry: true, request: { ...payload.request, messages: view(await api.readHistory(payload.sessionId), payload.turnId) } };
 			});
 
 			api.registerCommand("compact", {
@@ -68,7 +68,7 @@ export function contextCompaction(options: CompactionOptions = {}): Plugin {
 
 /** Summarize everything before the recent part of the history, and record the summary. */
 export async function compact(api: PluginApi, sessionId: string, keepTokens: number): Promise<boolean> {
-	const history = api.history(sessionId);
+	const history = await api.readHistory(sessionId);
 	const lastSummary = history.map(isSummary).lastIndexOf(true);
 	const candidates = history.slice(lastSummary + 1);
 	// Keep recent entries, cutting only before an input so tool calls stay with their results.

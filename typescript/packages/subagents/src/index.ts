@@ -42,9 +42,9 @@ const DEFINITION: ToolDefinition = {
 	callers: ["model"],
 };
 
-function lastTurnEnd(api: PluginApi, sessionId: string): { id: string; outcome: { kind: string; error?: string; limit?: string }; result: { text?: string; openToolCalls: string[] } } | undefined {
-	const end = api.history(sessionId, { all: true }).filter((e: HistoryEntry) => e.kind === "turnEnd").at(-1);
-	return end && !end.erased ? { id: end.id, ...(end.data as object) } as ReturnType<typeof lastTurnEnd> : undefined;
+async function lastTurnEnd(api: PluginApi, sessionId: string) {
+	const end = (await api.readHistory(sessionId, { all: true })).filter((e: HistoryEntry) => e.kind === "turnEnd").at(-1);
+	return end && !end.erased ? { id: end.id, ...(end.data as object) } as { id: string; outcome: { kind: string; error?: string; limit?: string }; result: { text?: string; openToolCalls: string[] } } : undefined;
 }
 
 /**
@@ -158,10 +158,10 @@ export class Subagents implements ToolSource, InterfaceCapability {
 			.catch(() => undefined);
 	}
 
-	private check(child: string): void {
+	private async check(child: string): Promise<void> {
 		const settle = this.waiting.get(child);
 		if (!settle || this.api.session(child).busy) return;
-		const end = lastTurnEnd(this.api, child);
+		const end = await lastTurnEnd(this.api, child);
 		if (!end || end.result.openToolCalls.length) return;
 		const kind = end.outcome.kind;
 		const state = kind === "failed" ? "failed" : kind === "cancelled" ? "cancelled" : "completed";
@@ -207,10 +207,10 @@ export class Subagents implements ToolSource, InterfaceCapability {
 			// Reopening the child lets its Runtime decide what happens to an interrupted turn.
 			await this.api.openSession(d.childSessionId, this.parentActor(parent));
 			// A follow-up job's child already has earlier input: this job's task is given only if it is the latest.
-			const latest = this.api.history(d.childSessionId, { all: true }).filter((e: HistoryEntry) => e.kind === "input").at(-1);
+			const latest = (await this.api.readHistory(d.childSessionId, { all: true })).filter((e: HistoryEntry) => e.kind === "input").at(-1);
 			const gaveTask = latest?.message ? textOf(latest.message.content) === d.task : false;
 			if (!gaveTask) await this.api.input(d.childSessionId, { content: d.task, actorId: PARENT });
-			else if (!this.api.session(d.childSessionId).busy) this.check(d.childSessionId);
+			else if (!this.api.session(d.childSessionId).busy) await this.check(d.childSessionId);
 		}
 	}
 }

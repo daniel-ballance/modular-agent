@@ -332,6 +332,7 @@ export interface HistoryStore {
 	supports: Declaration;
 	/** Authoritative registry shared by Harness readers and writers of this namespace. */
 	pendingErasure?: import("./erasure.js").PendingErasure;
+	historyErasure?: import("./erasure.js").HistoryErasureRegistry;
 	create(meta: StoredSession): Promise<void>;
 	/** Refuses if the session is already open for writing elsewhere. */
 	openForWriting(sessionId: string, options?: { wait?: boolean }): Promise<void>;
@@ -340,7 +341,7 @@ export interface HistoryStore {
 	writerSignal?(sessionId: string): AbortSignal | undefined;
 	close(sessionId: string): Promise<void>;
 	/** Keep these entries. All of them are kept, or none are. */
-	append(sessionId: string, batch: HistoryEntry[]): Promise<void>;
+	append(sessionId: string, batch: HistoryEntry[], options?: { forkErasureView?: string }): Promise<void>;
 	load(sessionId: string): Promise<{ meta: StoredSession; entries: HistoryEntry[] }>;
 	list(filter?: { project?: string }): Promise<StoredSession[]>;
 	erase?(sessionId: string, entryIds: string[]): Promise<void>;

@@ -210,7 +210,7 @@ function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" 
         assert();
         return page;
       }
-      const all = api.history(ids.sessionId, { all: true });
+      const all = await api.readHistory(ids.sessionId, { all: true });
       const at = cursor === undefined ? -1 : all.findIndex(e => e.id === cursor);
       if (cursor !== undefined && at < 0) throw new AgentError("invalid_request", "Unknown history cursor");
       const entries = all.slice(at + 1, at + 101);

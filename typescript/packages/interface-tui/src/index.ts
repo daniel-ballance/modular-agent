@@ -322,7 +322,7 @@ export class TuiInterface implements InterfaceCapability {
 				return true;
 			case "/fork":
 			case "/back": {
-				const inputs = this.api.history(this.sessionId).filter((e) => e.kind === "input");
+				const inputs = (await this.api.readHistory(this.sessionId)).filter((e) => e.kind === "input");
 				const target = inputs[inputs.length - Number(arg || 1)];
 				if (!target) return this.note("Nothing to go back to."), true;
 				if (name === "/back") {

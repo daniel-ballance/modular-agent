@@ -161,8 +161,7 @@ async function main(argv: string[]) {
   }
   const conformance = opts.acp && process.env.MODULAR_AGENT_CONFORMANCE === "1";
   const history = process.env.MODULAR_AGENT_HISTORY_URL ? httpHistory(process.env.MODULAR_AGENT_HISTORY_URL,
-    process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "", { pendingErasureDir: process.env.MODULAR_AGENT_PENDING_ERASURE_DIR ??
-      (conformance ? process.env.MODULAR_AGENT_CONFORMANCE_ERASURE_DIR : undefined) }) : undefined;
+    process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "") : undefined;
   const base = { durability: opts.runtime === "durable" ? "durable" as const : "kept" as const, history, dataDir: p.state,
     resourceReservations: policy.resourceReservations };
   const script = await loadScript(process.env.MODULAR_AGENT_SCRIPT, process.env.MODULAR_AGENT_SCRIPT_LOG);

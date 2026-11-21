@@ -294,6 +294,7 @@ test("serving a memory history handle exposes its existing records, without bypa
   t.after(async () => { await a.close(); await service.close(); await rm(dir, { recursive: true, force: true }); });
   const reader = await testAgent({ durability: "kept", dataDir: dir, history: httpHistory(service.url, tokenFile), script: [] });
   t.after(() => reader.close());
+  assert.equal(reader.declaration().erasure, false, "a volatile service cannot declare a durable registry");
   assert.ok((await reader.sessions()).some(s => s.id === local.id));
   const acquire = await fetch(new URL(`/v1/sessions/${local.id}/lease`, service.url), {
     method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },

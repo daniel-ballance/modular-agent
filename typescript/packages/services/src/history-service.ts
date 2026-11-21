@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -18,6 +18,16 @@ const id = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 export const MAX_LEASE_BYTES = 128;
 export const validLease = (v: unknown): v is string => typeof v === "string" && v.length >= 1 && v.length <= MAX_LEASE_BYTES && !/[^A-Za-z0-9_-]/.test(v);
 const ids = (v: Json | undefined): v is string[] => Array.isArray(v) && v.every(id);
+const distinctIds = (v: Json | undefined): v is string[] => ids(v) && v.length > 0 && new Set(v).size === v.length;
+const fields = (v: JsonObject, ...keys: string[]) => Object.keys(v).length === keys.length && keys.every(key => Object.hasOwn(v, key));
+type CopySet = { sessionId: string; recordId: string; entryIds: string[] };
+type Publication = { revision: string; intentId: string; entryIds: string[]; copies: CopySet[] };
+type Plan = { intentId: string; sourceSessionId: string; recordId: string; copies: { entryId: string; complete: boolean }[] };
+const planFrame = (revision: string) => `{"revision":${JSON.stringify(revision)},"plans":[`;
+const sortIds = (values: string[]) => [...values].sort();
+const copyKey = (copies: CopySet[]) => JSON.stringify(copies.map(c => JSON.stringify([c.sessionId, c.recordId, sortIds(c.entryIds)])).sort());
+const unknownIntent = () => new BindingError(404, "unknown_intent", "Unknown erasure intent");
+const unknownEntry = () => new BindingError(404, "unknown_entry", "Unknown erasure target");
 
 class BindingError extends Error {
 	constructor(readonly status: number, readonly code: string, message: string, readonly retryAfterMs?: number) { super(message); }
@@ -85,6 +95,8 @@ function page(prefix: string, rows: Iterable<Row>, limit: number): string {
 class Records {
 	private db: DatabaseSync;
 	private failed = false;
+	private registryFailed = false;
+	private disk?: { path: string; dev: bigint; ino: bigint };
 	holdUntil = 0;
 	ttlEpoch = 0;
 
@@ -93,8 +105,21 @@ class Records {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 			if (readdirSync(dir).some((name) => name.endsWith(".jsonl"))) throw new Error("Legacy history directory has no verifiable lease bound; use a fresh directory");
 		}
-		this.db = new DatabaseSync(dir === undefined ? ":memory:" : join(dir, "history.sqlite"));
+		const path = dir === undefined ? undefined : join(dir, "history.sqlite");
+		const marker = dir === undefined ? undefined : join(dir, "pending-erasure.profile");
+		const declared = marker !== undefined && existsSync(marker);
+		if (declared && !existsSync(path!)) {
+			// Do not create an empty archive in the place of an existing store.
+			this.db = new DatabaseSync(":memory:");
+			this.failed = true;
+			return;
+		}
+		this.db = new DatabaseSync(path ?? ":memory:");
 		try {
+			if (path !== undefined) {
+				const { dev, ino } = statSync(path, { bigint: true });
+				this.disk = { path, dev, ino };
+			}
 			// The retained exclusive lock prevents two service processes from
 			// managing independent lease maps over the same store. FULL sync
 			// and a rollback journal make a whole batch the durable unit.
@@ -105,6 +130,21 @@ class Records {
 				CREATE INDEX IF NOT EXISTS session_order ON sessions (created DESC, id);
 				CREATE TABLE IF NOT EXISTS entries (seq INTEGER PRIMARY KEY, session TEXT NOT NULL, id TEXT NOT NULL, json TEXT NOT NULL, UNIQUE (session,id));
 				CREATE INDEX IF NOT EXISTS entry_order ON entries (session,seq);`);
+			const profile = this.db.prepare("SELECT value FROM settings WHERE key='pending-erasure-profile'").get();
+			if ((declared || profile) && profile?.value !== 1) this.registryFailed = true;
+			if (!declared && !profile) {
+				this.db.exec(`CREATE TABLE registry_revision (revision TEXT NOT NULL);
+					CREATE TABLE registry_intents (seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, operation TEXT UNIQUE NOT NULL, copies TEXT NOT NULL);
+					CREATE TABLE registry_plans (session TEXT NOT NULL, intent INTEGER NOT NULL, record TEXT NOT NULL, json TEXT NOT NULL,
+						PRIMARY KEY (session,intent), UNIQUE (session,record));
+					INSERT INTO settings VALUES ('pending-erasure-profile',1);`);
+				this.db.prepare("INSERT INTO registry_revision VALUES (?)").run(randomBytes(32).toString("hex"));
+			}
+			try {
+				this.revision();
+				this.db.prepare("SELECT seq,id,operation,copies FROM registry_intents LIMIT 1").get();
+				this.db.prepare("SELECT session,intent,record,json FROM registry_plans LIMIT 1").get();
+			} catch { this.registryFailed = true; }
 			const prior = this.db.prepare("SELECT value FROM settings WHERE key='ttl-bound'").get()?.value;
 			if (prior === undefined && this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get()) throw new Error("Stored TTL bound is missing");
 			if (prior !== undefined && (typeof prior !== "number" || !Number.isSafeInteger(prior) || prior < 0)) throw new Error("Stored TTL bound is invalid");
@@ -113,6 +153,12 @@ class Records {
 			if (ttl > 0) this.bumpTtlEpoch();
 			else this.ttlEpoch = Number(this.db.prepare("SELECT value FROM settings WHERE key='ttl-epoch'").get()?.value ?? 0);
 			this.db.exec("COMMIT");
+			if (marker !== undefined && !declared && !this.registryFailed) {
+				// The marker detects an absent database, not two matching, stale backups.
+				writeFileSync(marker, "1\n", { mode: 0o600, flag: "wx", flush: true });
+				const directory = openSync(dir!, "r");
+				try { fsyncSync(directory); } finally { closeSync(directory); }
+			}
 			this.holdUntil = prior === undefined ? 0 : performance.now() + bound;
 		} catch (error) { this.db.close(); throw error; }
 	}
@@ -122,6 +168,7 @@ class Records {
 		this.ttlEpoch = Number(this.db.prepare("SELECT value FROM settings WHERE key='ttl-epoch'").get()!.value);
 	}
 	bindTtl(ttl: number) {
+		if (this.failed) return;
 		this.commit(() => {
 			this.db.prepare("UPDATE settings SET value=MAX(value,?) WHERE key='ttl-bound'").run(ttl);
 			this.bumpTtlEpoch();
@@ -149,6 +196,7 @@ class Records {
 		this.commit(() => {
 			this.db.prepare("UPDATE sessions SET expired=1,json='',project='' WHERE id=?").run(sid);
 			this.db.prepare("DELETE FROM entries WHERE session=?").run(sid);
+			this.advanceRevision();
 		});
 	}
 	put(sid: string, initial: JsonObject, expires: (s: Session) => boolean) {
@@ -158,7 +206,10 @@ class Records {
 		if (row) { if (!equalJson(row.json, meta)) throw conflict(); return; }
 		if (this.db.prepare("SELECT 1 FROM sessions WHERE id=?").get(sid)) throw conflict();
 		if (this.db.prepare("SELECT COUNT(*) AS n FROM sessions").get()!.n as number >= this.quota) throw unavailable();
-		this.commit(() => this.db.prepare("INSERT INTO sessions (id,json,created,project,changed) VALUES (?,?,?,?,?)").run(sid, json, count(initial.created)!, initial.project as string, Date.now()));
+		this.commit(() => {
+			this.db.prepare("INSERT INTO sessions (id,json,created,project,changed) VALUES (?,?,?,?,?)").run(sid, json, count(initial.created)!, initial.project as string, Date.now());
+			this.advanceRevision();
+		});
 	}
 	list(project: string | undefined, after: string | undefined, limit: number, expires: (s: Session) => boolean) {
 		const visible = "NOT expired AND EXISTS (SELECT 1 FROM entries WHERE entries.session=sessions.id)";
@@ -177,12 +228,14 @@ class Records {
 		if (at === undefined) throw new BindingError(404, "unknown_entry", "Unknown entry cursor");
 		return page(frame(s.json), this.db.prepare("SELECT id,json FROM entries WHERE session=? AND seq>? ORDER BY seq LIMIT ?").iterate(s.id, at, limit + 1) as Iterable<Row>, limit);
 	}
-	keep(s: Session, batch: JsonObject[], authorize: () => void) {
+	keep(s: Session, batch: JsonObject[], authorize: () => void, revision?: string) {
 		const prefix = frame(s.json);
 		let kept = 0;
 		const find = this.db.prepare("SELECT json FROM entries WHERE session=? AND id=?");
 		const insert = this.db.prepare("INSERT INTO entries (session,id,json) VALUES (?,?,?)");
 		return this.commit(() => {
+			authorize();
+			if (revision !== undefined) this.requireRevision(revision);
 			for (const e of batch) {
 				const eid = e.id as string;
 				const known = find.get(s.id, eid)?.json as string | undefined;
@@ -217,7 +270,98 @@ class Records {
 			return { erased };
 		});
 	}
-	private changed(sid: string) { this.db.prepare("UPDATE sessions SET changed=? WHERE id=?").run(Date.now(), sid); }
+	private changed(sid: string) {
+		this.db.prepare("UPDATE sessions SET changed=? WHERE id=?").run(Date.now(), sid);
+		this.advanceRevision();
+	}
+	private revision() {
+		if (this.registryFailed) throw unavailable();
+		if (this.disk) {
+			const where = statSync(this.disk.path, { bigint: true, throwIfNoEntry: false });
+			if (where?.dev !== this.disk.dev || where.ino !== this.disk.ino) throw unavailable();
+		}
+		const rows = this.db.prepare("SELECT revision FROM registry_revision LIMIT 2").all();
+		if (rows.length !== 1 || !validLease(rows[0].revision)) throw unavailable();
+		return rows[0].revision;
+	}
+	private requireRevision(revision: string) {
+		if (this.revision() !== revision) throw new BindingError(409, "stale_revision", "History has changed");
+	}
+	private advanceRevision() {
+		this.revision();
+		this.db.prepare("UPDATE registry_revision SET revision=?").run(randomBytes(32).toString("hex"));
+	}
+	plans(sid: string, after: string | undefined, limit: number) {
+		const revision = this.revision();
+		if (!this.db.prepare("SELECT 1 FROM sessions WHERE id=?").get(sid)) throw unknownSession();
+		const at = after === undefined ? 0 : this.db.prepare(`SELECT intent FROM registry_plans
+			JOIN registry_intents ON seq=intent WHERE session=? AND id=?`).get(sid, after)?.intent as number | undefined;
+		if (at === undefined) throw unknownIntent();
+		return page(planFrame(revision), this.db.prepare(`SELECT id,json FROM registry_plans
+			JOIN registry_intents ON seq=intent WHERE session=? AND intent>? ORDER BY intent LIMIT ?`).iterate(sid, at, limit + 1) as Iterable<Row>, limit);
+	}
+	publish(sid: string, request: Publication, authorize: () => void, expires: (s: Session) => boolean) {
+		const { revision, intentId, entryIds, copies } = request;
+		const operation = JSON.stringify([sid, sortIds(entryIds)]);
+		// Expiry is applied at lookup. Do not open a nested transaction when checking destinations.
+		return this.commit(() => {
+			authorize();
+			this.revision();
+			const sameId = this.db.prepare("SELECT operation,copies FROM registry_intents WHERE id=?").get(intentId);
+			const key = copyKey(copies);
+			if (sameId && (sameId.operation !== operation || sameId.copies !== key)) throw conflict();
+			const prior = this.db.prepare("SELECT id FROM registry_intents WHERE operation=?").get(operation);
+			if (prior) return { intentId: prior.id };
+			this.requireRevision(revision);
+			const select = this.db.prepare("SELECT * FROM sessions WHERE id=? AND NOT expired");
+			for (const copy of copies) {
+				const destination = select.get(copy.sessionId) as Session | undefined;
+				if (!destination || expires(destination)) throw unknownSession();
+			}
+			const entry = this.db.prepare("SELECT 1 FROM entries WHERE session=? AND id=?");
+			const reserved = this.db.prepare("SELECT 1 FROM registry_plans WHERE session=? AND record=?");
+			const plans = copies.map(copy => {
+				if (copy.entryIds.some(id => !entry.get(copy.sessionId, id))) throw unknownEntry();
+				if (entry.get(copy.sessionId, copy.recordId) || reserved.get(copy.sessionId, copy.recordId)) throw conflict();
+				const plan: Plan = { intentId, sourceSessionId: sid, recordId: copy.recordId,
+					copies: copy.entryIds.map(entryId => ({ entryId, complete: false })) };
+				const json = JSON.stringify(plan);
+				if (!fits(planFrame("x".repeat(MAX_LEASE_BYTES)), json, intentId)) throw new BindingError(413, "request_too_large", "Erasure plan cannot fit a read page");
+				return json;
+			});
+			const { lastInsertRowid } = this.db.prepare("INSERT INTO registry_intents (id,operation,copies) VALUES (?,?,?)").run(intentId, operation, key);
+			const insert = this.db.prepare("INSERT INTO registry_plans VALUES (?,?,?,?)");
+			copies.forEach((copy, i) => insert.run(copy.sessionId, lastInsertRowid, copy.recordId, plans[i]));
+			authorize();
+			this.advanceRevision();
+			return { intentId };
+		});
+	}
+	complete(sid: string, intentId: string, entryIds: string[], authorize: () => void) {
+		this.commit(() => {
+			authorize();
+			this.revision();
+			const row = this.db.prepare(`SELECT intent,json FROM registry_plans
+				JOIN registry_intents ON seq=intent WHERE session=? AND id=?`).get(sid, intentId);
+			if (!row) throw unknownIntent();
+			const plan = JSON.parse(row.json as string) as Plan;
+			const copies = new Map(plan.copies.map(copy => [copy.entryId, copy]));
+			if (entryIds.some(id => !copies.has(id))) invalid("Entry is not in the erasure plan");
+			const get = this.db.prepare("SELECT json FROM entries WHERE session=? AND id=?");
+			const read = (id: string) => {
+				const row = get.get(sid, id);
+				return row && parseJson(row.json as string) as JsonObject;
+			};
+			const record = read(plan.recordId);
+			const listed = record && object(record.data) && ids(record.data.entryIds) ? new Set(record.data.entryIds) : new Set();
+			if (!record || record.erased === true || record.kind !== "erasure" || entryIds.some(id => !listed.has(id) || read(id)?.erased !== true)) throw conflict();
+			authorize();
+			if (entryIds.every(id => copies.get(id)!.complete)) return;
+			for (const id of entryIds) copies.get(id)!.complete = true;
+			this.db.prepare("UPDATE registry_plans SET json=? WHERE session=? AND intent=?").run(JSON.stringify(plan), sid, row.intent!);
+			this.advanceRevision();
+		});
+	}
 }
 
 const routes = [
@@ -229,6 +373,8 @@ const routes = [
 	[/^\/v1\/sessions\/([^/]+)\/lease\/([^/]+)$/, ["DELETE"], "release"],
 	[/^\/v1\/sessions\/([^/]+)\/entries$/, ["POST"], "append"],
 	[/^\/v1\/sessions\/([^/]+)\/erase$/, ["POST"], "erase"],
+	[/^\/v1\/sessions\/([^/]+)\/pending-erasure$/, ["GET", "POST"], "plans"],
+	[/^\/v1\/sessions\/([^/]+)\/pending-erasure\/([^/]+)\/complete$/, ["POST"], "complete"],
 ] as const;
 
 const digest = (s: string) => createHash("sha256").update(s).digest();
@@ -281,6 +427,7 @@ export class HistoryArchive {
 	private local = new Map<string, symbol>();
 	private remote?: { leased(id: string): boolean; ttl: number };
 	constructor(private dir?: string, private pendingErasureDir = dir) {}
+	get persistent() { return this.dir !== undefined; }
 
 	private db() {
 		if (!this.records) {
@@ -421,9 +568,11 @@ export async function historyService(options: HistoryServiceOptions) {
 	if (options.archive && retention !== null) throw new Error("An attached SDK archive does not support service retention");
 	const attached = options.archive?.attach(sid => current(sid) !== undefined, ttlMs);
 	const records = options.store ? undefined : attached?.records ?? new Records(options.dir, ttlMs, retention, quota);
+	const profile = records !== undefined && (options.archive?.persistent ?? options.dir !== undefined);
 	const closeRecords = () => attached ? attached.detach() : records?.close();
 	const expired = (s: Session) => retention !== null && !current(s.id) && Date.now() - s.changed >= retention;
-	function builtInStore(records: Records): Omit<HistoryServiceStore, "ttlMs" | "retention" | "read" | "list"> & {
+	function builtInStore(records: Records): Omit<HistoryServiceStore, "ttlMs" | "retention" | "read" | "list" | "append"> & {
+		append(id: string, lease: string, entries: JsonObject[], revision?: string): number;
 		read(sid: string, q: { after?: string; limit: number }): string;
 		list(q: { after?: string; limit: number; project?: string }): string;
 	} {
@@ -445,10 +594,9 @@ export async function historyService(options: HistoryServiceOptions) {
 			},
 			renew(sid, lease) { known(sid); requireLease(sid, lease).expires = performance.now() + ttlMs; },
 			release(sid, lease) { known(sid); if (current(sid)?.lease === lease) leases.delete(sid); },
-			append(sid, lease, entries) {
+			append(sid, lease, entries, revision) {
 				const s = known(sid), authorize = () => { requireLease(sid, lease); };
-				authorize();
-				return records.keep(s, entries, authorize);
+				return records.keep(s, entries, authorize, revision);
 			},
 			erase(sid, entryIds, lease) {
 				const s = known(sid);
@@ -494,7 +642,7 @@ export async function historyService(options: HistoryServiceOptions) {
 			const rawQuery = q < 0 ? undefined : target.slice(q + 1);
 			// Do not use a URL parser that normalizes dot segments or backslashes.
 			if (path.split("/").some((s) => [".", ".."].includes(decode(s)))) invalid("Dot path segments are forbidden");
-			const route = routes.find(([re]) => re.test(path));
+			const route = routes.find(([re, , op]) => (profile || (op !== "plans" && op !== "complete")) && re.test(path));
 			if (!route) throw new BindingError(404, "not_found", "Unknown path");
 			const [re, methods, op] = route;
 			if (!(methods as readonly string[]).includes(req.method ?? "")) {
@@ -508,14 +656,14 @@ export async function historyService(options: HistoryServiceOptions) {
 			if (req.headers["content-encoding"] !== undefined) throw new BindingError(415, "unsupported_media_type", "Content-Encoding must be omitted");
 			if (raw.length && req.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") throw new BindingError(415, "unsupported_media_type", "Expected application/json");
 			const reading = req.method === "GET";
-			const [sid, leaseParam] = re.exec(path)!.slice(1).map(decode);
-			if (leaseParam !== undefined && !validLease(leaseParam)) return invalid("Invalid lease");
-			const { after, limit, project } = query(rawQuery, op === "list" ? ["after", "limit", "project"] : op === "session" && reading ? ["after", "limit"] : []);
-			const b = bodyObject(raw, req.method === "PUT" || op === "acquire" || op === "append" || op === "erase");
-			records?.check();
+			const [sid, param] = re.exec(path)!.slice(1).map(decode);
+			if ((op === "renew" || op === "release") && !validLease(param)) return invalid("Invalid lease");
+			const { after, limit, project } = query(rawQuery, op === "list" ? ["after", "limit", "project"] : (op === "session" || op === "plans") && reading ? ["after", "limit"] : []);
+			const b = bodyObject(raw, req.method === "PUT" || op === "acquire" || op === "append" || op === "erase" || op === "complete" || (op === "plans" && !reading));
+			if (op !== "version") records?.check();
 			let result: unknown = {};
 			switch (op) {
-				case "version": result = { binding: HISTORY_BINDING, ttlMs, retention }; break;
+				case "version": result = { binding: HISTORY_BINDING, ttlMs, retention, ...(profile && { pendingErasure: 1 }) }; break;
 				case "list": {
 					const page = await store.list({ project, after, limit });
 					return send(res, 200, encodePage(typeof page === "string" ? page : {
@@ -542,19 +690,49 @@ export async function historyService(options: HistoryServiceOptions) {
 					break;
 				}
 				case "renew":
-					await mutate(() => store.renew(sid, leaseParam));
+					await mutate(() => store.renew(sid, param));
 					result = { ttlMs };
 					break;
 				case "release":
-					await mutate(() => store.release(sid, leaseParam));
+					await mutate(() => store.release(sid, param));
 					break;
 				case "append": {
 					const { lease, entries } = b;
 					if (!validLease(lease) || !Array.isArray(entries) || !entries.every((e) => object(e) && id(e.id) && (e.parentId === null || id(e.parentId)) && e.erased !== true)) return invalid("Invalid lease or entries");
-					const kept = await mutate(() => store.append(sid, lease, entries as JsonObject[]));
+					const revisions = profile && req.headersDistinct["history-revision"];
+					if (revisions && (revisions.length !== 1 || !validLease(revisions[0]))) return invalid("Invalid History-Revision header");
+					const kept = await mutate(() => store.append(sid, lease, entries as JsonObject[], revisions ? revisions[0] : undefined));
 					if (!Number.isSafeInteger(kept) || kept < 0 || kept > entries.length) throw new UncertainCommit();
 					result = { kept };
 					if (drop > 0) { drop--; res.destroy(); return; }
+					break;
+				}
+				case "plans": {
+					if (reading) {
+						res.setHeader("Cache-Control", "no-store");
+						const json = records!.plans(sid, after, limit);
+						return send(res, 200, json);
+					}
+					const { lease, revision, intentId, entryIds, copies } = b;
+					if (!fields(b, "lease", "revision", "intentId", "entryIds", "copies") || !validLease(lease) || !validLease(revision) ||
+						!id(intentId) || intentId === "." || intentId === ".." || !distinctIds(entryIds) || !Array.isArray(copies) || !copies.length) return invalid("Invalid erasure publication");
+					const sets = new Map<string, CopySet>();
+					for (const copy of copies) {
+						if (!object(copy) || !fields(copy, "sessionId", "recordId", "entryIds") || !id(copy.sessionId) || copy.sessionId === "." || copy.sessionId === ".." ||
+							!id(copy.recordId) || !distinctIds(copy.entryIds) || sets.has(copy.sessionId)) return invalid("Invalid erasure copy set");
+						sets.set(copy.sessionId, { sessionId: copy.sessionId, recordId: copy.recordId, entryIds: copy.entryIds });
+					}
+					const source = new Set(sets.get(sid)?.entryIds);
+					if (entryIds.some(id => !source.has(id))) return invalid("Copy sets must cover the source targets");
+					if (!records!.session(sid, expired)) throw unknownSession();
+					result = records!.publish(sid, { revision, intentId, entryIds, copies: [...sets.values()] }, () => requireLease(sid, lease), expired);
+					break;
+				}
+				case "complete": {
+					const { lease, entryIds } = b;
+					if (!fields(b, "lease", "entryIds") || !validLease(lease) || !distinctIds(entryIds)) return invalid("Invalid erasure completion");
+					if (!records!.session(sid, expired)) throw unknownSession();
+					records!.complete(sid, param, entryIds, () => requireLease(sid, lease));
 					break;
 				}
 				case "erase": {
