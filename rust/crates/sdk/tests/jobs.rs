@@ -126,3 +126,90 @@ async fn reopening_resumes_registered_command_job_before_returning() -> Result<(
     );
     agent.close().await
 }
+
+#[tokio::test]
+async fn unconfirmed_job_cleanup_fences_late_callbacks_and_resume() -> Result<()> {
+    struct Unconfirmed;
+    #[async_trait]
+    impl JobOwner for Unconfirmed {
+        fn can_resume(&self) -> bool {
+            true
+        }
+        async fn cancel(&self, _: Job, _: modular_agent::HookContext) -> Result<()> {
+            Err(modular_agent::Error::msg("cannot confirm cleanup"))
+        }
+        async fn resume(&self, _: Job, _: modular_agent::HookContext) -> Result<()> {
+            panic!("an unconfirmed execution must not be resumed");
+        }
+    }
+    for served in [false, true] {
+        let (handle, mut handles) = tokio::sync::mpsc::unbounded_channel();
+        let (seen, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let plugin = Plugin::new("unconfirmed-jobs")
+            .setup(|r| r.jobs(Unconfirmed))
+            .command(Command::new(
+                "start",
+                "Start an unfinished job",
+                move |_, cx| {
+                    let handle = handle.clone();
+                    async move {
+                        let job = cx.start_job("test", json!({}), None).await?.job.unwrap();
+                        handle.send(job).ok().unwrap();
+                        Ok(None)
+                    }
+                },
+            ))
+            .on_session_start(move |start| {
+                let seen = seen.clone();
+                async move {
+                    if start.resumed {
+                        let jobs = start.context.jobs().unfinished().await?;
+                        assert_eq!(jobs.len(), 1);
+                        assert!(jobs[0].cleanup_unconfirmed);
+                        assert_eq!(
+                            start
+                                .context
+                                .jobs()
+                                .resume(&jobs[0])
+                                .await
+                                .unwrap_err()
+                                .code(),
+                            Code::InvalidRequest
+                        );
+                        seen.send(()).unwrap();
+                    }
+                    Ok(())
+                }
+            });
+        let directory = tempfile::tempdir()?;
+        let builder = test_agent()
+            .data_dir(directory.path())
+            .durability(modular_agent::Durability::Kept);
+        let agent = if served {
+            builder.over_wire(plugin)
+        } else {
+            builder.plugin(plugin)
+        }
+        .build()
+        .await?;
+        let session = agent.session().await?;
+        let id = session.id().to_owned();
+        session.run_command("start").await?;
+        let job = handles.try_recv().unwrap();
+        session.close().await?;
+        let reopened = agent.open_session(&id).await?;
+        observed.try_recv().expect("owner saw the unconfirmed job");
+        assert_eq!(
+            job.end(JobOutcome::Completed, None, false)
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidRequest
+        );
+        let history = reopened.history().await?;
+        assert!(history.iter().any(|e| e["kind"] == "jobCleanupUnconfirmed"));
+        assert!(!history.iter().any(|e| e["kind"] == "jobEnded"));
+        agent.close().await?;
+    }
+    Ok(())
+}

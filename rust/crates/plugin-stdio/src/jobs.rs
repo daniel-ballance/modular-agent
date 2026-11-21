@@ -70,7 +70,7 @@ impl RemoteJobs {
                 if let Some(ref key) = key
                     && let Some(job) = jobs(&api.snapshot(&scope.session)?)?
                         .into_iter()
-                        .find(|j| j.key.as_ref() == Some(key))
+                        .find(|j| j.owner == self.owner() && j.key.as_ref() == Some(key))
                 {
                     return Ok(json!({"jobId":job.id,"started":false}));
                 }
@@ -106,15 +106,20 @@ impl RemoteJobs {
             }
             "host/jobs/unfinished" => {
                 let jobs = self.own_jobs(&api, wire::string(p,"sessionId")?)?.into_iter()
-                    .filter(|j| j.state == JobState::Running)
+                    .filter(|j| j.state.is_unfinished())
                     .map(|j| { let mut v = json!({"jobId":j.id,"kind":j.kind,"detail":j.detail,"actorId":j.scope.actor});
+                        if j.state == JobState::CleanupUnconfirmed { v["cleanup"] = json!("unconfirmed"); }
                         if let Some(key) = j.key { v["key"] = json!(key); } v }).collect::<Vec<_>>();
                 Ok(json!({"jobs":jobs}))
             }
             "host/jobs/end" | "host/jobs/resume" => {
                 let job = self.find(&api, wire::string(p, "jobId")?)?;
                 if method == "host/jobs/resume" {
-                    ensure!(job.state == JobState::Running, "job already ended");
+                    api.check_writer(&job.scope.session)?;
+                    ensure!(
+                        job.state == JobState::Running,
+                        "job ended or cleanup is unconfirmed"
+                    );
                     ensure!(
                         self.shared
                             .running_jobs
@@ -125,6 +130,10 @@ impl RemoteJobs {
                     );
                     return Ok(json!({}));
                 }
+                ensure!(
+                    job.state != JobState::CleanupUnconfirmed,
+                    "job execution revoked"
+                );
                 if job.state != JobState::Running {
                     let data = api.snapshot(&job.scope.session)?;
                     let ended = data
@@ -142,6 +151,10 @@ impl RemoteJobs {
                     );
                     return Ok(json!({}));
                 }
+                ensure!(
+                    self.shared.running_jobs.lock().unwrap().contains(&job.id),
+                    "job has no active execution on this connection"
+                );
                 self.record_end(&api, &job, p)?;
                 self.shared.running_jobs.lock().unwrap().remove(&job.id);
                 drop(lock);
@@ -211,27 +224,29 @@ impl ExternalJobs for RemoteJobs {
     }
     async fn cancel(&self, api: Api, job: Job) -> Result<Job> {
         ensure!(job.owner == self.owner(), "wrong job owner");
-        self.peer
+        let confirmation = self
+            .peer
             .call(
                 "jobs/cancel",
                 json!({"jobId":job.id}),
                 None,
                 CancellationToken::new(),
             )
-            .await?;
-        let lock = self.shared.job_lock.lock().await;
+            .await;
+        let _lock = self.shared.job_lock.lock().await;
         let current = self.find(&api, &job.id)?;
         if current.state != JobState::Running {
             return Ok(current);
         }
-        self.record_end(
-            &api,
-            &current,
-            &json!({"outcome":{"kind":"cancelled"},"report":false}),
+        self.shared.running_jobs.lock().unwrap().remove(&job.id);
+        api.append(
+            &job.scope,
+            &job.owner,
+            Draft::new("job.cleanup_unconfirmed", false, json!({})),
         )?;
-        drop(lock);
-        api.emit(Event::new(&job.scope, "job.ended", json!({"jobId":job.id})))
-            .await?;
-        self.find(&api, &job.id)
+        let diagnostic = confirmation
+            .err()
+            .map_or_else(|| "owner did not commit an end".into(), |e| e.to_string());
+        Err(LostPart(format!("job cleanup could not be confirmed: {diagnostic}")).into())
     }
 }

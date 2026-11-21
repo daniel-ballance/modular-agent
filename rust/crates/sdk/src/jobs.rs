@@ -45,6 +45,44 @@ pub trait JobOwner: Send + Sync + 'static {
     }
 }
 
+/// Call-scoped access to jobs owned by the plugin handling session.start.
+pub struct StartJobs<'a>(pub(crate) &'a HookContext);
+impl StartJobs<'_> {
+    fn owner(&self) -> Result<(&str, &Owner, &Backend)> {
+        let backend = self.0.backend()?;
+        let (name, owner) = self.0.job_owner.as_ref().ok_or_else(|| {
+            Error::new(
+                Code::InvalidRequest,
+                "jobs are only available in the owner's session.start hook",
+            )
+        })?;
+        Ok((name, owner, backend))
+    }
+    pub async fn unfinished(&self) -> Result<Vec<Job>> {
+        let (name, owner, backend) = self.owner()?;
+        owner.unfinished(backend, name, &self.0.session_id).await
+    }
+    pub async fn resume(&self, job: &Job) -> Result<()> {
+        let (_, owner, _) = self.owner()?;
+        if !owner.can_resume()
+            || job.session_id != self.0.session_id
+            || !job.active.ptr_eq(&Arc::downgrade(&owner.active))
+        {
+            return Err(Error::new(
+                Code::InvalidRequest,
+                "this hook cannot resume the job",
+            ));
+        }
+        let job = self
+            .unfinished()
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.id == job.id)
+            .ok_or_else(|| Error::new(Code::InvalidRequest, "job is no longer unfinished"))?;
+        owner.resume(job).await
+    }
+}
+
 type Active = Arc<Mutex<HashMap<String, Job>>>;
 #[derive(Clone)]
 pub(crate) struct Owner {
@@ -65,7 +103,7 @@ impl Owner {
         self.handler.can_resume()
     }
     fn local_handle(&self, api: &base::Api, record: &base::Job) -> Job {
-        self.handle(
+        let mut job = self.handle(
             &record.id,
             &record.kind,
             record.detail.clone(),
@@ -76,7 +114,9 @@ impl Owner {
                 api: api.clone(),
                 scope: record.scope.clone(),
             },
-        )
+        );
+        job.cleanup_unconfirmed = record.state == base::JobState::CleanupUnconfirmed;
+        job
     }
     #[allow(clippy::too_many_arguments)]
     fn handle(
@@ -96,6 +136,7 @@ impl Owner {
             key,
             session_id: session.into(),
             actor_id: actor.into(),
+            cleanup_unconfirmed: false,
             backend,
             active: Arc::downgrade(&self.active),
             records: self.records.clone(),
@@ -213,7 +254,7 @@ impl Owner {
         match backend {
             Backend::Local { api, .. } => Ok(base::jobs(&api.snapshot(session)?)?
                 .into_iter()
-                .filter(|r| r.owner == owner && r.state == base::JobState::Running)
+                .filter(|r| r.owner == owner && r.state.is_unfinished())
                 .map(|r| self.local_handle(api, &r))
                 .collect()),
             Backend::Remote { peer, .. } => {
@@ -234,9 +275,8 @@ impl Owner {
                     Error::new(Code::InvalidRequest, "invalid unfinished jobs list")
                 })?;
                 list.iter()
-                    .filter(|v| v["cleanup"] != "unconfirmed")
                     .map(|v| {
-                        Ok(self.handle(
+                        let mut job = self.handle(
                             base::wire::string(v, "jobId")?,
                             base::wire::string(v, "kind")?,
                             v["detail"].clone(),
@@ -244,13 +284,21 @@ impl Owner {
                             session,
                             base::wire::string(v, "actorId")?,
                             backend.clone(),
-                        ))
+                        );
+                        job.cleanup_unconfirmed = v["cleanup"] == "unconfirmed";
+                        Ok(job)
                     })
                     .collect()
             }
         }
     }
     pub(crate) async fn resume(&self, job: Job) -> Result<()> {
+        if job.cleanup_unconfirmed {
+            return Err(Error::new(
+                Code::InvalidRequest,
+                "cannot resume a job with unconfirmed cleanup",
+            ));
+        }
         if let Backend::Remote { peer, .. } = &job.backend {
             peer.call(
                 "host/jobs/resume",
@@ -309,6 +357,7 @@ pub struct Job {
     pub key: Option<String>,
     pub session_id: String,
     pub actor_id: String,
+    pub cleanup_unconfirmed: bool,
     backend: Backend,
     active: std::sync::Weak<Mutex<HashMap<String, Job>>>,
     records: Arc<Mutex<()>>,
@@ -321,7 +370,7 @@ impl Job {
             Backend::Local { api, scope } => HookContext::local(api.clone(), scope.clone()),
             remote => HookContext::remote(
                 remote.clone(),
-                &json!({"sessionId":self.session_id,"actorId":self.actor_id}),
+                &json!({"sessionId":self.session_id,"actorId":self.actor_id,"jobId":self.id}),
                 self.cancelled.clone(),
             ),
         };
@@ -426,13 +475,44 @@ impl Job {
 }
 
 pub(crate) struct LocalOwner(pub String, pub Owner);
+impl LocalOwner {
+    pub(crate) async fn cancel_record(
+        &self,
+        api: base::Api,
+        id: &str,
+        session: &str,
+    ) -> base::Result<base::Job> {
+        let record = base::jobs(&api.snapshot(session)?)?
+            .into_iter()
+            .find(|job| job.id == id && job.owner == self.0)
+            .ok_or_else(|| base::anyhow!("unknown owned job"))?;
+        base::ExternalJobs::cancel(self, api, record).await
+    }
+}
 #[crate::async_trait]
 impl base::ExternalJobs for LocalOwner {
     fn owner(&self) -> String {
         self.0.clone()
     }
     async fn cancel(&self, api: base::Api, job: base::Job) -> base::Result<base::Job> {
-        self.1.cancel_id(&job.id).await?;
+        let cancelled =
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.1.cancel_id(&job.id))
+                .await;
+        if !matches!(cancelled, Ok(Ok(()))) {
+            let _guard = self.1.records.lock().unwrap();
+            self.1.active.lock().unwrap().remove(&job.id);
+            if base::jobs(&api.snapshot(&job.scope.session)?)?
+                .iter()
+                .any(|j| j.id == job.id && j.state == base::JobState::Running)
+            {
+                api.append(
+                    &job.scope,
+                    &self.0,
+                    base::Draft::new("job.cleanup_unconfirmed", false, json!({})),
+                )?;
+                return Err(base::LostPart("job cleanup could not be confirmed".into()).into());
+            }
+        }
         base::jobs(&api.snapshot(&job.scope.session)?)?
             .into_iter()
             .find(|j| j.id == job.id)

@@ -557,11 +557,20 @@ impl base::Plugin for InProcess {
                     let (name, owner) = (name.clone(), closer.clone());
                     Box::pin(async move {
                         let backend = Backend::Local {
-                            api,
+                            api: api.clone(),
                             scope: scope.clone(),
                         };
-                        for job in owner.unfinished(&backend, &name, &scope.session).await? {
-                            if let Err(error) = owner.cancel_id(&job.id).await {
+                        let closer = crate::jobs::LocalOwner(name.clone(), owner.clone());
+                        for job in owner
+                            .unfinished(&backend, &name, &scope.session)
+                            .await?
+                            .into_iter()
+                            .filter(|j| !j.cleanup_unconfirmed)
+                        {
+                            if let Err(error) = closer
+                                .cancel_record(api.clone(), &job.id, &scope.session)
+                                .await
+                            {
                                 eprintln!("could not cancel job {}: {error}", job.id);
                             }
                         }
@@ -569,7 +578,13 @@ impl base::Plugin for InProcess {
                     })
                 }),
             );
-            if owner.can_resume() {
+            if owner.can_resume()
+                && !self
+                    .registered
+                    .hooks
+                    .iter()
+                    .any(|hook| hook.point == "session.start")
+            {
                 let name = self.name.clone();
                 r.on(
                     "session.start",
@@ -581,7 +596,12 @@ impl base::Plugin for InProcess {
                                 api,
                                 scope: scope.clone(),
                             };
-                            for job in owner.unfinished(&backend, &name, &scope.session).await? {
+                            for job in owner
+                                .unfinished(&backend, &name, &scope.session)
+                                .await?
+                                .into_iter()
+                                .filter(|j| !j.cleanup_unconfirmed)
+                            {
                                 owner.resume(job).await?;
                             }
                             Ok(base::HookResult::default())
@@ -667,12 +687,14 @@ impl base::Plugin for InProcess {
             let handle = hook.handle.clone();
             let point = hook.point;
             let question_key = format!("gate:{}:{index}", self.name);
+            let job_owner = (point == "session.start").then(|| jobs.clone()).flatten();
             r.on(
                 plugin_stdio::hook_name(point).expect("known hook"),
                 hook.order.native(),
                 base::handler(move |api, scope, original| {
                     let handle = handle.clone();
                     let question_key = question_key.clone();
+                    let job_owner = job_owner.clone();
                     Box::pin(async move {
                         let mut payload =
                             plugin_stdio::hook_payload(point, &scope, &original, &api)?;
@@ -686,7 +708,8 @@ impl base::Plugin for InProcess {
                                     .collect::<Vec<_>>()
                             );
                         }
-                        let context = crate::HookContext::local(api.clone(), scope.clone());
+                        let mut context = crate::HookContext::local(api.clone(), scope.clone());
+                        context.job_owner = job_owner;
                         let guard = context.settled.clone().drop_guard();
                         let reply = handle(payload, context)
                             .await

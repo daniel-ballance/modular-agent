@@ -54,7 +54,7 @@ pub use history::{
     serve_history,
 };
 pub use hooks::*;
-pub use jobs::{Job, JobOutcome, JobOwner, JobStart};
+pub use jobs::{Job, JobOutcome, JobOwner, JobStart, StartJobs};
 pub use parts::{
     Configuration, Environment, Interface, Runtime, durable_runtime, local_environment, native,
     transient_runtime,

@@ -150,7 +150,9 @@ fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
         .enumerate()
         .map(|(i, hook)| json!({"hook":hook.point,"handlerId":i + 1,"order":hook.order.name()}))
         .collect::<Vec<_>>();
-    if r.jobs.as_ref().is_some_and(crate::jobs::Owner::can_resume) {
+    if r.jobs.as_ref().is_some_and(crate::jobs::Owner::can_resume)
+        && !r.hooks.iter().any(|hook| hook.point == "session.start")
+    {
         hooks.push(json!({"hook":"session.start","handlerId":hooks.len()+1}));
     }
     if !hooks.is_empty() {
@@ -417,6 +419,8 @@ impl Endpoint for Served {
                         .unfinished(&backend, &self.plugin.name, session)
                         .await
                         .map_err(to_fault)?
+                        .into_iter()
+                        .filter(|j| !j.cleanup_unconfirmed)
                     {
                         owner.resume(job).await.map_err(to_fault)?;
                     }
@@ -427,11 +431,17 @@ impl Endpoint for Served {
                     .and_then(|i| r.hooks.get((i as usize).checked_sub(1)?))
                     .filter(|handler| p["hook"] == handler.point)
                     .ok_or_else(|| Fault::new("unknown_handler", "unknown handler"))?;
-                let context = crate::HookContext::remote(
+                let mut context = crate::HookContext::remote(
                     Backend::Remote { peer, parent: id },
                     &p["payload"],
                     cancel,
                 );
+                if handler.point == "session.start" {
+                    context.job_owner = r
+                        .jobs
+                        .clone()
+                        .map(|owner| (self.plugin.name.clone(), owner));
+                }
                 let _guard = context.settled.clone().drop_guard();
                 match (handler.handle)(p["payload"].clone(), context).await {
                     Err(e)
