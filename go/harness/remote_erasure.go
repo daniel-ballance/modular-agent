@@ -234,11 +234,29 @@ func listRemoteViews(remote api.RemoteErasureCoordinator, rows []api.Session) ([
 			return nil, errors.Join(api.ErrErasureUnavailable, err)
 		}
 		revision = rev
-		if checkRemotePlans(plans, erasureTombstones(row)) == nil {
-			visible = append(visible, row)
+		if checkRemotePlans(plans, erasureTombstones(row)) != nil {
+			// Keep only routing and authority facts. ACP must be able to
+			// authorize an open so a later writer can settle the plan.
+			row = erasureRoutingView(row)
 		}
+		visible = append(visible, row)
 	}
 	return visible, nil
+}
+
+func erasureRoutingView(row api.Session) api.Session {
+	out := api.Session{ID: row.ID, Version: row.Version, Project: row.Project, Tenant: row.Tenant,
+		Actor: row.Actor, Actors: row.Actors, Limit: row.Limit, Parent: row.Parent, ParentActor: row.ParentActor,
+		Ceiling: row.Ceiling, Depth: row.Depth, Settings: api.Settings{Model: row.Settings.Model}}
+	for _, e := range row.Entries {
+		switch e.Kind {
+		case "actor.set", "actor.left", "subagent.bound":
+			if e.AuthorityRecord() {
+				out.Entries = append(out.Entries, api.Entry{Kind: e.Kind, Data: e.Data, Time: e.Time})
+			}
+		}
+	}
+	return out
 }
 
 func (s *session) admitErasureView(snap api.Session) error {
