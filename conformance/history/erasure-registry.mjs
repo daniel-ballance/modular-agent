@@ -174,7 +174,7 @@ if (process.argv[2] === "--fixture-client" && process.send) {
 				need((await c.read(source)).body.entries.some(e => e.id === publish.entryIds[0]) &&
 					(await c.read(dest)).body.entries.some(e => equal(e, copy)), "writer A could not discover the copy");
 				const request = { ...publish, revision, lease };
-				const expected = { intentId: publish.intentId, sessionIds: [dest] };
+				const expected = { intentId: publish.intentId, sessionIds: [source, dest] };
 				result = { published: ok(await c.publish(source, request), expected), duplicate: ok(await c.publish(source, request), expected) };
 				need(ok(await c.release(source, lease), {}), "writer A could not release its lease");
 			} else if (action === "complete") {
