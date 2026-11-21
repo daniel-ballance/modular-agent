@@ -187,6 +187,7 @@ pub struct SnapshotStore {
     _exclusive: Box<dyn Lease>,
     ttl_ms: u64,
     hold: Option<Instant>,
+    authoritative: bool,
     max_sessions: usize,
     state: Mutex<State>,
 }
@@ -229,29 +230,46 @@ impl SnapshotStore {
         );
         ensure!(max_sessions > 0, "history session quota must be positive");
         let exclusive = store.acquire(CONTROL)?;
+        let (authoritative, hold) = Self::prepare_control(store.as_ref(), ttl_ms)?;
+        Ok(Self {
+            store,
+            _exclusive: exclusive,
+            ttl_ms,
+            hold,
+            authoritative,
+            max_sessions,
+            state: Mutex::new(State {
+                leases: HashMap::new(),
+                revision: nonce().map_err(|_| anyhow!("cannot generate history revision"))?,
+            }),
+        })
+    }
+
+    fn prepare_control(
+        store: &dyn HistoryStore,
+        ttl_ms: u64,
+    ) -> agent_api::Result<(bool, Option<Instant>)> {
         let (prior, mut control) = match store.load(CONTROL) {
             Ok(data) => {
-                let bound = data.settings["historyTtlBound"]
+                let Some(bound) = data.settings["historyTtlBound"]
                     .as_u64()
                     .filter(|ms| (1..=MAX_COUNT).contains(ms))
-                    .ok_or_else(|| anyhow!("unknown previous history lease bound"))?;
+                else {
+                    return Ok((false, None));
+                };
                 (Some(bound), data)
             }
-            Err(e) if missing(&e) => {
-                ensure!(
-                    store.list(None)?.is_empty(),
-                    "history service needs a dedicated store with a verifiable lease bound"
-                );
-                (
-                    None,
-                    snapshot_data(
-                        CONTROL.into(),
-                        json!({"pendingErasureV1": Registry::default()}),
-                        vec![],
-                    ),
-                )
-            }
-            Err(e) => return Err(e),
+            Err(e) if missing(&e) && store.list(None).is_ok_and(|rows| rows.is_empty()) => (
+                None,
+                snapshot_data(
+                    CONTROL.into(),
+                    json!({"pendingErasureV1": Registry::default()}),
+                    vec![],
+                ),
+            ),
+            // There is no proof that old leases have expired. Do not recreate
+            // the control record or serve any history until an operator repairs it.
+            Err(_) => return Ok((false, None)),
         };
         let bound = ttl_ms.max(prior.unwrap_or(0));
         let migrated = if !control.settings["pendingErasure"].is_null() {
@@ -275,18 +293,10 @@ impl SnapshotStore {
             control.settings["historyTtlBound"] = json!(bound);
             store.save(&control)?;
         }
-        let hold = prior.map(|_| Instant::now() + Duration::from_millis(bound));
-        Ok(Self {
-            store,
-            _exclusive: exclusive,
-            ttl_ms,
-            hold,
-            max_sessions,
-            state: Mutex::new(State {
-                leases: HashMap::new(),
-                revision: nonce().map_err(|_| anyhow!("cannot generate history revision"))?,
-            }),
-        })
+        Ok((
+            true,
+            prior.map(|_| Instant::now() + Duration::from_millis(bound)),
+        ))
     }
 
     fn load(&self, id: &str) -> std::result::Result<Option<Snapshot>, Failure> {
@@ -445,6 +455,9 @@ impl SnapshotStore {
     }
 
     fn apply(&self, route: Route, op: Op, query: Query, mut body: Value) -> Answer {
+        if !self.authoritative && !matches!(route, Route::Root) {
+            return Err(Failure::unavailable());
+        }
         let mut state = self.state.lock().map_err(|_| Failure::unavailable())?;
         let State { leases, revision } = &mut *state;
         let now = Instant::now();
