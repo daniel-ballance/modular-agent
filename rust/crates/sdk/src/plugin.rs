@@ -68,6 +68,7 @@ pub struct Registrar {
     pub(crate) sources: Vec<(String, Arc<dyn ToolSource>)>,
     prepare: Vec<LocalHook<SessionPrepare, ()>>,
     pub(crate) environment: Option<Arc<dyn base::WorkingEnvironment>>,
+    pub(crate) portable_environment: Option<crate::environment::Adapter>,
     runtime: Option<Arc<dyn base::Runtime>>,
     pub(crate) portable_runtime: Option<crate::runtime::Adapter>,
     history: Option<crate::History>,
@@ -142,6 +143,26 @@ impl CommandContext {
             return Err(cannot_serve("command questions"));
         }
         self.work.ask(question).await
+    }
+
+    /// Ask from an in-process command and decline if the wait expires.
+    /// A command has no turn in which to leave the question open.
+    pub async fn ask_with(
+        &self,
+        question: crate::Ask,
+        wait: std::time::Duration,
+    ) -> Result<crate::Answer> {
+        if !self.can_ask {
+            return Err(cannot_serve("command questions"));
+        }
+        let ms = wait.as_millis();
+        if ms > 9_007_199_254_740_991 {
+            return Err(Error::new(
+                Code::InvalidRequest,
+                "question wait is not representable",
+            ));
+        }
+        self.work.ask_inner(question, Some(ms as u64)).await
     }
 
     pub async fn call_hook(
@@ -237,7 +258,11 @@ impl Plugin {
             Ok(())
         })
     }
-    pub fn provider(self, provider: impl crate::Provider) -> Self {
+    pub fn provider(mut self, provider: impl crate::Provider) -> Self {
+        if !provider.provider_tools().is_empty() {
+            self.local_items
+                .push(format!("Provider tools:{}", provider.id()));
+        }
         let provider: Arc<dyn crate::Provider> = Arc::new(provider);
         self.setup(move |r| {
             r.providers.push(provider.clone());
@@ -314,6 +339,7 @@ impl Plugin {
             sources: vec![],
             prepare: vec![],
             environment: None,
+            portable_environment: None,
             runtime: None,
             portable_runtime: None,
             history: None,
@@ -395,6 +421,19 @@ impl Registrar {
         Ok(())
     }
 
+    /// Register an environment with binding-shaped operations.
+    pub fn environment_part(&mut self, part: impl crate::EnvironmentPart) -> Result<()> {
+        let adapter = crate::environment::Adapter::new(part);
+        set_part(
+            &mut self.environment,
+            Arc::new(adapter.clone()),
+            "working-environment",
+        )?;
+        self.portable_environment = Some(adapter);
+        Ok(())
+    }
+
+    /// Register an advanced native environment.
     pub fn environment(&mut self, part: impl base::WorkingEnvironment + 'static) -> Result<()> {
         set_part(&mut self.environment, Arc::new(part), "working-environment")
     }
@@ -452,6 +491,13 @@ impl Registrar {
             if registered {
                 return Err(cannot_serve(name));
             }
+        }
+        if let Some(p) = self
+            .providers
+            .iter()
+            .find(|p| !p.provider_tools().is_empty())
+        {
+            return Err(cannot_serve(&format!("Provider tools:{}", p.id())));
         }
         if let Some(hook) = self.local_hooks.first() {
             return Err(cannot_serve(hook.point));
@@ -731,6 +777,15 @@ impl base::Plugin for InProcess {
                             plugin_stdio::hook_payload(point, &scope, &original, &api)?;
                         if point == "step.before" {
                             let data = api.snapshot(&scope.session)?;
+                            let request: base::ModelRequest =
+                                serde_json::from_value(original["request"].clone())?;
+                            payload["providerTools"] = json!(
+                                request
+                                    .provider_tools
+                                    .iter()
+                                    .map(base::wire::definition)
+                                    .collect::<Vec<_>>()
+                            );
                             payload["history"] = json!(
                                 data.entries
                                     .iter()
@@ -847,6 +902,7 @@ impl base::Plugin for InProcess {
                             actor_id: scope.actor.clone(),
                             project: api.snapshot(&scope.session)?.project,
                             call_id: String::new(),
+                            parent_call_id: None,
                             turn_id: None,
                             step_id: scope.step.clone(),
                             cancelled: cancelled.clone(),
@@ -1041,6 +1097,7 @@ impl base::ToolSource for Source {
             session_id: scope.session.clone(),
             actor_id: scope.actor.clone(),
             call_id: call.id.clone(),
+            parent_call_id: call.extra["parentCallId"].as_str().map(str::to_owned),
             turn_id: scope.turn.clone(),
             step_id: scope.step.clone(),
             backend: Backend::Local { api, scope },

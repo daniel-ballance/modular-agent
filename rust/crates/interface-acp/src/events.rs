@@ -20,6 +20,22 @@ pub(crate) fn notify(cx: &ConnectionTo<acp::Client>, id: &str, update: Value) ->
     cx.send_notification(notification)?;
     Ok(())
 }
+fn progress_blocks(content: &Value) -> Vec<Value> {
+    let Some(parts) = content.as_array() else {
+        return vec![
+            json!({"type":"content","content":{"type":"text","text":content.as_str().unwrap_or("")}}),
+        ];
+    };
+    parts
+        .iter()
+        .filter(|part| match part["type"].as_str() {
+            Some("text") => part["text"].is_string(),
+            Some("image" | "audio") => part["data"].is_string() && part["mimeType"].is_string(),
+            _ => false,
+        })
+        .map(|part| json!({"type":"content","content":part}))
+        .collect()
+}
 fn text(cx: &ConnectionTo<acp::Client>, id: &str, kind: &str, value: &str) -> Result<()> {
     if !value.is_empty() {
         notify(
@@ -98,7 +114,7 @@ pub(crate) async fn pump(
                                 notify(&cx,&session.id,update)
                             }
                             "tool.started" => notify(&cx,&session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":event.scope.call,"status":"in_progress"})),
-                            "tool.progress" => notify(&cx,&session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":event.scope.call,"content":[{"type":"content","content":{"type":"text","text":c.as_str().unwrap_or("")}}]})),
+                            "tool.progress" => notify(&cx,&session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":event.scope.call,"content":progress_blocks(&c)})),
                             "tool.ended" => notify(&cx,&session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":c["call"],"status":if c["status"] == "completed" { "completed" } else { "failed" },"rawOutput":c,"content":[{"type":"content","content":{"type":"text","text":c["text"]}}]})),
                             "command.result" => text(&cx,&session.id,"agent_message_chunk",&c.to_string()),
                             "request.opened" => {

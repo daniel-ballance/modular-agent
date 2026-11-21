@@ -288,6 +288,9 @@ pub trait CredentialStore: Send + Sync {
 }
 #[async_trait]
 pub trait ModelAccess: Send + Sync {
+    fn provider_tools(&self) -> Vec<ToolDefinition> {
+        vec![]
+    }
     fn safe_to_repeat(&self) -> bool {
         let info = self.info();
         !info.keeps_state && !info.runs_tools

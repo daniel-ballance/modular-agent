@@ -456,6 +456,8 @@ pub struct ModelRequest {
     pub system: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_tools: Vec<ToolDefinition>,
     pub thinking: String,
     pub output_limit: u64,
     #[serde(default, skip_serializing_if = "Value::is_null")]

@@ -1,5 +1,8 @@
 //! Loopback HTTP transport for the opaque history binding.
-use super::{BODY_LIMIT, PAGE_LIMIT};
+use super::{
+    BODY_LIMIT, EntryPage, HistoryFault, HistoryResult, LeaseGrant, PAGE_LIMIT,
+    PortableHistoryStore, SessionPage, portable_store,
+};
 use agent_api::{
     Entry, HistoryStore, Lease, OperationError, Scope, SessionData, Value, anyhow, ensure, json,
     wire,
@@ -85,29 +88,53 @@ pub async fn listen_history(
     })
 }
 
+pub async fn serve_portable_history(
+    part: Arc<dyn PortableHistoryStore>,
+    options: ServeHistoryOptions,
+) -> agent_api::Result<()> {
+    let (listener, server) = prepare_backend(Backend::Portable(part), options).await?;
+    drive(listener, server).await
+}
+
+pub async fn listen_portable_history(
+    part: Arc<dyn PortableHistoryStore>,
+    options: ServeHistoryOptions,
+) -> agent_api::Result<HistoryServer> {
+    let (listener, server) = prepare_backend(Backend::Portable(part), options).await?;
+    Ok(HistoryServer {
+        url: format!("http://{}", listener.local_addr()?),
+        task: tokio::spawn(drive(listener, server)),
+    })
+}
+
 async fn prepare(
     store: Arc<dyn HistoryStore>,
     options: ServeHistoryOptions,
 ) -> agent_api::Result<(tokio::net::TcpListener, Arc<Server>)> {
-    if !store.supports_service_snapshots() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "the history service requires durable opaque snapshots and exclusive writer leases",
-        )
-        .into());
+    let ttl = options.ttl;
+    let max_sessions = options.max_sessions;
+    let store =
+        tokio::task::spawn_blocking(move || SnapshotStore::new(store, ttl, max_sessions)).await??;
+    prepare_backend(Backend::Snapshot(Arc::new(store)), options).await
+}
+
+async fn prepare_backend(
+    backend: Backend,
+    options: ServeHistoryOptions,
+) -> agent_api::Result<(tokio::net::TcpListener, Arc<Server>)> {
+    if let Backend::Portable(store) = &backend {
+        ensure!(
+            store.supports_history_service() && store.supports_erasure(),
+            "history store cannot serve durable opaque records, leases and tombstones"
+        );
+        ensure!(
+            (1..=MAX_COUNT).contains(&store.ttl_ms()),
+            "invalid history lease TTL"
+        );
     }
     ensure!(
         options.address.ip().is_loopback(),
         "plaintext history service must listen on loopback"
-    );
-    let ttl_ms = u64::try_from(options.ttl.as_millis())?;
-    ensure!(
-        (1..=MAX_COUNT).contains(&ttl_ms) && options.ttl == Duration::from_millis(ttl_ms),
-        "history lease TTL must be a positive whole number of milliseconds"
-    );
-    ensure!(
-        options.max_sessions > 0,
-        "history session quota must be positive"
     );
     let token = std::fs::read_to_string(&options.token_file)?;
     let token = token.trim_matches([' ', '\t', '\r', '\n']);
@@ -120,11 +147,7 @@ async fn prepare(
         "history bearer token must encode at least 128 random bits"
     );
     let token = Sha256::digest(token).into();
-    let max_sessions = options.max_sessions;
-    let server =
-        tokio::task::spawn_blocking(move || Server::new(store, token, ttl_ms, max_sessions))
-            .await??;
-    let server = Arc::new(server);
+    let server = Arc::new(Server { token, backend });
     let listener = tokio::net::TcpListener::bind(options.address).await?;
     Ok((listener, server))
 }
@@ -148,6 +171,16 @@ async fn drive(listener: tokio::net::TcpListener, server: Arc<Server>) -> agent_
 
 struct Server {
     token: [u8; 32],
+    backend: Backend,
+}
+enum Backend {
+    Snapshot(Arc<SnapshotStore>),
+    Portable(Arc<dyn PortableHistoryStore>),
+}
+
+/// Durable portable records over a dedicated native snapshot store. Holds
+/// exclusive access and records a conservative restart exclusion bound.
+pub struct SnapshotStore {
     store: Arc<dyn HistoryStore>,
     _exclusive: Box<dyn Lease>,
     ttl_ms: u64,
@@ -165,13 +198,22 @@ struct Snapshot {
     entries: Vec<Value>,
 }
 
-impl Server {
-    fn new(
+impl SnapshotStore {
+    pub fn new(
         store: Arc<dyn HistoryStore>,
-        token: [u8; 32],
-        ttl_ms: u64,
+        ttl: Duration,
         max_sessions: usize,
     ) -> agent_api::Result<Self> {
+        ensure!(
+            store.supports_service_snapshots(),
+            "the history service requires durable opaque snapshots and exclusive writer leases"
+        );
+        let ttl_ms = u64::try_from(ttl.as_millis())?;
+        ensure!(
+            (1..=MAX_COUNT).contains(&ttl_ms) && ttl == Duration::from_millis(ttl_ms),
+            "history lease TTL must be a positive whole number of milliseconds"
+        );
+        ensure!(max_sessions > 0, "history session quota must be positive");
         let exclusive = store.acquire(CONTROL)?;
         let prior = match store.load(CONTROL) {
             Ok(data) => Some(
@@ -199,7 +241,6 @@ impl Server {
         }
         let hold = prior.map(|_| Instant::now() + Duration::from_millis(bound));
         Ok(Self {
-            token,
             store,
             _exclusive: exclusive,
             ttl_ms,
@@ -397,6 +438,182 @@ impl Server {
             }
             Op::Put => unreachable!(),
         }
+    }
+}
+
+impl From<Failure> for HistoryFault {
+    fn from(fault: Failure) -> Self {
+        match fault {
+            Failure::Held(until) => Self::Held {
+                retry_after_ms: until
+                    .saturating_duration_since(Instant::now())
+                    .as_nanos()
+                    .div_ceil(1_000_000)
+                    .max(1) as u64,
+            },
+            Failure::Uncertain => Self::Uncertain,
+            Failure::Http(_, code, _) => match code {
+                "unknown_session" => Self::UnknownSession,
+                "unknown_entry" => Self::UnknownEntry,
+                "invalid_request" => Self::InvalidRequest,
+                "lost" => Self::Lost,
+                "conflict" => Self::Conflict,
+                "entry_too_large" | "request_too_large" => Self::EntryTooLarge,
+                _ => Self::Unavailable,
+            },
+        }
+    }
+}
+
+impl SnapshotStore {
+    async fn portable(
+        self: Arc<Self>,
+        mut route: Route,
+        op: Op,
+        query: Query,
+        body: Value,
+    ) -> HistoryResult<Value> {
+        route.validate()?;
+        op.validate_body(&body, body.is_null())?;
+        tokio::task::spawn_blocking(move || self.apply(route, op, query, body))
+            .await
+            .map_err(|_| HistoryFault::Uncertain)?
+            .map_err(Into::into)
+    }
+}
+
+#[agent_api::async_trait]
+impl PortableHistoryStore for Arc<SnapshotStore> {
+    fn ttl_ms(&self) -> u64 {
+        self.ttl_ms
+    }
+    fn supports_erasure(&self) -> bool {
+        true
+    }
+    fn supports_history_service(&self) -> bool {
+        true
+    }
+
+    async fn create(&self, session: &str, metadata: Value) -> HistoryResult<()> {
+        self.clone()
+            .portable(
+                Route::Session(session.into()),
+                Op::Put,
+                Query::default(),
+                metadata,
+            )
+            .await
+            .map(|_| ())
+    }
+    async fn acquire(&self, session: &str, owner: &str) -> HistoryResult<LeaseGrant> {
+        let grant = self
+            .clone()
+            .portable(
+                Route::Acquire(session.into()),
+                Op::Acquire,
+                Query::default(),
+                json!({"owner":owner}),
+            )
+            .await?;
+        serde_json::from_value(grant).map_err(|_| HistoryFault::Unavailable)
+    }
+    async fn renew(&self, session: &str, lease: &str) -> HistoryResult<u64> {
+        let reply = self
+            .clone()
+            .portable(
+                Route::Renew(session.into(), lease.into()),
+                Op::Renew,
+                Query::default(),
+                Value::Null,
+            )
+            .await?;
+        reply["ttlMs"].as_u64().ok_or(HistoryFault::Unavailable)
+    }
+    async fn release(&self, session: &str, lease: &str) -> HistoryResult<()> {
+        self.clone()
+            .portable(
+                Route::Lease(session.into(), lease.into()),
+                Op::Release,
+                Query::default(),
+                Value::Null,
+            )
+            .await
+            .map(|_| ())
+    }
+    async fn append(&self, session: &str, lease: &str, entries: Vec<Value>) -> HistoryResult<u64> {
+        let reply = self
+            .clone()
+            .portable(
+                Route::Entries(session.into()),
+                Op::Append,
+                Query::default(),
+                json!({"lease":lease,"entries":entries}),
+            )
+            .await?;
+        reply["kept"].as_u64().ok_or(HistoryFault::Unavailable)
+    }
+    async fn read(
+        &self,
+        session: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> HistoryResult<EntryPage> {
+        let page = self
+            .clone()
+            .portable(
+                Route::Session(session.into()),
+                Op::Get,
+                Query {
+                    after: after.map(str::to_owned),
+                    limit: limit.clamp(1, 500),
+                    project: None,
+                },
+                Value::Null,
+            )
+            .await?;
+        serde_json::from_value(page).map_err(|_| HistoryFault::Unavailable)
+    }
+    async fn list(
+        &self,
+        project: Option<&std::path::Path>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> HistoryResult<SessionPage> {
+        let page = self
+            .clone()
+            .portable(
+                Route::Sessions,
+                Op::Get,
+                Query {
+                    after: after.map(str::to_owned),
+                    limit: limit.clamp(1, 500),
+                    project: project.map(|p| p.to_string_lossy().into_owned()),
+                },
+                Value::Null,
+            )
+            .await?;
+        serde_json::from_value(page).map_err(|_| HistoryFault::Unavailable)
+    }
+    async fn erase(
+        &self,
+        session: &str,
+        lease: Option<&str>,
+        entries: Vec<String>,
+    ) -> HistoryResult<Vec<String>> {
+        let mut body = json!({"entryIds":entries});
+        if let Some(lease) = lease {
+            body["lease"] = json!(lease);
+        }
+        let reply = self
+            .clone()
+            .portable(
+                Route::Erase(session.into()),
+                Op::Erase,
+                Query::default(),
+                body,
+            )
+            .await?;
+        serde_json::from_value(reply["erased"].clone()).map_err(|_| HistoryFault::Unavailable)
     }
 }
 
@@ -715,9 +932,53 @@ async fn request(server: Arc<Server>, req: Request<Incoming>) -> Answer {
         wire::decode_json(&bytes).map_err(|_| Failure::invalid())?
     };
     op.validate_body(&body, bytes.is_empty())?;
-    tokio::task::spawn_blocking(move || server.apply(route, op, query, body))
-        .await
-        .map_err(|_| Failure::Uncertain)?
+    match &server.backend {
+        Backend::Snapshot(store) => {
+            let store = store.clone();
+            tokio::task::spawn_blocking(move || store.apply(route, op, query, body))
+                .await
+                .map_err(|_| Failure::Uncertain)?
+        }
+        Backend::Portable(store) => {
+            let path = route.segments();
+            let (status, value) = portable_store::request(
+                store.as_ref(),
+                parts.method,
+                &path,
+                query.project.as_deref().map(std::path::Path::new),
+                (!bytes.is_empty()).then_some(body),
+                query.after.as_deref(),
+                query.limit,
+            )
+            .await
+            .map_err(|_| Failure::Uncertain)?;
+            if status.is_success() {
+                if !fits(&value) {
+                    return Err(Failure::unavailable());
+                }
+                Ok(value)
+            } else {
+                Err(match value["code"].as_str() {
+                    Some("held") => Failure::held(
+                        Instant::now()
+                            + Duration::from_millis(
+                                value["retryAfterMs"]
+                                    .as_u64()
+                                    .unwrap_or(1)
+                                    .clamp(1, MAX_COUNT),
+                            ),
+                    ),
+                    Some("lost") => Failure::lost(),
+                    Some("conflict") => Failure::conflict(),
+                    Some("entry_too_large") => Failure::http(413, "entry_too_large"),
+                    Some("unknown_entry") => Failure::http(404, "unknown_entry"),
+                    Some("unknown_session") => Failure::http(404, "unknown_session"),
+                    Some("invalid_request") => Failure::invalid(),
+                    _ => Failure::unavailable(),
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -732,6 +993,19 @@ enum Route {
     Erase(String),
 }
 impl Route {
+    fn segments(&self) -> Vec<&str> {
+        match self {
+            Self::Root => vec!["v1"],
+            Self::Sessions => vec!["v1", "sessions"],
+            Self::Session(id) => vec!["v1", "sessions", id],
+            Self::Acquire(id) => vec!["v1", "sessions", id, "lease"],
+            Self::Lease(id, token) => vec!["v1", "sessions", id, "lease", token],
+            Self::Renew(id, token) => vec!["v1", "sessions", id, "lease", token, "renew"],
+            Self::Entries(id) => vec!["v1", "sessions", id, "entries"],
+            Self::Erase(id) => vec!["v1", "sessions", id, "erase"],
+        }
+    }
+
     fn parse(path: &str) -> std::result::Result<Self, Failure> {
         let p: Vec<_> = path.split('/').collect();
         // Dot segments are illegal even when they replace a fixed segment.
@@ -872,6 +1146,7 @@ fn valid_lease(s: &str) -> bool {
 fn lease_field(value: &Value) -> bool {
     value.as_str().is_some_and(valid_lease)
 }
+#[derive(Default)]
 struct Query {
     after: Option<String>,
     project: Option<String>,

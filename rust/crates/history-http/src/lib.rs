@@ -6,7 +6,10 @@ pub use portable_store::{
     EntryPage, HistoryFault, HistoryResult, LeaseGrant, PortableHistoryStore, SessionPage,
 };
 use reqwest::{Client, Method, StatusCode, Url};
-pub use server::{HistoryServer, ServeHistoryOptions, listen_history, serve_history};
+pub use server::{
+    HistoryServer, ServeHistoryOptions, SnapshotStore, listen_history, listen_portable_history,
+    serve_history, serve_portable_history,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -111,8 +114,16 @@ impl Service {
                 token,
             } => (client, base, token),
             Transport::Embedded(store) => {
-                return portable_store::request(store.as_ref(), method, path, project, body, after)
-                    .await;
+                return portable_store::request(
+                    store.as_ref(),
+                    method,
+                    path,
+                    project,
+                    body,
+                    after,
+                    500,
+                )
+                .await;
             }
         };
         let mut url = base.clone();
@@ -406,7 +417,25 @@ impl State {
         let service = self.service.clone();
         let session = self.session.clone();
         let lease_id = lease.clone();
+        let backend_lost = match &service.transport {
+            Transport::Embedded(store) => store.writer_lost(&session, &lease),
+            Transport::Http { .. } => None,
+        };
         let stop = remote.stop.clone();
+        if let Some(signal) = backend_lost {
+            if signal.is_cancelled() {
+                self.lost.cancel();
+                bail!(LostPart("history writer lease was lost".into()));
+            }
+            let (stop, lost) = (stop.clone(), self.lost.clone());
+            io().spawn(async move {
+                tokio::select! {
+                    _ = stop.cancelled() => {},
+                    _ = lost.cancelled() => {},
+                    _ = signal.cancelled() => lost.cancel(),
+                }
+            });
+        }
         let lost = self.lost.clone();
         let cutoff = remote.cutoff.clone();
         io().spawn(async move {
@@ -517,9 +546,9 @@ impl HttpHistory {
             margin,
         })
     }
-    pub fn from_store(store: impl PortableHistoryStore) -> Result<Self> {
+    pub fn from_store(store: Arc<dyn PortableHistoryStore>) -> Result<Self> {
         Self::from_service(Service {
-            transport: Transport::Embedded(Arc::new(store)),
+            transport: Transport::Embedded(store),
             margin: clock_margin()?,
         })
     }

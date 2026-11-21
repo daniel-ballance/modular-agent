@@ -22,6 +22,7 @@ mod context;
 mod core;
 mod credentials;
 mod data;
+mod environment;
 mod error;
 mod events;
 mod history;
@@ -49,6 +50,10 @@ pub use credentials::{
     environment_credentials, file_credentials,
 };
 pub use data::{HistoryEntry, ToolCall, ToolDefinition, ToolHints, ToolSettlement, TurnOutput};
+pub use environment::{
+    Containment, DirEntry, DirEntryKind, EnvironmentContext, EnvironmentDeclaration,
+    EnvironmentPart, ExecResult,
+};
 pub use error::{Code, Error, Result};
 pub use events::{
     ActorEvent, AudioData, ErasureEvent, Event, EventData, EventPayload, HistoryEvent, InputEvent,
@@ -60,7 +65,7 @@ pub use history::{
     EntryPage, ErasedEntry, ErasureReport, History, HistoryFault, HistoryResult, HistoryServer,
     HistoryStore, LeaseGrant, PortableHistoryStore, ServeHistoryOptions, SessionInfo, SessionPage,
     file_history, http_history, http_history_from_env, listen_history, memory_history,
-    serve_history,
+    portable_file_history, serve_history,
 };
 pub use hooks::*;
 pub use jobs::{Job, JobOutcome, JobOwner, JobStart, StartJobs};

@@ -52,12 +52,22 @@ pub type HistoryResult<T> = std::result::Result<T, HistoryFault>;
 #[async_trait]
 pub trait PortableHistoryStore: Send + Sync + 'static {
     fn ttl_ms(&self) -> u64;
+    /// Opt in only if leases (or an exclusion bound), opaque records, durable
+    /// commits and tombstones satisfy the history binding across restarts.
+    fn supports_history_service(&self) -> bool {
+        false
+    }
     fn supports_erasure(&self) -> bool {
         false
     }
     async fn create(&self, session: &str, metadata: Value) -> HistoryResult<()>;
     async fn acquire(&self, session: &str, owner: &str) -> HistoryResult<LeaseGrant>;
     async fn renew(&self, session: &str, lease: &str) -> HistoryResult<u64>;
+    /// If the backend detects revocation independently of renewal, expose a
+    /// level-triggered signal, including for a lease already revoked.
+    fn writer_lost(&self, _session: &str, _lease: &str) -> Option<CancellationToken> {
+        None
+    }
     async fn release(&self, session: &str, lease: &str) -> HistoryResult<()>;
     async fn append(&self, session: &str, lease: &str, entries: Vec<Value>) -> HistoryResult<u64>;
     async fn read(
@@ -89,9 +99,9 @@ pub(super) async fn request(
     project: Option<&Path>,
     body: Option<Value>,
     after: Option<&str>,
+    limit: usize,
 ) -> Result<(StatusCode, Value)> {
     let body = body.unwrap_or_default();
-    let limit = 500;
     let reply: HistoryResult<Value> = match (method, path) {
         (Method::GET, ["v1"]) => {
             Ok(json!({"binding":"modular-agent-history/1", "ttlMs":store.ttl_ms()}))

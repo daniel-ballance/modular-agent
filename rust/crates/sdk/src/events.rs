@@ -132,7 +132,8 @@ event_data!(ToolCallData {
 });
 event_data!(ToolOutputData {
     tool_call_id: String,
-    chunk: String
+    chunk: String,
+    content: Option<crate::Content>
 });
 event_data!(QuestionResponse { request_id: Option<String>, request: Option<String>, actor_id: Option<String>, declined: Option<bool>, reason: Option<String> });
 event_data!(JobStartedData { id: String, owner: String, kind: String, detail: Value, key: Option<String> });

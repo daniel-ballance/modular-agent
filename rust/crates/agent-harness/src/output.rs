@@ -142,8 +142,13 @@ pub fn encode(event: &Event, api: &dyn AgentApi) -> Result<Value> {
             "toolCall",
             json!({"call":wire::call(&serde_json::from_value(c.clone())?, s)}),
         ),
-        "tool.progress" if s.call.is_some() && c.is_string() => {
-            ("toolOutput", json!({"toolCallId":s.call,"chunk":c}))
+        "tool.progress" if s.call.is_some() && (c.is_string() || c.is_array()) => {
+            let data = if c.is_array() {
+                json!({"toolCallId":s.call,"chunk":wire::text(c),"content":c})
+            } else {
+                json!({"toolCallId":s.call,"chunk":c})
+            };
+            ("toolOutput", data)
         }
         "tool.ended" => {
             let r = wire::result(&serde_json::from_value(c.clone())?);
@@ -240,7 +245,7 @@ pub fn decode(mut event: Event, before: &Value, after: &Value) -> Result<Event> 
         }
         "toolOutput" => {
             event.scope.call = d["toolCallId"].as_str().map(str::to_owned);
-            event.content = d["chunk"].clone();
+            event.content = d.get("content").unwrap_or(&d["chunk"]).clone();
         }
         "toolResult" => {
             let mut r = serde_json::from_value::<ToolResult>(event.content.clone())?;

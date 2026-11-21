@@ -536,6 +536,9 @@ impl Harness {
         );
         self.invoke(&self.points["session.end"], &Scope::session(id), json!({}))
             .await?;
+        if let Ok(environment) = capability::<dyn WorkingEnvironment>(self, "environment") {
+            environment.session_ended(id).await?;
+        }
         self.emit(Event::new(&Scope::session(id), "session.end", json!({})))
             .await?;
         self.invalidate_providers(id)?;
@@ -1560,7 +1563,9 @@ impl AgentApi for Harness {
     ) -> Result<ModelRequest> {
         let provider = model.name.split('/').next().unwrap_or(&model.name);
         let result=self.invoke(&self.points["provider.request"],scope,json!({"sessionId":scope.session,"provider":provider,"model":model,"request":request})).await?;
-        Ok(serde_json::from_value(result.value["request"].clone())?)
+        let mut changed: ModelRequest = serde_json::from_value(result.value["request"].clone())?;
+        changed.provider_tools = request.provider_tools;
+        Ok(changed)
     }
     async fn provider_response(
         &self,

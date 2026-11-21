@@ -248,6 +248,40 @@ pub fn questions(data: &SessionData) -> Result<Vec<Question>> {
     }
     Ok(result)
 }
+/// Whether a leave-open wait elapsed in this invocation without an answer
+/// or closure before its deadline. An answer after expiry is not proof that
+/// the interrupted invocation relinquished execution.
+pub fn expired_leave_open(branch: &[Entry], scope: &Scope) -> bool {
+    branch.iter().any(|opened| {
+        if opened.kind != "request.open"
+            || opened.scope.call != scope.call
+            || opened.scope.turn != scope.turn
+        {
+            return false;
+        }
+        let Some(question) = opened.content.as_ref() else {
+            return false;
+        };
+        let Some(timeout) = question["timeout_ms"].as_u64() else {
+            return false;
+        };
+        if question["extra"]["whenTimeLimit"] != "leaveOpen" {
+            return false;
+        }
+        let deadline = opened.at.saturating_add(timeout);
+        let request = &question["id"];
+        now() >= deadline
+            && !branch.iter().any(|e| {
+                e.at < deadline
+                    && matches!(
+                        e.kind.as_str(),
+                        "request.answer" | "request.closed" | "request.invalidated"
+                    )
+                    && e.content.as_ref().is_some_and(|v| &v["request"] == request)
+            })
+    })
+}
+
 #[async_trait]
 pub trait InputRequests: Send + Sync {
     async fn ask(
