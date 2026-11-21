@@ -131,7 +131,7 @@ class _Options(TypedDict, total=False):
     data_dir: str | PathLike[str] | None
     durability: Durability
     environment: MemoryEnvironment
-    history: HistoryStore
+    history: HistoryStore | None
     tools: Sequence[Tool]
     plugins: Sequence[Plugin]
     process_plugins: Sequence[ProcessPlugin | JsonObject] | None
