@@ -66,7 +66,11 @@ class Policy:
                         raise ValueError("actors with the same id must use the same kind")
                     self.actors.append(cast(AcpActor, {**item, "token_file": token_file}))
             self.limits = _limits(raw.get("limits", {}))
-            self.tenants = tenants_from_environment() or None
+            configured = (self.stdio, *(self.actors or ()))
+            named = any(
+                t is not None for scope in configured if scope for t in scope.get("tenants", ())
+            )
+            self.tenants = (tenants_from_environment() or None) if named else None
         except Exception as exc:
             raise ValueError(f"policy {path}: {exc}") from exc
 
