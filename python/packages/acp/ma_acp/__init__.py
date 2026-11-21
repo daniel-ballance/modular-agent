@@ -365,8 +365,9 @@ class ACP(Plugin):
                 if value is not None:
                     await self.entry(sid, value, replay=True)
         await self.set_presence(sid, self.actor, True)
-        for actor in sorted(self.represents & (await self.get(sid))["actors"].keys()):
-            await self.set_presence(sid, actor, True)
+        if self.represents and "watch" in await self.rights(sid):
+            for actor in sorted(self.represents & (await self.get(sid))["actors"].keys()):
+                await self.set_presence(sid, actor, True)
         if replay:
             for q in await self.api.call(
                 "questions", "list", {"session": sid, "actor": self.actor}

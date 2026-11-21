@@ -332,7 +332,11 @@ class Harness(Authority, Erasure):
             and sid in self.sessions
             and (
                 operation in {"run", "bash", "write", "restore", "save", "generate"}
-                or (target == "environment" and operation == "read")
+                or (
+                    target == "environment"
+                    and operation
+                    in {"read", "read_bytes", "write_bytes", "list_directory", "exists"}
+                )
             )
             and (target != "runtime" and target != "history")
         )
@@ -344,7 +348,8 @@ class Harness(Authority, Erasure):
                         method,
                         data,
                         emit,
-                        allow_provisional=target == "environment" and operation == "read",
+                        allow_provisional=target == "environment"
+                        and operation in {"read", "read_bytes", "list_directory", "exists"},
                     )
                 )
             return clone(await method(data, emit))
@@ -521,13 +526,17 @@ class Harness(Authority, Erasure):
             self._require_materialized(self.sessions[sid])
         await self._assert_writable(sid)
         await self.guard_erasure(sid, reconcile=True)
+        revision = await self.erasure_revision(sid)
         tasks = self.effects.setdefault(sid, {})
         task = asyncio.current_task()
         own = task not in tasks
         if own:
             tasks[task] = asyncio.Event()
         try:
-            return await callback(*args)
+            result = await callback(*args)
+            if revision != await self.erasure_revision(sid):
+                raise AgentError("Session content changed during an effect", "unavailable")
+            return result
         except asyncio.CancelledError as exc:
             if self.sessions.get(sid, {}).get("writer_lost"):
                 raise AgentError("Session interrupted", "lost") from exc
