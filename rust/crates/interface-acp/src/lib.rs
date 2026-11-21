@@ -245,15 +245,21 @@ impl State {
                 .ok_or_else(|| withheld().into());
         }
         let result = self.request(request, cx).await;
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.is::<acp::Error>() || e.is::<LostPart>())
-            || matches!(
-                method.as_str(),
-                "session/load" | "session/resume" | "session/new"
-            )
-        {
+        if result.as_ref().err().is_some_and(|e| {
+            e.is::<acp::Error>()
+                || e.is::<LostPart>()
+                || matches!(
+                    e.downcast_ref::<OperationError>(),
+                    Some(
+                        OperationError::Busy(_)
+                            | OperationError::Forbidden(_)
+                            | OperationError::Unavailable(_)
+                    )
+                )
+        }) || matches!(
+            method.as_str(),
+            "session/load" | "session/resume" | "session/new"
+        ) {
             return result;
         }
         let session = before.or_else(|| result.as_ref().ok().and_then(|v| self.session(v).ok()));

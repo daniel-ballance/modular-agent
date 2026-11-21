@@ -676,6 +676,11 @@ pub(crate) async fn extension(
         }
         "requests" => poll_payload(&session),
         "answer" => {
+            let rights = api.authority(&session.id, connection_actor.as_str())?;
+            ensure!(
+                rights.has("answer") || rights.has("approve"),
+                request_error("forbidden", "actor lacks answer authority")
+            );
             let id = string(p, "requestId")?;
             let service = requests(session.api.as_ref())?;
             let question = service

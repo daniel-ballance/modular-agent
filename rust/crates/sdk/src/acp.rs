@@ -46,6 +46,7 @@ pub trait AcpComposition: Send + Sync + 'static {
 #[derive(Default)]
 pub struct AcpOptions {
     pub compose: Option<Arc<dyn AcpComposition>>,
+    pub actor: Option<crate::Actor>,
     pub projects: Option<Vec<std::path::PathBuf>>,
     pub tenants: Option<Vec<Option<String>>>,
     pub rights: Option<crate::Rights>,
@@ -84,6 +85,16 @@ impl AcpActor {
             represents: vec![],
         }
     }
+}
+
+fn validate_actor(actor: &crate::Actor) -> Result<()> {
+    if actor.id.is_empty()
+        || actor.id.starts_with("job:")
+        || !matches!(actor.kind.as_str(), "user" | "host" | "agent" | "program")
+    {
+        return Err(Error::new(Code::InvalidComposition, "invalid ACP actor"));
+    }
+    Ok(())
 }
 
 fn validate_scope(
@@ -246,12 +257,20 @@ impl Agent {
             validate_scope(options.projects, &options.tenants, &options.represents)?;
         identity.tenants = options.tenants;
         identity.represents = options.represents;
+        if let Some(actor) = options.actor {
+            validate_actor(&actor)?;
+            identity.kind = actor.kind;
+            identity.id = actor.id;
+            identity.rights = actor.rights;
+            identity.explicit_rights = true;
+        } else {
+            identity = interface_acp::stdio_identity(identity)
+                .map_err(|e| Error::new(Code::InvalidComposition, e.to_string()))?;
+        }
         if let Some(rights) = options.rights {
-            identity.rights = rights;
+            identity.rights = identity.rights.intersect(&rights);
             identity.explicit_rights = true;
         }
-        let identity = interface_acp::stdio_identity(identity)
-            .map_err(|e| Error::new(Code::InvalidComposition, e.to_string()))?;
         let routes = self.acp_routes();
         let _serving = routes
             .serving
@@ -274,12 +293,7 @@ impl Agent {
             if actor.kind == "plugin" {
                 actor.kind = "program".into();
             }
-            if actor.id.is_empty()
-                || actor.id.starts_with("job:")
-                || !matches!(actor.kind.as_str(), "user" | "host" | "agent" | "program")
-            {
-                return Err(Error::new(Code::InvalidComposition, "invalid ACP actor"));
-            }
+            validate_actor(&actor)?;
             let projects = validate_scope(token.projects, &token.tenants, &token.represents)?;
             let join_on_open = actor.id == base::ACP_HOST_ACTOR && actor.kind == "host";
             entries.push((

@@ -10,6 +10,7 @@ use standard::{
 };
 
 mod sandbox_worker;
+use standard::policy::Policy;
 
 const HELP: &str = "ma, the standard Modular Agent
 
@@ -37,8 +38,9 @@ Options:
   --history             print the session's history
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol on stdio, for an editor or host
-  --listen ADDR --token-file FILE
-                        with --acp, serve ACP on a loopback WebSocket instead
+  --listen ADDR         with --acp, serve on a loopback WebSocket instead
+  --token-file FILE     configure a single local token for --listen
+  --policy FILE         read operator policy instead of policy.json
 
 While the agent works, a line you type steers it; /after TEXT queues a new
 turn; /cancel or Ctrl-C stops the turn. /commands lists the rest, including
@@ -218,7 +220,43 @@ fn auth_status(standard: &Standard) -> Result<()> {
 
 async fn start() -> Result<()> {
     let mut standard = Standard::from_env()?;
-    let mut args = std::env::args().skip(1).peekable();
+    let mut raw = std::env::args().skip(1);
+    let mut remaining = Vec::new();
+    let mut policy_file = None;
+    while let Some(arg) = raw.next() {
+        if arg == "--policy" {
+            ensure!(
+                policy_file.is_none(),
+                "--policy was supplied more than once"
+            );
+            policy_file = Some(std::path::PathBuf::from(take(&mut raw, &arg)?));
+        } else {
+            remaining.push(arg);
+            if matches!(
+                remaining.last().map(String::as_str),
+                Some(
+                    "-p" | "--print"
+                        | "--project"
+                        | "--model"
+                        | "--thinking"
+                        | "--runtime"
+                        | "--session"
+                        | "--listen"
+                        | "--token-file"
+                )
+            ) && let Some(value) = raw.next()
+            {
+                remaining.push(value);
+            }
+        }
+    }
+    let required = policy_file.is_some();
+    let policy_file = policy_file.unwrap_or_else(|| standard.config.join("policy.json"));
+    let mut policy = Policy::read(&policy_file, required).await?;
+    let bounds = policy.bounds()?;
+    standard.limits = bounds.counts();
+    standard.tenant_scopes = policy.named_tenants();
+    let mut args = remaining.into_iter().peekable();
     let mut project = std::env::current_dir()?;
     match args.peek().map(String::as_str) {
         Some("login") => return login(&standard, args.skip(1)).await,
@@ -350,13 +388,15 @@ async fn start() -> Result<()> {
         }
     }
     let service = match (listen, token_file) {
-        (Some(listen), Some(token_file)) if acp => Some(sdk::AcpServiceOptions {
+        (Some(listen), token_file) if acp => Some(sdk::AcpServiceOptions {
             listen,
-            actors: vec![sdk::AcpActor::local(token_file.into())],
+            actors: policy
+                .network(token_file.map(Into::into))
+                .map_err(|error| anyhow!("policy {}: {error}", policy_file.display()))?,
             tls: None,
         }),
         (None, None) => None,
-        _ => bail!("--listen and --token-file must be used together with --acp"),
+        _ => bail!("--listen requires --acp, and --token-file requires --listen"),
     };
     if acp {
         ensure!(
@@ -369,15 +409,22 @@ async fn start() -> Result<()> {
         let mcp = Mcp::default();
         // The bootstrap agent supplies the declaration. Only the actual
         // project/session composition can choose to start Claude.
-        let agent = builder(&standard, &project, &mcp, vec![])?.build().await?;
-        let options = sdk::AcpOptions {
-            compose: Some(std::sync::Arc::new(standard::acp::Factory {
-                standard,
-                settings: terminal.settings,
-                mcp,
-            })),
-            ..Default::default()
-        };
+        let launch = tempfile::tempdir_in(&standard.state).or_else(|err| {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return Err(err);
+            }
+            std::fs::create_dir_all(&standard.state)?;
+            tempfile::tempdir_in(&standard.state)
+        })?;
+        let agent = builder(&standard, launch.path(), &mcp, vec![])?
+            .build()
+            .await?;
+        let mut options = policy.stdio();
+        options.compose = Some(std::sync::Arc::new(standard::acp::Factory {
+            standard,
+            settings: terminal.settings,
+            mcp,
+        }));
         let served = if let Some(service) = service {
             async {
                 let server = agent.serve_acp_websocket(options, service).await?;
@@ -432,7 +479,9 @@ async fn start() -> Result<()> {
         let agent = builder(&standard, &project, &Mcp::default(), vec![])?
             .build()
             .await?;
-        println!("{}", serde_json::to_string_pretty(&agent.declaration()?)?);
+        let mut declaration = agent.declaration()?;
+        declaration["limits"] = serde_json::to_value(bounds)?;
+        println!("{}", serde_json::to_string_pretty(&declaration)?);
         agent.close().await?;
         return Ok(());
     }

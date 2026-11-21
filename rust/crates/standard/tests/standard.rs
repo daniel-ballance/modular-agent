@@ -67,6 +67,8 @@ impl Rig {
         let worker = root.path().join("sandbox-worker");
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ma"), &worker).unwrap();
         let standard = Standard {
+            limits: standard::policy::Bounds::default().counts(),
+            tenant_scopes: false,
             config: root.path().join("config"),
             state: root.path().join("state"),
             durable,

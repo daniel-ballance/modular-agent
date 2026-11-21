@@ -74,7 +74,7 @@ pub struct Connection {
     pub outgoing: mpsc::Sender<String>,
 }
 
-async fn token(path: &Path) -> Result<String> {
+pub async fn read_token_file(path: &Path) -> Result<String> {
     let mut file = tokio::fs::File::open(path)
         .await
         .context("open token file")?;
@@ -139,7 +139,7 @@ pub async fn connect(
     protocol: &'static str,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
     let url = parse_url(url)?;
-    let token = token(token_file).await?;
+    let token = read_token_file(token_file).await?;
     let mut request = url.as_str().into_client_request()?;
     let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
         .map_err(|_| anyhow!("invalid bearer token"))?;
@@ -219,7 +219,7 @@ where
     ensure!(!entries.is_empty(), "no WebSocket tokens configured");
     let mut tokens = Vec::new();
     for (path, value) in entries {
-        let hash = Sha256::digest(token(&path).await?);
+        let hash = Sha256::digest(read_token_file(&path).await?);
         ensure!(
             !tokens.iter().any(|(other, _)| *other == hash),
             "duplicate WebSocket token"
