@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Disposable background-job fixture for Plugin binding: Jobs. It does not run an external executor.
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, watch } from "node:fs";
+import { dirname } from "node:path";
 import { isDeepStrictEqual as equal } from "node:util";
 import { rpcError, serve } from "./peer.mjs";
 
@@ -23,9 +24,15 @@ const all = async (ask, sessionId) => {
 	throw rpcError("internal", "fixture history too long");
 };
 
+function clearJobGate(job) {
+	clearTimeout(job.timer);
+	job.watch?.close();
+	job.watch = undefined;
+}
+
 function end(job, kind, result) {
 	if (job.ending) return job.ending;
-	clearTimeout(job.timer);
+	clearJobGate(job);
 	const { jobId, sessionId } = job;
 	const p = { jobId, outcome: { kind }, ...(result ? { result } : {}), report: !!result };
 	job.ending = (async () => {
@@ -72,7 +79,7 @@ const peer = serve("jobs", async (m, { ask, signal }) => {
 			return { binding, name, toolSources: [{ id: toolSource, tools }], hooks: [{ hook: "session.start", handlerId: 1 }] };
 		case "plugin/shutdown":
 			stopping = true;
-			for (const j of running.values()) clearTimeout(j.timer);
+			for (const j of running.values()) clearJobGate(j);
 			await Promise.allSettled([...running.values()].map((j) => j.ending));
 			return {};
 		case "$/ping": return {};
@@ -90,7 +97,12 @@ const peer = serve("jobs", async (m, { ask, signal }) => {
 				if (started) {
 					const job = { jobId, sessionId };
 					running.set(jobId, job);
-					job.timer = setTimeout(() => void end(job, "completed", text(`background: ${message}`)).catch(() => undefined), ms);
+					const report = () => void end(job, "completed", text(`background: ${message}`)).catch(() => undefined);
+					if (config.releaseFile) {
+						const release = () => { if (existsSync(config.releaseFile)) report(); };
+						job.watch = watch(dirname(config.releaseFile), release);
+						release();
+					} else job.timer = setTimeout(report, ms);
 				}
 				if (signal.aborted) throw rpcError("cancelled");
 				// Jobs: commit before start acknowledgement, then same-key start is idempotent.
@@ -100,7 +112,7 @@ const peer = serve("jobs", async (m, { ask, signal }) => {
 				return { status: "completed", content: text(`started job ${jobId}`) };
 			} catch (error) {
 				if (signal.aborted) throw rpcError("cancelled");
-				note({ startFailed: call.id, code: error?.data?.code });
+				note({ startFailed: call.id, code: error?.data?.code, ...(config.releaseFile ? { number: error?.code } : {}) });
 				return { status: "failed", content: text("Could not start the fixture job.") };
 			}
 		}

@@ -135,6 +135,7 @@ async function authCommand(argv: string[], p: Paths, auth: AuthFile) {
   return 0;
 }
 async function main(argv: string[]) {
+  if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("ma supports only Linux and macOS");
   const p = paths(), auth = new AuthFile(p.config);
   if (["login", "logout", "auth"].includes(argv[0])) return authCommand(argv, p, auth);
   const opts = parse(argv);

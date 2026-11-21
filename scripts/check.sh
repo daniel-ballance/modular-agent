@@ -88,10 +88,13 @@ if $all; then
   step "scenarios: Go runner, every placement" bash -c "cd go && mise exec -- go test -count=1 ./modular/scenarios/"
   step "scenarios: Python runner, every placement" bash -c "cd python && uv run --offline python -m modular_agent._scenarios"
   step "reference checks: all four ma" node conformance/reference/run.mjs --all
+  step "demo: project notes, including crash recovery" bash -c 'demos/project-notes/build.sh --sdk-built && demos/project-notes/run.py'
   if ! $quick; then
     for language in rust typescript go python; do
       command=$(node -e "const a=require('./conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")
       step "ACP kit: $language ma (crash, probe, job checks)" bash -c "cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- $command --acp"
+      # Enable only once all four builds pass with the disposable policy and shared history setup:
+      # ACP options: --isolation-checks --capacity-checks --erasure-checks
       step "kits over WebSocket: $language plugin and ma" scripts/websocket-kits.sh "$language"
     done
   fi

@@ -7,10 +7,10 @@ import { isLoopback } from "../tools/websocket.mjs";
 export function manageServices(config, command, cwd, envFor, verbose) {
 	let primary;
 	const children = new Set();
-	const launch = (url, extraEnv) => {
+	const launch = (url, extraEnv, { captureStderr = false } = {}) => {
 		const child = spawn("bash", ["-c", command], {
 			cwd, env: { ...envFor(extraEnv), MODULAR_AGENT_CONFORMANCE_URL: url.href, MODULAR_AGENT_CONFORMANCE_TOKEN_FILE: config.tokenFile },
-			detached: true, stdio: ["ignore", verbose ? "inherit" : "ignore", verbose ? "inherit" : "ignore"],
+			detached: true, stdio: ["ignore", verbose ? "inherit" : "ignore", captureStderr ? "pipe" : verbose ? "inherit" : "ignore"],
 		});
 		const exited = new Promise((resolve) => {
 			child.once("error", () => resolve({ code: null, signal: null }));
@@ -35,7 +35,7 @@ export function manageServices(config, command, cwd, envFor, verbose) {
 	process.once("exit", () => { for (const service of children) signalGroup(service, "SIGKILL"); });
 	return {
 		primary: () => primary ??= launch(config.url, {}),
-		async variant(extraEnv) {
+		async variant(extraEnv, options) {
 			if (!isLoopback(config.url.hostname)) throw new Error("service variants require a loopback --connect URL");
 			const host = config.url.hostname.replace(/^\[|\]$/g, "");
 			const url = new URL(config.url);
@@ -46,7 +46,7 @@ export function manageServices(config, command, cwd, envFor, verbose) {
 					reserve.close((error) => error ? reject(error) : resolve(port));
 				});
 			});
-			return launch(url, extraEnv);
+			return launch(url, extraEnv, options);
 		},
 		stop,
 		stopAll: () => Promise.all([...children].map((service) => stop(service))),
