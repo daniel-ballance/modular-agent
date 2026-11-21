@@ -1147,10 +1147,28 @@ export class Harness {
 			}
 			throw error;
 		}
-		const ordinary = entries.some(entry => entry.kind.includes(".") && !STANDARD_ENTRY_KINDS.has(entry.kind) && entry.kind !== "modular-agent.nestedCall" && entry.kind !== "harness.parentAuthority");
-		const charge = `batch:${entries[0]?.id}`;
-		if (ordinary && !this.reservations.reserve(s, charge, { storageBytes: bytes })) throw failure("busy", "No capacity for plugin history");
-		try {
+		const control = entries.every(e => ["actorLeft", "limit", "erasure", "jobCleanupUnconfirmed", "inputHandedBack"].includes(e.kind));
+		const holders = entries.flatMap(entry => {
+			if (!["input", "inputAccepted", "inputHandedBack", "turnStart", "turnEnd", "modelRequest", "response", "toolStarted",
+				"toolResult", "toolPending", "toolOutput", "inputRequest", "inputAnswer", "secretAnswerAccepted", "jobStarted", "jobEnded",
+				"jobCleanupUnconfirmed", "modular-agent.nestedCall", "modular-agent.stepAfter", "resultFeedback"].includes(entry.kind)) return [];
+			const inputId = inputIdOf(entry);
+			return [
+				...(inputId ? [`input:${inputId}`] : []),
+				...(entry.stepId ? [`model:${entry.stepId}`, `command:${entry.stepId}`] : []),
+				...(entry.toolCallId ? [`call:${entry.toolCallId}`] : []),
+				...(entry.jobId ? [`job:${entry.jobId}`] : []),
+				...(entry.turnId ? [`turn:${entry.turnId}`] : []),
+			];
+		});
+		if (!this.reservations.write(s, bytes, holders, control)) {
+			const error = failure("busy", "No history capacity for this write");
+			if (entries.some(e => ["turnEnd", "toolResult", "inputAnswer", "inputHandedBack", "jobEnded", "response"].includes(e.kind))) {
+				this.interruptSession(s, "commitFailed", error);
+				throw failure("lost", "Required history write could not be covered");
+			}
+			throw error;
+		}
 		if (firstAdmission) {
 			const store = this.use<HistoryStore>("history-store")!;
 			const initial = [...s.order.map(id => s.entries.get(id)!), ...entries];
@@ -1166,18 +1184,22 @@ export class Harness {
 			const store = this.use<HistoryStore>("history-store");
 			await this.write(s, () => store?.append(s.id, entries));
 		}
-		this.reservations.retain(s, bytes);
-		} finally { if (ordinary) this.reservations.release(s, charge); }
 		for (const e of entries) {
 			s.apply(e);
 			const inputId = inputIdOf(e);
 			if (inputId && e.kind === "input" && e.turnId) {
 				const unit = this.reservations.limits.settlementBytes;
 				this.reservations.release(s, `input:${inputId}`);
-				this.reservations.reserve(s, `turn:${e.turnId}`, { storageBytes: 2 * unit }, true);
+				if (!this.reservations.has(s, `turn:${e.turnId}`)) this.reservations.reserve(s, `turn:${e.turnId}`, { storageBytes: 2 * unit }, true);
 			}
 			if (inputId && e.kind === "inputHandedBack") this.reservations.release(s, `input:${inputId}`);
-			if (e.kind === "turnEnd" && e.turnId) this.reservations.release(s, `turn:${e.turnId}`);
+			if (e.kind === "turnEnd" && e.turnId) {
+				this.reservations.release(s, `turn:${e.turnId}`);
+				for (const id of s.order) {
+					const kept = s.entries.get(id)!;
+					if (kept.turnId === e.turnId && kept.stepId && kept.kind === "modelRequest") this.reservations.release(s, `model:${kept.stepId}`);
+				}
+			}
 			if (e.kind === "response" && e.stepId) this.reservations.release(s, `model:${e.stepId}`);
 			if (e.kind === "toolResult" && e.toolCallId) this.reservations.release(s, `call:${e.toolCallId}`);
 			const ids = { turnId: e.turnId, stepId: e.stepId, toolCallId: e.toolCallId, actorId: e.actorId };
@@ -2139,7 +2161,9 @@ export class Harness {
 							return matches.length === 1 ? matches[0].message : message;
 						}),
 					};
-					if (resourceBytes(dispatched) + 2048 > bounds.entryBytes || model.supports.runsTools !== false && dispatched.providerTools !== "none") {
+					const size = resourceBytes(dispatched);
+					if (size + 2048 > bounds.entryBytes || model.supports.runsTools !== false && dispatched.providerTools !== "none" ||
+						!this.reservations.resize(s, attempt, { calls: 1, storageBytes: size + 3 * bounds.settlementBytes })) {
 						state.capacityLimit = true;
 						throw turnLimit("capacity");
 					}
@@ -2178,9 +2202,12 @@ export class Harness {
 							: { role: "assistant", stop: "failed", content: [], error: { kind: "other", message: String(error) } };
 					}
 					const reserved: string[] = [];
-					this.reservations.release(s, attempt);
 					const calls = message.content.filter(isToolCall);
-					let fits = resourceBytes(message) + 2048 <= bounds.entryBytes;
+					const size = resourceBytes(message);
+					const replace = !!turnId && calls.length > 0;
+					let fits = size + 2048 <= bounds.entryBytes && this.reservations.resize(s, attempt, {
+						calls: replace ? 0 : 1, bufferedBytes: size, storageBytes: size + 2 * bounds.settlementBytes,
+					});
 					if (fits && turnId) for (const call of calls) {
 						if (!this.reserveCall(s, call.id)) { fits = false; break; }
 						reserved.push(call.id);
@@ -2196,7 +2223,7 @@ export class Harness {
 						actorId: [...state.actors][0], message, modelVisible: false, sources: [intentId] }]);
 					return message;
 				} finally {
-					this.reservations.release(s, attempt);
+					if (!turnId || !intentId) this.reservations.release(s, attempt);
 					await observed;
 					if (turnId) this.emit(s, "model.streamEnd", {}, "harness", { turnId, stepId }); }
 			});

@@ -79,12 +79,44 @@ export class Reservations {
 		if (session.work.has(id)) return true;
 		if (!rebuild && scopes.some((scope, index) => keys.some(key => {
 			const added = charge[key] ?? 0;
-			return added !== 0 && usage[index][key] + added > this.limits[scope][key];
+			const limit = this.limits[scope][key] - (key === "storageBytes" ? this.limits.controlBytes : 0);
+			return added !== 0 && usage[index][key] + added > limit;
 		}))) return false;
 		this.adjust(usage, charge, 1);
 		session.work.set(id, charge);
 		return true;
 	}
+	/** Update an obligation without leaving a gap in the synchronous ledger. */
+	resize(owner: ReservationOwner, id: string, charge: Charge): boolean {
+		const { session } = this.accounts(owner);
+		const previous = session.work.get(id);
+		if (!previous) return this.reserve(owner, id, charge);
+		this.release(owner, id);
+		if (this.reserve(owner, id, charge)) return true;
+		this.reserve(owner, id, previous, true);
+		return false;
+	}
+
+	/** Moving reserved write space to retained storage never needs another free slot. */
+	write(owner: ReservationOwner, bytes: number, keys: string[], control: boolean): boolean {
+		const { session, usage } = this.accounts(owner);
+		let remaining = bytes;
+		const transfers: [Charge, number][] = [];
+		for (const id of new Set(keys)) {
+			const charge = session.work.get(id);
+			if (!charge?.storageBytes) continue;
+			const used = Math.min(charge.storageBytes, remaining);
+			transfers.push([charge, used]);
+			remaining -= used;
+		}
+		if (remaining && scopes.some((scope, index) =>
+			usage[index].storageBytes + remaining > this.limits[scope].storageBytes - (control ? 0 : this.limits.controlBytes))) return false;
+		for (const [charge, used] of transfers) charge.storageBytes! -= used;
+		this.adjust(usage, { storageBytes: remaining }, 1);
+		session.retained += bytes;
+		return true;
+	}
+
 	has(owner: ReservationOwner, id: string): boolean { return this.sessions.get(owner.id)?.work.has(id) ?? false; }
 	release(owner: ReservationOwner, id: string) {
 		if (!this.has(owner, id)) return;
