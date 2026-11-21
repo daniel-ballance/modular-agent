@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")] // Needs Linux child subreaper and strong containment.
 //! A kill in the middle of a code run, through the real binary. The durable
 //! Runtime carries the turn on when the session is reopened. Neither the code
 //! run nor the command it had started runs again.

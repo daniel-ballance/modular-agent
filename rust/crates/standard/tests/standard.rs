@@ -546,6 +546,10 @@ fn sandbox_pid(rig: &Rig) -> i32 {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "requires Linux process inspection or strong containment"
+)]
 async fn a_worker_death_fails_its_call_without_waiting_for_the_nested_tool() {
     let (rig, held) = suspended_rig(vec![
         code("lost", "tools.hold()"),
@@ -578,6 +582,7 @@ async fn a_worker_death_fails_its_call_without_waiting_for_the_nested_tool() {
 }
 
 #[tokio::test]
+#[cfg(target_os = "linux")] // Uses pidfd to observe exit without recycling the PID.
 async fn cancelling_a_run_kills_the_worker_and_a_new_run_can_start() {
     let (rig, held) = suspended_rig(vec![
         code("held", "tools.hold()"),

@@ -5,9 +5,15 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncReadExt;
+#[cfg(target_os = "linux")]
+mod containment;
+#[cfg(target_os = "macos")]
+#[path = "process_group.rs"]
 mod containment;
 mod git_points;
 mod points;
+#[cfg(all(test, target_os = "linux"))]
+mod process_group;
 /// Where the local environment keeps saved points for rewinding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PointStore {
@@ -69,7 +75,7 @@ impl Plugin for LocalPlugin {
         "environment.local"
     }
     fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        install(r, &self.state, false, self.points)
+        install(r, &self.state, cfg!(target_os = "macos"), self.points)
     }
 }
 impl Plugin for ServedEnvironment {
@@ -88,6 +94,7 @@ fn install(
 ) -> Result<()> {
     // Adopt and reap shell grandchildren instead of leaving zombies to PID 1.
     // https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
+    #[cfg(target_os = "linux")]
     ensure!(
         unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0,
         "cannot become child subreaper"
@@ -125,7 +132,11 @@ impl WorkingEnvironment for LocalEnvironment {
         .await?
     }
     fn declaration(&self) -> Value {
-        json!({"local":true,"rewinding":true,"stops_commands_after_sigkill":true,"escaped_process_groups":true,"normal_cleanup":true,"containment":"linux-ptrace-exitkill","startup_cleanup":true})
+        if cfg!(target_os = "macos") {
+            json!({"local":true,"rewinding":true,"normal_cleanup":true,"containment":"processGroup","platforms":["darwin"]})
+        } else {
+            json!({"local":true,"rewinding":true,"stops_commands_after_sigkill":true,"escaped_process_groups":true,"normal_cleanup":true,"containment":"linux-ptrace-exitkill","startup_cleanup":true})
+        }
     }
     fn keeps_points(&self, project: &Path) -> bool {
         match self.store {

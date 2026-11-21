@@ -10,13 +10,16 @@ use monty_types::{
     NameLookupResult, OsFunctionCall, OsPolicy, ProcessTime, RandomStart, ResourceLimits,
     SleepMode,
 };
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::{
     future::{pending, ready},
     io,
-    os::fd::{FromRawFd, OwnedFd},
     time::Duration,
 };
-use tokio::{io::unix::AsyncFd, sync::Notify, time::timeout};
+#[cfg(target_os = "linux")]
+use tokio::io::unix::AsyncFd;
+use tokio::{sync::Notify, time::timeout};
 
 const MAX_MEMORY: usize = 256 * 1024 * 1024;
 const PIPE_ALLOWANCE: Duration = Duration::from_millis(250);
@@ -219,7 +222,7 @@ impl Run<'_> {
                         // without running the pipe watchdog or the compute clock.
                         tokio::select! {
                             biased;
-                            exited = exit.readable() => return Err(match exited {
+                            exited = worker_exited(&exit) => return Err(match exited {
                                 Ok(_) => "sandbox worker died while waiting for a nested tool call".into(),
                                 Err(error) => format!("could not watch sandbox worker: {error}"),
                             }),
@@ -292,6 +295,45 @@ fn exception_text(exc: &MontyException) -> String {
     text
 }
 
+#[cfg(target_os = "linux")]
+async fn worker_exited(exit: &AsyncFd<OwnedFd>) -> io::Result<()> {
+    exit.readable().await.map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn watch_exit(pid: u32) -> io::Result<u32> {
+    Ok(pid)
+}
+
+#[cfg(target_os = "macos")]
+async fn worker_exited(pid: &u32) -> io::Result<()> {
+    loop {
+        // Observe the owned child without reaping it; Monty's pool does that.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                *pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ECHILD) => return Ok(()),
+                Some(libc::EINTR) => continue,
+                _ => return Err(error),
+            }
+        }
+        if unsafe { info.si_pid() } != 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn watch_exit(pid: u32) -> io::Result<AsyncFd<OwnedFd>> {
     // SAFETY: pidfd_open takes a PID value and zero flags, and returns a new
     // owned descriptor on success. The pool still owns the child handle.
