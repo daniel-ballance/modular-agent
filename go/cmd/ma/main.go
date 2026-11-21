@@ -227,10 +227,10 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		return err
 	}
 	if o.listen != "" {
-		if o.tokenFile != "" && o.policy.actors != nil {
+		if o.tokenFile != "" && o.policy.Actors != nil {
 			return fmt.Errorf("policy %s: cannot combine actors with --token-file", policyPath)
 		}
-		if o.tokenFile == "" && len(o.policy.actors) == 0 {
+		if o.tokenFile == "" && len(o.policy.Actors) == 0 {
 			return fmt.Errorf("policy %s: --listen needs actors or --token-file", policyPath)
 		}
 	}
@@ -259,7 +259,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 	}
 	o.project = project
 	config := o.acp && os.Getenv("MODULAR_AGENT_CONFORMANCE") == "1"
-	store, err := d.history(config)
+	store, err := d.history()
 	if err != nil {
 		return err
 	}
@@ -408,7 +408,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		}
 		if o.listen == "" {
 			acpOptions.Represents = []string{}
-			if scope := o.policy.stdio; scope != nil {
+			if scope := o.policy.Stdio; scope != nil {
 				acpOptions.StdioActor = &scope.Actor
 				acpOptions.Projects, acpOptions.Tenants = scope.Projects, scope.Tenants
 			}
@@ -416,7 +416,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 			return a.ServeACP(ctx, acpOptions)
 		}
 		acpOptions.Listen = o.listen
-		acpOptions.Actors = o.policy.actors
+		acpOptions.Actors = o.policy.Actors
 		if o.tokenFile != "" {
 			acpOptions.Actors = []modular.ACPActor{{TokenFile: o.tokenFile, Actor: modular.LocalACPActor()}}
 		}

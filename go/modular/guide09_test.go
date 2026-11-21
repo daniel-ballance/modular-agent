@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,7 +14,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
 )
 
-func serveStore(ctx context.Context, address, storeDir, tokenFile string) error {
+func serveStore(ctx context.Context, address, storeDir, tokenFile string) (*modular.HistoryService, error) {
 	return modular.ServeHistory(ctx, modular.FileHistory(storeDir),
 		modular.HistoryOptions{Address: address, TokenFile: tokenFile})
 }
@@ -92,34 +91,21 @@ func TestHandsOffASessionOverHTTP(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte(hex.EncodeToString(secret[:])+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	service, err := serveStore(ctx, "127.0.0.1:0", filepath.Join(tmp, "history"), tokenFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	address := reserved.Addr().String()
-	reserved.Close()
-
-	done := make(chan error, 1)
-	go func() { done <- serveStore(ctx, address, filepath.Join(tmp, "history"), tokenFile) }()
-	defer func() {
-		cancel()
-		if err := <-done; err != nil {
+	t.Cleanup(func() {
+		if err := service.Close(); err != nil {
 			t.Error(err)
 		}
-	}()
-	dialer := net.Dialer{}
-	for {
-		conn, err := dialer.DialContext(ctx, "tcp", address)
-		if err == nil {
-			conn.Close()
-			break
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("history service did not start")
-		case <-time.After(10 * time.Millisecond):
-		}
+	})
+	handoff(t, ctx, project, filepath.Join(tmp, "writer"), filepath.Join(tmp, "reader"), service.URL, tokenFile)
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
 	}
-	handoff(t, ctx, project, filepath.Join(tmp, "writer"), filepath.Join(tmp, "reader"),
-		"http://"+address, tokenFile)
+	if agent, err := connectHistory(ctx, project, filepath.Join(tmp, "after-close"), service.URL, tokenFile); err == nil {
+		agent.Close(ctx)
+		t.Fatal("history service still accepting connections after Close")
+	}
 }

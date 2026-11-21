@@ -12,10 +12,44 @@ import (
 	acp "github.com/caelis-labs/acp-go-sdk"
 )
 
+type deliveryEpochKey struct{}
+
+func withDeliveryEpoch(ctx context.Context, epoch int) context.Context {
+	return context.WithValue(ctx, deliveryEpochKey{}, epoch)
+}
+
+func (s *server) currentDeliveryEpoch(ctx context.Context, id string) bool {
+	expected, ok := ctx.Value(deliveryEpochKey{}).(int)
+	if !ok {
+		return true
+	}
+	epoch, err := s.erasureEpoch(id)
+	return err == nil && epoch == expected
+}
+
+// releaseBuffers is called under the server lock.
+func (st *attachment) releaseBuffers() {
+	for _, event := range st.pending {
+		event.Release()
+	}
+	st.pending = nil
+	for k, event := range st.models {
+		event.Release()
+		delete(st.models, k)
+	}
+	for k, event := range st.progress {
+		event.Release()
+		delete(st.progress, k)
+	}
+}
+
 func (s *server) update(ctx context.Context, id string, u acp.SessionUpdate) error {
 	st, err := s.attached(id)
 	if err != nil || ctx.Err() != nil || !s.canDeliver(st, id, st.actor) {
 		return acpError("forbidden")
+	}
+	if !s.currentDeliveryEpoch(ctx, id) {
+		return acpError("unavailable")
 	}
 	return s.peer.SessionUpdate(ctx, acp.SessionNotification{SessionId: acp.SessionId(id), Update: u})
 }
@@ -43,12 +77,15 @@ func (s *server) event(e api.Event) {
 	if st.loading {
 		// Optional live updates may be dropped while replay is blocked.
 		if len(st.pending) < 256 && len(e.Data) <= 64<<10 {
-			st.pending = append(st.pending, e)
+			if event, ok := api.BufferEvent(s.a, e); ok {
+				st.pending = append(st.pending, event)
+			}
 		}
 		s.mu.Unlock()
 		return
 	}
 	s.mu.Unlock()
+	delivery := withDeliveryEpoch(st.ctx, e.ErasureEpoch)
 	var u *acp.SessionUpdate
 	switch e.Kind {
 	case "question.open":
@@ -73,21 +110,37 @@ func (s *server) event(e api.Event) {
 		entry := api.Decode[api.Entry](e.Data)
 		if entry.Kind == "model" {
 			s.mu.Lock()
-			st.models[e.Step] = entry.Content
+			if old, ok := st.models[e.Step]; ok {
+				old.Release()
+				delete(st.models, e.Step)
+			}
+			if !s.closed && s.sessions[e.Session] == st {
+				if event, ok := api.BufferEvent(s.a, e); ok {
+					st.models[e.Step] = event
+				}
+			}
 			s.mu.Unlock()
 		}
 	case "model.stream.end":
 		s.mu.Lock()
-		content, streamed := st.models[e.Step], st.streamed[e.Step]
+		event, buffered := st.models[e.Step]
+		streamed := st.streamed[e.Step]
+		delete(st.models, e.Step)
 		s.mu.Unlock()
-		if !streamed {
-			for _, p := range content {
-				s.part(st.ctx, e.Session, p, false)
+		if buffered {
+			defer event.Release()
+			if !streamed && event.ErasureEpoch == e.ErasureEpoch {
+				for _, p := range api.Decode[api.Entry](event.Data).Content {
+					s.part(delivery, e.Session, p, false)
+				}
 			}
 		}
 	case "step.end":
 		s.mu.Lock()
-		delete(st.models, e.Step)
+		if event, ok := st.models[e.Step]; ok {
+			event.Release()
+			delete(st.models, e.Step)
+		}
 		delete(st.streamed, e.Step)
 		s.mu.Unlock()
 	case "tool.requested":
@@ -98,17 +151,34 @@ func (s *server) event(e api.Event) {
 		v := acp.UpdateToolCall(acp.ToolCallId(e.Call), acp.WithUpdateStatus(acp.ToolCallStatusInProgress))
 		u = &v
 	case "tool.progress":
-		s.mu.Lock()
 		var content api.Content
+		var piece string
 		if json.Unmarshal(e.Data, &content) == nil {
-			st.progress[e.Call] += content.Text()
+			piece = content.Text()
 		} else {
-			st.progress[e.Call] += api.Decode[string](e.Data)
+			piece = api.Decode[string](e.Data)
 		}
-		value := st.progress[e.Call]
+		s.mu.Lock()
+		if !s.closed && s.sessions[e.Session] == st {
+			view := e
+			prefix := ""
+			if old, ok := st.progress[e.Call]; ok && old.ErasureEpoch == e.ErasureEpoch {
+				prefix = api.Decode[string](old.Data)
+			}
+			if len(prefix)+len(piece) <= 64<<10 {
+				value := prefix + piece
+				view.Data = api.JSON(value)
+				if event, ok := api.BufferEvent(s.a, view); ok {
+					if old, ok := st.progress[e.Call]; ok {
+						old.Release()
+					}
+					st.progress[e.Call] = event
+					v := acp.UpdateToolCall(acp.ToolCallId(e.Call), acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(value))}))
+					u = &v
+				}
+			}
+		}
 		s.mu.Unlock()
-		v := acp.UpdateToolCall(acp.ToolCallId(e.Call), acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(value))}))
-		u = &v
 	case "tool.end":
 		r := api.Decode[api.ToolResult](e.Data)
 		status := acp.ToolCallStatusCompleted
@@ -118,11 +188,14 @@ func (s *server) event(e api.Event) {
 		v := acp.UpdateToolCall(acp.ToolCallId(e.Call), acp.WithUpdateStatus(status), acp.WithUpdateRawOutput(r), acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(r.Content.Text()))}))
 		u = &v
 		s.mu.Lock()
-		delete(st.progress, e.Call)
+		if event, ok := st.progress[e.Call]; ok {
+			event.Release()
+			delete(st.progress, e.Call)
+		}
 		s.mu.Unlock()
 	case "turn.end":
 		for _, call := range api.Decode[api.Outcome](e.Data).Open {
-			_ = s.update(st.ctx, e.Session, acp.UpdateToolCall(acp.ToolCallId(call.ID), acp.WithUpdateStatus(acp.ToolCallStatusPending)))
+			_ = s.update(delivery, e.Session, acp.UpdateToolCall(acp.ToolCallId(call.ID), acp.WithUpdateStatus(acp.ToolCallStatusPending)))
 		}
 	case "setting":
 		if opts, err := s.config(e.Session); err == nil {
@@ -131,7 +204,7 @@ func (s *server) event(e api.Event) {
 		}
 	}
 	if u != nil {
-		_ = s.update(st.ctx, e.Session, *u)
+		_ = s.update(delivery, e.Session, *u)
 	}
 	s.mu.Lock()
 	events := s.capabilities.Meta[Namespace]
@@ -140,7 +213,7 @@ func (s *server) event(e api.Event) {
 		Events bool `json:"events"`
 	}
 	_ = json.Unmarshal(events, &cap)
-	if !s.canDeliver(st, e.Session, st.actor) {
+	if !s.canDeliver(st, e.Session, st.actor) || !s.currentDeliveryEpoch(delivery, e.Session) {
 		return
 	}
 	if e.Kind == api.SessionInterrupted {

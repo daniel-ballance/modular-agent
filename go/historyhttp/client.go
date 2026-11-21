@@ -21,14 +21,15 @@ import (
 )
 
 type Client struct {
-	wire     *servicehttp.Client
-	owner    string
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	leases   []*lease
-	backend  operations
-	localTTL time.Duration
+	wire        *servicehttp.Client
+	owner       string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	leases      []*lease
+	backend     operations
+	localTTL    time.Duration
+	coordinated atomic.Bool
 }
 type lease struct {
 	c          *Client
@@ -103,6 +104,19 @@ func (c *Client) Verify() error {
 	if out.Binding != Binding || leaseDuration(out.TTLMS) <= 0 || out.TTLMS != float64(leaseDuration(out.TTLMS).Milliseconds()) {
 		return errors.New("unsupported history binding or invalid history TTL")
 	}
+	var registry registryState
+	err = (httpBackend{c.wire}).call(c.ctx, "GET", registryPath, nil, &registry)
+	var response *servicehttp.ResponseError
+	if errors.As(err, &response) && (response.Status == http.StatusNotFound || response.Status == http.StatusBadRequest || response.Status == http.StatusMethodNotAllowed) {
+		return nil
+	}
+	if err != nil {
+		return errors.Join(api.ErrErasureUnavailable, err)
+	}
+	if registry.Guard == "" || registry.Revision == "" || registry.History == "" {
+		return api.ErrErasureUnavailable
+	}
+	c.coordinated.Store(true)
 	return nil
 }
 
@@ -128,8 +142,16 @@ func (c *Client) read(id string) (document, error) {
 	}
 }
 func (c *Client) Acquire(id string) (api.Lease, error) {
+	return c.acquire(id, true)
+}
+
+func (c *Client) TryAcquire(id string) (api.Lease, error) {
+	return c.acquire(id, false)
+}
+
+func (c *Client) acquire(id string, wait bool) (api.Lease, error) {
 	l := &lease{c: c, id: id, lost: make(chan struct{})}
-	if err := l.acquire(true); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := l.acquire(wait); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	return c.track(l)
@@ -381,7 +403,9 @@ func (l *lease) loadSnapshot() (api.Session, error) {
 	}
 	return snap, nil
 }
-func (l *lease) Save(s api.Session) error {
+func (l *lease) Save(s api.Session) error { return l.SaveGuarded(s, "") }
+
+func (l *lease) SaveGuarded(s api.Session, guard string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.usable(); err != nil {
@@ -400,7 +424,7 @@ func (l *lease) Save(s api.Session) error {
 	if token == "" {
 		token = strings.Repeat("A", maxLeaseBytes)
 	}
-	size := len(appendBody(token, []json.RawMessage{}))
+	size := len(guardedAppendBody(token, []json.RawMessage{}, guard))
 	for _, e := range s.Entries {
 		if e.Session == "" {
 			e.Session = s.ID
@@ -454,7 +478,14 @@ func (l *lease) Save(s api.Session) error {
 	}
 	writeCtx, cancel := context.WithTimeout(l.c.ctx, time.Duration(l.cutoff.Load()-leaseClock()))
 	defer cancel()
-	if _, err := l.c.backend.Append(writeCtx, l.id, l.token, entries); err != nil {
+	var err error
+	if guard != "" {
+		var reply struct{ Kept int }
+		err = (httpBackend{l.c.wire}).call(writeCtx, "POST", path(l.id)+"/entries", guardedAppendBody(l.token, entries, guard), &reply)
+	} else {
+		_, err = l.c.backend.Append(writeCtx, l.id, l.token, entries)
+	}
+	if err != nil {
 		writerLost := l.CheckWriter() != nil
 		l.fence()
 		var response *servicehttp.ResponseError

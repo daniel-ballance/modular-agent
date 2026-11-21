@@ -29,6 +29,8 @@ func NewFileStoreServer(store api.Store, dir string, ttl time.Duration) (*Server
 	if err != nil {
 		return nil, err
 	}
+	// Native writers do not take this server's registry lock.
+	server.registry = false
 	server.store = store
 	server.storeLeases = map[string]api.Lease{}
 	server.timers = map[string]*time.Timer{}

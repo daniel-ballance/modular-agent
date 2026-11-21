@@ -91,6 +91,7 @@ type Provider struct {
 	Available      func() bool
 	Request        func(context.Context, ModelRef, ModelRequest, *ProviderContext) (AssistantMessage, error)
 	DiscardState   func(context.Context, string) error
+	EraseState     func(context.Context, string, []string) (ProviderErasure, error)
 	CatalogChanges *CatalogChanges
 }
 
@@ -158,6 +159,16 @@ func (p providerAdapter) Discard(ctx context.Context, session string) error {
 		return nil
 	}
 	return p.p.DiscardState(ctx, session)
+}
+
+// ProviderErasure describes remote deletion that could not be confirmed.
+type ProviderErasure = api.ProviderErasure
+
+func (p providerAdapter) EraseState(ctx context.Context, session string, entries []string) (api.ProviderErasure, error) {
+	if p.p.EraseState == nil {
+		return api.ProviderErasure{}, &Error{Code: NotSupported, Message: "Provider cannot erase remote state"}
+	}
+	return p.p.EraseState(ctx, session, entries)
 }
 
 type modelAccess struct {

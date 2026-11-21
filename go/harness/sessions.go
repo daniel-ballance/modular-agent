@@ -19,6 +19,7 @@ import (
 type session struct {
 	id               string // immutable, safe for event routing while snapshots change
 	project          string // immutable canonical workspace for rewind exclusion
+	tenant           string // immutable capacity scope for output
 	rewindBlocked    bool
 	commandCancels   map[*commandCancellation]struct{}
 	commandBytes     int64
@@ -133,6 +134,7 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		settings.Approval = "off"
 	}
 	s := c.newSessionState(id, project)
+	s.tenant = tenant
 	s.data = api.Session{Version: 1, ID: id, Project: project, Settings: settings, Actor: c.h.localActor, Tenant: tenant, Limit: limit}
 	if host != nil {
 		s.data.Actor = host.ID
@@ -273,6 +275,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		return err
 	}
 	s := c.newSessionState(id, project)
+	s.tenant = snap.Tenant
 	s.data, s.lease, s.last, s.opening = snap, lease, recordedOutcome(snap), true
 	if err = s.reconcileErasureLocked(); err != nil {
 		_ = lease.Close()
@@ -516,12 +519,12 @@ func (s *session) publishInitialLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
-	return s.withErasureCheck(next, func() error {
-		return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next) })
+	return s.withErasureCheck(next, func(guard string) error {
+		return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next, guard) })
 	})
 }
 
-func (s *session) publishReservedInitialLocked(next api.Session) error {
+func (s *session) publishReservedInitialLocked(next api.Session, guard string) error {
 	l, err := acquireNew(s.pendingStore, s.id)
 	if err != nil {
 		return s.stopWriterLocked(err)
@@ -531,7 +534,7 @@ func (s *session) publishReservedInitialLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
-	if err := l.Save(next); err != nil {
+	if err := guardedSave(l, next, guard); err != nil {
 		return s.stopWriterLocked(err)
 	}
 	s.pendingStore, s.data = nil, next
@@ -539,12 +542,12 @@ func (s *session) publishReservedInitialLocked(next api.Session) error {
 }
 
 func (s *session) commitSnapshotLocked(next api.Session) error {
-	return s.withErasureCheck(next, func() error {
-		return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next) })
+	return s.withErasureCheck(next, func(guard string) error {
+		return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next, guard) })
 	})
 }
 
-func (s *session) commitReservedSnapshotLocked(next api.Session) error {
+func (s *session) commitReservedSnapshotLocked(next api.Session, guard string) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
@@ -558,7 +561,7 @@ func (s *session) commitReservedSnapshotLocked(next api.Session) error {
 	// Outside the public persistent lifecycle, keep the original lazy
 	// save rule. An attached public persistent lease saves all changes.
 	if s.lease != nil && (s.h.deferHistory || next.ForkedFrom != "" || slices.ContainsFunc(next.Entries, startsLegacyHistory)) {
-		if err := s.lease.Save(next); err != nil {
+		if err := guardedSave(s.lease, next, guard); err != nil {
 			if s.rewindBlocked && !errors.Is(err, api.ErrWriterLost) && s.reconcileRewindCommit(next) {
 				return nil
 			}
@@ -598,6 +601,11 @@ func appendEntry(next *api.Session, e api.Entry, writer string, advance bool) ap
 	return e
 }
 func (c *client) Record(ctx context.Context, id string, e api.Entry) (api.Entry, error) {
+	if e.Kind == "model.request" {
+		if err := c.checkProviderErasure(ctx, id); err != nil {
+			return e, err
+		}
+	}
 	s, err := c.find(id)
 	if err != nil {
 		return e, err
@@ -1340,6 +1348,7 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 	c.h.mu.Lock()
 	delete(c.h.sessions, id)
 	c.h.mu.Unlock()
+	c.dropOutput(id)
 	if closing && !interrupted {
 		c.Emit(context.Background(), api.Event{Kind: "session.end", Session: id, Data: api.JSON(map[string]any{"sessionId": id})})
 	}
@@ -1359,7 +1368,8 @@ func (c *client) Emit(ctx context.Context, e api.Event) {
 		out.Event.ErasureEpoch = e.ErasureEpoch
 		e = out.Event
 	}
-	events := c.streamOutput(e, err != nil || out.Hold)
+	events, release := c.streamOutput(e, err != nil || out.Hold)
+	defer release()
 	if len(events) == 0 {
 		return
 	}
@@ -1460,6 +1470,13 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 			result.Content = api.Text("Tool result processing failed.")
 			result.Structured, result.Data, result.Wire = nil, nil, nil
 			result.ProcessingError = errors.Join(result.ProcessingError, err)
+		}
+		// Validate the original result first. If it cannot fit the
+		// settlement reservation, preserve dispatch status, not its data.
+		if len(api.JSON(result)) > 1<<20 {
+			result.Content = api.Text(api.ErrResultTooLarge.Error())
+			result.Structured, result.Data, result.Wire, result.Copies = nil, nil, nil, nil
+			result.ProcessingError = errors.Join(result.ProcessingError, api.ErrResultTooLarge)
 		}
 		before.Result = result
 		return before, nil
@@ -1692,11 +1709,11 @@ func (p *turnPorts) RunTool(ctx context.Context, call api.Call) api.ToolResult {
 	if !found || !api.CanCall(def, call.Origin) || !p.canRunTools(call.Actor) {
 		return api.ToolResult{Call: call.ID, Status: "refused", NotDispatched: true}
 	}
-	if ctx.Err() != nil || p.CheckWriter() != nil {
-		return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
-	}
 	if err := validateToolInput(def, call.Input); err != nil {
 		return api.ToolResult{Call: call.ID, Status: "failed", Content: api.Text(err.Error()), NotDispatched: true}
+	}
+	if ctx.Err() != nil || p.CheckWriter() != nil || !p.canRunTools(call.Actor) {
+		return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
 	}
 	result, err := p.executeTool(ctx, source, snap, call, api.ToolRegistration{Plugin: plugin, ToolSource: id}, 0)
 	result.Returns = def.Output

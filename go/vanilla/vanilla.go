@@ -31,6 +31,8 @@ import (
 
 type Options struct {
 	Conformance            bool
+	Capacity               *harness.Capacity
+	PolicyTenants          map[string]harness.TenantConfig
 	History, Global, Model string
 	DataDir                string
 	Store, Environment     api.Plugin
@@ -46,6 +48,12 @@ type Options struct {
 
 func New(opt Options) (*harness.Harness, error) {
 	h := harness.New()
+	if opt.Capacity != nil {
+		h.UseCapacity(opt.Capacity)
+	}
+	if opt.PolicyTenants != nil {
+		h.ConfigureTenants(opt.PolicyTenants)
+	}
 	provider := opt.Provider
 	if provider.Name == "" && os.Getenv("MODULAR_AGENT_PLUGINS") == "" {
 		return nil, fmt.Errorf("model gateway Provider required (or use the offline fake Provider)")

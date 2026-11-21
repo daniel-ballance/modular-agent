@@ -34,7 +34,7 @@ func FileHistory(dir string) HistoryStore {
 
 // HTTPHistory uses a modular-agent-history/1 service as a HistoryStore.
 func HTTPHistory(url, tokenFile string) HistoryStore {
-	return HistoryStore{persistent: true, make: func() (api.Store, error) {
+	return HistoryStore{persistent: true, erasure: true, make: func() (api.Store, error) {
 		token, err := historyhttp.TokenFile(tokenFile)
 		if err != nil {
 			return nil, err
@@ -62,13 +62,9 @@ type HistoryOptions struct {
 	AllowVolatileForTests bool
 }
 
-func ServeHistory(ctx context.Context, store HistoryStore, options HistoryOptions) error {
-	listener, err := net.Listen("tcp", options.Address)
-	if err != nil {
-		return appError(err, InvalidParams)
-	}
-	defer listener.Close()
-	return serveHistory(ctx, store, options, listener)
+// ServeHistory starts serving history and returns the bound URL, including for port 0.
+func ServeHistory(ctx context.Context, store HistoryStore, options HistoryOptions) (*HistoryService, error) {
+	return ListenHistory(ctx, store, options)
 }
 
 // HistoryService holds a running loopback history service.

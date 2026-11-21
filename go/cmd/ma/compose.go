@@ -29,9 +29,9 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		durability = modular.Kept
 	}
 	opts := []modular.Option{modular.WithProject(o.project), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp), modular.WithJobReportsStartTurns(true), modular.WithLateAnswersStartTurns(true), modular.WithRefusedSettingsDuringTurn()}
-	opts = append(opts, modular.WithCapacityLimits(o.policy.limits))
-	if len(o.policy.tenants) != 0 {
-		opts = append(opts, modular.WithTenants(o.policy.tenants))
+	opts = append(opts, modular.WithCapacityLimits(o.policy.Limits))
+	if len(o.policy.Tenants) != 0 {
+		opts = append(opts, modular.WithTenants(o.policy.Tenants))
 	}
 	fixture := o.acp && os.Getenv("MODULAR_AGENT_CONFORMANCE") == "1"
 	if fixture {

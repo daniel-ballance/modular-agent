@@ -12,8 +12,10 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/durable"
 	"github.com/daniel-ballance/modular-agent/go/fake"
 	"github.com/daniel-ballance/modular-agent/go/gateway"
+	"github.com/daniel-ballance/modular-agent/go/harness"
 	"github.com/daniel-ballance/modular-agent/go/history"
 	"github.com/daniel-ballance/modular-agent/go/historyhttp"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 	"github.com/daniel-ballance/modular-agent/go/terminal"
@@ -172,6 +174,16 @@ func run(ctx context.Context, args []string, input io.ReadCloser, stdout, stderr
 		return fmt.Errorf("subagents must be transient or durable")
 	}
 	conformance := os.Getenv("MODULAR_AGENT_CONFORMANCE") == "1"
+	var policy *modular.ACPPolicy
+	if path := os.Getenv("MODULAR_AGENT_CONFORMANCE_POLICY"); conformance && opt.Mode == "acp" && path != "" {
+		config, err := modular.ReadACPPolicy(path, false, true)
+		if err != nil {
+			return err
+		}
+		policy = &config
+		options.Capacity = harness.NewCapacity(config.Limits)
+		options.PolicyTenants = config.Tenants
+	}
 	if conformance {
 		options.Provider, options.Model = conformancemodel.Plugin(), conformancemodel.ID
 		options.Conformance = true
@@ -207,7 +219,23 @@ func run(ctx context.Context, args []string, input io.ReadCloser, stdout, stderr
 		if err != nil {
 			return err
 		}
-		return v.(*acpinterface.Interface).Serve(ctx, input, stdout)
+		if policy == nil {
+			return v.(*acpinterface.Interface).Serve(ctx, input, stdout)
+		}
+		var principal acpinterface.Principal
+		if s := policy.Stdio; s != nil {
+			principal = acpinterface.Principal{Actor: s.Actor, Projects: s.Projects, Tenants: s.Tenants, Represents: s.Represents}
+		}
+		projects := acpinterface.Projects{Compose: func(_ context.Context, project, _ string) (acpinterface.Project, error) {
+			projectOptions := options
+			projectOptions.Project = project
+			part, err := vanilla.New(projectOptions)
+			if err != nil {
+				return acpinterface.Project{}, err
+			}
+			return acpinterface.Project{API: part.API(), Close: part.Close}, nil
+		}}
+		return v.(*acpinterface.Interface).ServeStdio(ctx, input, stdout, nil, projects, principal)
 	}
 	v, err := h.API().Get("interface.terminal")
 	if err != nil {

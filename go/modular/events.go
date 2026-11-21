@@ -3,6 +3,7 @@ package modular
 import (
 	"context"
 	"iter"
+	"sync"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 )
@@ -19,7 +20,15 @@ func (s *Session) Events(ctx context.Context, fromEntry ...string) iter.Seq2[Eve
 		if len(fromEntry) > 0 {
 			cursor = fromEntry[0]
 		}
-		pending := make(chan api.Event, 256)
+		pending := make(chan api.BufferedEvent, 256)
+		var mu sync.Mutex
+		stopped := false
+		host := s.agent.a
+		reader := host.(interface{ ErasureEpoch(string) (int, error) })
+		allowed := func(expected int) bool {
+			epoch, err := reader.ErasureEpoch(s.id)
+			return err == nil && epoch == expected
+		}
 		lag := make(chan struct{}, 1)
 		subscribe := s.agent.a.(interface {
 			SubscribeOutput(func(api.Event) string, func(api.Event)) func()
@@ -28,16 +37,39 @@ func (s *Session) Events(ctx context.Context, fromEntry ...string) iter.Seq2[Eve
 			if e.Session != s.id {
 				return
 			}
-			select {
-			case pending <- e:
-			default:
+			mu.Lock()
+			defer mu.Unlock()
+			if stopped {
+				return
+			}
+			if buffered, ok := api.BufferEvent(host, e); ok {
 				select {
-				case lag <- struct{}{}:
+				case pending <- buffered:
+					return
 				default:
+					buffered.Release()
 				}
 			}
+			select {
+			case lag <- struct{}{}:
+			default:
+			}
 		})
-		defer stop()
+		defer func() {
+			stop()
+			mu.Lock()
+			defer mu.Unlock()
+			stopped = true
+			close(pending)
+			for buffered := range pending {
+				buffered.Release()
+			}
+		}()
+		epoch, err := reader.ErasureEpoch(s.id)
+		if err != nil {
+			yield(nil, appError(err, Unavailable))
+			return
+		}
 		view, err := s.view(ctx)
 		if err != nil {
 			yield(nil, err)
@@ -61,6 +93,10 @@ func (s *Session) Events(ctx context.Context, fromEntry ...string) iter.Seq2[Eve
 			}
 			if ctx.Err() != nil {
 				yield(nil, appError(ctx.Err(), CancelledCode))
+				return
+			}
+			if !allowed(epoch) {
+				lost()
 				return
 			}
 			raw := api.Event{Kind: "history.added", Time: entry.Time, Session: s.id, Turn: entry.Turn, Step: entry.Step, Call: entry.Call, Actor: entry.Actor, Data: api.JSON(entry)}
@@ -87,7 +123,13 @@ func (s *Session) Events(ctx context.Context, fromEntry ...string) iter.Seq2[Eve
 			case <-lag:
 				lost()
 				return
-			case raw := <-pending:
+			case buffered := <-pending:
+				raw := buffered.Event
+				buffered.Release()
+				if !allowed(raw.ErasureEpoch) {
+					lost()
+					return
+				}
 				if raw.Kind == "history.added" {
 					id := api.Decode[api.Entry](raw.Data).ID
 					if seen[id] {

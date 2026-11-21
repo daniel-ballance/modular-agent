@@ -49,16 +49,19 @@ func (b CapacityBounds) permits(old, next CapacityBounds) bool {
 // Session locks protect the corresponding snapshots; the ledger lock orders
 // checks and successful commits across sessions.
 type Capacity struct {
-	limits   CapacityLimits
-	mu       sync.Mutex
-	seeded   bool
-	sessions map[string]CapacityBounds
-	tenants  map[string]CapacityBounds
-	agent    CapacityBounds
+	limits       CapacityLimits
+	mu           sync.Mutex
+	seeded       bool
+	sessions     map[string]CapacityBounds
+	tenants      map[string]CapacityBounds
+	agent        CapacityBounds
+	output       map[string]int64
+	tenantOutput map[string]int64
+	agentOutput  int64
 }
 
 func NewCapacity(limits CapacityLimits) *Capacity {
-	return &Capacity{limits: limits, sessions: map[string]CapacityBounds{}, tenants: map[string]CapacityBounds{}}
+	return &Capacity{limits: limits, sessions: map[string]CapacityBounds{}, tenants: map[string]CapacityBounds{}, output: map[string]int64{}, tenantOutput: map[string]int64{}}
 }
 func (h *Harness) Capacity() *Capacity { return h.capacity }
 func (c *client) ReservationDeclaration() any {
@@ -154,7 +157,51 @@ func (p *Capacity) permits(row api.Session, charge CapacityBounds) bool {
 	old := p.sessions[row.ID]
 	delta := charge.minus(old)
 	tenant := p.tenants[row.Tenant]
+	if delta.BufferedBytes > 0 && (charge.BufferedBytes+p.output[row.ID] > p.limits.Session.BufferedBytes ||
+		tenant.BufferedBytes+delta.BufferedBytes+p.tenantOutput[row.Tenant] > p.limits.Tenant.BufferedBytes ||
+		p.agent.BufferedBytes+delta.BufferedBytes+p.agentOutput > p.limits.Agent.BufferedBytes) {
+		return false
+	}
 	return p.limits.Session.permits(old, charge) && p.limits.Tenant.permits(tenant, tenant.add(delta)) && p.limits.Agent.permits(p.agent, p.agent.add(delta))
+}
+
+// ReserveOutput uses the same byte pool as queued input. Dropping or
+// consuming output frees only buffer bytes, never durable write headroom.
+func (c *client) ReserveOutput(e api.Event) func() {
+	tenant := ""
+	if e.Session != "" {
+		if s, err := c.find(e.Session); err == nil {
+			tenant = s.tenant
+		}
+	}
+	n := int64(128 + len(e.Data) + len(e.Session) + len(e.Turn) + len(e.Step) + len(e.Call) + len(e.Actor) + len(e.Kind))
+	return c.h.capacity.reserveOutput(e.Session, tenant, n)
+}
+
+func (p *Capacity) reserveOutput(id, tenant string, n int64) func() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if (id != "" && p.sessions[id].BufferedBytes+p.output[id]+n > p.limits.Session.BufferedBytes) ||
+		p.tenants[tenant].BufferedBytes+p.tenantOutput[tenant]+n > p.limits.Tenant.BufferedBytes ||
+		p.agent.BufferedBytes+p.agentOutput+n > p.limits.Agent.BufferedBytes {
+		return nil
+	}
+	p.output[id] += n
+	p.tenantOutput[tenant] += n
+	p.agentOutput += n
+	return sync.OnceFunc(func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.output[id] -= n
+		if p.output[id] == 0 {
+			delete(p.output, id)
+		}
+		p.tenantOutput[tenant] -= n
+		if p.tenantOutput[tenant] == 0 {
+			delete(p.tenantOutput, tenant)
+		}
+		p.agentOutput -= n
+	})
 }
 
 func (s *session) capacityCharges(next api.Session) CapacityBounds {
@@ -238,6 +285,7 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 	}
 	jobs := map[string]struct{}{}
 	turns := map[string]bool{}
+	questions := map[string]bool{}
 	// The second map tracks model attempts; a committed response transfers
 	// the call reservation to all call IDs it contains.
 	attempts := map[string]string{}
@@ -267,8 +315,13 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 					delete(attempts, step)
 				}
 			}
-		case e.Kind == "tool.call":
+		case e.Kind == "tool.call" || e.Kind == "external.start":
 			calls[e.Call] = true
+		case e.Kind == "question.open":
+			q := api.Decode[struct{ Question api.Question }](e.Data).Question
+			questions[q.ID] = true
+		case e.Kind == "question.answer":
+			delete(questions, api.Decode[api.Answer](e.Data).Request)
 		case e.WasKind("tool.result"):
 			delete(calls, e.Call)
 		}
@@ -279,6 +332,6 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 	b.BufferedBytes += b.Jobs * api.JobReportBytes
 	// Keep enough room for a bounded disposition or result in addition to
 	// the committed intent. Taken inputs transfer their slot to a live turn.
-	b.StorageBytes += 2*b.BufferedBytes + (b.Inputs+int64(len(turns)))*(4<<20) + b.Calls*(4<<20) + b.Jobs*(8<<20)
+	b.StorageBytes += 2*b.BufferedBytes + (b.Inputs+int64(len(turns)))*(4<<20) + b.Calls*(4<<20) + b.Jobs*(8<<20) + int64(len(questions))*(2<<20)
 	return b
 }

@@ -75,6 +75,8 @@ type Server struct {
 	storeLeases map[string]api.Lease
 	timers      map[string]*time.Timer
 	closed      bool
+	registry    bool
+	historyRev  string
 }
 
 func New(dir string, ttl time.Duration) (*Server, error) {
@@ -93,7 +95,11 @@ func New(dir string, ttl time.Duration) (*Server, error) {
 		f.Close()
 		return nil, errors.New("history service store already open")
 	}
-	s := &Server{dir: dir, ttl: ttl, held: map[string]held{}, lock: f}
+	s := &Server{dir: dir, ttl: ttl, held: map[string]held{}, lock: f, historyRev: api.ID()}
+	if err := s.startupRegistry(); err != nil {
+		f.Close()
+		return nil, err
+	}
 	if err := s.startup(); err != nil {
 		f.Close()
 		return nil, err
@@ -267,6 +273,10 @@ func (s *Server) Handler(token string) http.Handler {
 			failure(w, 401, "unauthorized", "authentication required")
 			return
 		}
+		if r.URL.Path == registryPath {
+			s.serveRegistry(w, r)
+			return
+		}
 		q, ok := parseRequest(w, r)
 		if !ok {
 			return
@@ -288,6 +298,7 @@ type request struct {
 	meta                                 Session
 	entries                              []json.RawMessage
 	erase                                []string
+	guard                                string
 }
 
 func parseRequest(w http.ResponseWriter, r *http.Request) (q request, ok bool) {
@@ -452,6 +463,12 @@ func (q *request) body(body []byte) bool {
 		return q.owner != ""
 	case "entries":
 		q.lease = idOf(f["lease"])
+		if f["goErasureGuard"] != nil {
+			q.guard = idOf(f["goErasureGuard"])
+			if q.guard == "" {
+				return false
+			}
+		}
 		if !validLease(q.lease) || json.Unmarshal(f["entries"], &q.entries) != nil || q.entries == nil {
 			return false
 		}
@@ -562,6 +579,13 @@ func (s *Server) serve(w http.ResponseWriter, q request) {
 			lost(w)
 			return
 		}
+		if q.guard != "" {
+			state, err := s.loadRegistry()
+			if err != nil || state.Guard != q.guard {
+				unavailable(w)
+				return
+			}
+		}
 		s.append(w, d, q.entries, current)
 	case "erase":
 		if q.lease != "" {
@@ -637,8 +661,11 @@ func (s *Server) append(w http.ResponseWriter, d document, entries []json.RawMes
 		lost(w)
 		return
 	}
-	if kept > 0 && !s.save(w, d, false) {
-		return
+	if kept > 0 {
+		s.historyRev = api.ID()
+		if !s.save(w, d, false) {
+			return
+		}
 	}
 	respond(w, 200, map[string]int{"kept": kept})
 }
@@ -668,8 +695,11 @@ func (s *Server) erase(w http.ResponseWriter, d document, ids []string, current 
 		lost(w)
 		return
 	}
-	if changed && !s.save(w, d, true) {
-		return
+	if changed {
+		s.historyRev = api.ID()
+		if !s.save(w, d, true) {
+			return
+		}
 	}
 	respond(w, 200, map[string]any{"erased": erased})
 }
