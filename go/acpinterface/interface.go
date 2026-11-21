@@ -44,7 +44,7 @@ type attachment struct {
 	joined     map[string]func()
 	busy       bool
 	loading    bool
-	pending    []api.Event
+	pending    []api.BufferedEvent
 	streamed   map[string]bool
 	models     map[string]api.Content
 	progress   map[string]string
@@ -183,6 +183,12 @@ func (s *server) stop() {
 	s.closed = true
 	attached := s.sessions
 	s.sessions = map[string]*attachment{}
+	for _, st := range attached {
+		for _, event := range st.pending {
+			event.Release()
+		}
+		st.pending = nil
+	}
 	s.mu.Unlock()
 	for id, st := range attached {
 		st.disconnect()
@@ -320,6 +326,10 @@ func (s *server) attach(id string, loading bool, identity ...string) *attachment
 func (s *server) detach(id string, st *attachment) bool {
 	s.mu.Lock()
 	delete(s.sessions, id)
+	for _, event := range st.pending {
+		event.Release()
+	}
+	st.pending = nil
 	s.mu.Unlock()
 	st.disconnect()
 	s.connectionRights.Delete(id)
@@ -559,10 +569,12 @@ func (s *server) drainOpen(st *attachment, snap *api.Session) {
 	st.pending = nil
 	st.loading = false
 	s.mu.Unlock()
-	for _, e := range pending {
+	for _, buffered := range pending {
+		e := buffered.Event
 		if snap == nil || !represented(*snap, e) {
 			s.event(e)
 		}
+		buffered.Release()
 	}
 }
 

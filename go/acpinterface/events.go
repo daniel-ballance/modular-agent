@@ -43,7 +43,9 @@ func (s *server) event(e api.Event) {
 	if st.loading {
 		// Optional live updates may be dropped while replay is blocked.
 		if len(st.pending) < 256 && len(e.Data) <= 64<<10 {
-			st.pending = append(st.pending, e)
+			if event, ok := api.BufferEvent(s.a, e); ok {
+				st.pending = append(st.pending, event)
+			}
 		}
 		s.mu.Unlock()
 		return

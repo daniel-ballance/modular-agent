@@ -19,6 +19,7 @@ import (
 type session struct {
 	id               string // immutable, safe for event routing while snapshots change
 	project          string // immutable canonical workspace for rewind exclusion
+	tenant           string // immutable capacity scope for output
 	rewindBlocked    bool
 	commandCancels   map[*commandCancellation]struct{}
 	commandBytes     int64
@@ -133,6 +134,7 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		settings.Approval = "off"
 	}
 	s := c.newSessionState(id, project)
+	s.tenant = tenant
 	s.data = api.Session{Version: 1, ID: id, Project: project, Settings: settings, Actor: c.h.localActor, Tenant: tenant, Limit: limit}
 	if host != nil {
 		s.data.Actor = host.ID
@@ -273,6 +275,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		return err
 	}
 	s := c.newSessionState(id, project)
+	s.tenant = snap.Tenant
 	s.data, s.lease, s.last, s.opening = snap, lease, recordedOutcome(snap), true
 	if err = s.reconcileErasureLocked(); err != nil {
 		_ = lease.Close()
@@ -1340,6 +1343,7 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 	c.h.mu.Lock()
 	delete(c.h.sessions, id)
 	c.h.mu.Unlock()
+	c.dropOutput(id)
 	if closing && !interrupted {
 		c.Emit(context.Background(), api.Event{Kind: "session.end", Session: id, Data: api.JSON(map[string]any{"sessionId": id})})
 	}
@@ -1359,7 +1363,8 @@ func (c *client) Emit(ctx context.Context, e api.Event) {
 		out.Event.ErasureEpoch = e.ErasureEpoch
 		e = out.Event
 	}
-	events := c.streamOutput(e, err != nil || out.Hold)
+	events, release := c.streamOutput(e, err != nil || out.Hold)
+	defer release()
 	if len(events) == 0 {
 		return
 	}

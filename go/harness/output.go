@@ -148,12 +148,17 @@ func (c *client) OutputValue(ctx context.Context, e api.Event) (api.Event, error
 
 // streamOutput keeps model deltas and tool progress until their end markers.
 // The raw ledger and the local, piece-oriented gate are not changed.
-func (c *client) streamOutput(e api.Event, held bool) []api.Event {
+func (c *client) streamOutput(e api.Event, held bool) ([]api.Event, func()) {
+	nothing := func() {}
 	if !c.HoldsOutput() {
 		if held {
-			return nil
+			return nil, nothing
 		}
-		return []api.Event{e}
+		buffered, ok := api.BufferEvent(c, e)
+		if !ok {
+			return nil, nothing
+		}
+		return []api.Event{e}, buffered.Release
 	}
 	var key outputStream
 	final := false
@@ -167,25 +172,55 @@ func (c *client) streamOutput(e api.Event, held bool) []api.Event {
 	}
 	if key.kind == "" {
 		if held {
-			return nil
+			return nil, nothing
 		}
-		return []api.Event{e}
+		buffered, ok := api.BufferEvent(c, e)
+		if !ok {
+			return nil, nothing
+		}
+		return []api.Event{e}, buffered.Release
 	}
 	c.h.outputMu.Lock()
 	buffer := c.h.outputStreams[key]
 	if len(buffer) > 0 && buffer[0].ErasureEpoch != e.ErasureEpoch {
+		for _, old := range buffer {
+			old.Release()
+		}
 		delete(c.h.outputStreams, key)
 		buffer = nil
 	}
 	if !held && len(buffer) < 256 && len(e.Data) <= 64<<10 {
-		c.h.outputStreams[key] = append(buffer, e)
+		if event, ok := api.BufferEvent(c, e); ok {
+			buffer = append(buffer, event)
+			c.h.outputStreams[key] = buffer
+		}
 	}
 	if !final {
 		c.h.outputMu.Unlock()
-		return nil
+		return nil, nothing
 	}
-	events := c.h.outputStreams[key]
 	delete(c.h.outputStreams, key)
 	c.h.outputMu.Unlock()
-	return events
+	events := make([]api.Event, 0, len(buffer))
+	for _, event := range buffer {
+		events = append(events, event.Event)
+	}
+	return events, func() {
+		for _, event := range buffer {
+			event.Release()
+		}
+	}
+}
+
+func (c *client) dropOutput(id string) {
+	c.h.outputMu.Lock()
+	defer c.h.outputMu.Unlock()
+	for key, events := range c.h.outputStreams {
+		if key.session == id {
+			for _, event := range events {
+				event.Release()
+			}
+			delete(c.h.outputStreams, key)
+		}
+	}
 }
