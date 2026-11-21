@@ -105,6 +105,7 @@ if ! $quick; then
     step "kits over WebSocket: $language plugin and ma" scripts/websocket-kits.sh "$language"
     step "ADR 0030 kits: $language ACP and history" scripts/production-kits.sh "$language"
   done
+  step "ADR 0030: erasure across languages (12 pairings)" scripts/erasure-matrix.sh
 fi
 
 echo

@@ -2,12 +2,16 @@
 # Run the ADR 0030 ACP and history checks against one language's own builds.
 #
 #   scripts/production-kits.sh rust|typescript|go|python
+#   scripts/production-kits.sh LANGUAGE --erasure-with HISTORY_LANGUAGE
+#       only the ACP erasure checks, with LANGUAGE's agents on HISTORY_LANGUAGE's history service
 #
 # Needs the launchers and history service built as in scripts/check.sh, and the kit npm dependencies.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-language="${1:?usage: production-kits.sh rust|typescript|go|python}"
+language="${1:?usage: production-kits.sh rust|typescript|go|python [--erasure-with HISTORY_LANGUAGE]}"
+history_language="$language"; erasure_only=false
+if [ "${2:-}" = --erasure-with ]; then history_language="${3:?--erasure-with needs a language}"; erasure_only=true; fi
 case "$language" in
   rust) base=("$repo/rust/target/debug/modular-agent" --acp) ;;
   typescript) base=(node "$repo/typescript/packages/agent/dist/src/cli.js" --acp) ;;
@@ -50,7 +54,7 @@ history_service() { # Store directory; sets history_url when the service is read
   local -a service
   mkdir "$dir"
   openssl rand -hex 32 >"$dir/token"
-  case "$language" in
+  case "$history_language" in
     rust)
       # The SDK example takes a fixed address and does not print its bound URL.
       address="127.0.0.1:$(free_port)"
@@ -86,7 +90,7 @@ signal.pause()
   pids+=("$pid")
   for _ in $(seq 300); do
     kill -0 "$pid" 2>/dev/null || break
-    if [ "$language" = rust ]; then
+    if [ "$history_language" = rust ]; then
       if (exec 3<>"/dev/tcp/${address%:*}/${address#*:}") 2>/dev/null; then
         line="http://$address"
         break
@@ -97,7 +101,7 @@ signal.pause()
     sleep 0.1
   done
   if [ -z "$line" ] || ! kill -0 "$pid" 2>/dev/null; then
-    echo "the $language history service did not start ($dir)" >&2
+    echo "the $history_language history service did not start ($dir)" >&2
     tail -n 30 "$dir/service.log" >&2
     return 1
   fi
@@ -114,11 +118,34 @@ run() { # Label, command and arguments. Keep going so each option is checked.
   "$@" || failed=1
 }
 
-history_service "$work/history-a"; first="$history_url"
-history_service "$work/history-b"; second="$history_url"
-run 'history --isolation-checks' node "$repo/conformance/history/run.mjs" \
-  "$first" "$work/history-a/token" --isolation-checks "$second" "$work/history-b/token"
-stop_history
+if ! $erasure_only; then
+  history_service "$work/history-a"; first="$history_url"
+  history_service "$work/history-b"; second="$history_url"
+  run 'history --isolation-checks' node "$repo/conformance/history/run.mjs" \
+    "$first" "$work/history-a/token" --isolation-checks "$second" "$work/history-b/token"
+  stop_history
+  # The pending-erasure registry profile, across a service restart on a fixed address.
+  mkdir "$work/registry"; openssl rand -hex 32 >"$work/registry/token"
+  port=$(free_port); restart=--restart
+  case "$history_language" in
+    rust) restart=--restart-ttl
+      registry=("$repo/rust/target/debug/examples/history_service" "127.0.0.1:$port" "$work/registry/token" "$work/registry/store") ;;
+    typescript)
+      registry=(node "$repo/typescript/packages/services/dist/src/serve.js" history "$(node -e 'const fs=require("fs"); console.log(JSON.stringify({ dir: process.argv[1] + "/store", token: fs.readFileSync(process.argv[1] + "/token", "utf8").trim(), port: +process.argv[2], leaseMs: 2500 }))' "$work/registry" "$port")") ;;
+    go) registry=("$repo/go/.bin/modular-service" --role history --listen "127.0.0.1:$port" --token-file "$work/registry/token" --state "$work/registry/store" --history-ttl 2500ms) ;;
+    python) registry=("$repo/python/.venv/bin/python" -c '
+import signal, sys
+from pathlib import Path
+from modular_agent import file_history, serve_history
+root = Path(sys.argv[1])
+serve_history(file_history(root / "store"), address=("127.0.0.1", int(sys.argv[2])),
+              token_file=root / "token", witness=root / "witness")
+signal.pause()
+' "$work/registry" "$port") ;;
+  esac
+  run "history --erasure-registry-checks" node "$repo/conformance/history/run.mjs" \
+    "http://127.0.0.1:$port" "$work/registry/token" --erasure-registry-checks "$restart" -- "${registry[@]}"
+fi
 
 # The kit makes each operator policy, including the small capacity ceilings.
 # Erasure needs a shared store without the raw records left by the history kit.
@@ -129,12 +156,14 @@ python_coordination=(bash -c 'export MODULAR_AGENT_HISTORY_COORDINATION="$1" MOD
 openssl rand -hex 32 >"$work/acp-token"
 unset MODULAR_AGENT_HISTORY_URL MODULAR_AGENT_HISTORY_TOKEN_FILE MODULAR_AGENT_PLUGINS
 cd "$repo/conformance/acp"
-for option in --isolation-checks --capacity-checks --erasure-checks; do
+options=(--isolation-checks --capacity-checks --erasure-checks)
+if $erasure_only; then options=(--erasure-checks); fi
+for option in "${options[@]}"; do
   prefix=()
   if [ "$option" = --erasure-checks ]; then
     history_service "$work/erasure"
     export MODULAR_AGENT_HISTORY_URL="$history_url" MODULAR_AGENT_HISTORY_TOKEN_FILE="$work/erasure/token"
-    if [ "$language" = python ]; then prefix=("${python_coordination[@]}"); fi
+    if [ "$language:$history_language" = python:python ]; then prefix=("${python_coordination[@]}"); fi
   fi
   for launcher in ma base; do
     if [ "$launcher" = ma ]; then command=("${prefix[@]}" "${ma[@]}")

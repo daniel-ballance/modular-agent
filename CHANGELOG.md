@@ -4,6 +4,7 @@ The four SDKs share one version, the revision of the [SDK specification](docs/sd
 
 ## Unreleased
 
+- **Production gaps closed ([ADR 0030](docs/adr/0030-production-gaps.md)).** Per-connection isolation, capacity reserved so settlement always completes under load, and cross-session erasure coordination, in all four SDKs and `ma`, with `ma`'s operator `policy.json`. New opt-in kit checks for each, run by `scripts/production-kits.sh` in `scripts/check.sh`. Erasure is coordinated through one interoperable history profile, `pendingErasure: 1`, which every language's history service and client implement: each language's agents pass the erasure checks on every language's history service.
 - Specified the optional [pending-erasure registry for history HTTP](docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1), so agents can share pending marks and reconcile them under current writer leases.
 - Added the [project notes demo](demos/project-notes/README.md): one agent using all four SDKs, with a scripted check for normal execution and crash recovery.
 
