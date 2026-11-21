@@ -1,6 +1,7 @@
 """Journalled turn engine shared by the two independently installed Runtimes."""
 
 import asyncio
+import json
 
 from jsonschema import Draft202012Validator, ValidationError
 from referencing import Registry
@@ -25,22 +26,38 @@ UNKNOWN = "Call did not finish. Its outcome is unknown. Check outside state befo
 
 def checked_tool_result(definition, result):
     schema = (definition or {}).get("returns")
-    if result["status"] != "completed" or schema is None:
-        return result
-    error = "Completed tool result is missing its value"
-    if "value" in result:
-        try:
-            Draft202012Validator(schema, registry=Registry()).validate(result["value"])
-        except ValidationError as exc:
-            error = "Invalid completed tool value: " + exc.message
+    error = None
+    if result["status"] == "completed" and schema is not None:
+        if "value" not in result:
+            error = "Completed tool result is missing its value"
         else:
-            return result
-    return {"call": result["call"], "status": "completed", "content": [], "_result_error": error}
+            try:
+                Draft202012Validator(schema, registry=Registry()).validate(result["value"])
+            except ValidationError as exc:
+                error = "Invalid completed tool value: " + exc.message[:512]
+    if error:
+        return {
+            "call": result["call"],
+            "status": "completed",
+            "content": [],
+            "_result_error": error,
+        }
+    # A local Runtime records both the receipt and the terminal result. Leave
+    # room in the call's 64 KiB obligation for both envelopes and bookkeeping.
+    if len(json.dumps(result, ensure_ascii=True, separators=(",", ":"))) > 16 * 1024:
+        return {
+            "call": result["call"],
+            "status": result["status"],
+            "content": [],
+            "resultUnavailable": "result_too_large",
+            "_result_error": "Tool result exceeds reserved space",
+        }
+    return result
 
 
 def require_processed_result(result):
     if error := result.get("_result_error"):
-        raise AgentError(error, "internal")
+        raise AgentError(error, result.get("resultUnavailable", "internal"))
 
 
 async def ordered_tools(calls, parallel, execute, record):

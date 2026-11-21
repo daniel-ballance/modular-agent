@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from modular_agent import AgentError, ErrorCode, create_agent, file_history
+from modular_agent import AgentError, ErrorCode, create_agent, file_history, tool
 from modular_agent.testing import scripted_provider
 
 
@@ -61,6 +61,25 @@ async def test_over_capacity_call_list_is_replaced_before_recording():
         assert response["message"]["stop"] == "failed"
         assert response["message"]["content"] == []
         assert response["message"]["usage"]["input"] == 3
+
+
+async def test_oversized_tool_result_still_records_terminal_call():
+    @tool
+    async def large() -> str:
+        """Return a result larger than the tool settlement budget."""
+        return "x" * 50_000
+
+    async with create_agent(
+        tools=[large], resource_reservations={"session": {"calls": 1}}
+    ) as agent:
+        session = await agent.session()
+        with pytest.raises(AgentError) as too_large:
+            await session.call_tool("large", {})
+        assert too_large.value.code is ErrorCode.RESULT_TOO_LARGE
+        [terminal] = [e for e in await session.history() if e["kind"] == "toolResult"]
+        assert terminal["data"]["status"] == "completed"
+        assert terminal["data"]["resultUnavailable"] == "result_too_large"
+        assert terminal["message"]["content"] == []
 
 
 async def test_unopened_proposal_is_charged_after_restart(tmp_path):
