@@ -102,6 +102,7 @@ impl Service {
         project: Option<&Path>,
         body: Option<Value>,
         after: Option<&str>,
+        revision: Option<&str>,
     ) -> Result<(StatusCode, Value)> {
         ensure!(
             path.iter().all(|s| !matches!(*s, "." | "..")),
@@ -118,10 +119,13 @@ impl Service {
                     store.as_ref(),
                     method,
                     path,
-                    project,
                     body,
-                    after,
-                    500,
+                    portable_store::RequestOptions {
+                        project,
+                        after,
+                        limit: 500,
+                        revision,
+                    },
                 )
                 .await;
             }
@@ -144,6 +148,12 @@ impl Service {
         let mut request = client
             .request(method.clone(), url)
             .bearer_auth(token.as_ref());
+        if let Some(revision) = revision {
+            request = request.header("History-Revision", revision);
+        }
+        if method == Method::GET && path.last() == Some(&"pending-erasure") {
+            request = request.header(reqwest::header::CACHE_CONTROL, "no-store");
+        }
         if let Some(body) = body {
             let body = serde_json::to_vec(&body)?;
             ensure!(body.len() <= BODY_LIMIT, "history request is too large");
@@ -218,14 +228,47 @@ impl Service {
         after: Option<&str>,
         deadline: Option<Duration>,
     ) -> Result<(StatusCode, Value)> {
+        self.exchange(
+            method,
+            path,
+            body,
+            Exchange {
+                project,
+                after,
+                deadline,
+                revision: None,
+            },
+        )
+    }
+    fn exchange(
+        &self,
+        method: Method,
+        path: &[&str],
+        body: Option<Value>,
+        options: Exchange<'_>,
+    ) -> Result<(StatusCode, Value)> {
+        let Exchange {
+            project,
+            after,
+            deadline,
+            revision,
+        } = options;
         let service = self.clone();
         let path: Vec<_> = path.iter().map(|s| s.to_string()).collect();
         let project = project.map(Path::to_owned);
         let after = after.map(str::to_owned);
+        let revision = revision.map(str::to_owned);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         io().spawn(async move {
             let path: Vec<_> = path.iter().map(String::as_str).collect();
-            let send = service.send(method, &path, project.as_deref(), body, after.as_deref());
+            let send = service.send(
+                method,
+                &path,
+                project.as_deref(),
+                body,
+                after.as_deref(),
+                revision.as_deref(),
+            );
             let result = if let Some(deadline) = deadline {
                 match tokio::time::timeout(deadline.saturating_sub(now()), send).await {
                     Ok(result) => result,
@@ -283,9 +326,13 @@ impl Service {
             after = next;
         }
     }
-    fn post(&self, path: &[&str], body: Value) -> Result<Value> {
-        checked(self.request(Method::POST, path, None, Some(body))?)
-    }
+}
+#[derive(Default)]
+struct Exchange<'a> {
+    project: Option<&'a Path>,
+    after: Option<&'a str>,
+    deadline: Option<Duration>,
+    revision: Option<&'a str>,
 }
 fn positive_ms(value: &Value, key: &str) -> Result<u64> {
     value[key]
@@ -306,6 +353,13 @@ fn escape(value: &str) -> String {
     out
 }
 fn checked((status, value): (StatusCode, Value)) -> Result<Value> {
+    if (status == StatusCode::CONFLICT && value["code"] == "stale_revision")
+        || status == StatusCode::SERVICE_UNAVAILABLE
+    {
+        return Err(registry_unavailable(
+            "history state changed or is unavailable",
+        ));
+    }
     if status == StatusCode::NOT_FOUND && value["code"] == "unknown_session" {
         return Err(OperationError::NotFound("unknown session".into()).into());
     }
@@ -360,6 +414,18 @@ struct State {
     owner: String,
 }
 impl State {
+    fn observe_write(&self, result: Result<(StatusCode, Value)>) -> Result<(StatusCode, Value)> {
+        let guard = self.lease.lock().unwrap();
+        let remote = guard.as_ref().expect("acquired lease");
+        if result
+            .as_ref()
+            .map_or(true, |(_, body)| body["code"] == "lost")
+        {
+            self.lost.cancel();
+        }
+        remote.check(&self.lost)?;
+        result
+    }
     fn acquire(&self, ttl_ms: u64) -> Result<String> {
         self.acquire_with_wait(ttl_ms, true)
     }
@@ -462,7 +528,7 @@ impl State {
                 let path = ["v1", "sessions", &session, "lease", &lease_id, "renew"];
                 let renew = tokio::time::timeout(
                     old - sent,
-                    service.send(Method::POST, &path, None, None, None),
+                    service.send(Method::POST, &path, None, None, None, None),
                 );
                 let reply = tokio::select! {
                     _ = stop.cancelled() => return,
@@ -578,7 +644,7 @@ impl HttpHistory {
         Ok(Self {
             service,
             ttl,
-            coordinated: version["rustPendingErasure"] == 1,
+            coordinated: wire::json_eq(&version["pendingErasure"], &json!(1)),
             held: Mutex::default(),
         })
     }
@@ -607,13 +673,147 @@ impl HttpHistory {
             .pages(&["v1", "sessions", id], None, "entries")?;
         Ok((portable::session(&meta, &entries)?, entries))
     }
-    fn erasure_plans(&self, session: &str) -> Result<Vec<pending::Plan>> {
-        self.service
-            .get(&["rust", "erasure", "v1", session], None)
-            .and_then(|mut value| Ok(serde_json::from_value(value["plans"].take())?))
-            .map_err(|error| {
-                OperationError::Unavailable(format!("pending erasure unavailable: {error}")).into()
-            })
+    fn erasure_plans(&self, session: &str) -> Result<(String, Vec<pending::Plan>)> {
+        let read = || -> Result<_> {
+            let mut after: Option<String> = None;
+            let mut seen = BTreeSet::new();
+            let mut revision = None;
+            let mut plans = Vec::new();
+            loop {
+                let value = checked(self.service.request_with(
+                    Method::GET,
+                    &["v1", "sessions", session, "pending-erasure"],
+                    None,
+                    None,
+                    after.as_deref(),
+                    None,
+                )?)?;
+                ensure!(
+                    value.get("next").is_none_or(Value::is_string),
+                    "invalid registry cursor"
+                );
+                let page: pending::PlansPage = serde_json::from_value(value)?;
+                lease_value(&json!({"lease":page.revision}))?;
+                ensure!(
+                    revision.as_ref().is_none_or(|r| *r == page.revision),
+                    "registry changed during paging"
+                );
+                ensure!(
+                    page.plans.len() <= 500
+                        && page.plans.iter().all(|p| {
+                            pending::path_id(&p.intent_id)
+                                && seen.insert(p.intent_id.clone())
+                                && pending::path_id(&p.source_session_id)
+                                && !p.record_id.is_empty()
+                                && pending::distinct_ids(
+                                    &p.copies
+                                        .iter()
+                                        .map(|c| c.entry_id.clone())
+                                        .collect::<Vec<_>>(),
+                                )
+                        }),
+                    "invalid registry plans"
+                );
+                ensure!(
+                    after.is_none() || !page.plans.is_empty(),
+                    "empty continuation of registry plans"
+                );
+                if let Some(next) = &page.next {
+                    ensure!(
+                        page.plans.last().is_some_and(|p| &p.intent_id == next),
+                        "invalid registry cursor"
+                    );
+                }
+                plans.extend(page.plans);
+                if page.next.is_none() {
+                    return Ok((page.revision, plans));
+                }
+                revision = Some(page.revision);
+                after = page.next;
+            }
+        };
+        read()
+            .map_err(|error| registry_unavailable(&format!("pending erasure unavailable: {error}")))
+    }
+    fn guarded_append(
+        &self,
+        session: &str,
+        lease: &str,
+        entries: &[Value],
+        revision: Option<&str>,
+    ) -> Result<(StatusCode, Value)> {
+        self.service.exchange(
+            Method::POST,
+            &["v1", "sessions", session, "entries"],
+            Some(json!({"lease":lease,"entries":entries})),
+            Exchange {
+                revision,
+                ..Exchange::default()
+            },
+        )
+    }
+    fn check_append(&self, data: &SessionData, entries: &[Value]) -> Result<String> {
+        let (revision, plans) = self.erasure_plans(&data.id)?;
+        check_plans(data, &plans)?;
+        let mut sources: BTreeSet<_> = entries
+            .iter()
+            .flat_map(|e| e["sources"].as_array().into_iter().flatten())
+            .filter_map(Value::as_str)
+            .collect();
+        let fork_source = data.origin.as_ref().filter(|_| {
+            !entries.is_empty() && entries.first().is_some_and(|e| e["parentId"].is_null())
+        });
+        // Sources local to the append or its current session need no other plan read.
+        for e in &data.entries {
+            if sources.remove(e.id.as_str()) && e.content.is_none() {
+                return Err(registry_unavailable("append uses erased content"));
+            }
+        }
+        let check_source = |source: &SessionData, sources: &mut BTreeSet<&str>| -> Result<()> {
+            let (observed, plans) = self.erasure_plans(&source.id)?;
+            ensure!(
+                observed == revision,
+                registry_unavailable("registry changed during append preparation")
+            );
+            check_plans(source, &plans)?;
+            for e in &source.entries {
+                if sources.remove(e.id.as_str()) && e.content.is_none() {
+                    return Err(registry_unavailable("append uses erased content"));
+                }
+            }
+            Ok(())
+        };
+        if let Some((parent, _)) = fork_source {
+            let source = self.fetch(parent)?.0;
+            check_source(&source, &mut sources)?;
+            // A fork retains the provenance of the parent's already-checked copies.
+            for entry in &source.entries {
+                for inherited in &entry.copies {
+                    sources.remove(inherited.as_str());
+                }
+            }
+        } else if !sources.is_empty() {
+            // The binding carries unqualified source IDs. Locate external sources
+            // without assuming that a project or local open-session set is complete.
+            for source in self.list(None)? {
+                if source.id != data.id
+                    && source
+                        .entries
+                        .iter()
+                        .any(|e| sources.contains(e.id.as_str()))
+                {
+                    check_source(&source, &mut sources)?;
+                }
+            }
+        }
+        ensure!(
+            sources.is_empty(),
+            registry_unavailable("could not establish append source freshness")
+        );
+        Ok(revision)
+    }
+    fn writer_post(&self, state: &State, path: &[&str], body: Value) -> Result<Value> {
+        checked(state.observe_write(self.service.request(Method::POST, path, None, Some(body)))?)
     }
     fn temporary_lease(&self, session: &str) -> Arc<State> {
         Arc::new(State {
@@ -626,6 +826,63 @@ impl HttpHistory {
         })
     }
 }
+fn registry_unavailable(message: &str) -> anyhow::Error {
+    OperationError::Unavailable(message.into()).into()
+}
+
+fn erasable(e: &Entry) -> bool {
+    e.writer != "rust.derived" && !authority_record(e) && e.kind != "erasure"
+}
+
+fn discover_copies(
+    sessions: &[SessionData],
+    mut ids: BTreeSet<String>,
+) -> BTreeMap<String, Vec<String>> {
+    loop {
+        let before = ids.len();
+        for e in sessions.iter().flat_map(|s| &s.entries) {
+            if e.kind == "input" && ids.contains(&e.id) {
+                ids.extend(e.copies.iter().cloned());
+            }
+            if e.copies.iter().any(|id| ids.contains(id)) {
+                ids.insert(e.id.clone());
+            }
+        }
+        if ids.len() == before {
+            break;
+        }
+    }
+    sessions
+        .iter()
+        .filter_map(|s| {
+            let copies: Vec<_> = s
+                .entries
+                .iter()
+                .filter(|e| erasable(e) && ids.contains(&e.id))
+                .map(|e| e.id.clone())
+                .collect();
+            (!copies.is_empty()).then(|| (s.id.clone(), copies))
+        })
+        .collect()
+}
+
+fn check_plans(data: &SessionData, plans: &[pending::Plan]) -> Result<()> {
+    let tombstones: BTreeSet<_> = data
+        .entries
+        .iter()
+        .filter(|e| e.content.is_none())
+        .map(|e| &e.id)
+        .collect();
+    ensure!(
+        plans
+            .iter()
+            .flat_map(|plan| &plan.copies)
+            .all(|copy| copy.complete && tombstones.contains(&copy.entry_id)),
+        registry_unavailable("session has pending erasure or lacks its tombstones")
+    );
+    Ok(())
+}
+
 impl HistoryStore for HttpHistory {
     fn coordinates_erasure(&self) -> bool {
         self.coordinated
@@ -639,28 +896,90 @@ impl HistoryStore for HttpHistory {
             self.coordinated,
             "history service does not coordinate erasure"
         );
-        Ok(serde_json::from_value(
-            self.service.post(
-                &["rust", "erasure", "v1", session],
-                json!({"entryIds": entry_ids}),
-            )?["copies"]
-                .take(),
-        )?)
+        if entry_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let state = self
+            .lease(session)
+            .unwrap_or_else(|| self.temporary_lease(session));
+        let lease = state.acquire_with_wait(self.ttl, false)?;
+        let (revision, _) = self.erasure_plans(session)?;
+        let sessions = self.list(None)?;
+        let source = sessions
+            .iter()
+            .find(|s| s.id == session)
+            .ok_or_else(|| OperationError::NotFound("unknown erasure source".into()))?;
+        let entries: BTreeSet<_> = entry_ids.iter().cloned().collect();
+        for target in &entries {
+            let e = source
+                .entries
+                .iter()
+                .find(|e| &e.id == target)
+                .ok_or_else(|| OperationError::NotFound("unknown erasure target".into()))?;
+            ensure!(
+                erasable(e),
+                OperationError::Forbidden("protected erasure target".into())
+            );
+        }
+        let affected = discover_copies(&sessions, entries.clone());
+        let intent = pending::Publication {
+            lease,
+            revision,
+            intent_id: id(),
+            entry_ids: entries.into_iter().collect(),
+            copies: affected
+                .iter()
+                .map(|(sid, ids)| pending::CopySet {
+                    session_id: sid.clone(),
+                    record_id: id(),
+                    entry_ids: ids.clone(),
+                })
+                .collect(),
+        };
+        state.acquire(self.ttl)?;
+        let response = self.writer_post(
+            &state,
+            &["v1", "sessions", session, "pending-erasure"],
+            json!(intent),
+        )?;
+        let intent_id = wire::string(&response, "intentId")?;
+        ensure!(
+            pending::path_id(intent_id),
+            registry_unavailable("invalid published intent ID")
+        );
+        if intent_id == intent.intent_id {
+            return Ok(affected);
+        }
+        // A different writer already published this operation. The returned ID,
+        // not the newly computed copy sets, identifies its durable plans.
+        let mut original = BTreeMap::new();
+        for s in sessions {
+            if let Some(plan) = self
+                .erasure_plans(&s.id)?
+                .1
+                .into_iter()
+                .find(|p| p.intent_id == intent_id)
+            {
+                original.insert(s.id, plan.copies.into_iter().map(|c| c.entry_id).collect());
+            }
+        }
+        ensure!(
+            original.contains_key(session),
+            registry_unavailable("missing source erasure plan")
+        );
+        Ok(original)
     }
     fn check_erasure(&self, data: &SessionData) -> Result<()> {
         if !self.coordinated {
             return Ok(());
         }
-        let plans = self.erasure_plans(&data.id)?;
-        if data.entries.iter().any(|entry| {
-            entry.content.is_some() && plans.iter().any(|plan| plan.targets.contains(&entry.id))
+        if self.lease(&data.id).is_some_and(|state| {
+            state.lease.lock().unwrap().is_none() && !state.lost.is_cancelled()
         }) {
-            return Err(OperationError::Unavailable(
-                "session contains content marked for erasure".into(),
-            )
-            .into());
+            // This writer is still assembling a local, unpublished session.
+            return Ok(());
         }
-        Ok(())
+        check_plans(data, &self.erasure_plans(&data.id)?.1)
     }
     fn confirmed_erasure(&self, session: &str) -> Result<Vec<String>> {
         if !self.coordinated {
@@ -668,72 +987,107 @@ impl HistoryStore for HttpHistory {
         }
         Ok(self
             .erasure_plans(session)?
+            .1
             .into_iter()
-            .flat_map(|plan| plan.confirmed)
+            .flat_map(|plan| {
+                plan.copies
+                    .into_iter()
+                    .filter(|c| c.complete)
+                    .map(|c| c.entry_id)
+            })
             .collect())
     }
     fn reconcile_erasure(&self, session: &str) -> Result<Option<(SessionData, Vec<String>)>> {
         if !self.coordinated {
             return Ok(None);
         }
-        let plans = self.erasure_plans(session)?;
+        let Some(state) = self.lease(session) else {
+            return Err(anyhow!("no history writer lease"));
+        };
+        let lease = state.acquire_with_wait(self.ttl, false)?;
+        let (_, plans) = self.erasure_plans(session)?;
         if plans.is_empty() {
             return Ok(None);
         }
-        let state = self
-            .lease(session)
-            .ok_or_else(|| anyhow!("no history writer lease"))?;
-        let lease = state.acquire_with_wait(self.ttl, false)?;
-        let (mut data, _) = self.fetch(session)?;
         let mut confirmed = BTreeSet::new();
         for plan in plans {
-            let live: Vec<_> = data
-                .entries
+            let targets: Vec<_> = plan.copies.iter().map(|c| c.entry_id.clone()).collect();
+            let pending: Vec<_> = plan
+                .copies
                 .iter()
-                .filter(|e| plan.targets.contains(&e.id) && e.content.is_some())
-                .map(|e| e.id.clone())
+                .filter(|c| !c.complete)
+                .map(|c| c.entry_id.clone())
                 .collect();
-            if !live.is_empty()
-                && !data
-                    .entries
+            confirmed.extend(
+                plan.copies
                     .iter()
-                    .any(|e| e.id == plan.record && e.kind == "erasure")
-            {
-                let keys = erased_input_keys(&data, &live);
-                record_erasure(&mut data, live.clone(), keys);
-                data.entries.last_mut().unwrap().id = plan.record;
-                let entry = portable::entry(data.entries.last().unwrap(), &data)?;
-                self.service.post(
-                    &["v1", "sessions", session, "entries"],
-                    json!({"lease":lease,"entries":[entry]}),
-                )?;
+                    .filter(|c| c.complete)
+                    .map(|c| c.entry_id.clone()),
+            );
+            if pending.is_empty() {
+                continue;
             }
-            // Confirm already-tombstoned targets too if the service failed
-            // between the record commit and the registry progress commit.
-            if !live.is_empty() || plan.targets.iter().any(|id| !plan.confirmed.contains(id)) {
+            let (revision, fresh) = self.erasure_plans(session)?;
+            ensure!(
+                fresh.contains(&plan),
+                registry_unavailable("erasure plan changed before reconciliation")
+            );
+            let (mut data, raw) = self.fetch(session)?;
+            if !raw.iter().any(|e| e["id"] == plan.record_id) {
+                let keys = erased_input_keys(&data, &targets);
+                record_erasure(&mut data, targets.clone(), keys);
+                let record = data.entries.last_mut().unwrap();
+                record.id = plan.record_id.clone();
+                let entry = portable::entry(data.entries.last().unwrap(), &data)?;
                 state.acquire(self.ttl)?;
-                self.service.post(
-                    &["v1", "sessions", session, "erase"],
-                    json!({"lease":lease,"entryIds":plan.targets}),
-                )?;
-                data = self.fetch(session)?.0;
+                checked(state.observe_write(self.guarded_append(
+                    session,
+                    &lease,
+                    &[entry],
+                    Some(&revision),
+                ))?)?;
+            } else {
+                ensure!(
+                    raw.iter().any(|e| e["id"] == plan.record_id
+                        && e["kind"] == "erasure"
+                        && e["erased"] != true
+                        && e["data"]["entryIds"].as_array().is_some_and(|ids| targets
+                            .iter()
+                            .all(|target| ids.iter().any(|v| v == target)))),
+                    registry_unavailable("erasure bookkeeping does not match the plan")
+                );
             }
             state.acquire(self.ttl)?;
-            confirmed.extend(plan.targets.into_iter().filter(|id| {
-                data.entries
-                    .iter()
-                    .any(|e| e.id == *id && e.content.is_none())
-                    && data.entries.iter().any(|e| {
-                        e.kind == "erasure"
-                            && e.content
-                                .as_ref()
-                                .and_then(|c| c["entryIds"].as_array())
-                                .is_some_and(|ids| ids.iter().any(|v| v == id))
-                    })
-            }));
+            self.writer_post(
+                &state,
+                &["v1", "sessions", session, "erase"],
+                json!({"lease":lease,"entryIds":pending}),
+            )?;
+            let (_, raw) = self.fetch(session)?;
+            let verified: Vec<_> = pending
+                .into_iter()
+                .filter(|id| raw.iter().any(|e| e["id"] == *id && e["erased"] == true))
+                .collect();
+            if !verified.is_empty() {
+                state.acquire(self.ttl)?;
+                self.writer_post(
+                    &state,
+                    &[
+                        "v1",
+                        "sessions",
+                        session,
+                        "pending-erasure",
+                        &plan.intent_id,
+                        "complete",
+                    ],
+                    json!({"lease":lease,"entryIds":verified}),
+                )?;
+                confirmed.extend(verified);
+            }
         }
         // Include bookkeeping written outside save() in the next append's base.
         let (data, entries) = self.fetch(session)?;
+        self.check_erasure(&data)?;
         state.acquire(self.ttl)?;
         *state.kept.lock().unwrap() = entries
             .iter()
@@ -742,10 +1096,7 @@ impl HistoryStore for HttpHistory {
         Ok(Some((data, confirmed.into_iter().collect())))
     }
     fn supports_erasure(&self) -> bool {
-        match &self.service.transport {
-            Transport::Http { .. } => true,
-            Transport::Embedded(store) => store.supports_erasure(),
-        }
+        self.coordinated
     }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
         let mut held = self.held.lock().unwrap();
@@ -823,12 +1174,12 @@ impl HistoryStore for HttpHistory {
             )?)?;
         }
         let lease = state.acquire(self.ttl)?;
-        let appended = self.service.request(
-            Method::POST,
-            &["v1", "sessions", &data.id, "entries"],
-            None,
-            Some(json!({"lease":lease,"entries":entries})),
-        );
+        let revision = self
+            .coordinated
+            .then(|| self.check_append(data, &entries))
+            .transpose()?;
+        state.acquire(self.ttl)?;
+        let appended = self.guarded_append(&data.id, &lease, &entries, revision.as_deref());
         let guard = state.lease.lock().unwrap();
         let remote = guard.as_ref().expect("acquired lease");
         if appended.as_ref().map_or(true, |(status, body)| {
@@ -855,58 +1206,37 @@ impl HistoryStore for HttpHistory {
             .collect()
     }
     fn erase(&self, ids: Vec<String>, held: &[String]) -> Result<Vec<SessionData>> {
-        let mut erased: BTreeSet<_> = ids.into_iter().collect();
+        ensure!(
+            self.coordinated,
+            registry_unavailable("history service does not coordinate erasure")
+        );
+        let erased: BTreeSet<_> = ids.into_iter().collect();
         let sessions = self.list(None)?;
-        loop {
-            let before = erased.len();
-            for s in &sessions {
-                for e in &s.entries {
-                    if e.kind == "input" && erased.contains(&e.id) {
-                        erased.extend(e.copies.iter().cloned());
-                    }
-                    if e.copies.iter().any(|id| erased.contains(id)) {
-                        erased.insert(e.id.clone());
-                    }
-                }
-            }
-            if erased.len() == before {
-                break;
-            }
-        }
-        let mut result = vec![];
-        for session in sessions {
-            let ids: Vec<_> = session
+        let mut affected = BTreeSet::new();
+        for source in sessions {
+            let targets: Vec<_> = source
                 .entries
                 .iter()
-                .filter(|e| {
-                    e.writer != "rust.derived" && !authority_record(e) && erased.contains(&e.id)
-                })
+                .filter(|e| erasable(e) && erased.contains(&e.id))
                 .map(|e| e.id.clone())
                 .collect();
-            if ids.is_empty() {
-                continue;
+            if !targets.is_empty() {
+                affected.extend(self.mark_erasure(&source.id, &targets)?.into_keys());
             }
-            let state = if held.contains(&session.id) {
-                self.lease(&session.id)
-                    .ok_or_else(|| anyhow!("missing held history lease"))?
+        }
+        let mut result = Vec::new();
+        for sid in affected {
+            let _lease = if held.contains(&sid) {
+                None
             } else {
-                self.temporary_lease(&session.id)
+                Some(self.acquire(&sid)?)
             };
-            let lease = state.acquire(self.ttl)?;
-            let (mut data, _) = self.fetch(&session.id)?;
-            let keys = erased_input_keys(&data, &ids);
-            record_erasure(&mut data, ids.clone(), keys);
-            let entry = wire::entry(data.entries.last().unwrap(), &data)?;
-            self.service.post(
-                &["v1", "sessions", &data.id, "entries"],
-                json!({"lease":lease,"entries":[entry]}),
-            )?;
-            state.acquire(self.ttl)?;
-            self.service.post(
-                &["v1", "sessions", &session.id, "erase"],
-                json!({"entryIds":ids,"lease":lease}),
-            )?;
-            result.push(self.fetch(&session.id)?.0);
+            self.lease(&sid)
+                .ok_or_else(|| anyhow!("missing history lease"))?
+                .acquire(self.ttl)?;
+            if let Some((data, _)) = self.reconcile_erasure(&sid)? {
+                result.push(data);
+            }
         }
         Ok(result)
     }

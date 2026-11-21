@@ -620,7 +620,9 @@ impl Harness {
         let Some(open) = sessions.get(session) else {
             return Ok(None);
         };
-        if let Some(store) = self.store() {
+        if !open.provisional
+            && let Some(store) = self.store()
+        {
             store.check_erasure(&open.data)?;
         }
         Ok(open
@@ -1978,7 +1980,9 @@ impl AgentApi for Harness {
             .get_mut(session)
             .ok_or_else(|| anyhow!("session not open"))?;
         self.check_open_writer(open)?;
-        if let Some(store) = self.store() {
+        if !open.provisional
+            && let Some(store) = self.store()
+        {
             store.check_erasure(&open.data)?;
         }
         Ok(())
@@ -2015,7 +2019,8 @@ impl AgentApi for Harness {
         let open = sessions
             .get_mut(session)
             .ok_or_else(|| anyhow!("session not open"))?;
-        if let Some(store) = self.store()
+        if !open.provisional
+            && let Some(store) = self.store()
             && let Err(error) = store.check_erasure(&open.data)
         {
             if open.active || open.environment_work > 0 || open.rewinding || open.lease.is_none() {
