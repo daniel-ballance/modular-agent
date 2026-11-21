@@ -93,6 +93,8 @@ if $all; then
     for language in rust typescript go python; do
       command=$(node -e "const a=require('./conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")
       step "ACP kit: $language ma (crash, probe, job checks)" bash -c "cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- $command --acp"
+      # Enable only once all four builds pass with the disposable policy and shared history setup:
+      # ACP options: --isolation-checks --capacity-checks --erasure-checks
       step "kits over WebSocket: $language plugin and ma" scripts/websocket-kits.sh "$language"
     done
   fi
