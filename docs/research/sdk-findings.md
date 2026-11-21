@@ -10,7 +10,7 @@ These are review notes, not requirements. The SDK and binding pages contain the 
 4. **Inference from a command.** The [core command contract](../contracts.md#commands) already requires authorization, dispatch checks, recording and metering. It does not settle the SDK's public call shape, which prepared context a command gets, or how to handle a model's tool requests. Options: expose only higher-level commands supplied by the SDK, or expose a call-scoped auxiliary request operation for developer commands. **Recommend** the latter: use the session's current model and normal Provider hooks, account to the session and tenant, record by `stepId`, and neither start a turn nor dispatch tools from the model reply. Do not expose an unscoped Provider adapter.
 5. **API-key reasoning levels.** See the [vendor research, options and recommended request mappings](sdk-api-key-reasoning.md). Recommend one vendored capability table shared by all four SDKs; no guessed settings for new ids.
 
-## Applied (19)
+## Applied (22)
 
 | Point | Findings covered |
 |---|---|
@@ -27,14 +27,17 @@ These are review notes, not requirements. The SDK and binding pages contain the 
 | Truthful held-output declaration | TypeScript current findings |
 | Completed tool value required and checked after the hook | Go and TypeScript result-processing findings |
 | Latest settled turn | All four Guide 05 findings |
-| ACP factory, identity and actor option spellings | Rust, Go, TypeScript, Python findings for Guides 05 and 08 |
+| ACP composition and saved-session factory | Rust, Go, TypeScript, Python Guide 08 findings |
+| Operator-set ACP actor id | TypeScript Guide 08 finding |
+| Embedded session options and represented actors | Rust, Go and Python Guide 05 findings |
 | History service and client spellings and scheduling | All four Guide 09 findings |
 | Go, Rust, TypeScript and Python question guide corrections | All four Guide 04 findings |
-| Provider catalog, readiness and credentials | Go and Python Guide 06 findings; Rust and TypeScript served-catalog findings |
+| Provider catalog notifications and refresh | Rust and TypeScript served-catalog findings; Go and Python Guide 06 |
+| Provider readiness and credential context | Go and Python Guide 06 findings |
 | Hook examples, placement and failures | Rust, Go, Python Guide 07 findings |
 | Offline process tests | Rust and TypeScript examples in [Guide 03](../sdk/guides/03-tool-in-another-process.md) |
 
-## Rejected (24)
+## Rejected (30)
 
 | Point | Reason |
 |---|---|
@@ -44,7 +47,8 @@ These are review notes, not requirements. The SDK and binding pages contain the 
 | Memory capabilities | Erasure depends on the store and agent, not on the store being named memory. No portability is promised by in-memory history. |
 | Writer conflicts | The native lock's lack of expiry is not a reason to change the HTTP lease contract. |
 | ACP sharing a Harness | Internal composition and connection lifetimes are not a new public API. |
-| Event cursor, replay and actor gating | Cursor and per-actor gating are already specified. Do not make Rust's shared live sink an exception or permit dropping live pieces instead of disconnecting on SDK overrun. |
+| Event cursor and replay | The SDK already requires exclusive replay after the cursor, `null` for the beginning and disconnection on overrun. |
+| Per-actor event gating | Already required, including for live events. Do not make Rust's shared live sink an exception. |
 | Plugin setup preflight and failure | The SDK already says to register after config and refuse unsupported registrations, without running setup twice; passing a base PluginApi and partial loads remain prohibited. |
 | Missing base history store | The SDK already installs a store; the base default is not the SDK default. |
 | Late questions and job-started turns | Already opt-in. Only the binding and the declared capabilities decide which points can leave work open. |
@@ -53,12 +57,17 @@ These are review notes, not requirements. The SDK and binding pages contain the 
 | One installed model catalog | The catalog note already tells a developer to choose an offered id. Do not require the base dependency's catalog. |
 | Invalid composition for missing history | Already rejects kept/durable without a persistent store and permits an explicit one. `dataDir` for a part that needs it is separate. |
 | ACP open waiting for recovery | Already forbids waiting on ACP and permits it on the embedded SDK. |
-| Unknown models and post-admission failures | The boundary errors and failed AssistantMessage are already specified. A saved model that disappears follows the shared failed-turn rule, not a new input refusal. |
+| Unknown models | Boundary errors are already specified. A saved model that disappears follows the shared failed-turn rule, not a new input refusal. |
+| Post-admission Provider failures | The SDK already records a failed AssistantMessage and uses `other` for an untyped error. |
 | Unexpected scripted answers | Separate verification and boundary decline already specified. |
 | Rust stream import | Guide 01 already imports `futures_util::StreamExt`. |
-| Fixture argument count, one fixture and zombie reaping | Already four arguments, one fixture, and no live process group member before reopen. |
-| Structured turn result and simulated restart | Already defines text-to-JSON and feedback, and interruption without graceful settlement. |
-| `waitingThroughRestart` and `nestedToolCalls` | Already conditional; the nested-call declaration already excludes private flags. |
-| Tool hints and failure diagnostics | Already defines the shared serialization, fixed wording allowance and placement equality. |
+| Fixture command line | Already takes one fixture name and appends four service arguments. |
+| Process group exit | Already requires reaping the child and waiting for every live member to stop; zombies count as exited. |
+| Structured turn result | Already defines text-to-JSON, null and validation feedback. |
+| Simulated restart | Already defines interruption without graceful settlement and distinguishes it from a real crash. |
+| `waitingThroughRestart` | Already conditional on durable re-asking, not on a live unanswered wire request. |
+| `nestedToolCalls` | Already derives support from the Runtime path and excludes private wire flags. |
+| Tool hints | Shared serialization already puts the four hints in `hints`. |
+| Tool failure diagnostics | Fixed wording is allowed; placement equality is already required. |
 | Scenario requests | Approval hints, input validation, nested call lineage and cancellation/idempotency are coverage requests for existing rules, not new specification rules. |
 | Explicit processes with `pluginHost: false` | The host role requires discovery; the SDK intentionally rejects the contradiction. |

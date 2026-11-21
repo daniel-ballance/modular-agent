@@ -39,6 +39,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - A plugin program awaits `modular_agent::serve(plugin)` for stdio. To listen on a WebSocket, call `serve_websocket(plugin, ServeOptions { listen, token_file, tls })`.
 - For ACP use `agent.serve_acp(AcpOptions { compose })` on stdio, or `agent.serve_acp_websocket(options, AcpServiceOptions { listen, actors, tls })`. `compose` is an optional `Arc<dyn AcpComposition>`; the trait takes a canonical project and optional saved session id, supplies history, trust and new-session settings, and attaches client-supplied MCP servers through `project_mcp(session, project, servers)`.
 - Use `session.r#as(actor_id)?` to act for a joined actor.
+- `serve_history(file_history(dir)?, options)` keeps service records separate from native session files; it does not export existing native sessions.
 - Public errors are `modular_agent::Error`, not `anyhow::Error`. Plugin code can return any error that converts into it.
 - An operation with options has a plain form and a `_with` form: `session()` and `session_with(SessionOptions { … })`.
 - A tool refuses with `return Err(cx.refuse("reason"))`: the call ends `refused`, where any other error ends it `failed`.
