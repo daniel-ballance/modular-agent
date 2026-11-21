@@ -21,6 +21,7 @@ type session struct {
 	project          string // immutable canonical workspace for rewind exclusion
 	rewindBlocked    bool
 	commandCancels   map[*commandCancellation]struct{}
+	commandBytes     int64
 	mu               sync.Mutex
 	data             api.Session
 	lease            api.Lease

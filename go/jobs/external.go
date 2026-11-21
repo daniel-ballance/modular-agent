@@ -89,10 +89,14 @@ func (m *Manager) EndExternal(ctx context.Context, owner, id string, outcome api
 		m.mu.Unlock()
 		return err
 	}
+	outcome, tooLarge := boundJobOutcome(outcome, report)
 	if j.State != "running" {
 		m.mu.Unlock()
 		if j.State != "erased" && j.State == outcome.Status && j.Report == report && j.Outcome.Error == outcome.Error &&
 			j.ResultPresent == (outcome.Result != nil) && portable.EqualJSON(api.JSON(portable.Content(j.Outcome.Result)), api.JSON(portable.Content(outcome.Result))) {
+			if tooLarge {
+				return api.ErrResultTooLarge
+			}
 			return nil
 		}
 		return errors.New("conflicting or erased job end")
@@ -109,6 +113,9 @@ func (m *Manager) EndExternal(ctx context.Context, owner, id string, outcome api
 	m.mu.Unlock()
 	if err == nil {
 		m.emit(ctx, "job.ended", j, api.JSON(j))
+		if tooLarge {
+			return api.ErrResultTooLarge
+		}
 	}
 	return err
 }

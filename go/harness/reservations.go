@@ -139,12 +139,31 @@ func (s *session) capacityCharges(next api.Session) CapacityBounds {
 	if claim := s.responseClaim; claim != nil {
 		for _, e := range next.Entries {
 			if e.Kind == "model" && e.Step == claim.Step || e.Kind == "turn.end" && e.Turn == claim.Turn {
-				return snapshotCharges(next)
+				return s.withCommandBytes(snapshotCharges(next))
 			}
 		}
 		next.Entries = append(append([]api.Entry(nil), next.Entries...), *claim)
 	}
-	return snapshotCharges(next)
+	return s.withCommandBytes(snapshotCharges(next))
+}
+
+func (s *session) withCommandBytes(b CapacityBounds) CapacityBounds {
+	b.BufferedBytes += s.commandBytes
+	return b
+}
+
+func (s *session) chargeCommandLocked(bytes int64) error {
+	p := s.h.capacity
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	next := p.sessions[s.id]
+	next.BufferedBytes += bytes
+	if bytes > 0 && !p.permits(s.data, next) {
+		return api.ErrCapacity
+	}
+	s.commandBytes += bytes
+	p.update(s.data, next)
+	return nil
 }
 
 // ReserveModelResponse exchanges the pending model slot for the whole call
@@ -184,7 +203,7 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 		b.Inputs++
 		b.BufferedBytes += int64(len(e.Data))
 	}
-	jobs := map[string]bool{}
+	jobs := map[string]struct{}{}
 	// The second map tracks model attempts; a committed response transfers
 	// the call reservation to all call IDs it contains.
 	attempts := map[string]string{}
@@ -192,7 +211,8 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 	for _, e := range row.LiveEntries() {
 		switch {
 		case e.Kind == "job.start":
-			jobs[e.Job] = api.Decode[api.Job](e.Data).Report
+			// Jobs can opt to report at job end on the wire.
+			jobs[e.Job] = struct{}{}
 		case e.WasKind("job.end"):
 			delete(jobs, e.Job)
 		case e.Kind == "model.request":
@@ -218,11 +238,7 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 	}
 	b.Calls = int64(len(attempts) + len(calls))
 	b.Jobs = int64(len(jobs))
-	for _, report := range jobs {
-		if report {
-			b.Inputs++
-			b.BufferedBytes += api.JobReportBytes
-		}
-	}
+	b.Inputs += b.Jobs
+	b.BufferedBytes += b.Jobs * api.JobReportBytes
 	return b
 }

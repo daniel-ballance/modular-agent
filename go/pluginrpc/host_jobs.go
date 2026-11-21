@@ -48,6 +48,12 @@ func (r *remote) jobCallback(ctx context.Context, method string, v object, notif
 	}
 	invalid := func(err error) (any, error) {
 		if err != nil {
+			if errors.Is(err, api.ErrCapacity) {
+				return nil, fault("busy", err.Error())
+			}
+			if errors.Is(err, api.ErrResultTooLarge) {
+				return nil, fault("result_too_large", err.Error())
+			}
 			if errors.Is(err, api.ErrJobCommitLost) {
 				return nil, fault("lost", err.Error())
 			}

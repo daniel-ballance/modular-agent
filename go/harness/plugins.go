@@ -418,6 +418,16 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 		s.mu.Unlock()
 		return "", err
 	}
+	if err := s.reconcileErasureLocked(); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
+	const commandResultBytes = 1 << 20
+	reserved := int64(len(line)) + commandResultBytes
+	if err := s.chargeCommandLocked(reserved); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
 	ctx, cancel := context.WithCancelCause(ctx)
 	token := &commandCancellation{cancel}
 	if s.commandCancels == nil {
@@ -429,6 +439,7 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 	defer func() {
 		s.mu.Lock()
 		delete(s.commandCancels, token)
+		_ = s.chargeCommandLocked(-reserved)
 		s.mu.Unlock()
 	}()
 	fields := strings.Fields(strings.TrimPrefix(line, "/"))
@@ -448,6 +459,9 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 	}
 	if err != nil {
 		return "", err
+	}
+	if len(result) > commandResultBytes {
+		return "", api.ErrResultTooLarge
 	}
 	out, err := c.OutputValue(ctx, api.Event{Kind: "command.result", Session: id, Data: api.JSON(result)})
 	if err != nil {
