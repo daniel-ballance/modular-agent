@@ -14,6 +14,7 @@ import { servePluginService } from "../src/serve.js";
 import { MAX_MESSAGE, PLUGIN_BINDING, WirePeer } from "../src/wire.js";
 import { connectWebSocket, listenWebSocket, PLUGIN_PROTOCOL, receiveMessages } from "../src/websocket.js";
 import { startPluginService } from "../src/host.js";
+import { localEnvironment } from "@modular-agent/env-local";
 
 async function fixture(t: TestContext) {
 	const dir = await mkdtemp(join(tmpdir(), "plugin-websocket-"));
@@ -132,4 +133,27 @@ test("plugin service uses wss and the client verifies the certificate", async t 
 		const socket = await connectWebSocket(service.url, f.tokenFile, PLUGIN_PROTOCOL, 5_000);
 		assert.equal((await peerOf(socket).request("plugin/initialize", init(f.dir))).name, "fixture");
 	} finally { setDefaultCACertificates(ca); await service.close(); }
+});
+
+test("a served command works in its session's project, which it learns from host/session", async t => {
+	const f = await fixture(t);
+	const other = await mkdtemp(join(tmpdir(), "plugin-session-project-"));
+	t.after(() => rm(other, { recursive: true, force: true }));
+	await writeFile(join(f.dir, "where.txt"), "the project given at plugin/initialize");
+	await writeFile(join(other, "where.txt"), "the session's project");
+	const make = () => ({ name: "where", plugins: [{ name: "where", setup(api: any) {
+		api.registerCommand("where", { description: "Read where.txt", async run(_: string, cx: any) { return String(await (await cx.environment()).readFile("where.txt")); } });
+	} }] });
+	const service = await servePluginService(make, { listen: "127.0.0.1:0", tokenFile: f.tokenFile });
+	try {
+		const info = { project: f.dir, home: f.dir };
+		const external = await startPluginService({ url: service.url, tokenFile: f.tokenFile }, info);
+		const harness = new Harness(info);
+		try {
+			await harness.load([localEnvironment({ cwd: f.dir }), external.plugin]);
+			const api = harness.api("test");
+			const sessionId = await api.startSession({ settings: { cwd: other } });
+			assert.equal(await api.runCommand(sessionId, "/where", "user"), "the session's project");
+		} finally { await external.stop(); await harness.stop(); }
+	} finally { await service.close(); }
 });
