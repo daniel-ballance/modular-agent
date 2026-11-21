@@ -40,9 +40,11 @@ ma sessions [--all]          list saved sessions
 | `--json` | print each event as one JSON object per line, in the SDK's event shape: `type`, `time`, the ids that apply (`sessionId`, `turnId`, `stepId`, `toolCallId`) and `data` |
 | `--history` | print the session's history, in the shared format |
 | `--declaration` | print the declaration (below) as one JSON object |
-| `--acp` | serve ACP on stdio, for an editor or host. Any project the client names is served, each with its own trust; the declaration names no `projectRoot`. |
+| `--acp` | serve ACP on stdio, for an editor or host. With no operator project restriction this local mode serves any project the client names, each with its own trust. |
 | `--listen ADDR --token-file FILE` | with `--acp`, serve ACP on a WebSocket instead ([an agent service](../bindings/websocket.md#an-agent-service)). `ADDR` is `HOST:PORT` or a `ws:` URL, and must be a loopback address: `ma` has no TLS options. Connections must present the token in `FILE`. They act as `ma`'s local user, the actor a stdio connection has when `MODULAR_AGENT_ACTOR` is unset; `MODULAR_AGENT_ACTOR` does not apply to them. `ma` serves until it is stopped. |
 | `-h`, `--help`; `-V`, `--version` | help; the version, which names the implementation's language |
+
+ACP project scope, tenant reach and any narrower rights come from operator configuration, never from project files. `ma` MUST enforce an operator restriction before reading project settings or composing that project. Its single-user profile does not enable configured representation. The unrestricted local shorthand is for a trusted launcher, not an untrusted stdio proxy. See [ACP starting](../bindings/acp.md#starting) and [ACP authorization](../bindings/acp.md#authorization).
 
 With no `--model` and none in settings, `ma` uses the first Provider that is signed in, in the order `openai-codex`, `xai`, `claude`. With none signed in it exits with status 1 and says how to sign in.
 
@@ -162,12 +164,16 @@ With the durable Runtime on Linux, every implementation declares the same values
 | `settingsDuringTurn` | `refused` | | `erasureDuringTurn` | `refused` |
 | `movingWithUnfinishedWork` | `refused` | | `mixedActorInput` | `refused` |
 | `rewinding` | true when the session's project is in a git work tree ([rewind points](#rewind-points)); false otherwise |
-| `forking`, `erasure`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` |
+| `forking`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` |
 | `confinesFiles`, `severalActors`, `sessionLimits`, `tenants`, `holdsOutput`, `outputBypassesAgent`, `cancellingTurnCancelsJobs`, `pluginsDuringSession`, `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | false | | `projectRoot` | omitted |
 
 These are what the Rust implementation declares. An implementation that cannot meet one declares what it does meet, and the difference is a gap to close, not a choice.
 
-The same values go out on every path: `ma --declaration`, the ACP `initialize` result, every session reply and every configuration update. Conformance mode changes none of them: the ACP kit checks the agent as shipped, so a test-only declaration would have it check a different agent.
+`ma` MUST declare `erasure` only when its history configuration supports [pending erasure](../contracts.md#cross-session-coordination) across its readers and writers. It MUST NOT infer that support from a configured history HTTP endpoint.
+
+The declaration MUST include the [reservation ceilings](../bindings/acp.md#the-declaration) enforced by the SDK. Operator limits are outside project settings; the project MUST NOT raise them.
+
+The same values go out on every path, subject to the binding's projection for the declared scope: `ma --declaration`, the ACP `initialize` result, every session reply and every configuration update. Conformance mode changes none of them: the ACP kit checks the agent as shipped, so a test-only declaration would have it check a different agent.
 
 ## Hooks for testing
 

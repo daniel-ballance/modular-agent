@@ -1,0 +1,61 @@
+---
+status: proposed
+---
+
+# Close the remaining production gaps
+
+[ADR 0021](0021-production-edition.md) left four gaps. Secret staging and recovery are now specified under [Secrets](../contracts.md#secrets) and shipped in all four SDKs. This record proposes rules for the other three. It does not change the edition to pin or claim implementation coverage.
+
+## Per-connection isolation
+
+[ADR 0029](0029-sdk-decisions-after-four-builds.md) settled ACP service token scope and the rights ceiling, not stdio policy, configured representation, or isolation of plugin and history services. ACP already requires project and tenant checks; it does not specify the cutoff for attached work and deliveries or the operator API for representation. The plugin service already promises separate instances and named state, but does not specify which state must be connection-local or how host-supplied paths are bounded. History `/1` already gives every credential full raw access; the deployment must partition the storage, not just front it with different tokens.
+
+[Authority](../contracts.md#authority), [ACP](../bindings/acp.md#authorization) and the [SDK serving options](../sdk/api.md#the-agent) specify these boundaries. [WebSocket](../bindings/websocket.md#a-plugin-service) separates a live plugin instance from retained state and trusted storage. [History HTTP](../bindings/history-http.md#the-basics) keeps its existing trust model. Joining does not confer representation; using a joined actor as the caller's identity would let `grant` change authentication. A mutable plugin instance shared by live connections would make callbacks and cancellation ambiguous. Neither tenant metadata nor a project filter is a raw-history security boundary.
+
+### Isolation checks
+
+- **ACP kit and reference check, both transports:** configure two projects (one nested in the other), two tenants plus no tenant, and one recorded actor with larger grants than the connection ceiling. Test exact paths through symlinks, empty scopes, configured no-tenant access and omitted scope. Probe new, list (including borrowed cursors), load/resume with supplied and stored project mismatches, and fork. Use counters to prove forbidden opens do not call project setup or load MCP. Check that unknown and inaccessible IDs produce the same refusal and that grants are unchanged after a narrow connection opens.
+- **ACP kit, multiple connections:** test history, input, cancellation, questions, updates and withheld or queued replies on a narrowed scope or a detached connection. Pause before dispatch and before delivery, then revoke the required access; check no effect or disclosure. Repeat through a nested callback, child or job report and after reopen to verify stored work ceilings. Join an unrepresented actor and try its ID in `input` and `answer`; expect `forbidden`, no presence and no admission. On an authorized route verify the two identities in history, negative acknowledgements for stale questions, the intersection of rights, and that closing one route leaves membership and another eligible route intact. Try malformed operator options and assert startup fails. Run the supported subset against `ma`, which does not declare several actors.
+- **Plugin kit, service mode:** connect two hosts with the same request, session and job IDs and `home` but distinct credentials and project grants. Run overlapping work, cancel and close one connection, and check that callbacks, results, cleanup and retained state do not cross. Reconnect and check that only that host's retained state is available. A working environment must deny another host's project or point on initialize or operation as applicable. Include a same-credential pair to check connection-local work even within one trust scope.
+- **History kit, deployment check:** launch two services with separate credentials and backing namespaces. A credential is rejected on the other service (`401 unauthorized`); listing and direct lookup in the first cannot see a session seeded only in the second. Try acquire, append and erase against the foreign ID in the first and verify `unknown_session` and unchanged records in the second. Check that trusted routing selects the correct store regardless of client-supplied IDs or project settings.
+
+### Open isolation decisions
+
+- **CLI policy:** a shared operator-owned policy file or separate flags and environment variables. Recommend one file for stdio and WebSocket; keep the existing local shorthand and fail startup on invalid policy. The SDK options do not depend on that format.
+- **Stateful plugin provisioning:** separate listeners or a shared listener with distinct host credentials and operator-assigned state and project scopes. Recommend separate listeners until there is a common hosting API that proves the same isolation. `/1` history stays on separate service instances; a multi-tenant raw service would need a separate binding decision.
+
+## Resource reservations
+
+[Security](../security.md#resource-limits-and-denial-of-service) required capacity for settlement but left the admission and dispatch cutoffs, concurrent accounting, refusal mapping and declaration unspecified. Checking current depth or free disk alone would let several operations commit against the same capacity. Documented token budgets are soft metering, not a reservation for work or writes. Reserving an entire turn's future calls at admission would tie up capacity before the calls are known.
+
+[Resource reservations](../contracts.md#resource-reservations) charges known obligations at each cutoff and keeps control capacity separate. It reuses `busy`, existing tool settlements, the `turn_limit` callback error and the `limit` outcome. [ACP](../bindings/acp.md#the-declaration) adds an optional declaration projection for count ceilings, not current usage. History HTTP still has no reservation RPC.
+
+### Reservation checks
+
+- **ACP kit with a bounded store and held fixture work:** oversubscribe each of the session, tenant and agent limits separately. Race two admissions for the last slot; exactly one can win. Use a second session in the same tenant, another tenant, and a no-tenant session. Probe steering, proposals, release, direct commands and jobs; check counts at the limits and compare declarations with configured ceilings. Check that a refused key is reusable, a duplicate succeeds without consuming a slot, and that admitted input can be handed back at saturation. Exercise multiple project compositions behind one listener.
+- **Plugin host and ACP kits:** fill the ordinary pool with model or tool work. Leave a call pending, then answer and continue it; its closing question and result must still commit once. Refuse a nested start and cancel the parent; verify that a recorded unstarted call is `notStarted`, while an ambiguous dispatched attempt stays `outcomeUnknown`. Saturate capacity for a model response's call count; require one bounded response that preserves usage, no dispatch and a `capacity` limit in both ACP versions. Check the wire Runtime's response/record and limit sequence. End a reporting job while input slots are otherwise full; verify one end and one admission with the same bounded result, including oversized and unconfirmed-cleanup cases.
+- **Fault-injected store and transport:** keep ordinary writes and output buffers full while cancelling, revoking, or erasing. Check control progress, replay records and the existing cancellation cutoff; a slow recipient must not be needed for settlement. Kill the agent after a durable admission, call intent or job start, then bring it back with tightened bounds. Check recovery honors old obligations before fresh admission and never starts a call merely because a reservation existed. Fail a reserved write and require `lost`, interruption and no new effects, not a false terminal commit.
+
+### Open reservation decisions
+
+- **Provisioning shared history:** fixed writer shares or shared reservation accounting. Recommend fixed shares where all writers and storage allocations are known; use shared accounting when independent writers must borrow spare capacity. Do not add a reservation endpoint to `/1` without a separate binding decision.
+- **Limits for `ma`:** fixed defaults alone or finite defaults with trusted operator overrides. Recommend the latter; choose sizes with measurements of worst-case settlement and control work. The contract sets no universal byte or count values.
+
+## Cross-session erasure coordination
+
+[Erasure](../contracts.md#erasure) already follows lineage, requires pending marks, and uses leases and tombstones. It did not say who reads the marks, how a held copy stays hidden, how a different writer takes over, or what survives a crash between intent, tombstone and acknowledgement. A journal in the source session alone does not protect a fork another process has open. Taking all affected leases first either blocks progress on any held copy or tempts the agent to bypass fencing. A distributed delete transaction is not needed: publication of the pending marks prevents disclosure, and deletion is fenced separately per session.
+
+[Cross-session coordination](../contracts.md#cross-session-coordination) specifies the shared, content-free intent, read and write cutoff, writer handoff, completion evidence and report. Existing history and ACP records and result shapes are sufficient for per-session bookkeeping and authorized progress. [History HTTP](../bindings/history-http.md#erasure) still knows only exact targets and leases. [Security](../security.md#deliberate-limits) leaves backup erasure and raw-service isolation to the operator.
+
+### Erasure checks
+
+- **ACP and plugin host kits, two writers and a reader:** seed an input with a key, a fork, a fork of that fork, a derived summary, and a child report. Hold a destination lease while erasing the source. The request must leave those copies pending and must not mutate them under the other writer's lease. While held, probe history, replay, keyed receipts, callback history, buffered streams and the next model request; none may disclose pending content. Hold a fork publication and an output gate across the cutoff to test both sides of the race. After release or on an already-current writer's next authorized use, require reconciliation before effects, tombstones, preserved accounting and the erased duplicate receipt. Check that a principal who cannot see the destination sees only the generic description, not its IDs. Capture the Provider discard and test that a failure is not reported as erased.
+- **Portable ACP matrix with history faults:** interrupt the initiator immediately after intent, after the destination bookkeeping append, and after tombstone commit with its reply withheld. Reopen with a different SDK over the same pending state. Require no exposure during handoff, one bookkeeping record per change, the same tombstones and no replayed effect. Repeat the authorized erase and check convergence of `pending` to `erased` without duplicate records. Return an absent target after a lost reply or retention; it must not become confirmed. Break the freshness source and restore a stale backup; require fail-closed access, and verify that the declaration does not claim erasure on a composition lacking coordination from the start.
+
+### Open erasure decision
+
+- **Shared pending state:** a durable registry colocated with the shared history backend, or a separately provisioned coordinator used by all readers and writers. Recommend colocation to simplify freshness and backup fencing. Neither layout works with a reader that bypasses it. Choose an interoperable API only after two independent implementations can check the cutoff; until then deployments provide the shared mechanism or do not claim that scope.
+
+## Why these are kit checks
+
+The [shared scenario format](../sdk/testing.md#the-format) has one embedded agent and session. Plugin placements do not create multiple host connections or authenticated ACP identities. The format has no reservation setup, erasure, second writer, or assertions for scopes, declarations and the required races. The checks above are proposed kit and fixture checks, not new shared scenarios. Use fixture barriers and commit observations rather than sleeps or retries.

@@ -33,6 +33,10 @@ See [MCP servers](contracts.md#mcp-servers) for programs an Interface asks the a
 
 The connection rules also give the `joinOnOpen` default. See [Limits and tenants](contracts.md#limits-and-tenants) for tenant access, inheritance and session ceilings.
 
+### Connection scope
+
+An Interface connection's project and tenant limits restrict which sessions and mediated operations it can reach. They do not confine trusted code, a Provider or a shell. The operator MUST separate agents, stores, credentials and working environments wherever the deployment requires isolation those parts do not enforce. This includes tenant-isolated deployments with loaded plugins that can read raw records. See [ACP authorization](bindings/acp.md#authorization), [plugin services](bindings/websocket.md#a-plugin-service) and [history HTTP authentication](bindings/history-http.md#the-basics).
+
 ## Plugins
 
 [Configuration and trust](contracts.md#configuration-and-trust) covers approved code and project options. The operator SHOULD review the project's executable code, settings and dependencies before granting trust and when they change.
@@ -63,7 +67,11 @@ See [The output gate](contracts.md#the-output-gate) for raw records, recipient v
 
 The [plugin](bindings/plugin.md#transport) and [ACP](bindings/acp.md#starting) bindings cap single messages and give the errors for oversized messages. The [plugin](bindings/plugin.md#paging-history), [ACP](bindings/acp.md#extension-methods) and [history](bindings/history-http.md#sessions) bindings cap history pages. Wire caps do not bound total work or storage.
 
-The operator MUST bound concurrent connections, queued work, partial-message bytes and time, parser work, output buffering and storage. The agent MUST refuse new work before admission when it cannot reserve capacity to record its terminal state. It MUST reserve capacity for cancellation, revocation, recovery and erasure. See [Output events](bindings/data.md#output-events) for gate and wire size limits and the handling of withheld items. If even a reserved write fails, the agent MUST stop effects under [Recovery](contracts.md#recovery-and-repeating-work). The operator SHOULD test overload and recovery at these limits.
+The operator MUST set finite limits on connections, open sessions, queueing, partial-message bytes and time, parser work, output buffering and storage. The Harness MUST enforce [work and settlement reservations](contracts.md#resource-reservations). This includes all ordinary paths to the store, not just external input; limits on individual frames do not supply settlement capacity.
+
+The operator MUST provision control headroom for cancellation, authority revocation, recovery and erasure, including access to the store and the connection that carries control messages. The Harness MUST keep it unavailable to ordinary work and give authorized control work access to it under saturation. Control work MUST also be bounded: process it in bounded units where needed, leave unfinished durable obligations pending, and refuse new work rather than overcommit. A store refusing new work at a configured quota MUST still permit writes charged to reserved capacity. If old records consume all usable space, the operator MUST reclaim or add space before allowing more work; the Harness MUST NOT keep serving affected work or views when a required revocation or pending erasure check cannot be enforced. Slow recipients MUST NOT block settlement or cancellation; the Harness MUST drop optional output or detach them rather than exceed its buffers. These rules do not promise successful delivery on a failed transport or store.
+
+The operator SHOULD test overload and recovery at these limits. [Output events](bindings/data.md#output-events) describes withholding. [Recovery](contracts.md#recovery-and-repeating-work) describes failures of reserved writes.
 
 ## Crash, failure and what recovery can't promise
 
@@ -89,6 +97,6 @@ The operator MUST NOT enable or keep enabled a production path that cannot enfor
 - This edition defines no named production profile or common policy management protocol. It does not define a wire for network Interfaces or other services beyond the bindings listed here.
 - The bindings do not prove human presence or define portable delegation credentials, project trust attestations, tenant-scoped service roles or scoped credential handles. These are deployment concerns.
 - There is no hard tenant budget, cross-deployment quota or general protocol to reconcile unknown external effects or erase and restore backups. Erasure cannot recall data already delivered.
-- Cross-session erasure is not atomic. The Harness MUST hold the lease of each affected session when erasing its copies. It MUST leave copies in sessions held elsewhere `pending`. See [Erasure](contracts.md#erasure).
+- Cross-session deletion is not atomic. [Cross-session coordination](contracts.md#cross-session-coordination) makes pending content unavailable before per-session deletion. Raw `/1` readers bypass the Harness. The operator MUST restrict their access to components that enforce pending marks or keep such readers outside a deployment that promises complete shared erasure. The binding does not define a portable pending-state service.
 - There is no portable reconciliation for an initial create whose acknowledgement was lost.
 - A legacy history store with no recorded TTL bound needs an offline migration.

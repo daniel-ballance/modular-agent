@@ -58,11 +58,11 @@ Each option that names a part is shorthand for a plugin that provides it. `provi
 | `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md). On stdio it returns when the client disconnects. With `listen`, `actors` and optional `tls`, it returns a listener with `url` and `close()` once ready ([Placement](placement.md#the-whole-agent)). See composition options below. |
 | `close()` | closes open sessions, stops plugins in reverse load order and releases what it holds |
 
-For a WebSocket listener, each `actors` entry binds a token file to an actor and optional `tenants` and `projects` lists. Omitted `tenants` allows only sessions without a tenant; include `null` in a list to allow them. A project list matches exact canonical paths, not subdirectories. Omitted `projects` uses the serving composition's scope. An empty list permits nothing in its scope. The service computes the connection's rights by intersecting the token's rights with the actor's recorded grants at connection time, without rewriting those grants. See [The whole agent](placement.md#the-whole-agent) and the [WebSocket binding](../bindings/websocket.md#an-agent-service).
+On stdio, `serveAcp` accepts operator-supplied `projects`, `tenants`, `rights` (the optional connection ceiling) and `represents` (a list of actor IDs, empty if omitted). These constrain the configured stdio principal; they are not ACP request fields. `projects` lists exact canonical paths and `tenants` lists names or `null` for sessions without a tenant. An empty list denies that scope entirely. With no explicit lists, stdio uses the serving composition's project scope and the operator's tenant grants for the principal; by default those grants allow only sessions without a tenant. For a WebSocket listener, each `actors` entry binds a token file to an actor and optional `tenants`, `projects` and `represents` lists. Omitted `tenants` allows only sessions without a tenant; include `null` in a list to allow them. A project list matches exact canonical paths, not subdirectories. Omitted `projects` uses the serving composition's scope. An empty list permits nothing in its scope. The service computes the connection's rights by intersecting the token's rights with the actor's recorded grants at connection time, without rewriting those grants. See [The whole agent](placement.md#the-whole-agent) and the [WebSocket binding](../bindings/websocket.md#an-agent-service).
 
-Without a composition factory, ACP serves only the Agent's configured project. A factory builds an Agent for a canonical project and can use the saved session's identity or metadata when reopening. The serving agent needs access to the saved session's history before choosing a composition. Project settings supply defaults for new sessions, not replacements on reopen. Keep trusted project MCP configuration separate from attaching client-supplied servers under the [host MCP policy](../contracts.md#mcp-servers). See [Languages](languages.md) for the factory and callback signatures.
+Without a composition factory, ACP serves only the Agent's configured project. A factory builds an Agent for a canonical project and can use the saved session's identity or metadata when reopening. The serving agent needs access to the saved session's history before choosing a composition. It MUST authorize the saved project and tenant before passing saved metadata to a factory or invoking project configuration callbacks. SDKs MUST reject malformed operator scope or representation configuration with `invalid_composition`, before serving. Project settings supply defaults for new sessions, not replacements on reopen. Keep trusted project MCP configuration separate from attaching client-supplied servers under the [host MCP policy](../contracts.md#mcp-servers). See [Languages](languages.md) for the factory and callback signatures.
 
-An Agent is safe to use from several tasks at once. Sessions are independent of each other.
+An Agent is safe to use from several tasks at once. Sessions have separate work and history, but share [tenant and agent capacity](../contracts.md#resource-reservations).
 
 ### The declaration
 
@@ -85,7 +85,7 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `outputBypassesAgent` | false |
 | `cancellingTurnCancelsJobs` | false |
 | `pluginsDuringSession` | false |
-| `erasure` | true only if the history store and the agent both implement erasure; false for the memory store until it does |
+| `erasure` | true only if the history store and the agent implement erasure and can enforce [pending erasure](../contracts.md#cross-session-coordination) across the declared scope |
 | `inputKeys` | true |
 | `questionsOutlastTurns`, `lateAnswersStartTurns` | false unless the app enables both |
 | `startsTurnsUnasked` | `jobReports` if `jobReportsStartTurns`; otherwise `never` |
@@ -93,6 +93,7 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `mixedActorInput` | `refused` |
 | `settingsDuringTurn` | `nextTurn` if the host records a change during a turn and applies it from the next; otherwise `refused` |
 | `erasureDuringTurn` | `refused` |
+| `resourceReservations` | The configured count ceilings from [Resource reservations](../contracts.md#resource-reservations). The SDK MUST make the bounds configurable by the operator. Project composition callbacks and project settings MUST NOT raise them. |
 | `commandContainment` | the containment the working environment declares for the current platform. `strong` only where it confirms that every descendant of a command stops; `processGroup` where it contains only the command's process group. Never inferred from the environment's name. |
 | `confinesFiles` | from the working environment. False for the local one: it resolves paths against the project but does not refuse ones that lead outside it. True for the testing kit's memory environment, which has no other files. |
 | `nestedToolCalls` | true only if the host and the Runtime path both run nested calls in the chosen placement. For a served Runtime the host decides from its own Runtime bridge, which settles nested calls; the plugin binding's `RuntimeSupports` has no flag for it, and no private wire field may stand in for one. |
@@ -117,7 +118,7 @@ The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check th
 | `history(options?)` | the recorded entries, in order, as this actor may see them: the gated view, not the raw record |
 | `fork(entryId?)` | a new Session branching from that entry, or from the current position |
 | `moveTo(entryId, options?)` | moves the current position; `rewind: true` also restores files where the environment can |
-| `erase(entryIds)` | an ErasureReport |
+| `erase(entryIds)` | an ErasureReport: `{ erased, pending, outOfReach }` as in [ACP](../bindings/acp.md#extension-methods). Repeating authorized targets reports progress; it does not erase again. |
 | `commands()` / `runCommand(line)` | the commands available / runs one |
 | `callTool(name, input)` | a ToolResult; a direct call by this actor, through every gate |
 | `events(fromEntry?)` | every event in the session this actor may see, from the start or a cursor, then live |
@@ -435,7 +436,8 @@ The SDK has two surfaces, and each uses the codes of the binding it mirrors:
 | `forbidden` | app | the actor lacks a required right |
 | `not_found` | both | a named session, entry, file, point, tool or question does not exist |
 | `not_open` | app | the session is not open |
-| `busy` | app | conflicts with current work, close or recovery |
+| `busy` | both | conflicts with current work, close or recovery (app), or no capacity for new work |
+| `unavailable` | app | a required pending-erasure check or coordination could not be established |
 | `held` | app | another writer holds the session's history; `data.retryAfterMs` says when to retry |
 | `conflict` | app | an invalid transition, such as a proposal already released, or an entry that conflicts with a kept one |
 | `cancelled` | both | the operation was cancelled |

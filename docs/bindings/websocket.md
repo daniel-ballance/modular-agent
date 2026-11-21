@@ -36,8 +36,9 @@ The connection takes the place of the child process's pipes, and closing it take
 
 ## A plugin service
 
-- **Paths.** `project` and `home` in `plugin/initialize` are the host's paths. A plugin service that does not use the host's files treats them as names. A working environment served over the network MUST serve the same absolute project path in its own file system, for example through a shared mount, or answer `plugin/initialize` with `not_supported`. A remote environment never gives the host access to the service's other files.
-- **State.** `home` names state the host expects to keep; it does not authorize opening that path on the service. A stateful service MUST choose its own storage and keep each authenticated host's named state separate. It SHOULD use the authenticated token to distinguish hosts.
+- **Instance.** The service MUST scope setup, mutable invocation state, callbacks, request IDs and cancellation to the connection. It MUST NOT route work or callbacks by a bare session, job, call or request ID across connections. Shutdown or loss of one connection MUST NOT stop or transfer another's work.
+- **Paths.** `project` and `home` in `plugin/initialize` are the host's paths, not grants. A plugin service that does not use the host's files treats them as names. A working environment MUST serve the same absolute project path in its own file system, for example through a shared mount, or answer `plugin/initialize` with `not_supported`. The service MUST check every file, command and point request against the operator-assigned project reach of that host; it MUST refuse a scope violation with `invalid_request`. The service MUST NOT treat a host path or a point ID as permission to reach another host's resources. The operator MUST supply filesystem and command confinement when hosts must not share those resources.
+- **State.** A stateful service MUST choose its storage and scope retained state by authenticated host identity before using names such as `home` or session IDs. Distinct isolated hosts MUST have distinct credentials and non-overlapping state; a shared credential cannot distinguish hosts. A listener that cannot make this distinction MUST serve only one host trust scope. A plugin service MUST NOT infer tenant policy from `/1` payloads. The operator MUST use separately confined instances when the plugin or its external resources cannot isolate the required scopes.
 - **Raw reads.** A loaded plugin can read every session open in its host ([Authority](plugin.md#authority)). A host operator MUST treat a plugin service as trusted code with that reach, the same as a child process.
 
 ## Choosing plugin services at start
@@ -47,12 +48,14 @@ Each entry of `MODULAR_AGENT_PLUGINS` is either the stdio form `{ command, env?,
 ## An agent service
 
 - **Liveness.** The agent service MUST accept `$/ping` with params `{}` and return `{}`. This rule applies before and after `initialize`; the request does not change session state. A client MAY use `$/ping` or WebSocket ping frames to check liveness; it need not use both. It MUST apply the five-second default control deadline, configurable by the operator, to the ping it sends and treat a missed deadline as loss. This does not change ACP on stdio.
-- **Actors.** The token decides the connection's actor. The operator MUST configure the actor id, kind, rights and scope for each token outside client and project control. `MODULAR_AGENT_ACTOR` does not apply to a network connection.
+- **Actors.** The token decides the connection's actor. The operator MUST configure the actor id, kind, rights and scope for each token outside client and project control. The same configuration supplies the list of actors that the connection may [represent](acp.md#several-actors), empty if omitted. `MODULAR_AGENT_ACTOR` does not apply to a network connection.
 - **Scope.** If `tenants` is omitted, the token permits only sessions without a tenant. An explicit `tenants` list permits only the named tenants and permits sessions without a tenant only if it includes `null`. An explicit `projects` list matches canonical project paths exactly, not their subdirectories. If `projects` is omitted, the token permits only projects the serving composition serves. Neither list can enlarge what the composition serves. An empty list permits nothing in its scope.
 - **Rights.** At connection time the service MUST use the token's rights as a ceiling: for a recorded actor its connection rights are the intersection of the token's rights and the actor's recorded grants. The service MUST NOT rewrite recorded grants to apply the ceiling. The [connection actor rules](../contracts.md#authority) still govern creation and join on open; prospective grants are also subject to the ceiling. The service MUST still apply ACP's [authorization checks](acp.md#authorization) at the point of action.
 - **State.** `MODULAR_AGENT_DATA_DIR` applies to the agent service as a whole.
 - **Client methods.** ACP's client file and terminal methods reach the client's machine, not the agent's. An agent service MUST NOT offer them to tools as the agent's working environment.
 
 ## Changes
+
+- **Proposed production rules.** Connection-local plugin instances, authenticated host scope for state and projects, and configuration of represented ACP actors.
 
 - **New with [ADR 0028](../adr/0028-websocket-transport.md).** No method or shape changed; stdio builds are unaffected.
