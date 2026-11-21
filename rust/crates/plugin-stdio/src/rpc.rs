@@ -1,6 +1,6 @@
 //! Symmetric, cancellable JSON-RPC over stdio or WebSocket. Each direction has its own id space.
 use agent_api::*;
-use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt, sink, stream};
+use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt, future::BoxFuture, sink, stream};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -100,7 +100,7 @@ impl Work {
     }
 }
 #[async_trait]
-pub trait Endpoint: Send + Sync {
+pub trait Endpoint: Send + Sync + 'static {
     async fn request(
         &self,
         peer: Arc<Peer>,
@@ -109,13 +109,36 @@ pub trait Endpoint: Send + Sync {
         params: Value,
         cancel: CancellationToken,
     ) -> Reply;
-    async fn notification(&self, _peer: Arc<Peer>, _method: &str, _params: Value) {}
+    // Admission runs on the reader: capture live scope and register changes here,
+    // but leave any delivery or RPC work to the notification worker.
+    fn admit_notification(
+        self: Arc<Self>,
+        _peer: &Arc<Peer>,
+        _method: &str,
+        _params: Value,
+    ) -> Option<Notification> {
+        None
+    }
+    fn request_barrier(&self, _method: &str, _params: &Value) -> Option<NotificationKey> {
+        None
+    }
     async fn disconnected(&self) {}
 }
-type OnEvent = Box<dyn Fn(Value) + Send + Sync>;
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+pub enum NotificationKey {
+    Stream(String),
+    Job(String),
+}
+pub struct Notification {
+    pub(crate) barrier: Option<NotificationKey>,
+    pub(crate) run: BoxFuture<'static, ()>,
+}
+type OnEvent = Arc<dyn Fn(Value) + Send + Sync>;
 struct Pending {
-    reply: oneshot::Sender<Reply>,
+    reply: oneshot::Sender<(Reply, Option<CancellationToken>)>,
     work: Option<Arc<Work>>,
+    method: String,
     event: Option<OnEvent>,
 }
 // A host callback may be dropped while it is awaiting a nested RPC. Stop that
@@ -239,8 +262,20 @@ impl Peer {
             let mut reader = Box::pin(incoming);
             let mut tasks = JoinSet::new();
             let mut used = BTreeSet::new();
+            let (notify, mut notifications) = mpsc::channel(1024);
+            let byte_budget = Arc::new(tokio::sync::Semaphore::new(2 * MAX_FRAME));
+            let mut barriers = BTreeMap::<NotificationKey, CancellationToken>::new();
+            let worker = tokio::spawn(async move {
+                while let Some((run, _complete, _bytes)) = notifications.recv().await {
+                    // A panic must not leave a completion barrier waiting forever.
+                    let _ = std::panic::AssertUnwindSafe::<BoxFuture<'static, ()>>(run)
+                        .catch_unwind()
+                        .await;
+                }
+            });
             loop {
                 while tasks.try_join_next().is_some() {}
+                barriers.retain(|_, done| !done.is_cancelled());
                 let Some(bytes) = p.closed.run_until_cancelled(reader.next()).await.flatten()
                 else {
                     break;
@@ -334,7 +369,13 @@ impl Peer {
                         let p = p.clone();
                         let endpoint = endpoint.clone();
                         let method = method.to_string();
+                        let after = endpoint
+                            .request_barrier(&method, &params)
+                            .and_then(|key| barriers.get(&key).cloned());
                         tasks.spawn(async move {
+                            if let Some(after) = after {
+                                cancel.run_until_cancelled(after.cancelled()).await;
+                            }
                             let reply = if cancel.is_cancelled() {
                                 Err(Fault::new(
                                     "cancelled",
@@ -361,7 +402,28 @@ impl Peer {
                             p.respond_frame(id, reply, end);
                         });
                     } else {
-                        endpoint.notification(p.clone(), method, params).await;
+                        if let Some(note) = endpoint.clone().admit_notification(&p, method, params)
+                        {
+                            // Never wait for notification capacity on the reader. In
+                            // particular, responses must be able to unblock the worker.
+                            // Close on overflow rather than silently dropping ordered work.
+                            let Ok(bytes) = byte_budget
+                                .clone()
+                                .try_acquire_many_owned(line.len() as u32)
+                            else {
+                                break;
+                            };
+                            let done = CancellationToken::new();
+                            if let Some(key) = note.barrier {
+                                barriers.insert(key, done.clone());
+                            }
+                            if notify
+                                .try_send((note.run, done.drop_guard(), bytes))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                     }
                 } else if let Some(id) = m.get("id")
                     && let Some(waiter) = p.pending.lock().unwrap().remove(&id.to_string())
@@ -376,7 +438,8 @@ impl Peer {
                     } else {
                         Ok(m.get("result").cloned().unwrap_or(Value::Null))
                     };
-                    let _ = waiter.reply.send(reply);
+                    let after = barriers.remove(&NotificationKey::Stream(id.to_string()));
+                    let _ = waiter.reply.send((reply, after));
                 } else {
                     break;
                 }
@@ -385,6 +448,8 @@ impl Peer {
             for token in p.incoming.lock().unwrap().values() {
                 token.cancel()
             }
+            worker.abort();
+            let _ = worker.await;
             // Cancellation is cooperative, including joined environment cleanup.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 while tasks.join_next().await.is_some() {}
@@ -442,7 +507,7 @@ impl Peer {
         for (_, pending) in std::mem::take(&mut *self.pending.lock().unwrap()) {
             let _ = pending
                 .reply
-                .send(Err(Fault::new("lost", "plugin connection closed")));
+                .send((Err(Fault::new("lost", "plugin connection closed")), None));
         }
     }
     pub fn notify(&self, method: &str, params: Value) {
@@ -474,6 +539,13 @@ impl Peer {
             .get(&id.to_string())
             .and_then(|p| p.work.clone())
     }
+    pub(crate) fn handling_output(&self) -> bool {
+        self.pending.lock().unwrap().values().any(|p| {
+            p.work
+                .as_ref()
+                .is_some_and(|work| work.method == "hook/output")
+        })
+    }
     pub async fn call(
         &self,
         method: &str,
@@ -484,16 +556,20 @@ impl Peer {
         self.call_with_events(method, params, work, cancel, None)
             .await
     }
-    pub(crate) fn deliver_event(&self, id: &Value, event: Value) {
-        if let Some(on_event) = self
-            .pending
+    pub(crate) fn pending_method(&self, id: &Value, method: &str) -> bool {
+        self.pending
             .lock()
             .unwrap()
             .get(&id.to_string())
-            .and_then(|p| p.event.as_ref())
-        {
-            on_event(event);
-        }
+            .is_some_and(|p| p.method == method)
+    }
+    pub(crate) fn event_handler(&self, id: &Value, method: &str) -> Option<OnEvent> {
+        self.pending
+            .lock()
+            .unwrap()
+            .get(&id.to_string())
+            .filter(|p| p.method == method)
+            .and_then(|p| p.event.clone())
     }
     pub(crate) async fn call_with_events(
         &self,
@@ -516,6 +592,7 @@ impl Peer {
                 Pending {
                     reply: tx,
                     work,
+                    method: method.to_owned(),
                     event,
                 },
             );
@@ -552,6 +629,14 @@ impl Peer {
                 }
             }
         };
-        reply.unwrap_or_else(|_| Err(Fault::new("lost", "plugin reply lost")))
+        let (reply, after) = reply.map_err(|_| Fault::new("lost", "plugin reply lost"))?;
+        if let Some(after) = after {
+            tokio::select! {
+                biased;
+                _ = self.closed.cancelled() => return Err(Fault::new("lost", "plugin connection closed during stream delivery")),
+                _ = after.cancelled() => (),
+            }
+        }
+        reply
     }
 }

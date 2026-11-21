@@ -1090,7 +1090,9 @@ impl Environment {
                 "cwd is outside the environment project",
             ));
         }
-        self.peer
+        let work = Work::new(&api, &scope, method, cancel.clone());
+        let reply = self
+            .peer
             .call(
                 method,
                 {
@@ -1098,10 +1100,17 @@ impl Environment {
                     p["sessionId"] = json!(scope.session);
                     p
                 },
-                Some(Work::new(&api, &scope, method, cancel.clone())),
+                Some(work.clone()),
                 cancel,
             )
-            .await
+            .await;
+        if method == "env/exec" {
+            let mut end = Event::new(&scope, "tool.stream.end", Value::Null);
+            end.stream = Some(work.stream.clone());
+            end.end = true;
+            api.emit(end).await?;
+        }
+        reply
     }
 }
 #[async_trait]
@@ -1635,6 +1644,12 @@ pub fn hook_result(hook: &str, s: &Scope, mut original: Value, reply: Value) -> 
 struct Callbacks(Arc<Shared>);
 impl Callbacks {
     fn scope(&self, peer: &Peer, p: &Value) -> Result<(Api, Scope, Option<Arc<Work>>)> {
+        let context = self.capture_scope(peer, p)?;
+        context.0.snapshot(&context.1.session)?;
+        Ok(context)
+    }
+
+    fn capture_scope(&self, peer: &Peer, p: &Value) -> Result<(Api, Scope, Option<Arc<Work>>)> {
         let work = if !p["parentRequestId"].is_null() {
             Some(
                 peer.parent(&p["parentRequestId"])
@@ -1663,7 +1678,6 @@ impl Callbacks {
             .and_then(|w| w.api.upgrade())
             .or_else(|| self.0.api.upgrade())
             .ok_or_else(|| anyhow!("host closed"))?;
-        api.snapshot(&scope.session)?;
         Ok((api, scope, work))
     }
 
@@ -2024,66 +2038,89 @@ impl Endpoint for Callbacks {
             }
         })
     }
-    async fn notification(&self, peer: Arc<Peer>, method: &str, p: Value) {
+    fn request_barrier(&self, method: &str, params: &Value) -> Option<NotificationKey> {
+        match method {
+            "host/jobs/end" | "host/jobs/resume" => job_progress_key(params),
+            "host/hook" if params["hook"] == "provider.response" => Some(NotificationKey::Stream(
+                params.get("parentRequestId")?.to_string(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn admit_notification(
+        self: Arc<Self>,
+        peer: &Arc<Peer>,
+        method: &str,
+        p: Value,
+    ) -> Option<Notification> {
         if method == "tools/changed" {
-            if let Some(source) = p["toolSource"].as_str() {
-                let parent = peer.parent(&p["parentRequestId"]);
-                if !p["parentRequestId"].is_null()
-                    && parent.as_ref().is_none_or(|w| w.method == "tools/list")
-                {
-                    return;
-                }
-                let view = self
-                    .0
-                    .sources
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter_map(Weak::upgrade)
-                    .find(|s| s.id == source);
-                if let Some(view) = view {
-                    view.invalidate(
-                        parent
-                            .as_ref()
-                            .map(|w| w.scope.session.as_str())
-                            .filter(|s| !s.is_empty()),
-                    );
-                    if let Some(work) = parent {
-                        work.changed_tools.lock().unwrap().insert(source.into());
-                    }
-                }
+            // Invalidate at receipt and let the triggering caller refresh after
+            // its reply. Never ask tools/list from the reader.
+            let source = p["toolSource"].as_str()?;
+            let parent = peer.parent(&p["parentRequestId"]);
+            if !p["parentRequestId"].is_null()
+                && parent.as_ref().is_none_or(|w| w.method == "tools/list")
+            {
+                return None;
             }
-            return;
+            let view = self
+                .0
+                .sources
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(Weak::upgrade)
+                .find(|s| s.id == source)?;
+            view.invalidate(
+                parent
+                    .as_ref()
+                    .map(|w| w.scope.session.as_str())
+                    .filter(|s| !s.is_empty()),
+            );
+            if let Some(work) = parent {
+                work.changed_tools.lock().unwrap().insert(source.into());
+            }
+            return None;
         }
         if method == "host/jobs/progress" {
             let jobs = crate::jobs::RemoteJobs {
-                peer,
+                peer: peer.clone(),
                 shared: self.0.clone(),
             };
-            tokio::spawn(async move {
-                let _ = jobs.progress(&p).await;
+            return Some(Notification {
+                barrier: Some(job_progress_key(&p)?),
+                run: Box::pin(async move {
+                    let _ = jobs.progress(&p).await;
+                }),
             });
-            return;
         }
         if method == "host/problem" {
-            eprintln!("plugin problem at {}: {}", p["where"], p["message"]);
-            return;
+            return Some(Notification {
+                barrier: None,
+                run: Box::pin(async move {
+                    eprintln!("plugin problem at {}: {}", p["where"], p["message"]);
+                }),
+            });
         }
-        let (api, scope, _) = match self.scope(&peer, &p) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
+        if method == "host/emit" && peer.handling_output() {
+            return None;
+        }
+        let (api, scope, work) = self.capture_scope(peer, &p).ok()?;
+        let barrier = || Some(NotificationKey::Stream(p["parentRequestId"].to_string()));
         if method == "host/runtime/report" {
-            if let Some(w) = peer.parent(&p["parentRequestId"])
-                && let Some(rt) = &w.runtime
-            {
-                let _ = rt.report(&api, &w, &p).await;
-            }
-            return;
+            let work = work.as_ref()?.clone();
+            let runtime = work.runtime.clone()?;
+            return Some(Notification {
+                barrier: barrier(),
+                run: Box::pin(async move {
+                    let _ = runtime.report(&api, &work, &p).await;
+                }),
+            });
         }
         let mut event = match method {
             "provider/event"
-                if peer.parent(&p["parentRequestId"]).is_some_and(|work| {
+                if work.as_ref().is_some_and(|work| {
                     work.provider.as_ref().is_some_and(|p| {
                         p.phase.load(Ordering::Acquire) == 2 && p.response.lock().unwrap().is_none()
                     }) && !work.cancel.is_cancelled()
@@ -2101,24 +2138,41 @@ impl Endpoint for Callbacks {
                     p["event"]["delta"].clone(),
                 )
             }
-            "tools/progress" => Event::new(&scope, "tool.progress", p["content"].clone()),
-            "env/output" => Event::new(&scope, "tool.progress", p["chunk"].clone()),
-            "host/emit" => Event::new(
-                &scope,
-                p["type"].as_str().unwrap_or("plugin.event"),
-                p["data"].clone(),
-            ),
-            _ => return,
+            "tools/progress" if work.as_ref()?.method == "tools/call" => {
+                Event::new(&scope, "tool.progress", p["content"].clone())
+            }
+            "env/output" if work.as_ref()?.method == "env/exec" => {
+                Event::new(&scope, "tool.progress", p["chunk"].clone())
+            }
+            "host/emit" if !work.as_ref().is_some_and(|w| w.cancel.is_cancelled()) => {
+                let kind = p["type"].as_str().filter(|kind| kind.contains('.'))?;
+                let registration = self.0.registration.lock().unwrap();
+                let plugin = registration["name"].as_str()?;
+                Event::new(
+                    &scope,
+                    &format!("plugin.{plugin}.{kind}"),
+                    p["data"].clone(),
+                )
+            }
+            _ => return None,
         };
-        if let Some(work) = peer.parent(&p["parentRequestId"]) {
-            event.stream = Some(work.stream.clone());
-        }
-        if event.stream.is_some() {
-            let _ = api.emit(event).await;
+        let barrier = if method == "host/emit" {
+            None
         } else {
-            tokio::spawn(async move {
-                let _ = api.emit(event).await;
-            });
-        }
+            event.stream = Some(work?.stream.clone());
+            barrier()
+        };
+        Some(Notification {
+            barrier,
+            run: Box::pin(async move {
+                if api.snapshot(&scope.session).is_ok() {
+                    let _ = api.emit(event).await;
+                }
+            }),
+        })
     }
+}
+
+fn job_progress_key(p: &Value) -> Option<NotificationKey> {
+    Some(NotificationKey::Job(p["jobId"].as_str()?.to_owned()))
 }

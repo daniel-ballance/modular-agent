@@ -498,20 +498,33 @@ impl Endpoint for Conformance {
             _ => Err(Fault::unknown(method)),
         }
     }
-    async fn notification(&self, peer: Arc<Peer>, method: &str, p: Value) {
-        if method == "host/runtime/modelEvent" {
-            peer.deliver_event(&p["parentRequestId"], p["event"].clone());
-        }
-        if method == "host/env/output"
-            && let Some(work) = peer.parent(&p["parentRequestId"])
-        {
-            let parent: Value = serde_json::from_str(work.scope.call.as_deref().unwrap_or("null"))
-                .unwrap_or(Value::Null);
-            peer.notify(
-                "tools/progress",
-                json!({"parentRequestId":parent,"content":[{"type":"text","text":p["chunk"]}]}),
-            );
-        }
+    fn admit_notification(
+        self: Arc<Self>,
+        peer: &Arc<Peer>,
+        method: &str,
+        p: Value,
+    ) -> Option<Notification> {
+        let id = p.get("parentRequestId")?;
+        let barrier = Some(NotificationKey::Stream(id.to_string()));
+        let run: futures_util::future::BoxFuture<'static, ()> = match method {
+            "host/runtime/modelEvent" => {
+                let handler = peer.event_handler(id, "host/runtime/model")?;
+                Box::pin(async move { handler(p["event"].clone()) })
+            }
+            "host/env/output" if peer.pending_method(id, "host/env/exec") => {
+                let work = peer.parent(id)?;
+                let parent: Value = serde_json::from_str(work.scope.call.as_deref()?).ok()?;
+                let peer = peer.clone();
+                Box::pin(async move {
+                    peer.notify(
+                        "tools/progress",
+                        json!({"parentRequestId":parent,"content":[{"type":"text","text":p["chunk"]}]}),
+                    );
+                })
+            }
+            _ => return None,
+        };
+        Some(Notification { barrier, run })
     }
 }
 fn wire_session(p: &Value) -> std::result::Result<&str, Fault> {
