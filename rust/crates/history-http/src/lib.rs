@@ -6,7 +6,10 @@ pub use portable_store::{
     EntryPage, HistoryFault, HistoryResult, LeaseGrant, PortableHistoryStore, SessionPage,
 };
 use reqwest::{Client, Method, StatusCode, Url};
-pub use server::{HistoryServer, ServeHistoryOptions, listen_history, serve_history};
+pub use server::{
+    HistoryServer, ServeHistoryOptions, SnapshotStore, listen_history, listen_portable_history,
+    serve_history, serve_portable_history,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -111,8 +114,16 @@ impl Service {
                 token,
             } => (client, base, token),
             Transport::Embedded(store) => {
-                return portable_store::request(store.as_ref(), method, path, project, body, after)
-                    .await;
+                return portable_store::request(
+                    store.as_ref(),
+                    method,
+                    path,
+                    project,
+                    body,
+                    after,
+                    500,
+                )
+                .await;
             }
         };
         let mut url = base.clone();
@@ -517,9 +528,9 @@ impl HttpHistory {
             margin,
         })
     }
-    pub fn from_store(store: impl PortableHistoryStore) -> Result<Self> {
+    pub fn from_store(store: Arc<dyn PortableHistoryStore>) -> Result<Self> {
         Self::from_service(Service {
-            transport: Transport::Embedded(Arc::new(store)),
+            transport: Transport::Embedded(store),
             margin: clock_margin()?,
         })
     }

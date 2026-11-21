@@ -587,15 +587,15 @@ impl AgentBuilder {
             }
         };
         std::fs::create_dir_all(&state)?;
-        let History(history, persistent, store_name) = match self.history {
+        let History(history, persistent, store_name, portable) = match self.history {
             Some(history) => history,
             None if self.durability == Durability::Ephemeral || !has_data_dir => memory_history(),
             None => file_history(state.join("sessions"))?,
         };
-        let mut saved_history = History(history.clone(), persistent, store_name);
+        let mut saved_history = History(history.clone(), persistent, store_name, portable.clone());
         if let Some(recipe) = &mut restart {
             recipe.project = Some(project.clone());
-            recipe.history = Some(History(history.clone(), persistent, store_name));
+            recipe.history = Some(History(history.clone(), persistent, store_name, portable));
         }
         let mut defaults = base::portable::settings_from_wire(&Value::Object(self.settings));
         if let Some(policy) = self.approval {

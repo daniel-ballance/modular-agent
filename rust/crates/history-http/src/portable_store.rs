@@ -52,6 +52,11 @@ pub type HistoryResult<T> = std::result::Result<T, HistoryFault>;
 #[async_trait]
 pub trait PortableHistoryStore: Send + Sync + 'static {
     fn ttl_ms(&self) -> u64;
+    /// Opt in only if leases (or an exclusion bound), opaque records, durable
+    /// commits and tombstones satisfy the history binding across restarts.
+    fn supports_history_service(&self) -> bool {
+        false
+    }
     fn supports_erasure(&self) -> bool {
         false
     }
@@ -89,9 +94,9 @@ pub(super) async fn request(
     project: Option<&Path>,
     body: Option<Value>,
     after: Option<&str>,
+    limit: usize,
 ) -> Result<(StatusCode, Value)> {
     let body = body.unwrap_or_default();
-    let limit = 500;
     let reply: HistoryResult<Value> = match (method, path) {
         (Method::GET, ["v1"]) => {
             Ok(json!({"binding":"modular-agent-history/1", "ttlMs":store.ttl_ms()}))

@@ -1,5 +1,5 @@
 //! Disposable service for the shared history kit.
-use modular_agent::{Result, ServeHistoryOptions, file_history, serve_history};
+use modular_agent::{Result, ServeHistoryOptions, portable_file_history, serve_history};
 use std::time::Duration;
 
 #[tokio::main]
@@ -22,5 +22,9 @@ async fn main() -> Result<()> {
         Ok("restart") => Duration::from_millis(1000),
         _ => opts.ttl,
     };
-    serve_history(file_history(store)?, opts).await
+    serve_history(
+        portable_file_history(store, opts.ttl, opts.max_sessions)?,
+        opts,
+    )
+    .await
 }
