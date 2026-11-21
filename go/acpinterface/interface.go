@@ -46,8 +46,8 @@ type attachment struct {
 	loading    bool
 	pending    []api.BufferedEvent
 	streamed   map[string]bool
-	models     map[string]api.Content
-	progress   map[string]string
+	models     map[string]api.BufferedEvent
+	progress   map[string]api.BufferedEvent
 	requests   map[questionRecipient]context.CancelFunc
 	polled     map[questionRecipient]bool
 }
@@ -184,10 +184,7 @@ func (s *server) stop() {
 	attached := s.sessions
 	s.sessions = map[string]*attachment{}
 	for _, st := range attached {
-		for _, event := range st.pending {
-			event.Release()
-		}
-		st.pending = nil
+		st.releaseBuffers()
 	}
 	s.mu.Unlock()
 	for id, st := range attached {
@@ -315,7 +312,7 @@ func (s *server) attach(id string, loading bool, identity ...string) *attachment
 		s.connectionRights.LoadOrStore(id, rights)
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
-	st := &attachment{actor: who, ctx: s.acting(ctx, id, who), cancel: cancel, loading: loading, streamed: map[string]bool{}, models: map[string]api.Content{}, progress: map[string]string{}, requests: map[questionRecipient]context.CancelFunc{}, polled: map[questionRecipient]bool{}, joined: map[string]func(){}}
+	st := &attachment{actor: who, ctx: s.acting(ctx, id, who), cancel: cancel, loading: loading, streamed: map[string]bool{}, models: map[string]api.BufferedEvent{}, progress: map[string]api.BufferedEvent{}, requests: map[questionRecipient]context.CancelFunc{}, polled: map[questionRecipient]bool{}, joined: map[string]func(){}}
 	st.disconnect = s.questions().Connect(id, who)
 	s.mu.Lock()
 	s.sessions[id] = st
@@ -326,10 +323,7 @@ func (s *server) attach(id string, loading bool, identity ...string) *attachment
 func (s *server) detach(id string, st *attachment) bool {
 	s.mu.Lock()
 	delete(s.sessions, id)
-	for _, event := range st.pending {
-		event.Release()
-	}
-	st.pending = nil
+	st.releaseBuffers()
 	s.mu.Unlock()
 	st.disconnect()
 	s.connectionRights.Delete(id)
@@ -554,7 +548,7 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 			if current, err := s.erasureEpoch(id); err != nil || current != epoch {
 				return result, api.ErrErasureUnavailable
 			}
-			s.replayEntry(st.ctx, id, entry)
+			s.replayEntry(withDeliveryEpoch(st.ctx, epoch), id, entry)
 		}
 		s.drainOpen(st, &snap)
 	} else {
