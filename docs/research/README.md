@@ -16,6 +16,7 @@ Notes on other systems, gathered to inform the [architecture](../architecture.md
 | [SDK findings](sdk-findings.md) | Decisions from the four SDK builds and the disposition of the other findings |
 | [API-key reasoning](sdk-api-key-reasoning.md) | OpenAI and Anthropic request settings and the research behind the shared catalog |
 | [Protocol landscape](protocol-landscape-2026-11.md) | MCP, MCP Apps, AG-UI, A2A, ACP, A2UI and OpenTelemetry |
+| [Codemode engines](codemode-engines.md) | One sandbox for all four `ma` builds; Monty, QuickJS, Starlark, Lua, and Go worker tests |
 | [ChatGPT conversation](chatgpt-conversation.md) | Where the project started, and what we kept, changed or dropped |
 
 ## How each agent fills our parts
