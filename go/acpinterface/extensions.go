@@ -85,7 +85,7 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 	if err := json.Unmarshal(b, &p); err != nil || p.SessionID == "" {
 		return nil, acpError("invalid_params")
 	}
-	st, err := s.attached(p.SessionID)
+	st, err := s.requireAttachment(p.SessionID)
 	if err != nil {
 		return nil, err
 	}

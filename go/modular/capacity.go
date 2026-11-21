@@ -14,7 +14,10 @@ func DefaultCapacityLimits() CapacityLimits { return harness.DefaultCapacityLimi
 func WithCapacityLimits(limits CapacityLimits) Option {
 	return func(o *options) error {
 		for _, b := range []CapacityBounds{limits.Session, limits.Tenant, limits.Agent} {
-			for _, n := range []int64{b.Inputs, b.Calls, b.Jobs, b.BufferedBytes} {
+			if b.ControlBytes > b.StorageBytes {
+				return &Error{Code: InvalidComposition, Message: "controlBytes cannot exceed storageBytes"}
+			}
+			for _, n := range []int64{b.Inputs, b.Calls, b.Jobs, b.BufferedBytes, b.StorageBytes, b.ControlBytes} {
 				if n < 0 || n > 9007199254740991 {
 					return &Error{Code: InvalidComposition, Message: "invalid capacity ceiling"}
 				}

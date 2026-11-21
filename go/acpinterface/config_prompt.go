@@ -45,7 +45,7 @@ func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionCon
 	if host := s.sessionHost(id); host != s {
 		return host.SetSessionConfigOption(ctx, p)
 	}
-	st, err := s.attached(id)
+	st, err := s.requireAttachment(id)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
@@ -120,7 +120,7 @@ func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptRes
 	if host := s.sessionHost(id); host != s {
 		return host.Prompt(ctx, p)
 	}
-	st, err := s.attached(id)
+	st, err := s.requireAttachment(id)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}

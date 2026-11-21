@@ -48,7 +48,6 @@ func isolated(t *testing.T) (layout, string, string) {
 func TestACPListenOptions(t *testing.T) {
 	for _, args := range [][]string{
 		{"--listen", "127.0.0.1:0", "--token-file", "token"},
-		{"--acp", "--listen", "127.0.0.1:0"},
 		{"--acp", "--token-file", "token"},
 		{"--acp", "--listen=", "--token-file", "token"},
 	} {

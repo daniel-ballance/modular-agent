@@ -3,6 +3,8 @@ package harness
 import (
 	"sync"
 
+	"github.com/daniel-ballance/modular-agent/go/portable"
+
 	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
@@ -13,6 +15,8 @@ type CapacityBounds struct {
 	Calls         int64 `json:"calls"`
 	Jobs          int64 `json:"jobs"`
 	BufferedBytes int64 `json:"bufferedBytes"`
+	StorageBytes  int64 `json:"storageBytes"`
+	ControlBytes  int64 `json:"controlBytes"`
 }
 
 type CapacityLimits struct {
@@ -23,21 +27,22 @@ type CapacityLimits struct {
 
 func DefaultCapacityLimits() CapacityLimits {
 	return CapacityLimits{
-		Session: CapacityBounds{64, 512, 64, 64 << 20},
-		Tenant:  CapacityBounds{512, 4096, 256, 256 << 20},
-		Agent:   CapacityBounds{2048, 8192, 1024, 1 << 30},
+		Session: CapacityBounds{64, 512, 64, 64 << 20, 4 << 30, 8 << 20},
+		Tenant:  CapacityBounds{512, 4096, 256, 256 << 20, 32 << 30, 32 << 20},
+		Agent:   CapacityBounds{2048, 8192, 1024, 1 << 30, 64 << 30, 128 << 20},
 	}
 }
 
 func (b CapacityBounds) add(v CapacityBounds) CapacityBounds {
-	return CapacityBounds{b.Inputs + v.Inputs, b.Calls + v.Calls, b.Jobs + v.Jobs, b.BufferedBytes + v.BufferedBytes}
+	return CapacityBounds{b.Inputs + v.Inputs, b.Calls + v.Calls, b.Jobs + v.Jobs, b.BufferedBytes + v.BufferedBytes, b.StorageBytes + v.StorageBytes, b.ControlBytes + v.ControlBytes}
 }
 func (b CapacityBounds) minus(v CapacityBounds) CapacityBounds {
-	return b.add(CapacityBounds{-v.Inputs, -v.Calls, -v.Jobs, -v.BufferedBytes})
+	return b.add(CapacityBounds{-v.Inputs, -v.Calls, -v.Jobs, -v.BufferedBytes, -v.StorageBytes, -v.ControlBytes})
 }
 func (b CapacityBounds) permits(old, next CapacityBounds) bool {
 	return next.Inputs <= max(old.Inputs, b.Inputs) && next.Calls <= max(old.Calls, b.Calls) &&
-		next.Jobs <= max(old.Jobs, b.Jobs) && next.BufferedBytes <= max(old.BufferedBytes, b.BufferedBytes)
+		next.Jobs <= max(old.Jobs, b.Jobs) && next.BufferedBytes <= max(old.BufferedBytes, b.BufferedBytes) &&
+		next.StorageBytes <= max(old.StorageBytes, b.StorageBytes-b.ControlBytes) && next.ControlBytes <= max(old.ControlBytes, b.ControlBytes)
 }
 
 // Capacity keeps one ledger for the serving Harness and its project Harnesses.
@@ -186,16 +191,7 @@ func (p *turnPorts) ReserveModelResponse(step string, content api.Content) error
 }
 
 func changesCapacity(before, after api.Session) bool {
-	if len(before.Entries) > len(after.Entries) || before.ForkedFrom != after.ForkedFrom {
-		return true
-	}
-	for _, e := range after.Entries[len(before.Entries):] {
-		switch e.Kind {
-		case "input.accepted", "input", "input.returned", "input.withdrawn", "job.start", "job.end", "model.request", "model", "turn.end", "tool.call", "tool.result":
-			return true
-		}
-	}
-	return false
+	return len(before.Entries) != len(after.Entries) || before.ForkedFrom != after.ForkedFrom
 }
 
 func snapshotCharges(row api.Session) (b CapacityBounds) {
@@ -203,7 +199,19 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 		b.Inputs++
 		b.BufferedBytes += int64(len(e.Data))
 	}
+	// The encoded record size is the logical quota. Native snapshots need
+	// additional disk space for atomic replacement; the operator provisions it.
+	for _, e := range row.Entries {
+		size := int64(len(portable.HistoryEntry(row, e)) + 1)
+		switch e.Kind {
+		case "input.returned", "input.withdrawn", "actor.left", "limit", "job.cleanup", "erasure":
+			b.ControlBytes += size
+		default:
+			b.StorageBytes += size
+		}
+	}
 	jobs := map[string]struct{}{}
+	turns := map[string]bool{}
 	// The second map tracks model attempts; a committed response transfers
 	// the call reservation to all call IDs it contains.
 	attempts := map[string]string{}
@@ -224,7 +232,10 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 					calls[part.Call.ID] = true
 				}
 			}
+		case e.Kind == "turn.start":
+			turns[e.Turn] = true
 		case e.WasKind("turn.end"):
+			delete(turns, e.Turn)
 			for step, turn := range attempts {
 				if turn == e.Turn {
 					delete(attempts, step)
@@ -240,5 +251,8 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 	b.Jobs = int64(len(jobs))
 	b.Inputs += b.Jobs
 	b.BufferedBytes += b.Jobs * api.JobReportBytes
+	// Keep enough room for a bounded disposition or result in addition to
+	// the committed intent. Taken inputs transfer their slot to a live turn.
+	b.StorageBytes += 2*b.BufferedBytes + (b.Inputs+int64(len(turns)))*(4<<20) + b.Calls*(4<<20) + b.Jobs*(8<<20)
 	return b
 }

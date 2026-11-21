@@ -2,6 +2,7 @@ package modular
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,10 @@ type ACPActor struct {
 	Actor             Actor
 	Tenants, Projects []string
 	Represents        []string
+}
+
+func validACPActor(actor Actor) bool {
+	return actor.ID != "" && utf8.ValidString(actor.ID) && slices.Contains([]string{"user", "host", "agent", "program"}, actor.Kind)
 }
 
 func acpPolicy(projects, tenants, rights, represents []string) (acpinterface.Principal, error) {
@@ -65,13 +70,29 @@ func LocalACPActor() Actor {
 	return Actor{ID: "local-user", Kind: "host", Rights: slices.Clone(api.Rights)}
 }
 
+// ValidateACPActorTokens verifies the token files and rejects duplicate tokens before serving.
+func ValidateACPActorTokens(actors []ACPActor) error {
+	seen := map[string]bool{}
+	for i, actor := range actors {
+		token, err := wswire.ReadToken(actor.TokenFile)
+		if err != nil {
+			return appError(fmt.Errorf("actors[%d] tokenFile %q: %w", i, actor.TokenFile, err), InvalidComposition)
+		}
+		if seen[token] {
+			return &Error{Code: InvalidComposition, Message: "actors has duplicate bearer tokens"}
+		}
+		seen[token] = true
+	}
+	return nil
+}
+
 // ListenACP starts serving immediately and returns the listener and its URL.
 // ServeACP with the same options blocks until shutdown instead.
 func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, error) {
 	if opt.Listen == "" || opt.Input != nil || opt.Output != nil {
 		return nil, &Error{Code: InvalidParams, Message: "ACP service requires Listen and no stdio streams"}
 	}
-	if opt.Projects != nil || opt.Tenants != nil || opt.Rights != nil || opt.Represents != nil {
+	if opt.Projects != nil || opt.Tenants != nil || opt.Rights != nil || opt.Represents != nil || opt.StdioActor != nil {
 		return nil, &Error{Code: InvalidComposition, Message: "WebSocket scope belongs to each ACP actor"}
 	}
 	iface, err := a.acpInterface()
@@ -80,15 +101,14 @@ func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, e
 	}
 	actors := make(map[string]acpinterface.Principal, len(opt.Actors))
 	for _, entry := range opt.Actors {
-		id := entry.Actor.ID
-		if id == "" || !utf8.ValidString(id) || !slices.Contains([]string{"user", "host", "agent", "program"}, entry.Actor.Kind) {
+		if !validACPActor(entry.Actor) {
 			return nil, &Error{Code: InvalidComposition, Message: "invalid ACP actor identity or kind"}
 		}
 		policy, err := acpPolicy(entry.Projects, entry.Tenants, append([]string{}, entry.Actor.Rights...), entry.Represents)
 		if err != nil {
 			return nil, err
 		}
-		policy.Actor.ID, policy.Actor.Kind = id, entry.Actor.Kind
+		policy.Actor.ID, policy.Actor.Kind = entry.Actor.ID, entry.Actor.Kind
 		token, err := wswire.ReadToken(entry.TokenFile)
 		if err != nil {
 			return nil, appError(err, InvalidParams)

@@ -675,8 +675,10 @@ type ServeACPOptions struct {
 	// Stdio-only scope. Empty project or tenant lists deny that scope.
 	Projects, Tenants  []string
 	Rights, Represents []string
-	TLS                *TLSOptions
-	ControlDeadline    time.Duration
+	// StdioActor replaces the environment-derived principal and sets its ceiling.
+	StdioActor      *Actor
+	TLS             *TLSOptions
+	ControlDeadline time.Duration
 }
 
 // ServeACP serves stdio (or the supplied streams), or blocks until its
@@ -711,9 +713,19 @@ func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error 
 		return err
 	}
 	declared, projects := a.acpResources(opt)
-	policy, err := acpPolicy(opt.Projects, opt.Tenants, opt.Rights, opt.Represents)
+	rights := opt.Rights
+	if opt.StdioActor != nil {
+		if opt.Rights != nil || !validACPActor(*opt.StdioActor) || opt.StdioActor.Rights == nil {
+			return &Error{Code: InvalidComposition, Message: "invalid stdio ACP actor or conflicting rights"}
+		}
+		rights = opt.StdioActor.Rights
+	}
+	policy, err := acpPolicy(opt.Projects, opt.Tenants, rights, opt.Represents)
 	if err != nil {
 		return err
+	}
+	if opt.StdioActor != nil {
+		policy.Actor.ID, policy.Actor.Kind = opt.StdioActor.ID, opt.StdioActor.Kind
 	}
 	return appError(iface.ServeStdio(ctx, opt.Input, opt.Output, declared, projects, policy), Lost)
 }

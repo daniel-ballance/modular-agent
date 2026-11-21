@@ -92,20 +92,21 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 // ServeStdio serves the configured local principal. A nil rights ceiling leaves
 // recorded grants unchanged and uses the normal prospective rights on creation.
 func (i *Interface) ServeStdio(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any, config Projects, policy Principal) error {
-	who := actor
-	if id, set := os.LookupEnv("MODULAR_AGENT_ACTOR"); set {
-		if id == "" || !utf8.ValidString(id) {
-			return errors.New("MODULAR_AGENT_ACTOR must be a nonempty UTF-8 id")
+	if policy.Actor.ID == "" {
+		policy.Actor.ID, policy.Actor.Kind = actor, "host"
+		if id, set := os.LookupEnv("MODULAR_AGENT_ACTOR"); set {
+			if id == "" || !utf8.ValidString(id) {
+				return errors.New("MODULAR_AGENT_ACTOR must be a nonempty UTF-8 id")
+			}
+			policy.Actor.ID = id
 		}
-		who = id
 	}
-	policy.Actor.ID, policy.Actor.Kind = who, "host"
 	if raw := os.Getenv("MODULAR_AGENT_ACP_REPRESENTS"); policy.Represents == nil && raw != "" {
 		if err := json.Unmarshal([]byte(raw), &policy.Represents); err != nil || policy.Represents == nil {
 			return errors.New("MODULAR_AGENT_ACP_REPRESENTS must be a JSON array of principal IDs")
 		}
 	}
-	return i.serve(ctx, in, out, declared, config, who, &policy)
+	return i.serve(ctx, in, out, declared, config, policy.Actor.ID, &policy)
 }
 
 func (i *Interface) serve(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any, config Projects, who string, principal *Principal) error {
@@ -243,6 +244,32 @@ func (s *server) attached(id string) (*attachment, error) {
 	}
 	return st, nil
 }
+func (s *server) requireAttachment(id string) (*attachment, error) {
+	if st, err := s.attached(id); err == nil {
+		snap, err := s.a.Snapshot(id)
+		if err != nil {
+			return nil, outputReplyError(err)
+		}
+		if !s.permitsMembership(snap) {
+			return nil, acpError("forbidden")
+		}
+		return st, nil
+	}
+	if row, err := s.a.Snapshot(id); err == nil && s.discoverable(row) {
+		return nil, acpError("not_open")
+	}
+	rows, err := s.a.List("")
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if row.ID == id && s.discoverable(row) {
+			return nil, acpError("not_open")
+		}
+	}
+	return nil, acpError("forbidden")
+}
+
 func (s *server) mcp() *mcptools.Manager   { v, _ := s.a.Get("mcp"); return v.(*mcptools.Manager) }
 func (s *server) questions() api.Questions { v, _ := s.a.Get("questions"); return v.(api.Questions) }
 func (s *server) root(cwd string, extra []string, prompt *acp.SystemPrompt) error {
@@ -596,9 +623,9 @@ func (s *server) CloseSession(ctx context.Context, p acp.CloseSessionRequest) (a
 	}
 	defer lifecycle.Unlock()
 	id := string(p.SessionId)
-	st, err := s.attached(id)
+	st, err := s.requireAttachment(id)
 	if err != nil {
-		return acp.CloseSessionResponse{}, acpError("not_open")
+		return acp.CloseSessionResponse{}, err
 	}
 	if s.principal != nil {
 		snap, err := s.a.Snapshot(id)
