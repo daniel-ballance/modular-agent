@@ -7,11 +7,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, mkdtempSync, openSync, readSync, readFileSync, rmSync, writeFileSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, rpcError } from "./peer.mjs";
-import { checkUpgrades, CONTROL_MS, PLUGIN_PROTOCOL, socketPeer, websocketOptions } from "../tools/websocket.mjs";
+import { checkUpgrades, CONTROL_MS, PLUGIN_PROTOCOL, socketPeer, upgradeStatus, websocketOptions } from "../tools/websocket.mjs";
 
 const args = process.argv.slice(2);
 const dash = args.indexOf("--");
@@ -33,16 +33,25 @@ try {
 	} else if (argv.includes("--runtime-url") || argv.includes("--durable-runtime-url")) throw new Error("--runtime-url and --durable-runtime-url need --connect");
 	if (network ? dash >= 0 : dash < 0 || dash === args.length - 1) throw new Error("choose a stdio command or a WebSocket URL");
 	const index = argv.indexOf("--isolation-checks");
+	const secondIndex = argv.indexOf("--second-connect");
+	if (secondIndex >= 0 && index < 0) throw Error("--second-connect needs --isolation-checks");
 	if (index >= 0) {
 		const [otherFile, a, b, home] = argv.slice(index + 1, index + 5);
 		if (!network || !home || [otherFile, a, b, home].some((x) => x.startsWith("--"))) throw Error("--isolation-checks needs a service and SECOND_TOKEN_FILE PROJECT_A PROJECT_B HOME");
-		const { token } = websocketOptions(["--connect", network.url.href, "--token-file", otherFile]);
-		const projects = [a, b].map((path) => realpathSync(path));
-		if (token === network.token || projects[0] === projects[1]) throw Error("the isolation fixture needs distinct credentials and projects");
-		isolation = { projects, home: realpathSync(home), second: { ...network, token } };
+		const secondUrl = secondIndex < 0 ? network.url.href : argv[secondIndex + 1];
+		if (!secondUrl || secondUrl.startsWith("--") || secondIndex !== argv.lastIndexOf("--second-connect")) throw Error("--second-connect needs one URL");
+		const second = { ...websocketOptions(["--connect", secondUrl, "--token-file", otherFile]), protocol: PLUGIN_PROTOCOL };
+		if (secondIndex >= 0 && network.url.href === second.url.href) throw Error("separate listeners need different WebSocket URLs");
+		const directory = (path) => {
+			if (!isAbsolute(path) || !statSync(path).isDirectory()) throw Error(`expected an absolute directory: ${path}`);
+			return realpathSync(path);
+		};
+		const projects = [a, b].map(directory);
+		if (second.token === network.token || projects[0] === projects[1]) throw Error("the isolation fixture needs distinct credentials and projects");
+		isolation = { projects, home: directory(home), second, separate: secondIndex >= 0 };
 	}
 } catch (e) {
-	console.error(`${e.message}\nUsage: node run.mjs [--verbose] [--no-runtime] (-- <plugin command> [args...] | --connect URL --token-file FILE [--runtime-url URL] [--durable-runtime-url URL] [--isolation-checks SECOND_TOKEN_FILE PROJECT_A PROJECT_B HOME])`);
+	console.error(`${e.message}\nUsage: node run.mjs [--verbose] [--no-runtime] (-- <plugin command> [args...] | --connect URL --token-file FILE [--runtime-url URL] [--durable-runtime-url URL] [--isolation-checks SECOND_TOKEN_FILE PROJECT_A PROJECT_B HOME [--second-connect URL]])`);
 	process.exit(2);
 }
 const command = args.slice(dash + 1);
@@ -1133,7 +1142,10 @@ if (!argv.includes("--no-runtime")) {
 }
 
 async function checkIsolation() {
-	const [projectA, projectB] = isolation.projects;
+	const scopes = isolation.projects.map((project, i) => ({
+		label: i === 0 ? "A" : "B", project, connection: i === 0 ? network : isolation.second,
+	}));
+	const [a, b] = scopes;
 	const peers = [];
 	const attach = async (connection, project) => {
 		const peer = start({}, connection);
@@ -1143,23 +1155,32 @@ async function checkIsolation() {
 	};
 	const deferred = () => { let finish; const wait = new Promise((resolve) => { finish = resolve; }); return { wait, finish }; };
 	try {
+		if (isolation.separate) {
+			for (const [source, target] of [[a, b], [b, a]]) {
+				const result = await upgradeStatus(target.connection.url, PLUGIN_PROTOCOL, source.connection.token);
+				check(`plugin isolation: token ${source.label} is refused on listener ${target.label} with HTTP 401`, !result.upgraded && result.status === 401, `HTTP ${result.status}`);
+			}
+		}
 		const toolSource = (p) => p.state.reg.toolSources.find((s) => s.tools.some((t) => t.name === "bash")).id;
-		for (const [label, credential, project] of [["same credential", network, projectA], ["different credentials", isolation.second, projectB]]) {
+		const pairs = [["same credential A", a, a], ["different credentials", a, b]];
+		if (isolation.separate) pairs.splice(1, 0, ["same credential B", b, b]);
+		for (const [label, first, second] of pairs) {
 			// Fresh peers allocate the same request ID on different connections.
-			const left = await attach(network, projectA);
-			const right = await attach(credential, project);
+			const left = await attach(first.connection, first.project);
+			const right = await attach(second.connection, second.project);
 			const waitLeft = deferred(), waitRight = deferred(), allowLeft = deferred(), allowRight = deferred();
 			left.state.holdExec = (m) => { waitLeft.finish(m); return allowLeft.wait; };
 			right.state.holdExec = (m) => { waitRight.finish(m); return allowRight.wait; };
 			const send = (p, cwd) => p.request("tools/call", { toolSource: toolSource(p), sessionId: "s1", project: cwd,
 				call: { id: "same-call", name: "bash", input: { command: "echo kit-out; echo more" } } });
-			const l = send(left, projectA), r = send(right, project);
+			const l = send(left, first.project), r = send(right, second.project);
 			const leftReply = l.catch((e) => e), rightReply = r.catch((e) => e);
 			try {
 				const seen = (barrier, reply) => Promise.race([barrier.wait, reply.then(() => { throw Error("call settled before its environment callback"); })]);
 				const [lc, rc] = await Promise.all([seen(waitLeft, leftReply), seen(waitRight, rightReply)]);
 				check(`plugin isolation (${label}): identical request, session and call IDs keep distinct callback routes`, l.id === r.id &&
-					lc.params.parentRequestId === l.id && rc.params.parentRequestId === r.id && lc.params.cwd === projectA && rc.params.cwd === project);
+					lc.params.parentRequestId === l.id && rc.params.parentRequestId === r.id && lc.params.cwd === first.project && rc.params.cwd === second.project &&
+					lc.params.sessionId === "s1" && rc.params.sessionId === "s1");
 				left.cancel(l.id);
 				allowLeft.finish("");
 				const cancelled = await leftReply;
@@ -1170,35 +1191,55 @@ async function checkIsolation() {
 				check(`plugin isolation (${label}): cancel and close leave the other call to settle once`,
 					(code(cancelled) === "cancelled" || cancelled.status === "cancelled") && done.status === "completed" && JSON.stringify(done.content).includes(marker) &&
 					right.hostCalls.filter((m) => m.method === "host/env/exec").length === 1);
-			} finally { allowLeft.finish(""); allowRight.finish(""); }
-		}
-		const b = await attach(isolation.second, projectB);
-		if (b.state.reg.workingEnvironment) {
-			const invalidScope = (e) => e?.code === -32602 && code(e) === "invalid_request";
-			const read = (peer, cwd, path) => peer.request("env/read", { cwd, sessionId: "s1", path }).catch((e) => e);
-			const name = `isolation-${randomUUID()}.txt`;
-			const markerA = Buffer.from("host A").toString("base64"), markerB = Buffer.from("host B").toString("base64");
-			const write = (peer, cwd, data) => peer.request("env/write", { cwd, sessionId: "s1", path: name, data });
-			const first = await attach(network, projectA);
-			await write(first, projectA, markerA);
-			await write(b, projectB, markerB);
-			const wrongInit = start({}, isolation.second);
-			peers.push(wrongInit);
-			const rejected = await wrongInit.request("plugin/initialize", { ...initParams, project: projectA, home: isolation.home }).catch((e) => e);
-			const denied = invalidScope(rejected) || code(rejected) === "not_supported" ||
-				(!!rejected.binding && invalidScope(await read(wrongInit, projectA, name)));
-			check("plugin isolation: host-supplied project does not grant access on initialize or operation", denied && invalidScope(await read(b, projectA, name)));
-			if (first.state.reg.workingEnvironment.points) {
-				const saved = await first.request("env/save", { cwd: projectA, sessionId: "s1" });
-				const restore = await b.request("env/restore", { cwd: projectA, sessionId: "s1", point: saved.point }).catch((e) => e);
-				check("plugin isolation: foreign point cannot be restored in the other project", invalidScope(restore));
+			} finally {
+				allowLeft.finish("");
+				allowRight.finish("");
+				await Promise.all([left.stop(), right.stop()]);
 			}
-			await first.stop();
-			await b.stop();
-			const againA = await attach(network, projectA), againB = await attach(isolation.second, projectB);
-			check("plugin isolation: reconnect reads only the host's own retained fixture file",
-				(await read(againA, projectA, name)).data === markerA && (await read(againB, projectB, name)).data === markerB &&
-				invalidScope(await read(againB, projectA, name)));
+		}
+		const invalidScope = (e) => e?.code === -32602 && code(e) === "invalid_request";
+		const name = `isolation-${randomUUID()}.txt`;
+		const env = (peer, op, cwd, params = {}) => peer.request(`env/${op}`, { cwd, sessionId: "s1", ...params });
+		const read = (peer, cwd, path = name) => env(peer, "read", cwd, { path }).catch((e) => e);
+		for (const scope of scopes) scope.peer = await attach(scope.connection, scope.project);
+		if (!scopes.every(({ peer }) => peer.state.reg.workingEnvironment)) {
+			if (isolation.separate) throw Error("the separate-listener fixture needs a working environment on both listeners");
+			console.log("SKIP  project and point isolation (both hosts need a working environment)");
+			return;
+		}
+		for (const scope of scopes) {
+			scope.marker = Buffer.from(`host ${scope.label}`).toString("base64");
+			await env(scope.peer, "write", scope.project, { path: name, data: scope.marker });
+			if (scope.peer.state.reg.workingEnvironment.points) {
+				({ point: scope.point } = await env(scope.peer, "save", scope.project));
+				if (!scope.point) throw Error(`host ${scope.label} did not return a saved point`);
+			} else if (isolation.separate) throw Error(`the separate-listener fixture needs saved points on listener ${scope.label}`);
+		}
+		for (const [own, other] of [[a, b], [b, a]]) {
+			const wrongInit = start({}, own.connection);
+			peers.push(wrongInit);
+			const rejected = await wrongInit.request("plugin/initialize", { ...initParams, project: other.project, home: isolation.home }).catch((e) => e);
+			const denied = invalidScope(rejected) || code(rejected) === "not_supported" ||
+				(!!rejected.binding && invalidScope(await read(wrongInit, other.project, join(other.project, name))));
+			check(`plugin isolation: host ${own.label} cannot read project ${other.label} through initialize or env/read`,
+				denied && invalidScope(await read(own.peer, other.project)) && invalidScope(await read(own.peer, own.project, join(other.project, name))));
+			await wrongInit.stop();
+
+			if (own.point && other.point) {
+				const point = other.point;
+				const visible = await env(other.peer, "checkPoint", other.project, { point });
+				const crossProject = await env(own.peer, "restore", other.project, { point }).catch((e) => e);
+				const foreign = await env(own.peer, "checkPoint", own.project, { point });
+				const restore = await env(own.peer, "restore", own.project, { point }).catch((e) => e);
+				check(`plugin isolation: host ${own.label} cannot see or restore host ${other.label}'s saved point`,
+					visible.exists === true && invalidScope(crossProject) && foreign.exists === false && code(restore) === "not_found");
+			}
+		}
+		await Promise.all(scopes.map(({ peer }) => peer.stop()));
+		for (const [own, other] of [[a, b], [b, a]]) {
+			const again = await attach(own.connection, own.project);
+			check(`plugin isolation: host ${own.label} reconnects and reads only its own retained fixture file`,
+				(await read(again, own.project)).data === own.marker && invalidScope(await read(again, other.project)));
 		}
 	} finally { await Promise.all(peers.map((p) => p.stop())); }
 }

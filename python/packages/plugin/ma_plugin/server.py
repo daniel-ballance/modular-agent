@@ -111,8 +111,10 @@ class EnvironmentAPI:
 
 
 class Conformance(PluginServer):
-    def __init__(self, parts, *, network=False):
+    def __init__(self, parts, *, network=False, project_grant=None, state_dir=None):
         self.network = network
+        self.project_grant = project_grant
+        self.state_dir = state_dir
         self.project = None
         self.scratch = None
         runtime_parts = parts & {"runtime", "durable-runtime"}
@@ -219,8 +221,12 @@ class Conformance(PluginServer):
                 if not project.is_absolute() or not project.is_dir():
                     raise WireError("Service cannot see the host project path", "not_supported")
                 self.project = project.resolve()
-                self.scratch = TemporaryDirectory(prefix="ma-plugin-")
-            self.local = local_for_platform(self.scratch.name if self.scratch else params["home"])
+                if self.project_grant is not None and project != self.project_grant:
+                    raise WireError("Project is outside the service scope", "invalid_request")
+                if self.state_dir is None:
+                    self.scratch = TemporaryDirectory(prefix="ma-plugin-")
+            home = self.state_dir or (self.scratch.name if self.scratch else params["home"])
+            self.local = local_for_platform(home)
             await self.local.start(EnvironmentAPI())
 
     async def close(self):
@@ -414,7 +420,7 @@ class Conformance(PluginServer):
             path = Path(p.get("path", ""))
             path = path if path.is_absolute() else Path(cwd) / path
             if self.project is not None and not path.resolve().is_relative_to(self.project):
-                raise WireError("Environment path is outside this host project", "forbidden")
+                raise WireError("Environment path is outside this host project", "invalid_request")
             if op == "list":
                 try:
                     return await self.local.list_directory(
@@ -490,8 +496,27 @@ def main():
         asyncio.run(Conformance(parts).serve())
         return
 
+    project = os.environ.get("MODULAR_AGENT_PLUGIN_PROJECT")
+    state = os.environ.get("MODULAR_AGENT_PLUGIN_STATE_DIR")
+    project_grant = state_dir = None
+    if project is not None or state is not None:
+        if not project or not state:
+            parser.error("Set both MODULAR_AGENT_PLUGIN_PROJECT and MODULAR_AGENT_PLUGIN_STATE_DIR")
+        project_grant = Path(project)
+        state_dir = Path(state)
+        if (
+            not project_grant.is_absolute()
+            or not project_grant.is_dir()
+            or not state_dir.is_absolute()
+        ):
+            parser.error("Use an absolute project directory and absolute state path")
+        project_grant = project_grant.resolve()
+        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
     async def connected(frames, _):
-        await Conformance(parts, network=True).serve_frames(frames)
+        await Conformance(
+            parts, network=True, project_grant=project_grant, state_dir=state_dir
+        ).serve_frames(frames)
 
     async def run():
         server = await listen_websocket(
