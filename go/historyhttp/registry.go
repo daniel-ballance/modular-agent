@@ -99,7 +99,7 @@ func (s *Server) loadRegistry() ([]intentRecord, error) {
 		return nil, api.ErrErasureUnavailable
 	}
 	for _, row := range records {
-		if row.SessionIDs == nil || len(row.SessionIDs)+1 != len(row.Plans) {
+		if row.SessionIDs == nil || len(row.SessionIDs) != len(row.Plans) {
 			return nil, api.ErrErasureUnavailable
 		}
 	}
@@ -224,7 +224,7 @@ func (s *Server) publishPlans(w http.ResponseWriter, source document, q request,
 		return
 	}
 	row := intentRecord{ID: p.IntentID, Source: q.id, Targets: targets,
-		SessionIDs: make([]string, 0, len(p.Copies)-1), Plans: make(map[string]plan)}
+		SessionIDs: make([]string, 0, len(p.Copies)), Plans: make(map[string]plan)}
 	for _, set := range p.Copies {
 		d := source
 		if set.SessionID != q.id {
@@ -255,9 +255,8 @@ func (s *Server) publishPlans(w http.ResponseWriter, source document, q request,
 			failure(w, 413, "request_too_large", "plan cannot fit a page")
 			return
 		}
-		if set.SessionID != q.id {
-			row.SessionIDs = append(row.SessionIDs, set.SessionID)
-		}
+		// sessionIds lists every copy set's session, the source's own included (history-http.md).
+		row.SessionIDs = append(row.SessionIDs, set.SessionID)
 		row.Plans[set.SessionID] = result
 	}
 	if !current() {

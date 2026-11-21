@@ -260,7 +260,7 @@ func (l *lease) mutateRegistry(path string, body func(string) any, publish bool)
 		id := idOf(out["intentId"])
 		sessions, ok := distinctIDs(out["sessionIds"], true)
 		if validSegment(id) && ok &&
-			!slices.ContainsFunc(sessions, func(id string) bool { return !validSegment(id) || id == l.id }) {
+			!slices.ContainsFunc(sessions, func(id string) bool { return !validSegment(id) }) {
 			return api.ErasurePublication{IntentID: id, SessionIDs: sessions}, nil
 		}
 	}

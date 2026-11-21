@@ -56,7 +56,7 @@ func TestPublicationReturnsOriginalDestinationsInOrder(t *testing.T) {
 		Copies: []copySet{{SessionID: "zeta", RecordID: "zeta-record", EntryIDs: []string{"entry"}},
 			{SessionID: "source", RecordID: "source-record", EntryIDs: []string{"entry"}},
 			{SessionID: "alpha", RecordID: "alpha-record", EntryIDs: []string{"entry"}}}}
-	want := fields{"intentId": raw("original"), "sessionIds": raw([]string{"zeta", "alpha"})}
+	want := fields{"intentId": raw("original"), "sessionIds": raw([]string{"zeta", "source", "alpha"})}
 	publish := func() {
 		t.Helper()
 		var out fields
@@ -120,7 +120,7 @@ func TestRegistryOrdersIntentAndAppend(t *testing.T) {
 		t.Fatalf("stale publication changed plans: %v, %v", plans, err)
 	}
 	published, err := writer.PublishErasure(fresh, intent)
-	want := api.ErasurePublication{IntentID: intent.ID, SessionIDs: []string{}}
+	want := api.ErasurePublication{IntentID: intent.ID, SessionIDs: []string{next.ID}}
 	if err != nil || !reflect.DeepEqual(published, want) {
 		t.Fatalf("publish: %+v, %v", published, err)
 	}
