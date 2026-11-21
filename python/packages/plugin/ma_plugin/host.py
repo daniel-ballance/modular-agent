@@ -430,11 +430,6 @@ class External(Plugin):
 
     async def cancel_job(self, d, emit):
         await self.request("jobs/cancel", {"jobId": d["job"]}, d)
-        # The plugin is expected to end it before answering. The native Jobs
-        # ledger makes this fallback harmless if the plugin already did.
-        jobs = await self.api.call("jobs", "list", d)
-        if any(j["id"] == d["job"] and j["state"] == "running" for j in jobs):
-            await self.api.call("jobs", "report", {**d, "state": "cancelled", "report": False})
         return {}
 
     async def owned_job(self, job_id):
@@ -896,6 +891,9 @@ class External(Plugin):
                         "detail": j["detail"],
                         "actorId": j["actor"],
                         **({"key": j["key"]} if j.get("key") else {}),
+                        **(
+                            {"cleanup": "unconfirmed"} if j["state"] == "cleanupUnconfirmed" else {}
+                        ),
                     }
                     for j in jobs
                 ]
