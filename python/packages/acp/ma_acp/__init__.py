@@ -939,7 +939,7 @@ class ACP(Plugin):
         return None
 
     async def answer_request(self, sid, q):
-        if q["kind"] not in {"approval", "text", "choice"}:
+        if q["kind"] not in {"approval", "text", "choice", "secret"}:
             return
         value = None
         try:
