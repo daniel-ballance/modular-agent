@@ -448,6 +448,10 @@ func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Sess
 	if !api.ConnectionAllows(ctx, "watch") || !c.Authorize(id, api.Acting(ctx), "watch") {
 		return api.Session{}, errors.New("watch refused")
 	}
+	epoch, err := c.ErasureEpoch(id)
+	if err != nil {
+		return api.Session{}, err
+	}
 	snap, err := c.Snapshot(id)
 	if err != nil {
 		return snap, err
@@ -461,11 +465,17 @@ func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Sess
 		if err != nil {
 			return api.Session{}, err
 		}
+		if got, err := c.ErasureEpoch(id); err != nil || got != epoch {
+			return api.Session{}, api.ErrErasureUnavailable
+		}
 		return api.Decode[api.Session](out.Data), nil
 	}
 	out, err := c.output(ctx, event)
 	if err != nil || out.Hold {
 		return api.Session{}, api.ErrOutputWithheld
+	}
+	if got, err := c.ErasureEpoch(id); err != nil || got != epoch {
+		return api.Session{}, api.ErrErasureUnavailable
 	}
 	return api.Decode[api.Session](out.Event.Data), nil
 }
@@ -1322,9 +1332,15 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 func (c *client) Emit(ctx context.Context, e api.Event) {
 	// A failing output gate drops the event. A listener cannot change execution.
 	defer func() { _ = recover() }()
+	if epoch, err := c.ErasureEpoch(e.Session); err != nil {
+		return
+	} else {
+		e.ErasureEpoch = epoch
+	}
 	e.Time = time.Now().UTC()
 	out, err := c.output(ctx, e)
 	if err == nil && !out.Hold {
+		out.Event.ErasureEpoch = e.ErasureEpoch
 		e = out.Event
 	}
 	events := c.streamOutput(e, err != nil || out.Hold)

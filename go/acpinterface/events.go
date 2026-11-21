@@ -28,6 +28,12 @@ func (s *server) outputRecipient(e api.Event) string {
 	return ""
 }
 func (s *server) event(e api.Event) {
+	if epoch, err := s.erasureEpoch(e.Session); err != nil || epoch != e.ErasureEpoch {
+		return
+	}
+	if e.Kind == "session.leave" {
+		s.setPresence(e.Session, e.Actor, false)
+	}
 	s.mu.Lock()
 	st := s.sessions[e.Session]
 	if st == nil || s.closed || !s.authorize(e.Session, st.actor, "watch") {

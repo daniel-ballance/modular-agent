@@ -487,6 +487,10 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 		return result, err
 	}
 	if replay {
+		epoch, e := s.erasureEpoch(id)
+		if e != nil {
+			return result, e
+		}
 		snap, e := s.historyView(st.ctx, id)
 		if e != nil {
 			if s.detach(id, st) {
@@ -501,6 +505,9 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 					continue
 				}
 				entry = api.Decode[api.Entry](e.Data)
+			}
+			if current, err := s.erasureEpoch(id); err != nil || current != epoch {
+				return result, api.ErrErasureUnavailable
 			}
 			s.replayEntry(st.ctx, id, entry)
 		}

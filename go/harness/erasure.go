@@ -9,6 +9,34 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
+// ErasureEpoch lets a delivery discard a view captured before the cutoff.
+func (c *client) ErasureEpoch(id string) (int, error) {
+	v, _ := c.Get("history")
+	registry, ok := v.(api.ErasureCoordinator)
+	if !ok || id == "" {
+		return 0, nil
+	}
+	var epoch int
+	err := registry.PendingErasures(func(intents *[]api.ErasureIntent) error {
+		for _, intent := range *intents {
+			matches := false
+			for _, copy := range intent.Copies {
+				if copy.SessionID == id {
+					matches = true
+					if !copy.Complete {
+						return api.ErrErasureUnavailable
+					}
+				}
+			}
+			if matches {
+				epoch++
+			}
+		}
+		return nil
+	})
+	return epoch, err
+}
+
 func (c *client) SupportsErasure() bool {
 	v, err := c.Get("history")
 	if err != nil {

@@ -105,6 +105,13 @@ func (s *server) authorize(id, who, right string) bool {
 	return err == nil && s.permitsMembership(snap) && api.ConnectionAllows(s.acting(s.ctx, id, who), right) && s.a.Authorize(id, who, right)
 }
 
+func (s *server) erasureEpoch(id string) (int, error) {
+	if a, ok := s.a.(interface{ ErasureEpoch(string) (int, error) }); ok {
+		return a.ErasureEpoch(id)
+	}
+	return 0, nil
+}
+
 func (s *server) canDeliver(st *attachment, id, who string) bool {
 	s.mu.Lock()
 	live := !s.closed && st != nil && s.sessions[id] == st && st.ctx.Err() == nil &&

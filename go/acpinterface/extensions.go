@@ -32,12 +32,25 @@ func (s *server) HandleExtensionMethod(ctx context.Context, method string, b jso
 	if host := s.sessionHost(p.SessionID); host != s {
 		return host.HandleExtensionMethod(ctx, method, b)
 	}
+	var epoch int
+	if _, err := s.attached(p.SessionID); err == nil && method != "_modular-agent/erase" {
+		var e error
+		epoch, e = s.erasureEpoch(p.SessionID)
+		if e != nil {
+			return nil, outputReplyError(e)
+		}
+	}
 	result, err := s.handleExtensionMethod(ctx, method, b)
 	if err == nil {
 		if st, e := s.attached(p.SessionID); e == nil {
 			if method != "_modular-agent/requests" {
 				result, err = s.gateAnswer(s.acting(ctx, p.SessionID, st.actor), p.SessionID, method, result)
 			}
+		}
+	}
+	if err == nil && method != "_modular-agent/erase" {
+		if got, e := s.erasureEpoch(p.SessionID); e != nil || got != epoch {
+			return nil, outputReplyError(api.ErrErasureUnavailable)
 		}
 	}
 	return result, outputReplyError(err)
