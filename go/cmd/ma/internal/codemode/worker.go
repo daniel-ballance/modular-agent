@@ -39,7 +39,6 @@ func workerCommand(ctx context.Context, path string) (*exec.Cmd, error) {
 	check := command(checkCtx, path, "--version")
 	check.WaitDelay = openingTimeout
 	var version versionOutput
-	// Writer-only: prevent io.Copy from using the embedded Builder directly.
 	check.Stdout = &version
 	if err := check.Run(); err != nil {
 		return nil, fmt.Errorf("cannot run Monty %s worker at %s: %w", workerVersion, path, err)

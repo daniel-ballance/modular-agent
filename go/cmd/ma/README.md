@@ -7,13 +7,12 @@
 On Linux with unprivileged user, PID and mount namespaces, from `go/`:
 
 ```sh
-mkdir -p .bin
+./scripts/build-monty.sh
 mise exec -- go build -o .bin/ma ./cmd/ma
 .bin/ma --help
-mise exec -- go install ./cmd/ma  # installs to GOBIN or GOPATH/bin
 ```
 
-Monty comes from [gomonty v0.0.14](https://github.com/ewhauser/gomonty/tree/v0.0.14). The tag embeds the native library and loads it through `purego`. No cgo, Rust compiler, interpreter, or separate library install is needed. It writes the library to the user's cache, or the temporary directory when a cache directory is unavailable. The Go working environment and credential locking are Linux-specific in this build.
+The script checks out [Monty v1.6.0](https://github.com/pydantic/monty/tree/v1.6.0) at its pinned commit and uses the Rust toolchain from `rust/mise.toml` to build it with `cargo build --locked --release`. It writes `go/.bin/monty`. To install `ma`, copy both executables into the same directory on `PATH`. `go install ./cmd/ma` on its own does not install the worker. No Rust toolchain, cgo, Python installation or worker download is needed at run time. Go's working environment and credential locking are Linux-specific.
 
 ```sh
 ma login openai-codex            # browser; add --device to enter a code
@@ -32,11 +31,11 @@ The four languages share `$XDG_CONFIG_HOME/modular-agent` (or `~/.config/modular
 
 ## Code sandbox
 
-Each `codemode` call starts a fresh worker by re-executing `ma`. Only the worker compiles and runs the Python code. It sends requests over framed stdio; the agent makes each nested tool call and returns its result through the same connection.
+Each `codemode` call starts `monty subprocess` next to the running `ma`. The agent checks the binary's version and requires an acknowledgement of protocol 8 before sending Python. It never searches `PATH`, the project or the network for the worker. Only the worker compiles and runs Python. It sends length-prefixed protobuf frames over stdio; the agent makes each nested tool call and sends the result back. The worker receives no agent environment variables. `tools` is prebound and importable; its functions can be assigned and called later.
 
-The worker sets Monty's heap limit to 256 MiB. This is an approximate count of the interpreter heap, not a cap on the process's resident memory. The other limits are 30 seconds of computation between nested calls, 500 nested calls per run, recursion depth 200, 1 MiB of printed output, and 2,000 lines or 50 KiB of result text. Each stdio frame is limited to 64 MiB. Time spent waiting for a nested result does not count against the compute limit. Print formatting can differ from Python's.
+The 256 MiB memory limit is Monty's `max_memory`, not a limit on resident memory. The worker measures active execution on its wall clock. The agent allows 30 seconds between nested calls and does not charge import, lookup or discovery suspensions as tool calls or let them reset the compute budget. Time spent waiting for a nested tool does not count. A pipe deadline stops a worker that fails to reply. A run can make 500 nested calls, use 200 frames of recursion and collect 1 MiB of print output. Result text is cut to 2,000 lines or 50 KiB. The agent also caps wire frames at 32 MiB and checks both decoded and expanded value sizes before converting them. Python gets no ambient files, network, wall clock, entropy, sleep or processes.
 
-A memory or time limit fails the call with Monty's error. The worker exits after each run, even on success. If it dies during a run, the call reports that the worker died; the next call starts a new worker. Cancelling the call kills and reaps the worker.
+A memory or time limit fails the call. The agent discards and reaps the worker after each run, even on success. If it dies during a run, the call reports that the worker died; the next call starts a new worker. Cancelling the call kills and reaps the worker.
 
 ## What is checked
 
@@ -45,8 +44,8 @@ From the repository root:
 ```sh
 export TMPDIR="$HOME/.cache/ma-std-tmp"
 mkdir -p "$TMPDIR"
-(cd conformance/acp && npm ci)
-(cd go && mkdir -p .bin && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular)
+(cd conformance/acp && npm ci && cd ../tools && npm ci)
+(cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular)
 node conformance/reference/run.mjs --agent go
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/go/.bin/ma" --acp
 scripts/websocket-kits.sh go
@@ -55,15 +54,14 @@ scripts/websocket-kits.sh go
 (cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/... > "$TMPDIR/ma-go-race.log" 2>&1)
 ```
 
-- **Reference checks:** 18/18, including the sandbox memory limit and recovery.
-- **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio and 193/193 over WebSocket against `ma`.
-- **Sandbox regressions:** the Go tests cover memory and time limits, worker death, cancellation, the 500-call budget, nested calls and exceptions, and printed output and return values.
+- **Reference checks:** 19/19 in each language, including tool function values and memory failure followed by recovery.
+- **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio and 193/193 over WebSocket against Go `ma`. The Go plugin WebSocket kit passed 153/153.
+- **Sandbox regressions:** the Go tests cover imports and aliases, argument binding, structured and failed results, terminal memory and time limits, time waiting on a tool, worker death and cancellation, call and recursion boundaries, print and result limits, malformed worker messages and denied OS operations.
 - **Go checks:** build, vet and formatting pass. The full suite passed 37 packages. The race run for `modular/...` and `cmd/ma/...` passed 7 tested packages. `cmd/modular` takes several minutes; use the default package timeout.
 - **Claude:** the first pass tested the sidecar over stdio with its scripted SDK. No real sign-ins or model requests were made for any Provider.
 
 ## Known gaps
 
-- `gomonty` v0.0.14 is the latest release, and its main branch resolves to that tag. It pins Monty 0.0.9 at [`c9802b5`](https://github.com/pydantic/monty/tree/c9802b5f30d11fecf9f153feb1dfdab3abda070e), not Monty 1.6.0. The binding exposes external functions and dataclasses but no module registration or import handler. Monty's [compiler](https://github.com/pydantic/monty/blob/c9802b5f30d11fecf9f153feb1dfdab3abda070e/crates/monty/src/bytecode/compiler.rs#L575-L591) emits an instruction that raises `ModuleNotFoundError` for unknown modules without calling the host. In [`Dataclass.py_call_attr`](https://github.com/pydantic/monty/blob/c9802b5f30d11fecf9f153feb1dfdab3abda070e/crates/monty/src/types/dataclass.rs#L260-L303), a public name missing from the dataclass yields a host method call, but a present field raises `TypeError` on direct call syntax, even when it holds an external function. Leaving the field absent supports `tools.read(...)` and `t = tools; t.read(...)`, but `f = tools.read` then raises `AttributeError`. The binding cannot support both forms on the same object. Go keeps direct calls and does not rewrite Python source.
 - `find` uses `git ls-files` where Git can read a worktree and falls back to `find` otherwise. It does not interpret `.gitignore` outside a Git worktree. The existing SDK command environment is required for this tool. Very long command output is held by that environment before being cut and spilled.
 - The SDK's question handler supports in-turn text and choice answers. `auth.json` preserves named answers written by Rust, but this configuration does not store new secret answers. The SDK's question tool keeps its existing definition, which is not word-for-word the Rust question tool.
 - The subscription Providers use the documented endpoints, not API-key Providers supplied by the SDK. Only loopback fixtures have checked the protocols. Model streams honor request cancellation and a response-header timeout; a quiet stream after headers has no independent idle timeout.
@@ -79,11 +77,16 @@ Proposed replacement text, without changing the shared documents from this workt
 
 1. **`docs/reference/standard-configuration.md`, Tools.** Replace the argument sentence with:
    > Pass arguments by keyword or position: required fields in schema order, then optional fields by name. A single dict supplies named arguments unless the first parameter takes an object. `None` omits an argument.
-2. **`docs/reference/standard-configuration.md`, Tools.** Add after the `tools` object description:
-   > The sandbox supplies `tools` without an import. Call a function directly as `tools.name(...)`. Importing `tools` or reading an individual function as a value is not required of every build.
-3. **`docs/reference/standard-configuration.md`, Tools.** Replace the memory limit clause with:
-   > 256 MiB of interpreter memory (Monty's `max_memory`; the binding decides what allocations to count, and this is not a limit on the worker's resident memory)
-4. **`docs/sdk/api.md`, The agent.** Add after `serveAcp`:
+2. **`docs/reference/standard-configuration.md`, Tools.** Monty 1.6.0 [does not cache host imports](https://github.com/pydantic/monty/blob/v1.6.0/crates/monty/src/bytecode/vm/module_cache.rs). In Go, the prebound and imported `tools` have the same boundary module ID and the same function values, but comparing the module objects with `is` returns false. Importing once in a separate prelude also returned distinct objects. Replace the `tools` bullet with:
+   > The sandbox supplies `tools` without an import. `import tools` exposes the same functions; it need not return an identical Python module object. Functions are values: `f = tools.read` then `f(path='a.txt')` makes the same call as `tools.read(path='a.txt')`.
+3. **`docs/reference/standard-configuration.md`, Tools.** Replace the OS-access bullet with:
+   > The sandbox denies ambient files, networking, process creation, wall clocks, system entropy and sleep. Process and thread clocks return zero. Scripts can seed their own pseudorandom generator.
+   Rust and Python set the wall clock and sleep to call the host but leave Monty's default for unseeded randomness. TypeScript and Go explicitly delegate entropy and deny it. Go follows Rust's error for denied OS calls.
+4. **`docs/reference/standard-configuration.md`, Tools.** Replace “30 seconds of computation between calls” with:
+   > 30 seconds on the interpreter's active wall clock between nested tool calls. Waiting for tools, import, name lookup and catalog discovery does not count, but only a nested tool call resets the budget.
+   Rust, TypeScript and Python use Monty's per-turn budget, which resets at other suspensions too. Go keeps the worker's per-turn limit and accumulates active time across those suspensions until a nested tool call runs.
+5. **Other differences.** Go uses Rust's JSON shape for results and Python representations for non-JSON values. TypeScript and Python use their own host conversions, so unusual values need a shared output profile. Go follows Rust in stopping at the print limit and keeping the UTF-8 prefix; TypeScript can run to the next suspension and drops the segment that did not fit. Rust and Python prefer image content over a structured value and return an `exec` dict even for a timeout. TypeScript and Go prefer the structured value and raise for a timeout; Go gives the failed `exec` dict only for a non-zero exit, as specified. Go, TypeScript and Python dispatch qualified tool function names; Rust also accepts a bare unresolved call if its name matches a registered tool.
+6. **`docs/sdk/api.md`, The agent.** Add after `serveAcp`:
    > On reopen, the composition factory can read the saved session ID before building the agent, so it can start a Provider selected by the saved settings. Inspecting the ID does not start recovery. Project compositions on one connection share the history store and are closed when the connection ends.
-5. **`docs/sdk/api.md`, The agent.** Add after `sessionInfo`:
+7. **`docs/sdk/api.md`, The agent.** Add after `sessionInfo`:
    > A file or HTTP history handle exposes `sessions` and `sessionInfo` before an Agent is constructed, so an application can choose the project or Provider for a reopen without starting recovery.

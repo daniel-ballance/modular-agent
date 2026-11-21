@@ -106,7 +106,7 @@ The other languages' builds are in [`typescript/packages/ma`](typescript/package
 - **Linux only.** Command containment uses Linux namespaces, ptrace and cgroups. macOS and Windows are not supported yet.
 - **`ma` names itself `pi` to OpenAI and xAI,** Pi's client identity, because it is the only one known to be accepted. If you build an agent from this code, change it in the one place each implementation keeps it ([client identity](docs/reference/standard-configuration.md#providers)).
 - **Few real requests.** The test suites use scripted models and local fakes. The ChatGPT and Claude subscription Providers have answered real requests through all four `ma` builds, and the `openai` and `anthropic` API-key Providers pass the [live checks](docs/sdk/testing.md#live-checks) in all four SDKs. Grok has not made a real request.
-- **Go's code sandbox is behind the others.** Every `ma` runs code in a worker process with a 256 MiB limit, but Go's binding to Monty is built on an old Monty: code cannot `import tools` or assign a tool to a variable.
+- **Monty does not preserve Python object identity for host module imports.** Go `ma` now uses Monty 1.6.0, like the other builds. `import tools` and function aliases work, but the prebound and imported module objects can compare unequal with `is`.
 - **`ma` turns off several actors, session limits and tenants.** The SDKs offer them as options.
 - **Parts as network services are new.** All four SDKs serve plugins and agents over the [WebSocket transport](docs/bindings/websocket.md), and the kits check each one, but only on loopback in tests; nothing has run across machines yet.
 

@@ -79,7 +79,7 @@ func (w *worker) functionCall(c *pb.FunctionCall, fs []function, nested nestedFu
 		if err != nil {
 			return fail("TypeError", f.name+"(): "+err.Error())
 		}
-		*made++
+		*made = *made + 1
 		res, err := w.callNested(nested, f.tool.Name, json.RawMessage(input))
 		if w.ctx.Err() != nil {
 			return nil, w.ioError(io.EOF)
@@ -87,15 +87,13 @@ func (w *worker) functionCall(c *pb.FunctionCall, fs []function, nested nestedFu
 		if err != nil {
 			return fail("RuntimeError", fmt.Sprintf("%s() could not run: %v", f.name, err))
 		}
-		if res.Status == modular.Completed {
+		if res.Status == modular.Completed && len(res.Value) == 0 {
 			for _, p := range res.Content {
 				if p.Type == "image" {
 					return answer(map[string]any{"type": "image", "mimeType": partString(p, "mimeType"), "data": partString(p, "data"), "note": res.Text()})
 				}
 			}
-			if len(res.Value) == 0 {
-				return answer(res.Text())
-			}
+			return answer(res.Text())
 		}
 		if (res.Status == modular.Completed || res.Status == modular.Failed && f.tool.Name == "exec") && len(res.Value) > 0 {
 			if len(res.Value) > maxFrame {
@@ -104,11 +102,10 @@ func (w *worker) functionCall(c *pb.FunctionCall, fs []function, nested nestedFu
 			var value any
 			decoder := json.NewDecoder(bytes.NewReader(res.Value))
 			decoder.UseNumber()
-			if err := decoder.Decode(&value); err != nil {
-				return fail("RuntimeError", "invalid structured tool result: "+err.Error())
+			if err := decoder.Decode(&value); err != nil || decoder.Decode(new(any)) != io.EOF {
+				return fail("RuntimeError", "invalid structured tool result")
 			}
-			_, object := value.(map[string]any)
-			if res.Status == modular.Completed || object {
+			if res.Status == modular.Completed || commandExitedNonzero(value) {
 				return answer(value)
 			}
 		}
@@ -119,4 +116,11 @@ func (w *worker) functionCall(c *pb.FunctionCall, fs []function, nested nestedFu
 		return fail("RuntimeError", fmt.Sprintf("%s() %s: %s", f.name, status, res.Text()))
 	}
 	return fail("NameError", fmt.Sprintf("name '%s' is not defined", name))
+}
+
+func commandExitedNonzero(value any) bool {
+	obj, _ := value.(map[string]any)
+	code, _ := obj["exit_code"].(json.Number)
+	n, err := code.Int64()
+	return err == nil && n != 0 && obj["timed_out"] != true
 }

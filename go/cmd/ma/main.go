@@ -179,7 +179,6 @@ func parse(args []string) (o options, err error) {
 }
 
 func main() {
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 	interrupts := make(chan os.Signal, 1)

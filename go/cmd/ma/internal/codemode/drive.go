@@ -6,9 +6,12 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	pb "github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/codemode/protocol"
 	"github.com/daniel-ballance/modular-agent/go/modular"
+	"google.golang.org/protobuf/proto"
 )
 
 const osDenied = "the sandbox has no direct access to files, the network, the clock or the environment; use the provided functions"
@@ -233,30 +236,65 @@ func raisedError(e *pb.RaisedException) error {
 	}
 	// Keep the reason last, as Monty does, so truncation can put it first.
 	var out strings.Builder
-	if len(e.Traceback) > 1 {
+	if len(e.Traceback) != 0 {
 		out.WriteString("Traceback (most recent call last):\n")
 	}
-	for _, frame := range e.Traceback {
-		if frame.Start == nil || frame.End == nil {
-			return protocolError("missing exception location")
+	for i := 0; i < len(e.Traceback); {
+		frame := e.Traceback[i]
+		if frame.Start == nil || frame.End == nil || frame.Start.Line == 0 || frame.Start.Column == 0 ||
+			frame.End.Line < frame.Start.Line || frame.End.Line == frame.Start.Line && frame.End.Column < frame.Start.Column {
+			return protocolError("missing or invalid exception location")
 		}
-		fmt.Fprintf(&out, "  File %q, line %d", frame.Filename, frame.Start.Line)
-		if !frame.HideFrameName {
-			name := "<module>"
-			if frame.FrameName != nil {
-				name = *frame.FrameName
-			}
-			fmt.Fprintf(&out, ", in %s", name)
+		if out.Len() > 50*1024 {
+			break // The error reason still goes at the end of a long traceback.
 		}
-		out.WriteByte('\n')
-		if frame.PreviewLine != nil {
-			fmt.Fprintf(&out, "    %s\n", *frame.PreviewLine)
+		j := i + 1
+		for j < len(e.Traceback) && proto.Equal(frame, e.Traceback[j]) {
+			j++
 		}
+		for range min(3, j-i) {
+			writeTraceFrame(&out, frame)
+		}
+		if j-i > 3 {
+			fmt.Fprintf(&out, "  [Previous line repeated %d more times]\n", j-i-3)
+		}
+		i = j
 	}
 	out.WriteString(e.ExcType)
-	if e.GetMessage() != "" {
+	if e.Message != nil {
 		out.WriteString(": ")
 		out.WriteString(e.GetMessage())
 	}
 	return errors.New(out.String())
+}
+
+func writeTraceFrame(out *strings.Builder, frame *pb.StackFrame) {
+	fmt.Fprintf(out, "  File %q, line %d", utf8Prefix(frame.Filename, 2000), frame.Start.Line)
+	if !frame.HideFrameName {
+		name := "<module>"
+		if frame.FrameName != nil {
+			name = utf8Prefix(*frame.FrameName, 2000)
+		}
+		fmt.Fprintf(out, ", in %s", name)
+	}
+	out.WriteByte('\n')
+	if frame.PreviewLine == nil {
+		return
+	}
+	line := utf8Prefix(*frame.PreviewLine, 2000)
+	if frame.Start.Line != frame.End.Line {
+		for entry := range strings.SplitSeq(strings.TrimSuffix(line, "\n"), "\n") {
+			fmt.Fprintf(out, "    %s\n", entry)
+		}
+		return
+	}
+	trimmed := strings.TrimLeftFunc(line, unicode.IsSpace)
+	fmt.Fprintf(out, "    %s\n", trimmed)
+	if !frame.HideCaret {
+		offset := max(0, int64(frame.Start.Column)-1-int64(len(line)-len(trimmed)))
+		width := uint64(frame.End.Column - frame.Start.Column)
+		// A malformed column must not force a large allocation.
+		space := 4 + int(min(offset, int64(utf8.RuneCountInString(trimmed))))
+		fmt.Fprintf(out, "%s%s\n", strings.Repeat(" ", space), strings.Repeat("~", int(max(1, min(width, 2000)))))
+	}
 }
