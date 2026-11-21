@@ -90,7 +90,7 @@ func discoverErasure(store api.Store, source string, ids []string) (api.ErasureI
 }
 
 func (c *client) eraseRemote(ctx context.Context, store api.Store, remote api.RemoteErasureCoordinator, source *session, ids []string) (report api.ProviderErasure, err error) {
-	var operation string
+	var published api.ErasurePublication
 	source.mu.Lock()
 	err = func() error {
 		if !c.authorizedBy(source.data, ctx, "erase") {
@@ -117,8 +117,7 @@ func (c *client) eraseRemote(ctx context.Context, store api.Store, remote api.Re
 		if err != nil {
 			return err
 		}
-		published, err := writer.PublishErasure(revision, intent)
-		operation = published.IntentID
+		published, err = writer.PublishErasure(revision, intent)
 		return err
 	}()
 	source.mu.Unlock()
@@ -130,48 +129,47 @@ func (c *client) eraseRemote(ctx context.Context, store api.Store, remote api.Re
 	if err != nil {
 		return report, errors.Join(api.ErrErasureUnavailable, err)
 	}
+	live := make(map[string]api.Session, len(rows))
 	for _, row := range rows {
-		plans, _, err := remote.ErasurePlans(row.ID)
-		if err != nil {
-			return report, err
-		}
-		if !slices.ContainsFunc(plans, func(p api.ErasurePlan) bool { return p.IntentID == operation }) {
-			continue
-		}
-		if current, err := c.find(row.ID); err == nil {
-			current.mu.Lock()
-			_ = current.reconcileRemoteErasureLocked(remote)
-			current.mu.Unlock()
-		} else if lease, err := tryAcquireErasure(store, row.ID); err == nil {
-			if writer, ok := lease.(api.RemoteErasureLease); ok {
-				if actual, err := writer.LoadErasure(); err == nil {
-					// Read again with writer access; the earlier read only
-					// selected a session to try.
-					if current, _, err := remote.ErasurePlans(row.ID); err == nil {
-						_, _ = completeRemoteCopies(lease, actual, current)
+		live[row.ID] = row
+	}
+	for _, id := range published.SessionIDs {
+		row, exists := live[id]
+		if exists {
+			if current, err := c.find(id); err == nil {
+				current.mu.Lock()
+				_ = current.reconcileRemoteErasureLocked(remote)
+				current.mu.Unlock()
+			} else if lease, err := tryAcquireErasure(store, id); err == nil {
+				if writer, ok := lease.(api.RemoteErasureLease); ok {
+					if actual, err := writer.LoadErasure(); err == nil {
+						if plans, _, err := remote.ErasurePlans(id); err == nil {
+							_, _ = completeRemoteCopies(lease, actual, plans)
+						}
 					}
 				}
+				_ = lease.Close()
 			}
-			_ = lease.Close()
 		}
-		plans, _, err = remote.ErasurePlans(row.ID)
+		// Plans outlive retention. A destination without a live authority
+		// record can count as out of reach, but its IDs cannot be disclosed.
+		plans, _, err := remote.ErasurePlans(id)
 		if err != nil {
 			return report, err
 		}
-		for _, plan := range plans {
-			if plan.IntentID != operation {
-				continue
-			}
-			if row.ID != source.id && !c.authorizedBy(row, ctx, "watch") {
-				report.OutOfReach = []string{"copies in other sessions"}
-				continue
-			}
-			for _, copy := range plan.Copies {
-				if copy.Complete {
-					report.ErasedPairs = append(report.ErasedPairs, copy.EntryPair)
-				} else {
-					report.PendingPairs = append(report.PendingPairs, copy.EntryPair)
-				}
+		i := slices.IndexFunc(plans, func(p api.ErasurePlan) bool { return p.IntentID == published.IntentID && p.SourceID == source.id })
+		if i < 0 {
+			return report, api.ErrErasureUnavailable
+		}
+		if !exists || id != source.id && !c.authorizedBy(row, ctx, "watch") {
+			report.OutOfReach = []string{"copies in other sessions"}
+			continue
+		}
+		for _, copy := range plans[i].Copies {
+			if copy.Complete {
+				report.ErasedPairs = append(report.ErasedPairs, copy.EntryPair)
+			} else {
+				report.PendingPairs = append(report.PendingPairs, copy.EntryPair)
 			}
 		}
 	}
