@@ -427,6 +427,7 @@ export class HistoryArchive {
 	private local = new Map<string, symbol>();
 	private remote?: { leased(id: string): boolean; ttl: number };
 	constructor(private dir?: string, private pendingErasureDir = dir) {}
+	get persistent() { return this.dir !== undefined; }
 
 	private db() {
 		if (!this.records) {
@@ -567,6 +568,7 @@ export async function historyService(options: HistoryServiceOptions) {
 	if (options.archive && retention !== null) throw new Error("An attached SDK archive does not support service retention");
 	const attached = options.archive?.attach(sid => current(sid) !== undefined, ttlMs);
 	const records = options.store ? undefined : attached?.records ?? new Records(options.dir, ttlMs, retention, quota);
+	const profile = records !== undefined && (options.archive?.persistent ?? options.dir !== undefined);
 	const closeRecords = () => attached ? attached.detach() : records?.close();
 	const expired = (s: Session) => retention !== null && !current(s.id) && Date.now() - s.changed >= retention;
 	function builtInStore(records: Records): Omit<HistoryServiceStore, "ttlMs" | "retention" | "read" | "list" | "append"> & {
@@ -640,7 +642,7 @@ export async function historyService(options: HistoryServiceOptions) {
 			const rawQuery = q < 0 ? undefined : target.slice(q + 1);
 			// Do not use a URL parser that normalizes dot segments or backslashes.
 			if (path.split("/").some((s) => [".", ".."].includes(decode(s)))) invalid("Dot path segments are forbidden");
-			const route = routes.find(([re, , op]) => (records || (op !== "plans" && op !== "complete")) && re.test(path));
+			const route = routes.find(([re, , op]) => (profile || (op !== "plans" && op !== "complete")) && re.test(path));
 			if (!route) throw new BindingError(404, "not_found", "Unknown path");
 			const [re, methods, op] = route;
 			if (!(methods as readonly string[]).includes(req.method ?? "")) {
@@ -661,7 +663,7 @@ export async function historyService(options: HistoryServiceOptions) {
 			if (op !== "version") records?.check();
 			let result: unknown = {};
 			switch (op) {
-				case "version": result = { binding: HISTORY_BINDING, ttlMs, retention, ...(records && { pendingErasure: 1 }) }; break;
+				case "version": result = { binding: HISTORY_BINDING, ttlMs, retention, ...(profile && { pendingErasure: 1 }) }; break;
 				case "list": {
 					const page = await store.list({ project, after, limit });
 					return send(res, 200, encodePage(typeof page === "string" ? page : {
@@ -697,7 +699,7 @@ export async function historyService(options: HistoryServiceOptions) {
 				case "append": {
 					const { lease, entries } = b;
 					if (!validLease(lease) || !Array.isArray(entries) || !entries.every((e) => object(e) && id(e.id) && (e.parentId === null || id(e.parentId)) && e.erased !== true)) return invalid("Invalid lease or entries");
-					const revisions = records && req.headersDistinct["history-revision"];
+					const revisions = profile && req.headersDistinct["history-revision"];
 					if (revisions && (revisions.length !== 1 || !validLease(revisions[0]))) return invalid("Invalid History-Revision header");
 					const kept = await mutate(() => store.append(sid, lease, entries as JsonObject[], revisions ? revisions[0] : undefined));
 					if (!Number.isSafeInteger(kept) || kept < 0 || kept > entries.length) throw new UncertainCommit();
