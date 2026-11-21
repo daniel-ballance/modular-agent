@@ -4,7 +4,7 @@ import asyncio
 
 from ma_core import AgentError, content, identity, plain
 from ma_runtime import Runtime
-from ma_runtime.turns import UNKNOWN
+from ma_runtime.turns import UNKNOWN, checked_tool_result, require_processed_result
 
 from . import hooks
 from ma_core.recovery import STEP_AFTER, step_checkpoint
@@ -1002,13 +1002,14 @@ class TurnHost:
     def unrepeated(self, cid):
         return cid in self.prior_starts and cid not in self.restarted
 
-    async def finish_tool(self, call, step, result):
+    async def finish_tool(self, call, step, result, definition=None):
         answer = await self.api.hook(
             "tool.after",
             {**self.scope, "step": step, "call": call, "result": {**result, "call": call["id"]}},
         )
-        terminal = answer["result"]
+        terminal = checked_tool_result(definition, answer["result"])
         await self.runtime._result(self.sid, self.turn, step, call, terminal)
+        require_processed_result(terminal)
         wire = result_out({**terminal, "call": call["id"]})
         self.results[call["id"]] = wire
         return wire
@@ -1133,7 +1134,7 @@ class TurnHost:
                     data={"requestIds": request_ids, "toolStartedId": started["id"]},
                 )
                 return {"callId": cid, "pending": result.get("pending", "Waiting for an answer")}
-            return await self.finish_tool(call, step, result)
+            return await self.finish_tool(call, step, result, definition)
         except asyncio.CancelledError:
             return {"callId": cid, "status": "cancelled", "content": content("Tool call cancelled")}
         finally:

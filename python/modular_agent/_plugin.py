@@ -2,18 +2,54 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Literal, NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict, cast, overload
 
+from ._context import CallContext, HookContext
+from ._credentials import CredentialStore
+from ._jobs import Job, JobManager, JobOwner
+from ._parts import Configuration, Interface
 from ._provider import Provider
-from ._tool import Tool, ToolEnvironment
-from ._types import AgentError, ErrorCode, Json, JsonObject
+from ._tool import Tool, ToolEnvironment, ToolSource
+from ._types import AgentError, Answer, ErrorCode, Json, JsonObject, QuestionSpec
+from ._working import WorkingEnvironment
 
 type Order = Literal["first", "normal", "last"]
-type HookHandler = Callable[[JsonObject], JsonObject | None | Awaitable[JsonObject | None]]
+type HookAnswer = JsonObject | None
+type HookRule = Literal["observe", "gate", "transform", "collect", "firstAnswer"]
+type Handler[P] = Callable[[P, HookContext], HookAnswer | Awaitable[HookAnswer]]
+type HookHandler = Callable[[JsonObject], HookAnswer | Awaitable[HookAnswer]] | Handler[JsonObject]
+type _AnyHandler = HookHandler | Handler[ToolBefore] | Handler[ToolAfter] | Handler[ProviderPiece]
+
+
+class ToolBefore(TypedDict):
+    sessionId: str
+    turnId: NotRequired[str | None]
+    stepId: NotRequired[str | None]
+    call: JsonObject
+    definition: JsonObject | None
+
+
+class ToolAfter(TypedDict):
+    sessionId: str
+    turnId: NotRequired[str | None]
+    call: JsonObject
+    result: JsonObject
+
+
+class ProviderPiece(TypedDict):
+    sessionId: str | None
+    stepId: NotRequired[str]
+    provider: str
+    model: JsonObject
+    event: JsonObject
+
+
 type CommandHandler = Callable[[str, CommandContext], str | None | Awaitable[str | None]]
 type Setup = Callable[[Registrar], None | Awaitable[None]]
 type Stop = Callable[[], None | Awaitable[None]]
@@ -25,21 +61,42 @@ class ServicePlugin(TypedDict):
     config: NotRequired[JsonObject]
 
 
-class CommandContext:
+class CommandContext(CallContext):
     def __init__(
         self,
         session_id: str,
         actor_id: str,
         environment: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
+        *,
+        step_id: str | None = None,
+        request_model: Callable[[JsonObject], Awaitable[JsonObject]] | None = None,
+        ask: Callable[[QuestionSpec, float | None], Awaitable[Answer]] | None = None,
+        history: Callable[[str | None], Awaitable[JsonObject]] | None = None,
+        emit: Callable[[str, Json], Awaitable[None]] | None = None,
+        call_hook: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
+        start_job: Callable[[str, Json, str | None], Awaitable[Job]] | None = None,
     ) -> None:
-        self.session_id = session_id
-        self.actor_id = actor_id
-        self._active = True
+        super().__init__(
+            session_id, actor_id, step_id=step_id, history=history, emit=emit, call_hook=call_hook
+        )
+        self._model = request_model
+        self._ask = ask
         self.environment = ToolEnvironment(self._check, environment)
+        self.jobs = JobManager(self._check, start_job)
 
-    def _check(self) -> None:
-        if not self._active:
-            raise AgentError(ErrorCode.INVALID_REQUEST, "The command has settled")
+    async def request_model(self, request: JsonObject) -> JsonObject:
+        self._check()
+        if self._model is None:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Command did not register uses_model")
+        return await self._model(request)
+
+    async def ask(self, question: QuestionSpec, *, wait: float | None = None) -> Answer:
+        self._check()
+        if self._ask is None:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Command questions require in_process_only")
+        if wait is not None and (not math.isfinite(wait) or wait < 0):
+            raise AgentError(ErrorCode.INVALID_REQUEST, "Invalid question wait")
+        return await self._ask(question, wait)
 
 
 @dataclass(frozen=True)
@@ -55,7 +112,7 @@ class ProcessPlugin:
 @dataclass(frozen=True)
 class _Hook:
     point: str
-    handler: HookHandler
+    handler: _AnyHandler
     order: Order
     in_process_only: bool
 
@@ -66,15 +123,55 @@ class _Command:
     description: str
     handler: CommandHandler
     in_process_only: bool
+    uses_model: bool
 
 
 class Registrar:
     def __init__(self, config: JsonObject) -> None:
         self._config = config
         self._tools: dict[str, Tool] = {}
+        self._sources: dict[str, ToolSource] = {}
         self._providers: dict[str, Provider] = {}
         self._hooks: list[_Hook] = []
         self._commands: dict[str, _Command] = {}
+        self._credential_store: CredentialStore | None = None
+        self._configuration: Configuration | None = None
+        self._interface: Interface | None = None
+        self._environment: WorkingEnvironment | None = None
+        self._job_owner: JobOwner | None = None
+        self._defined_hooks: dict[str, HookRule] = {}
+
+    def define_hook(self, name: str, rule: HookRule) -> None:
+        if "." not in name or name in self._defined_hooks or name in _SUPPORTED_HOOKS:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid custom hook: {name}")
+        if rule not in {"observe", "gate", "transform", "collect", "firstAnswer"}:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid hook rule for {name}")
+        self._defined_hooks[name] = rule
+
+    def jobs(self, owner: JobOwner) -> None:
+        if self._job_owner is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate job owner")
+        self._job_owner = owner
+
+    def environment(self, environment: WorkingEnvironment) -> None:
+        if self._environment is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate working environment")
+        self._environment = environment
+
+    def credential_store(self, store: CredentialStore) -> None:
+        if self._credential_store is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate credential store")
+        self._credential_store = store
+
+    def configuration(self, source: Configuration) -> None:
+        if self._configuration is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate configuration source")
+        self._configuration = source
+
+    def interface(self, interface: Interface) -> None:
+        if self._interface is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate Interface")
+        self._interface = interface
 
     def config(self) -> JsonObject:
         return self._config
@@ -86,6 +183,11 @@ class Registrar:
             )
         self._tools[tool.name] = tool
 
+    def tools(self, source: ToolSource) -> None:
+        if not source.id or source.id in self._sources:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid tool source: {source.id}")
+        self._sources[source.id] = source
+
     def provider(self, provider: Provider) -> None:
         if not provider.id or provider.id in self._providers:
             raise AgentError(
@@ -93,6 +195,37 @@ class Registrar:
             )
         self._providers[provider.id] = provider
 
+    @overload
+    def on(
+        self,
+        point: Literal["tool.before"],
+        handler: Handler[ToolBefore],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["tool.after"],
+        handler: Handler[ToolAfter],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["provider.piece"],
+        handler: Handler[ProviderPiece],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
     def on(
         self,
         point: str,
@@ -100,12 +233,19 @@ class Registrar:
         order: Order = "normal",
         *,
         in_process_only: bool = False,
+    ) -> None: ...
+
+    def on(
+        self,
+        point: str,
+        handler: _AnyHandler,
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
     ) -> None:
         if order not in {"first", "normal", "last"}:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid hook order: {order}")
-        self._hooks.append(
-            _Hook(point, handler, order, in_process_only or point == "session.prepare")
-        )
+        self._hooks.append(_Hook(point, handler, order, in_process_only or point in _LOCAL_HOOKS))
 
     def command(
         self,
@@ -123,7 +263,9 @@ class Registrar:
             or any(c.isspace() for c in name)
         ):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid command registration: {name}")
-        self._commands[name] = _Command(name, description, handler, uses_model or in_process_only)
+        self._commands[name] = _Command(
+            name, description, handler, uses_model or in_process_only, uses_model
+        )
 
 
 class Plugin:
@@ -167,6 +309,7 @@ class Plugin:
             *(f"tool:{n}" for n in registrar._tools),
             *(f"command:{n}" for n in registrar._commands),
             *(f"provider:{n}" for n in registrar._providers),
+            *(["working-environment"] if registrar._environment is not None else []),
         }
         if len(set(self.replaces)) != len(self.replaces) or set(self.replaces) - items:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid replacements in {self.name}")
@@ -218,10 +361,34 @@ def _hook_reply(point: str, answer: JsonObject | None) -> JsonObject | None:
     raise AgentError(ErrorCode.INVALID_REQUEST, f"Invalid answer at {point}")
 
 
-async def _handle_hook(hook: _Hook, payload: JsonObject) -> JsonObject | None:
-    reply = hook.handler(payload)
-    if inspect.isawaitable(reply):
-        reply = await reply
+async def _invoke_hook(hook: _Hook, payload: JsonObject, context: HookContext) -> HookAnswer:
+    try:
+        try:
+            inspect.signature(hook.handler).bind(payload, context)
+        except (ValueError, TypeError):
+            reply = cast(Callable[[JsonObject], HookAnswer | Awaitable[HookAnswer]], hook.handler)(
+                payload
+            )
+        else:
+            reply = cast(Handler[JsonObject], hook.handler)(payload, context)
+        return await reply if inspect.isawaitable(reply) else reply
+    except asyncio.CancelledError:
+        context.cancelled.set()
+        raise
+    finally:
+        context._active = False
+
+
+async def _handle_hook(
+    hook: _Hook, payload: JsonObject, context: HookContext | None = None
+) -> JsonObject | None:
+    reply = await _invoke_hook(hook, payload, context or HookContext(payload))
+    if reply is not None and hook.in_process_only:
+        if hook.point == "tool.before" and isinstance(reply.get("pending"), dict):
+            return {"pending": reply["pending"]}
+        if hook.point == "input" and isinstance(handle := reply.get("handle"), dict):
+            if set(handle) == {"command"} and isinstance(handle["command"], str):
+                return {"value": {**payload, "command": handle["command"]}, "stop": True}
     result = _hook_reply(hook.point, reply)
     # The SDK changes only the documented fields, even though the edition-3
     # wire expects a replacement enclosing the whole call/result.
@@ -263,10 +430,14 @@ async def _handle_command(command: _Command, args: str, context: CommandContext)
     try:
         result = command.handler(args, context)
         return await result if inspect.isawaitable(result) else result
+    except asyncio.CancelledError:
+        context.cancelled.set()
+        raise
     finally:
         context._active = False
 
 
+_LOCAL_HOOKS = {"session.prepare", "session.join", "session.leave", "provider.piece"}
 _SUPPORTED_HOOKS = {
     "input",
     "plugin.load",
@@ -276,7 +447,7 @@ _SUPPORTED_HOOKS = {
     "provider.request",
     "provider.response",
     "output",
-    "session.prepare",
+    *_LOCAL_HOOKS,
     "session.start",
     "session.end",
     "turn.start",
@@ -287,7 +458,7 @@ _SUPPORTED_HOOKS = {
     "tool.after",
 }
 _OBSERVERS = {
-    "session.prepare",
+    *_LOCAL_HOOKS,
     "session.start",
     "session.end",
     "turn.start",

@@ -16,6 +16,7 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, create_model
 from referencing import Registry
 
+from ._jobs import Job, JobManager
 from ._types import (
     AgentError,
     Answer,
@@ -109,6 +110,34 @@ class ToolEnvironment:
         )
 
 
+class ToolSource:
+    """A tool catalog; call changed() after mutating a list."""
+
+    def __init__(
+        self,
+        id: str,
+        tools: Callable[[str | None], Sequence[Tool] | Awaitable[Sequence[Tool]]],
+        *,
+        per_session: bool = False,
+    ) -> None:
+        self.id = id
+        self.per_session = per_session
+        self._list = tools
+        self._subscribers: set[Callable[[], None]] = set()
+
+    async def tools(self, session_id: str | None = None) -> Sequence[Tool]:
+        listing = self._list(session_id)
+        result = await listing if inspect.isawaitable(listing) else listing
+        names = {tool.name for tool in result}
+        if len(names) != len(result):
+            raise AgentError(ErrorCode.INVALID_REQUEST, f"Duplicate tool in {self.id}")
+        return result
+
+    def changed(self) -> None:
+        for subscriber in tuple(self._subscribers):
+            subscriber()
+
+
 class LeftOpen(Exception):
     """A timed question left this tool call open for a later turn."""
 
@@ -128,6 +157,8 @@ class ToolContext:
         nested: Callable[[str, JsonObject], Awaitable[Json]],
         environment: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
         history: Callable[[str | None], Awaitable[JsonObject]] | None = None,
+        *,
+        start_job: Callable[[str, Json, str | None], Awaitable[Job]] | None = None,
     ) -> None:
         self.session_id = session_id
         self.actor_id = actor_id
@@ -139,6 +170,7 @@ class ToolContext:
         self._history = history
         self.environment = ToolEnvironment(self._check, environment)
         self.tools = _NestedTools(self)
+        self.jobs = JobManager(self._check, start_job)
         self._question_index = 0
         self._active = True
 
@@ -282,11 +314,11 @@ class Tool:
                 result = {"status": "completed", "value": value, "content": []}
             else:
                 raise ValueError("A structured tool value needs an output schema")
-            if self._output is not None and result["status"] == "completed":
-                checked = self._output.validate_python(result.get("value"), strict=True)
-                encoded = cast(Json, self._output.dump_python(checked, mode="json"))
-                Draft202012Validator(self.definition["returns"], registry=Registry()).validate(
-                    encoded
+            if self._output is not None and result["status"] == "completed" and "value" in result:
+                # Serialization is local; validation belongs to the settling host,
+                # because tool.after can add or change the value.
+                encoded = cast(
+                    Json, self._output.dump_python(result["value"], mode="json", warnings=False)
                 )
                 result["value"] = encoded
                 if not result["content"]:

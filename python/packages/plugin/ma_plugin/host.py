@@ -13,6 +13,7 @@ from ma_core.wire import (
     call_out,
     entry_out,
     model_in,
+    model_out,
     model_request_fields,
     provider_projection,
     request_for_provider,
@@ -139,7 +140,22 @@ class NativeProvider:
     async def generate(self, d, emit):
         if "_provider_scope" not in d:
             d = await self.prepare_request(d)
-        response = await self.service.generate(d, emit)
+
+        async def piece(event):
+            await self.h.fire(
+                "@harness",
+                "provider.piece",
+                {
+                    **d["_provider_scope"],
+                    **({"stepId": d["step"]} if d.get("step") else {}),
+                    "event": provider_projection(
+                        event.get("event", {"type": "text", "delta": event.get("text", "")})
+                    ),
+                },
+            )
+            await emit(event)
+
+        response = await self.service.generate(d, piece)
         await self.h.fire(
             "@harness",
             "provider.response",
@@ -546,7 +562,7 @@ class External(Plugin):
                 return
             if source.get("perSession"):
                 sid = (parent or {}).get("context", {}).get("session")
-                sessions = list(dict.fromkeys([*source["cache"], *([sid] if sid else [])]))
+                sessions = [sid] if sid else list(source["cache"])
             else:
                 sessions = [None]
             for sid in sessions:
@@ -560,6 +576,19 @@ class External(Plugin):
         if parent:
             if method == "provider/event" and parent.get("provider_committed"):
                 event = p["event"]
+                ctx = parent["context"]
+                access = ctx["access"]
+                await self.h.fire(
+                    "@harness",
+                    "provider.piece",
+                    {
+                        "sessionId": ctx.get("session"),
+                        "stepId": ctx.get("step"),
+                        "provider": access["target"],
+                        "model": model_out(access, access["target"]),
+                        "event": provider_projection(event),
+                    },
+                )
                 await parent["emit"](
                     {
                         "text": event.get("delta", "") if event["type"] == "text" else "",
@@ -1154,7 +1183,7 @@ async def load_plugins(harness, specs, project, home, *, external_factory=Extern
         for t in await harness.api().call("tools", "definitions")
     }
     wrap_native_providers(harness)
-    for index, spec in enumerate(specs):
+    for spec in specs:
         if not isinstance(spec, dict) or not isinstance(spec.get("config", {}), dict):
             raise WireError("Plugin entry and its config must be objects", "invalid_request")
         if "url" in spec:
@@ -1174,6 +1203,13 @@ async def load_plugins(harness, specs, project, home, *, external_factory=Extern
             or not all(isinstance(s, str) for s in spec["command"])
         ):
             raise WireError("Plugin command must be a nonempty string array", "invalid_request")
+        env = spec.get("env", {})
+        if not isinstance(env, dict) or any(
+            not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()
+        ):
+            raise WireError("Plugin env must map strings to strings", "invalid_request")
+    offset = sum(isinstance(plugin, External) for plugin in harness.plugins.values())
+    for index, spec in enumerate(specs, offset):
         plugin = external_factory(
             harness, spec, project, Path(home) / "external" / str(index), index
         )

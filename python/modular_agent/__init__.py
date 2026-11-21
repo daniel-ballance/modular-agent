@@ -10,6 +10,7 @@ from ._agent import (
     run as run,
     transient_runtime as transient_runtime,
 )
+from ._context import CallContext as CallContext, HookContext as HookContext
 from ._credentials import (
     CredentialStore as CredentialStore,
     environment_credentials as environment_credentials,
@@ -26,9 +27,21 @@ from ._history import (
     memory_history as memory_history,
     serve_history as serve_history,
 )
+from ._jobs import (
+    Job as Job,
+    JobContext as JobContext,
+    JobManager as JobManager,
+    JobOwner as JobOwner,
+)
+from ._parts import Configuration as Configuration, Interface as Interface
 from ._plugin import (
     CommandContext as CommandContext,
+    HookAnswer as HookAnswer,
+    HookRule as HookRule,
     Plugin as Plugin,
+    ProviderPiece as ProviderPiece,
+    ToolAfter as ToolAfter,
+    ToolBefore as ToolBefore,
     ProcessPlugin as ProcessPlugin,
     Registrar as Registrar,
     ServicePlugin as ServicePlugin,
@@ -50,7 +63,12 @@ from ._tool import (
     Tool as Tool,
     ToolContext as ToolContext,
     ToolOutput as ToolOutput,
+    ToolSource as ToolSource,
     tool as tool,
+)
+from ._working import (
+    EnvironmentSupports as EnvironmentSupports,
+    WorkingEnvironment as WorkingEnvironment,
 )
 from ._types import (
     Actor as Actor,
@@ -61,6 +79,7 @@ from ._types import (
     Disposition as Disposition,
     Durability as Durability,
     ErrorCode as ErrorCode,
+    ErasureReport as ErasureReport,
     Event as Event,
     EventData as EventData,
     InputReceipt as InputReceipt,
@@ -70,6 +89,7 @@ from ._types import (
     Outcome as Outcome,
     OutcomeKind as OutcomeKind,
     PromptResult as PromptResult,
+    Proposal as Proposal,
     Question as Question,
     QuestionContext as QuestionContext,
     QuestionSpec as QuestionSpec,

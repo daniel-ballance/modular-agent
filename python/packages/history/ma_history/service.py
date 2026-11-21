@@ -322,7 +322,7 @@ def shape(route, method, body):
             invalid()
 
 
-def serve(directory, address, token_file, ttl_ms):
+def serve(directory, address, token_file, ttl_ms, *, ready=None):
     ip = ipaddress.ip_address(address[0])
     if not ip.is_loopback or type(ttl_ms) is not int or not 0 < ttl_ms <= 2**53 - 1:
         raise ValueError("History service requires a numeric loopback address and positive TTL")
@@ -465,4 +465,6 @@ def serve(directory, address, token_file, ttl_ms):
             else:
                 Server = HTTPServer
             with Server(address, Handler) as server:
+                if ready is not None:
+                    ready(server.server_address)
                 server.serve_forever()

@@ -81,7 +81,7 @@ def model_out(m, provider=None):
         "contextWindow": m.get("context_window", m.get("contextWindow", 1_000_000)),
         "maxOutput": m.get("output_limit", m.get("maxOutput", 4096)),
         "input": m.get("input_types", m.get("input", ["text"])),
-        "reasoning": any(x != "off" for x in m.get("thinking", [])),
+        "reasoning": m.get("reasoning", any(x != "off" for x in m.get("thinking", []))),
     }
 
 
@@ -92,7 +92,6 @@ def model_in(m, supports):
         "context_window": m["contextWindow"],
         "output_limit": m["maxOutput"],
         "input_types": m["input"],
-        "thinking": m.get("thinking") or ["off"],
         "provider": {
             "stateful": supports.get("keepsState", False),
             "runs_tools": supports.get("runsTools", False),
@@ -236,10 +235,7 @@ def request_out(d):
         "systemPrompt": d.get("system", ""),
         "messages": messages_out(d.get("messages", [])),
         "tools": [tool_out(t) for t in d.get("tools", [])],
-        "settings": {
-            **d.get("settings", {}),
-            "reasoning": d.get("settings", {}).get("thinking", "off"),
-        },
+        "settings": settings_out(d.get("settings", {})),
     }
 
 
@@ -282,7 +278,10 @@ def request_in(r, d):
             }
             for m in r["messages"]
         ],
-        "settings": {**r["settings"], "thinking": r["settings"].get("reasoning", "off")},
+        "settings": {
+            **r["settings"],
+            **({"thinking": r["settings"]["reasoning"]} if "reasoning" in r["settings"] else {}),
+        },
     }
 
 

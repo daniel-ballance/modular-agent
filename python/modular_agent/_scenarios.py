@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from . import Agent, AgentError, JsonObject, ProcessPlugin, PromptResult, ServicePlugin, Session
+from ._history import HistoryStore, file_history, http_history
 from .fixtures import count, fixture
 from .testing import answers, test_agent
 
@@ -103,11 +104,24 @@ class _Services:
         await _kill_groups(processes)
 
 
+def _history_service(directory: Path, token: Path) -> None:
+    from ma_history.service import serve
+
+    serve(
+        directory,
+        ("127.0.0.1", 0),
+        token,
+        2500,
+        ready=lambda address: print(f"http://127.0.0.1:{address[1]}", flush=True),
+    )
+
+
 async def _agent(
     scenario: dict[str, Any],
     directory: Path,
     command: list[str],
     services: list[ServicePlugin] | None = None,
+    history: HistoryStore | None = None,
 ) -> Agent:
     options = scenario["agent"]
     project = directory / "project"
@@ -124,6 +138,7 @@ async def _agent(
         project=project,
         data_dir=directory / "data",
         durability=options.get("durability", "ephemeral"),
+        history=history,
         approval=options.get("approval"),
         settings=options.get("settings"),
         several_actors=options.get("severalActors", False),
@@ -140,9 +155,17 @@ async def _crash_child(
     index: int,
     command: list[str],
     services: list[ServicePlugin] | None,
+    history_url: str,
 ) -> None:
     scenario = _load(path)
-    async with await _agent(scenario, directory, command, services) as agent:
+    store = (
+        file_history(directory / "history")
+        if scenario["agent"].get("history") == "file"
+        else http_history(history_url, directory / "history.token")
+        if history_url
+        else None
+    )
+    async with await _agent(scenario, directory, command, services, store) as agent:
         session = await agent.session(actors=scenario["agent"].get("actors", []))
         print(session.id, flush=True)
         async for event in session.prompt_stream(scenario["steps"][index]["prompt"]):
@@ -190,6 +213,7 @@ async def _crash(
     command: list[str],
     services: list[ServicePlugin] | None,
     pool: _Services | None,
+    history_url: str,
 ) -> str:
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -200,6 +224,7 @@ async def _crash(
         str(directory),
         str(index),
         json.dumps(services),
+        history_url,
         *command,
         stdout=asyncio.subprocess.PIPE,
         start_new_session=True,
@@ -243,6 +268,9 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
         directory = Path(temp)
         pool = _Services(command, directory) if placement.startswith("service:") else None
         process_command = command if pool is None else []
+        service: asyncio.subprocess.Process | None = None
+        store: HistoryStore | None = None
+        history_url = ""
 
         async def start_services() -> list[ServicePlugin] | None:
             if pool is None:
@@ -250,9 +278,58 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
             return await pool.start(scenario["agent"].get("plugins", []))
 
         async def start_agent() -> Agent:
-            return await _agent(scenario, directory, process_command, await start_services())
+            return await _agent(scenario, directory, process_command, await start_services(), store)
 
         try:
+            try:
+                match scenario["agent"].get("history"):
+                    case "file":
+                        store = file_history(directory / "history")
+                    case "service":
+                        token = directory / "history.token"
+                        with os.fdopen(
+                            os.open(token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
+                        ) as f:
+                            f.write(secrets.token_hex(32))
+                        service = await asyncio.create_subprocess_exec(
+                            sys.executable,
+                            "-m",
+                            "modular_agent._scenarios",
+                            "--history-service",
+                            str(directory / "history"),
+                            str(token),
+                            stdout=asyncio.subprocess.PIPE,
+                            start_new_session=True,
+                        )
+                        assert service.stdout is not None
+                        async with asyncio.timeout(10):
+                            url = (await service.stdout.readline()).decode().strip()
+                        if not url.startswith("http://127.0.0.1:"):
+                            raise RuntimeError("History fixture did not announce a loopback URL")
+                        history_url = url
+                        store = http_history(url, token)
+                    case None:
+                        pass
+                    case value:
+                        raise ValueError(f"Unknown scenario history: {value}")
+                if "expectCreateError" in scenario:
+                    services = await start_services()
+            except Exception as exc:
+                return [f"{scenario['scenario']} ({placement}) setup: {type(exc).__name__}: {exc}"]
+
+            if want := scenario.get("expectCreateError"):
+                label = f"{scenario['scenario']} ({placement}) createAgent"
+                try:
+                    agent = await _agent(scenario, directory, process_command, services, store)
+                except AgentError as exc:
+                    if want["code"] != exc.code or want["messageContains"] not in exc.message:
+                        failures.append(f"{label}: want {want!r}, got {exc.code}: {exc.message}")
+                except Exception as exc:
+                    failures.append(f"{label}: want {want!r}, got {type(exc).__name__}: {exc}")
+                else:
+                    failures.append(f"{label}: want {want!r}, got success")
+                return failures
+
             for n, step in enumerate(scenario["steps"]):
                 label = f"{scenario['scenario']} ({placement}) step {n}"
                 expect = step.get("expect", {})
@@ -277,6 +354,7 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                                 process_command,
                                 await start_services(),
                                 pool,
+                                history_url,
                             )
                         elif any(field in step for field in ("prompt", "send", "answer", "wait")):
                             if agent is None:
@@ -363,8 +441,12 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                 if agent is not None:
                     await agent.close()
             finally:
-                if pool is not None:
-                    await pool.stop()
+                try:
+                    if pool is not None:
+                        await pool.stop()
+                finally:
+                    if service is not None:
+                        await _kill_groups([service])
     return failures
 
 
@@ -390,14 +472,17 @@ async def _main(files: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--child":
+    if len(sys.argv) > 1 and sys.argv[1] == "--history-service":
+        _history_service(Path(sys.argv[2]), Path(sys.argv[3]))
+    elif len(sys.argv) > 1 and sys.argv[1] == "--child":
         asyncio.run(
             _crash_child(
                 Path(sys.argv[2]),
                 Path(sys.argv[3]),
                 int(sys.argv[4]),
-                sys.argv[6:],
+                sys.argv[7:],
                 json.loads(sys.argv[5]),
+                sys.argv[6],
             )
         )
     else:

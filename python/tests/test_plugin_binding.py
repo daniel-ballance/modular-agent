@@ -427,7 +427,8 @@ async def test_shared_tool_lists_are_session_scoped(tmp_path, monkeypatch, runti
             names = [
                 t["name"] for t in await h.api().call("tools", "definitions", {"session": sid})
             ]
-            assert "added" in names and "in-" + sid in names
+            assert ("added" in names) == (sid == ids[0])
+            assert "in-" + sid in names
     finally:
         await h.stop()
 

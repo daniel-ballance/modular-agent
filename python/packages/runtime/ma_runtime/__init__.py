@@ -6,7 +6,7 @@ from datetime import datetime
 from ma_core import AgentError, Plugin, content, identity
 from ma_core.wire import recorded_as
 
-from .turns import Turns
+from .turns import Turns, require_processed_result
 
 
 class Runtime(Turns, Plugin):
@@ -219,7 +219,7 @@ class Runtime(Turns, Plugin):
                 None,
             )
             if proposed is None:
-                raise AgentError("Unknown proposed input")
+                raise AgentError("Unknown or settled proposal", "conflict")
             if d.get("declined"):
                 await self._return(sid, proposed)
                 return {"input": d["input"], "when": "handedBack"}
@@ -284,14 +284,14 @@ class Runtime(Turns, Plugin):
                 (p for p in await self.proposals(d, emit) if p["inputId"] == d["input"]), None
             )
             if proposal is None:
-                raise AgentError("Unknown proposed input")
+                raise AgentError("Unknown or settled proposal", "conflict")
             principal = d["actor"]
             actor = d.get("acting_for", principal)
             rights = set(await self.api.session("authority", session=sid, actor=principal))
             if actor != principal:
                 rights &= set(await self.api.session("authority", session=sid, actor=actor))
             if "input" not in rights and not (
-                proposal["actorId"] == actor and (actor == principal or "propose" in rights)
+                proposal["actorId"] in {principal, actor} and "propose" in rights
             ):
                 raise AgentError(
                     "Only the proposer or an actor with input may withdraw", "forbidden"
@@ -518,6 +518,7 @@ class Runtime(Turns, Plugin):
         )
         answer = await self._tool(sid, None, "ui:" + c["id"], c, definition)
         await self._result(sid, None, "ui:" + c["id"], c, answer)
+        require_processed_result(answer)
         return answer
 
     async def _opened(self, d):

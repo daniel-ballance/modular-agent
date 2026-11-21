@@ -424,8 +424,8 @@ class ACP(Plugin):
                 "thinking",
                 "Thinking level",
                 "thought_level",
-                access["thinking"] if access else [],
-                lower_reasoning(session["settings"].get("thinking"), access["thinking"])
+                access.get("thinking", []) if access else [],
+                lower_reasoning(session["settings"].get("thinking"), access.get("thinking", []))
                 if access
                 else None,
             ),
@@ -587,7 +587,7 @@ class ACP(Plugin):
             model = next(m for m in session["catalog"] if binding.model_id(m) == value)
             changes["model"] = model["id"]
             changes["thinking"] = lower_reasoning(
-                session["settings"].get("thinking"), model["thinking"]
+                session["settings"].get("thinking"), model.get("thinking", [])
             )
         await self.api.session("settings", session=session_id, actor=self.actor, changes=changes)
         options = await self.options(session_id)

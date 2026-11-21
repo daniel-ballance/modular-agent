@@ -16,6 +16,7 @@ from ._types import (
     AnswerInput,
     Disposition,
     ErrorCode,
+    ErasureReport,
     Event,
     EventData,
     Input,
@@ -25,6 +26,7 @@ from ._types import (
     Outcome,
     OutcomeKind,
     PromptResult,
+    Proposal,
     Question,
     QuestionHandler,
     Timing,
@@ -45,6 +47,14 @@ _EVENT_NAMES = {
     "turn_started": "turnStarted",
     "turn_ended": "turnEnded",
     "step_ended": "stepEnded",
+    "job_started": "jobStarted",
+    "job_progress": "jobProgress",
+    "job_ended": "jobEnded",
+    "entries_erased": "entriesErased",
+    "position_moved": "positionMoved",
+    "plugin_loaded": "pluginLoaded",
+    "plugin_replaced": "pluginReplaced",
+    "plugin_unloaded": "pluginUnloaded",
     "tool_progress": "toolOutput",
     "input_request_opened": "questionOpened",
     "input_request_answered": "questionAnswered",
@@ -100,6 +110,8 @@ def _events(d: dict[str, Any]) -> list[Event]:
             if k not in {"kind", "time", "session", "turn", "step", "call"}
         }
     event_name = _EVENT_NAMES.get(kind)
+    if "." in kind:
+        return [Event(kind, data=EventData(data), **args)]
     return [Event(event_name, data=EventData(data), **args)] if event_name else []
 
 
@@ -525,6 +537,100 @@ class Session:
             raise AgentError(ErrorCode.NOT_FOUND, "Fork entry is not on the current branch")
         result = await self._native("fork", **({"point": entry_id} if entry_id is not None else {}))
         return self._agent._attach(result["id"]).as_actor(self._actor)
+
+    async def move_to(self, entry_id: str, *, rewind: bool = False) -> JsonObject:
+        entries = await self._native("branch")
+        done = {
+            "jobs": {e.get("job") for e in entries if e["kind"] == "job_end"},
+            "calls": {e.get("call") for e in entries if e["kind"] == "tool_result"},
+            "questions": {
+                (e.get("data") or {}).get("request")
+                for e in entries
+                if e["kind"] in {"question_answer", "question_closed"}
+            },
+        }
+        if any(
+            (e["kind"] == "tool_deferred" and e.get("call") not in done["calls"])
+            or (e["kind"] == "job_start" and e.get("job") not in done["jobs"])
+            or (
+                e["kind"] == "question_open"
+                and (e.get("data") or {}).get("id") not in done["questions"]
+            )
+            for e in entries
+        ):
+            raise AgentError(ErrorCode.CONFLICT, "Cannot move with unfinished work")
+        result = await self._native("move", point=entry_id, rewind=rewind)
+        return {"outOfReach": result.get("outOfReach", [])}
+
+    async def erase(self, entry_ids: Sequence[str]) -> ErasureReport:
+        if not self._agent.declaration()["erasure"]:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "History does not support erasure")
+        if (
+            not entry_ids
+            or isinstance(entry_ids, str)
+            or any(not isinstance(id, str) or not id for id in entry_ids)
+        ):
+            raise AgentError(ErrorCode.INVALID_PARAMS, "Erasure requires entry IDs")
+        outcome = await self._native("erase", entries=list(entry_ids))
+        return {
+            "erased": outcome.get("erasedPairs", []),
+            "pending": outcome.get("pendingPairs", []),
+            "outOfReach": outcome.get("out_of_reach", []),
+        }
+
+    async def proposals(self) -> list[Proposal]:
+        if not self._agent._several_actors:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Proposed input is not enabled")
+        await self._state()
+        data = await self._agent._call(
+            "runtime", "proposals", session=self.id, actor=self._actor, **self._acting(self._actor)
+        )
+        reply = await self._agent._session(
+            "view",
+            session=self.id,
+            recipient=self._actor,
+            type="reply",
+            method="proposals",
+            value={"proposals": data},
+        )
+        if reply is None:
+            raise AgentError(ErrorCode.WITHHELD, "Proposals were withheld")
+        return cast(list[Proposal], reply.get("proposals", []))
+
+    async def release(
+        self, input_id: str, timing: Timing = "now", *, declined: bool = False
+    ) -> InputReceipt:
+        if not self._agent._several_actors:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Proposed input is not enabled")
+        if timing not in {"now", "steer", "after"}:
+            raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid proposal release timing")
+        await self._state()
+        receipt = await self._agent._call(
+            "runtime",
+            "release",
+            session=self.id,
+            actor=self._actor,
+            **self._acting(self._actor),
+            input=input_id,
+            when=timing,
+            declined=declined,
+        )
+        if receipt["when"] == "handedBack":
+            return InputReceipt(input_id, timing, disposition=Disposition.HANDED_BACK)
+        return InputReceipt(input_id, receipt["when"])
+
+    async def withdraw(self, input_id: str) -> None:
+        if not self._agent._several_actors:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Proposed input is not enabled")
+        await self._state()
+        await self._agent._call(
+            "runtime",
+            "withdraw_proposal",
+            session=self.id,
+            actor=self._actor,
+            **self._acting(self._actor),
+            input=input_id,
+        )
 
     async def on_question(self, handler: QuestionHandler | None) -> None:
         if self._actor != "user":

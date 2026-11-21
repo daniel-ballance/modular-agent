@@ -2,6 +2,7 @@
 
 import json
 import math
+from contextvars import ContextVar
 
 from ma_core import AgentError, clone
 from ma_core.wire import usage_out
@@ -43,6 +44,11 @@ def read_tenants(raw):
         return tenants
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
         raise AgentError("Invalid MODULAR_AGENT_TENANTS configuration") from None
+
+
+# Only an authenticated Interface installs this context; request data cannot
+# supply it. Child work also records its granted ceiling at admission.
+CONNECTION_AUTHORITY = ContextVar("connection_authority", default=None)
 
 
 class Authority:
@@ -103,6 +109,10 @@ class Authority:
             if parent is None:
                 return set()
             allowed &= self.permissions(parent, origin["actor"], origin.get("authority"))
+        if connection := CONNECTION_AUTHORITY.get():
+            principal, token_rights, grants = connection
+            if actor == principal:
+                allowed &= grants.get(s["id"], token_rights)
         if ceiling is not None:
             allowed &= set(ceiling)
         return allowed

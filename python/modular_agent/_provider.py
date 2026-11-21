@@ -117,10 +117,19 @@ async def _request(
     try:
         settings = request.get("settings", {})
         if isinstance(settings, dict):
-            requested = settings.get("reasoning", "off")
-            level = lower_reasoning(requested, info.get("thinking") or ["off"])
-            if requested != level:
-                request = {**request, "settings": {**settings, "reasoning": level}}
+            requested = settings.get("reasoning")
+            if requested is not None:
+                offered = info.get("thinking", [])
+                level = lower_reasoning(requested, offered)
+                if level not in offered:
+                    request = {
+                        **request,
+                        "settings": {
+                            k: v for k, v in settings.items() if k not in {"reasoning", "thinking"}
+                        },
+                    }
+                elif level != requested:
+                    request = {**request, "settings": {**settings, "reasoning": level}}
         return await provider.request(model, request, cx)
     except ModelFailure as exc:
         error = {"kind": exc.error["kind"], "message": exc.error["message"]}

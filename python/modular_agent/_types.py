@@ -121,6 +121,19 @@ class InputReceipt:
     disposition: Disposition | None = None
 
 
+class ErasureReport(TypedDict):
+    erased: list[JsonObject]
+    pending: list[JsonObject]
+    outOfReach: list[JsonObject]
+
+
+class Proposal(TypedDict):
+    inputId: str
+    actorId: str
+    content: Content
+    time: int
+
+
 @dataclass(frozen=True)
 class EventData:
     fields: JsonObject

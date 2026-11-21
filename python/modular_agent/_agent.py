@@ -28,7 +28,7 @@ from ma_core import plain
 from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
-from ma_harness.authority import PERMISSIONS
+from ma_harness.authority import CONNECTION_AUTHORITY, PERMISSIONS
 from ma_history import History
 from ma_history.http import HTTPHistory
 from ma_jobs import Jobs
@@ -63,10 +63,12 @@ from ._native import (
     _reply,
 )
 from ._plugin import Plugin, ProcessPlugin, ServicePlugin, _SUPPORTED_HOOKS
+from ._parts import Interface, _Configuration, _InterfacePart
 from ._provider import ModelInfo, Provider, _ProviderAdapter
 from ._serve import _MemoryExternal, _OverWire
 from ._session import Session, _events
 from ._tool import Tool
+from ._working import _WorkingPart
 from ._types import (
     Actor,
     AgentError,
@@ -216,9 +218,12 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         self._allowed_projects: set[Path] | None = None
         self._allowed_tenants: set[str | None] = {None}
         self._connections = connections
+        self._token_rights: set[str] = set()
+        self._connection_grants: dict[str, set[str]] = {}
         if principal is not None:
             self.name = "acp:" + uuid4().hex
             self.principal = principal["actor"]
+            self._token_rights = set(self.principal["rights"])
             if "projects" in principal:
                 self._allowed_projects = {Path(p).resolve() for p in principal["projects"]}
             self._allowed_tenants = set(principal.get("tenants", [None]))
@@ -245,11 +250,17 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
     def _current(self) -> Agent:
         return self._scope.get() or self._agents.get(OUTPUT_SESSION.get() or "", self._agent)
 
-    def project_scope(self) -> Token[Agent | None]:
-        return self._scope.set(None)
+    def _authority_scope(self) -> Any:
+        return CONNECTION_AUTHORITY.set(
+            (self.actor, self._token_rights, self._connection_grants) if self.network else None
+        )
 
-    def reset_project_scope(self, token: Token[Agent | None]) -> None:
-        self._scope.reset(token)
+    def project_scope(self) -> tuple[Token[Agent | None], Any]:
+        return self._scope.set(None), self._authority_scope()
+
+    def reset_project_scope(self, token: tuple[Token[Agent | None], Any]) -> None:
+        self._scope.reset(token[0])
+        CONNECTION_AUTHORITY.reset(token[1])
 
     def register_project(self, agent: Agent, api: Any) -> None:
         self._apis[agent] = api
@@ -259,11 +270,11 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 sid = payload.get("session")
                 if self.network and self._scope.get() is not agent and sid not in self._agents:
                     return None
-                token = self._scope.set(agent)
+                token = self._scope.set(agent), self._authority_scope()
                 try:
                     return await handler(payload)
                 finally:
-                    self._scope.reset(token)
+                    self.reset_project_scope(token)
 
             return run
 
@@ -329,6 +340,16 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
     async def require_visible_session(self, project: str, sid: str) -> None:
         await super().require_visible_session(project, sid)
         self._claim(sid)
+        if self.network and sid not in self._connection_grants:
+            owner = self._connections.composition(sid) if self._connections else None
+            session = (owner or self._agent)._h.sessions.get(sid)
+            if session is None:
+                session = await self._agent._api.call("history", "read", {"session": sid})
+            if session is not None:
+                grant = session.get("actors", {}).get(self.actor)
+                self._connection_grants[sid] = self._token_rights & set(
+                    grant["authority"] if grant else ()
+                )
 
     async def _open(
         self,
@@ -372,8 +393,8 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 selected = await self._compose_reopen(folder, session_id)
             else:
                 selected = await self._compose(folder) if self._compose else self._agent
-        if selected is not self._agent and selected._project != folder:
-            if selected not in self._apis:
+        if selected._project != folder:
+            if selected is not self._agent and selected not in self._apis:
                 await selected.close()
             raise ValueError("Session is not in this project")
         if selected not in self._apis:
@@ -524,6 +545,7 @@ class Agent:
         self._lock = asyncio.Lock()
         self._closed = False
         self._plugin_host = False
+        self._enable_plugin_host: Callable[[], Awaitable[None]] | None = None
         self._acp_server: WebSocketServer | None = None
         self._conformance = False
         self._late_answers = False
@@ -770,6 +792,7 @@ class Agent:
                 value["waitingThroughRestart"] and self._late_answers and "questions" in parts
             ),
             mixedActorInput="refused",
+            holdsOutput=bool(self._h.holds_output()),
             severalActors=self._several_actors,
             sessionLimits=self._session_limits,
             tenants=self._tenants,
@@ -846,8 +869,6 @@ class Agent:
         """Serve ACP on stdio or start an authenticated WebSocket listener."""
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
-        if not self._plugin_host:
-            raise AgentError(ErrorCode.INVALID_COMPOSITION, "ACP requires plugin_host=True")
         if self._handler is not None:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "ACP answers its own questions")
         async with self._lock:
@@ -855,8 +876,13 @@ class Agent:
                 raise AgentError(ErrorCode.BUSY, "ACP must start before any sessions open")
             if listen is None and (actors or tls is not None):
                 raise ValueError("Network ACP options require listen")
+            if not self._plugin_host and self._enable_plugin_host is not None:
+                try:
+                    await self._enable_plugin_host()
+                except Exception as exc:
+                    raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
+                self._plugin_host = True
             if listen is not None:
-                rights: dict[str, set[str]] = {}
                 kinds: dict[str, str] = {}
                 connections = _AcpConnections()
                 principals = deepcopy(actors)
@@ -869,11 +895,9 @@ class Agent:
                         or not allowed <= PERMISSIONS
                     ):
                         raise ValueError("Each WebSocket actor needs an id, kind and valid rights")
-                    if aid in rights and (allowed != rights[aid] or kind != kinds[aid]):
-                        raise ValueError(
-                            "Tokens for the same actor id must agree on kind and rights"
-                        )
-                    rights[aid], kinds[aid] = allowed, kind
+                    if aid in kinds and kind != kinds[aid]:
+                        raise ValueError("Tokens for the same actor id must agree on kind")
+                    kinds[aid] = kind
                 if not actors:
                     raise ValueError("WebSocket ACP requires at least one configured actor")
                 await self._install_acp_mcp(project_mcp)
@@ -1045,15 +1069,16 @@ def create_agent(
                 raise AgentError(
                     ErrorCode.INVALID_COMPOSITION, "Kept history needs a persistent store"
                 )
-            if not isinstance(environment, MemoryEnvironment):
-                raise AgentError(
-                    ErrorCode.INVALID_COMPOSITION, "Local environment recovery needs data_dir"
-                )
         if runtime is not None and runtime.continues_after_restart != (durability == "durable"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Runtime does not match durability")
         if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
-            raise AgentError(ErrorCode.INVALID_COMPOSITION, "History does not match durability")
-        external_placement = process_plugins is not None or service_plugins is not None
+            raise AgentError(
+                ErrorCode.INVALID_COMPOSITION,
+                "Persistent history requires kept or durable"
+                if durability == "ephemeral"
+                else "History does not match durability",
+            )
+        external_placement = bool(process_plugins or service_plugins)
         if plugin_host is False and external_placement:
             raise AgentError(
                 ErrorCode.INVALID_COMPOSITION,
@@ -1080,7 +1105,7 @@ def create_agent(
                 )
             if not folder.is_dir():
                 raise ValueError("Project must be a directory")
-            defaults = {"thinking": "off", **settings_in(settings or {})}
+            defaults = settings_in(settings or {})
             if approval is not None:
                 defaults.update(settings_in({"approval": approval}))
             agent = Agent(h, folder, defaults, on_question, scratch)
@@ -1096,12 +1121,13 @@ def create_agent(
                 store_root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 store = History(store_root)
             await h.load(store)
-            local = Local(root, point_store="git")
+            local_root = Path(scratch.name) if durability == "ephemeral" else root
+            local = Local(local_root, point_store="git")
             if not isinstance(environment, MemoryEnvironment) and local_process_groups:
                 try:
                     delegated_root()
                 except Exception:
-                    local = ProcessGroupLocal(root, point_store="git")
+                    local = ProcessGroupLocal(local_root, point_store="git")
             await h.load(environment if isinstance(environment, MemoryEnvironment) else local)
             dispatcher = _SdkTools()
             dispatcher.conformance = conformance
@@ -1156,6 +1182,8 @@ def create_agent(
             if approval is not None or conformance:
                 await h.load(_Approval())
             registered_tools: dict[str, _LocalPlugin] = {}
+            interfaces: list[tuple[str, Interface]] = []
+            credential_registered = credentials is not None
             for plugin in [
                 *(Plugin(t.name, tools=[t]) for t in tools),
                 *(
@@ -1170,11 +1198,27 @@ def create_agent(
                     )
                 try:
                     registrar = await plugin._register(plugin.config)
-                    for hook in registrar._hooks:
-                        if hook.point not in _SUPPORTED_HOOKS:
-                            raise AgentError(
-                                ErrorCode.NOT_SUPPORTED, f"Unsupported hook: {hook.point}"
-                            )
+                    if registrar._credential_store is not None:
+                        if credential_registered:
+                            raise ValueError("Duplicate credential store")
+                        credential_registered = True
+                        agent._credentials = registrar._credential_store
+                        await h.unload("credentials")
+                        await h.load(_CredentialAdapter(agent._credentials))
+                        for owner in h.plugins.values():
+                            if isinstance(owner, _ProviderAdapter):
+                                owner.credentials = agent._credentials
+                    if registrar._configuration is not None:
+                        if "config" in h.capabilities:
+                            raise ValueError("Duplicate configuration source")
+                        await h.load(_Configuration(plugin.name, registrar._configuration))
+                    if registrar._interface is not None:
+                        interfaces.append((plugin.name, registrar._interface))
+                    if registrar._environment is not None:
+                        if "working-environment" not in plugin.replaces:
+                            raise ValueError("Unlisted working-environment replacement")
+                        await h.unload(h.capabilities["environment"][0])
+                        await h.load(_WorkingPart(plugin.name, registrar._environment))
                     for provider in registrar._providers.values():
                         prior_provider = h.capabilities.get(provider.id)
                         if prior_provider is not None:
@@ -1209,7 +1253,18 @@ def create_agent(
                 for p in plugins
                 if isinstance(p, _OverWire)
             ]
-            if agent._plugin_host:
+
+            for adapter in (p for p in h.plugins.values() if isinstance(p, _LocalPlugin)):
+                for hook in adapter.registrar._hooks:
+                    if hook.point not in _SUPPORTED_HOOKS and hook.point not in h.hooks:
+                        raise AgentError(ErrorCode.NOT_SUPPORTED, f"Unsupported hook: {hook.point}")
+
+            async def load_configured_plugins(initial: list[dict[str, Any]], *, host: bool) -> None:
+                configured = list(initial)
+                if not host:
+                    if configured:
+                        await load_plugins(h, configured, folder, root, external_factory=factory)
+                    return
                 processes = [
                     p._wire() if isinstance(p, ProcessPlugin) else p for p in process_plugins or ()
                 ]
@@ -1224,23 +1279,34 @@ def create_agent(
                     }
                     for p in service_plugins or ()
                 ]
-                specs.extend([*processes, *services, *env])
-            if specs:
+                configured.extend([*processes, *services, *env])
+                if configured:
+                    await load_plugins(h, configured, folder, root, external_factory=factory)
 
-                def factory(
-                    harness: Any, spec: dict[str, Any], project: Path, home: Path, index: int
-                ) -> Any:
-                    kind = (
-                        _MemoryExternal if isinstance(spec.get("_over_wire"), Plugin) else External
-                    )
-                    plugin = kind(harness, spec, project, home, index)
-                    if "url" in spec:
-                        plugin.ping_interval = service_ping_interval
-                        plugin.control_timeout = service_control_timeout
-                    return plugin
+            def factory(
+                harness: Any, spec: dict[str, Any], project: Path, home: Path, index: int
+            ) -> Any:
+                kind = _MemoryExternal if isinstance(spec.get("_over_wire"), Plugin) else External
+                plugin = kind(harness, spec, project, home, index)
+                if "url" in spec:
+                    plugin.ping_interval = service_ping_interval
+                    plugin.control_timeout = service_control_timeout
+                return plugin
 
-                await load_plugins(h, specs, folder, root, external_factory=factory)
+            await load_configured_plugins(specs, host=agent._plugin_host)
+
+            async def enable_plugin_host() -> None:
+                await load_configured_plugins([], host=True)
+
+            agent._enable_plugin_host = enable_plugin_host
             wrap_native_providers(h)
+            environment_owner = h.capabilities["environment"][0]
+            if (
+                data_dir is None
+                and durability != "ephemeral"
+                and h.plugins[environment_owner] is local
+            ):
+                raise ValueError("Local environment recovery needs data_dir")
             runtime_owner = h.capabilities["runtime"][0]
             continues = bool(h.plugins[runtime_owner].declarations.get("durable"))
             # Offline ACP fixtures exercise both Runtime kinds with persistent
@@ -1258,8 +1324,10 @@ def create_agent(
                 raise AgentError(ErrorCode.INVALID_PARAMS, f"Unknown model: {selected}")
             if selected is not None:
                 defaults["model"] = selected
-            if not specs and not agent._plugin_host:
+            if not specs and not agent._plugin_host and not interfaces:
                 agent._restart = lambda: build_with_store(agent._memory_store)
+            for owner_name, implementation in interfaces:
+                await h.load(_InterfacePart(owner_name, implementation, agent))
             return agent
         except BaseException as exc:
             try:
