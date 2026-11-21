@@ -192,12 +192,13 @@ func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptRes
 		return acp.PromptResponse{}, err
 	}
 	if out.Status == "failed" && s.binding == Binding2 {
-		return acp.PromptResponse{}, &acp.RequestError{Code: -32000, Message: out.Error, Data: map[string]any{"_meta": response.Meta}}
+		meta := api.Decode[struct{ Outcome struct{ Error string } }](response.Meta[Namespace])
+		return acp.PromptResponse{}, &acp.RequestError{Code: -32000, Message: meta.Outcome.Error, Data: map[string]any{"_meta": response.Meta}}
 	}
 	return response, nil
 }
 func (s *server) gatedPrompt(ctx context.Context, st *attachment, id string, reply acp.PromptResponse) (acp.PromptResponse, error) {
-	result, err := s.gateAnswer(s.acting(ctx, id, st.actor), id, "session/prompt", reply)
+	result, err := s.gateAnswer(s.acting(context.WithoutCancel(ctx), id, st.actor), id, "session/prompt", reply)
 	if err != nil {
 		return acp.PromptResponse{}, outputReplyError(err)
 	}

@@ -171,16 +171,17 @@ func (c *client) BindChild(ctx context.Context, id, parent, who string) error {
 		}
 		ancestor = s.Parent
 	}
-	if !c.Authorize(parent, who, "delegate") {
-		return errors.New("delegation refused")
-	}
+	ctx = api.AsActor(ctx, who)
 	p, err := c.Snapshot(parent)
 	if err != nil {
 		return err
 	}
+	if !c.authorizedBy(p, ctx, "delegate") {
+		return errors.New("delegation refused")
+	}
 	var cap []string
 	for _, r := range api.Rights {
-		if c.Authorize(parent, who, r) {
+		if c.authorizedBy(p, ctx, r) {
 			cap = append(cap, r)
 		}
 	}
@@ -190,6 +191,9 @@ func (c *client) BindChild(ctx context.Context, id, parent, who string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.data.Project != p.Project || s.data.Tenant != p.Tenant {
+		return api.ErrAuthority
+	}
 	if s.data.Parent != "" && s.data.Parent != parent {
 		return errors.New("different parent")
 	}

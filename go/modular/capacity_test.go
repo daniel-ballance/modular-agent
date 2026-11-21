@@ -1,12 +1,72 @@
 package modular_test
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
 )
+
+func TestModelCallListCapacitySettlesResponseWithoutDispatch(t *testing.T) {
+	const script = `[{"toolCalls":[{"name":"demo","input":{}},{"name":"demo","input":{}}],"usage":{"input":12,"output":5}}]`
+	for _, placement := range []string{"built-in", "custom", "served"} {
+		t.Run(placement, func(t *testing.T) {
+			limits := modular.DefaultCapacityLimits()
+			limits.Session.Calls = 1
+			tool := modular.NewTool("demo", "must not run", func(context.Context, struct{}, *modular.ToolContext) (string, error) {
+				t.Error("unreserved call ran")
+				return "ran", nil
+			})
+			opts := []modular.Option{modular.WithCapacityLimits(limits), modular.WithTool(tool), modulartest.Script(script)}
+			plugin := modular.Plugin{Name: "limited-runtime", Replaces: []string{"runtime"}, Setup: func(r *modular.Registrar) error {
+				return r.Runtime(modular.NewRuntime(demoRuntime{}))
+			}}
+			switch placement {
+			case "custom":
+				opts = append(opts, modular.WithPlugin(plugin))
+			case "served":
+				opts = append(opts, modulartest.OverWire(plugin))
+			}
+			a := modulartest.Agent(t, opts...)
+			s, err := a.Session(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := s.Prompt(t.Context(), "call tools")
+			if err != nil || out.Outcome.Kind != "limit" || out.Outcome.Limit != "capacity" {
+				t.Fatalf("want capacity limit: %+v %v", out, err)
+			}
+			entries, err := s.History(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var responses int
+			for _, e := range entries {
+				switch e["kind"] {
+				case "response":
+					responses++
+					var msg modular.AssistantMessage
+					data, err := json.Marshal(e["message"])
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := json.Unmarshal(data, &msg); err != nil || msg.Stop != "failed" || len(msg.Content) != 0 || msg.Usage.Input != 12 || msg.Usage.Output != 5 {
+						t.Fatalf("unexpected bounded response %s: %v", data, err)
+					}
+				case "toolCall", "toolCallStarted":
+					t.Fatal(e)
+				}
+			}
+			if responses != 1 {
+				t.Fatalf("recorded %d responses: %v", responses, entries)
+			}
+		})
+	}
+}
 
 func TestConcurrentAdmissionsShareTheNoTenantBucket(t *testing.T) {
 	limits := modular.DefaultCapacityLimits()
