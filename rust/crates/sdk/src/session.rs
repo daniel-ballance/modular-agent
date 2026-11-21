@@ -82,6 +82,16 @@ pub use base::Authority as Rights;
 #[derive(Default)]
 pub(crate) struct Driver {
     run: tokio::sync::Mutex<()>,
+    scheduled: std::sync::atomic::AtomicUsize,
+}
+
+struct Scheduled(Arc<Driver>);
+impl Drop for Scheduled {
+    fn drop(&mut self) {
+        self.0
+            .scheduled
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -428,7 +438,11 @@ impl Session {
         } else {
             "answer"
         })?;
-        crate::events::answer(api, &self.id, &self.actor, &q, answer).await
+        crate::events::answer(api, &self.id, &self.actor, &q, answer).await?;
+        if q.scope.session == self.id && q.scope.call.is_some() {
+            self.drive();
+        }
+        Ok(())
     }
 
     /// Override the agent handler for this session. Use a pending future if the UI
@@ -772,7 +786,12 @@ impl Session {
 
     fn drive(&self) -> tokio::task::JoinHandle<Result<()>> {
         let me = self.clone();
+        self.driver
+            .scheduled
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let scheduled = Scheduled(self.driver.clone());
         self.inner.workers.spawn(async move {
+            let _scheduled = scheduled;
             tokio::select! {
                 biased;
                 _ = me.inner.crash.cancelled() => Err(Error::new(Code::Lost, "the agent was restarted")),
@@ -1003,7 +1022,14 @@ impl Session {
                         v["parked"] != true && v["taken"] != "proposed" && v["timing"] != "propose"
                     })
                 });
-                if !self.is_running() && !queued {
+                if !self.is_running()
+                    && !queued
+                    && self
+                        .driver
+                        .scheduled
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        == 0
+                {
                     return Ok(());
                 }
             }

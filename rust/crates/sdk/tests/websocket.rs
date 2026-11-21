@@ -188,6 +188,99 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
     Ok(())
 }
 
+struct ComposedProject {
+    project: PathBuf,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl modular_agent::Configuration for ComposedProject {
+    fn settings(&self, _: &Path) -> modular_agent::Result<Value> {
+        Ok(json!({}))
+    }
+    fn trusted(&self, project: &Path) -> modular_agent::Result<bool> {
+        Ok(project == self.project)
+    }
+}
+
+struct Lifecycle(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+#[modular_agent::async_trait]
+impl modular_agent::Interface for Lifecycle {
+    async fn start(&self, _: Agent) -> modular_agent::Result<()> {
+        Ok(())
+    }
+    async fn stop(&self) -> modular_agent::Result<()> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[modular_agent::async_trait]
+impl modular_agent::AcpComposition for ComposedProject {
+    async fn compose(&self, project: &Path, _: Option<&str>) -> modular_agent::Result<Agent> {
+        let stopped = self.stopped.clone();
+        Agent::builder()
+            .project(project)
+            .plugin_host(true)
+            .plugin(Plugin::new("lifecycle").setup(move |r| {
+                r.interface(Lifecycle(stopped.clone()));
+                Ok(())
+            }))
+            .build()
+            .await
+    }
+    fn history(&self) -> modular_agent::Result<modular_agent::History> {
+        Ok(modular_agent::memory_history())
+    }
+    fn trust(&self, _: &Path) -> modular_agent::Result<()> {
+        Err(modular_agent::Error::new(
+            Code::Forbidden,
+            "read-only trust",
+        ))
+    }
+    fn configuration(&self) -> Option<&dyn modular_agent::Configuration> {
+        Some(self)
+    }
+}
+
+#[tokio::test]
+async fn acp_composition_keeps_ephemeral_agents_and_checks_project_trust()
+-> modular_agent::Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let project = tempfile::tempdir()?;
+    let denied = tempfile::tempdir()?;
+    let dir = tempfile::tempdir()?;
+    let bearer = token(
+        dir.path(),
+        "composition",
+        "0b22057fef8484bd731e150d279a3707",
+    );
+    let agent = Agent::builder().plugin_host(true).build().await?;
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let server = agent
+        .serve_acp_websocket(
+            modular_agent::AcpOptions {
+                compose: Some(Arc::new(ComposedProject {
+                    project: project.path().canonicalize()?,
+                    stopped: stopped.clone(),
+                })),
+            },
+            AcpServiceOptions {
+                listen: "127.0.0.1:0".into(),
+                actors: vec![AcpActor::local(bearer.clone())],
+                tls: None,
+            },
+        )
+        .await?;
+    inspect(&server.url, &bearer, denied.path(), false).await;
+    inspect(&server.url, &bearer, project.path(), true).await;
+    server.close().await;
+    assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    agent.close().await
+}
+
 #[tokio::test]
 async fn service_factory_creates_and_stops_one_instance_per_connection() -> modular_agent::Result<()>
 {

@@ -67,7 +67,7 @@ pub struct Registrar {
     subscriptions: Vec<(String, crate::Order, crate::hooks::LocalHandle)>,
     pub(crate) sources: Vec<(String, Arc<dyn ToolSource>)>,
     prepare: Vec<LocalHook<SessionPrepare, ()>>,
-    environment: Option<Arc<dyn base::WorkingEnvironment>>,
+    pub(crate) environment: Option<Arc<dyn base::WorkingEnvironment>>,
     runtime: Option<Arc<dyn base::Runtime>>,
     history: Option<crate::History>,
     credentials: Option<Arc<dyn crate::CredentialStore>>,
@@ -420,7 +420,6 @@ impl Registrar {
 
     pub(crate) fn check_servable(&self) -> Result<()> {
         for (registered, name) in [
-            (self.environment.is_some(), "native working-environment"),
             (self.runtime.is_some(), "native Runtime"),
             (self.history.is_some(), "history store"),
             (self.credentials.is_some(), "credential store"),
@@ -664,14 +663,16 @@ impl base::Plugin for InProcess {
                 }),
             );
         }
-        for hook in &self.registered.hooks {
+        for (index, hook) in self.registered.hooks.iter().enumerate() {
             let handle = hook.handle.clone();
             let point = hook.point;
+            let question_key = format!("gate:{}:{index}", self.name);
             r.on(
                 plugin_stdio::hook_name(point).expect("known hook"),
                 hook.order.native(),
                 base::handler(move |api, scope, original| {
                     let handle = handle.clone();
+                    let question_key = question_key.clone();
                     Box::pin(async move {
                         let mut payload =
                             plugin_stdio::hook_payload(point, &scope, &original, &api)?;
@@ -691,6 +692,42 @@ impl base::Plugin for InProcess {
                             .await
                             .map_err(|e| base::anyhow!("{}", e.message()))?;
                         drop(guard);
+                        if point == "tool.before"
+                            && let Some(ask) = reply.get("pendingQuestion")
+                        {
+                            let ask: crate::Ask = serde_json::from_value(ask.clone())?;
+                            let mut question = ask.into_question(scope.clone());
+                            question.key = scope
+                                .call
+                                .as_ref()
+                                .map(|call| format!("{question_key}:{call}"));
+                            question.timeout_ms = Some(0);
+                            if question.kind == base::RequestKind::Approval {
+                                question.extra["approvalCall"] = plugin_stdio::hook_payload(
+                                    point, &scope, &original, &api,
+                                )?["call"]
+                                    .clone();
+                            }
+                            let cancelled = api.cancellation(&scope.session)?;
+                            return Ok(
+                                match base::requests(api.as_ref())?
+                                    .ask(api, question, cancelled)
+                                    .await?
+                                {
+                                    base::RequestReply::Waiting => base::HookResult {
+                                        suspended: true,
+                                        ..Default::default()
+                                    },
+                                    base::RequestReply::Answer(answer) if !answer.declined => {
+                                        base::HookResult::default()
+                                    }
+                                    _ => base::HookResult {
+                                        refused: Some("question declined".into()),
+                                        ..Default::default()
+                                    },
+                                },
+                            );
+                        }
                         if point == "input"
                             && let Some(line) = reply["command"].as_str()
                         {

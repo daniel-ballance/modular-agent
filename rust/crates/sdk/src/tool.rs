@@ -299,7 +299,7 @@ pub(crate) enum Backend {
 }
 
 /// A question a tool asks.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ask {
     kind: base::RequestKind,
     text: String,
@@ -309,6 +309,15 @@ pub struct Ask {
 }
 
 impl Ask {
+    pub(crate) fn into_question(self, scope: base::Scope) -> base::Question {
+        let mut question = base::Question::new(scope, self.kind, &self.text);
+        question.options = self.options;
+        question.credential = self.credential;
+        if self.link {
+            question.extra["kind"] = json!("link");
+        }
+        question
+    }
     pub fn choice(question: impl Into<String>, options: &[&str]) -> Self {
         Ask {
             kind: base::RequestKind::Choice,
@@ -450,17 +459,7 @@ impl ToolContext {
                 "this plugin did not register a job owner",
             )
         })?;
-        owner
-            .start(
-                &self.backend,
-                name,
-                kind,
-                detail,
-                key,
-                &self.session_id,
-                &self.actor_id,
-            )
-            .await
+        owner.start(self, name, kind, detail, key).await
     }
 
     pub async fn history(&self, after: Option<&str>) -> Result<crate::HistoryPage> {

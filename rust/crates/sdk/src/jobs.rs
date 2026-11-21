@@ -105,14 +105,14 @@ impl Owner {
     }
     pub(crate) async fn start(
         &self,
-        backend: &Backend,
+        context: &crate::ToolContext,
         name: &str,
         kind: &str,
         detail: Value,
         key: Option<&str>,
-        session: &str,
-        actor: &str,
     ) -> Result<JobStart> {
+        let (backend, session, actor) =
+            (&context.backend, context.session_id(), context.actor_id());
         if kind.is_empty() {
             return Err(Error::new(Code::InvalidRequest, "job kind is empty"));
         }

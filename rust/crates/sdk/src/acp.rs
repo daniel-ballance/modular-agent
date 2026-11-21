@@ -18,8 +18,16 @@ pub trait AcpComposition: Send + Sync + 'static {
     fn history(&self) -> Result<crate::History>;
     fn trust(&self, project: &Path) -> Result<()>;
 
-    fn project_settings(&self, _project: &Path) -> Result<Value> {
-        Ok(serde_json::json!({}))
+    /// When provided, check project trust before invoking the composition factory.
+    fn configuration(&self) -> Option<&dyn crate::Configuration> {
+        None
+    }
+
+    fn project_settings(&self, project: &Path) -> Result<Value> {
+        match self.configuration() {
+            Some(configuration) => configuration.settings(project),
+            None => Ok(serde_json::json!({})),
+        }
     }
 
     async fn project_mcp(&self, _session: &str, _project: &Path, servers: Value) -> Result<()> {
@@ -101,6 +109,11 @@ impl interface_acp::Factory for ProjectFactory {
         reopening: Option<&str>,
         sink: Sink,
     ) -> base::Result<base::Api> {
+        if let Some(configuration) = self.0.configuration()
+            && !configuration.trusted(project)?
+        {
+            return Err(interface_acp::request_error("forbidden", "project is not trusted").into());
+        }
         let agent = self.0.compose(project, reopening).await?;
         if !agent.inner.plugin_host {
             agent.close().await?;
@@ -361,7 +374,7 @@ impl interface_acp::Factory for Factory {
             base::ensure!(
                 !routes.contains_key(id)
                     && base::AgentApi::snapshot(self.0.inner.harness.as_ref(), id).is_err(),
-                base::OperationError::Busy("session is already open by another writer".into())
+                interface_acp::request_error("busy", "session is already open by another writer")
             );
             routes.insert(id.into(), sink.clone());
             self.3.lock().unwrap().insert(id.into(), sink.clone());

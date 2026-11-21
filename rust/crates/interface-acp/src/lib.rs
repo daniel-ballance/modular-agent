@@ -734,7 +734,8 @@ impl State {
         }
     }
 }
-fn request_error(code: &str, message: &str) -> acp::Error {
+/// A Factory refusal with a stable ACP error code.
+pub fn request_error(code: &str, message: &str) -> acp::Error {
     acp::Error::new(-32602, message).data(json!({"code":code}))
 }
 fn withheld() -> acp::Error {

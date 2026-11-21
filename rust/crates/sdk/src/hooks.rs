@@ -94,6 +94,8 @@ pub enum Gate {
     Allow,
     Refuse(String),
     Change(Value),
+    /// Leave a tool call pending while an actor answers.
+    Pending(crate::Ask),
 }
 fn gate(answer: Gate, p: Value) -> Result<Value> {
     Ok(match answer {
@@ -104,7 +106,8 @@ fn gate(answer: Gate, p: Value) -> Result<Value> {
             call["input"] = input;
             json!({"change":{"call":call}})
         }
-        Gate::Change(_) => {
+        Gate::Pending(ask) if p["call"].is_object() => json!({"pendingQuestion":ask}),
+        Gate::Change(_) | Gate::Pending(_) => {
             return Err(crate::Error::new(
                 crate::Code::InvalidRequest,
                 "this gate cannot change its payload",
