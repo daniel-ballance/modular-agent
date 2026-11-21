@@ -66,3 +66,23 @@ test("a reopened agent charges persisted proposals before admitting to another s
   await previous.withdraw(proposal.inputId);
   assert.ok((await next.send(text, "propose")).inputId);
 });
+
+test("reconstructed payload bytes block new work but not hand-back", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-reserved-bytes-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const config = { project: dir, dataDir: dir, durability: "kept" as const, severalActors: true, script: [] };
+  const first = await testAgent(config);
+  const saved = await first.session();
+  const proposed = await saved.send("é".repeat(650), "propose", { key: "saved" });
+  await first.close();
+  const resumed = await testAgent({ ...config, resourceReservations: { agent: { bufferedBytes: 1500 } } });
+  t.after(() => resumed.close());
+  const next = await resumed.session();
+  await assert.rejects(next.send("x".repeat(500), "propose", { key: "refused" }), { code: "busy" });
+  const old = await resumed.openSession(saved.id);
+  assert.equal((await old.send("Ignored", "propose", { key: "saved" })).duplicate, true);
+  await old.withdraw(proposed.inputId);
+  const accepted = await next.send("x".repeat(500), "propose", { key: "refused" });
+  assert.ok(accepted.inputId);
+  assert.equal(accepted.duplicate, undefined);
+});

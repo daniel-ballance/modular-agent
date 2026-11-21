@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { textOf, type Harness } from "@modular-agent/harness";
+import { ALL_AUTHORITY, textOf, type Harness } from "@modular-agent/harness";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { createAgent } from "../src/index.js";
 
@@ -25,7 +25,7 @@ async function crashedSession() {
 	const s = await api.startSession();
 	await api.append(s, { kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: "user", inputId: "foreign-input",
 		data: { inputId: "foreign-input", content: [{ type: "text", text: "do three things" }], when: "now", taken: "now" } });
-	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t1", actorId: "user", data: { startedBy: { kind: "actor", id: "user" }, model: { provider: "faux", id: "faux-1" }, system: "", tools: api.tools(s), settings: {} } });
+	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t1", actorId: "user", data: { startedBy: { kind: "actor", id: "user" }, model: { provider: "faux", id: "faux-1" }, system: "", tools: api.tools(s), settings: {}, rights: ALL_AUTHORITY, authorizers: [{ sessionId: s, actorId: "user" }] } });
 	await api.append(s, { kind: "input", writer: "test", modelVisible: true, turnId: "t1", actorId: "user", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, data: { inputId: "foreign-input" } });
 	const calls = [fauxToolCall("read", { path: "notes.txt" }), fauxToolCall("bash", { command: "echo charged >> payments.log" }), fauxToolCall("write", { path: "done.txt", content: "ok" })];
 	await api.append(s, { kind: "modelRequest", writer: "test", modelVisible: false, turnId: "t1", stepId: "step1", data: { model: { provider: "faux", id: "faux-1" }, tools: calls.map((call) => call.name), tracksStepAfter: true } });

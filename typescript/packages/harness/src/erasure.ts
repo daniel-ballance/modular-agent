@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 export interface ErasureCopy { sessionId: string; id: string; erased: boolean }
-export interface ErasureIntent { id: string; sessionId: string; actorId: string; targets: string[]; copies: ErasureCopy[] }
+export interface ProviderErasureCopy { sessionId: string; provider: string; confirmed: boolean }
+export interface ErasureIntent {
+	id: string; sessionId: string; actorId: string; targets: string[]; copies: ErasureCopy[];
+	providers?: ProviderErasureCopy[];
+}
 
 export interface PendingErasure {
 	/** Read current state, including completed marks needed to fence stale readers. */

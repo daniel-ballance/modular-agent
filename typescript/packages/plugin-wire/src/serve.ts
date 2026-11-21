@@ -319,7 +319,14 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	};
 	peer.handle("provider/models", async (p) => ({ models: toWire(provider(p.provider).models()) }));
 	peer.handle("provider/available", async (p) => ({ available: (await provider(p.provider).available?.()) ?? true }));
-	peer.handle("provider/discard", async (p) => (await provider(p.provider).discardState?.(String(p.sessionId), p.erase === true ? { erase: true, entryIds: p.entryIds } : undefined)) ?? {});
+	peer.handle("provider/discard", async p => {
+		const part = provider(p.provider);
+		if (!part.discardState) {
+			if (p.erase === true) throw new WireError("not_supported", "Provider does not confirm deletion");
+			return {};
+		}
+		return (await part.discardState(String(p.sessionId), p.erase === true ? { erase: true, entryIds: p.entryIds } : undefined)) ?? {};
+	});
 	peer.handle("provider/request", async (p, ctx) => {
 		const impl = provider(p.provider);
 		if (p.model?.provider !== impl.id || !impl.models().some((m) => m.id === p.model.id) ||

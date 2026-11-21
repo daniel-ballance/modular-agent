@@ -31,6 +31,7 @@ export interface QueuedInput {
 	releasedBy?: string;
 	delegatedBy?: string;
 	authorityActors?: string[];
+	startingRights?: Actor["authority"];
 	connectionRights?: Record<string, Actor["authority"]>;
 	authorityJobs?: string[];
 	sources?: string[];
@@ -132,14 +133,15 @@ export class Session {
 		}
 		switch (entry.kind) {
 			case "inputAccepted": {
-				const { key, content, when, releasedBy, submittedBy, delegatedBy = submittedBy, taken, parked, connectionRights } = entry.data as {
+				const { key, content, when, releasedBy, submittedBy, delegatedBy = submittedBy, taken, parked, connectionRights, rights } = entry.data as {
+					rights?: Actor["authority"];
 					connectionRights?: QueuedInput["connectionRights"];
 					key?: string; content: ContentPart[]; when: InputTiming; releasedBy?: string; submittedBy?: string; delegatedBy?: string; taken?: InputReceipt["taken"]; parked?: boolean;
 				};
 				const inputId = inputIdOf(entry)!;
 				const actorId = entry.actorId!;
 				const startedBy = entry.jobId ? { kind: "job" as const, id: entry.jobId } : { kind: "actor" as const, id: actorId };
-				const queued = { id: inputId, actorId, key, content, when, releasedBy, delegatedBy, time: entry.time, kind: "input", startedBy, connectionRights };
+				const queued = { id: inputId, actorId, key, content, when, releasedBy, delegatedBy, time: entry.time, kind: "input", startedBy, connectionRights, startingRights: rights };
 				this.admissions.set(inputId, queued);
 				if (when === "propose" || parked === true && !releasedBy) this.proposals.set(inputId, queued);
 				else this.proposals.delete(inputId);

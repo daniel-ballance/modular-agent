@@ -97,7 +97,9 @@ let openHttpHistory: (store: HttpHistory) => Promise<HistoryStore>;
 let httpUpstream: (store: HttpHistory) => Promise<{ url: string; token: string }>;
 export class FileHistory {
   #archive: HistoryArchive;
-  constructor(dir: string) { this.#archive = new HistoryArchive(resolve(dir)); }
+  constructor(dir: string, options?: { pendingErasureDir?: string }) {
+    this.#archive = new HistoryArchive(resolve(dir), options?.pendingErasureDir === undefined ? undefined : resolve(options.pendingErasureDir));
+  }
   static { fileArchive = store => store.#archive; }
 }
 export class HttpHistory {
@@ -152,7 +154,7 @@ export async function serveHistory(store: FileHistory | MemoryHistory | HttpHist
       service.server.close(error => error ? reject(error) : resolve())) };
   });
 }
-export const fileHistory = (dir: string): FileHistory => new FileHistory(dir);
+export const fileHistory = (dir: string, options?: { pendingErasureDir?: string }): FileHistory => new FileHistory(dir, options);
 export const memoryHistory = (): MemoryHistory => new MemoryHistory();
 
 export let createAgent: (options?: AgentOptions) => Promise<Agent>;
