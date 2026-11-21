@@ -77,6 +77,7 @@ async fn callback_service(
             listen: "127.0.0.1:0".into(),
             token_file: token_file.clone(),
             tls: None,
+            projects: vec![],
         },
     )
     .await?;

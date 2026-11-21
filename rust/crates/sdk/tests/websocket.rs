@@ -373,6 +373,7 @@ async fn service_factory_creates_and_stops_one_instance_per_connection() -> modu
             listen: "127.0.0.1:0".into(),
             token_file: bearer.clone(),
             tls: None,
+            projects: vec![],
         },
     )
     .await?;
@@ -426,6 +427,7 @@ async fn service_registration_and_pending_tool_loss() -> modular_agent::Result<(
             listen: "127.0.0.1:0".into(),
             token_file: bearer.clone(),
             tls: None,
+            projects: vec![],
         },
     )
     .await?;

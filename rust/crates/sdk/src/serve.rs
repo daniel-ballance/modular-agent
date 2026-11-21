@@ -36,6 +36,9 @@ pub struct ServeOptions {
     pub listen: String,
     pub token_file: std::path::PathBuf,
     pub tls: Option<crate::TlsOptions>,
+    /// Exact canonical roots assigned to this listener's one host trust scope.
+    /// A network working environment cannot initialize without a matching root.
+    pub projects: Vec<std::path::PathBuf>,
 }
 
 /// Serve a fresh plugin instance on each authenticated WebSocket connection.
@@ -46,11 +49,12 @@ pub async fn serve_websocket(
     if let Some(item) = plugin.local_items.first() {
         return Err(cannot_serve(item));
     }
+    let projects = service_projects(options.projects)?;
     Ok(plugin_stdio::server::serve_websocket(
         &options.listen,
         options.token_file,
         options.tls,
-        move || Served::new(plugin.clone()),
+        move || Served::with_scope(plugin.clone(), Some(projects.clone()), false),
     )
     .await?)
 }
@@ -61,17 +65,38 @@ pub async fn serve_websocket_factory(
     factory: impl Fn() -> Plugin + Send + Sync + 'static,
     options: ServeOptions,
 ) -> Result<crate::WebSocketServer> {
+    let projects = service_projects(options.projects)?;
     Ok(plugin_stdio::server::serve_websocket(
         &options.listen,
         options.token_file,
         options.tls,
-        move || Served::new(factory()),
+        move || Served::with_scope(factory(), Some(projects.clone()), true),
     )
     .await?)
 }
 
+fn service_projects(projects: Vec<std::path::PathBuf>) -> Result<Arc<[std::path::PathBuf]>> {
+    projects
+        .into_iter()
+        .map(|p| {
+            p.is_absolute()
+                .then(|| p.canonicalize().ok())
+                .flatten()
+                .filter(|p| p.is_dir())
+                .ok_or_else(|| {
+                    Error::new(
+                        Code::InvalidComposition,
+                        format!("invalid plugin service project: {}", p.display()),
+                    )
+                })
+        })
+        .collect()
+}
+
 pub(crate) struct Served {
     plugin: Plugin,
+    projects: Option<Arc<[std::path::PathBuf]>>,
+    fresh_instance: bool,
     registered: Mutex<Option<Arc<Registrar>>>,
     initializing: tokio::sync::Mutex<()>,
     startup: Mutex<Option<Error>>,
@@ -81,8 +106,18 @@ pub(crate) struct Served {
 
 impl Served {
     pub(crate) fn new(plugin: Plugin) -> Arc<Self> {
+        Self::with_scope(plugin, None, true)
+    }
+
+    fn with_scope(
+        plugin: Plugin,
+        projects: Option<Arc<[std::path::PathBuf]>>,
+        fresh_instance: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             plugin,
+            projects,
+            fresh_instance,
             registered: Mutex::default(),
             initializing: tokio::sync::Mutex::new(()),
             startup: Mutex::default(),
@@ -293,6 +328,26 @@ impl Endpoint for Served {
                     })));
                 }
                 let v = registration(&self.plugin.name, &self.plugin.replaces, &r);
+                let environment = r.environment.is_some() || r.portable_environment.is_some();
+                if environment && let Some(projects) = &self.projects {
+                    if !self.fresh_instance {
+                        return Err(Fault::new(
+                            "not_supported",
+                            "a served environment requires a per-connection factory",
+                        ));
+                    }
+                    let project = std::path::Path::new(base::wire::string(&p, "project")?);
+                    if !project.is_absolute()
+                        || !project
+                            .canonicalize()
+                            .is_ok_and(|path| projects.contains(&path))
+                    {
+                        return Err(Fault::new(
+                            "invalid_request",
+                            "project is outside the plugin service scope",
+                        ));
+                    }
+                }
                 if r.portable_environment.is_some() {
                     let project = std::path::PathBuf::from(base::wire::string(&p, "project")?);
                     if !project.is_absolute() {
@@ -301,6 +356,12 @@ impl Endpoint for Served {
                             "environment project must be absolute",
                         ));
                     }
+                    let project = match &self.projects {
+                        Some(_) => project
+                            .canonicalize()
+                            .map_err(|e| Fault::new("invalid_request", e))?,
+                        None => project,
+                    };
                     *self.environment_project.lock().unwrap() = Some(project);
                 }
                 if r.environment.is_some() && r.portable_environment.is_none() {
