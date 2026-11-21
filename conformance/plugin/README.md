@@ -35,7 +35,7 @@ node conformance/plugin/run.mjs --connect ws://127.0.0.1:39191/ --token-file FIL
   --runtime-url ws://127.0.0.1:39192/ --durable-runtime-url ws://127.0.0.1:39193/
 ```
 
-Against the Rust fixture plugin this passes 153/153; the same plugin on stdio passes 146/146.
+Against the Rust fixture plugin this passes 153/153; the same plugin on stdio passes 146/146. Each SDK's own conformance plugin also serves itself with `--listen ADDR --token-file FILE`; [`scripts/websocket-kits.sh`](../../scripts/websocket-kits.sh) runs the kit against each with no bridge: Rust, TypeScript and Python 153/153, Go 151/151 (its environment does not list directories).
 
 What it checks:
 - Handshake, supported version, selected parts, registration, replacement names, ping, framing, JSON nesting at 64 and 65 levels, error envelopes, shutdown and natural EOF exit.

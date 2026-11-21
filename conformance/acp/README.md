@@ -47,7 +47,7 @@ MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-
   --service-command "node $PWD/conformance/tools/ws-bridge.mjs --binding acp -- $PWD/rust/target/debug/ma --acp"
 ```
 
-Results through the bridge: Rust `ma`, 96/96 with the default checks and 193/193 with the three options above (stdio: 188/188); the Rust base agent, 219/219 (stdio: 214/214). The bridge accepts one token, so it cannot exercise `--other-token-file`.
+Results through the bridge: Rust `ma`, 96/96 with the default checks and 193/193 with the three options above (stdio: 188/188); the Rust base agent, 219/219 (stdio: 214/214). The bridge accepts one token, so it cannot exercise `--other-token-file`. Each `ma` serves ACP itself with `ma --acp --listen ADDR --token-file FILE`; [`scripts/websocket-kits.sh`](../../scripts/websocket-kits.sh) runs the kit against each with no bridge: 193/193 in all four languages.
 
 , the rights checks accept a completed turn with a refusal or a failed turn with `Invalid tool directive`. They check that no dispatch was recorded, the command did not run, and no result came from the tool. See [Tool dispatch](../../docs/contracts.md#tool-dispatch), [Prompts](../../docs/bindings/acp.md#prompts) and [Conformance mode](../../docs/bindings/acp.md#conformance-mode).
 

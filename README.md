@@ -108,7 +108,7 @@ The other languages' builds are in [`typescript/packages/ma`](typescript/package
 - **Few real requests.** The test suites use scripted models and local fakes. The ChatGPT and Claude subscription Providers have answered real requests through all four `ma` builds, and the `openai` and `anthropic` API-key Providers pass the [live checks](docs/sdk/testing.md#live-checks) in all four SDKs. Grok has not made a real request.
 - **The code sandbox runs in the agent's process**, with no memory limit. The Go binding to Monty cannot import `tools` or assign a function to a variable.
 - **`ma` turns off several actors, session limits and tenants.** The SDKs offer them as options.
-- **Parts as network services.** The [WebSocket transport](docs/bindings/websocket.md) is specified and the conformance kits check it, but no SDK serves a part or an agent over it yet.
+- **Parts as network services are new.** All four SDKs serve plugins and agents over the [WebSocket transport](docs/bindings/websocket.md), and the kits check each one, but only on loopback in tests; nothing has run across machines yet.
 
 Each SDK's README lists its own gaps.
 

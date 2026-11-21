@@ -23,16 +23,16 @@ A scenario that turns out to be wrong is fixed here first, then in the SDKs.
 
 ## Results
 
-SDK specification 0.1 after the third build round. Each runner ran all fourteen scenarios in process and served by each SDK's fixture program, with `MODULAR_AGENT_SDK_REQUIRE=all`:
+SDK specification 0.1 after the fourth build round. Each runner ran all fourteen scenarios in process, served by each SDK's fixture program on stdio, and served by each as a WebSocket service, with `MODULAR_AGENT_SDK_REQUIRE=all`:
 
-| Runner | In process | Rust | TypeScript | Go | Python |
-|---|---|---|---|---|---|
-| Rust | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
-| TypeScript | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
-| Go | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
-| Python | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
+| Runner | In process | Rust | TypeScript | Go | Python | Rust service | TypeScript service | Go service | Python service |
+|---|---|---|---|---|---|---|---|---|---|
+| Rust | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
+| TypeScript | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
+| Go | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
+| Python | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 | 14/14 |
 
-280 runs, all passed. The crash scenarios killed the agent's whole process group with `SIGKILL` in every cell. Earlier rounds passed the same matrix with fewer scenarios: 140 runs with the first seven, 220 with eleven.
+504 runs, all passed. The crash scenarios killed the agent's whole process group, and each service's group, with `SIGKILL` in every cell. Earlier rounds passed the same matrix with fewer scenarios or placements: 140 runs with the first seven scenarios, 220 with eleven, 280 with fourteen and no services.
 
 ## Proposed, not yet written
 
