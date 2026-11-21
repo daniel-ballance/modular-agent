@@ -119,6 +119,7 @@ func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, e
 		actors[token] = policy
 	}
 	declared, projects := a.acpResources(opt)
+	projects = acpinterface.ShareCompositions(projects)
 	service, err := wswire.Listen(ctx, opt.Listen, opt.TLS, wswire.ACP, actors, func(ctx context.Context, c *wswire.Conn, p acpinterface.Principal) {
 		c.EnableACPControl(opt.ControlDeadline)
 		_ = iface.ServePrincipal(ctx, c, c, declared, projects, p)
