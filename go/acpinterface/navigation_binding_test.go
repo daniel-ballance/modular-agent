@@ -43,6 +43,9 @@ func TestACPBindingNavigationAndOptionalMethods(t *testing.T) {
 		if fork == "" {
 			t.Fatal("fork shape")
 		}
+		if _, err = conn.LoadSession(timeout(t), acp.LoadSessionRequest{SessionId: acp.SessionId(fork), Cwd: root}); err != nil {
+			t.Fatal(err)
+		}
 		if _, err = conn.CloseSession(timeout(t), acp.CloseSessionRequest{SessionId: acp.SessionId(fork)}); err != nil {
 			t.Fatal(err)
 		}

@@ -176,6 +176,10 @@ func (w *runtimeWork) model(ctx context.Context, id any, p *Peer, step string, r
 			}
 		}
 		a.intent, err = w.record(ctx, draft)
+		if errors.Is(err, api.ErrCapacity) {
+			w.limit = "capacity"
+			return limitError(w.limit)
+		}
 		if err != nil {
 			return err
 		}
@@ -234,6 +238,16 @@ func (w *runtimeWork) model(ctx context.Context, id any, p *Peer, step string, r
 	if !fitsHistoryEntry(t, responseDraft(step, msg)) {
 		msg = responseOut(api.Response{Stop: "failed", Usage: res.Usage})
 		msg["error"] = object{"kind": "other", "message": "result_too_large: model response exceeds history page"}
+	}
+	if reserve, ok := t.IO.(interface {
+		ReserveModelResponse(string, api.Content) error
+	}); ok {
+		if err := reserve.ReserveModelResponse(step, responseIn(msg).Content); errors.Is(err, api.ErrCapacity) {
+			w.limit = "capacity"
+			msg = responseOut(api.Response{Stop: "failed", Usage: res.Usage, Content: api.Content{}})
+		} else if err != nil {
+			return nil, err
+		}
 	}
 	a.answer = msg
 	t.IO.Emit(ctx, api.Event{Kind: "model.stream.end", Step: step, Data: api.JSON(res.Stop)})

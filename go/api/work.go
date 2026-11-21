@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+var ErrCapacity = errors.New("capacity limit")
+
+// JobReportBytes bounds the encoded input reserved for a reporting job.
+const JobReportBytes = 1 << 20
+
 var ErrTenantTokens = errors.New("tenantTokens limit")
 var ErrAuthority = errors.New("authority refused")
 var ErrTenantForbidden = errors.New("tenant access forbidden")
@@ -24,6 +29,18 @@ type Actor struct {
 	Kind   string   `json:"kind"`
 	Rights []string `json:"rights"`
 }
+type sessionScopeKey struct{}
+
+// WithSessionScope carries the operator's connection scope to mediated work.
+func WithSessionScope(ctx context.Context, permits func(project, tenant string) bool) context.Context {
+	return context.WithValue(ctx, sessionScopeKey{}, permits)
+}
+
+func SessionScopeAllows(ctx context.Context, project, tenant string) bool {
+	permits, _ := ctx.Value(sessionScopeKey{}).(func(string, string) bool)
+	return permits == nil || permits(project, tenant)
+}
+
 type sessionSettingsKey struct{}
 
 // WithSessionSettings sets trusted initial settings for a new session.

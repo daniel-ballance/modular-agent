@@ -45,7 +45,7 @@ func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionCon
 	if host := s.sessionHost(id); host != s {
 		return host.SetSessionConfigOption(ctx, p)
 	}
-	st, err := s.attached(id)
+	st, err := s.requireAttachment(id)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
@@ -92,7 +92,14 @@ func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionCon
 		return acp.SetSessionConfigOptionResponse{}, outputReplyError(err)
 	}
 	opts, err = s.config(id)
-	return acp.SetSessionConfigOptionResponse{ConfigOptions: opts}, err
+	if err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
+	}
+	gated, err := s.gateAnswer(s.acting(ctx, id, st.actor), id, "session/set_config_option", acp.SetSessionConfigOptionResponse{ConfigOptions: opts})
+	if err != nil {
+		return acp.SetSessionConfigOptionResponse{}, outputReplyError(err)
+	}
+	return api.Decode[acp.SetSessionConfigOptionResponse](api.JSON(gated)), nil
 }
 func promptContent(blocks []acp.ContentBlock) (api.Content, error) {
 	var out api.Content
@@ -113,7 +120,7 @@ func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptRes
 	if host := s.sessionHost(id); host != s {
 		return host.Prompt(ctx, p)
 	}
-	st, err := s.attached(id)
+	st, err := s.requireAttachment(id)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -147,10 +154,7 @@ func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptRes
 		return acp.PromptResponse{}, outputReplyError(err)
 	}
 	if receipt.Erased {
-		return acp.PromptResponse{StopReason: acp.StopReasonEndTurn, Meta: map[string]json.RawMessage{Namespace: api.JSON(receiptValue(receipt))}}, nil
-	}
-	if receipt.Erased {
-		return acp.PromptResponse{StopReason: acp.StopReasonEndTurn, Meta: map[string]json.RawMessage{Namespace: api.JSON(receiptValue(receipt))}}, nil
+		return s.gatedPrompt(ctx, st, id, acp.PromptResponse{StopReason: acp.StopReasonEndTurn, Meta: map[string]json.RawMessage{Namespace: api.JSON(receiptValue(receipt))}})
 	}
 	if receipt.Command != "" {
 		_ = s.update(st.ctx, id, acp.UpdateAgentMessageText(receipt.Command))
@@ -183,12 +187,24 @@ func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptRes
 			return acp.PromptResponse{}, acp.NewInvalidParams(map[string]string{"reason": "the original input was not taken by a turn"})
 		}
 	}
-	response := promptResponse(receipt, out)
+	response, err := s.gatedPrompt(ctx, st, id, promptResponse(receipt, out))
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
 	if out.Status == "failed" && s.binding == Binding2 {
-		return acp.PromptResponse{}, &acp.RequestError{Code: -32000, Message: out.Error, Data: map[string]any{"_meta": response.Meta}}
+		meta := api.Decode[struct{ Outcome struct{ Error string } }](response.Meta[Namespace])
+		return acp.PromptResponse{}, &acp.RequestError{Code: -32000, Message: meta.Outcome.Error, Data: map[string]any{"_meta": response.Meta}}
 	}
 	return response, nil
 }
+func (s *server) gatedPrompt(ctx context.Context, st *attachment, id string, reply acp.PromptResponse) (acp.PromptResponse, error) {
+	result, err := s.gateAnswer(s.acting(context.WithoutCancel(ctx), id, st.actor), id, "session/prompt", reply)
+	if err != nil {
+		return acp.PromptResponse{}, outputReplyError(err)
+	}
+	return api.Decode[acp.PromptResponse](api.JSON(result)), nil
+}
+
 func recordedOutcome(a api.API, id, input string) api.Outcome {
 	return recordedOutcomeFor(a, id, input, actor)
 }

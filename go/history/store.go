@@ -48,7 +48,8 @@ func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	return &Store{dir: dir, leases: map[string]*lease{}}, nil
+	s := &Store{dir: dir, leases: map[string]*lease{}}
+	return s, s.initPendingErasures()
 }
 func Plugin(dir string) api.Plugin {
 	var s *Store

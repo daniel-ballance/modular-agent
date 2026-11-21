@@ -297,7 +297,25 @@ func (m *Manager) release(key ref) {
 		close(w.done)
 	}
 }
+
+// Keep one bounded factual result in the job end and any report admission.
+func boundJobOutcome(out api.Outcome, report bool) (api.Outcome, bool) {
+	if len(api.JSON(out)) <= api.JobReportBytes/2 {
+		return out, false
+	}
+	bounded := api.Outcome{Status: out.Status, Usage: out.Usage}
+	if bounded.Status == "completed" || bounded.Status == "failed" {
+		bounded.Status = "failed"
+		bounded.Error = api.ErrResultTooLarge.Error()
+	}
+	if report || out.Result != nil {
+		bounded.Result = api.Text(api.ErrResultTooLarge.Error())
+	}
+	return bounded, true
+}
+
 func (m *Manager) endLocked(j api.Job, out api.Outcome, report bool) (api.Job, error) {
+	out, _ = boundJobOutcome(out, report)
 	switch out.Status {
 	case "completed", "failed", "cancelled", "outcomeUnknown":
 	default:

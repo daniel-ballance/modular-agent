@@ -24,8 +24,10 @@ func TestSessionsSurviveRestartAndUnusedLeavesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	files, _ := os.ReadDir(dir)
-	if len(files) != 0 {
-		t.Fatalf("unused left %v", files)
+	for _, file := range files {
+		if name := file.Name(); name != ".pending-erasure" && name != ".pending-erasure.lock" {
+			t.Fatalf("unused session left %s", name)
+		}
 	}
 	l, _ = s.Acquire("used")
 	snap := api.Session{Version: 1, ID: "used", Project: "/one", Position: "entry", Entries: []api.Entry{{ID: "entry", Session: "used", Kind: "input", Content: api.Text("hello")}}}

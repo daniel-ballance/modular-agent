@@ -34,7 +34,7 @@ func FileHistory(dir string) HistoryStore {
 
 // HTTPHistory uses a modular-agent-history/1 service as a HistoryStore.
 func HTTPHistory(url, tokenFile string) HistoryStore {
-	return HistoryStore{persistent: true, erasure: true, make: func() (api.Store, error) {
+	return HistoryStore{persistent: true, make: func() (api.Store, error) {
 		token, err := historyhttp.TokenFile(tokenFile)
 		if err != nil {
 			return nil, err

@@ -29,7 +29,7 @@ func TestErasureReachesWaitedJobCopiesAndNeverRestartsErasedWork(t *testing.T) {
 				target = e.ID
 			}
 		}
-		if err = a.Erase(ctx, id, []string{target}); err != nil {
+		if err = a.Erase(api.AsActor(ctx, "parent-agent"), d.Child, []string{target}); err != nil {
 			t.Fatal(err)
 		}
 		all, _ := a.List("")

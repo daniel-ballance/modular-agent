@@ -64,8 +64,10 @@ func testSettingsPromptCommandsAndUnusedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	files, _ := os.ReadDir(dir)
-	if len(files) != 0 {
-		t.Fatal("unused session persisted", files)
+	for _, file := range files {
+		if name := file.Name(); name != ".pending-erasure" && name != ".pending-erasure.lock" {
+			t.Fatal("unused session persisted", name)
+		}
 	}
 	id, err = a.New(context.Background(), project)
 	if err != nil {

@@ -243,15 +243,16 @@ func (u *Usage) Add(v Usage) {
 const SessionInterrupted = "session.interrupted"
 
 type Event struct {
-	Kind    string          `json:"kind"`
-	Method  string          `json:"-"` // request method for a gated reply
-	Session string          `json:"session,omitempty"`
-	Turn    string          `json:"turn,omitempty"`
-	Step    string          `json:"step,omitempty"`
-	Call    string          `json:"call,omitempty"`
-	Actor   string          `json:"actor,omitempty"`
-	Time    time.Time       `json:"time"`
-	Data    json.RawMessage `json:"data,omitempty"`
+	Kind         string          `json:"kind"`
+	Method       string          `json:"-"` // request method for a gated reply
+	ErasureEpoch int             `json:"-"` // freshness at the start of delivery
+	Session      string          `json:"session,omitempty"`
+	Turn         string          `json:"turn,omitempty"`
+	Step         string          `json:"step,omitempty"`
+	Call         string          `json:"call,omitempty"`
+	Actor        string          `json:"actor,omitempty"`
+	Time         time.Time       `json:"time"`
+	Data         json.RawMessage `json:"data,omitempty"`
 }
 type Output struct {
 	Event Event

@@ -21,6 +21,7 @@ type session struct {
 	project          string // immutable canonical workspace for rewind exclusion
 	rewindBlocked    bool
 	commandCancels   map[*commandCancellation]struct{}
+	commandBytes     int64
 	mu               sync.Mutex
 	data             api.Session
 	lease            api.Lease
@@ -42,6 +43,8 @@ type session struct {
 	last             api.Outcome
 	resume           *api.Entry
 	external         []api.Call
+	responseClaim    *api.Entry
+	transferredInput string
 }
 
 func clone[T any](v T) T {
@@ -92,6 +95,9 @@ func (c *client) NewEmbedded(ctx context.Context, project, tenant string, actors
 }
 
 func (c *client) newSession(ctx context.Context, project, tenant string, limit *[]string, forking bool, host *api.Actor, initial []api.Actor) (string, error) {
+	if err := c.seedCapacity(); err != nil {
+		return "", err
+	}
 	project, err := filepath.Abs(project)
 	if err == nil {
 		project, err = filepath.EvalSymlinks(project)
@@ -101,6 +107,9 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	}
 	if err = c.checkProject(project); err != nil {
 		return "", err
+	}
+	if !api.SessionScopeAllows(ctx, project, tenant) {
+		return "", api.ErrAuthority
 	}
 	info, err := os.Stat(project)
 	if err != nil {
@@ -220,6 +229,9 @@ func (c *client) OpenForHost(ctx context.Context, id string, host api.Actor) err
 }
 
 func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
+	if err := c.seedCapacity(); err != nil {
+		return err
+	}
 	v, err := c.Get("history")
 	if err != nil {
 		return err
@@ -237,9 +249,17 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = lease.Close()
 		return err
 	}
+	if !api.SessionScopeAllows(ctx, snap.Project, snap.Tenant) {
+		_ = lease.Close()
+		return api.ErrAuthority
+	}
 	if err = c.checkTenant(snap.Tenant); err != nil {
 		_ = lease.Close()
 		return err
+	}
+	if host != nil && (!api.ConnectionAllows(ctx, "watch") || !c.DiscoverForHost(snap, *host)) {
+		_ = lease.Close()
+		return api.ErrAuthority
 	}
 	savedApproval := snap.Settings.Approval
 	if conf, err := c.Get("configuration"); err == nil {
@@ -254,6 +274,11 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	}
 	s := c.newSessionState(id, project)
 	s.data, s.lease, s.last, s.opening = snap, lease, recordedOutcome(snap), true
+	if err = s.reconcileErasureLocked(); err != nil {
+		_ = lease.Close()
+		return err
+	}
+	snap = s.data
 	if err = c.registerOpen(ctx, s, host, savedApproval); err != nil {
 		_ = lease.Close()
 		return err
@@ -410,6 +435,9 @@ func (c *client) Snapshot(id string) (api.Session, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reconcileErasureLocked(); err != nil {
+		return api.Session{}, err
+	}
 	return copySession(s.data), nil
 }
 func (c *client) View(ctx context.Context, id string) (api.Session, error) {
@@ -426,6 +454,10 @@ func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Sess
 	if !api.ConnectionAllows(ctx, "watch") || !c.Authorize(id, api.Acting(ctx), "watch") {
 		return api.Session{}, errors.New("watch refused")
 	}
+	epoch, err := c.ErasureEpoch(id)
+	if err != nil {
+		return api.Session{}, err
+	}
 	snap, err := c.Snapshot(id)
 	if err != nil {
 		return snap, err
@@ -439,11 +471,17 @@ func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Sess
 		if err != nil {
 			return api.Session{}, err
 		}
+		if got, err := c.ErasureEpoch(id); err != nil || got != epoch {
+			return api.Session{}, api.ErrErasureUnavailable
+		}
 		return api.Decode[api.Session](out.Data), nil
 	}
 	out, err := c.output(ctx, event)
 	if err != nil || out.Hold {
 		return api.Session{}, api.ErrOutputWithheld
+	}
+	if got, err := c.ErasureEpoch(id); err != nil || got != epoch {
+		return api.Session{}, api.ErrErasureUnavailable
 	}
 	return api.Decode[api.Session](out.Event.Data), nil
 }
@@ -478,6 +516,12 @@ func (s *session) publishInitialLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
+	return s.withErasureCheck(next, func() error {
+		return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next) })
+	})
+}
+
+func (s *session) publishReservedInitialLocked(next api.Session) error {
 	l, err := acquireNew(s.pendingStore, s.id)
 	if err != nil {
 		return s.stopWriterLocked(err)
@@ -495,6 +539,12 @@ func (s *session) publishInitialLocked(next api.Session) error {
 }
 
 func (s *session) commitSnapshotLocked(next api.Session) error {
+	return s.withErasureCheck(next, func() error {
+		return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next) })
+	})
+}
+
+func (s *session) commitReservedSnapshotLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
@@ -633,12 +683,16 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 		return "", err
 	}
 	s.mu.Lock()
+	if err := s.reconcileErasureLocked(); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
 	snap := s.data
 	running := s.running
 	allowed := c.authorizedBy(snap, ctx, "input") && c.authorizedBy(snap, ctx, "settings")
 	s.mu.Unlock()
 	if !allowed {
-		return "", errors.New("fork refused")
+		return "", api.ErrAuthority
 	}
 	if running {
 		return "", errors.New("cancel turn before forking")
@@ -740,217 +794,6 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	}
 	return fork, nil
 }
-func (c *client) Erase(ctx context.Context, id string, ids []string) error {
-	_, err := c.EraseDetails(ctx, id, ids)
-	return err
-}
-
-// EraseDetails waits for stateful Providers before an Interface reports erasure.
-func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api.ProviderErasure, error) {
-	affected, err := c.eraseLocal(ctx, id, ids)
-	var report api.ProviderErasure
-	if err != nil {
-		return report, err
-	}
-	for session, entryIDs := range affected {
-		visible := id == session || c.Authorize(session, api.Acting(ctx), "watch")
-		if visible {
-			for _, entryID := range entryIDs {
-				report.ErasedPairs = append(report.ErasedPairs, api.EntryPair{SessionID: session, ID: entryID})
-			}
-		} else {
-			report.OutOfReach = append(report.OutOfReach, "copies in other sessions")
-		}
-		for _, value := range c.All("provider.") {
-			provider := value.(api.Provider)
-			if !slices.ContainsFunc(provider.Catalog(), func(m api.Model) bool { return m.Stateful }) {
-				continue
-			}
-			eraser, ok := provider.(api.ProviderEraser)
-			if !ok {
-				report.OutOfReach = append(report.OutOfReach, "Provider remote copies")
-				continue
-			}
-			answer, err := eraser.EraseState(ctx, session, entryIDs)
-			if err != nil {
-				report.Pending = append(report.Pending, entryIDs...)
-				if visible {
-					for _, entryID := range entryIDs {
-						report.PendingPairs = append(report.PendingPairs, api.EntryPair{SessionID: session, ID: entryID})
-					}
-				}
-			} else {
-				for _, pending := range answer.Pending {
-					if slices.Contains(entryIDs, pending) {
-						report.Pending = append(report.Pending, pending)
-						if visible {
-							report.PendingPairs = append(report.PendingPairs, api.EntryPair{SessionID: session, ID: pending})
-						}
-					}
-				}
-			}
-			report.OutOfReach = append(report.OutOfReach, answer.OutOfReach...)
-		}
-	}
-	sort.Strings(report.Pending)
-	report.Pending = slices.Compact(report.Pending)
-	sort.Strings(report.OutOfReach)
-	report.OutOfReach = slices.Compact(report.OutOfReach)
-	return report, nil
-}
-
-func (c *client) eraseLocal(ctx context.Context, id string, ids []string) (map[string][]string, error) {
-	if !api.ConnectionAllows(ctx, "erase") || !c.Authorize(id, api.Acting(ctx), "erase") {
-		return nil, errors.New("erasure refused")
-	}
-	if _, err := c.find(id); err != nil {
-		return nil, err
-	}
-	c.h.mu.RLock()
-	var sessionIDs []string
-	for id := range c.h.sessions {
-		sessionIDs = append(sessionIDs, id)
-	}
-	sort.Strings(sessionIDs)
-	var sessions []*session
-	for _, id := range sessionIDs {
-		sessions = append(sessions, c.h.sessions[id])
-	}
-	c.h.mu.RUnlock()
-	// Erasure is a quiescent operation. Hold every session to prevent stale snapshots.
-	for _, s := range sessions {
-		s.mu.Lock()
-	}
-	defer func() {
-		for _, s := range sessions {
-			s.mu.Unlock()
-		}
-	}()
-	for _, s := range sessions {
-		if s.id == id && s.pendingStore != nil {
-			return nil, errProvisionalSession
-		}
-		if s.rewindBlocked {
-			return nil, errRewindUnresolved
-		}
-		if s.running || unfinished(s.data) {
-			return nil, errors.New("erase refused while a turn, call or job runs")
-		}
-	}
-	v, err := c.Get("history")
-	if err != nil {
-		return nil, errors.New("erasure requires a history store")
-	}
-	store := v.(api.Store)
-	all, err := store.List("")
-	if err != nil {
-		return nil, err
-	}
-	for _, entryID := range ids {
-		found := false
-		for _, snap := range all {
-			i := slices.IndexFunc(snap.Entries, func(e api.Entry) bool { return e.ID == entryID })
-			if i < 0 {
-				continue
-			}
-			found = true
-			e := snap.Entries[i]
-			if e.AuthorityRecord() || e.Kind == "position" || e.Kind == "erasure" && !e.IsErased() {
-				return nil, api.ErrEraseForbidden
-			}
-		}
-		if !found {
-			return nil, os.ErrNotExist
-		}
-	}
-	affected := map[string][]string{}
-	selected := map[string]bool{}
-	for _, entryID := range ids {
-		selected[entryID] = true
-	}
-	// Include every admission of the same input, and follow copies.
-	for changed := true; changed; {
-		changed = false
-		for _, snap := range all {
-			logical := map[string]bool{}
-			for _, e := range snap.Entries {
-				if selected[e.ID] {
-					if input := recordedInputID(e); input != "" {
-						logical[input] = true
-					}
-				}
-			}
-			for _, e := range snap.Entries {
-				if selected[e.ID] || e.AuthorityRecord() {
-					continue
-				}
-				if logical[recordedInputID(e)] || slices.ContainsFunc(e.Copies, func(origin string) bool { return selected[origin] }) {
-					selected[e.ID], changed = true, true
-				}
-			}
-		}
-	}
-	ids = nil
-	for _, snap := range all {
-		for _, e := range snap.Entries {
-			if selected[e.ID] {
-				ids = append(ids, e.ID)
-				affected[snap.ID] = append(affected[snap.ID], e.ID)
-			}
-		}
-	}
-	for _, s := range sessions {
-		if len(affected[s.id]) == 0 {
-			continue
-		}
-		record := api.ErasureRecord{EntryIDs: []string{}}
-		for _, e := range s.data.Entries {
-			if selected[e.ID] && e.Kind == "input.accepted" {
-				in := api.Decode[api.Input](e.Data)
-				if in.Key != "" {
-					record.InputKeys = append(record.InputKeys, api.ErasedInputKey{InputID: in.ID, Key: in.Key, ActorID: in.Actor, SubmittedBy: in.ViaActor})
-				}
-			}
-		}
-		if len(record.InputKeys) > 0 {
-			if _, err := s.recordLocked(api.Entry{Kind: "erasure", Data: api.JSON(record)}, "harness", true); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if err = store.Erase(ids); err != nil {
-		return nil, err
-	}
-	for _, s := range sessions {
-		if s.lease != nil {
-			snap, err := s.lease.Load()
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			var newlyErased []string
-			for i, entry := range snap.Entries {
-				if entry.Kind != "erasure" || len(entry.Data) != 0 {
-					continue
-				}
-				fresh := i < len(s.data.Entries) && s.data.Entries[i].Kind != "erasure"
-				if fresh {
-					newlyErased = append(newlyErased, entry.ID)
-				}
-			}
-			s.data = snap
-			s.last = recordedOutcome(snap)
-			if len(newlyErased) > 0 {
-				if _, err := s.recordLocked(api.Entry{Kind: "erasure", Data: api.JSON(newlyErased)}, c.owner, true); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-	return affected, nil
-}
 func recordedInputID(e api.Entry) string {
 	switch e.Kind {
 	case "input":
@@ -1031,11 +874,15 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 		in.When = "now"
 	}
 	s.mu.Lock()
+	if err := s.reconcileErasureLocked(); err != nil {
+		s.mu.Unlock()
+		return api.Receipt{}, err
+	}
 	if s.rewindBlocked {
 		s.mu.Unlock()
 		return api.Receipt{}, errRewindUnresolved
 	}
-	if !c.canAdmit(s.data, in) {
+	if !api.SessionScopeAllows(ctx, s.data.Project, s.data.Tenant) || !c.canAdmit(s.data, in) {
 		s.mu.Unlock()
 		return api.Receipt{}, api.ErrAuthority
 	}
@@ -1067,12 +914,20 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !c.canAdmit(s.data, in) {
+	if !api.SessionScopeAllows(ctx, s.data.Project, s.data.Tenant) || !c.canAdmit(s.data, in) {
 		return api.Receipt{}, api.ErrAuthority
 	}
 	if r, ok := duplicate(s.data, in); ok {
 		return r, nil
 	}
+	starting := []string{}
+	for _, right := range api.Rights {
+		if api.ConnectionAllows(ctx, right) && c.authorized(s.data, in.Actor, right) &&
+			(in.ViaActor == "" || c.authorized(s.data, in.ViaActor, right)) {
+			starting = append(starting, right)
+		}
+	}
+	in.ConnectionRights = &starting
 	return c.admitLocked(s, in)
 }
 func duplicate(s api.Session, input api.Input) (api.Receipt, bool) {
@@ -1146,11 +1001,13 @@ func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 		if !errors.Is(context.Cause(ctx), api.ErrProcessStopped) && (ctx.Err() != nil || outcome.Status == "cancelled") {
 			outcome.Returned = append([]api.Input(nil), s.queue...)
 			if len(s.queue) > 0 {
-				ids := make([]string, 0, len(s.queue))
+				next := s.data
+				next.Entries = slices.Clip(next.Entries)
 				for _, queued := range s.queue {
-					ids = append(ids, queued.ID)
+					appendEntry(&next, api.Entry{Kind: "input.returned", Actor: queued.Actor, InputRef: queued.ID,
+						Data: api.JSON(map[string]string{"reason": "cancelled"})}, "harness", true)
 				}
-				if _, err := s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
+				if err := s.commitLocked(next); err != nil {
 					outcome.Error = err.Error()
 				}
 			}
@@ -1398,17 +1255,17 @@ func (c *client) Wait(ctx context.Context, id string) (api.Outcome, error) {
 func (c *client) CloseSession(id string) error { return c.stopSession(id, true) }
 func (c *client) StopSession(id string) error  { return c.stopSession(id, false) }
 func (c *client) CloseAs(id, who string) error {
-	return c.stopSessionAs(id, true, who)
+	return c.CloseFor(api.AsActor(context.Background(), who), id)
 }
 func (c *client) CloseFor(ctx context.Context, id string) error {
-	return c.stopSessionAs(id, true, api.Acting(ctx), api.ActingVia(ctx))
+	return c.stopSessionAs(ctx, id, true, api.Acting(ctx), api.ActingVia(ctx))
 }
 
 func (c *client) stopSession(id string, closing bool) error {
-	return c.stopSessionAs(id, closing, "")
+	return c.stopSessionAs(context.Background(), id, closing, "", "")
 }
 
-func (c *client) stopSessionAs(id string, closing bool, who string, via ...string) error {
+func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who, via string) error {
 	s, err := c.find(id)
 	if err != nil {
 		return err
@@ -1416,14 +1273,14 @@ func (c *client) stopSessionAs(id string, closing bool, who string, via ...strin
 	s.mu.Lock()
 	if who != "" {
 		_, member := actors(s.data)[who]
-		if !member || (s.running || hasUnfinishedJobs(s.data)) && !c.authorized(s.data, who, "cancel") {
+		if !member || (s.running || hasUnfinishedJobs(s.data)) && !c.authorizedBy(s.data, ctx, "cancel") {
 			s.mu.Unlock()
 			return api.ErrCloseForbidden
 		}
 	}
-	if len(via) > 0 && via[0] != "" {
-		_, member := actors(s.data)[via[0]]
-		if !member || (s.running || hasUnfinishedJobs(s.data)) && !c.authorized(s.data, via[0], "cancel") {
+	if via != "" {
+		_, member := actors(s.data)[via]
+		if !member {
 			s.mu.Unlock()
 			return api.ErrCloseForbidden
 		}
@@ -1491,9 +1348,15 @@ func (c *client) stopSessionAs(id string, closing bool, who string, via ...strin
 func (c *client) Emit(ctx context.Context, e api.Event) {
 	// A failing output gate drops the event. A listener cannot change execution.
 	defer func() { _ = recover() }()
+	if epoch, err := c.ErasureEpoch(e.Session); err != nil {
+		return
+	} else {
+		e.ErasureEpoch = epoch
+	}
 	e.Time = time.Now().UTC()
 	out, err := c.output(ctx, e)
 	if err == nil && !out.Hold {
+		out.Event.ErasureEpoch = e.ErasureEpoch
 		e = out.Event
 	}
 	events := c.streamOutput(e, err != nil || out.Hold)
@@ -1649,6 +1512,9 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 func (p *turnPorts) CheckWriter() error {
 	p.s.mu.Lock()
 	defer p.s.mu.Unlock()
+	if err := p.s.reconcileErasureLocked(); err != nil {
+		return err
+	}
 	return p.s.checkWriterLocked()
 }
 
@@ -1703,6 +1569,9 @@ func (p *turnPorts) ResultShape() json.RawMessage { return p.input.ResultSchema 
 func (p *turnPorts) Snapshot() (api.Session, error) {
 	p.s.mu.Lock()
 	defer p.s.mu.Unlock()
+	if err := p.s.reconcileErasureLocked(); err != nil {
+		return api.Session{}, err
+	}
 	return copySession(p.s.data), nil
 }
 func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) {

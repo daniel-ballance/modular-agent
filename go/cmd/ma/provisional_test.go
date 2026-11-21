@@ -84,8 +84,13 @@ func TestACPNewLeavesNoPersistentSession(t *testing.T) {
 				t.Helper()
 				if store == "file" {
 					rows, err := os.ReadDir(filepath.Join(d.state, "sessions"))
-					if len(rows) != 0 || (err != nil && !errors.Is(err, os.ErrNotExist)) {
-						t.Errorf("session/new touched persistent history: %v, %v", rows, err)
+					if err != nil && !errors.Is(err, os.ErrNotExist) {
+						t.Fatal(err)
+					}
+					for _, row := range rows {
+						if name := row.Name(); name != ".pending-erasure" && name != ".pending-erasure.lock" {
+							t.Errorf("session/new left %s in persistent history", name)
+						}
 					}
 					return
 				}

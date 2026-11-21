@@ -25,6 +25,7 @@ const (
 	CancelledCode      Code = "cancelled"
 	NotSupported       Code = "not_supported"
 	TurnLimit          Code = "turn_limit"
+	Unavailable        Code = "unavailable"
 	UnknownHandler     Code = "unknown_handler"
 	Withheld           Code = "withheld"
 	ResultTooLarge     Code = "result_too_large"
@@ -55,6 +56,16 @@ func appError(err error, fallback Code) error {
 		return &Error{Code: Lost, Message: api.ErrSessionLost.Error()}
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		fallback = CancelledCode
+	case errors.Is(err, api.ErrErasureUnavailable):
+		fallback = Unavailable
+	case errors.Is(err, api.ErrErasureUnsupported):
+		fallback = NotSupported
+	case errors.Is(err, api.ErrErasureBusy):
+		fallback = Busy
+	case errors.Is(err, api.ErrResultTooLarge):
+		fallback = ResultTooLarge
+	case errors.Is(err, api.ErrCapacity):
+		fallback = Busy
 	case errors.Is(err, api.ErrAuthority), errors.Is(err, api.ErrTenantForbidden):
 		fallback = Forbidden
 	case errors.Is(err, fs.ErrNotExist):

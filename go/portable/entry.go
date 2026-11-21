@@ -180,6 +180,16 @@ func Entry(e api.Entry) map[string]any {
 		if in.Job != "" && len(e.Wire) == 0 {
 			d["authorizers"] = []object{{"sessionId": e.Session, "jobId": in.Job}}
 			set(d, "rights", in.JobRights, in.JobRights != nil)
+		} else if in.ConnectionRights != nil && len(e.Wire) == 0 {
+			var authorizers []object
+			seen := map[string]bool{}
+			for _, actor := range []string{in.Actor, in.ViaActor, in.ReleasedBy} {
+				if actor != "" && !seen[actor] {
+					authorizers = append(authorizers, object{"sessionId": e.Session, "actorId": actor})
+					seen[actor] = true
+				}
+			}
+			d["authorizers"], d["rights"] = authorizers, *in.ConnectionRights
 		}
 		set(d, "key", in.Key, in.Key != "")
 		set(d, "releasedBy", in.ReleasedBy, in.ReleasedBy != "")
@@ -475,7 +485,11 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		if str(v, "kind") == "input.accepted" {
 			in = api.Decode[api.Input](api.JSON(v["data"]))
 		}
-		in.ConnectionRights = api.Decode[*[]string](api.JSON(d["go.connectionRights"]))
+		if in.Job == "" && has(d, "rights") {
+			in.ConnectionRights = api.Decode[*[]string](api.JSON(d["rights"]))
+		} else if has(d, "go.connectionRights") {
+			in.ConnectionRights = api.Decode[*[]string](api.JSON(d["go.connectionRights"]))
+		}
 		if !has(d, "submittedBy") && in.ViaActor == "" {
 			in.ViaActor = str(d, "go.viaActor")
 		}

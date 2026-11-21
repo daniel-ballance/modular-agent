@@ -9,9 +9,11 @@ import (
 )
 
 type memoryStore struct {
-	mu   sync.Mutex
-	data map[string][]byte
-	held map[string]bool
+	mu        sync.Mutex
+	data      map[string][]byte
+	held      map[string]bool
+	pendingMu sync.Mutex
+	pending   []api.ErasureIntent
 }
 type lease struct {
 	store  *memoryStore
@@ -82,6 +84,17 @@ func (m *memoryStore) List(project string) ([]api.Session, error) {
 	}
 	return out, nil
 }
+func (m *memoryStore) PendingErasures(fn func(*[]api.ErasureIntent) error) error {
+	m.pendingMu.Lock()
+	defer m.pendingMu.Unlock()
+	copy := api.Decode[[]api.ErasureIntent](api.JSON(m.pending))
+	if err := fn(&copy); err != nil {
+		return err
+	}
+	m.pending = copy
+	return nil
+}
+
 func (l *lease) SaveErasure(s api.Session) error { return l.Save(s) }
 
 func (m *memoryStore) Erase(ids []string) error {

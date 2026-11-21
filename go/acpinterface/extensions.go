@@ -32,12 +32,25 @@ func (s *server) HandleExtensionMethod(ctx context.Context, method string, b jso
 	if host := s.sessionHost(p.SessionID); host != s {
 		return host.HandleExtensionMethod(ctx, method, b)
 	}
+	var epoch int
+	if _, err := s.attached(p.SessionID); err == nil && method != "_modular-agent/erase" {
+		var e error
+		epoch, e = s.erasureEpoch(p.SessionID)
+		if e != nil {
+			return nil, outputReplyError(e)
+		}
+	}
 	result, err := s.handleExtensionMethod(ctx, method, b)
 	if err == nil {
 		if st, e := s.attached(p.SessionID); e == nil {
 			if method != "_modular-agent/requests" {
-				result, err = s.gateAnswer(api.AsActor(ctx, st.actor), p.SessionID, method, result)
+				result, err = s.gateAnswer(s.acting(ctx, p.SessionID, st.actor), p.SessionID, method, result)
 			}
+		}
+	}
+	if err == nil && method != "_modular-agent/erase" {
+		if got, e := s.erasureEpoch(p.SessionID); e != nil || got != epoch {
+			return nil, outputReplyError(api.ErrErasureUnavailable)
 		}
 	}
 	return result, outputReplyError(err)
@@ -72,7 +85,7 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 	if err := json.Unmarshal(b, &p); err != nil || p.SessionID == "" {
 		return nil, acpError("invalid_params")
 	}
-	st, err := s.attached(p.SessionID)
+	st, err := s.requireAttachment(p.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +98,12 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 	// Proposals, release and withdraw also serve parked job reports.
 	feature := ""
 	represented := p.ActorID != "" && p.ActorID != st.actor
+	if represented && (method == "_modular-agent/input" || method == "_modular-agent/answer") {
+		snap, err := s.a.Snapshot(p.SessionID)
+		if err != nil || !s.represents[p.ActorID] || snap.Actors[p.ActorID].ID == "" {
+			return nil, acpError("forbidden")
+		}
+	}
 	switch method {
 	case "_modular-agent/actors", "_modular-agent/join", "_modular-agent/leave":
 		feature = "severalActors"
@@ -251,10 +270,15 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		if errors.Is(err, api.ErrResultTooLarge) {
 			return nil, acpError("result_too_large")
 		}
+		if errors.Is(err, api.ErrAuthority) {
+			return nil, acpError("forbidden")
+		}
 		if err != nil {
 			return nil, err
 		}
-		s.attach(id, false, st.actor)
+		if err := s.a.StopSession(id); err != nil {
+			return nil, err
+		}
 		return map[string]string{"sessionId": id}, nil
 	case "_modular-agent/move":
 		if p.EntryID == "" {
@@ -274,6 +298,9 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		}
 		return map[string]any{}, nil
 	case "_modular-agent/erase":
+		if s.declaration(p.SessionID)["erasure"] != true {
+			return nil, acpError("not_supported")
+		}
 		if !s.authorize(p.SessionID, st.actor, "erase") {
 			return nil, acpError("forbidden")
 		}

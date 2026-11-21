@@ -71,7 +71,7 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 	}()
 	fail := func(err error) api.Outcome {
 		out.Status, out.Error = "failed", err.Error()
-		if errors.Is(err, api.ErrTenantTokens) {
+		if errors.Is(err, api.ErrTenantTokens) || errors.Is(err, api.ErrCapacity) {
 			out.Status = "limit"
 		}
 		return out
@@ -305,6 +305,9 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 				}
 				attempted = sc
 				response, err = t.Access.Generate(modelCtx, sc.Request, func(p api.Part) { t.IO.Emit(ctx, api.Event{Kind: "model.delta", Step: step, Data: api.JSON(p)}) })
+				if errors.Is(err, api.ErrCapacity) {
+					return fail(err)
+				}
 				// A wire Provider can return a typed error alongside an actual
 				// failed message. Record that answer just as for a local Provider.
 				if err == nil || (response.Stop == "failed" && len(response.Wire) != 0) {
@@ -386,6 +389,16 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 				sources = []string{intent.ID}
 			}
 			model, err = t.IO.Record(ctx, api.Entry{Kind: "model", Step: step, Visible: true, Content: response.Content, Copies: sources, Data: api.JSON(modelData{Stop: response.Stop, Usage: response.Usage, Wire: response.Wire})})
+			if errors.Is(err, api.ErrCapacity) {
+				response = api.Response{Stop: "failed", Usage: response.Usage}
+				model, err = t.IO.Record(context.WithoutCancel(ctx), api.Entry{Kind: "model", Step: step, Content: response.Content, Copies: sources, Data: api.JSON(modelData{Stop: response.Stop, Usage: response.Usage})})
+				if err != nil {
+					return fail(err)
+				}
+				produced = append(produced, model.ID)
+				out.Usage.Add(response.Usage)
+				return fail(api.ErrCapacity)
+			}
 			if err != nil {
 				return fail(err)
 			}

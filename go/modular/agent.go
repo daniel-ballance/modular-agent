@@ -78,6 +78,7 @@ type options struct {
 	credentials                             CredentialStore
 	severalActors, sessionLimits            bool
 	tenants                                 map[string]Tenant
+	capacity                                *CapacityLimits
 	host                                    *bool
 	settings                                Settings
 	approval                                Approval
@@ -302,6 +303,11 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		h.DeferPersistentHistory()
 	}
 	h.ConfigureTenants(o.tenants)
+	if capacity, _ := ctx.Value(servingCapacityKey{}).(*harness.Capacity); capacity != nil {
+		h.UseCapacity(capacity)
+	} else if o.capacity != nil {
+		h.UseCapacity(harness.NewCapacity(*o.capacity))
+	}
 	h.HandBackQueuedOnOpen()
 	h.ConfigureSessions(o.jobReports, o.lateAnswers, o.refuseSettings)
 	a := &Agent{severalActors: o.severalActors, sessionLimits: o.sessionLimits, tenants: o.tenants != nil, jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
@@ -461,6 +467,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		}
 		a.erasure = history.erasure
 	}
+	a.erasure = a.erasure && a.a.(interface{ SupportsErasure() bool }).SupportsErasure()
 	selectedRuntime, err := a.a.Get("runtime")
 	if err != nil {
 		return nil, appError(err, InvalidComposition)
@@ -665,6 +672,11 @@ type ServeACPOptions struct {
 	Output          io.Writer
 	Listen          string
 	Actors          []ACPActor
+	// Stdio-only scope. Empty project or tenant lists deny that scope.
+	Projects, Tenants  []string
+	Rights, Represents []string
+	// StdioActor replaces the environment-derived principal and sets its ceiling.
+	StdioActor      *Actor
 	TLS             *TLSOptions
 	ControlDeadline time.Duration
 }
@@ -701,7 +713,21 @@ func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error 
 		return err
 	}
 	declared, projects := a.acpResources(opt)
-	return appError(iface.ServeWithDeclaration(ctx, opt.Input, opt.Output, declared, projects), Lost)
+	rights := opt.Rights
+	if opt.StdioActor != nil {
+		if opt.Rights != nil || !validACPActor(*opt.StdioActor) || opt.StdioActor.Rights == nil {
+			return &Error{Code: InvalidComposition, Message: "invalid stdio ACP actor or conflicting rights"}
+		}
+		rights = opt.StdioActor.Rights
+	}
+	policy, err := acpPolicy(opt.Projects, opt.Tenants, rights, opt.Represents)
+	if err != nil {
+		return err
+	}
+	if opt.StdioActor != nil {
+		policy.Actor.ID, policy.Actor.Kind = opt.StdioActor.ID, opt.StdioActor.Kind
+	}
+	return appError(iface.ServeStdio(ctx, opt.Input, opt.Output, declared, projects, policy), Lost)
 }
 
 func (a *Agent) acpInterface() (*acpinterface.Interface, error) {
@@ -726,6 +752,7 @@ func (a *Agent) acpResources(opt ServeACPOptions) (func() map[string]any, acpint
 	projects := acpinterface.Projects{MCP: opt.ProjectMCP, WarnMCP: opt.WarnMCP}
 	if opt.Compose != nil {
 		projects.Compose = func(ctx context.Context, project, id string) (acpinterface.Project, error) {
+			ctx = context.WithValue(ctx, servingCapacityKey{}, a.h.Capacity())
 			child, err := opt.Compose(context.WithValue(ctx, reopeningSessionKey{}, id), project)
 			if err != nil {
 				return acpinterface.Project{}, err
@@ -736,6 +763,7 @@ func (a *Agent) acpResources(opt ServeACPOptions) (func() map[string]any, acpint
 				}
 				return acpinterface.Project{}, &Error{Code: InvalidComposition, Message: "Compose must return a separate agent bound to the requested project"}
 			}
+			child.h.UseCapacity(a.h.Capacity())
 			return acpinterface.Project{API: child.a, Declaration: func() map[string]any { return child.Declaration() }, Close: func() error { return child.Close(context.Background()) }}, nil
 		}
 	}
@@ -757,6 +785,7 @@ func (a *Agent) acpResources(opt ServeACPOptions) (func() map[string]any, acpint
 }
 
 type reopeningSessionKey struct{}
+type servingCapacityKey struct{}
 
 // ACPReopeningSession returns the stored session ID when a factory is called for a reopen.
 // The call does not grant access to the session or start its recovery.

@@ -29,7 +29,7 @@ func TestTenantBudgetSpansSessionsAndReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			conn, closeConn := connection(t, h.API(), &client{})
+			conn, closeConn := connection(t, h.API(), &client{}, acpinterface.Principal{Tenants: []string{"team"}})
 			closeAll := func() { closeConn(); _ = h.Close() }
 			t.Cleanup(closeAll)
 			initClient(t, conn, false)

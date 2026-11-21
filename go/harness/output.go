@@ -59,7 +59,13 @@ func (c *client) deliverOutput(ctx context.Context, final api.Event, events []ap
 				perRecipient[recipient] = gated
 			}
 			for _, event := range gated {
-				listener.deliver(clone(event))
+				epoch, err := c.ErasureEpoch(final.Session)
+				if err != nil || epoch != final.ErasureEpoch {
+					return
+				}
+				view := clone(event)
+				view.ErasureEpoch = epoch
+				listener.deliver(view)
 			}
 		}()
 	}
@@ -116,6 +122,10 @@ func (c *client) gateBatch(ctx context.Context, session, recipient string, event
 
 // OutputValue gates a non-stream Interface response once, without publishing it.
 func (c *client) OutputValue(ctx context.Context, e api.Event) (api.Event, error) {
+	epoch, err := c.ErasureEpoch(e.Session)
+	if err != nil {
+		return api.Event{}, err
+	}
 	out, err := c.output(ctx, e)
 	if err != nil {
 		return api.Event{}, fmt.Errorf("%w: %w", api.ErrOutputWithheld, err)
@@ -129,6 +139,9 @@ func (c *client) OutputValue(ctx context.Context, e api.Event) (api.Event, error
 	}
 	if len(events) != 1 || events[0].Kind != e.Kind {
 		return api.Event{}, api.ErrOutputWithheld
+	}
+	if current, err := c.ErasureEpoch(e.Session); err != nil || epoch != current {
+		return api.Event{}, api.ErrErasureUnavailable
 	}
 	return events[0], nil
 }
@@ -159,8 +172,13 @@ func (c *client) streamOutput(e api.Event, held bool) []api.Event {
 		return []api.Event{e}
 	}
 	c.h.outputMu.Lock()
-	if !held {
-		c.h.outputStreams[key] = append(c.h.outputStreams[key], e)
+	buffer := c.h.outputStreams[key]
+	if len(buffer) > 0 && buffer[0].ErasureEpoch != e.ErasureEpoch {
+		delete(c.h.outputStreams, key)
+		buffer = nil
+	}
+	if !held && len(buffer) < 256 && len(e.Data) <= 64<<10 {
+		c.h.outputStreams[key] = append(buffer, e)
 	}
 	if !final {
 		c.h.outputMu.Unlock()

@@ -119,7 +119,15 @@ func (m *Manager) Run(ctx context.Context, s api.Session, c api.Call, _ func(str
 		}
 		child := in.Session
 		if child == "" {
-			child, err = m.a.New(ctx, s.Project)
+			if s.Tenant == "" {
+				child, err = m.a.New(ctx, s.Project)
+			} else if scoped, ok := m.a.(interface {
+				NewInTenant(context.Context, string, string) (string, error)
+			}); ok {
+				child, err = scoped.NewInTenant(ctx, s.Project, s.Tenant)
+			} else {
+				return fail(api.ErrTenantForbidden)
+			}
 			if err != nil {
 				return fail(err)
 			}
@@ -131,7 +139,7 @@ func (m *Manager) Run(ctx context.Context, s api.Session, c api.Call, _ func(str
 				}
 				snap, _ = m.a.Snapshot(child)
 			}
-			if snap.Parent != s.ID {
+			if snap.Parent != s.ID || snap.Project != s.Project || snap.Tenant != s.Tenant {
 				return fail(errors.New("not a child of this session"))
 			}
 			// Only finished subagents can be messaged again.

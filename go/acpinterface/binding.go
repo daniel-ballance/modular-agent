@@ -57,7 +57,7 @@ func Declaration(a api.API, project, id string) map[string]any {
 			containment = e.Containment()
 		}
 	}
-	return map[string]any{
+	d := map[string]any{
 		"projectRoot":     project,
 		"inputDuringTurn": runtime.Steering, "waitingThroughRestart": runtime.WaitingThroughRestart,
 		"continuesAfterRestart": runtime.Durable, "rewinding": rewind, "forking": true,
@@ -69,6 +69,13 @@ func Declaration(a api.API, project, id string) map[string]any {
 		"mixedActorInput": "refused", "settingsDuringTurn": "nextTurn", "erasureDuringTurn": "refused",
 		"commandContainment": containment, "nestedToolCalls": true,
 	}
+	if store, ok := a.(interface{ SupportsErasure() bool }); ok {
+		d["erasure"] = store.SupportsErasure()
+	}
+	if caps, ok := a.(interface{ ReservationDeclaration() any }); ok {
+		d["resourceReservations"] = caps.ReservationDeclaration()
+	}
+	return d
 }
 func sessionRewinding(a api.API, project, id string) bool {
 	if id != "" {

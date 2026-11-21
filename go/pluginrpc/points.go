@@ -61,6 +61,37 @@ func cwdInProject(project, cwd string) bool {
 	return err == nil && info.IsDir()
 }
 
+// pathInProject also checks the nearest existing ancestor of a path that
+// will be created. A broken symlink is not a missing ancestor.
+func pathInProject(project, cwd, path string) bool {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
+	}
+	path = filepath.Clean(path)
+	for {
+		rel, err := filepath.Rel(project, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return false
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			rel, err = filepath.Rel(project, resolved)
+			return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+		if _, stat := os.Lstat(path); !errors.Is(stat, fs.ErrNotExist) {
+			return false
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return false
+		}
+		path = parent
+	}
+}
+
 func (e *remoteEnvironment) SupportsPoints() bool { return e.points }
 
 func (e *remoteEnvironment) SavePoint(ctx context.Context, cwd string) (string, error) {

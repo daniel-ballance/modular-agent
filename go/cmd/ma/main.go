@@ -46,7 +46,8 @@ Options:
   --history             print the session's history
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol for an editor or host
-  --listen ADDR --token-file FILE
+  --listen ADDR [--token-file FILE]
+  --policy FILE        read operator policy from FILE
                         with --acp, listen on a loopback WebSocket instead of stdio
   -h, --help            print help
   -V, --version         print the version
@@ -60,7 +61,8 @@ Files: settings.json, mcp.json, models.json, AGENTS.md and skills/ in
 
 type options struct {
 	command, provider, project, session, model, thinking                            string
-	listen, tokenFile                                                               string
+	listen, tokenFile, policyPath                                                   string
+	policy                                                                          operatorPolicy
 	prompt                                                                          *string
 	loadClaude                                                                      bool
 	device, resume, all, trust, transient, verbose, json, history, declaration, acp bool
@@ -148,6 +150,11 @@ func parse(args []string) (o options, err error) {
 			if err == nil && o.listen == "" {
 				err = errors.New("--listen needs a nonempty address")
 			}
+		case "--policy":
+			o.policyPath, err = take()
+			if err == nil && o.policyPath == "" {
+				err = errors.New("--policy needs a nonempty path")
+			}
 		case "--token-file":
 			o.tokenFile, err = take()
 			if err == nil && o.tokenFile == "" {
@@ -173,8 +180,8 @@ func parse(args []string) (o options, err error) {
 	if o.acp && (o.prompt != nil || o.session != "" || o.resume || o.trust || o.command != "") {
 		return o, errors.New("with --acp the client creates sessions and grants trust")
 	}
-	if (o.listen != "" || o.tokenFile != "") && (!o.acp || o.listen == "" || o.tokenFile == "") {
-		return o, errors.New("--listen ADDR and --token-file FILE must be used together with --acp")
+	if o.listen != "" && !o.acp || o.tokenFile != "" && o.listen == "" {
+		return o, errors.New("--listen requires --acp; --token-file requires --listen")
 	}
 	return o, nil
 }
@@ -210,6 +217,22 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 	d, err := directories()
 	if err != nil {
 		return err
+	}
+	policyPath := o.policyPath
+	if policyPath == "" {
+		policyPath = filepath.Join(d.config, "policy.json")
+	}
+	o.policy, err = readPolicy(policyPath, o.policyPath == "")
+	if err != nil {
+		return err
+	}
+	if o.listen != "" {
+		if o.tokenFile != "" && o.policy.actors != nil {
+			return fmt.Errorf("policy %s: cannot combine actors with --token-file", policyPath)
+		}
+		if o.tokenFile == "" && len(o.policy.actors) == 0 {
+			return fmt.Errorf("policy %s: --listen needs actors or --token-file", policyPath)
+		}
 	}
 	if o.command == "auth" {
 		return d.authStatus(ctx, out)
@@ -302,7 +325,16 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		}
 		return nil
 	}
-	settings, err := d.settings(o.project)
+	bootstrap := o
+	if o.acp {
+		// The listener has no client project yet. The authorized factory reads
+		// client project settings after checking its scope.
+		if err := os.MkdirAll(d.state, 0700); err != nil {
+			return err
+		}
+		bootstrap.project = d.state
+	}
+	settings, err := d.settings(bootstrap.project)
 	if err != nil {
 		return err
 	}
@@ -326,7 +358,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 			return errors.New("no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`.")
 		}
 	}
-	a, err := d.compose(ctx, o, settings, store, stderr)
+	a, err := d.compose(ctx, bootstrap, settings, store, stderr)
 	if err != nil {
 		return err
 	}
@@ -375,11 +407,19 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 			WarnMCP: func(err error) { fmt.Fprintln(stderr, err) },
 		}
 		if o.listen == "" {
+			acpOptions.Represents = []string{}
+			if scope := o.policy.stdio; scope != nil {
+				acpOptions.StdioActor = &scope.Actor
+				acpOptions.Projects, acpOptions.Tenants = scope.Projects, scope.Tenants
+			}
 			acpOptions.Input, acpOptions.Output = in, out
 			return a.ServeACP(ctx, acpOptions)
 		}
 		acpOptions.Listen = o.listen
-		acpOptions.Actors = []modular.ACPActor{{TokenFile: o.tokenFile, Actor: modular.LocalACPActor()}}
+		acpOptions.Actors = o.policy.actors
+		if o.tokenFile != "" {
+			acpOptions.Actors = []modular.ACPActor{{TokenFile: o.tokenFile, Actor: modular.LocalACPActor()}}
+		}
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		go func() {
@@ -392,7 +432,9 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		return a.ServeACP(ctx, acpOptions)
 	}
 	if o.declaration {
-		return writeJSON(out, a.Declaration(), true)
+		decl := a.Declaration()
+		decl["limits"] = a.CapacityLimits()
+		return writeJSON(out, decl, true)
 	}
 	if o.command == "models" {
 		for _, m := range a.Models() {
