@@ -80,13 +80,13 @@ export class HttpHistoryStore implements HistoryStore {
 	checkWriter(id: string): void {
 		const lease = this.leases.get(id);
 		if (!lease && this.unsent.has(id)) return;
-		if (!lease) throw new Error("Session is not open for writing");
+		if (!lease) throw new ServiceError(409, "Session is not open for writing", "lost");
 		try { if (this.clock.now() >= lease.cutoff) this.lose(lease); } catch { this.lose(lease); }
 		if (lease.abort.signal.aborted) throw lease.abort.signal.reason;
 	}
 	private lose(lease: Lease) {
 		clearTimeout(lease.timer);
-		lease.abort.abort(new Error("Session is not open for writing: its lease is lost"));
+		lease.abort.abort(new ServiceError(409, "Session is not open for writing: its lease is lost", "lost"));
 	}
 	private async takeLease(id: string, wait = false, abort = new AbortController()): Promise<void> {
 		if (this.ttl === undefined) await this.initialize();
@@ -115,7 +115,7 @@ export class HttpHistoryStore implements HistoryStore {
 				throw error;
 			}
 			if (lastHeld && this.clock.now() >= budget) throw lastHeld;
-			if (!validLease(grant.lease) || !positive(grant.ttlMs)) throw new Error("Invalid history lease grant");
+			if (!validLease(grant.lease) || !positive(grant.ttlMs)) throw new ServiceError(409, "Invalid history lease grant", "lost");
 			const lease: Lease = { value: grant.lease, ttl: grant.ttlMs, cutoff: sent + grant.ttlMs / 2 - this.clock.margin, abort };
 			this.leases.set(id, lease);
 			this.checkWriter(id);
@@ -217,7 +217,7 @@ export class HttpHistoryStore implements HistoryStore {
 		return sessions;
 	}
 	private next(rows: { id: string }[], next?: string, previous?: string) {
-		if (next !== undefined && (typeof next !== "string" || next === previous || next !== rows.at(-1)?.id)) throw new Error("Invalid history page cursor");
+		if (next !== undefined && (typeof next !== "string" || next === previous || next !== rows.at(-1)?.id)) throw new ServiceError(503, "Invalid history page cursor", "lost");
 		return next;
 	}
 	async erase(id: string, entryIds: string[]): Promise<void> {

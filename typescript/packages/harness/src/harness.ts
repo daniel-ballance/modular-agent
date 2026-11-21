@@ -571,13 +571,13 @@ export class Harness {
 
 	private async runCommand(sessionId: string, line: string, actorId: string): Promise<string | void> {
 		const match = /^\/(\S+)\s*([\s\S]*)$/.exec(line.trim());
-		if (!match) throw new Error("Not a command");
+		if (!match) throw failure("invalid_params", "Not a command");
 		const session = this.session(sessionId);
 		this.requireAuthority(session, actorId, "input");
 		const store = this.use<HistoryStore>("history-store");
 		store?.checkWriter?.(sessionId);
 		const command = this.commandTable.get(match[1]);
-		if (!command) throw new Error(`Unknown command /${match[1]}`);
+		if (!command) throw failure("not_found", `Unknown command /${match[1]}`);
 		const abort = new AbortController();
 		const writer = store?.writerSignal?.(sessionId);
 		const signal = writer ? AbortSignal.any([abort.signal, writer]) : abort.signal;
@@ -618,10 +618,13 @@ export class Harness {
 				ask: async request => { live(); return this.ask(session, request, command.plugin, signal); },
 				environment: async () => {
 					live();
-					this.requireAuthority(session, actorId, "tools");
+					const authorize = () => {
+						if (!this.rightsOf(session, actorId).includes("tools")) throw failure("invalid_request", "Command cannot use the environment");
+					};
+					authorize();
 					const environment = await this.environmentFor(session);
 					live();
-					this.requireAuthority(session, actorId, "tools");
+					authorize();
 					if (!environment) throw Object.assign(new Error("No working environment"), { code: "not_supported" });
 					return environment;
 				},
@@ -633,7 +636,7 @@ export class Harness {
 
 	session(id: string): Session {
 		const s = this.sessions.get(id);
-		if (!s) throw new Error(`Session ${id} is not open`);
+		if (!s) throw failure("not_open", `Session ${id} is not open`);
 		return s;
 	}
 
@@ -760,12 +763,12 @@ export class Harness {
 			return id;
 		}
 		const store = this.use<HistoryStore>("history-store");
-		if (!store) throw new Error("No history store: sessions can't be reopened");
+		if (!store) throw failure("not_supported", "No history store: sessions can't be reopened");
 		await store.openForWriting(id, { wait: true });
 		const s = await this.loadInto(id, true).catch(async (error) => { await store.close(id); throw error; });
 		if (!s || (s.tenant !== undefined && !this.tenants.has(s.tenant))) {
 			await store.close(id);
-			throw new Error(s ? `Unknown tenant ${s.tenant}` : `Session ${id} not found`);
+			throw s ? failure("forbidden", "Session tenant is unavailable") : failure("not_found", `Session ${id} not found`);
 		}
 		const a = actor ?? this.defaultActor();
 		try { await this.authorizeOpeningActor(s, a); }
@@ -886,9 +889,9 @@ export class Harness {
 
 	async forkSession(sessionId: string, entryId: string): Promise<string> {
 		const s = this.session(sessionId);
-		if (s.erasing) throw new Error("Erasure is in progress");
+		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		// Forking at unfinished work would copy work that is still running: refused.
-		if (s.running || this.runningJobs(s).length || this.waitingRequests(s).length) throw new Error("Can't fork while the session has unfinished work: a running turn, a job, or a call waiting for an answer");
+		if (s.running || this.runningJobs(s).length || this.waitingRequests(s).length) throw failure("busy", "Can't fork while the session has unfinished work: a running turn, a job, or a call waiting for an answer");
 		const target = s.entries.get(entryId);
 		if (!target) throw Object.assign(new Error("Unknown fork target"), { code: "not_found" });
 		if (target.kind === "position") throw Object.assign(new Error("Cannot fork a position record"), { code: "conflict" });
@@ -1008,7 +1011,7 @@ export class Harness {
 		return this.admit(s, async () => {
 			if (options.actorId) this.requireAuthority(s, options.actorId, "settings");
 			if (s.isBusy() || s.outsideTools || s.erasing || s.settling || s.requests.size || this.waitingRequests(s).length || this.openCalls(s).length || this.runningJobs(s).length) {
-				throw new Error("Can't move while work is unfinished");
+				throw failure("busy", "Can't move while work is unfinished");
 			}
 			const target = s.branch().find((e) => e.id === entryId);
 			if (!target) {
@@ -1023,12 +1026,12 @@ export class Harness {
 			try {
 				if (options.rewind) {
 					const env = await this.environmentFor(s);
-					if (!env || !(env.keepsPoints?.(this.projectOf(s)) ?? env.points) || !env.restore || !env.save || !env.hasPoint) throw new Error("This environment cannot rewind");
+					if (!env || !(env.keepsPoints?.(this.projectOf(s)) ?? env.points) || !env.restore || !env.save || !env.hasPoint) throw failure("not_supported", "This environment cannot rewind");
 					const branch = s.branch();
 					const at = branch.findIndex((e) => e.id === entryId);
-					if (at < 0) throw new Error("Rewind needs an entry on the current branch");
+					if (at < 0) throw failure("conflict", "Rewind needs an entry on the current branch");
 					const after = branch.slice(at + 1);
-					if (after.some((e) => e.kind === "jobStarted" || e.kind === "harness.jobStarted" || e.kind === "jobEnded")) throw new Error("Cannot rewind past a job");
+					if (after.some((e) => e.kind === "jobStarted" || e.kind === "harness.jobStarted" || e.kind === "jobEnded")) throw failure("conflict", "Cannot rewind past a job");
 					for (const e of after) {
 						if (e.kind !== "toolStarted" || !e.toolCallId) continue;
 						const data = e.data as { call?: ToolCall; openWorld?: boolean } | undefined;
@@ -1062,10 +1065,10 @@ export class Harness {
 	private async completeRewind(s: Session, to: string | null, previous: string | null, restore: { point: string; undo: string }, undoing: boolean): Promise<void> {
 		const move = (target: string | null, intent?: typeof restore) => this.commit(s, [{ kind: "position", writer: "harness", modelVisible: false, data: { to: target, ...(intent ? { restore: intent } : {}) } }]);
 		const env = await this.environmentFor(s);
-		if (!env?.restore || !env.hasPoint || !(env.keepsPoints?.(this.projectOf(s)) ?? env.points)) { s.suspended = true; throw new Error("Rewind environment unavailable"); }
+		if (!env?.restore || !env.hasPoint || !(env.keepsPoints?.(this.projectOf(s)) ?? env.points)) { s.suspended = true; throw failure("lost", "Rewind environment unavailable"); }
 		const verify = async (point: string) => {
 			try {
-				if (!await env.hasPoint!(point)) throw new Error("Cannot verify ownership of rewind point");
+				if (!await env.hasPoint!(point)) throw failure("conflict", "Cannot verify ownership of rewind point");
 			} catch (error) { s.suspended = true; throw error; }
 		};
 		await verify(restore.point);
@@ -1105,15 +1108,15 @@ export class Harness {
 		try {
 			// Take every lease before erasing anything. These acquisitions never wait for a writer.
 			for (const session of targets.keys()) {
-				if (session.running || this.runningJobs(session).length || session.erasing || session.moving) throw new Error("Cannot erase while affected work is running");
+				if (session.running || this.runningJobs(session).length || session.erasing || session.moving) throw failure("busy", "Cannot erase while affected work is running");
 				session.erasing = true;
 				guarded.push(session);
 				if (!session.ephemeral) {
-					if (!store?.erase) throw new Error("Erasure is not supported by this history store");
+					if (!store?.erase) throw failure("not_supported", "Erasure is not supported by this history store");
 					if (!this.sessions.has(session.id)) {
 						try { await store.openForWriting(session.id); }
 						catch (error) {
-							if ((error as { code?: string }).code !== "held" && !/open for writing/.test(String(error))) throw error;
+							if ((error as { code?: string }).code !== "held") throw error;
 							heldCopies.add(session);
 							continue;
 						}
@@ -1121,7 +1124,7 @@ export class Harness {
 						// A writer may have appended between our read and acquisition. Refuse and retry from a fresh view.
 						const current = (await store.load(session.id)).entries;
 						if (current.length !== session.order.length || current.some((e, i) => e.id !== session.order[i] || e.erased !== session.entries.get(e.id)?.erased)) {
-							throw new Error(`Session ${session.id} changed while planning erasure; retry`);
+							throw failure("busy", `Session ${session.id} changed while planning erasure; retry`);
 						}
 					}
 				}
@@ -1290,7 +1293,7 @@ export class Harness {
 
 	private async input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }> {
 		const s = this.session(sessionId);
-		if (s.erasing) throw new Error("Erasure is in progress");
+		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		const right = options.when === "propose" ? "propose" : "input";
 		if (options.startedBy?.kind !== "job") {
 			this.requireAuthority(s, options.actorId, right);
@@ -1316,7 +1319,7 @@ export class Harness {
 					throw new Error("An input hook may change only content");
 				}
 			});
-		if (s.erasing) throw new Error("Erasure is in progress");
+		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		if (transformed.stopped) {
 			let output: string | void = undefined;
 			const command = transformed.command;
@@ -1356,7 +1359,9 @@ export class Harness {
 	}
 
 	private async acceptInput(s: Session, q: QueuedInput): Promise<InputReceipt> {
-		if (s.closed || s.closing || s.suspended || s.erasing || s.moving) throw new Error("Session cannot take input right now");
+		if (s.closed) throw failure("not_open", "Session is closed");
+		if (s.suspended) throw failure("lost", "Session has lost its writer");
+		if (s.closing || s.erasing || s.moving) throw failure("busy", "Session cannot take input right now");
 		if (this.rejectUnknownModel && q.startedBy.kind === "actor" && q.when !== "propose" && s.settings.model != null) {
 			await this.providerFor(s)?.refreshModels?.();
 			if (!this.modelAccess(s)) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
@@ -2170,7 +2175,9 @@ export class Harness {
 
 	/** A tool call a UI or plugin starts. The same checks apply. */
 	private async callTool(s: Session, call: ToolCall): Promise<ToolResult> {
-		if (s.moving || s.closed || s.suspended) throw new Error("Session cannot run tools right now");
+		if (s.closed) throw failure("not_open", "Session is closed");
+		if (s.suspended) throw failure("lost", "Session has lost its writer");
+		if (s.moving || s.closing || s.erasing) throw failure("busy", "Session cannot run tools right now");
 		s.outsideTools++;
 		try { return await this.callOutsideTurn(s, call); }
 		finally { s.outsideTools--; }
@@ -2617,13 +2624,13 @@ export class Harness {
 	}
 
 	private startJob(s: Session, options: JobStart, plugin: string): JobHandle {
-		if (s.moving || s.closing || s.closed || s.suspended || s.erasing) throw new Error("Session cannot start jobs right now");
+		if (s.moving || s.closing || s.closed || s.suspended || s.erasing) throw failure("invalid_request", "Session cannot start jobs right now");
 		const current = [...this.workActors(s), ...(options.actors ?? [])];
 		const actorId = current[0] ?? options.actorId ?? [...s.actors.keys()][0];
 		const actors = [...new Set([actorId, ...current, options.actorId].filter((id): id is string => id !== undefined))];
 		const context = this.turnAuthority.getStore();
 		const rights = this.workRights(s, actors, context?.sessionId === s.id ? context.jobs : options.jobs);
-		if (!actorId || !rights.includes("jobs")) throw new Error('Job requires the "jobs" right');
+		if (!actorId || !rights.includes("jobs")) throw failure("invalid_request", 'Job requires the "jobs" right');
 		const { key, detail } = options;
 		if (key !== undefined) {
 			const active = [...s.jobs.values()].find((r) => r.key === key && r.job.plugin === plugin);
@@ -2680,12 +2687,12 @@ export class Harness {
 						: { kind: state, error: options?.error };
 					const report = options?.report !== false;
 					await this.admit(s, async () => {
-						if (report && s.closing) throw new Error("Cannot report to a closing session");
+						if (report && s.closing) throw failure("invalid_request", "Cannot report to a closing session");
 						const end: EntryDraft = { id: this.newId(), kind: "jobEnded", writer: plugin, modelVisible: false, jobId: job.id, sources: options?.sources, data: { outcome, result: content, report } };
 						let queued: QueuedInput | undefined;
 						const drafts = [end];
 						if (report && !s.keys.has(`job:${job.id}`)) {
-							if (!this.workRights(s, [], [job.id]).includes("input")) throw new Error('Job report requires the "input" right');
+							if (!this.workRights(s, [], [job.id]).includes("input")) throw failure("invalid_request", 'Job report requires the "input" right');
 							queued = { id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key: `job:${job.id}`, kind: "input",
 								startedBy: { kind: "job", id: job.id }, sources: [end.id!], content: content ?? [] };
 							drafts.push({ kind: "inputAccepted", writer: "harness", modelVisible: false, inputId: queued.id, actorId: queued.actorId, jobId: job.id,
@@ -2940,6 +2947,10 @@ function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () =>
 }
 
 /** Walk copy links to a fixed point, without following parentId (which is just position). */
+function failure(code: "invalid_params" | "invalid_request" | "not_open" | "not_found" | "forbidden" | "not_supported" | "busy" | "lost" | "conflict", message: string) {
+	return Object.assign(new Error(message), { code });
+}
+
 function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Session>): Map<Session, Set<string>> {
 	const targets = new Map<Session, Set<string>>();
 	const authority = (kind: string) => ["actorJoined", "actorLeft", "limit", "tenant", "grant", "authority.grant", "authority.revoke", "position", "erasure", "jobCleanupUnconfirmed"].includes(kind);

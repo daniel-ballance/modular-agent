@@ -64,7 +64,7 @@ for (const placement of ["local", "wire"]) {
     assert.equal((await s.callTool("first", {})).text(), "first");
     // A notification made during the command must be applied before its reply settles.
     await s.runCommand("/refresh");
-    assert.notEqual((await s.callTool("first", {})).status, "completed");
+    await assert.rejects(s.callTool("first", {}), { code: "not_found" });
     assert.equal((await s.callTool("second", {})).text(), "second");
   });
 }
