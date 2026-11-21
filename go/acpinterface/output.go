@@ -23,6 +23,9 @@ func heldError(err error) error {
 }
 
 func outputReplyError(err error) error {
+	if errors.Is(err, api.ErrSessionLost) {
+		return &acp.RequestError{Code: -32000, Message: api.ErrSessionLost.Error(), Data: map[string]string{"code": "lost"}}
+	}
 	if errors.Is(err, api.ErrSettingsBusy) {
 		return &acp.RequestError{Code: -32000, Message: err.Error(), Data: map[string]string{"code": "busy"}}
 	}

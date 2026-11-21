@@ -51,6 +51,8 @@ func appError(err error, fallback Code) error {
 	switch {
 	case errors.As(err, &sdk):
 		return sdk
+	case errors.Is(err, api.ErrSessionLost):
+		return &Error{Code: Lost, Message: api.ErrSessionLost.Error()}
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		fallback = CancelledCode
 	case errors.Is(err, api.ErrAuthority), errors.Is(err, api.ErrTenantForbidden):

@@ -127,7 +127,7 @@ func (s *server) event(e api.Event) {
 		Events bool `json:"events"`
 	}
 	_ = json.Unmarshal(events, &cap)
-	if cap.Events {
+	if cap.Events || e.Kind == api.SessionInterrupted {
 		_ = s.peer.NotifyExtension(st.ctx, "_modular-agent/event", e)
 	}
 }

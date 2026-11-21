@@ -122,7 +122,7 @@ func (c *client) rewindLocked(ctx context.Context, s *session, target string, la
 	if c.otherProjectSession(s) {
 		return errors.New("rewind refused: another session uses the project")
 	}
-	if s.commands > 0 {
+	if len(s.commandCancels) > 0 {
 		return api.ErrMoveConflict
 	}
 	if pending, _ := recovery(s.data); pending != nil || len(externalRecovery(s.data)) > 0 {
@@ -228,9 +228,7 @@ func (c *client) movePosition(s *session, target string, restore *api.RestoreInt
 	next.Entries = append(next.Entries, api.Entry{ID: api.ID(), Parent: next.Position, Session: s.id, Kind: "position", Writer: c.owner, Actor: next.Actor, Time: time.Now().UTC(), Data: api.JSON(p)})
 	next.Position = target
 	if err := s.commitSnapshotLocked(next); err != nil {
-		if !s.rewindBlocked || !s.reconcileRewindCommit(next) {
-			return err
-		}
+		return err
 	}
 	s.last = recordedOutcome(s.data)
 	return nil
@@ -256,7 +254,7 @@ func (s *session) reconcileRewindCommit(expected api.Session) bool {
 			return false
 		}
 	}
-	s.data, s.writerFailed = expected, false
+	s.data = expected
 	return true
 }
 

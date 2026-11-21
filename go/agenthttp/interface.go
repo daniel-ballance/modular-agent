@@ -199,6 +199,12 @@ func (i *Interface) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
+		if errors.Is(err, api.ErrSessionLost) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(servicehttp.Failure{Error: api.ErrSessionLost.Error(), Kind: "lost", Code: "lost"})
+			return
+		}
 		servicehttp.Fail(w, err)
 		return
 	}

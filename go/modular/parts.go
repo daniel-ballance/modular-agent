@@ -12,6 +12,18 @@ import (
 type HistoryBackend = api.Store
 type HistoryLease = api.Lease
 
+// WatchedHistoryLease reports revocation by closing WriterLost, including
+// while a call is running and the agent is not making any store requests.
+// CheckWriter rechecks authority immediately before dispatch or commit.
+// Return ErrHistoryWriterLost from Save if the writer lease was revoked.
+type WatchedHistoryLease interface {
+	HistoryLease
+	WriterLost() <-chan struct{}
+	CheckWriter() error
+}
+
+var ErrHistoryWriterLost = api.ErrWriterLost
+
 // ServiceHistoryLease is the lease required to serve a custom backend.
 // SaveErasure atomically installs the exact tombstoned snapshot the adapter
 // supplies. Load and List must return committed snapshots including Wire.

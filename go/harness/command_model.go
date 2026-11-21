@@ -19,7 +19,7 @@ func (c *client) RequestCommandModel(ctx context.Context, id, step string, req a
 	check := func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if s.commands == 0 || s.closing || !c.authorizedBy(s.data, ctx, "input") {
+		if len(s.commandCancels) == 0 || s.closing || !c.authorizedBy(s.data, ctx, "input") {
 			return api.ErrAuthority
 		}
 		return s.checkWriterLocked()

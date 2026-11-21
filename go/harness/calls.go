@@ -16,6 +16,10 @@ func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.To
 		s.mu.Unlock()
 		return api.ToolResult{}, errRewindUnresolved
 	}
+	if err := s.checkWriterLocked(); err != nil {
+		s.mu.Unlock()
+		return api.ToolResult{}, err
+	}
 	if s.running || s.opening || s.closing {
 		s.mu.Unlock()
 		return api.ToolResult{}, errors.New("session busy")
@@ -31,7 +35,7 @@ func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.To
 		cancel(nil)
 		s.mu.Lock()
 		close(s.done)
-		if len(s.queue) > 0 && !s.closing && !interrupted {
+		if len(s.queue) > 0 && !s.closing && !interrupted && s.writerFailure == nil {
 			in := s.queue[0]
 			s.queue = s.queue[1:]
 			s.activeActor = in.Actor
@@ -77,6 +81,9 @@ func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.To
 		canRepeat = env.(api.WorkingEnvironment).StopsOnCrash()
 	}
 	result, err := runner.RunCall(callCtx, api.Turn{Session: id, Actor: call.Actor, Tools: tools, IO: ports, CanRepeat: canRepeat}, call)
+	if errors.Is(context.Cause(callCtx), api.ErrProcessStopped) {
+		return api.ToolResult{}, api.ErrSessionLost
+	}
 	if err != nil {
 		return result, err
 	}

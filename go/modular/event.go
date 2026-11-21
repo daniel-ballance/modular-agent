@@ -125,6 +125,17 @@ type PluginData struct {
 	Name     string   `json:"name"`
 	Replaces []string `json:"replaces,omitempty"`
 }
+type SessionInterruptionReason string
+
+const (
+	CommitFailed SessionInterruptionReason = "commitFailed"
+	WriterLost   SessionInterruptionReason = "writerLost"
+)
+
+type SessionInterruptedData struct {
+	Reason SessionInterruptionReason `json:"reason"`
+}
+
 type SessionData struct {
 	SessionID string `json:"sessionId"`
 	Reopened  bool   `json:"reopened,omitempty"`
@@ -145,7 +156,8 @@ var eventNames = map[string]string{
 	"tool.requested": "toolCall", "tool.started": "toolStarted", "tool.progress": "toolOutput", "tool.end": "toolResult",
 	"question.open": "questionOpened", "question.answered": "questionAnswered", "question.closed": "questionClosed",
 	"session.join": "actorJoined", "session.leave": "actorLeft", "job.ended": "jobEnded", "job.started": "jobStarted",
-	"session.ready": "sessionStarted", "session.end": "sessionEnded", "position.moved": "positionMoved", "entries.erased": "entriesErased", "setting.changed": "settingChanged", "input.accepted": "inputAccepted", "input.withdrawn": "inputWithdrawn", "question.unanswerable": "questionNoLongerAnswerable",
+	api.SessionInterrupted: "sessionInterrupted",
+	"session.ready":        "sessionStarted", "session.end": "sessionEnded", "position.moved": "positionMoved", "entries.erased": "entriesErased", "setting.changed": "settingChanged", "input.accepted": "inputAccepted", "input.withdrawn": "inputWithdrawn", "question.unanswerable": "questionNoLongerAnswerable",
 	"plugin.loaded": "pluginLoaded", "plugin.replaced": "pluginReplaced", "plugin.unloaded": "pluginUnloaded",
 	"input.returned": "inputHandedBack", "history.added": "entry", "job.start": "jobStarted", "job.end": "jobEnded", "job.progress": "jobProgress",
 }
@@ -226,6 +238,8 @@ func sdkEvent(e api.Event) Event {
 		return typedEvent[ToolOutputData](h, data)
 	case "toolResult":
 		return typedEvent[ToolResult](h, data)
+	case "sessionInterrupted":
+		return typedEvent[SessionInterruptedData](h, data)
 	case "sessionStarted", "sessionEnded":
 		return typedEvent[SessionData](h, data)
 	case "actorJoined", "actorLeft":
