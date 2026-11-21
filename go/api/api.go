@@ -240,6 +240,8 @@ func (u *Usage) Add(v Usage) {
 	u.Cost += v.Cost
 }
 
+const SessionInterrupted = "session.interrupted"
+
 type Event struct {
 	Kind    string          `json:"kind"`
 	Method  string          `json:"-"` // request method for a gated reply

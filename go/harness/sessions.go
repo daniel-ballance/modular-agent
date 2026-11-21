@@ -20,12 +20,17 @@ type session struct {
 	id               string // immutable, safe for event routing while snapshots change
 	project          string // immutable canonical workspace for rewind exclusion
 	rewindBlocked    bool
-	commands         int // direct commands in progress
+	commandCancels   map[*commandCancellation]struct{}
 	mu               sync.Mutex
 	data             api.Session
 	lease            api.Lease
-	writerFailed     bool
+	h                *Harness
+	interrupted      chan struct{}
+	interruptEmitted chan struct{}
+	writerWatchDone  chan struct{}
+	writerFailure    error
 	running, closing bool
+	stopping         bool // a detach is already settling work and closing the lease
 	opening          bool // job reports during session.start wait for recovery setup
 	cancel           context.CancelCauseFunc
 	done             chan struct{}
@@ -117,7 +122,8 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	if settings.Approval == "" {
 		settings.Approval = "off"
 	}
-	s := &session{id: id, project: project, data: api.Session{Version: 1, ID: id, Project: project, Settings: settings, Actor: c.h.localActor, Tenant: tenant, Limit: limit}}
+	s := c.newSessionState(id, project)
+	s.data = api.Session{Version: 1, ID: id, Project: project, Settings: settings, Actor: c.h.localActor, Tenant: tenant, Limit: limit}
 	if host != nil {
 		s.data.Actor = host.ID
 	}
@@ -192,6 +198,7 @@ func (c *client) registerNew(s *session, commit bool) error {
 	c.h.mu.Lock()
 	c.h.sessions[s.id] = s
 	c.h.mu.Unlock()
+	s.watchWriter()
 	return nil
 }
 
@@ -236,7 +243,8 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = lease.Close()
 		return err
 	}
-	s := &session{id: id, project: project, data: snap, lease: lease, last: recordedOutcome(snap), opening: true}
+	s := c.newSessionState(id, project)
+	s.data, s.lease, s.last, s.opening = snap, lease, recordedOutcome(snap), true
 	if err = c.registerOpen(ctx, s, host, savedApproval); err != nil {
 		_ = lease.Close()
 		return err
@@ -355,6 +363,7 @@ func (c *client) registerOpen(ctx context.Context, s *session, host *api.Actor, 
 	c.h.mu.Lock()
 	c.h.sessions[s.id] = s
 	c.h.mu.Unlock()
+	s.watchWriter()
 	return nil
 }
 
@@ -447,33 +456,16 @@ func (s *session) commitSnapshotLocked(next api.Session) error {
 	}) || next.ForkedFrom != ""
 	if s.lease != nil && used {
 		if err := s.lease.Save(next); err != nil {
-			s.stopWriterLocked()
-			return err
+			if s.rewindBlocked && !errors.Is(err, api.ErrWriterLost) && s.reconcileRewindCommit(next) {
+				return nil
+			}
+			return s.stopWriterLocked(err)
 		}
 	}
 	s.data = next
 	return nil
 }
 
-func (s *session) stopWriterLocked() {
-	s.writerFailed = true
-	if s.cancel != nil {
-		s.cancel(api.ErrProcessStopped)
-	}
-}
-
-func (s *session) checkWriterLocked() error {
-	if s.writerFailed {
-		return errors.New("session writer lost; reopen to recover")
-	}
-	if writer, ok := s.lease.(interface{ CheckWriter() error }); ok {
-		if err := writer.CheckWriter(); err != nil {
-			s.stopWriterLocked()
-			return err
-		}
-	}
-	return nil
-}
 func (s *session) recordLocked(e api.Entry, writer string, advance bool) (api.Entry, error) {
 	// Appending does not change published entries or session metadata. Clip
 	// the prefix so staging cannot overwrite the published slice's backing array.
@@ -988,6 +980,10 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 		s.mu.Unlock()
 		return api.Receipt{}, api.ErrAuthority
 	}
+	if err := s.checkWriterLocked(); err != nil {
+		s.mu.Unlock()
+		return api.Receipt{}, err
+	}
 	if r, ok := duplicate(s.data, in); ok {
 		s.mu.Unlock()
 		return r, nil
@@ -1103,7 +1099,7 @@ func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 		}
 		s.last = outcome
 		nextInput := runnableInput(s.queue)
-		if nextInput < 0 || s.closing || ctx.Err() != nil {
+		if nextInput < 0 || s.closing || s.writerFailure != nil || ctx.Err() != nil {
 			s.running = false
 			s.cancel(nil)
 			done := s.done
@@ -1308,8 +1304,11 @@ func (c *client) Wait(ctx context.Context, id string) (api.Outcome, error) {
 	}
 	for {
 		s.mu.Lock()
-		running, done, last := s.running, s.done, clone(s.last)
+		running, done, last, failure := s.running, s.done, clone(s.last), s.writerFailure
 		s.mu.Unlock()
+		if failure != nil {
+			return api.Outcome{}, failure
+		}
 		if !running {
 			if done != nil {
 				select {
@@ -1333,6 +1332,7 @@ func (c *client) Wait(ctx context.Context, id string) (api.Outcome, error) {
 		case <-ctx.Done():
 			return api.Outcome{}, ctx.Err()
 		case <-done:
+		case <-s.interrupted:
 		}
 	}
 }
@@ -1369,11 +1369,15 @@ func (c *client) stopSessionAs(id string, closing bool, who string, via ...strin
 			return api.ErrCloseForbidden
 		}
 	}
-	if s.commands != 0 {
+	if s.stopping {
+		s.mu.Unlock()
+		return errors.New("session close already in progress")
+	}
+	if len(s.commandCancels) != 0 {
 		s.mu.Unlock()
 		return errors.New("session has a direct command in progress")
 	}
-	s.closing = true
+	s.stopping, s.closing = true, true
 	if s.running {
 		cause := error(context.Canceled)
 		if !closing {
@@ -1381,9 +1385,20 @@ func (c *client) stopSessionAs(id string, closing bool, who string, via ...strin
 		}
 		s.cancel(cause)
 	}
+	done := s.done
 	s.mu.Unlock()
-	_, _ = c.Wait(context.Background(), id)
-	if closing {
+	defer func() {
+		s.mu.Lock()
+		s.stopping = false
+		s.mu.Unlock()
+	}()
+	if done != nil {
+		<-done // A lost writer still has to stop old work before releasing its lease.
+	}
+	s.mu.Lock()
+	interrupted := s.writerFailure != nil
+	s.mu.Unlock()
+	if closing && !interrupted {
 		snap, _ := c.Snapshot(id)
 		for _, call := range api.OpenCalls(snap) {
 			result := api.ToolResult{Call: call.ID, Reference: call.Reference, Status: "cancelled", Content: api.Text("Session closed before the call finished.")}
@@ -1393,7 +1408,7 @@ func (c *client) stopSessionAs(id string, closing bool, who string, via ...strin
 		}
 	}
 	hook := "session.stop"
-	if closing {
+	if closing && !interrupted {
 		hook = "session.end"
 	}
 	_, err = c.h.API().Invoke(context.Background(), hook, id)
@@ -1401,20 +1416,18 @@ func (c *client) stopSessionAs(id string, closing bool, who string, via ...strin
 		return err
 	}
 	s.mu.Lock()
+	close(s.writerWatchDone)
 	if s.lease != nil {
-		if err = s.lease.Close(); err != nil {
-			s.mu.Unlock()
-			return err
-		}
+		err = s.lease.Close()
 	}
 	s.mu.Unlock()
 	c.h.mu.Lock()
 	delete(c.h.sessions, id)
 	c.h.mu.Unlock()
-	if closing {
+	if closing && !interrupted {
 		c.Emit(context.Background(), api.Event{Kind: "session.end", Session: id, Data: api.JSON(map[string]any{"sessionId": id})})
 	}
-	return nil
+	return err
 }
 func (c *client) Emit(ctx context.Context, e api.Event) {
 	// A failing output gate drops the event. A listener cannot change execution.

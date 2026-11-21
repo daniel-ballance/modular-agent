@@ -155,6 +155,14 @@ func (s *Session) PromptStream(ctx context.Context, input any, opts ...PromptOpt
 	}
 }
 func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error) bool, opts []PromptOption) (PromptResult, error) {
+	type interruptionSource interface {
+		SessionInterruption(string) (<-chan struct{}, <-chan struct{}, error)
+	}
+	interrupted, emitted, err := s.agent.a.(interruptionSource).SessionInterruption(s.id)
+	if err != nil {
+		return PromptResult{}, appError(err, NotOpen)
+	}
+	interruption := make(chan api.Event, 1)
 	eventBuf := make(chan api.Event, 256)
 	overflow := make(chan struct{}, 1)
 	wake := make(chan struct{}, 1)
@@ -163,6 +171,13 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 	})
 	stop := subscribe.SubscribeOutput(func(api.Event) string { return s.actorID() }, func(e api.Event) {
 		if e.Session != s.id {
+			return
+		}
+		if e.Kind == api.SessionInterrupted {
+			select {
+			case interruption <- e:
+			default:
+			}
 			return
 		}
 		if yield == nil {
@@ -199,6 +214,10 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 	lost := func() (PromptResult, error) {
 		return PromptResult{}, streamLost("prompt stream fell behind", lastDelivered)
 	}
+	terminal := interrupted
+	if yield != nil {
+		terminal = emitted // Give the gated live event a chance to reach the stream first.
+	}
 	for {
 		select {
 		case <-overflow:
@@ -222,6 +241,22 @@ func (s *Session) prompt(ctx context.Context, input any, yield func(Event, error
 			return PromptResult{}, appError(ctx.Err(), CancelledCode)
 		case <-overflow:
 			return lost()
+		case raw := <-interruption:
+			if yield != nil && !yield(sdkEvent(raw), nil) {
+				return PromptResult{}, nil
+			}
+			return PromptResult{}, appError(api.ErrSessionLost, Lost)
+		case <-terminal:
+			if yield != nil {
+				select {
+				case raw := <-interruption:
+					if !yield(sdkEvent(raw), nil) {
+						return PromptResult{}, nil
+					}
+				default:
+				}
+			}
+			return PromptResult{}, appError(api.ErrSessionLost, Lost)
 		case <-wake:
 		case <-tick.C:
 			if yield != nil {

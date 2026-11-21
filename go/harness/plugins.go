@@ -407,11 +407,21 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 		s.mu.Unlock()
 		return "", errors.New("session is closing")
 	}
-	s.commands++
+	if err := s.checkWriterLocked(); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	token := &commandCancellation{cancel}
+	if s.commandCancels == nil {
+		s.commandCancels = make(map[*commandCancellation]struct{})
+	}
+	s.commandCancels[token] = struct{}{}
 	s.mu.Unlock()
+	defer cancel(nil)
 	defer func() {
 		s.mu.Lock()
-		s.commands--
+		delete(s.commandCancels, token)
 		s.mu.Unlock()
 	}()
 	fields := strings.Fields(strings.TrimPrefix(line, "/"))
@@ -426,6 +436,9 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 	}
 	ctx = api.WithExecution(ctx, api.Execution{Session: id, Step: api.ID()})
 	result, err := r.value.(api.Command)(ctx, id, fields[1:])
+	if errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
+		return "", api.ErrSessionLost
+	}
 	if err != nil {
 		return "", err
 	}

@@ -28,7 +28,7 @@ func (c *client) enqueueLocked(s *session, in api.Input) {
 }
 
 func (c *client) startQueuedLocked(s *session) {
-	if s.opening || s.closing || s.running {
+	if s.opening || s.closing || s.running || s.writerFailure != nil {
 		return
 	}
 	i := runnableInput(s.queue)

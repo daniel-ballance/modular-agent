@@ -150,6 +150,8 @@ var (
 	ErrJobNotFound      = errors.New("job not found")
 	ErrJobReportRefused = errors.New("job report refused")
 	ErrUnknownModel     = errors.New("model is not offered")
+	ErrWriterLost       = errors.New("history writer access lost")
+	ErrSessionLost      = errors.New("session interrupted; reopen to recover")
 	ErrJobCommitLost    = errors.New("job commit unconfirmed")
 	ErrJobCleanupLost   = errors.New("job cleanup unconfirmed")
 )

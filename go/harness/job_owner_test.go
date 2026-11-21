@@ -28,7 +28,8 @@ func TestReportedEndPublishesOneBatch(t *testing.T) {
 			lease.err = errors.New("store did not acknowledge")
 		}
 		j := api.Job{ID: "job", Session: "session", Actor: "local-user", Owner: "owner", Rights: []string{"input"}, State: "running"}
-		s := &session{id: j.Session, data: api.Session{ID: j.Session, Actor: j.Actor}, lease: lease, running: true}
+		s := c.newSessionState(j.Session, "")
+		s.data, s.lease, s.running = api.Session{ID: j.Session, Actor: j.Actor}, lease, true
 		appendEntry(&s.data, api.Entry{Kind: "setting"}, "harness", true)
 		appendEntry(&s.data, api.Entry{Kind: "job.start", Job: j.ID, Actor: j.Actor, Data: api.JSON(j)}, j.Owner, true)
 		h.sessions[s.id] = s

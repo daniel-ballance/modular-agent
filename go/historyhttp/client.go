@@ -33,7 +33,8 @@ type lease struct {
 	id, token  string
 	mu         sync.Mutex
 	closed     bool
-	fenced     atomic.Bool
+	lost       chan struct{}
+	lose       sync.Once
 	cutoff     atomic.Int64
 	stop, done chan struct{}
 	known      map[string]json.RawMessage
@@ -111,7 +112,7 @@ func (c *Client) read(id string) (document, error) {
 	}
 }
 func (c *Client) Acquire(id string) (api.Lease, error) {
-	l := &lease{c: c, id: id}
+	l := &lease{c: c, id: id, lost: make(chan struct{})}
 	if err := l.acquire(true); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
@@ -121,7 +122,7 @@ func (c *Client) Acquire(id string) (api.Lease, error) {
 // AcquireNew reserves a local handle without contacting the store. The first
 // Save checks the append size before sending PUT or acquiring a writer.
 func (c *Client) AcquireNew(id string) (api.Lease, error) {
-	return c.track(&lease{c: c, id: id})
+	return c.track(&lease{c: c, id: id, lost: make(chan struct{})})
 }
 
 func (c *Client) track(l *lease) (api.Lease, error) {
@@ -242,13 +243,16 @@ func (l *lease) acquire(wait bool) error {
 				return
 			case <-l.c.ctx.Done():
 				t.Stop()
-				l.fenced.Store(true)
+				l.fence()
+				return
+			case <-l.lost:
+				t.Stop()
 				return
 			case <-t.C:
 			}
 			sent, previous := leaseClock(), l.cutoff.Load()
-			if sent >= previous || l.fenced.Load() {
-				l.fenced.Store(true)
+			if sent >= previous || l.isFenced() {
+				l.fence()
 				return
 			}
 			ctx, cancel := context.WithTimeout(l.c.ctx, time.Duration(previous-sent))
@@ -257,7 +261,7 @@ func (l *lease) acquire(wait bool) error {
 			cancel()
 			cutoff := sent + int64(ttl/2)
 			if err != nil || leaseDuration(reply.TTL) != ttl || leaseClock() >= min(previous, cutoff) {
-				l.fenced.Store(true)
+				l.fence()
 				return
 			}
 			l.cutoff.Store(cutoff)
@@ -275,11 +279,23 @@ func leaseDuration(ms float64) time.Duration {
 
 func (l *lease) CheckWriter() error {
 	cutoff := l.cutoff.Load()
-	if l.fenced.Load() || cutoff != 0 && leaseClock() >= cutoff {
-		l.fenced.Store(true)
-		return errors.New("history lease lost")
+	if l.isFenced() || cutoff != 0 && leaseClock() >= cutoff || l.c.ctx.Err() != nil {
+		l.fence()
+		return api.ErrWriterLost
 	}
-	return l.c.ctx.Err()
+	return nil
+}
+
+func (l *lease) WriterLost() <-chan struct{} { return l.lost }
+func (l *lease) fence()                      { l.lose.Do(func() { close(l.lost) }) }
+
+func (l *lease) isFenced() bool {
+	select {
+	case <-l.lost:
+		return true
+	default:
+		return false
+	}
 }
 func (l *lease) usable() error {
 	if l.closed {
@@ -404,7 +420,11 @@ func (l *lease) Save(s api.Session) error {
 	writeCtx, cancel := context.WithTimeout(l.c.ctx, time.Duration(l.cutoff.Load()-leaseClock()))
 	defer cancel()
 	if err := l.c.call(writeCtx, "POST", path(l.id)+"/entries", appendBody(l.token, entries), &out); err != nil {
-		l.fenced.Store(true)
+		l.fence()
+		var response *servicehttp.ResponseError
+		if errors.As(err, &response) && response.Code == "lost" {
+			return errors.Join(api.ErrWriterLost, err)
+		}
 		return err
 	}
 	if err := l.CheckWriter(); err != nil {
@@ -556,7 +576,7 @@ func (l *lease) Close() error {
 		return nil
 	}
 	l.closed = true
-	l.fenced.Store(true)
+	l.fence()
 	token := l.token
 	if token != "" {
 		close(l.stop)
