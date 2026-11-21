@@ -74,6 +74,18 @@ const checks = [
     },
   },
   {
+    name: "codemode-positional-order",
+    about: "Positional arguments take the required fields, then the others in alphabetical order, as the prompt's signature shows.",
+    files: { "project/in.txt": "l1\nl2\nl3\nl4\nl5\n" },
+    script: [codemode("tools.read('in.txt', 1, 2)"), { text: "Done." }],
+    runs: [{ args: ["-p", "Read."], expect: { stdout: "Done.", exit: 0 } }],
+    log: (log, ok) => {
+      const text = (log[1]?.messages ?? []).filter((m) => m.role === "toolResult").at(-1)?.text ?? "";
+      ok(text.startsWith("l2\n") && !text.includes("l3"), "read('in.txt', 1, 2) is limit=1, offset=2", text.slice(0, 200));
+      ok(/read\(path: str, limit[^,)]*, offset/.test(JSON.stringify(log[0] ?? {})), "the prompt's signature lists limit before offset", (JSON.stringify(log[0] ?? {}).match(/read\(path[^)]*\)/) ?? [""])[0]);
+    },
+  },
+  {
     name: "codemode-no-ambient-access",
     about: "The sandbox refuses wall clocks, sleep, unseeded randomness and files; a seeded generator works.",
     script: [codemode([
