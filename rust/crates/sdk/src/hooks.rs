@@ -80,7 +80,8 @@ pub struct HookReply {
     pub refused: Option<String>,
 }
 
-pub(crate) type Handle = Arc<dyn Fn(Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
+pub(crate) type Handle =
+    Arc<dyn Fn(Value, crate::HookContext) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
 pub(crate) struct Hook {
     pub point: &'static str,
     pub order: Order,
@@ -114,6 +115,7 @@ fn gate(answer: Gate, p: Value) -> Result<Value> {
 
 #[derive(Clone, Debug)]
 pub struct ToolBefore {
+    pub context: crate::HookContext,
     pub session_id: String,
     pub call_id: String,
     pub name: String,
@@ -124,6 +126,8 @@ pub struct ToolBefore {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnBefore {
+    #[serde(skip)]
+    pub context: crate::HookContext,
     pub session_id: String,
     pub turn_id: String,
     pub input: Value,
@@ -146,6 +150,8 @@ pub struct TurnAddition {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolAfter {
+    #[serde(skip)]
+    pub context: crate::HookContext,
     pub session_id: String,
     pub call: Value,
     pub result: Value,
@@ -158,6 +164,8 @@ pub struct ToolChange {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepAfter {
+    #[serde(skip)]
+    pub context: crate::HookContext,
     pub session_id: String,
     pub turn_id: String,
     pub step_id: String,
@@ -166,6 +174,8 @@ pub struct StepAfter {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnEnd {
+    #[serde(skip)]
+    pub context: crate::HookContext,
     pub session_id: String,
     pub turn_id: String,
     pub outcome: Value,
@@ -176,7 +186,11 @@ macro_rules! payload {
     ($name:ident { $($field:ident : $ty:ty),* }) => {
         #[derive(Clone, Debug, Deserialize)]
         #[serde(rename_all = "camelCase")]
-        pub struct $name { $(pub $field: $ty),* }
+        pub struct $name {
+            #[serde(skip)]
+            pub context: crate::HookContext,
+            $(pub $field: $ty),*
+        }
     }
 }
 payload!(PluginLoad {
@@ -225,6 +239,8 @@ pub enum InputChange {
     Pass,
     Change(Value),
     Handle,
+    /// Handle the input by running a registered command instead of a turn.
+    HandleCommand(String),
 }
 #[derive(Clone, Debug)]
 pub enum ModelDecision {
@@ -245,6 +261,7 @@ payload!(ProviderPiece { session_id: String, step_id: Option<String>, tool_call_
 
 #[derive(Clone, Debug)]
 pub struct OutputView {
+    pub context: crate::HookContext,
     pub session_id: String,
     pub recipient: String,
     pub value: Value,
@@ -259,8 +276,11 @@ pub enum OutputDecision {
     Redact(Value),
 }
 
-pub(crate) type LocalHandle =
-    Arc<dyn Fn(Value) -> BoxFuture<'static, Result<agent_api::HookResult>> + Send + Sync>;
+pub(crate) type LocalHandle = Arc<
+    dyn Fn(Value, crate::HookContext) -> BoxFuture<'static, Result<agent_api::HookResult>>
+        + Send
+        + Sync,
+>;
 pub(crate) struct LocalRegistration {
     pub point: &'static str,
     pub order: Order,
@@ -294,10 +314,11 @@ macro_rules! local_hook {
                 self.local_hooks.push(LocalRegistration {
                     point: $point,
                     order,
-                    handle: Arc::new(move |raw| {
+                    handle: Arc::new(move |raw, context| {
                         let f = f.clone();
                         Box::pin(async move {
-                            let payload = ($decode)(&raw)?;
+                            let mut payload: $payload = ($decode)(&raw)?;
+                            payload.context = context;
                             ($encode)(f(payload).await?, raw)
                         })
                     }),
@@ -309,6 +330,7 @@ macro_rules! local_hook {
 
 fn membership(event: &Value) -> Result<SessionMembership> {
     Ok(SessionMembership {
+        context: Default::default(),
         session_id: event["scope"]["session"].as_str().unwrap_or("").into(),
         actor_id: event["content"]["actorId"].as_str().unwrap_or("").into(),
         changed_by: event["scope"]["actor"].as_str().unwrap_or("").into(),
@@ -337,6 +359,7 @@ local_hook!(
     (),
     |event: &Value| {
         Ok::<_, crate::Error>(ProviderPiece {
+            context: Default::default(),
             session_id: event["scope"]["session"].as_str().unwrap_or("").into(),
             step_id: event["scope"]["step"].as_str().map(str::to_owned),
             tool_call_id: event["scope"]["call"].as_str().map(str::to_owned),
@@ -359,6 +382,7 @@ local_hook!(
     OutputDecision,
     |raw: &Value| {
         Ok::<_, crate::Error>(OutputView {
+            context: Default::default(),
             session_id: raw["sessionId"].as_str().unwrap_or("").into(),
             recipient: raw["recipient"].as_str().unwrap_or("").into(),
             value: raw["value"].clone(),
@@ -428,10 +452,11 @@ macro_rules! registration {
                 self.hooks.push(Hook {
                     point: $point,
                     order,
-                    handle: Arc::new(move |p| {
+                    handle: Arc::new(move |p, context| {
                         let f = f.clone();
                         Box::pin(async move {
-                            let input = ($decode)(&p)?;
+                            let mut input: $in = ($decode)(&p)?;
+                            input.context = context;
                             ($encode)(f(input).await?, p)
                         })
                     }),
@@ -449,6 +474,7 @@ registration!(
     Gate,
     |p: &Value| -> Result<ToolBefore> {
         Ok(ToolBefore {
+            context: Default::default(),
             session_id: p["sessionId"].as_str().unwrap_or_default().into(),
             call_id: p["call"]["id"].as_str().unwrap_or_default().into(),
             name: p["call"]["name"].as_str().unwrap_or_default().into(),
@@ -570,6 +596,7 @@ registration!(
             json!({"value":p})
         }
         InputChange::Handle => json!({"value":p,"stop":true}),
+        InputChange::HandleCommand(command) => json!({"command":command}),
     })
 );
 registration!(

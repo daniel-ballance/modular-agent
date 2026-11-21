@@ -222,7 +222,8 @@ async fn restart_leaves_interrupted_call_unsettled_for_recovery() -> Result<()> 
     let agent = restart(agent).await?;
     let reopened = agent.open_session(&id).await?;
     let result = reopened
-        .last_turn()?
+        .last_turn()
+        .await?
         .expect("recovery settles the interrupted turn");
     assert!(matches!(result.outcome, Some(Outcome::Failed { .. })));
     assert_eq!(result.tool_results()[0].status, ToolStatus::OutcomeUnknown);

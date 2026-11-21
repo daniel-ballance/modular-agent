@@ -118,16 +118,17 @@ fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
     if !sources.is_empty() {
         v["toolSources"] = json!(sources);
     }
-    if !r.hooks.is_empty() {
-        v["hooks"] = json!(
-            r.hooks
-                .iter()
-                .enumerate()
-                .map(|(i, hook)| {
-                    json!({"hook":hook.point,"handlerId":i + 1,"order":hook.order.name()})
-                })
-                .collect::<Vec<_>>()
-        );
+    let mut hooks = r
+        .hooks
+        .iter()
+        .enumerate()
+        .map(|(i, hook)| json!({"hook":hook.point,"handlerId":i + 1,"order":hook.order.name()}))
+        .collect::<Vec<_>>();
+    if r.jobs.as_ref().is_some_and(crate::jobs::Owner::can_resume) {
+        hooks.push(json!({"hook":"session.start","handlerId":hooks.len()+1}));
+    }
+    if !hooks.is_empty() {
+        v["hooks"] = json!(hooks);
     }
     if !r.commands.is_empty() {
         v["commands"] = json!(
@@ -321,6 +322,10 @@ impl Endpoint for Served {
                     return Err(Fault::new("invalid_request", "unknown tool"));
                 };
                 let cx = ToolContext {
+                    jobs: r
+                        .jobs
+                        .clone()
+                        .map(|owner| (self.plugin.name.clone(), owner)),
                     project: p["project"].as_str().unwrap_or_default().into(),
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: call["actorId"].as_str().unwrap_or_default().into(),
@@ -354,12 +359,33 @@ impl Endpoint for Served {
             }
             "hook/handle" => {
                 let r = self.registered()?;
+                if p["hook"] == "session.start"
+                    && p["handlerId"] == r.hooks.len() + 1
+                    && let Some(owner) = r.jobs.as_ref().filter(|owner| owner.can_resume())
+                {
+                    let session = base::wire::string(&p["payload"], "sessionId")?;
+                    let backend = Backend::Remote { peer, parent: id };
+                    for job in owner
+                        .unfinished(&backend, &self.plugin.name, session)
+                        .await
+                        .map_err(to_fault)?
+                    {
+                        owner.resume(job).await.map_err(to_fault)?;
+                    }
+                    return Ok(Value::Null);
+                }
                 let handler = p["handlerId"]
                     .as_u64()
                     .and_then(|i| r.hooks.get((i as usize).checked_sub(1)?))
                     .filter(|handler| p["hook"] == handler.point)
                     .ok_or_else(|| Fault::new("unknown_handler", "unknown handler"))?;
-                match (handler.handle)(p["payload"].clone()).await {
+                let context = crate::HookContext::remote(
+                    Backend::Remote { peer, parent: id },
+                    &p["payload"],
+                    cancel,
+                );
+                let _guard = context.settled.clone().drop_guard();
+                match (handler.handle)(p["payload"].clone(), context).await {
                     Err(e)
                         if matches!(
                             handler.point,
@@ -368,6 +394,9 @@ impl Endpoint for Served {
                     {
                         Ok(json!({"refuse":e.message()}))
                     }
+                    Ok(reply) if handler.point == "input" && reply["command"].is_string() => Err(
+                        Fault::new("not_supported", "input commands are in-process only"),
+                    ),
                     result => result.map_err(to_fault),
                 }
             }
@@ -378,17 +407,45 @@ impl Endpoint for Served {
                     .iter()
                     .find(|c| p["name"] == c.name)
                     .ok_or_else(|| Fault::new("not_found", "unknown command"))?;
-                let cx = CommandContext {
+                let settled = CancellationToken::new();
+                let _guard = settled.clone().drop_guard();
+                let work = ToolContext {
+                    jobs: r
+                        .jobs
+                        .clone()
+                        .map(|owner| (self.plugin.name.clone(), owner)),
+                    project: p["project"].as_str().unwrap_or_default().into(),
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: p["actorId"].as_str().unwrap_or_default().into(),
+                    call_id: String::new(),
+                    backend: Backend::Remote { peer, parent: id },
+                    cancelled: cancel.clone(),
+                    settled,
+                };
+                let cx = CommandContext {
+                    session_id: work.session_id.clone(),
+                    actor_id: work.actor_id.clone(),
                     cancelled: cancel,
                     model: None,
-                    local_work: None,
+                    work,
+                    can_ask: false,
                 };
                 let text = (command.run)(p["args"].as_str().unwrap_or_default().into(), cx)
                     .await
                     .map_err(to_fault)?;
                 Ok(command_reply(text))
+            }
+            "jobs/cancel" => {
+                let r = self.registered()?;
+                let owner = r
+                    .jobs
+                    .as_ref()
+                    .ok_or_else(|| Fault::new("invalid_request", "no job owner registered"))?;
+                owner
+                    .cancel_id(base::wire::string(&p, "jobId")?)
+                    .await
+                    .map_err(to_fault)?;
+                Ok(json!({}))
             }
             _ => Err(Fault::unknown(method)),
         }

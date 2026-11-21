@@ -5,7 +5,7 @@ pub(crate) struct Session {
     pub id: String,
     pub project: PathBuf,
     pub api: Api,
-    owns_agent: bool,
+    factory: Arc<dyn Factory>,
     pub gate: tokio::sync::Mutex<()>,
     pub stop: CancellationToken,
     pub tx: mpsc::UnboundedSender<Message>,
@@ -98,11 +98,7 @@ impl Session {
         if let Some(worker) = worker {
             let _ = worker.await;
         }
-        if self.owns_agent {
-            result.and(self.api.shutdown().await)
-        } else {
-            result
-        }
+        result.and(self.factory.dispose(self.api.clone()).await)
     }
     pub async fn prompt(&self, text: &str, key: Option<String>) -> Result<Value> {
         let mut guard = Some(self.gate.lock().await);
@@ -549,15 +545,15 @@ impl State {
         let id = if let Some(data) = existing {
             data.id
         } else {
-            match api
-                .create_in_tenant(&project, self.factory.project_settings(&project)?, tenant)
-                .await
-            {
+            let created = async {
+                api.create_in_tenant(&project, self.factory.project_settings(&project)?, tenant)
+                    .await
+            }
+            .await;
+            match created {
                 Ok(id) => id,
                 Err(error) => {
-                    if self.factory.owns_session_agent() {
-                        let _ = api.shutdown().await;
-                    }
+                    let _ = self.factory.dispose(api).await;
                     return Err(error);
                 }
             }
@@ -566,7 +562,7 @@ impl State {
             id: id.clone(),
             project: project.clone(),
             api: api.clone(),
-            owns_agent: self.factory.owns_session_agent(),
+            factory: self.factory.clone(),
             gate: tokio::sync::Mutex::new(()),
             stop: CancellationToken::new(),
             tx,

@@ -62,6 +62,7 @@ pub struct Registrar {
     pub(crate) hooks: Vec<Hook>,
     pub(crate) local_hooks: Vec<crate::hooks::LocalRegistration>,
     pub(crate) commands: Vec<Command>,
+    pub(crate) jobs: Option<crate::jobs::Owner>,
     defined: Vec<(String, HookRule, crate::DefinedHook)>,
     subscriptions: Vec<(String, crate::Order, crate::hooks::LocalHandle)>,
     pub(crate) sources: Vec<(String, Arc<dyn ToolSource>)>,
@@ -89,7 +90,8 @@ pub struct CommandContext {
     pub actor_id: String,
     pub cancelled: CancellationToken,
     pub(crate) model: Option<Arc<CommandModel>>,
-    pub(crate) local_work: Option<ToolContext>,
+    pub(crate) work: ToolContext,
+    pub(crate) can_ask: bool,
 }
 
 pub(crate) struct CommandModel {
@@ -128,11 +130,10 @@ impl CommandContext {
 
     /// Ask an actor from an in-process-only command.
     pub async fn ask(&self, question: crate::Ask) -> Result<crate::Answer> {
-        let work = self
-            .local_work
-            .as_ref()
-            .ok_or_else(|| cannot_serve("command questions"))?;
-        work.ask(question).await
+        if !self.can_ask {
+            return Err(cannot_serve("command questions"));
+        }
+        self.work.ask(question).await
     }
 
     pub async fn call_hook(
@@ -140,20 +141,30 @@ impl CommandContext {
         hook: &crate::DefinedHook,
         value: Value,
     ) -> Result<crate::HookReply> {
-        let work = self
-            .local_work
-            .as_ref()
-            .ok_or_else(|| cannot_serve("custom hooks"))?;
-        work.call_hook(hook, value).await
+        self.work.call_hook(hook, value).await
     }
 
     /// The working environment scoped to this command.
     pub fn environment(&self) -> Result<crate::ToolEnvironment<'_>> {
-        let work = self
-            .local_work
-            .as_ref()
-            .ok_or_else(|| cannot_serve("command environment"))?;
-        Ok(work.environment())
+        self.work.check()?;
+        Ok(self.work.environment())
+    }
+
+    pub async fn start_job(
+        &self,
+        kind: &str,
+        detail: Value,
+        key: Option<&str>,
+    ) -> Result<crate::JobStart> {
+        self.work.start_job(kind, detail, key).await
+    }
+
+    pub async fn history(&self, after: Option<&str>) -> Result<crate::HistoryPage> {
+        self.work.history(after).await
+    }
+
+    pub async fn emit(&self, kind: &str, data: Value) -> Result<()> {
+        self.work.emit(kind, data).await
     }
 
     pub fn log(&self, message: impl std::fmt::Display) {
@@ -297,6 +308,7 @@ impl Plugin {
             environment: None,
             runtime: None,
             history: None,
+            jobs: None,
             credentials: None,
             configuration: None,
             interfaces: vec![],
@@ -322,6 +334,9 @@ impl Registrar {
     pub fn command(&mut self, command: Command) {
         self.commands.push(command);
     }
+    pub fn jobs(&mut self, owner: impl crate::JobOwner) -> Result<()> {
+        set_part(&mut self.jobs, crate::jobs::Owner::new(owner), "job owner")
+    }
     pub fn define_hook(&mut self, name: impl Into<String>, rule: HookRule) -> crate::DefinedHook {
         let hook = crate::DefinedHook(Arc::new(std::sync::OnceLock::new()));
         self.defined.push((name.into(), rule, hook.clone()));
@@ -334,11 +349,20 @@ impl Registrar {
         F: Fn(Value) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<crate::HookAnswer>> + Send + 'static,
     {
+        self.on_hook_context(name, order, move |value, _| f(value));
+    }
+
+    /// Subscribe to a custom hook with access to its scoped callbacks.
+    pub fn on_hook_context<F, Fut>(&mut self, name: impl Into<String>, order: crate::Order, f: F)
+    where
+        F: Fn(Value, crate::HookContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<crate::HookAnswer>> + Send + 'static,
+    {
         self.subscriptions.push((
             name.into(),
             order,
-            Arc::new(move |value| {
-                let result = f(value);
+            Arc::new(move |value, context| {
+                let result = f(value, context);
                 Box::pin(async move { Ok(result.await?.native()) })
             }),
         ));
@@ -516,17 +540,71 @@ impl base::Plugin for InProcess {
                 r,
             )?;
         }
+        let jobs = self
+            .registered
+            .jobs
+            .clone()
+            .map(|jobs| (self.name.clone(), jobs));
+        if let Some((name, owner)) = jobs.clone() {
+            r.provide::<dyn base::ExternalJobs>(
+                &format!("external.jobs.sdk.{name}"),
+                Arc::new(crate::jobs::LocalOwner(name.clone(), owner.clone())),
+            )?;
+            let closer = owner.clone();
+            r.on(
+                "session.end",
+                base::Order::First,
+                base::handler(move |api, scope, _| {
+                    let (name, owner) = (name.clone(), closer.clone());
+                    Box::pin(async move {
+                        let backend = Backend::Local {
+                            api,
+                            scope: scope.clone(),
+                        };
+                        for job in owner.unfinished(&backend, &name, &scope.session).await? {
+                            if let Err(error) = owner.cancel_id(&job.id).await {
+                                eprintln!("could not cancel job {}: {error}", job.id);
+                            }
+                        }
+                        Ok(base::HookResult::default())
+                    })
+                }),
+            );
+            if owner.can_resume() {
+                let name = self.name.clone();
+                r.on(
+                    "session.start",
+                    base::Order::Normal,
+                    base::handler(move |api, scope, _| {
+                        let (name, owner) = (name.clone(), owner.clone());
+                        Box::pin(async move {
+                            let backend = Backend::Local {
+                                api,
+                                scope: scope.clone(),
+                            };
+                            for job in owner.unfinished(&backend, &name, &scope.session).await? {
+                                owner.resume(job).await?;
+                            }
+                            Ok(base::HookResult::default())
+                        })
+                    }),
+                );
+            }
+        }
         if !self.registered.tools.is_empty() {
             r.provide::<dyn base::ToolSource>(
                 &format!("tools.{}", self.name),
-                Arc::new(Source(Arc::new(StaticTools(self.registered.tools.clone())))),
+                Arc::new(Source(
+                    Arc::new(StaticTools(self.registered.tools.clone())),
+                    jobs.clone(),
+                )),
             )?;
         }
         for (name, source) in &self.registered.sources {
             source.catalog_notifier(ToolsChanged(Arc::new(|| {})));
             r.provide::<dyn base::ToolSource>(
                 &format!("tools.{name}"),
-                Arc::new(Source(source.clone())),
+                Arc::new(Source(source.clone(), jobs.clone())),
             )?;
         }
         for prepare in &self.registered.prepare {
@@ -557,9 +635,13 @@ impl base::Plugin for InProcess {
             r.on(
                 name,
                 order.native(),
-                base::handler(move |_, _, value| {
+                base::handler(move |api, scope, value| {
                     let handle = handle.clone();
-                    Box::pin(async move { Ok(handle(value).await?) })
+                    Box::pin(async move {
+                        let context = crate::HookContext::local(api, scope);
+                        let _guard = context.settled.clone().drop_guard();
+                        Ok(handle(value, context).await?)
+                    })
                 }),
             );
         }
@@ -569,12 +651,16 @@ impl base::Plugin for InProcess {
             r.on(
                 point,
                 hook.order.native(),
-                base::handler(move |_, scope, mut value| {
+                base::handler(move |api, scope, mut value| {
                     if point == "output" {
                         value["sessionId"] = json!(scope.session);
                     }
                     let handle = handle.clone();
-                    Box::pin(async move { Ok(handle(value).await?) })
+                    Box::pin(async move {
+                        let context = crate::HookContext::local(api, scope);
+                        let _guard = context.settled.clone().drop_guard();
+                        Ok(handle(value, context).await?)
+                    })
                 }),
             );
         }
@@ -599,9 +685,22 @@ impl base::Plugin for InProcess {
                                     .collect::<Vec<_>>()
                             );
                         }
-                        let reply = handle(payload)
+                        let context = crate::HookContext::local(api.clone(), scope.clone());
+                        let guard = context.settled.clone().drop_guard();
+                        let reply = handle(payload, context)
                             .await
                             .map_err(|e| base::anyhow!("{}", e.message()))?;
+                        drop(guard);
+                        if point == "input"
+                            && let Some(line) = reply["command"].as_str()
+                        {
+                            let (name, args) = command_line(line);
+                            let value = api.command(&scope, name, args).await?;
+                            return Ok(base::HookResult {
+                                stopped: true,
+                                ..base::answer(value)
+                            });
+                        }
                         plugin_stdio::hook_result(point, &scope, original, reply)
                     })
                 }),
@@ -611,10 +710,12 @@ impl base::Plugin for InProcess {
             let run = command.run.clone();
             let uses_model = command.uses_model;
             let can_ask = command.local;
+            let jobs = jobs.clone();
             r.command(
                 &command.name,
                 base::handler(move |api, scope, args| {
                     let run = run.clone();
+                    let jobs = jobs.clone();
                     Box::pin(async move {
                         let cancelled = api.cancellation(&scope.session)?;
                         let done = cancelled.child_token();
@@ -632,21 +733,18 @@ impl base::Plugin for InProcess {
                                 sequence: tokio::sync::Mutex::new(()),
                             })
                         });
-                        let local_work = if can_ask {
-                            Some(ToolContext {
-                                backend: Backend::Local {
-                                    api: api.clone(),
-                                    scope: work_scope,
-                                },
-                                session_id: scope.session.clone(),
-                                actor_id: scope.actor.clone(),
-                                project: api.snapshot(&scope.session)?.project,
-                                call_id: String::new(),
-                                cancelled: cancelled.clone(),
-                                settled: done,
-                            })
-                        } else {
-                            None
+                        let work = ToolContext {
+                            jobs,
+                            backend: Backend::Local {
+                                api: api.clone(),
+                                scope: work_scope,
+                            },
+                            session_id: scope.session.clone(),
+                            actor_id: scope.actor.clone(),
+                            project: api.snapshot(&scope.session)?.project,
+                            call_id: String::new(),
+                            cancelled: cancelled.clone(),
+                            settled: done,
                         };
                         let text = run(
                             args["args"].as_str().unwrap_or_default().into(),
@@ -655,7 +753,8 @@ impl base::Plugin for InProcess {
                                 actor_id: scope.actor,
                                 cancelled,
                                 model,
-                                local_work,
+                                work,
+                                can_ask,
                             },
                         )
                         .await?;
@@ -666,6 +765,12 @@ impl base::Plugin for InProcess {
         }
         Ok(())
     }
+}
+
+pub(crate) fn command_line(line: &str) -> (&str, &str) {
+    let line = line.trim().trim_start_matches('/');
+    let (name, args) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    (name, args.trim())
 }
 
 async fn request_from_command(
@@ -781,7 +886,7 @@ impl ToolSource for StaticTools {
     }
 }
 
-struct Source(Arc<dyn ToolSource>);
+struct Source(Arc<dyn ToolSource>, Option<(String, crate::jobs::Owner)>);
 
 #[async_trait::async_trait]
 impl base::ToolSource for Source {
@@ -824,6 +929,7 @@ impl base::ToolSource for Source {
             Err(e) => return base::ToolResult::new(&call, base::ToolStatus::Failed, e.to_string()),
         };
         let cx = ToolContext {
+            jobs: self.1.clone(),
             project,
             session_id: scope.session.clone(),
             actor_id: scope.actor.clone(),

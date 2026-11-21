@@ -40,8 +40,8 @@ pub struct AcpOptions {
     pub compose: Option<Arc<dyn AcpComposition>>,
 }
 
-/// A bearer-token principal. Omitted scopes permit all projects or tenants;
-/// an explicit tenant list includes `None` to allow the absence of a tenant.
+/// A bearer-token principal. Omitted projects use the composition's scope.
+/// Omitted tenants permit only tenantless sessions, as does a list of just `None`.
 #[derive(Clone, Debug)]
 pub struct AcpActor {
     pub token_file: std::path::PathBuf,
@@ -72,7 +72,15 @@ impl AcpActor {
     }
 }
 
-struct ProjectFactory(Arc<dyn AcpComposition>, Agent);
+struct ProjectFactory(
+    Arc<dyn AcpComposition>,
+    Agent,
+    Mutex<BTreeMap<usize, Agent>>,
+);
+
+fn api_key(api: &dyn base::AgentApi) -> usize {
+    std::ptr::from_ref(api).cast::<()>() as usize
+}
 
 #[async_trait::async_trait]
 impl interface_acp::Factory for ProjectFactory {
@@ -104,12 +112,6 @@ impl interface_acp::Factory for ProjectFactory {
                 "ACP composition returned a different project"
             ));
         }
-        if agent.inner.scratch.lock().unwrap().is_some() {
-            agent.close().await?;
-            return Err(base::anyhow!(
-                "a project-aware ACP host must supply data_dir"
-            ));
-        }
         let harness = agent.inner.harness.clone();
         if let Err(error) = harness
             .load(Arc::new(interface_acp::AcpPlugin { sink }))
@@ -118,7 +120,19 @@ impl interface_acp::Factory for ProjectFactory {
             agent.close().await?;
             return Err(error);
         }
+        self.2
+            .lock()
+            .unwrap()
+            .insert(api_key(harness.as_ref()), agent);
         Ok(harness)
+    }
+
+    async fn dispose(&self, api: base::Api) -> base::Result<()> {
+        let agent = self.2.lock().unwrap().remove(&api_key(api.as_ref()));
+        if let Some(agent) = agent {
+            agent.close().await?;
+        }
+        Ok(())
     }
 
     fn list(&self, project: Option<&Path>) -> base::Result<Vec<base::SessionData>> {
@@ -267,8 +281,13 @@ impl Agent {
         routes: Arc<Routes>,
     ) -> Arc<dyn interface_acp::Factory> {
         match compose {
-            Some(compose) => Arc::new(ProjectFactory(compose, self.clone())),
-            None => Arc::new(Factory(self.clone(), routes, Mutex::default())),
+            Some(compose) => Arc::new(ProjectFactory(compose, self.clone(), Mutex::default())),
+            None => Arc::new(Factory(
+                self.clone(),
+                routes,
+                Mutex::default(),
+                Mutex::default(),
+            )),
         }
     }
 
@@ -304,7 +323,12 @@ impl Agent {
     }
 }
 
-struct Factory(Agent, Arc<Routes>, Mutex<Option<Sink>>);
+struct Factory(
+    Agent,
+    Arc<Routes>,
+    Mutex<Option<Sink>>,
+    Mutex<BTreeMap<String, Sink>>,
+);
 #[async_trait::async_trait]
 impl interface_acp::Factory for Factory {
     async fn declaration(&self) -> base::Result<Value> {
@@ -320,10 +344,28 @@ impl interface_acp::Factory for Factory {
         project == self.0.inner.project
     }
     async fn build(&self, project: &Path, sink: Sink) -> base::Result<base::Api> {
+        self.build_for(project, None, sink).await
+    }
+    async fn build_for(
+        &self,
+        project: &Path,
+        reopening: Option<&str>,
+        sink: Sink,
+    ) -> base::Result<base::Api> {
         base::ensure!(
             project == self.0.inner.project,
             "ACP cwd must be the configured project"
         );
+        if let Some(id) = reopening {
+            let mut routes = self.1.attached.lock().unwrap();
+            base::ensure!(
+                !routes.contains_key(id)
+                    && base::AgentApi::snapshot(self.0.inner.harness.as_ref(), id).is_err(),
+                base::OperationError::Busy("session is already open by another writer".into())
+            );
+            routes.insert(id.into(), sink.clone());
+            self.3.lock().unwrap().insert(id.into(), sink.clone());
+        }
         *self.2.lock().unwrap() = Some(sink);
         Ok(self.0.inner.harness.clone())
     }
@@ -353,10 +395,15 @@ impl interface_acp::Factory for Factory {
             servers.as_array().is_some_and(Vec::is_empty),
             "ACP cannot add MCP servers to a composed agent"
         );
-        self.1.attached.lock().unwrap().insert(session.into(), sink);
+        let mut routes = self.1.attached.lock().unwrap();
+        routes.insert(session.into(), sink.clone());
+        self.3.lock().unwrap().insert(session.into(), sink);
         Ok(())
     }
     async fn detach(&self, _: base::Api, session: &str) {
-        self.1.attached.lock().unwrap().remove(session);
+        let mut routes = self.1.attached.lock().unwrap();
+        if self.3.lock().unwrap().remove(session).is_some() {
+            routes.remove(session);
+        }
     }
 }

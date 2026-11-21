@@ -121,7 +121,8 @@ pub struct HandedBack {
 }
 
 /// How a turn ended.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Outcome {
     Completed,
     Cancelled,
@@ -142,7 +143,8 @@ impl Outcome {
 }
 
 /// Whether the input started a turn, or was settled without one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Disposition {
     Turn,
     Handled,
@@ -150,7 +152,8 @@ pub enum Disposition {
 }
 
 /// A tool call's recorded result.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolResult {
     pub call_id: String,
     pub name: String,
@@ -158,6 +161,7 @@ pub struct ToolResult {
     pub value: Option<Value>,
     /// Shared Content parts, including any non-text parts.
     pub content: Vec<Value>,
+    #[serde(skip)]
     text: String,
 }
 
@@ -199,7 +203,8 @@ impl From<Option<String>> for PromptOptions {
 }
 
 /// What `prompt` returns.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptResult {
     pub input_id: String,
     pub disposition: Disposition,
@@ -932,8 +937,8 @@ impl Session {
         })
     }
 
-    /// The outcome of the session's most recent turn, as recorded.
-    pub fn last_turn(&self) -> Result<Option<PromptResult>> {
+    /// This actor's view of the latest settled turn. Does not wait for running work.
+    pub async fn last_turn(&self) -> Result<Option<PromptResult>> {
         self.require("watch")?;
         let data = self.inner.harness.snapshot(&self.id)?;
         let Some(end) = data.entries.iter().rev().find(|e| e.kind == "turn.end") else {
@@ -941,12 +946,41 @@ impl Session {
         };
         let result: base::TurnResult =
             serde_json::from_value(end.content.clone().unwrap_or_default())?;
-        Ok(Some(from_turn(
-            String::new(),
+        let result = from_turn(
+            data.entries
+                .iter()
+                .find(|e| e.kind == "input" && e.scope.turn == end.scope.turn)
+                .and_then(|e| e.content.as_ref())
+                .and_then(|v| v["inputId"].as_str())
+                .unwrap_or_default()
+                .into(),
             &result,
             end.scope.turn.clone(),
             &data,
-        )))
+        );
+        let scope = base::Scope {
+            actor: self.actor.clone(),
+            ..end.scope.clone()
+        };
+        let gated = self
+            .inner
+            .harness
+            .output(
+                &scope,
+                base::Output {
+                    recipient: self.actor.clone(),
+                    value: json!({"method":"lastTurn","result":result}),
+                    stream: None,
+                    end: true,
+                },
+            )
+            .await?
+            .ok_or_else(|| Error::new(Code::Withheld, "last turn withheld"))?;
+        let mut result: PromptResult = serde_json::from_value(gated["result"].clone())?;
+        for tool in &mut result.tool_results {
+            tool.text = base::wire::text(&json!(tool.content));
+        }
+        Ok(Some(result))
     }
 
     /// Whether this session is currently driving a turn.
@@ -1090,8 +1124,7 @@ impl Session {
     /// Run a command without starting a turn. The result is text, if any.
     pub async fn run_command(&self, line: &str) -> Result<Option<String>> {
         self.require("input")?;
-        let line = line.trim().trim_start_matches('/');
-        let (name, args) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let (name, args) = crate::plugin::command_line(line);
         if !self.commands()?.iter().any(|command| command == name) {
             return Err(Error::new(
                 Code::NotFound,
@@ -1101,7 +1134,7 @@ impl Session {
         let value = self
             .inner
             .harness
-            .command(&self.scope(), name, args.trim())
+            .command(&self.scope(), name, args)
             .await?;
         Ok(if let Some(content) = value.get("content") {
             Some(base::wire::text(content))

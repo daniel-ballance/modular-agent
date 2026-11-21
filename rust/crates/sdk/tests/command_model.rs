@@ -32,7 +32,7 @@ async fn auxiliary_requests_use_the_command_step_without_running_tools() -> Resu
         session.run_command("/summarize").await?.as_deref(),
         Some("ready")
     );
-    assert!(session.last_turn()?.is_none());
+    assert!(session.last_turn().await?.is_none());
     let history = session.history().await?;
     let requests: Vec<_> = history
         .iter()

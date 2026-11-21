@@ -45,7 +45,7 @@ async fn handoff(
 
     let reader = connect_history(project, reader_dir, url, token_file).await?;
     let reopened = reader.open_session(&id).await?;
-    assert_eq!(reopened.last_turn()?.unwrap().text, "Whitby.");
+    assert_eq!(reopened.last_turn().await?.unwrap().text, "Whitby.");
     assert_eq!(
         reopened.prompt("When is high tide there?").await?.text,
         "14:02."

@@ -18,12 +18,14 @@ mod acp;
 mod agent;
 mod api_key;
 mod configuration;
+mod context;
 mod core;
 mod credentials;
 mod error;
 mod events;
 mod history;
 mod hooks;
+mod jobs;
 mod parts;
 mod plugin;
 mod provider;
@@ -39,6 +41,7 @@ pub use agent::{
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
 pub use configuration::FilesConfiguration;
+pub use context::{HistoryPage, HookContext};
 pub use credentials::{
     Activation, CredentialStore, SecretJournal, SecretRequest, StagingReceipt,
     environment_credentials, file_credentials,
@@ -51,6 +54,7 @@ pub use history::{
     serve_history,
 };
 pub use hooks::*;
+pub use jobs::{Job, JobOutcome, JobOwner, JobStart};
 pub use parts::{
     Configuration, Environment, Interface, Runtime, durable_runtime, local_environment, native,
     transient_runtime,

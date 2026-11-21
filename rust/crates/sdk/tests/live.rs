@@ -43,7 +43,7 @@ async fn check(
             text.push_str(event.data["delta"].as_str().unwrap());
         }
     }
-    let turn = session.last_turn()?.expect("streamed turn settled");
+    let turn = session.last_turn().await?.expect("streamed turn settled");
     assert_eq!(turn.outcome, Some(Outcome::Completed));
     assert!(!text.trim().is_empty());
     assert_eq!(text, turn.text);
