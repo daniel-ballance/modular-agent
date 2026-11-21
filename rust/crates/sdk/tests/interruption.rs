@@ -275,10 +275,9 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                             assert_eq!(v["error"]["data"]["code"], "lost", "{v}");
                             replied = true;
                         }
-                        let event = &v["params"]["update"]["_meta"]["modular-agent"]["event"];
-                        if event["type"] == "sessionInterrupted" {
-                            assert_eq!(event["sessionId"], *id);
-                            assert_eq!(event["data"]["reason"], reason);
+                        if v["method"] == "_modular-agent/interrupted" {
+                            assert_eq!(v["params"]["sessionId"], *id);
+                            assert_eq!(v["params"]["reason"], reason);
                             notified = true;
                         }
                     }

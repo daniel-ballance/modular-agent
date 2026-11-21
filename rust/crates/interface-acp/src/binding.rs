@@ -19,6 +19,7 @@ pub(crate) const EXTENSIONS: &[&str] = &[
     "erase",
     "jobs",
     "cancel-job",
+    "interrupted",
     "declaration",
     "withdraw",
     "drain",

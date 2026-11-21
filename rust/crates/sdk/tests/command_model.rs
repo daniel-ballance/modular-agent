@@ -63,3 +63,34 @@ async fn auxiliary_requests_use_the_command_step_without_running_tools() -> Resu
     assert_eq!(refused.err().unwrap().code(), Code::NotSupported);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_served_command_knows_its_session_project() -> Result<()> {
+    // command/run carries only the session and actor ids; a served command learns the
+    // project from host/session (docs/sdk/api.md, Commands).
+    let project = tempfile::tempdir().unwrap();
+    for over_wire in [false, true] {
+        let plugin = Plugin::new("where").command(Command::new(
+            "where",
+            "Name the project",
+            |_, cx| async move { Ok(Some(cx.project().display().to_string())) },
+        ));
+        let builder = test_agent().project(project.path());
+        let agent = if over_wire {
+            builder.over_wire(plugin)
+        } else {
+            builder.plugin(plugin)
+        }
+        .build()
+        .await?;
+        let session = agent.session().await?;
+        let named = session.run_command("/where").await?.unwrap_or_default();
+        assert_eq!(
+            std::fs::canonicalize(&named).ok(),
+            std::fs::canonicalize(project.path()).ok(),
+            "over_wire={over_wire}: {named:?}"
+        );
+        agent.close().await?;
+    }
+    Ok(())
+}

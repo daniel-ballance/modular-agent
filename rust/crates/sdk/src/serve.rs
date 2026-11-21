@@ -486,6 +486,17 @@ impl Endpoint for Served {
                     .iter()
                     .find(|c| p["name"] == c.name)
                     .ok_or_else(|| Fault::new("not_found", "unknown command"))?;
+                // command/run carries only the session and actor ids; the session's project,
+                // which the command's environment calls use, comes from host/session
+                // (docs/sdk/api.md, Commands).
+                let session = peer
+                    .call(
+                        "host/session",
+                        json!({"sessionId": p["sessionId"], "parentRequestId": id}),
+                        None,
+                        cancel.clone(),
+                    )
+                    .await?;
                 let settled = CancellationToken::new();
                 let _guard = settled.clone().drop_guard();
                 let work = ToolContext {
@@ -493,7 +504,7 @@ impl Endpoint for Served {
                         .jobs
                         .clone()
                         .map(|owner| (self.plugin.name.clone(), owner)),
-                    project: p["project"].as_str().unwrap_or_default().into(),
+                    project: session["project"].as_str().unwrap_or_default().into(),
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: p["actorId"].as_str().unwrap_or_default().into(),
                     call_id: String::new(),

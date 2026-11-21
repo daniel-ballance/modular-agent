@@ -65,9 +65,13 @@ pub(crate) async fn pump(
                                 streamed.clear();
                                 thoughts.clear();
                                 questions.abort_all();
-                                notify(&cx, &session.id, json!({"sessionUpdate":"agent_message_chunk",
-                                    "content":{"type":"text","text":""},
-                                    "_meta":{"modular-agent":{"event":{"type":"sessionInterrupted","time":event.at,"sessionId":session.id,"data":c}}}}))
+                                // The binding's projection of session interrupted (docs/bindings/acp.md, Updates).
+                                acp::UntypedMessage::new(
+                                    "_modular-agent/interrupted",
+                                    json!({"sessionId":session.id,"reason":c["reason"]}),
+                                )
+                                .and_then(|message| cx.send_notification(message))
+                                .map_err(Into::into)
                             },
                             "job.ended" => { session.wake.notify_one(); Ok(()) },
                             "request.answered" => {
