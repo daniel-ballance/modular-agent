@@ -106,10 +106,11 @@ impl Function {
     }
     /// The tool input for a Python call. Keywords, positions, or one dict.
     pub fn input(&self, args: &CallArgs) -> Result<Value> {
-        let mut positional = vec![];
-        while let Some(value) = args.arg(positional.len()) {
-            positional.push(convert::to_json(value));
-        }
+        let mut json = convert::Arguments::default();
+        let mut positional = args
+            .args()
+            .map(|value| json.value(value))
+            .collect::<Result<Vec<_>>>()?;
         let mut input = serde_json::Map::new();
         let first_is_object = self
             .parameters
@@ -132,7 +133,7 @@ impl Function {
                 .as_str()
                 .ok_or_else(|| anyhow!("keyword names must be strings"))?;
             ensure!(!input.contains_key(key), "got two values for {key}");
-            input.insert(key.to_owned(), convert::to_json(value));
+            input.insert(key.to_owned(), json.value(value)?);
         }
         // None means "left out", as the signatures' defaults say.
         input.retain(|_, value| !value.is_null());

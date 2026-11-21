@@ -5180,6 +5180,7 @@ dependencies = [
  "libc",
  "modular-agent",
  "monty-pool",
+ "monty-proto",
  "monty-types",
  "serde",
  "serde_json",

@@ -1,9 +1,12 @@
 //! Render the last Python value without losing types or dictionary order in JSON.
 use monty_types::{
-    FormatFloat,
+    FormatFloat, StringRepr,
     unstable::{MontyGraph, MontyNode, NodeId},
 };
-use std::fmt::{self, Write};
+use std::{
+    fmt::{self, Write},
+    iter::once,
+};
 
 pub(super) fn key(node: &MontyNode) -> Option<String> {
     Some(match node {
@@ -80,7 +83,7 @@ pub(super) fn value(out: &mut String, graph: &MontyGraph, root: NodeId, cap: usi
             let _ = write_json(&mut sink, graph, root, 0);
         }
         _ => {
-            let _ = write!(sink, "{}", graph.value(root));
+            let _ = write_repr(&mut sink, graph, root);
         }
     }
 }
@@ -130,6 +133,103 @@ fn write_json(out: &mut Prefix<'_>, graph: &MontyGraph, id: NodeId, depth: usize
     } else {
         out.write_str(&key(node).expect("validated JSON scalar"))
     }
+}
+
+enum Repr<'a> {
+    Text(&'a str),
+    Node(NodeId),
+}
+
+fn separated<'a, const N: usize>(
+    entries: impl Iterator<Item = [Repr<'a>; N]>,
+) -> impl Iterator<Item = Repr<'a>> {
+    entries.enumerate().flat_map(|(i, parts)| {
+        (i != 0)
+            .then_some(Repr::Text(", "))
+            .into_iter()
+            .chain(parts)
+    })
+}
+
+/// Walk container representations here so even a nested singleton tuple
+/// keeps its comma, which Monty's worker-side value formatter drops.
+fn repr_parts<'a>(
+    graph: &'a MontyGraph,
+    id: NodeId,
+) -> Option<Box<dyn Iterator<Item = Repr<'a>> + 'a>> {
+    use Repr::{Node, Text};
+    let surround = |open, contents: Box<dyn Iterator<Item = Repr<'a>> + 'a>, close| {
+        Box::new(once(Text(open)).chain(contents).chain(once(Text(close))))
+            as Box<dyn Iterator<Item = Repr<'a>> + 'a>
+    };
+    let items = |ids: &'a [NodeId]| Box::new(separated(ids.iter().map(|&id| [Node(id)])));
+    Some(match graph.node(id) {
+        MontyNode::List(ids) => surround("[", items(ids), "]"),
+        MontyNode::Tuple(ids) => surround("(", items(ids), if ids.len() == 1 { ",)" } else { ")" }),
+        MontyNode::Set(ids) if ids.is_empty() => Box::new(once(Text("set()"))),
+        MontyNode::Set(ids) => surround("{", items(ids), "}"),
+        MontyNode::FrozenSet(ids) if ids.is_empty() => Box::new(once(Text("frozenset()"))),
+        MontyNode::FrozenSet(ids) => surround("frozenset({", items(ids), "})"),
+        MontyNode::Dict(pairs) => surround(
+            "{",
+            Box::new(separated(
+                pairs.iter().map(|&(k, v)| [Node(k), Text(": "), Node(v)]),
+            )),
+            "}",
+        ),
+        MontyNode::NamedTuple {
+            type_name,
+            field_names,
+            values,
+        } => Box::new(
+            once(Text(type_name)).chain(surround(
+                "(",
+                Box::new(separated(
+                    field_names
+                        .iter()
+                        .zip(values)
+                        .map(|(name, &v)| [Text(name), Text("="), Node(v)]),
+                )),
+                ")",
+            )),
+        ),
+        MontyNode::ClassInstance { attrs, .. } => {
+            Box::new(once(Text(graph.value(id).type_name())).chain(surround(
+                "(",
+                Box::new(separated(attrs.iter().map(|&(k, v)| {
+                    let key = match graph.node(k) {
+                        MontyNode::String(s) => Text(s),
+                        _ => Node(k),
+                    };
+                    [key, Text("="), Node(v)]
+                }))),
+                ")",
+            )))
+        }
+        _ => return None,
+    })
+}
+
+fn write_repr(out: &mut Prefix<'_>, graph: &MontyGraph, root: NodeId) -> fmt::Result {
+    let mut stack: Vec<Box<dyn Iterator<Item = Repr<'_>>>> = vec![Box::new(once(Repr::Node(root)))];
+    while let Some(parts) = stack.last_mut() {
+        match parts.next() {
+            Some(Repr::Text(text)) => out.write_str(text)?,
+            Some(Repr::Node(id)) => {
+                if let Some(parts) = repr_parts(graph, id) {
+                    stack.push(parts);
+                } else if let MontyNode::String(s) = graph.node(id) {
+                    write!(out, "{}", StringRepr(s))?;
+                } else {
+                    write!(out, "{}", graph.value(id))?;
+                }
+            }
+            None => {
+                stack.pop();
+            }
+        }
+    }
+    Ok(())
 }
 
 fn quoted(out: &mut Prefix<'_>, s: &str) -> fmt::Result {
@@ -208,10 +308,10 @@ mod tests {
         );
         assert_eq!(
             render(MontyObject::dict([(
-                MontyObject::tuple([MontyObject::int(1), MontyObject::int(2)]),
+                MontyObject::tuple([MontyObject::int(1)]),
                 MontyObject::bool(true)
             )])),
-            "{(1, 2): True}"
+            "{(1,): True}"
         );
     }
 }
