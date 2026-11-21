@@ -8,12 +8,28 @@ No private ma-process protocol or Python serialization is used.
 
 import asyncio
 import json
+from contextvars import ContextVar
 
 from ma_core import AgentError
 
 MAX_FRAME = 64 * 1024 * 1024
 MAX_REQUEST_IDS = 2**20
 MAX_ACTIVE_REQUESTS = 256
+MAX_NOTIFICATIONS = 1024
+STREAMS = {
+    "tools/call": "tools/progress",
+    "env/exec": "env/output",
+    "provider/request": "provider/event",
+    "host/env/exec": "host/env/output",
+    "host/runtime/model": "host/runtime/modelEvent",
+}
+# Inherited by child tasks, unlike a test of asyncio.current_task().
+handling_notification = ContextVar("handling_plugin_notification", default=None)
+
+
+def job_scope(params):
+    job = params.get("jobId")
+    return ("job", job) if isinstance(job, str) else None
 
 
 def rpc_id(value):
@@ -53,6 +69,7 @@ class Peer:
         *,
         frames=None,
         close_after_shutdown=False,
+        prepare_notification=None,
     ):
         self.reader, self.writer = reader, writer
         self.frames = frames
@@ -67,10 +84,15 @@ class Peer:
         self.sequence = 0
         self.lock = asyncio.Lock()
         self.closed = asyncio.Event()
-        self.notes = None
-        self.note_requests = set()
-        self.note_tasks = set()
+        self.prepare_notification = prepare_notification
+        self.outgoing_methods = {}
+        self.request_notes = {}
+        self.notes = asyncio.Queue(MAX_NOTIFICATIONS)
+        self.note_bytes = 0
+        self.note_tails = {}
+        self.current_note = None
         self.deliveries = set()
+        self.note_worker = asyncio.create_task(self._run_notifications())
         self.reader_task = asyncio.create_task(self._read())
         self.liveness_task = None
 
@@ -137,6 +159,11 @@ class Peer:
     async def request(
         self, method, params, *, key=None, return_on_cancel=False, cancel_on_interrupt=True
     ):
+        note = handling_notification.get()
+        if method in STREAMS and note is not None and note is self.current_note:
+            # A nested stream on this peer would need to deliver pieces behind
+            # the notification currently waiting for it. Refuse before dispatch.
+            raise WireError("Cyclic plugin stream routing", "internal")
         self.sequence += 1
         key = key if key is not None else "r" + str(self.sequence)
         if not rpc_id(key) or key in self.sent_ids or len(self.sent_ids) >= MAX_REQUEST_IDS:
@@ -147,8 +174,9 @@ class Peer:
             self.last_received = asyncio.get_running_loop().time()
         self.pending[key] = future
         self.activity.set()
-        if asyncio.current_task() in self.note_tasks:
-            self.note_requests.add(key)
+        self.outgoing_methods[key] = method
+        if note is not None:
+            self.request_notes[key] = note
         try:
             await self.send({"id": key, "method": method, "params": params})
             return await asyncio.shield(future)
@@ -179,7 +207,8 @@ class Peer:
             self.activity.set()
             self.answered.discard(key)
             self.cancelled_outbound.discard(key)
-            self.note_requests.discard(key)
+            self.outgoing_methods.pop(key, None)
+            self.request_notes.pop(key, None)
             if future.done() and not future.cancelled():
                 future.exception()
 
@@ -191,12 +220,15 @@ class Peer:
         if key in self.started:
             task.cancel()
 
-    async def _answer(self, message):
+    async def _answer(self, message, after, note):
         key = message["id"]
         self.started.add(key)
+        token = handling_notification.set(note)
         try:
             if key in self.cancelled:
                 raise asyncio.CancelledError
+            if after:
+                await asyncio.shield(after)
             method = message["method"]
             result = (
                 {}
@@ -217,6 +249,8 @@ class Peer:
                     "data": {**getattr(exc, "details", {}), "code": code},
                 }
             }
+        finally:
+            handling_notification.reset(token)
         self.cancelled.add(key)  # Once answering, a late cancel must not interrupt the write.
         try:
             await self.send({"id": key, **answer})
@@ -235,26 +269,65 @@ class Peer:
             self.parents.pop(key, None)
             self.incoming_methods.pop(key, None)
 
-    async def _note(self, previous, message):
-        task = asyncio.current_task()
-        self.note_tasks.add(task)
-        try:
-            if previous:
-                await previous
-            if self.notification:
-                await self.notification(message["method"], message.get("params") or {})
-        finally:
-            self.note_tasks.discard(task)
+    async def _run_notifications(self):
+        while not self.closed.is_set():
+            work, scope, size, done = await self.notes.get()
+            self.current_note = done
+            token = handling_notification.set(done)
+            try:
+                await work()
+            except (Exception, asyncio.CancelledError):
+                # A failed notification has no reply and cannot poison the queue.
+                if self.closed.is_set():
+                    return
+            finally:
+                handling_notification.reset(token)
+                self.current_note = None
+                self.note_bytes -= size
+                if self.note_tails.get(scope) is done:
+                    self.note_tails.pop(scope, None)
+                done.set_result(None)
 
-    async def _deliver(self, previous, message):
+    def _admit_note(self, method, params, size):
+        if not (self.notification or self.prepare_notification):
+            return True
+        parent = params.get("parentRequestId")
+        scope = None
+        if method in STREAMS.values():
+            if (
+                not rpc_id(parent)
+                or parent in self.answered
+                or STREAMS.get(self.outgoing_methods.get(parent)) != method
+            ):
+                return True
+            scope = ("stream", parent)
+        elif method == "host/jobs/progress":
+            scope = job_scope(params)
+        if self.prepare_notification:
+            work = self.prepare_notification(method, params)
+            if work is None:
+                return True
+        else:
+
+            def work():
+                return self.notification(method, params)
+
+        if self.notes.full() or self.note_bytes + size > 2 * MAX_FRAME:
+            # Progress is expendable; a catalog invalidation is not.
+            return method in STREAMS.values() or method == "host/jobs/progress"
+        self.note_bytes += size
+        done = asyncio.get_running_loop().create_future()
+        self.notes.put_nowait((work, scope, size, done))
+        if scope is not None:
+            self.note_tails[scope] = done
+        return True
+
+    async def _deliver_after(self, previous, message):
+        await asyncio.shield(previous)
+        self._deliver(message)
+
+    def _deliver(self, message):
         future = self.pending.get(message["id"])
-        try:
-            if previous:
-                await previous
-        except Exception as exc:
-            if future is not None and not future.done():
-                future.set_exception(exc)
-            return
         if future is not None and not future.done():
             if "error" in message:
                 error = message["error"]
@@ -324,10 +397,13 @@ class Peer:
                         )
                     ):
                         break
+                    # The answer closes the parent immediately. Only its own
+                    # stream holds back delivery to the caller, not the reader.
                     self.answered.add(key)
-                    self._track(
-                        self._deliver(None if key in self.note_requests else self.notes, message)
-                    )
+                    if after := self.note_tails.get(("stream", key)):
+                        self._track(self._deliver_after(after, message))
+                    else:
+                        self._deliver(message)
                     continue
                 if (
                     not isinstance(message, dict)
@@ -354,15 +430,27 @@ class Peer:
                     if len(self.running) >= MAX_ACTIVE_REQUESTS:
                         await self._protocol_error(key, -32000, "internal", "Peer is busy")
                         continue
-                    self.parents[key] = params.get("parentRequestId")
+                    parent = params.get("parentRequestId")
+                    self.parents[key] = parent
                     self.incoming_methods[key] = method
-                    self.running[key] = asyncio.create_task(self._answer(message))
+                    after = None
+                    if method in {"host/jobs/end", "host/jobs/resume"}:
+                        after = self.note_tails.get(job_scope(params))
+                    elif (
+                        method == "host/hook"
+                        and params.get("hook") == "provider.response"
+                        and rpc_id(parent)
+                    ):
+                        after = self.note_tails.get(("stream", parent))
+                    # Carry cycle information across a reentrant wire callback.
+                    note = self.request_notes.get(parent) if rpc_id(parent) else None
+                    self.running[key] = asyncio.create_task(self._answer(message, after, note))
                 elif isinstance(params, dict):
                     if method == "$/cancel":
                         if rpc_id(params.get("id")):
                             self.cancel(params["id"])
-                    else:
-                        self.notes = asyncio.create_task(self._note(self.notes, message))
+                    elif not self._admit_note(method, params, len(raw)):
+                        break
         except (Exception, asyncio.CancelledError):
             pass
         finally:
@@ -375,6 +463,12 @@ class Peer:
                     )
             for key in list(self.running):
                 self.cancel(key)
+            self.note_worker.cancel()
+            while not self.notes.empty():
+                self.notes.get_nowait()
+            self.note_tails.clear()
+            for task in self.deliveries:
+                task.cancel()
 
     async def close(self):
         if self.liveness_task:
@@ -384,8 +478,7 @@ class Peer:
         await asyncio.gather(self.reader_task, return_exceptions=True)
         await asyncio.gather(*list(self.running.values()), return_exceptions=True)
         await asyncio.gather(*list(self.deliveries), return_exceptions=True)
-        if self.notes:
-            await asyncio.gather(self.notes, return_exceptions=True)
+        await asyncio.gather(self.note_worker, return_exceptions=True)
         if self.frames is not None:
             await self.frames.close()
         else:

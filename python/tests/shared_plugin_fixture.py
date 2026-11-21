@@ -295,12 +295,18 @@ class Fixture(PluginServer):
 
     async def handle(self, p, key):
         hook, value = p["hook"], p["payload"]
-        if hook == "output" and self.config.get("blockMethod"):
-            if any(
-                e["type"] == "reply" and e["data"]["method"] == self.config["blockMethod"]
-                for e in value["events"]
+        if hook == "output":
+            blocked = self.config.get("blockMethod")
+            if blocked and any(
+                e["type"] == "reply" and e["data"]["method"] == blocked for e in value["events"]
             ):
                 raise WireError("Gate failed", "internal")
+            if self.config.get("redactProblem"):
+                for event in value["events"]:
+                    if event["type"] == "python.plugin_problem":
+                        assert event["data"]["message"] == "carried on"
+                        event["data"]["message"] = "gated diagnostic"
+                return {"events": value["events"]}
         if hook == "turn.end" and self.config.get("turnEnd"):
             from pathlib import Path
 

@@ -54,14 +54,15 @@ The two [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_liv
 
 - **Shared scenarios:** 153/153 with `MODULAR_AGENT_SDK_REQUIRE=all`: all 17 in process, all 17 with each SDK's fixture programs on stdio, and all 17 with each SDK's fixtures over WebSocket.
 - **Reference `ma`:** 18/18. The stderr regression checks the actual dispatched `codemode` call, not `tool(null)`.
-- **ACP kit against `ma`:** 188/188 on stdio with crash, probe and job checks. The WebSocket run passed 177/179: the background prompt timed out, and the following reconnect check could not change a setting while the session was busy. An instrumented run passed the job and reconnect checks but missed an approval fixture deadline (191/192). The standard declaration keeps several actors, limits and tenants off.
+- **ACP kit against `ma`:** 188/188 on stdio and 193/193 over WebSocket, with crash, probe and job checks. The standard declaration keeps several actors, limits and tenants off.
 - **Plugin kit:** 146/146 on stdio and 153/153 over WebSocket, with both Runtime tiers.
 - **History kit:** 42/42 through a custom `HistoryPort` served by `serve_history`, including acknowledged commits and lease exclusion after a restart with a shorter TTL.
 - **Session interruption:** seven public API cases cover failed appends and revoked leases. Embedded `prompt`, embedded `prompt_stream` and WebSocket ACP each settle with `lost`; a follower sees the live interruption and reopening recovers from the kept journal. A custom store's revocation notice interrupts an idle session before any renewal or write.
+- **Plugin connection callbacks:** on stdio and WebSocket, two image-bearing job progress updates reach the originating plugin’s output gate and the SDK event follower in order, before job end. The old Python host let job end overtake progress and could stall when a notification handler delegated a same-peer RPC to a child task. The peer now drains notifications in order without holding unrelated replies or callbacks. Tests also cover same-peer tool and environment streams, Provider pieces, Runtime callbacks and reports, catalog refresh, custom events and diagnostics.
 - **SDK API regressions:** four follower cases preserve image progress through local and served tools and Runtimes. Three proposal cases check conflicts after release, decline and withdrawal. A history port case checks metadata and both page cursors; two Provider cases check the declaration in both placements.
 - **Command lifetime:** the WebSocket plugin kit checks disconnect cleanup. A regression also kills the agent's entire process group while a background descendant is still running; the separate lifetime watcher must survive the group kill and stop it on pipe EOF.
 - **Secret crash recovery:** three actual SIGKILL cutoffs: after staging, after committing the selection, and after activation. A separate test checks idempotence and generations.
-- **Python suites:** 511 passed and 2 live checks skipped in transient/native, durable/native and durable/process. Transient/process reported 505 passed, 2 skipped and 6 failures: one parked-child question timeout followed by five offline process-cleanup timeouts. Ruff lint, Ruff format (194 files) and strict mypy (38 source files) passed.
+- **Python suites:** 516 passed and 2 live checks skipped in each of the four transient/durable and local/process combinations. Ruff lint, Ruff format (195 files) and strict mypy (38 source files) passed.
 
 ## Built so far
 

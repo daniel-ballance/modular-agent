@@ -752,7 +752,7 @@ class _MemoryExternal(External):  # type: ignore[misc]  # Untyped base adapter.
             left.close()
             right.close()
             raise
-        self.peer = Peer(*host, self.callback, self.notification, self.name)
+        self.peer = self.connection(*host)
         self._task = asyncio.create_task(_serve(self.spec["_over_wire"], plugin))
 
     async def stop(self) -> None:

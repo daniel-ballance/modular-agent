@@ -93,7 +93,7 @@ async def test_external_replacements_remove_local_registrations(
 async def test_shared_plugin_host_callbacks_and_list_refresh(tmp_path, monkeypatch, runtime_type):
     spec = {
         "command": [str(ROOT / ".venv/bin/python"), str(ROOT / "tests/shared_plugin_fixture.py")],
-        "config": {"project": str(tmp_path)},
+        "config": {"project": str(tmp_path), "hooks": ["output"], "redactProblem": True},
     }
     monkeypatch.setenv("MODULAR_AGENT_PLUGINS", json.dumps([spec]))
     h = await build(tmp_path / "state", Fake(), runtime=runtime_type(), project=tmp_path)
@@ -101,7 +101,16 @@ async def test_shared_plugin_host_callbacks_and_list_refresh(tmp_path, monkeypat
         sid = (await h.api().session("create", project=str(tmp_path), settings={"model": "fake"}))[
             "id"
         ]
-        result = await h.api().session("command", session=sid, text="/probe callbacks")
+        diagnostic = asyncio.get_running_loop().create_future()
+
+        async def follow(event):
+            if event["kind"] == "plugin_problem" and not diagnostic.done():
+                diagnostic.set_result(event["message"])
+
+        h.api().follow("operator", follow)
+        async with asyncio.timeout(5):
+            result = await h.api().session("command", session=sid, text="/probe callbacks")
+            assert await diagnostic == "gated diagnostic"
         value = json.loads(result["output"])
         assert value["binary"] == {"data": "AP+A"}
         assert value["exists"] == {"exists": True}
