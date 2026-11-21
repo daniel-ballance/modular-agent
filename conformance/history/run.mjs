@@ -16,8 +16,8 @@ const isolation = flag === "--isolation-checks";
 const [otherUrl, otherTokenFile] = isolation ? extra : [];
 const restartFlag = isolation ? undefined : flag;
 const restartCommand = extra;
-if (!url || !tokenFile || (registryChecks && flag !== "--restart") || (isolation && extra.length !== 2) || (restartFlag !== undefined && (!["--restart", "--restart-ttl"].includes(restartFlag) || restartCommand[0] !== "--" || !restartCommand[1]))) {
-	console.error("Usage: node run.mjs <service url> <token file> [--restart|--restart-ttl -- <service command> [args...] | --isolation-checks <second URL> <second token file> | --erasure-registry-checks --restart -- <service command> [args...]]");
+if (!url || !tokenFile || (registryChecks && !["--restart", "--restart-ttl"].includes(flag)) || (isolation && extra.length !== 2) || (restartFlag !== undefined && (!["--restart", "--restart-ttl"].includes(restartFlag) || restartCommand[0] !== "--" || !restartCommand[1]))) {
+	console.error("Usage: node run.mjs <service url> <token file> [--restart|--restart-ttl -- <service command> [args...] | --isolation-checks <second URL> <second token file> | --erasure-registry-checks (--restart|--restart-ttl) -- <service command> [args...]]");
 	process.exit(2);
 }
 const base = new URL(url);

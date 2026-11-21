@@ -33,7 +33,7 @@ node conformance/history/run.mjs "$MODULAR_AGENT_HISTORY_URL" "$MODULAR_AGENT_HI
   --erasure-registry-checks --restart -- <service command> [args...]
 ```
 
-Use the same foreground command and disposable store rules as for `--restart`. Use a fixed TTL such as 2,500 ms. The option fails if the service does not declare `pendingErasure: 1`; the remaining profile checks run only if it does. Separate wire client processes publish a mark, refuse a cached copy, and complete it under a new lease. The kit restarts the service with the mark pending and again after completion. The reader fixture checks the wire cutoff; it does not test an SDK's delivery, dispatch or Provider behavior.
+Use the same foreground command and disposable store rules as for `--restart`; a service that changes its TTL across restart, such as the Rust SDK's example, uses `--restart-ttl` instead. Use a fixed TTL such as 2,500 ms. The option fails if the service does not declare `pendingErasure: 1`; the remaining profile checks run only if it does. Separate wire client processes publish a mark, refuse a cached copy, and complete it under a new lease. The kit restarts the service with the mark pending and again after completion. The reader fixture checks the wire cutoff; it does not test an SDK's delivery, dispatch or Provider behavior.
 
 Stop any service you started and remove the scratch directory after use. Exit code 0 means all checks run passed.
 

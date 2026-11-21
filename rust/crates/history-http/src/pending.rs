@@ -113,7 +113,6 @@ impl Intent {
             session_ids: self
                 .plans
                 .iter()
-                .filter(|(session, _)| session != &self.source)
                 .map(|(session, _)| session.clone())
                 .collect(),
         }

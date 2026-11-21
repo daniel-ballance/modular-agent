@@ -951,15 +951,12 @@ impl HistoryStore for HttpHistory {
                 && published
                     .session_ids
                     .iter()
-                    .all(|sid| pending::path_id(sid) && sid != session),
+                    .all(|sid| pending::path_id(sid)),
             registry_unavailable("invalid erasure publication response")
         );
         if published.intent_id == intent.intent_id {
             ensure!(
-                published
-                    .session_ids
-                    .iter()
-                    .eq(affected.keys().filter(|sid| sid.as_str() != session)),
+                published.session_ids.iter().eq(affected.keys()),
                 registry_unavailable(
                     "erasure publication did not return the submitted destinations"
                 )
@@ -968,8 +965,8 @@ impl HistoryStore for HttpHistory {
         }
         // Recover the source plan and every published destination, even if unlisted.
         let mut original = BTreeMap::new();
-        for sid in std::iter::once(session).chain(published.session_ids.iter().map(String::as_str))
-        {
+        // sessionIds lists every copy set's session, the source's included (history-http.md).
+        for sid in published.session_ids.iter().map(String::as_str) {
             let plan = self
                 .erasure_plans(sid)?
                 .1

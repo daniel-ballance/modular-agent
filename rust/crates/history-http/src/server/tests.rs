@@ -67,7 +67,7 @@ fn publication_keeps_unlisted_destinations_in_the_original_order() -> agent_api:
             )
             .unwrap();
     }
-    let expected = json!({"intentId":"original","sessionIds":["z-destination","a-destination"]});
+    let expected = json!({"intentId":"original","sessionIds":["z-destination",source,"a-destination"]});
     let (published, repeated) = io().block_on(async {
         let lease = service.acquire(source, "first-writer").await.unwrap().lease;
         let registry = service.erasure_plans(source, None, 500).await.unwrap();
