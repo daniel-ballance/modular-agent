@@ -248,23 +248,34 @@ class PendingErasure:
                     continue
                 raise
             break
-        intent = reply.get("intentId")
-        if not _id(intent) or intent in {".", ".."}:
+        intent, destinations = reply.get("intentId"), reply.get("sessionIds")
+        if (
+            set(reply) != {"intentId", "sessionIds"}
+            or not _id(intent)
+            or intent in {".", ".."}
+            or not isinstance(destinations, list)
+            or any(not _id(dest) or dest in {".", ".."} for dest in destinations)
+            or len(set(destinations)) != len(destinations)
+            or sid in destinations
+        ):
             raise AgentError("Invalid erasure publication response", "unavailable")
-        # A duplicate can return a plan different from this discovery. The
-        # returned intent, not the proposed copy set, determines the work.
+        # The session list does not include expired destinations. Use the
+        # original publication's destinations, whose plans are still readable.
         while True:
-            revision, _ = await self.registry(sid)
+            revision, source_plans = await self.registry(sid)
             progress = []
-            for dest in sessions:
-                current, plans = await self.registry(dest)
+            for dest in [sid, *destinations]:
+                current, plans = (
+                    (revision, source_plans) if dest == sid else await self.registry(dest)
+                )
                 if current != revision:
                     self._check(sid, lease)
                     break
-                progress.extend(self._progress(dest, [p for p in plans if p["intentId"] == intent]))
-            else:
-                if not any(p["sessionId"] == sid for p in progress):
+                plan = next((p for p in plans if p["intentId"] == intent), None)
+                if plan is None or plan["sourceSessionId"] != sid:
                     raise AgentError("Published erasure plan is missing", "unavailable")
+                progress.extend(self._progress(dest, [plan]))
+            else:
                 return progress
 
     async def erase(self, d, emit):

@@ -78,6 +78,15 @@ class Registry:
             "SELECT id FROM registry_intents WHERE source=? AND targets=?", (source, targets)
         ).fetchone()
 
+    def destinations(self, intent, source):
+        return [
+            session
+            for (session,) in self.db.execute(
+                "SELECT session FROM registry_plans WHERE intent=? AND session!=? ORDER BY rowid",
+                (intent, source),
+            )
+        ]
+
     def copy_sets(self, intent):
         return {
             session: (record, {copy["entryId"] for copy in json.loads(copies)})

@@ -16,6 +16,7 @@ from modular_agent import (
     sqlite_history_port,
 )
 from modular_agent.testing import scripted_provider
+from ma_history.http import HTTPHistory
 
 
 async def test_held_fork_is_pending_and_next_writer_confirms_it(tmp_path):
@@ -89,6 +90,58 @@ async def test_http_history_discovers_registry_and_reconciles_on_takeover(tmp_pa
                 duplicate = await loaded.send("ignored", "now", key="spent")
                 assert duplicate.duplicate and not duplicate.input_id
     finally:
+        server.close()
+
+
+@pytest.mark.loopback
+async def test_http_republication_recovers_original_destinations_in_order(tmp_path):
+    token = tmp_path / "token"
+    token.write_text("c79e2509a4395582e0fac55c25c18df1")
+    directory = tmp_path / "store"
+    server = serve_history(file_history(directory), address=("127.0.0.1", 0), token_file=token)
+    http = HTTPHistory(server.url, token)
+    http.token = token.read_text()
+    destinations = ["z-copy", "source", "a-copy"]
+    try:
+        for sid in destinations:
+            path = http.path(sid)
+            await http.request("PUT", path, {"project": str(tmp_path), "created": 0})
+            await http.acquire(sid)
+            await http.erasure_request(
+                sid,
+                http.leases[sid],
+                path + "/entries",
+                {"entries": [{"id": "target", "parentId": None, "kind": "input"}]},
+            )
+            if sid != "source":
+                await http.close({"session": sid}, None)
+        revision, _ = await http.registry("source")
+        body = {
+            "intentId": "original",
+            "revision": revision,
+            "entryIds": ["target"],
+            "copies": [
+                {"sessionId": sid, "recordId": "mark", "entryIds": ["target"]}
+                for sid in destinations
+            ],
+        }
+        path = http.registry_path("source")
+        lease = http.leases["source"]
+        expected = {"intentId": "original", "sessionIds": ["z-copy", "a-copy"]}
+        assert await http.erasure_request("source", lease, path, body) == expected
+
+        # Simulate retention reclaiming records while keeping the ID and its plans reserved.
+        with closing(sqlite3.connect(directory / "history-service" / "records.db")) as db, db:
+            db.execute("DELETE FROM entries WHERE session='z-copy'")
+        assert {row["id"] for row in await http.list({}, None)} == {"source", "a-copy"}
+        assert await http.erasure_request("source", lease, path, body) == expected
+        repeated = {**body, "intentId": "new", "copies": [body["copies"][1]]}
+        assert await http.erasure_request("source", lease, path, repeated) == expected
+        progress = await http.publish_erasure({"session": "source", "entries": ["target"]}, None)
+        assert [copy["sessionId"] for copy in progress] == ["source", "z-copy", "a-copy"]
+        assert all(copy["intent"] == "original" and not copy["confirmed"] for copy in progress)
+    finally:
+        await http.stop()
         server.close()
 
 

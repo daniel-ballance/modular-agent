@@ -348,9 +348,10 @@ class Store:
         if saved := registry.intent(intent):
             if saved != (sid, targets) or registry.copy_sets(intent) != sets:
                 raise Refusal(409, "conflict")
-            return {"intentId": intent}
+            return {"intentId": intent, "sessionIds": registry.destinations(intent, sid)}
         if saved := registry.operation(sid, targets):
-            return {"intentId": saved[0]}
+            original = saved[0]
+            return {"intentId": original, "sessionIds": registry.destinations(original, sid)}
         if body["revision"] != revision:
             raise Refusal(409, "stale_revision")
         for destination in sets:
@@ -378,7 +379,7 @@ class Store:
                 raise Refusal(413, "request_too_large")
             plans[destination] = plan
         registry.publish(sid, targets, intent, plans)
-        return {"intentId": intent}
+        return {"intentId": intent, "sessionIds": [dest for dest in plans if dest != sid]}
 
     def complete(self, sid, intent, entries):
         plan = next((p for p in self.registry.plans(sid) if p["intentId"] == intent), None)
