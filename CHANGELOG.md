@@ -4,7 +4,7 @@ The four SDKs share one version, the revision of the [SDK specification](docs/sd
 
 ## Unreleased
 
-- **Go `ma` now uses the pinned Monty 1.6.0 worker.** `import tools` and function aliases work in all four builds. Build the worker with Go `ma`; it runs beside the agent and is never downloaded at run time. All four builds pass 19 reference checks.
+- **One codemode in all four `ma` builds.** Go dropped gomonty (Monty 0.0.9) and drives the pinned Monty 1.6.0 worker over its protocol; the worker is built with Go `ma` and never downloaded at run time ([research](docs/research/codemode-engines.md)). The [Tools section](docs/reference/standard-configuration.md#tools) now fixes one exact profile: `import tools` and tool functions as values, alphabetical positional order for optional fields, how a value, an error and the print limit are rendered, the compute clock totalled across pauses and reset only by a tool call, and no wall clock, sleep or system entropy. Five new reference checks; all four builds pass 23 of 23.
 
 - **Session interrupted, a new standard event.** When an agent stops writing a session because a commit failed or it lost writer access, it now tells everyone following the session, and a caller waiting on the session fails with `lost`. Before, it stopped silently, and a client following events waited forever.
 - **Specified [ADR 0029](docs/adr/0029-sdk-decisions-after-four-builds.md):** ACP service liveness and token scope, rejection of persistent history under `ephemeral`, scoped model requests from commands, and a shared API-key model table.
