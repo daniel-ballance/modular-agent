@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { Actor, AgentOptions, Answer, InputTiming, PromptResult, ServicePlugin, Session } from "@modular-agent/core";
+import { AgentError, fileHistory, httpHistory, serveHistory, type Actor, type AgentOptions, type Answer, type InputTiming, type PromptResult, type ServicePlugin, type Session } from "@modular-agent/core";
 import { answers, testAgent, type ScriptStep } from "@modular-agent/core/testing";
 import { count, fixture } from "./index.js";
 
@@ -25,8 +25,6 @@ export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Pla
   const out: Placement[] = [{ name: "inProcess" }];
   const available = new Set<string>();
   const services: Placement[] = [];
-  // Inspect just these service SDKs during incremental integration. By default run every built SDK.
-  const selectedServices = process.env.MODULAR_AGENT_SDK_SERVICE?.split(",").map(s => s.trim());
   for (const file of files(join(repo, "conformance/sdk/fixtures"))) {
     const { sdk, build, command } = load<{ sdk: string; build: string; command: string[] }>(file);
     const argv = command.map(a => a.replaceAll("{repo}", repo));
@@ -38,7 +36,7 @@ export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Pla
     }
     available.add(sdk);
     out.push({ name: `process:${sdk}`, command: argv });
-    if (!selectedServices || selectedServices.includes(sdk)) services.push({ name: `service:${sdk}`, command: argv });
+    services.push({ name: `service:${sdk}`, command: argv });
   }
   for (const sdk of required) if (!available.has(sdk)) throw new Error(`Required fixture program ${sdk} is not registered`);
   return [...out, ...services];
@@ -50,7 +48,10 @@ type Step = ({ prompt: string; as?: string; crashWhen?: Crash } | { reopen: true
   { send: string; timing?: InputTiming } | { answer: Answer } | { wait: true }) & { expect?: Expect };
 export interface Scenario {
   scenario: string;
-  agent: Pick<AgentOptions, "durability" | "approval" | "settings" | "severalActors"> & { plugins?: string[]; answers?: Answer[]; actors?: Actor[] };
+  agent: Pick<AgentOptions, "durability" | "approval" | "settings" | "severalActors"> & {
+    plugins?: string[]; answers?: Answer[]; actors?: Actor[]; history?: "file" | "service";
+  };
+  expectCreateError?: { code: string; messageContains: string };
   model: ScriptStep[];
   steps: Step[];
   placements?: string[];
@@ -59,14 +60,25 @@ export const loadScenario = load<Scenario>;
 export const applies = (s: Scenario, p: Placement) => !s.placements || s.placements.includes(p.name) || p.name.startsWith("process:") && s.placements.includes("process") || p.name.startsWith("service:") && s.placements.includes("service");
 const countFile = (dir: string) => join(dir, "count");
 
+async function fixtureHistory(s: Scenario, dir: string) {
+  if (!s.agent.history) return {};
+  const history = fileHistory(join(dir, "history"));
+  if (s.agent.history === "file") return { history };
+  if (s.agent.history !== "service") throw new Error(`Unknown history fixture ${s.agent.history}`);
+  const tokenFile = join(dir, "history-token");
+  if (!existsSync(tokenFile)) await writeFile(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600, flag: "wx" });
+  const service = await serveHistory(history, { address: "127.0.0.1:0", tokenFile });
+  return { history: httpHistory(service.url, tokenFile), stop: service.close };
+}
+
 export async function scenarioAgent(s: Scenario, dir: string, p: Placement,
-  handler = s.agent.answers && answers(s.agent.answers)) {
+  handler = s.agent.answers && answers(s.agent.answers), history?: AgentOptions["history"]) {
   const project = join(dir, "project");
   await mkdir(project, { recursive: true });
-  const { plugins = [], answers: _answers, actors: _actors, ...options } = s.agent;
+  const { plugins = [], answers: _answers, actors: _actors, history: _history, ...options } = s.agent;
   const config = { path: countFile(dir) };
   return testAgent({ ...options, script: s.model, project, dataDir: join(dir, "data"),
-    onQuestion: handler,
+    onQuestion: handler, history,
     ...(p.servicePlugins ? { servicePlugins: p.servicePlugins }
       : p.command ? { processPlugins: plugins.map(name => ({ command: [...p.command!, name], config })) }
       : { plugins: plugins.map(name => fixture(name, config)) }),
@@ -190,16 +202,30 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
   let a: Awaited<ReturnType<typeof scenarioAgent>> | undefined;
   let session: Session | undefined;
   let services: Awaited<ReturnType<typeof servicesFor>> | undefined;
+  let history: Awaited<ReturnType<typeof fixtureHistory>> = {};
   const stop = async () => {
     try { await a?.close(); }
     finally { a = undefined; session = undefined; await services?.stop(); services = undefined; }
   };
   const start = async () => {
     services = await servicesFor(s, dir, p);
-    try { return await scenarioAgent(s, dir, services.placement, handler); }
+    try { return await scenarioAgent(s, dir, services.placement, handler, history.history); }
     catch (error) { await stop(); throw error; }
   };
   try {
+    history = await fixtureHistory(s, dir);
+    if (s.expectCreateError) {
+      if (s.steps.length) throw new Error(`${s.scenario} (${p.name}): expectCreateError requires no steps`);
+      services = await servicesFor(s, dir, p);
+      const want = s.expectCreateError;
+      let actual: unknown = "success";
+      try { a = await scenarioAgent(s, dir, services.placement, handler, history.history); }
+      catch (error) {
+        if (error instanceof AgentError && error.code === want.code && error.message.includes(want.messageContains)) return failures;
+        actual = { code: error instanceof AgentError ? error.code : undefined, message: String(error) };
+      }
+      return [`${s.scenario} (${p.name}) create: want ${JSON.stringify(want)}, got ${JSON.stringify(actual)}`];
+    }
     for (const [i, step] of s.steps.entries()) {
       const want = step.expect ?? {};
       const fail = (field: string, expected: unknown, actual: unknown) =>
@@ -273,7 +299,10 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
     }
   } finally {
     try { await stop(); }
-    finally { await rm(dir, { recursive: true, force: true }); }
+    finally {
+      try { await history.stop?.(); }
+      finally { await rm(dir, { recursive: true, force: true }); }
+    }
   }
   return failures;
 }
