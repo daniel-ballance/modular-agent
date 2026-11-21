@@ -3,6 +3,20 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+/** History HTTP's shared revision and per-session plans, not Provider state. */
+export interface ErasurePlan {
+	intentId: string; sourceSessionId: string; recordId: string;
+	copies: { entryId: string; complete: boolean }[];
+}
+export interface ErasurePublication {
+	revision: string; intentId: string; entryIds: string[];
+	copies: { sessionId: string; recordId: string; entryIds: string[] }[];
+}
+export interface HistoryErasureRegistry {
+	read(id: string): Promise<{ revision: string; plans: ErasurePlan[] }>;
+	publish(id: string, intent: ErasurePublication): Promise<string>;
+	complete(id: string, intentId: string, entryIds: string[]): Promise<void>;
+}
 export interface ErasureCopy { sessionId: string; id: string; erased: boolean }
 export interface ProviderErasureCopy { sessionId: string; provider: string; confirmed: boolean }
 export interface ErasureIntent {

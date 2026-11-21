@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, rename, rm } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { cp, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileHistory } from "@modular-agent/core";
+import { definePlugin, fileHistory, httpHistory, serveHistory } from "@modular-agent/core";
 import { testAgent } from "@modular-agent/core/testing";
 
 test("pending marks follow forks across held writers and survive restart", async t => {
@@ -46,6 +47,48 @@ test("pending marks follow forks across held writers and survive restart", async
   assert.equal(current.pending.length, 0);
   assert.equal(current.erased.length, report.erased.length + report.pending.length);
   assert.equal((await resumed.history()).filter(entry => entry.kind === "erasure").length, 1);
+});
+
+test("HTTP erasure refuses a history delivery waiting at its output gate", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-http-erasure-"));
+  const token = randomBytes(32).toString("hex"), tokenFile = join(dir, "token");
+  await writeFile(tokenFile, token, { mode: 0o600 });
+  const service = await serveHistory(fileHistory(join(dir, "store")), { address: "127.0.0.1:0", tokenFile });
+  let gated!: () => void, resume!: () => void;
+  const atGate = new Promise<void>(resolve => { gated = resolve; });
+  const release = new Promise<void>(resolve => { resume = resolve; });
+  let pause = false;
+  const a = await testAgent({ durability: "kept", history: httpHistory(service.url, tokenFile), script: [{ text: "private answer" }],
+    plugins: [definePlugin({ name: "pause-delivery", setup(registrar) {
+      registrar.on("output", async () => { if (pause) { gated(); await release; } });
+    } })],
+  });
+  t.after(async () => { resume(); await a.close(); await service.close(); await rm(dir, { recursive: true, force: true }); });
+  const view = await a.session();
+  await view.prompt("private input");
+  const target = (await view.history()).find(e => e.kind === "input")!.id;
+  const request = async <T = unknown>(path: string, method: string, body?: object): Promise<T> => {
+    const reply = await fetch(service.url + path, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: body && JSON.stringify(body) });
+    assert.equal(reply.status, 200);
+    return await reply.json() as T;
+  };
+  const source = "/v1/sessions/source", dest = `/v1/sessions/${view.id}`;
+  await request(source, "PUT", { created: Date.now(), project: dir });
+  const { lease } = await request<{ lease: string }>(source + "/lease", "POST", { owner: "wire-writer" });
+  await request(source + "/entries", "POST", { lease, entries: [{ id: "source-target", parentId: null }] });
+  pause = true;
+  const refused = assert.rejects(view.history(), { code: "unavailable" });
+  await atGate;
+  try {
+    const { revision } = await request<{ revision: string }>(source + "/pending-erasure", "GET");
+    await request(source + "/pending-erasure", "POST", { lease, revision, intentId: "mark", entryIds: ["source-target"],
+      copies: [{ sessionId: "source", recordId: "source-book", entryIds: ["source-target"] },
+        { sessionId: view.id, recordId: "dest-book", entryIds: [target] }] });
+    const { plans } = await request<{ plans: { copies: { complete: boolean }[] }[] }>(dest + "/pending-erasure", "GET");
+    assert.equal(plans[0].copies[0].complete, false);
+  } finally { resume(); }
+  await refused;
 });
 
 test("an independent erasure registry fences a restored history backup", async t => {

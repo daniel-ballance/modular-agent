@@ -48,11 +48,11 @@ export class HttpInterface implements InterfaceCapability {
 				["POST", /^\/sessions\/([^/]+)\/cancel$/, async (req) => ({ handedBack: await api.cancel(req.params[0]) })],
 				["GET", /^\/sessions\/([^/]+)\/requests$/, (req) => api.openRequests(req.params[0])],
 				["POST", /^\/sessions\/([^/]+)\/answers$/, (req) => api.answer(req.params[0], { ...req.body, actorId: actor.id })],
-				["GET", /^\/sessions\/([^/]+)\/events$/, (req, res) => {
+				["GET", /^\/sessions\/([^/]+)\/events$/, async (req, res) => {
 					const sessionId = req.params[0];
 					api.session(sessionId); // refuses a session that isn't open
 					const resumeFrom = req.headers["last-event-id"] ?? req.query.get("fromEntry");
-					const history = api.history(sessionId, { all: true });
+					const history = await api.readHistory(sessionId, { all: true });
 					const at = resumeFrom == null ? history.length - 1 : history.findIndex((entry) => entry.id === resumeFrom);
 					if (resumeFrom != null && at < 0) throw new HttpError(404, "Unknown entry");
 					res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });

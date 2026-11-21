@@ -680,8 +680,8 @@ export async function historyService(options: HistoryServiceOptions) {
 				}
 				case "plans": {
 					if (reading) {
-						const json = records!.plans(sid, after, limit);
 						res.setHeader("Cache-Control", "no-store");
+						const json = records!.plans(sid, after, limit);
 						return send(res, 200, json);
 					}
 					const { lease, revision, intentId, entryIds, copies } = b;

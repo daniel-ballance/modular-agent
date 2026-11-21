@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { MutableModels } from "@earendil-works/pi-ai";
-import { Harness, filePendingErasure, type ReservationOptions, type Plugin } from "@modular-agent/harness";
+import { Harness, type ReservationOptions, type Plugin } from "@modular-agent/harness";
 import { configuration } from "./config.js";
 import { contextCompaction } from "@modular-agent/context-compaction";
 import { fileCredentials } from "@modular-agent/credentials-file";
@@ -78,9 +78,6 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 		const client = { url: historyUrl, token: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "")) };
 		const store = new HttpHistoryStore(client);
 		await store.initialize();
-		const erasure = process.env.MODULAR_AGENT_PENDING_ERASURE_DIR ?? (process.env.MODULAR_AGENT_CONFORMANCE === "1"
-			? process.env.MODULAR_AGENT_CONFORMANCE_ERASURE_DIR : undefined);
-		if (erasure) Object.assign(store, { pendingErasure: filePendingErasure(erasure) });
 		historyService.push(historyHttp(client, store));
 	}
 	// Load local items first, then validate each external registration against them.

@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Reservations, resourceBytes, reservationLimits, type ReservationOptions } from "./reservations.js";
-import { memoryPendingErasure, type ErasureIntent, type PendingErasure } from "./erasure.js";
+import { memoryPendingErasure, type ErasureIntent, type ErasurePlan, type HistoryErasureRegistry, type PendingErasure } from "./erasure.js";
 import { addAbortListener } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -169,7 +169,8 @@ export interface PluginApi {
 	tenant(sessionId: string): Promise<TenantInfo>;
 	// history
 	history(sessionId: string, options?: { all?: boolean }): HistoryEntry[];
-	checkPending(sessionId: string): void;
+	checkPending(sessionId: string): Promise<string>;
+	readHistory(sessionId: string, options?: { all?: boolean }): HistoryEntry[] | Promise<HistoryEntry[]>;
 	/** The history as a recipient may see it: every entry passes the output gate for that recipient. */
 	gatedHistory(sessionId: string, options: { recipient: string; all?: boolean }): Promise<HistoryEntry[]>;
 	append(sessionId: string, draft: EntryDraft): Promise<HistoryEntry>;
@@ -371,14 +372,20 @@ export class Harness {
 			},
 			onEvent: (fn, options) => {
 				if (options?.raw) {
-					const entry = { plugin: pluginName, raw: true, fn };
+					let queue = Promise.resolve();
+					const entry = { plugin: pluginName, raw: true, fn: (event: AgentEvent) => {
+						if (!this.httpErasure() || !event.sessionId) return fn(event);
+						// Preserve event order for consumers that track input and turn IDs.
+						queue = queue.then(async () => { await this.eventAdmission(event); fn(event); })
+							.catch(e => this.problem(pluginName, "event listener", e));
+					} };
 					this.listeners.push(entry);
 					return () => {
 						this.listeners = this.listeners.filter((l) => l !== entry);
 					};
 				}
 				// Plugins that follow events see the gated view unless they ask for the raw one.
-				const follower = new Follower(this.hooks, `plugin:${pluginName}`, false, fn, (e) => this.problem(pluginName, "event listener", e));
+				const follower = new Follower(this.hooks, `plugin:${pluginName}`, false, fn, (e) => this.problem(pluginName, "event listener", e), undefined, undefined, event => this.eventAdmission(event));
 				this.pluginFollowers.push(follower);
 				return () => {
 					this.pluginFollowers = this.pluginFollowers.filter((f) => f !== follower);
@@ -430,10 +437,21 @@ export class Harness {
 			setSetting: (sessionId, key, value, actorId) => this.setSetting(this.session(sessionId), key, value, pluginName, actorId),
 			setLimit: (id, rights, actorId) => this.setLimit(this.session(id), rights, actorId, pluginName),
 			tenant: (id) => this.tenantInfo(this.session(id)),
-			checkPending: id => this.checkPending(this.session(id)),
+			checkPending: id => this.admitHistory(this.session(id)),
+			readHistory: (id, options) => {
+				const s = this.session(id);
+				const snapshot = () => {
+					this.checkScopedWork(s, "watch");
+					return options?.all ? s.order.map(id => s.entries.get(id)!) : s.branch();
+				};
+				if (this.httpErasure() && !s.provisional) return this.admitHistory(s).then(snapshot);
+				this.checkPending(s);
+				return snapshot();
+			},
 			history: (sessionId, options) => {
 				const s = this.session(sessionId);
 				this.checkScopedWork(s, "watch");
+				if (this.httpErasure() && !s.provisional) throw failure("unavailable", "HTTP history requires asynchronous readHistory");
 				this.checkPending(s);
 				return options?.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
 			},
@@ -482,27 +500,29 @@ export class Harness {
 			},
 			gateOutput: async (sessionId, recipient, type, data) => {
 				const s = this.sessions.get(sessionId);
-				const freshness = s && this.checkPending(s);
+				const freshness = s && await this.admitHistory(s);
 				let out: typeof data | undefined;
-				const follower = new Follower(this.hooks, recipient, false, (e) => { if (e.type === type) out = e.data; }, (e) => this.problem("harness", "output gate", e));
+				const follower = new Follower(this.hooks, recipient, false, (e) => { if (e.type === type) out = e.data; }, (e) => this.problem("harness", "output gate", e), undefined, undefined,
+					s && this.httpErasure() ? () => this.admitHistory(s).then(current => { if (current !== freshness) throw failure("unavailable", "Erasure changed the output view"); }) : undefined);
 				follower.push({ type, time: this.now(), sessionId, source: pluginName, data });
 				await follower.idle();
-				if (s && this.checkPending(s) !== freshness) throw failure("unavailable", "Erasure changed the output view");
+				if (s && await this.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the output view");
 				return out;
 			},
 			declaration: (sessionId) => this.declaration(sessionId ? this.session(sessionId) : undefined),
 			gatedHistory: async (sessionId, options) => {
 				const s = this.session(sessionId);
 				await this.reconcilePending(s);
-				const freshness = this.checkPending(s);
+				const freshness = await this.admitHistory(s);
 				const entries = options.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
 				const out: HistoryEntry[] = [];
-				const follower = new Follower(this.hooks, options.recipient, false, (e) => { if (e.type === "entry") out.push(e.data as HistoryEntry); }, (e) => this.problem("harness", "gated history", e));
+				const follower = new Follower(this.hooks, options.recipient, false, (e) => { if (e.type === "entry") out.push(e.data as HistoryEntry); }, (e) => this.problem("harness", "gated history", e), undefined, undefined,
+					this.httpErasure() ? () => this.admitHistory(s).then(current => { if (current !== freshness) throw failure("unavailable", "Erasure changed the history view"); }) : undefined);
 				for (const entry of entries) {
 					follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: entry });
 					await follower.idle();
 				}
-				if (this.checkPending(s) !== freshness) throw failure("unavailable", "Erasure changed the history view");
+				if (await this.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the history view");
 				return out;
 			},
 			modelAccess: (sessionId) => this.modelAccess(this.session(sessionId)),
@@ -559,6 +579,7 @@ export class Harness {
 		const s = this.sessions.get(sessionId);
 		if (typeof session !== "string" && session !== s) return; // An old writer must not publish to a reopened session.
 		const event: AgentEvent = { type, time: this.now(), sessionId, source, ...ids, data };
+		if (s) this.eventViews.set(event, { session: s, epoch: this.erasureEpoch.get(s) ?? 0 });
 		if (s?.interruption.signal.aborted && type !== "session.ended") return;
 		if (type !== "session.interrupted") s?.remember(event);
 		for (const l of [...this.listeners]) {
@@ -581,6 +602,16 @@ export class Harness {
 	// ---------- following, through the output gate ----------
 
 	private pluginFollowers: Follower[] = [];
+	private eventViews = new WeakMap<AgentEvent, { session: Session; epoch: number }>();
+	private erasureEpoch = new WeakMap<Session, number>();
+	private storedTombstones = new WeakMap<Session, Set<string>>();
+	private eventAdmission(event: AgentEvent): Promise<void> | undefined {
+		if (!this.httpErasure() || !event.sessionId || ["session.interrupted", "entries.erased", "session.ended"].includes(event.type)) return;
+		const view = this.eventViews.get(event);
+		const s = view?.session ?? this.sessions.get(event.sessionId);
+		if (!s || s !== this.sessions.get(event.sessionId) || view && view.epoch !== (this.erasureEpoch.get(s) ?? 0)) return Promise.reject(failure("unavailable", "The queued event no longer has a current view"));
+		return this.admitHistory(s).then(() => undefined);
+	}
 
 	private follow(s: Session, options: FollowOptions, listener: (event: AgentEvent) => unknown): (() => void) & { idle(): Promise<void> } {
 		const follower = new Follower(this.hooks, options.recipient, options.raw ?? false, event => {
@@ -596,10 +627,14 @@ export class Harness {
 				const key = `output:${this.newId()}`;
 				if (!this.reservations.reserve(s, key, { bufferedBytes: bytes })) return undefined;
 				return () => this.reservations.release(s, key);
-			});
+			}, event => this.eventAdmission(event));
 		// History first, from the requested point, then live events.
 		const from = options.fromEntry ?? s.order.length;
-		for (const id of s.order.slice(from)) follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: s.entries.get(id) });
+		for (const id of s.order.slice(from)) {
+			const event = { type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: s.entries.get(id) };
+			this.eventViews.set(event, { session: s, epoch: this.erasureEpoch.get(s) ?? 0 });
+			follower.push(event);
+		}
 		if (!follower.closed) s.followers.add(follower);
 		return Object.assign(() => { s.followers.delete(follower); follower.disconnect(); }, { idle: () => follower.idle() });
 	}
@@ -769,7 +804,7 @@ export class Harness {
 		const store = this.use<HistoryStore>("history-store");
 		const sourceId = options.forkFrom?.sessionId ?? options.parentSessionId;
 		const ancestor = sourceId ? this.sessions.get(sourceId) ?? await this.loadInto(sourceId) : undefined;
-		if (ancestor) this.checkPending(ancestor);
+		const ancestorView = ancestor && await this.admitHistory(ancestor);
 		const tenant = ancestor?.tenant ?? options.tenant;
 		if (tenant !== undefined && !this.tenants.has(tenant)) throw Object.assign(new Error(`Unknown tenant ${tenant}`), { code: "invalid_params" });
 		const cwd = options.settings?.cwd;
@@ -829,8 +864,8 @@ export class Harness {
 				});
 				const batch = [...copies, ...setup];
 				const publish = async () => {
-					if (ancestor) this.checkPending(ancestor);
-					await this.write(s, () => store?.append(s.id, batch));
+					if (ancestor && await this.admitHistory(ancestor) !== ancestorView) throw failure("unavailable", "Erasure changed the fork source");
+					await this.write(s, () => store?.append(s.id, batch, { forkErasureView: ancestorView }));
 					for (const e of batch) s.apply(e);
 				};
 				const registry = this.pendingRegistry();
@@ -857,6 +892,7 @@ export class Harness {
 		const { meta, entries } = await store.load(id);
 		if (!entries.length) return undefined;
 		const s = new Session(meta, false);
+		if (store.historyErasure) this.storedTombstones.set(s, new Set(entries.filter(e => e.erased === true).map(e => e.id)));
 		for (const e of entries) s.apply(e);
 		return s;
 	}
@@ -1026,7 +1062,7 @@ export class Harness {
 
 	async forkSession(sessionId: string, entryId: string): Promise<string> {
 		const s = this.session(sessionId);
-		this.checkPending(s);
+		await this.admitHistory(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		// Forking at unfinished work would copy work that is still running: refused.
 		if (s.running || this.runningJobs(s).length || this.waitingRequests(s).length) throw failure("busy", "Can't fork while the session has unfinished work: a running turn, a job, or a call waiting for an answer");
@@ -1375,7 +1411,29 @@ export class Harness {
 		return JSON.stringify(intents.map(intent => intent.id));
 	}
 
+	private httpErasure(): HistoryErasureRegistry | undefined { return this.use<HistoryStore>("history-store")?.historyErasure; }
+
+	private async admitHistory(s: Session): Promise<string> {
+		const registry = this.httpErasure();
+		if (!registry || s.provisional) return this.checkPending(s);
+		// Compare completed marks with the view as prepared, not a view updated during the request.
+		const view = new Map(s.entries);
+		const stored = this.storedTombstones.get(s);
+		const { plans } = await registry.read(s.id);
+		if (plans.some(p => p.copies.some(c => !c.complete || view.get(c.entryId)?.erased !== true || !stored?.has(c.entryId)))) {
+			throw failure("unavailable", "Session has unresolved pending erasure");
+		}
+		return JSON.stringify(plans.map(plan => plan.intentId));
+	}
+
 	private async reconcilePending(s: Session): Promise<void> {
+		const remote = this.httpErasure();
+		if (remote && !s.provisional) {
+			const { plans } = await remote.read(s.id);
+			for (const plan of plans) if (plan.copies.some(c => !c.complete)) await this.completeHttpErasure(s, plan);
+			await this.admitHistory(s);
+			return;
+		}
 		const registry = this.pendingRegistry();
 		if (!registry) return;
 		for (const intent of registry.intents()) {
@@ -1466,13 +1524,114 @@ export class Harness {
 		} finally { s.erasing = false; }
 	}
 
+	private async completeHttpErasure(s: Session, plan: ErasurePlan, actorId = "harness"): Promise<void> {
+		const store = this.use<HistoryStore>("history-store")!;
+		if (s.erasing || s.moving || s.outsideTools) return;
+		s.erasing = true;
+		try {
+			if (s.running) { s.running.abort.abort(); await s.running.done; }
+			if (this.runningJobs(s).length) return;
+			await s.committing;
+			this.checkWriter(s);
+			const pending = plan.copies.filter(copy => !copy.complete).map(copy => copy.entryId);
+			if (!pending.length) return;
+			if (!s.entries.has(plan.recordId)) {
+				const entryIds = plan.copies.map(copy => copy.entryId);
+				if (entryIds.some(id => !s.entries.has(id))) throw failure("unavailable", "Erasure plan names missing history");
+				const keys = entryIds.flatMap(id => {
+					const e = s.entries.get(id)!;
+					const d = e.data as { key?: string; submittedBy?: string; delegatedBy?: string } | undefined;
+					const inputId = inputIdOf(e);
+					return e.kind === "inputAccepted" && inputId && d?.key ? [{ inputId, key: d.key, actorId: e.actorId, submittedBy: d.submittedBy ?? d.delegatedBy ?? e.actorId }] : [];
+				});
+				const inputKeys = [...new Map(keys.map(k => [k.inputId, k])).values()];
+				await this.commitNow(s, [{ id: plan.recordId, kind: "erasure", writer: "harness", actorId, modelVisible: false,
+					data: { operation: plan.intentId, entryIds, ...(inputKeys.length ? { inputKeys } : {}) } }]);
+			}
+			const book = s.entries.get(plan.recordId);
+			const recorded = new Set((book?.data as { entryIds?: string[] } | undefined)?.entryIds);
+			if (!book || book.erased || book.kind !== "erasure" || pending.some(id => !recorded.has(id))) throw failure("unavailable", "Erasure bookkeeping does not match the plan");
+			await this.write(s, () => store.erase!(s.id, pending));
+			const tombstones = new Set((await store.load(s.id)).entries.filter(e => e.erased === true).map(e => e.id));
+			this.storedTombstones.set(s, tombstones);
+			if (pending.some(id => !tombstones.has(id))) throw failure("unavailable", "Erasure has no matching tombstones");
+			this.erasureEpoch.set(s, (this.erasureEpoch.get(s) ?? 0) + 1);
+			await store.historyErasure!.complete(s.id, plan.intentId, pending);
+			s.recent.length = 0;
+			this.emit(s, "entries.erased", { count: pending.length }, "harness", { actorId });
+		} finally { s.erasing = false; }
+	}
+
+	private async eraseHttp(s: Session, entryIds: string[], actorId: string, writer: string, store: HistoryStore, registry: HistoryErasureRegistry): Promise<ErasureReport> {
+		const requested = [...new Set(entryIds)].sort();
+		if (!requested.length) throw failure("invalid_request", "Erasure requires at least one entry");
+		let operation: string;
+		let sessions: Map<string, Session>;
+		for (;;) {
+			this.checkWriter(s);
+			const { revision } = await registry.read(s.id);
+			// Use stored rows rather than open views; another writer may have added
+			// copies, and an erasure record alone is not a verified tombstone.
+			sessions = new Map();
+			const metadata = await store.list();
+			for (const id of new Set([s.id, ...metadata.map(meta => meta.id)])) {
+				const view = await this.loadInto(id);
+				if (!view) throw failure("unavailable", "Cannot discover the full erasure scope");
+				sessions.set(id, view);
+			}
+			const targets = eraseCopies(sessions.get(s.id)!, requested, sessions);
+			this.requireAuthority(s, actorId, "erase");
+			try {
+				operation = await registry.publish(s.id, { revision, intentId: this.newId(), entryIds: requested,
+					copies: [...targets].map(([view, ids]) => ({ sessionId: view.id, recordId: this.newId(), entryIds: [...ids] })) });
+				break;
+			} catch (error) {
+				if ((error as { code?: string }).code !== "stale_revision") throw error;
+			}
+		}
+		const report: ErasureReport = { erased: [], pending: [], erasedPairs: [], pendingPairs: [], outOfReach: [] };
+		const note = (value: string) => { if (!report.outOfReach.includes(value)) report.outOfReach.push(value); };
+		for (const [id, view] of sessions) {
+			let plan = (await registry.read(id)).plans.find(p => p.intentId === operation);
+			if (!plan) continue;
+			let session = this.sessions.get(id);
+			let acquired = false;
+			try {
+				if (plan.copies.some(c => !c.complete)) {
+					if (!session) {
+						await store.openForWriting(id);
+						acquired = true;
+						session = await this.loadInto(id);
+					}
+					if (session) await this.completeHttpErasure(session, plan, actorId);
+				}
+			} catch (error) {
+				if ((error as { code?: string }).code !== "held") this.problem(writer, "reconcile erasure", error);
+			} finally { if (acquired) await store.close(id); }
+			s.interruption.signal.throwIfAborted();
+			plan = (await registry.read(id)).plans.find(p => p.intentId === operation);
+			if (!plan) throw failure("unavailable", "Published erasure plan disappeared");
+			if (id !== s.id && !this.actorRights(view, actorId).includes("watch")) { note("copies in other sessions"); continue; }
+			for (const copy of plan.copies) {
+				(copy.complete ? report.erased : report.pending).push(copy.entryId);
+				(copy.complete ? report.erasedPairs : report.pendingPairs).push({ sessionId: id, id: copy.entryId });
+			}
+			for (const provider of this.useAll<Provider>("provider")) if (provider.supports.keepsState) note(`Unconfirmed deletion at ${provider.id}`);
+		}
+		if (report.erased.length) note("Output already delivered and copies beyond the agent");
+		return report;
+	}
+
 	private async erase(s: Session, entryIds: string[], actorId: string, writer: string): Promise<ErasureReport> {
 		this.requireAuthority(s, actorId, "erase");
 		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 		const store = this.use<HistoryStore>("history-store");
 		const registry = this.pendingRegistry();
-		if (!registry || !s.ephemeral && !store?.erase) throw failure("not_supported", "This history has no shared erasure coordination");
+		const remote = this.httpErasure();
+		if ((!registry && !remote) || !s.ephemeral && !store?.erase) throw failure("not_supported", "This history has no shared erasure coordination");
 		if (s.running || this.runningJobs(s).length || s.erasing || s.moving) throw failure("busy", "Cannot erase during work");
+		if (remote) return this.eraseHttp(s, entryIds, actorId, writer, store!, remote);
+		if (!registry) throw failure("not_supported", "Missing local erasure coordination");
 		const sessions = new Map(this.sessions);
 		const requested = [...new Set(entryIds)].sort();
 		const operation = await registry.exclusive(async () => {
@@ -1748,7 +1907,7 @@ export class Harness {
 			await this.providerFor(s)?.refreshModels?.();
 			if (!this.modelAccess(s)) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
 		}
-		this.checkPending(s);
+		await this.admitHistory(s);
 		if (q.startedBy.kind !== "job" && !q.releasedBy) {
 			const right = q.when === "propose" ? "propose" : "input";
 			for (const actor of inputActors(q)) this.requireAuthority(s, actor, right);
@@ -1915,9 +2074,10 @@ export class Harness {
 				const env = await this.environmentFor(s);
 				if (env?.save && (env.keepsPoints?.(this.projectOf(s)) ?? env.points)) {
 					withAuthority(() => this.checkScopedWork(s, "watch"));
-					this.checkPending(s);
+					await this.admitHistory(s);
 					point = await env.save();
 				}
+				await this.admitHistory(s);
 				contributions = await withAuthority(() => this.hooks.collect("turn.before", { sessionId: s.id, turnId, input: queued.content }));
 			}
 		} catch (error) { failure = String(error); }
@@ -2127,12 +2287,12 @@ export class Harness {
 
 	private runtimeHost(s: Session, turnId: string, state: TurnState, resultShape?: Record<string, unknown>): RuntimeHost {
 		const withAuthority = <T>(fn: () => T): T => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, fn);
-		const checkRead = () => { this.checkPending(s); withAuthority(() => this.checkScopedWork(s, "watch")); };
+		const checkRead = async () => { await this.admitHistory(s); withAuthority(() => this.checkScopedWork(s, "watch")); };
 		return {
 			newId: async () => this.newId(),
 			callActor: () => state.actors.values().next().value ?? this.actorForJob(s, state.jobs),
 			prepareStep: async ({ stepId, usage }) => {
-				checkRead();
+				await checkRead();
 				if (state.capacityLimit) throw turnLimit("capacity");
 				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 				const attempts = s.order.map((id) => s.entries.get(id)!).filter((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary).length;
@@ -2147,12 +2307,12 @@ export class Harness {
 				};
 				const payload = { sessionId: s.id, turnId, stepId, usage, model: model?.model, history: s.branch(), request };
 				const transformed = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
-				checkRead();
+				await checkRead();
 				if (!Array.isArray(transformed?.tools) || transformed.tools.some(t => !request.tools.some(offered => isDeepStrictEqual(offered, t)))) throw new Error("step.before cannot widen the tool offer");
 				const prepared: ModelRequest = feedback.length ? { ...transformed, messages: [...transformed.messages,
 					...feedback.map((e): ModelMessage => ({ role: "user", content: [text((e.data as { reason: string }).reason)] }))] } : transformed;
 				// Hooks may copy or transform messages, so conservatively name their visible sources.
-				state.sources.set(stepId, [...new Set([...branch.filter((e) => (e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length)), ...feedback].map((e) => e.id))]);
+				state.sources.set(stepId, [...new Set([...branch.filter((e) => !e.erased && ((e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length))), ...feedback].map((e) => e.id))]);
 				return prepared;
 			},
 			hook: async (name, payload) => {
@@ -2214,7 +2374,7 @@ export class Harness {
 				return found && { source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition };
 			},
 			history: async options => {
-				checkRead();
+				await checkRead();
 				return options?.all ? s.order.map(id => s.entries.get(id)!) : s.branch();
 			},
 			record: async (draft) => {
@@ -2257,9 +2417,12 @@ export class Harness {
 				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 				const stepId = options.stepId ?? [...state.sources.keys()].at(-1) ?? this.newId();
 
-				const freshness = this.checkPending(s);
+				const freshness = await this.admitHistory(s);
 				await this.reconcileProviderErasure(s, model.model.provider);
 				this.checkProviderErasure(s, model.model.provider);
+				if (this.httpErasure() && freshness !== "[]" && model.supports.keepsState !== false) {
+					throw failure("unavailable", "The history registry cannot verify deletion of kept Provider state");
+				}
 				const attempt = `model:${stepId}`;
 				const bounds = this.reservations.limits;
 				const requestBytes = resourceBytes(request);
@@ -2271,10 +2434,10 @@ export class Harness {
 				const scope = { sessionId: s.id, turnId, stepId, provider: model.model.provider, model: { provider: model.model.provider, id: model.model.id } };
 				const safeToRepeat = !!turnId && (model.supports.safeToRepeat === true || (model.supports.keepsState === false && model.supports.runsTools === false));
 				let intentId: string | undefined;
-				const finalCheck = () => {
+				const finalCheck = async () => {
+					if (await this.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the model view");
 					options.signal.throwIfAborted();
 					authorize?.();
-					if (this.checkPending(s) !== freshness) throw failure("unavailable", "Erasure changed the model view");
 					this.checkScopedWork(s, "watch");
 					this.checkProviderErasure(s, model.model.provider);
 					this.checkWriter(s);
@@ -2282,10 +2445,10 @@ export class Harness {
 				const check = async () => {
 					options.signal.throwIfAborted();
 					if (await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
-					finalCheck();
+					await finalCheck();
 				};
 				const handoff = async (send: () => void) => {
-					const publish = async () => { finalCheck(); send(); };
+					const publish = async () => { await finalCheck(); send(); };
 					const registry = this.pendingRegistry();
 					if (registry) await registry.exclusive(publish); else await publish();
 				};
@@ -2519,7 +2682,9 @@ export class Harness {
 		if (!eligible(current)) return refused();
 		this.checkWriter(s);
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
-		this.checkPending(s);
+		await this.admitHistory(s);
+		this.checkWriter(s);
+		if (signal.aborted || !eligible(this.findTool(s, call.name))) return refused();
 		this.emit(s, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
 		let asked = 0;
 		const pendingQuestions: string[] = [];
@@ -2933,7 +3098,7 @@ export class Harness {
 		const gateSignal = this.gateSignal.getStore();
 		signal = signal && gateSignal ? AbortSignal.any([signal, gateSignal]) : signal ?? gateSignal;
 		signal?.throwIfAborted();
-		this.checkPending(s);
+		await this.admitHistory(s);
 		if (draft.whenTimeLimit === "leaveOpen" && !this.questionsOutlastTurns) throw Object.assign(new Error("Questions cannot outlast the turn"), { code: "not_supported" });
 		const call = this.toolWork.getStore();
 		if (call && call.id === draft.toolCallId) draft = { ...draft, boundCall: { name: call.name, input: call.input } };
@@ -3129,7 +3294,7 @@ export class Harness {
 	}
 
 	private async submitAnswer(s: Session, answer: Answer): Promise<{ accepted: boolean; reason?: string }> {
-		this.checkPending(s);
+		await this.admitHistory(s);
 		if (resourceBytes(answer) + 2048 > this.reservations.limits.settlementBytes) throw failure("result_too_large", "Answer exceeds reserved capacity");
 		const find = () => s.requests.get(answer.requestId)?.request ?? this.waitingRequests(s).find(r => r.id === answer.requestId);
 		const may = (request: InputRequest) => this.mayAnswer(s, request, answer.actorId) &&
@@ -3362,7 +3527,7 @@ export class Harness {
 			startsTurnsUnasked: this.jobReportsStartTurns ? "when a job reports back" : "never",
 			cancellingTurnCancelsJobs: false,
 			pluginsDuringSession: false,
-			erasure: !!this.pendingRegistry() && (!store || !!store.erase),
+			erasure: (!!this.pendingRegistry() || !!this.httpErasure()) && (!store || !!store.erase),
 			inputKeys: true,
 			resourceReservations: this.reservations.declaration(),
 			portableSessions: true,
@@ -3397,6 +3562,7 @@ class Follower {
 		private onError: (e: unknown) => void,
 		private onLag?: () => void,
 		private reserve?: (bytes: number) => (() => void) | undefined,
+		private admit?: (event: AgentEvent) => Promise<void> | undefined,
 	) {}
 
 	get closed() { return this.disconnected; }
@@ -3439,7 +3605,11 @@ class Follower {
 		return this.chain;
 	}
 
+	private originals = new WeakMap<AgentEvent, AgentEvent>();
 	private async deliver(event: AgentEvent): Promise<void> {
+		const original = event;
+		const admission = this.admit?.(original);
+		if (admission) await admission;
 		if (!this.raw && (event.type === "entry" || event.type === "entry.added")) {
 			const entry = event.data as HistoryEntry;
 			const data = entry.data as { request?: ModelRequest } | undefined;
@@ -3450,6 +3620,7 @@ class Follower {
 				} } } : {}),
 			} };
 		}
+		if (event !== original) this.originals.set(event, original);
 		const handlers = this.raw ? [] : this.hooks.raw("output");
 		if (event.type === "session.interrupted") {
 			// An incomplete stream must not be released because its writer stopped.
@@ -3508,7 +3679,14 @@ class Follower {
 			if (answer.events) events = answer.events;
 		}
 		this.held = [];
-		for (const e of events) if (!this.disconnected) await this.listener(e);
+		for (const e of events) if (!this.disconnected) {
+			// A gate may rewrite events; authorize the original batch, including held pieces.
+			for (const original of initial) {
+				const admission = this.admit?.(this.originals.get(original) ?? original);
+				if (admission) await admission;
+			}
+			if (!this.disconnected) await this.listener(e);
+		}
 	}
 }
 

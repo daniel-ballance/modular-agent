@@ -432,18 +432,18 @@ export class AcpInterface implements InterfaceCapability {
 			this.requireRight(sessionId, this.actorId, "watch");
 			const limit = params.limit ?? 500;
 			if (!Number.isInteger(limit) || limit < 1 || limit > 500 || (params.all !== undefined && typeof params.all !== "boolean")) throw bindingError("invalid_params");
-			const raw = this.apiFor(sessionId).history(sessionId, { all: params.all === true });
+			const raw = await this.apiFor(sessionId).readHistory(sessionId, { all: params.all === true });
 			const at = params.after === undefined ? -1 : raw.findIndex((e) => e.id === params.after);
 			if (params.after !== undefined && at < 0) throw bindingError("invalid_params", "Unknown history cursor");
 			const entries: HistoryEntry[] = [];
-			const before = new Map<string, ReturnType<AcpInterface["requestView"]>>();
+			const before = new Map<string, Awaited<ReturnType<AcpInterface["requestView"]>>>();
 			const changed = new Set<string>();
 			const max = 4 * 1024 * 1024;
 			let bytes = Buffer.byteLength('{"entries":[]}');
 			for (let i = at + 1; i < Math.min(raw.length, at + 1 + limit); i++) {
 				const entry = raw[i];
 				const request = entry.kind === "inputRequest" ? (entry.data as { request?: InputRequest } | undefined)?.request : undefined;
-				const view = request && this.requestView(request);
+				const view = request && await this.requestView(request);
 				const projected = view ? { ...entry, data: { request: view } } : entry;
 				const allowed = await this.apiFor(sessionId).gateOutput(sessionId, this.actorId, "entry", projected);
 				if (!allowed) continue;
@@ -494,7 +494,7 @@ export class AcpInterface implements InterfaceCapability {
 		extension("requests", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
-			const view = this.requestViews(sessionId);
+			const view = await this.requestViews(sessionId);
 			for (const q of view.requests) if (q.kind === "approval") this.deliveredPollApprovals.delete(q.id);
 			const gated = await this.gateReply(sessionId, "_modular-agent/requests", view);
 			return { requests: gated.requests.map((q) => {
@@ -717,7 +717,7 @@ export class AcpInterface implements InterfaceCapability {
 			}
 			return this.gateReply(sessionId, "session/prompt", promptResponse(receipt.inputId, { kind: "completed" }, receipt.duplicate ? { duplicate: true } : {}));
 		}
-		const all = this.apiFor(sessionId).history(sessionId, { all: true });
+		const all = await this.apiFor(sessionId).readHistory(sessionId, { all: true });
 		const taken = all.find((e) => e.kind === "input" && inputIdOf(e) === receipt.inputId);
 		const end = taken?.turnId ? all.find((e) => e.kind === "turnEnd" && e.turnId === taken.turnId) : undefined;
 		const latest = all.findLast((e) => e.kind === "inputAccepted" && inputIdOf(e) === receipt.inputId);
@@ -857,7 +857,7 @@ export class AcpInterface implements InterfaceCapability {
 
 	/** Send a reopened session's history, as session/load requires. */
 	private async replay(sessionId: string): Promise<void> {
-		for (const raw of this.apiFor(sessionId).history(sessionId)) {
+		for (const raw of await this.apiFor(sessionId).readHistory(sessionId)) {
 			if (!raw.message && raw.kind !== "modular-agent.nestedCall") continue;
 			const entry = await this.apiFor(sessionId).gateOutput(sessionId, this.actorId, "entry", raw);
 			const m = entry?.message;
@@ -906,12 +906,12 @@ export class AcpInterface implements InterfaceCapability {
 
 	// ---------- questions to the client ----------
 
-	private requestViews(sessionId: string) {
-		return { requests: this.apiFor(sessionId).openRequests(sessionId).map((r) => this.requestView(r)) };
+	private async requestViews(sessionId: string) {
+		return { requests: await Promise.all(this.apiFor(sessionId).openRequests(sessionId).map((r) => this.requestView(r))) };
 	}
 
-	private requestView(r: InputRequest) {
-		const call = r.kind === "approval" ? this.approvalCall(r) : undefined;
+	private async requestView(r: InputRequest) {
+		const call = r.kind === "approval" ? await this.approvalCall(r) : undefined;
 		return {
 			id: r.id, kind: r.kind, question: r.question, ...(r.kind === "choice" && r.options ? { options: r.options } : {}),
 			...(r.kind === "link" && r.details ? { details: r.details } : {}), ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}),
@@ -932,8 +932,8 @@ export class AcpInterface implements InterfaceCapability {
 			(!request.answerers.length || request.answerers.includes(actorId)));
 	}
 
-	private approvalCall(request: InputRequest) {
-		const entry = this.apiFor(request.sessionId).history(request.sessionId, { all: true }).find((e) => e.kind === "inputRequest" && (e.data as { request?: { id: string } })?.request?.id === request.id);
+	private async approvalCall(request: InputRequest) {
+		const entry = (await this.apiFor(request.sessionId).readHistory(request.sessionId, { all: true })).find((e) => e.kind === "inputRequest" && (e.data as { request?: { id: string } })?.request?.id === request.id);
 		return (entry?.data as { call?: { name: string; input: object } } | undefined)?.call;
 	}
 
@@ -969,7 +969,7 @@ export class AcpInterface implements InterfaceCapability {
 	private async offerApproval(request: InputRequest, actorId: string, signal: AbortSignal): Promise<{ value?: string; declined?: boolean; reason?: string } | undefined> {
 		{
 			const client = this.client!;
-			const call = this.approvalCall(request);
+			const call = await this.approvalCall(request);
 			if (!call) return { declined: true, reason: "refused" };
 			const options: acp.PermissionOption[] = [
 				{ optionId: "allow", name: "Allow", kind: "allow_once" },
@@ -983,7 +983,7 @@ export class AcpInterface implements InterfaceCapability {
 			} };
 			const gated = await this.apiFor(request.sessionId).gateOutput(request.sessionId, this.actorId, "request", payload);
 			if (!gated || !isDeepStrictEqual(gated, payload) || Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, ...gated })) > MAX_LINE_BYTES) {
-				const views = this.requestViews(request.sessionId);
+				const views = await this.requestViews(request.sessionId);
 				const poll = await this.gateReply(request.sessionId, "_modular-agent/requests", views).catch(() => undefined);
 				const exact = poll?.requests.find((q) => q.id === request.id);
 				if (!this.canAnswer(request.sessionId, request.id) || !this.hasRight(request.sessionId, this.actorId, "watch") ||
@@ -1093,14 +1093,14 @@ export class AcpInterface implements InterfaceCapability {
 					replies.delete(message.id);
 					const payload = "result" in message || ("error" in message && message.error.data && typeof message.error.data === "object" && "_meta" in message.error.data);
 					if (route && payload && route.right) {
-						const allowed = interfacePart.scoped(() => {
+						const refusal = await interfacePart.scoped(async () => {
 							try {
-								interfacePart.apiFor(route.sessionId).checkPending(route.sessionId);
-								return interfacePart.attached(route.sessionId) && interfacePart.hasRight(route.sessionId, interfacePart.actorId, route.right!);
-							} catch { return false; }
+								await interfacePart.apiFor(route.sessionId).checkPending(route.sessionId);
+								return interfacePart.attached(route.sessionId) && interfacePart.hasRight(route.sessionId, interfacePart.actorId, route.right!) ? undefined : "forbidden";
+							} catch (error) { return (error as { code?: string }).code === "unavailable" ? "unavailable" : "forbidden"; }
 						});
-						if (!allowed) return output.write({ jsonrpc: "2.0", id: message.id,
-							error: { code: -32602, message: "Session reply is no longer available", data: { code: "forbidden" } } });
+						if (refusal) return output.write({ jsonrpc: "2.0", id: message.id,
+							error: { code: -32602, message: "Session reply is no longer available", data: { code: refusal } } });
 					}
 				}
 				if (Buffer.byteLength(JSON.stringify(message)) <= MAX_LINE_BYTES) return output.write(message);

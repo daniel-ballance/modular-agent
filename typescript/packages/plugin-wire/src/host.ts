@@ -376,7 +376,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				return { credential: credential ?? null };
 			});
 			peer.handle("host/history", async (p) => {
-				const all = api.history(sessionOf(p), { all: p.all === true });
+				const all = await api.readHistory(sessionOf(p), { all: p.all === true });
 				let from = 0;
 				if (p.after != null) {
 					from = all.findIndex((e) => e.id === p.after) + 1;
@@ -447,7 +447,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				const id = ownJob(p);
 				if (!["completed", "failed", "cancelled"].includes(p.outcome?.kind) || typeof p.report !== "boolean" ||
 					(p.result !== undefined && !Array.isArray(p.result))) throw new WireError("invalid_request", "Invalid job result");
-				const previous = api.history(id, { all: true }).find((e) => e.kind === "jobEnded" && e.jobId === p.jobId);
+				const previous = (await api.readHistory(id, { all: true })).find((e) => e.kind === "jobEnded" && e.jobId === p.jobId);
 				if (previous) {
 					if (!previous.erased && wireEqual(previous.data, { outcome: p.outcome, result: fromWire(p.result), report: p.report })) return {};
 					throw new WireError("invalid_request", "Job already ended");

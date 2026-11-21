@@ -132,9 +132,9 @@ export interface Proposal { inputId: string; actorId: string; content: Content; 
 type Owner = { enabled: { severalActors: boolean; sessionLimits: boolean }; isOpen(): boolean; interruption: AbortSignal; fork(entry?: string): Promise<Session>; close(actor: string, delegatedBy?: string): Promise<void>; handler(handler?: QuestionHandler): void };
 const local = "user";
 
-export function questionOf(api: PluginApi, request: InputRequest): Question {
+export async function questionOf(api: PluginApi, request: InputRequest): Promise<Question> {
   const { id, kind, sessionId, question, details, options, timeLimitMs, answerers, credential } = request;
-  const entry = api.history(sessionId, { all: true }).findLast(e => e.kind === "inputRequest" && e.requestId === id);
+  const entry = (await api.readHistory(sessionId, { all: true })).findLast(e => e.kind === "inputRequest" && e.requestId === id);
   return structuredClone({ id, kind, sessionId, question, details, options, answerers, credential,
     call: (entry?.data as { call?: ToolCall } | undefined)?.call,
     deadline: timeLimitMs === undefined || !entry ? undefined : entry.time + timeLimitMs });
@@ -239,17 +239,18 @@ export class Session {
       for (;;) {
         signal.throwIfAborted();
         const changed = new Promise<void>(r => { wake = r; });
-        const raw = this.#api.history(this.id, { all: true });
+        const raw = await this.#api.readHistory(this.id, { all: true });
+        const freshness = await this.#api.checkPending(this.id);
         const entries = await view.history();
         const turn = entries.find(e => e.kind === "input" && inputIdOf(e) === id)?.turnId;
         const end = turn && entries.find(e => e.kind === "turnEnd" && e.turnId === turn && !e.erased);
-        if (end) { await off.idle(); return readTurn(entries, end); }
+        if (end) { await off.idle(); const result = readTurn(entries, end); if (await this.#api.checkPending(this.id) !== freshness) throw new AgentError("unavailable", "Erasure changed the prompt result"); return result; }
         const rawTurn = raw.find(e => e.kind === "input" && inputIdOf(e) === id)?.turnId;
         if (rawTurn && raw.some(e => e.kind === "turnEnd" && e.turnId === rawTurn && !e.erased)) {
           throw new AgentError("withheld", "Turn result was withheld");
         }
         if (entries.some(e => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(id))) return noTurn(id, "handedBack");
-        if (!this.#api.session(this.id).busy && this.#api.history(this.id, { all: true }).length === entries.length) {
+        if (!this.#api.session(this.id).busy && (await this.#api.readHistory(this.id, { all: true })).length === entries.length) {
           throw new AgentError("lost", "Input did not settle");
         }
         await Promise.race([changed, delay(25)]);
@@ -284,7 +285,7 @@ export class Session {
     while (!settled || queue.length) {
       if (overflow) throw new AgentError("lost", "Prompt event reader fell behind", { fromEntry: cursor });
       if (settled) turn ??= result?.turnId;
-      if (admission && !turn) turn = this.#api.history(this.id, { all: true })
+      if (admission && !turn) turn = (await this.#api.readHistory(this.id, { all: true }))
         .find(e => e.kind === "input" && inputIdOf(e) === admission)?.turnId;
       if (turn) {
         for (const e of queue.splice(0)) {
@@ -293,7 +294,7 @@ export class Session {
           if (overflow) throw new AgentError("lost", "Prompt event reader fell behind", { fromEntry: cursor });
           if (event?.type === "entry") cursor = event.data.id;
           if (event?.type === "turnEnded") terminal = event;
-          else if (event) yield event;
+          else if (event) { await this.#api.checkPending(this.id); yield event; }
         }
       } else if (settled) break;
       if (!settled && (!turn || !queue.length)) await new Promise<void>(r => { wake = r; });
@@ -302,13 +303,15 @@ export class Session {
     if (failure) throw sdkError(failure);
     if (result?.turnId && result.outcome) {
       if (!terminal) throw new AgentError("withheld", "Turn outcome was withheld");
+      await this.#api.checkPending(this.id);
       yield terminal;
     }
   }
 
   async *events(fromEntry?: string | null): AsyncIterable<Event> {
     this.#require("watch");
-    const entries = this.#api.history(this.id, { all: true });
+    const snapshot = this.#api.readHistory(this.id, { all: true });
+    const entries = snapshot instanceof Promise ? await snapshot : snapshot;
     const index = fromEntry == null ? -1 : entries.findIndex(e => e.id === fromEntry);
     if (fromEntry != null && index < 0) throw new AgentError("not_found", "Unknown entry cursor");
     let wake = () => {};
@@ -357,6 +360,7 @@ export class Session {
         const event = eventOf(next);
         if (!event) continue;
         if (event.type === "entry") cursor = event.data.id;
+        if (event.type !== "sessionEnded" && event.type !== "sessionInterrupted") await this.#api.checkPending(this.id);
         yield structuredClone(event);
         if (event.type === "sessionEnded" || event.type === "sessionInterrupted") return;
       }
@@ -455,8 +459,8 @@ export class Session {
   }
   async questions(): Promise<Question[]> {
     this.#require("watch");
-    const visible = await Promise.all(this.#api.openRequests(this.id).map(request =>
-      this.#api.gateOutput(this.id, this.actor, "input.request.opened", questionOf(this.#api, request))));
+    const visible = await Promise.all(this.#api.openRequests(this.id).map(async request =>
+      this.#api.gateOutput(this.id, this.actor, "input.request.opened", await questionOf(this.#api, request))));
     const open = new Set(this.#api.openRequests(this.id).map(request => request.id));
     return visible.flatMap(q => q && open.has(q.id) ? [structuredClone(q)] : []);
   }
