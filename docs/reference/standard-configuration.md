@@ -115,6 +115,8 @@ The model is offered one tool, `codemode`, which runs Python in a [Monty](https:
 
 The inputs, limits and wording are Pi's, as the Rust `tools-files` crate has them. In the sandbox:
 
+- The Python is Monty's, at the same pinned version in every implementation, so a script behaves the same in all four.
+- `tools` is there without an import, and `import tools` gives the same object. Its functions are values: `f = tools.read` then `f(path='a.txt')` makes the same call as `tools.read(path='a.txt')`.
 - Arguments go by keyword, or by position: the schema's required fields in order, then its optional fields in order. Passing `None` for an argument omits it.
 - A function returns the result's structured value if it has one, otherwise its text. A call that fails, is refused or is cancelled raises `RuntimeError` with the result's text; `exec` with a non-zero exit returns its dict rather than raising.
 - `describe_tool(name)` and `search_tools(query)` look functions up. With at most twelve functions the prompt describes each in full. With more, it lists every function by its signature and the first line of its description, cut to 160 characters, and `describe_tool` gives the rest.

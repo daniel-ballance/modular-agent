@@ -48,6 +48,18 @@ const checks = [
     },
   },
   {
+    name: "codemode-tools-values",
+    about: "`import tools` gives the tools object; a function assigned to a variable and positional arguments make the same calls.",
+    files: { "project/in.txt": "whitby\n" },
+    script: [codemode("import tools\nf = tools.read\na = f('in.txt')\nw = tools.write\nw('out.txt', a.upper())\nb = tools.read(path='in.txt')\nprint('same' if a == b else 'different')"), { text: "Done." }],
+    runs: [{ args: ["-p", "Copy it."], expect: { stdout: "Done.", exit: 0, files: { "project/out.txt": { contains: "WHITBY" } } } }],
+    log: (log, ok) => {
+      const results = (log[1]?.messages ?? []).filter((m) => m.role === "toolResult");
+      ok(results.length === 1 && results[0].name === "codemode", "the model sees one result, codemode's", results.map((r) => r.name));
+      ok(results[0]?.text?.includes("same"), "the alias and the direct call read the same text", results[0]?.text);
+    },
+  },
+  {
     name: "sandbox-memory",
     about: "Code that outgrows the 256 MiB sandbox limit fails with MemoryError; the agent carries on and the next run works.",
     // Bounded at about 2 GB, so a build without the limit fails this check rather than exhausting the machine.

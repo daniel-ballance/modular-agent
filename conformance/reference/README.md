@@ -17,6 +17,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 |---|---|
 | `print` | Print mode prints the final answer; the model is offered only `codemode` |
 | `codemode-nested` | Code reads and writes files through `tools`; the nested calls stay out of the model's view |
+| `codemode-tools-values` | `import tools`, a tool function held in a variable, and positional arguments make the same calls |
 | `sandbox-memory` | Code that outgrows the 256 MiB sandbox limit fails with `MemoryError`; the agent carries on and the next run works |
 | `one-offer` | A direct call to a tool not offered does not run |
 | `model-tools-null` | `model_tools: null` offers the six tools directly |
