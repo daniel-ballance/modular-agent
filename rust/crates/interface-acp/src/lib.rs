@@ -165,7 +165,11 @@ impl Plugin for AcpPlugin {
         Ok(())
     }
 }
+mod routes;
+pub use routes::OpenRoutes;
+
 struct State {
+    routes: Arc<OpenRoutes>,
     principal: Arc<Identity>,
     ceiling: Option<Arc<ConnectionCeiling>>,
     factory: Arc<dyn Factory>,
@@ -173,11 +177,36 @@ struct State {
     client: Mutex<Option<Value>>,
     binding_v2: std::sync::atomic::AtomicBool,
     sessions: Mutex<BTreeMap<String, Arc<Session>>>,
-    rewind_blocks: Mutex<BTreeMap<PathBuf, String>>,
-    setup: tokio::sync::Mutex<()>,
-    opening: Mutex<std::collections::BTreeSet<String>>,
+    delivery_views: Mutex<BTreeMap<String, std::sync::Weak<Session>>>,
 }
 impl State {
+    fn delivery_view(&self, id: &str) -> Option<Vec<String>> {
+        let session = self.delivery_views.lock().unwrap().get(id)?.upgrade()?;
+        if session.stop.is_cancelled()
+            || session.drive_stop.is_cancelled()
+            || !self.principal.rights.has("watch")
+        {
+            return None;
+        }
+        let data = session.api.snapshot(id).ok()?;
+        if !self.factory.serves_project(&data.project)
+            || !sessions::in_scope(&self.principal, &data)
+            || !session
+                .api
+                .authority(id, &self.principal.id)
+                .ok()?
+                .has("watch")
+        {
+            return None;
+        }
+        Some(
+            data.entries
+                .into_iter()
+                .filter(|e| e.kind == "erasure")
+                .map(|e| e.id)
+                .collect(),
+        )
+    }
     fn session(&self, p: &Value) -> Result<Arc<Session>> {
         let id = string(p, "sessionId")?;
         let attached = self.sessions.lock().unwrap().get(id).cloned();
@@ -195,17 +224,22 @@ impl State {
         Err(request_error("forbidden", "session inaccessible").into())
     }
     fn project_in_use(&self, project: &Path, except: &str) -> bool {
-        self.sessions
+        self.routes
+            .sessions
             .lock()
             .unwrap()
             .values()
+            .filter_map(std::sync::Weak::upgrade)
             .any(|s| s.id != except && s.project == project)
     }
     async fn shutdown(&self) {
         let sessions = std::mem::take(&mut *self.sessions.lock().unwrap());
+        let _setup = self.routes.setup.lock().await;
         for (_, session) in sessions {
-            let _ = session.close().await;
-            self.factory.detach(session.api.clone(), &session.id).await;
+            if session.detach_route().await {
+                let _ = session.close().await;
+                self.routes.sessions.lock().unwrap().remove(&session.id);
+            }
         }
     }
     async fn dispatch(
@@ -415,7 +449,7 @@ impl State {
                 if name == "move" && p["rewind"] == true {
                     // ACP may compose a different Harness for each session.
                     // Serialize project opens with rewind across those Harnesses.
-                    let _setup = self.setup.lock().await;
+                    let _setup = self.routes.setup.lock().await;
                     let s = self.session(&p)?;
                     require(s.api.as_ref(), &actor_scope(&s.id), "settings")?;
                     if self.project_in_use(&s.project, &s.id) {
@@ -426,7 +460,8 @@ impl State {
                     let result =
                         binding::extension(self.factory.as_ref(), s.clone(), name, &p).await;
                     if s.api.rewind_pending(&s.id).unwrap_or(false) {
-                        self.rewind_blocks
+                        self.routes
+                            .rewind_blocks
                             .lock()
                             .unwrap()
                             .insert(s.project.clone(), s.id.clone());
@@ -494,7 +529,7 @@ impl State {
                 let session = self.session(&p)?;
                 session.begin_close(true)?;
                 let result = session.finish_close().await;
-                self.factory.detach(session.api.clone(), &session.id).await;
+                self.routes.sessions.lock().unwrap().remove(&session.id);
                 self.sessions.lock().unwrap().remove(&session.id);
                 result?;
                 Ok(json!({}))
@@ -816,21 +851,40 @@ pub fn stdio_identity(mut identity: Identity) -> Result<Identity> {
 }
 
 pub async fn run_stdio(factory: Arc<dyn Factory>, identity: Identity) -> Result<()> {
-    run_connection(factory, identity, transport::stdio()).await
+    let delivery = Arc::new(transport::Delivery::default());
+    run_connection(
+        factory,
+        identity,
+        Arc::default(),
+        transport::stdio(delivery.clone()),
+        delivery,
+    )
+    .await
 }
 
 pub async fn run_websocket(
     factory: Arc<dyn Factory>,
     identity: Identity,
     connection: transport_websocket::Connection,
+    routes: Arc<OpenRoutes>,
 ) -> Result<()> {
-    run_connection(factory, identity, transport::websocket(connection)).await
+    let delivery = Arc::new(transport::Delivery::default());
+    run_connection(
+        factory,
+        identity,
+        routes,
+        transport::websocket(connection, delivery.clone()),
+        delivery,
+    )
+    .await
 }
 
 async fn run_connection(
     factory: Arc<dyn Factory>,
     identity: Identity,
+    routes: Arc<OpenRoutes>,
     wire: impl acp::ConnectTo<acp::Agent>,
+    delivery: Arc<transport::Delivery>,
 ) -> Result<()> {
     // Validate configured plugin startup before opening the ACP connection.
     // A failed launch must exit, not leave a connection with a substitute.
@@ -846,6 +900,7 @@ async fn run_connection(
         ))
     });
     let state = Arc::new(State {
+        routes,
         principal: Arc::new(identity),
         ceiling,
         factory,
@@ -853,10 +908,11 @@ async fn run_connection(
         client: Mutex::new(None),
         binding_v2: false.into(),
         sessions: Mutex::default(),
-        rewind_blocks: Mutex::default(),
-        setup: tokio::sync::Mutex::new(()),
-        opening: Mutex::default(),
+        delivery_views: Mutex::default(),
     });
+    let state_ref = Arc::downgrade(&state);
+    *delivery.check.lock().unwrap() =
+        Some(Arc::new(move |id| state_ref.upgrade()?.delivery_view(id)));
     let requests = state.clone();
     let notifications = state.clone();
     let closed = state.clone();

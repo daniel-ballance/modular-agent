@@ -1,7 +1,11 @@
 //! Enforce the Modular Agent framing rules before passing lines to the ACP SDK.
 use agent_api::{Value, json, wire};
 use futures::{AsyncBufReadExt, AsyncWriteExt, io::BufReader, sink, stream};
-use std::{collections::BTreeSet, io, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    sync::{Arc, Mutex as SyncMutex},
+};
 use tokio::sync::{Mutex, mpsc};
 
 const LIMIT: usize = 64 * 1024 * 1024;
@@ -10,6 +14,83 @@ type Reader = BufReader<blocking::Unblock<io::Stdin>>;
 type Writer = Arc<Mutex<blocking::Unblock<io::Stdout>>>;
 type SendLine =
     Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, io::Result<()>> + Send + Sync>;
+
+pub(crate) type CheckView = dyn Fn(&str) -> Option<Vec<String>> + Send + Sync;
+type InFlight = BTreeMap<String, (String, Option<Vec<String>>)>;
+#[derive(Default)]
+pub(crate) struct Delivery {
+    pub check: SyncMutex<Option<Arc<CheckView>>>,
+    requests: SyncMutex<InFlight>,
+}
+impl Delivery {
+    fn stamp(&self, session: &str) -> Option<Vec<String>> {
+        self.check.lock().unwrap().clone()?(session)
+    }
+    fn receive(&self, id: &Value, value: &Value) -> bool {
+        let (Some(method), Some(session)) = (
+            value["method"].as_str(),
+            value["params"]["sessionId"].as_str(),
+        ) else {
+            return true;
+        };
+        if matches!(method, "session/close" | "session/load" | "session/resume") {
+            return true;
+        }
+        let stamp = if method == "_modular-agent/erase" {
+            None
+        } else {
+            self.stamp(session)
+        };
+        let mut requests = self.requests.lock().unwrap();
+        if requests.len() >= 1024 {
+            return false;
+        }
+        requests.insert(id.to_string(), (session.into(), stamp));
+        true
+    }
+    fn send(&self, line: String, refuse: &mpsc::UnboundedSender<String>) -> Option<String> {
+        let frame: Value = serde_json::from_str(&line).ok()?;
+        if frame["method"].is_string() {
+            if let Some(session) = frame["params"]["sessionId"].as_str()
+                && self.stamp(session).is_none()
+            {
+                if let Some(id) = frame.get("id") {
+                    let _ = refuse.send(error(
+                        id,
+                        -32000,
+                        "withheld",
+                        "session delivery is no longer available",
+                    ));
+                }
+                return None;
+            }
+            return Some(line);
+        }
+        let id = &frame["id"];
+        let request = self.requests.lock().unwrap().remove(&id.to_string());
+        if frame["error"].is_object() && frame["error"]["data"]["_meta"].is_null() {
+            return Some(line);
+        }
+        let allowed = if let Some((session, before)) = request {
+            self.stamp(&session)
+                .is_some_and(|current| before.is_none_or(|stamp| stamp == current))
+        } else if let Some(session) = frame["result"]["sessionId"].as_str() {
+            self.stamp(session).is_some()
+        } else {
+            true
+        };
+        Some(if allowed {
+            line
+        } else {
+            error(
+                id,
+                -32000,
+                "withheld",
+                "session delivery is no longer available",
+            )
+        })
+    }
+}
 
 fn valid_id(id: &Value) -> bool {
     id.is_string()
@@ -66,6 +147,7 @@ struct Input {
     write: SendLine,
     refusals: mpsc::UnboundedReceiver<String>,
     seen: BTreeSet<String>,
+    delivery: Arc<Delivery>,
 }
 impl Input {
     async fn next(&mut self) -> io::Result<Option<String>> {
@@ -104,7 +186,9 @@ impl Input {
                 Ok(value) if value.is_object() => {
                     if value.get("method").is_some()
                         && let Some(id) = value.get("id")
-                        && (!valid_id(id) || !self.seen.insert(id.to_string()))
+                        && (!valid_id(id)
+                            || !self.seen.insert(id.to_string())
+                            || !self.delivery.receive(id, &value))
                     {
                         return Ok(None);
                     }
@@ -136,13 +220,16 @@ impl Input {
     }
 }
 
-pub(crate) fn stdio() -> impl agent_client_protocol::ConnectTo<agent_client_protocol::Agent> {
+pub(crate) fn stdio(
+    delivery: Arc<Delivery>,
+) -> impl agent_client_protocol::ConnectTo<agent_client_protocol::Agent> {
     let writer = Arc::new(Mutex::new(blocking::Unblock::new(io::stdout())));
     lines(
         WireReader::Stdio(
             BufReader::new(blocking::Unblock::new(io::stdin())),
             Vec::new(),
         ),
+        delivery,
         Arc::new(move |line| {
             let writer = writer.clone();
             Box::pin(async move { write_line(&writer, &line).await })
@@ -152,9 +239,11 @@ pub(crate) fn stdio() -> impl agent_client_protocol::ConnectTo<agent_client_prot
 
 pub(crate) fn websocket(
     conn: transport_websocket::Connection,
+    delivery: Arc<Delivery>,
 ) -> impl agent_client_protocol::ConnectTo<agent_client_protocol::Agent> {
     lines(
         WireReader::WebSocket(conn.incoming),
+        delivery,
         Arc::new(move |line| {
             let writer = conn.outgoing.clone();
             Box::pin(async move {
@@ -169,6 +258,7 @@ pub(crate) fn websocket(
 
 fn lines(
     reader: WireReader,
+    delivery: Arc<Delivery>,
     write: SendLine,
 ) -> impl agent_client_protocol::ConnectTo<agent_client_protocol::Agent> {
     // The peer can close its read pipe before EOF on its write pipe. Treat a
@@ -199,6 +289,7 @@ fn lines(
         write: write.clone(),
         refusals,
         seen: BTreeSet::new(),
+        delivery: delivery.clone(),
     };
     let incoming = stream::unfold(Some((input, disconnected)), |state| async move {
         let (mut input, disconnected) = state?;
@@ -213,10 +304,12 @@ fn lines(
         }
     });
     let outgoing = sink::unfold(
-        (write, refuse),
-        |(write, refuse), line: String| async move {
+        (write, refuse, delivery),
+        |(write, refuse, delivery), line: String| async move {
             if line.len() <= LIMIT {
-                write(line).await?;
+                if let Some(line) = delivery.send(line, &refuse) {
+                    write(line).await?;
+                }
             } else if let Ok(frame) = serde_json::from_str::<Value>(&line) {
                 if let Some(id) = frame.get("id") {
                     if frame["method"].is_string() {
@@ -244,7 +337,7 @@ fn lines(
                     "invalid outgoing ACP frame",
                 ));
             }
-            Ok((write, refuse))
+            Ok((write, refuse, delivery))
         },
     );
     agent_client_protocol::Lines::new(Box::pin(outgoing), Box::pin(incoming))

@@ -10,6 +10,7 @@ pub struct Factory {
     pub provider: Arc<dyn Plugin>,
     pub runtime: Arc<dyn Plugin>,
     pub settings: Value,
+    pub pool: Arc<agent_harness::ReservationPool>,
 }
 #[async_trait::async_trait]
 impl interface_acp::Factory for Factory {
@@ -24,14 +25,17 @@ impl interface_acp::Factory for Factory {
         declaration
     }
     async fn build(&self, project: &Path, sink: Arc<dyn EventSink>) -> Result<Api> {
-        Ok(crate::compose_project(
+        let agent = crate::compose_project(
             self.options.clone(),
             self.provider.clone(),
             Arc::new(interface_acp::AcpPlugin { sink }),
             self.runtime.clone(),
             project,
         )
-        .await?)
+        .await?;
+        agent.configure_reservations(self.pool.clone())?;
+        agent.rebuild_reservations()?;
+        Ok(agent)
     }
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
         match history_http::HttpHistory::from_env()? {

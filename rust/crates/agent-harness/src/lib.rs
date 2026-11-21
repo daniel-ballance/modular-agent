@@ -1,5 +1,7 @@
 //! Hosts plugins and owns sessions. Inference, turns, I/O and presentation are delegated.
 use agent_api::*;
+mod bytes;
+pub use bytes::{ByteCapacity, ByteLimits};
 mod capacity;
 pub use capacity::{Capacity, Pool as ReservationPool, ResourceLimits};
 mod output;
@@ -34,7 +36,7 @@ impl Drop for OpenSession {
     }
 }
 
-type HeldOutput = BTreeMap<(String, String, String), Vec<(Event, Value)>>;
+type HeldOutput = BTreeMap<(String, String, String), Vec<(Event, Value, capacity::Buffer)>>;
 
 pub struct Harness {
     me: Weak<Harness>,
@@ -331,9 +333,10 @@ impl Harness {
         let session_id = id.to_owned();
         let (lease, mut data, erased) = tokio::task::spawn_blocking(move || -> Result<_> {
             let lease = store.acquire(&session_id)?;
+            let loaded = store.load(&session_id)?;
             let (data, erased) = match store.reconcile_erasure(&session_id)? {
                 Some((data, _)) => (data, true),
-                None => (store.load(&session_id)?, false),
+                None => (loaded, false),
             };
             store.check_erasure(&data)?;
             Ok((lease, data, erased))
@@ -610,6 +613,24 @@ impl Harness {
             .retain(|(id, _, _), _| id != &session);
         self.invalidate_providers(&session)
     }
+    // Do not reconcile here: this check guards a view that was built from the
+    // old state. Reconciliation must never make that view eligible again.
+    fn output_epoch(&self, session: &str) -> Result<Option<String>> {
+        let sessions = self.sessions.lock().unwrap();
+        let Some(open) = sessions.get(session) else {
+            return Ok(None);
+        };
+        if let Some(store) = self.store() {
+            store.check_erasure(&open.data)?;
+        }
+        Ok(open
+            .data
+            .entries
+            .iter()
+            .rev()
+            .find(|e| e.kind == "erasure")
+            .map(|e| e.id.clone()))
+    }
     fn invalidate_providers(&self, session: &str) -> Result<()> {
         for name in self.capability_names("provider.") {
             capability::<dyn Provider>(self, &name)?.invalidate(session);
@@ -742,7 +763,15 @@ impl Harness {
                 .entries
                 .iter()
                 .skip(open.data.entries.len())
-                .any(|entry| entry.kind == "input.accepted");
+                .any(|entry| {
+                    entry.kind == "input.accepted"
+                        || (entry.kind == "actor.grant"
+                            && entry.writer == "interface.acp"
+                            && entry
+                                .content
+                                .as_ref()
+                                .is_some_and(|v| v["operatorAdmission"] != true))
+                });
             if !admitted {
                 return Ok(());
             }
@@ -776,7 +805,11 @@ impl Harness {
         // must not leave an unused session in the store.
         if data.entries.iter().all(|e| {
             matches!(e.kind.as_str(), "command" | "plugins.changed" | "tenant")
-                || (e.kind == "actor.grant" && e.writer == "interface.acp")
+                || (e.kind == "actor.grant"
+                    && e.writer == "interface.acp"
+                    && e.content
+                        .as_ref()
+                        .is_some_and(|v| v["operatorAdmission"] == true))
         }) {
             return Ok(());
         }
@@ -928,7 +961,10 @@ impl Harness {
                 });
             }
         }
-        let reservation = self.reservations().admit(&self.snapshot(session)?)?;
+        let payload = bytes::size(&(&text, &content, &key, &result_shape));
+        let reservation = self
+            .reservations()
+            .admit(&self.snapshot(session)?, payload)?;
         // A proposal is data, not a command. Do not run input hooks with
         // broader authority than the connection and actor share.
         let input_payload = json!({"text":text,"content":content,"actor":actor,"timing":timing});
@@ -1941,7 +1977,11 @@ impl AgentApi for Harness {
         let open = sessions
             .get_mut(session)
             .ok_or_else(|| anyhow!("session not open"))?;
-        self.check_open_writer(open)
+        self.check_open_writer(open)?;
+        if let Some(store) = self.store() {
+            store.check_erasure(&open.data)?;
+        }
+        Ok(())
     }
     fn cancellation(&self, session: &str) -> Result<CancellationToken> {
         Ok(self
@@ -2530,9 +2570,13 @@ impl AgentApi for Harness {
             "plugins.changed",
             |data| json!({"active":data.plugins}),
         );
-        if let Some(store) = self.store() {
-            store.save(&next)?;
-        }
+        let empty = SessionData {
+            entries: vec![],
+            position: None,
+            ..next.clone()
+        };
+        self.reservations()
+            .commit(&empty, &next, None, || self.save(&next))?;
         self.sessions.lock().unwrap().insert(
             new_id.clone(),
             OpenSession {
@@ -2628,7 +2672,10 @@ impl AgentApi for Harness {
                             .map(|result| result.map(|(_, ids)| ids))
                     })
                 };
-                let done = result.ok().flatten().unwrap_or_default();
+                let done = result
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| store.confirmed_erasure(session).unwrap_or_default());
                 for id in targets {
                     if done.contains(id) {
                         erased.push(id.clone());
@@ -2663,13 +2710,21 @@ impl AgentApi for Harness {
         let registry = self.registry.read().unwrap().clone();
         registry.invoke(self.api(), point, scope, value).await
     }
+    fn reserve_output(&self, session: &str, bytes: u64) -> Result<Box<dyn Send>> {
+        let sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get(session)
+            .ok_or_else(|| anyhow!("session not open"))?;
+        Ok(Box::new(self.reservations().buffer(&open.data, bytes)?))
+    }
     async fn output(&self, scope: &Scope, output: Output) -> Result<Option<Value>> {
+        let epoch = self.output_epoch(&scope.session)?;
         let recipient = output.recipient.clone();
         let Some(value) = self.local_output(scope, output).await? else {
             return Ok(None);
         };
         if !self.holds_remote_output() {
-            return Ok(Some(value));
+            return Ok((self.output_epoch(&scope.session)? == epoch).then_some(value));
         }
         let kind = if value["method"].is_string() && value.get("params").is_some() {
             "request"
@@ -2680,12 +2735,18 @@ impl AgentApi for Harness {
         } else {
             "rust.result"
         };
-        Ok(self
-            .remote_output(scope, &recipient, vec![json!({"type":kind,"data":value})])
-            .await?
-            .into_iter()
-            .next()
-            .map(|event| event["data"].clone()))
+        let recipient = if recipient == "interface.acp" {
+            scope.actor.as_str()
+        } else {
+            &recipient
+        };
+        let gated = self
+            .remote_output(scope, recipient, vec![json!({"type":kind,"data":value})])
+            .await?;
+        if self.output_epoch(&scope.session)? != epoch {
+            return Ok(None);
+        }
+        Ok(gated.into_iter().next().map(|event| event["data"].clone()))
     }
     async fn emit(&self, event: Event) -> Result<()> {
         let mut events =
@@ -2696,6 +2757,9 @@ impl AgentApi for Harness {
             };
         events.push(event);
         for event in events {
+            let Ok(epoch) = self.output_epoch(&event.scope.session) else {
+                continue;
+            };
             let observe = match event.kind.as_str() {
                 "actor.joined" => Some("session.join"),
                 "actor.left" => Some("session.leave"),
@@ -2722,7 +2786,11 @@ impl AgentApi for Harness {
                     )
                     .await?;
                 if !self.holds_remote_output() {
-                    if let Some(view) = view {
+                    if let Some(view) = view
+                        && self
+                            .output_epoch(&event.scope.session)
+                            .is_ok_and(|current| current == epoch)
+                    {
                         sink.send(serde_json::from_value(view)?);
                     }
                     continue;
@@ -2733,6 +2801,11 @@ impl AgentApi for Harness {
                     .and_then(|e| output::encode(&e, self).ok().map(|item| (e, item)));
                 let batch = if let Some(stream) = &event.stream {
                     let key = (event.scope.session.clone(), name.clone(), stream.clone());
+                    let item = item.and_then(|(event, item)| {
+                        let data = self.snapshot(&event.scope.session).ok()?;
+                        let permit = self.reservations().buffer(&data, bytes::size(&item)).ok()?;
+                        Some((event, item, permit))
+                    });
                     let mut held = self.held_output.lock().unwrap();
                     if let Some(item) = item {
                         held.entry(key.clone()).or_default().push(item);
@@ -2742,21 +2815,33 @@ impl AgentApi for Harness {
                     }
                     held.remove(&key).unwrap_or_default()
                 } else {
-                    item.into_iter().collect()
+                    item.and_then(|(event, item)| {
+                        let data = self.snapshot(&event.scope.session).ok()?;
+                        let permit = self.reservations().buffer(&data, bytes::size(&item)).ok()?;
+                        Some((event, item, permit))
+                    })
+                    .into_iter()
+                    .collect()
                 };
                 let gated = self
                     .remote_output(
                         &event.scope,
                         &name,
-                        batch.iter().map(|(_, item)| item.clone()).collect(),
+                        batch.iter().map(|(_, item, _)| item.clone()).collect(),
                     )
                     .await?;
                 let decoded = batch
                     .into_iter()
                     .zip(gated)
-                    .map(|((original, before), after)| output::decode(original, &before, &after))
+                    .map(|((original, before, _permit), after)| {
+                        output::decode(original, &before, &after)
+                    })
                     .collect::<Result<Vec<_>>>();
-                if let Ok(decoded) = decoded {
+                if let Ok(decoded) = decoded
+                    && self
+                        .output_epoch(&event.scope.session)
+                        .is_ok_and(|current| current == epoch)
+                {
                     for event in decoded {
                         sink.send(event);
                     }

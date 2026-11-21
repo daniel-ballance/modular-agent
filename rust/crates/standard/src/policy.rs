@@ -242,6 +242,19 @@ impl Default for Bounds {
 }
 
 impl Bounds {
+    pub fn bytes(&self) -> modular_agent::ByteLimits {
+        let capacity = |bound: &Bound| modular_agent::ByteCapacity {
+            buffered: bound.buffered_bytes,
+            storage: bound.storage_bytes,
+            control: bound.control_bytes,
+        };
+        modular_agent::ByteLimits {
+            session: capacity(&self.session),
+            tenant: capacity(&self.tenant),
+            agent: capacity(&self.agent),
+        }
+    }
+
     pub fn counts(&self) -> ResourceLimits {
         ResourceLimits {
             session: self.session.counts,

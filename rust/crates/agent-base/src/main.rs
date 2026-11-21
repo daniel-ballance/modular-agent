@@ -1,3 +1,4 @@
+mod policy;
 use agent_api::*;
 use agent_base::{Options, compose_project};
 use interface_terminal::{Mode, TerminalOptions, TerminalPlugin, TerminalSink};
@@ -33,7 +34,25 @@ async fn start() -> Result<()> {
                 server.close().await;
                 stopped?;
             }
-            _ => bail!("usage: modular-agent --serve-plugin [--listen ADDR --token-file FILE]"),
+            [flag, address, policy_flag, path]
+                if flag == "--listen" && policy_flag == "--host-policy" =>
+            {
+                let hosts = policy::plugin_hosts(&PathBuf::from(path))?;
+                let server = plugin_stdio::server::serve_websocket_hosts(
+                    address,
+                    None,
+                    hosts,
+                    move |(project, state)| Arc::new(plugin.for_host(project, state)),
+                )
+                .await?;
+                println!("{}", server.url);
+                let stopped = tokio::signal::ctrl_c().await;
+                server.close().await;
+                stopped?;
+            }
+            _ => bail!(
+                "usage: --serve-plugin [--listen ADDR --token-file FILE | --listen ADDR --host-policy FILE]"
+            ),
         }
         return Ok(());
     }
@@ -58,6 +77,8 @@ async fn start() -> Result<()> {
         declaration: false,
     };
     let mut acp_mode = false;
+    let mut listen = None;
+    let mut token_file = None;
     let mut trust_project = false;
     let mut fake = None;
     let mut subagents = None;
@@ -77,6 +98,8 @@ async fn start() -> Result<()> {
                 return Ok(());
             }
             "--acp" => acp_mode = true,
+            "--listen" => listen = Some(take(&mut args, "--listen")?),
+            "--token-file" => token_file = Some(PathBuf::from(take(&mut args, "--token-file")?)),
             "--trust-project" => trust_project = true,
             "--approval" => terminal.settings["approval"] = json!(take(&mut args, &arg)?),
             "--subagents" => {
@@ -155,14 +178,65 @@ async fn start() -> Result<()> {
             subagents.is_none(),
             "configure ACP subagents in plugin settings"
         );
-        return interface_acp::run(Arc::new(agent_base::acp::Factory {
+        if let Some(address) = listen {
+            let (hosts, limits) = if let Some(token_file) = token_file {
+                let mut identity = interface_acp::Identity::local();
+                identity.network = true;
+                (
+                    vec![(token_file, identity)],
+                    agent_harness::ResourceLimits::default(),
+                )
+            } else {
+                policy::network()?
+            };
+            let factory = Arc::new(agent_base::acp::Factory {
+                options,
+                provider,
+                runtime,
+                settings: terminal.settings,
+                pool: Arc::new(agent_harness::ReservationPool::new(limits)),
+            });
+            let routes = Arc::new(interface_acp::OpenRoutes::default());
+            let server = transport_websocket::serve(
+                &address,
+                None,
+                transport_websocket::ACP,
+                hosts,
+                move |actor, conn| {
+                    let factory = factory.clone();
+                    let routes = routes.clone();
+                    async move {
+                        let _ = interface_acp::run_websocket(factory, actor, conn, routes).await;
+                    }
+                },
+            )
+            .await?;
+            let stopped = tokio::signal::ctrl_c().await;
+            server.close().await;
+            stopped?;
+            return Ok(());
+        }
+        ensure!(token_file.is_none(), "--token-file requires --listen");
+        let (identity, limits) = policy::load()?.map_or_else(
+            || (None, agent_harness::ResourceLimits::default()),
+            |(identity, limits)| (Some(identity), limits),
+        );
+        let factory = Arc::new(agent_base::acp::Factory {
             options,
             provider,
             runtime,
             settings: terminal.settings,
-        }))
-        .await;
+            pool: Arc::new(agent_harness::ReservationPool::new(limits)),
+        });
+        return match identity {
+            Some(identity) => interface_acp::run_stdio(factory, identity).await,
+            None => interface_acp::run(factory).await,
+        };
     }
+    ensure!(
+        listen.is_none() && token_file.is_none(),
+        "--listen and --token-file require --acp"
+    );
     let interface = Arc::new(TerminalPlugin {
         sink: Arc::new(TerminalSink::new(terminal.mode)),
     });

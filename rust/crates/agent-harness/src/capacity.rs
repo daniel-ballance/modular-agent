@@ -1,3 +1,4 @@
+use crate::bytes::{self, ByteLimits};
 use agent_api::{ModelResponse, OperationError, Result, SessionData};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -97,6 +98,10 @@ struct Charge {
     // A served Runtime receives the response before it records it. These are
     // the extra slots beyond the model intent which the answer will settle.
     staged: BTreeMap<Step, usize>,
+    retained: u64,
+    settlement: u64,
+    buffered: u64,
+    temporary_bytes: u64,
 }
 impl Charge {
     fn new(data: &SessionData) -> Self {
@@ -105,6 +110,10 @@ impl Charge {
             committed: Capacity::ZERO,
             temporary: Capacity::ZERO,
             staged: BTreeMap::new(),
+            retained: 0,
+            settlement: 0,
+            buffered: 0,
+            temporary_bytes: 0,
         }
     }
     fn usage(&self) -> Capacity {
@@ -159,14 +168,57 @@ fn obligations(data: &SessionData) -> Capacity {
     }
 }
 
+// Room for basic intent, closing records and a bounded terminal payload.
+const SETTLEMENT: u64 = 64 * 1024;
+
+fn settlement(data: &SessionData, counts: Capacity) -> u64 {
+    let mut turns = BTreeSet::new();
+    let mut questions = BTreeSet::new();
+    for entry in &data.entries {
+        match entry.kind.as_str() {
+            "turn.start" => {
+                turns.insert(&entry.scope.turn);
+            }
+            "turn.end" => {
+                turns.remove(&entry.scope.turn);
+            }
+            "request.open" => {
+                questions.insert(entry.id.as_str());
+            }
+            "request.answer" | "request.closed" | "request.invalidated" => {
+                if let Some(id) = entry.content.as_ref().and_then(|v| v["request"].as_str()) {
+                    questions.remove(id);
+                }
+            }
+            _ => {}
+        }
+    }
+    let fixed = counts
+        .inputs
+        .saturating_add(counts.calls)
+        .saturating_add(counts.jobs)
+        .saturating_add(turns.len())
+        .saturating_add(questions.len()) as u64;
+    data.pending_inputs()
+        .into_iter()
+        .fold(fixed.saturating_mul(SETTLEMENT), |n, (_, entry)| {
+            n.saturating_add(bytes::size(entry))
+        })
+}
+
 pub struct Pool {
     limits: ResourceLimits,
+    bytes: Option<ByteLimits>,
     charges: Mutex<BTreeMap<String, Charge>>,
 }
 impl Pool {
     pub fn new(limits: ResourceLimits) -> Self {
+        Self::with_bytes(limits, None)
+    }
+    pub fn with_bytes(limits: ResourceLimits, bytes: Option<ByteLimits>) -> Self {
         Self {
             limits,
+            bytes,
             charges: Mutex::default(),
         }
     }
@@ -176,18 +228,26 @@ impl Pool {
 
     pub fn rebuild(&self, data: &SessionData) {
         let mut charges = self.charges.lock().unwrap();
-        charges
+        let charge = charges
             .entry(data.id.clone())
-            .or_insert_with(|| Charge::new(data))
-            .committed = obligations(data);
+            .or_insert_with(|| Charge::new(data));
+        charge.committed = obligations(data);
+        if self.bytes.is_some() {
+            charge.retained = bytes::size(data);
+            charge.settlement = settlement(data, charge.committed);
+        }
         Self::prune(&mut charges, &data.id);
     }
 
     fn prune(charges: &mut BTreeMap<String, Charge>, session: &str) {
-        if charges
-            .get(session)
-            .is_some_and(|c| c.usage() == Capacity::ZERO && c.staged.is_empty())
-        {
+        if charges.get(session).is_some_and(|c| {
+            c.usage() == Capacity::ZERO
+                && c.staged.is_empty()
+                && c.retained == 0
+                && c.settlement == 0
+                && c.buffered == 0
+                && c.temporary_bytes == 0
+        }) {
             charges.remove(session);
         }
     }
@@ -221,23 +281,91 @@ impl Pool {
         Ok(())
     }
 
-    pub(crate) fn admit(self: &Arc<Self>, data: &SessionData) -> Result<Reservation> {
-        self.reserve(data, Capacity::INPUT)
+    fn byte_scopes(
+        &self,
+        charges: &BTreeMap<String, Charge>,
+        data: &SessionData,
+        usage: impl Fn(&Charge) -> u64,
+    ) -> [u64; 3] {
+        let tenant = super::tenants::name(data);
+        let mut used = [charges.get(&data.id).map_or(0, &usage), 0_u64, 0_u64];
+        for charge in charges.values() {
+            let n = usage(charge);
+            if charge.tenant.as_deref() == tenant {
+                used[1] = used[1].saturating_add(n);
+            }
+            used[2] = used[2].saturating_add(n);
+        }
+        used
+    }
+
+    pub(crate) fn buffer(self: &Arc<Self>, data: &SessionData, bytes: u64) -> Result<Buffer> {
+        let mut reserved = Buffer {
+            pool: self.clone(),
+            session: data.id.clone(),
+            bytes: 0,
+        };
+        if let Some(limits) = self.bytes {
+            let mut charges = self.charges.lock().unwrap();
+            let used = self.byte_scopes(&charges, data, |charge| charge.buffered);
+            for (used, cap) in used
+                .into_iter()
+                .zip([limits.session, limits.tenant, limits.agent])
+            {
+                if used.saturating_add(bytes) > cap.buffered {
+                    return bytes::busy();
+                }
+            }
+            let charge = charges
+                .entry(data.id.clone())
+                .or_insert_with(|| Charge::new(data));
+            charge.buffered += bytes;
+            reserved.bytes = bytes;
+        }
+        Ok(reserved)
+    }
+
+    pub(crate) fn admit(self: &Arc<Self>, data: &SessionData, payload: u64) -> Result<Reservation> {
+        // Admission and later input records may each retain the payload.
+        self.reserve(data, Capacity::INPUT, payload.saturating_mul(2))
     }
     pub(crate) fn command(self: &Arc<Self>, data: &SessionData) -> Result<Reservation> {
-        self.reserve(data, Capacity::CALL)
+        self.reserve(data, Capacity::CALL, 0)
     }
-    fn reserve(self: &Arc<Self>, data: &SessionData, amount: Capacity) -> Result<Reservation> {
+    fn reserve(
+        self: &Arc<Self>,
+        data: &SessionData,
+        amount: Capacity,
+        payload: u64,
+    ) -> Result<Reservation> {
         let mut charges = self.charges.lock().unwrap();
         self.check(&charges, data, amount)?;
+        let bytes = if self.bytes.is_some() {
+            payload.saturating_add(SETTLEMENT)
+        } else {
+            0
+        };
+        if let Some(limits) = self.bytes {
+            let used = self.byte_scopes(&charges, data, accounted);
+            for (used, cap) in used
+                .into_iter()
+                .zip([limits.session, limits.tenant, limits.agent])
+            {
+                if used.saturating_add(bytes) > cap.storage.saturating_sub(cap.control) {
+                    return bytes::busy();
+                }
+            }
+        }
         let charge = charges
             .entry(data.id.clone())
             .or_insert_with(|| Charge::new(data));
         charge.temporary = charge.temporary + amount;
+        charge.temporary_bytes += bytes;
         Ok(Reservation {
             pool: self.clone(),
             session: data.id.clone(),
             amount,
+            bytes,
         })
     }
 
@@ -248,6 +376,9 @@ impl Pool {
         response: &ModelResponse,
     ) -> Result<()> {
         let extra = response.tool_calls().len().saturating_sub(1);
+        if self.bytes.is_some() && bytes::size(response) > SETTLEMENT / 2 {
+            return bytes::busy();
+        }
         if extra == 0 {
             return Ok(());
         }
@@ -260,6 +391,18 @@ impl Pool {
                 ..Capacity::ZERO
             },
         )?;
+        if let Some(limits) = self.bytes {
+            let used = self.byte_scopes(&charges, data, accounted);
+            let growth = (extra as u64).saturating_mul(SETTLEMENT);
+            for (used, cap) in used
+                .into_iter()
+                .zip([limits.session, limits.tenant, limits.agent])
+            {
+                if used.saturating_add(growth) > cap.storage.saturating_sub(cap.control) {
+                    return bytes::busy();
+                }
+            }
+        }
         charges
             .entry(data.id.clone())
             .or_insert_with(|| Charge::new(data))
@@ -300,14 +443,59 @@ impl Pool {
             .get(&after.id)
             .map_or(Capacity::ZERO, |c| c.committed);
         self.check(&charges, after, next.growth(old + n + consumed))?;
+        let mut retained = 0;
+        let mut reserved = 0;
+        if let Some(limits) = self.bytes {
+            retained = bytes::size(after);
+            reserved = settlement(after, next);
+            let old = charges.get(&after.id);
+            let before_bytes = old
+                .map_or(0, |c| c.retained.saturating_add(c.settlement))
+                .saturating_add(reservation.as_ref().map_or(0, |r| r.bytes))
+                .saturating_add((consumed.calls as u64).saturating_mul(SETTLEMENT));
+            let growth = retained
+                .saturating_add(reserved)
+                .saturating_sub(before_bytes);
+            if growth != 0 {
+                let added = after.entries.iter().skip(before.entries.len());
+                let control = added.clone().next().is_some()
+                    && added.clone().all(|e| {
+                        matches!(
+                            e.kind.as_str(),
+                            "actor.left"
+                                | "limit"
+                                | "erasure"
+                                | "cancel.requested"
+                                | "job.cleanup.unconfirmed"
+                        )
+                    });
+                let used = self.byte_scopes(&charges, after, accounted);
+                for (used, cap) in
+                    used.into_iter()
+                        .zip([limits.session, limits.tenant, limits.agent])
+                {
+                    let available = if control {
+                        cap.storage
+                    } else {
+                        cap.storage.saturating_sub(cap.control)
+                    };
+                    if used.saturating_add(growth) > available {
+                        return bytes::busy();
+                    }
+                }
+            }
+        }
         let result = save()?;
-        if next != Capacity::ZERO || charges.contains_key(&after.id) {
+        if retained != 0 || next != Capacity::ZERO || charges.contains_key(&after.id) {
             let charge = charges
                 .entry(after.id.clone())
                 .or_insert_with(|| Charge::new(after));
             charge.committed = next;
+            charge.retained = retained;
+            charge.settlement = reserved;
             if let Some(reservation) = &mut reservation {
                 charge.temporary = charge.temporary.growth(n);
+                charge.temporary_bytes -= reservation.bytes;
                 reservation.amount = Capacity::ZERO;
             }
             for e in after
@@ -329,10 +517,37 @@ impl Pool {
     }
 }
 
+fn accounted(charge: &Charge) -> u64 {
+    let staged = charge.staged.values().copied().sum::<usize>() as u64;
+    charge
+        .retained
+        .saturating_add(charge.settlement)
+        .saturating_add(charge.temporary_bytes)
+        .saturating_add(staged.saturating_mul(SETTLEMENT))
+}
+
+pub(crate) struct Buffer {
+    pool: Arc<Pool>,
+    session: String,
+    bytes: u64,
+}
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
+        let mut charges = self.pool.charges.lock().unwrap();
+        let charge = charges.get_mut(&self.session).expect("output has a charge");
+        charge.buffered -= self.bytes;
+        Pool::prune(&mut charges, &self.session);
+    }
+}
+
 pub(crate) struct Reservation {
     pool: Arc<Pool>,
     session: String,
     amount: Capacity,
+    bytes: u64,
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
@@ -344,6 +559,99 @@ impl Drop for Reservation {
             .get_mut(&self.session)
             .expect("reservation owns a charge");
         charge.temporary = charge.temporary.growth(self.amount);
+        charge.temporary_bytes -= self.bytes;
         Pool::prune(&mut charges, &self.session);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::make_entry;
+    use agent_api::{Draft, Scope, json};
+
+    fn session(id: &str) -> SessionData {
+        SessionData {
+            id: id.into(),
+            project: "/".into(),
+            settings: json!({}),
+            plugins: vec![],
+            position: None,
+            entries: vec![],
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn held_output_counts_against_each_scope_and_releases_on_drop() -> Result<()> {
+        let at = |buffered| crate::ByteCapacity {
+            storage: 1_000_000,
+            control: 1000,
+            buffered,
+        };
+        let pool = Arc::new(Pool::with_bytes(
+            ResourceLimits::default(),
+            Some(ByteLimits {
+                session: at(10),
+                tenant: at(14),
+                agent: at(15),
+            }),
+        ));
+        let a = session("a");
+        let b = session("b");
+        let mut c = session("c");
+        c.entries.push(make_entry(
+            &c,
+            &Scope::session(&c.id),
+            "harness",
+            Draft::new("tenant", false, json!({"tenant":"different"})),
+        ));
+        let first = pool.buffer(&a, 10)?;
+        assert!(pool.buffer(&a, 1).is_err());
+        assert!(pool.buffer(&b, 5).is_err());
+        let second = pool.buffer(&b, 4)?;
+        assert!(pool.buffer(&c, 2).is_err());
+        drop(first);
+        let _other = pool.buffer(&c, 10)?;
+        drop(second);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_writes_cannot_take_control_space_or_an_input_reservation() -> Result<()> {
+        let at = crate::ByteCapacity {
+            storage: SETTLEMENT + 3000,
+            control: 1000,
+            buffered: 0,
+        };
+        let pool = Arc::new(Pool::with_bytes(
+            ResourceLimits::default(),
+            Some(ByteLimits {
+                session: at,
+                tenant: at,
+                agent: at,
+            }),
+        ));
+        let a = session("a");
+        let reservation = pool.admit(&a, 0)?;
+        let append = |kind| {
+            let mut next = a.clone();
+            next.entries.push(make_entry(
+                &a,
+                &Scope::session(&a.id),
+                "harness",
+                Draft::new(kind, false, json!({"padding":"x".repeat(2000)})),
+            ));
+            next
+        };
+        assert!(
+            pool.commit::<()>(&a, &append("plugin.test"), None, || panic!(
+                "no ordinary write under saturation"
+            ))
+            .is_err()
+        );
+        pool.commit(&a, &append("limit"), None, || Ok(()))?;
+        drop(reservation);
+        Ok(())
     }
 }

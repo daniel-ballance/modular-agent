@@ -5,14 +5,8 @@ use super::*;
 use std::collections::BTreeSet;
 use tokio::sync::{mpsc, oneshot};
 pub(crate) enum Message {
-    Event(Box<Event>),
+    Event(Box<Event>, Box<dyn Send>),
     Flush(oneshot::Sender<()>),
-}
-pub(crate) struct Sink(pub mpsc::UnboundedSender<Message>);
-impl EventSink for Sink {
-    fn send(&self, event: Event) {
-        let _ = self.0.send(Message::Event(Box::new(event)));
-    }
 }
 pub(crate) fn notify(cx: &ConnectionTo<acp::Client>, id: &str, update: Value) -> Result<()> {
     let notification: SessionNotification =
@@ -48,7 +42,7 @@ fn text(cx: &ConnectionTo<acp::Client>, id: &str, kind: &str, value: &str) -> Re
 }
 pub(crate) async fn pump(
     session: Arc<Session>,
-    mut rx: mpsc::UnboundedReceiver<Message>,
+    mut rx: mpsc::Receiver<Message>,
     cx: ConnectionTo<acp::Client>,
     capabilities: Value,
 ) {
@@ -59,12 +53,13 @@ pub(crate) async fn pump(
         tokio::select! {
             biased;
             _ = session.stop.cancelled() => break,
+            _ = session.drive_stop.cancelled() => break,
             Some(_) = questions.join_next(), if !questions.is_empty() => {},
             message = rx.recv() => {
                 let Some(message) = message else { break };
                 let result:Result<()> = match message {
                     Message::Flush(done) => { let _ = done.send(()); Ok(()) },
-                    Message::Event(event) => {
+                    Message::Event(event, _permit) => {
                         // A child has its own history. Only its routed questions surface here.
                         if event.scope.session != session.id && event.kind != "request.opened" { continue; }
                         if session.check_view().is_err() { continue; }

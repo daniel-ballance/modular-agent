@@ -1,5 +1,6 @@
 //! A synchronous HistoryStore port backed by a separately driven HTTP client.
 use agent_api::*;
+mod pending;
 mod portable_store;
 mod server;
 pub use portable_store::{
@@ -55,7 +56,6 @@ fn now() -> Duration {
 }
 
 static IO: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-static OWNER: OnceLock<String> = OnceLock::new();
 fn io() -> &'static tokio::runtime::Runtime {
     IO.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -357,15 +357,18 @@ struct State {
     lease: Mutex<Option<RemoteLease>>,
     lost: CancellationToken,
     kept: Mutex<BTreeSet<String>>,
+    owner: String,
 }
 impl State {
     fn acquire(&self, ttl_ms: u64) -> Result<String> {
+        self.acquire_with_wait(ttl_ms, true)
+    }
+    fn acquire_with_wait(&self, ttl_ms: u64, wait_for_writer: bool) -> Result<String> {
         let mut guard = self.lease.lock().unwrap();
         if let Some(lease) = &*guard {
             lease.check(&self.lost)?;
             return Ok(lease.id.clone());
         }
-        let owner = OWNER.get_or_init(id);
         let mut budget = None;
         let margin = self.service.margin;
         let (lease, ttl, sent) = loop {
@@ -374,7 +377,7 @@ impl State {
                 Method::POST,
                 &["v1", "sessions", &self.session, "lease"],
                 None,
-                Some(json!({"owner":owner})),
+                Some(json!({"owner":self.owner})),
                 None,
                 budget.map(|(until, _)| until),
             );
@@ -387,6 +390,9 @@ impl State {
             let reply = reply?;
             if reply.0 == StatusCode::CONFLICT && reply.1["code"] == "held" {
                 let retry_after_ms = positive_ms(&reply.1, "retryAfterMs")?;
+                if !wait_for_writer {
+                    return Err(HistoryHeld { retry_after_ms }.into());
+                }
                 let wait = Duration::from_millis(retry_after_ms);
                 let until = budget
                     .map(|(until, _)| until)
@@ -450,6 +456,7 @@ impl State {
                 let sent = now();
                 let old = *cutoff.lock().unwrap();
                 if sent >= old {
+                    eprintln!("history writer renewal could not start before its cutoff");
                     break;
                 }
                 let path = ["v1", "sessions", &session, "lease", &lease_id, "renew"];
@@ -460,7 +467,11 @@ impl State {
                 let reply = tokio::select! {
                     _ = stop.cancelled() => return,
                     _ = lost.cancelled() => return,
-                    r = renew => r.ok().and_then(Result::ok).and_then(|r| checked(r).ok())
+                    r = renew => match r {
+                        Ok(Ok(reply)) => checked(reply).ok(),
+                        Ok(Err(_)) => { eprintln!("history writer renewal transport failed"); None },
+                        Err(_) => { eprintln!("history writer renewal arrived after its cutoff"); None },
+                    }
                 };
                 let Some(ms) = reply.and_then(|v| positive_ms(&v, "ttlMs").ok()) else {
                     break;
@@ -509,6 +520,7 @@ impl Lease for Held {
 pub struct HttpHistory {
     service: Service,
     ttl: u64,
+    coordinated: bool,
     held: Mutex<BTreeMap<String, Weak<State>>>,
 }
 impl HttpHistory {
@@ -566,6 +578,7 @@ impl HttpHistory {
         Ok(Self {
             service,
             ttl,
+            coordinated: version["rustPendingErasure"] == 1,
             held: Mutex::default(),
         })
     }
@@ -594,6 +607,14 @@ impl HttpHistory {
             .pages(&["v1", "sessions", id], None, "entries")?;
         Ok((portable::session(&meta, &entries)?, entries))
     }
+    fn erasure_plans(&self, session: &str) -> Result<Vec<pending::Plan>> {
+        self.service
+            .get(&["rust", "erasure", "v1", session], None)
+            .and_then(|mut value| Ok(serde_json::from_value(value["plans"].take())?))
+            .map_err(|error| {
+                OperationError::Unavailable(format!("pending erasure unavailable: {error}")).into()
+            })
+    }
     fn temporary_lease(&self, session: &str) -> Arc<State> {
         Arc::new(State {
             service: self.service.clone(),
@@ -601,10 +622,125 @@ impl HttpHistory {
             lease: Mutex::default(),
             lost: CancellationToken::new(),
             kept: Mutex::default(),
+            owner: id(),
         })
     }
 }
 impl HistoryStore for HttpHistory {
+    fn coordinates_erasure(&self) -> bool {
+        self.coordinated
+    }
+    fn mark_erasure(
+        &self,
+        session: &str,
+        entry_ids: &[String],
+    ) -> Result<BTreeMap<String, Vec<String>>> {
+        ensure!(
+            self.coordinated,
+            "history service does not coordinate erasure"
+        );
+        Ok(serde_json::from_value(
+            self.service.post(
+                &["rust", "erasure", "v1", session],
+                json!({"entryIds": entry_ids}),
+            )?["copies"]
+                .take(),
+        )?)
+    }
+    fn check_erasure(&self, data: &SessionData) -> Result<()> {
+        if !self.coordinated {
+            return Ok(());
+        }
+        let plans = self.erasure_plans(&data.id)?;
+        if data.entries.iter().any(|entry| {
+            entry.content.is_some() && plans.iter().any(|plan| plan.targets.contains(&entry.id))
+        }) {
+            return Err(OperationError::Unavailable(
+                "session contains content marked for erasure".into(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+    fn confirmed_erasure(&self, session: &str) -> Result<Vec<String>> {
+        if !self.coordinated {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .erasure_plans(session)?
+            .into_iter()
+            .flat_map(|plan| plan.confirmed)
+            .collect())
+    }
+    fn reconcile_erasure(&self, session: &str) -> Result<Option<(SessionData, Vec<String>)>> {
+        if !self.coordinated {
+            return Ok(None);
+        }
+        let plans = self.erasure_plans(session)?;
+        if plans.is_empty() {
+            return Ok(None);
+        }
+        let state = self
+            .lease(session)
+            .ok_or_else(|| anyhow!("no history writer lease"))?;
+        let lease = state.acquire_with_wait(self.ttl, false)?;
+        let (mut data, _) = self.fetch(session)?;
+        let mut confirmed = BTreeSet::new();
+        for plan in plans {
+            let live: Vec<_> = data
+                .entries
+                .iter()
+                .filter(|e| plan.targets.contains(&e.id) && e.content.is_some())
+                .map(|e| e.id.clone())
+                .collect();
+            if !live.is_empty()
+                && !data
+                    .entries
+                    .iter()
+                    .any(|e| e.id == plan.record && e.kind == "erasure")
+            {
+                let keys = erased_input_keys(&data, &live);
+                record_erasure(&mut data, live.clone(), keys);
+                data.entries.last_mut().unwrap().id = plan.record;
+                let entry = portable::entry(data.entries.last().unwrap(), &data)?;
+                self.service.post(
+                    &["v1", "sessions", session, "entries"],
+                    json!({"lease":lease,"entries":[entry]}),
+                )?;
+            }
+            // Confirm already-tombstoned targets too if the service failed
+            // between the record commit and the registry progress commit.
+            if !live.is_empty() || plan.targets.iter().any(|id| !plan.confirmed.contains(id)) {
+                state.acquire(self.ttl)?;
+                self.service.post(
+                    &["v1", "sessions", session, "erase"],
+                    json!({"lease":lease,"entryIds":plan.targets}),
+                )?;
+                data = self.fetch(session)?.0;
+            }
+            state.acquire(self.ttl)?;
+            confirmed.extend(plan.targets.into_iter().filter(|id| {
+                data.entries
+                    .iter()
+                    .any(|e| e.id == *id && e.content.is_none())
+                    && data.entries.iter().any(|e| {
+                        e.kind == "erasure"
+                            && e.content
+                                .as_ref()
+                                .and_then(|c| c["entryIds"].as_array())
+                                .is_some_and(|ids| ids.iter().any(|v| v == id))
+                    })
+            }));
+        }
+        // Include bookkeeping written outside save() in the next append's base.
+        let (data, entries) = self.fetch(session)?;
+        state.acquire(self.ttl)?;
+        *state.kept.lock().unwrap() = entries
+            .iter()
+            .filter_map(|v| v["id"].as_str().map(str::to_owned))
+            .collect();
+        Ok(Some((data, confirmed.into_iter().collect())))
+    }
     fn supports_erasure(&self) -> bool {
         match &self.service.transport {
             Transport::Http { .. } => true,
@@ -786,6 +922,7 @@ impl Plugin for HttpPlugin {
             Arc::new(HttpHistory {
                 service: self.0.service.clone(),
                 ttl: self.0.ttl,
+                coordinated: self.0.coordinated,
                 held: Mutex::default(),
             }),
         )

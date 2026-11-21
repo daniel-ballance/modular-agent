@@ -126,6 +126,7 @@ pub struct AgentBuilder {
     credentials: Option<Arc<dyn crate::CredentialStore>>,
     tenants: Option<Value>,
     resource_limits: ResourceLimits,
+    byte_limits: Option<ByteLimits>,
     several_actors: bool,
     session_limits: bool,
     pub(crate) acp_conformance: bool,
@@ -384,10 +385,15 @@ pub(crate) fn require_model(api: &dyn base::AgentApi, model: &str) -> Result<()>
     }
 }
 
-pub use agent_harness::{Capacity, ResourceLimits};
+pub use agent_harness::{ByteCapacity, ByteLimits, Capacity, ResourceLimits};
 
 impl AgentBuilder {
     /// Set the operator's admission bounds.
+    pub fn byte_limits(mut self, limits: ByteLimits) -> Self {
+        self.byte_limits = Some(limits);
+        self
+    }
+
     pub fn resource_limits(mut self, limits: ResourceLimits) -> Self {
         self.resource_limits = limits;
         self
@@ -676,8 +682,9 @@ impl AgentBuilder {
             own.push((Arc::new(InProcess::new(&plugin)?), vec![]));
         }
         let harness = Harness::for_project(project.clone());
-        harness.configure_reservations(Arc::new(agent_harness::ReservationPool::new(
+        harness.configure_reservations(Arc::new(agent_harness::ReservationPool::with_bytes(
             self.resource_limits,
+            self.byte_limits,
         )))?;
         let tenants = self.tenants.as_ref().map(Value::to_string);
         harness

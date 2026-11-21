@@ -11,7 +11,7 @@ pub struct QuestionsPlugin;
 #[derive(Default)]
 struct Questions {
     lock: Mutex<()>,
-    present: Mutex<BTreeSet<(String, String)>>,
+    present: Mutex<BTreeSet<(String, String, String)>>,
     notify: Notify,
 }
 impl Plugin for QuestionsPlugin {
@@ -140,7 +140,7 @@ impl InputRequests for Questions {
             let present = self.present.lock().unwrap().clone();
             if !present
                 .iter()
-                .any(|(session, actor)| may_answer(api.as_ref(), &q, session, actor))
+                .any(|(session, actor, _)| may_answer(api.as_ref(), &q, session, actor))
             {
                 api.append(
                     &q.scope,
@@ -180,7 +180,7 @@ impl InputRequests for Questions {
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|(session, actor)| may_answer(api.as_ref(), &q, session, actor))
+                    .any(|(session, actor, _)| may_answer(api.as_ref(), &q, session, actor))
             {
                 api.append(
                     &q.scope,
@@ -293,7 +293,10 @@ impl InputRequests for Questions {
     }
 
     fn presence(&self, session: &str, actor: &str, present: bool) {
-        let key = (session.into(), actor.into());
+        self.presence_route(session, actor, "", present);
+    }
+    fn presence_route(&self, session: &str, actor: &str, route: &str, present: bool) {
+        let key = (session.into(), actor.into(), route.into());
         if present {
             self.present.lock().unwrap().insert(key);
         } else {
@@ -302,13 +305,22 @@ impl InputRequests for Questions {
         self.notify.notify_waiters();
     }
 
+    fn detach_presence(&self, session: &str, route: &str) {
+        self.present
+            .lock()
+            .unwrap()
+            .retain(|(id, _, on)| id != session || on != route);
+        self.notify.notify_waiters();
+    }
     fn present(&self, session: &str) -> Vec<String> {
         self.present
             .lock()
             .unwrap()
             .iter()
-            .filter(|(id, _)| id == session)
-            .map(|(_, actor)| actor.clone())
+            .filter(|(id, _, _)| id == session)
+            .map(|(_, actor, _)| actor.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect()
     }
 
@@ -369,7 +381,8 @@ impl Questions {
                     self.present
                         .lock()
                         .unwrap()
-                        .contains(&(session.into(), actor.into())),
+                        .iter()
+                        .any(|(s, a, _)| s == session && a == actor),
                     "approval answerer is not present"
                 );
             }
