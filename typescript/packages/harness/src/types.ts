@@ -219,7 +219,7 @@ export interface ToolSource {
 // ---------- Declarations ----------
 
 /** What a part, or the session as set up, supports. */
-export type Declaration = Record<string, boolean | string>;
+export type Declaration = Record<string, boolean | string | import("./reservations.js").ReservationDeclaration>;
 
 // ---------- Providers and model access ----------
 

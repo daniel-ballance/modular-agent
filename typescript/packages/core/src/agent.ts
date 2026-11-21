@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider } from "@modular-agent/harness";
+import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
 import { contextCompaction } from "@modular-agent/context-compaction";
@@ -43,6 +43,7 @@ export interface AgentOptions {
   model?: string | ModelRef;
   settings?: Settings;
   approval?: Approval;
+  resourceReservations?: ReservationOptions;
   /** Enable the official context compaction plugin and /compact command. */
   compaction?: boolean;
   questionsOutlastTurns?: boolean;
@@ -225,7 +226,7 @@ export class Agent {
       await mkdir(home, { recursive: true });
       const h = new Harness({ project, home, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
         jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn",
-        rejectUnknownModel: true, tenants: options.tenants ?? (options.conformance ? undefined : null) });
+        rejectUnknownModel: true, resourceReservations: options.resourceReservations, tenants: options.tenants ?? (options.conformance ? undefined : null) });
       const settings = structuredClone(options.settings ?? {});
       agent = new Agent(h, scratch, project, settings, options.onQuestion);
       agent.#authority = { severalActors: options.severalActors ?? false, sessionLimits: options.sessionLimits ?? false, tenants: options.tenants !== undefined };
@@ -288,6 +289,7 @@ export class Agent {
         await effectiveStore?.list();
         agent.#portable = effectiveStore?.supports.portableSessions === true;
       }
+      await h.rebuildReservations();
       const env = h.use<WorkingEnvironment>("working-environment");
       if (!options.dataDir && (env?.requiresDataDir || effectiveRuntime?.supports.requiresDataDir === true ||
           (durability !== "ephemeral" && defaultEnvironment && env === defaultEnvironment))) {
@@ -498,6 +500,7 @@ export class Agent {
     this.#check();
     return structuredClone(this.#h.useAll<BaseProvider>("provider").flatMap(p => p.models()));
   }
+  resourceLimits(): ReservationLimits { this.#check(); return this.#h.resourceLimits(); }
   declaration(): Declaration {
     this.#check();
     const base = this.#api.declaration();
@@ -620,6 +623,7 @@ export class Agent {
                 if (agent === this) return agent;
                 try {
                   if (agent.#project !== project || agent.#open.size || agent.#acp) throw new AgentError("invalid_composition", "Factory must return a fresh agent for this project");
+                  agent.#h.shareReservations(this.#h);
                   agent.#acp = true;
                   await installMcp(agent);
                   return agent;

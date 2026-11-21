@@ -7,6 +7,7 @@ export type { AgentOptions, Approval, Durability, ProcessPlugin, ServicePlugin, 
 export { durableRuntime, transientRuntime, localEnvironment, environmentCredentials, fileCredentials } from "./parts.js";
 export { advanceSecretSlot, secretStaging, withCredentialLock } from "@modular-agent/harness";
 export type * from "./parts.js";
+export type { ReservationOptions, ReservationLimits, ReservationDeclaration } from "@modular-agent/harness";
 export { Session } from "./session.js";
 export type { Event, EventData, PromptOptions, PromptResult, Proposal, ToolResult } from "./session.js";
 export { AgentError } from "./errors.js";

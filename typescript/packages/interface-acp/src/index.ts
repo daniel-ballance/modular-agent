@@ -113,7 +113,7 @@ export interface AcpOptions {
 	represents?: ReadonlySet<string>;
 	connectionScope?<T>(run: () => T): T;
 	allowSession?(id: string, project: string): Promise<boolean>;
-	declaration?: (sessionId?: string) => Record<string, boolean | string>;
+	declaration?: (sessionId?: string) => Record<string, unknown>;
 	projectSettings?(project: string): Promise<Record<string, unknown>>;
 	project?(cwd: string, sessionId?: string): Promise<{ api: PluginApi; cwd: string }>;
 	associate?(sessionId: string, api: PluginApi): void;
@@ -675,6 +675,7 @@ export class AcpInterface implements InterfaceCapability {
 			commandContainment: d.commandContainment,
 			...(d.confinesFiles === undefined ? {} : { confinesFiles: bool("confinesFiles") }),
 			...(d.nestedToolCalls === undefined ? {} : { nestedToolCalls: bool("nestedToolCalls") }),
+			...(d.resourceReservations === undefined ? {} : { resourceReservations: d.resourceReservations }),
 		};
 	}
 

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { Reservations, resourceBytes, reservationLimits, type ReservationOptions } from "./reservations.js";
 import { addAbortListener } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -205,7 +206,7 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; tenants?: Record<string, Tenant> | null }
+export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
@@ -221,7 +222,7 @@ function intersectConnectionRights(...scopes: (ConnectionRights | undefined)[]):
 	}
 	return rights.size ? Object.fromEntries(rights) : undefined;
 }
-interface TurnState extends TurnSnapshot { connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
+interface TurnState extends TurnSnapshot { connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
 /**
  * The Harness: hosts plugins, offers the plugin API, keeps sessions.
@@ -236,6 +237,8 @@ export class Harness {
 	private sessions = new Map<string, Session>();
 	private opening = new Set<string>();
 	private readonly tenants: Map<string, Tenant>;
+	private reservations: Reservations;
+	private reservationScan?: Promise<void>;
 	private listeners: { plugin: string; raw: boolean; fn: (e: AgentEvent) => void }[] = [];
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
@@ -252,6 +255,7 @@ export class Harness {
 	readonly problems: { plugin: string; where: string; error: string }[] = [];
 
 	constructor(options: HarnessOptions) {
+		this.reservations = new Reservations(reservationLimits(options.resourceReservations));
 		this.tenants = readTenants(options.tenants === undefined ? process.env.MODULAR_AGENT_TENANTS : JSON.stringify(options.tenants ?? {}));
 		this.project = options.project;
 		this.home = options.home;
@@ -584,9 +588,12 @@ export class Harness {
 		this.checkWriter(session);
 		const command = this.commandTable.get(match[1]);
 		if (!command) throw failure("not_found", `Unknown command /${match[1]}`);
+		const stepId = this.newId();
+		const commandReservation = `command:${stepId}`;
+		if (!this.reservations.reserve(session, commandReservation, { calls: 1, bufferedBytes: resourceBytes(line),
+			storageBytes: this.reservations.limits.settlementBytes })) throw failure("busy", "No capacity for command");
 		const abort = new AbortController();
 		const signal = AbortSignal.any([abort.signal, session.interruption.signal]);
-		const stepId = this.newId();
 		const live = () => {
 			if (abort.signal.aborted || session.closed || session.closing || session.suspended) {
 				throw Object.assign(new Error("Command context has settled"), { code: "invalid_request" });
@@ -634,10 +641,65 @@ export class Harness {
 					return environment;
 				},
 			});
-		} finally { abort.abort(); await tail; }
+		} finally {
+			abort.abort();
+			await tail;
+			this.reservations.release(session, commandReservation);
+		}
 	}
 
 	// ---------- sessions ----------
+
+	resourceLimits() { return structuredClone(this.reservations.limits); }
+
+	shareReservations(serving: Harness) {
+		serving.reservations.adopt(this.reservations);
+		this.reservations = serving.reservations;
+	}
+
+	rebuildReservations(): Promise<void> {
+		return this.reservationScan ??= (async () => {
+			const store = this.use<HistoryStore>("history-store");
+			for (const meta of await store?.list() ?? []) {
+				const s = await this.loadInto(meta.id);
+				if (!s) continue;
+				const entries = s.order.map(id => s.entries.get(id)!);
+				this.reservations.retain(s, entries.reduce((n, entry) => n + resourceBytes(entry), 0), true);
+				for (const q of s.admissions.values()) this.reserveInput(s, q, true);
+				for (const { job } of this.runningJobs(s)) this.reserveJob(s, job.id, true);
+				const results = new Set(entries.filter(e => e.kind === "toolResult" && !s.copied.has(e.id)).map(e => e.toolCallId));
+				for (const entry of entries) {
+					if (s.copied.has(entry.id)) continue;
+					if (entry.kind === "response" && entry.message?.role === "assistant") {
+						for (const part of entry.message.content) if (isToolCall(part) && !results.has(part.id)) this.reserveCall(s, part.id, true);
+					}
+					if ((entry.kind === "modular-agent.nestedCall" || entry.kind === "toolStarted") && entry.toolCallId && !results.has(entry.toolCallId)) {
+						this.reserveCall(s, entry.toolCallId, true);
+					}
+				}
+			}
+		})();
+	}
+
+	private reserveInput(s: Session, q: QueuedInput, rebuilding = false) {
+		const size = resourceBytes(q);
+		const unit = this.reservations.limits.settlementBytes;
+		if (!rebuilding && size + 2048 > this.reservations.limits.entryBytes ||
+			!this.reservations.reserve(s, `input:${q.id}`, { inputs: 1, bufferedBytes: size, storageBytes: 3 * size + 4 * unit }, rebuilding)) {
+			throw failure("busy", "No capacity for input");
+		}
+	}
+
+	private reserveCall(s: Session, id: string, rebuilding = false) {
+		return this.reservations.reserve(s, `call:${id}`, { calls: 1, storageBytes: 4 * this.reservations.limits.settlementBytes }, rebuilding);
+	}
+
+	private reserveJob(s: Session, id: string, rebuilding = false) {
+		const unit = this.reservations.limits.settlementBytes;
+		if (!this.reservations.reserve(s, `job:${id}`, { jobs: 1, inputs: 1, bufferedBytes: unit, storageBytes: 9 * unit }, rebuilding)) {
+			throw failure("busy", "No capacity for job and its report");
+		}
+	}
 
 	session(id: string): Session {
 		const s = this.sessions.get(id);
@@ -658,6 +720,7 @@ export class Harness {
 	}
 
 	async startSession(options: SessionStartOptions = {}): Promise<string> {
+		await this.rebuildReservations();
 		const store = this.use<HistoryStore>("history-store");
 		const sourceId = options.forkFrom?.sessionId ?? options.parentSessionId;
 		const ancestor = sourceId ? this.sessions.get(sourceId) ?? await this.loadInto(sourceId) : undefined;
@@ -666,6 +729,7 @@ export class Harness {
 		const cwd = options.settings?.cwd;
 		const meta: StoredSession = { id: this.newId(), created: this.now(), project: ancestor?.meta.project ?? (typeof cwd === "string" ? cwd : this.project), forkedFrom: options.forkFrom, parentSessionId: options.parentSessionId };
 		const s = new Session(meta, !store);
+		s.tenant = tenant;
 		s.provisional = !!store && store.supports.persistent !== false && !options.forkFrom;
 		if (store && !s.provisional) {
 			await store.create(meta);
@@ -695,7 +759,7 @@ export class Harness {
 		}
 		const actors = options.forkFrom && ancestor ? [...ancestor.actors.values()] : [actor];
 		const drafts: EntryDraft[] = [...actors.map((a) => actorJoined(a, "harness")), ...Object.entries(defaults).map(([key, value]): EntryDraft => ({ kind: "setting", writer: "harness", modelVisible: false, data: { key, value } }))];
-		if (tenant !== undefined && s.tenant === undefined) drafts.unshift({ kind: "tenant", writer: "harness", modelVisible: false, data: { tenant } });
+		if (tenant !== undefined) drafts.unshift({ kind: "tenant", writer: "harness", modelVisible: false, data: { tenant } });
 		if (options.forkFrom && ancestor?.limit) drafts.push({ kind: "limit", writer: "harness", modelVisible: false, actorId: actor.id, data: { rights: ancestor.limit } });
 		else if (options.forkFrom && s.limit !== null) drafts.push({ kind: "limit", writer: "harness", modelVisible: false, actorId: actor.id, data: { rights: null } });
 		if (options.parentSessionId) {
@@ -763,6 +827,7 @@ export class Harness {
 	}
 
 	async openSession(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string> {
+		await this.rebuildReservations();
 		if (this.opening.has(id) || this.sessions.get(id)?.closing) {
 			throw Object.assign(new Error("Session is busy"), { code: "busy" });
 		}
@@ -1043,6 +1108,20 @@ export class Harness {
 			position = entry.kind === "position" ? (entry.data as { to: string | null }).to : entry.id;
 			return entry;
 		});
+		const bytes = entries.reduce((sum, entry) => sum + resourceBytes(entry), 0);
+		const bounds = this.reservations.limits;
+		if (entries.some(entry => resourceBytes(entry) > bounds.entryBytes) || bytes > bounds.batchBytes) {
+			const error = failure("result_too_large", "History batch or entry exceeds the write size limit");
+			if (entries.some(entry => ["turnEnd", "toolResult", "inputAnswer", "inputHandedBack", "jobEnded", "response"].includes(entry.kind))) {
+				this.interruptSession(s, "commitFailed", error);
+				throw failure("lost", "Required history record did not fit");
+			}
+			throw error;
+		}
+		const ordinary = entries.some(entry => entry.kind.includes(".") && !STANDARD_ENTRY_KINDS.has(entry.kind) && entry.kind !== "modular-agent.nestedCall" && entry.kind !== "harness.parentAuthority");
+		const charge = `batch:${entries[0]?.id}`;
+		if (ordinary && !this.reservations.reserve(s, charge, { storageBytes: bytes })) throw failure("busy", "No capacity for plugin history");
+		try {
 		if (firstAdmission) {
 			const store = this.use<HistoryStore>("history-store")!;
 			const initial = [...s.order.map(id => s.entries.get(id)!), ...entries];
@@ -1058,8 +1137,20 @@ export class Harness {
 			const store = this.use<HistoryStore>("history-store");
 			await this.write(s, () => store?.append(s.id, entries));
 		}
+		this.reservations.retain(s, bytes);
+		} finally { if (ordinary) this.reservations.release(s, charge); }
 		for (const e of entries) {
 			s.apply(e);
+			const inputId = inputIdOf(e);
+			if (inputId && e.kind === "input" && e.turnId) {
+				const unit = this.reservations.limits.settlementBytes;
+				this.reservations.release(s, `input:${inputId}`);
+				this.reservations.reserve(s, `turn:${e.turnId}`, { storageBytes: 2 * unit }, true);
+			}
+			if (inputId && e.kind === "inputHandedBack") this.reservations.release(s, `input:${inputId}`);
+			if (e.kind === "turnEnd" && e.turnId) this.reservations.release(s, `turn:${e.turnId}`);
+			if (e.kind === "response" && e.stepId) this.reservations.release(s, `model:${e.stepId}`);
+			if (e.kind === "toolResult" && e.toolCallId) this.reservations.release(s, `call:${e.toolCallId}`);
 			const ids = { turnId: e.turnId, stepId: e.stepId, toolCallId: e.toolCallId, actorId: e.actorId };
 			this.emit(s, "entry.added", e, e.writer, ids);
 			if (e.kind === "response" && e.turnId && e.modelVisible && e.message?.role === "assistant") {
@@ -1442,6 +1533,7 @@ export class Harness {
 			if (scoped && s.erasedKeys.has(scoped)) return { duplicate: true, erased: true } as InputReceipt;
 			const earlier = scoped && s.keys.get(scoped);
 			if (earlier) return { ...earlier, duplicate: true };
+			if (queued.startedBy.kind !== "job") queued.connectionRights = Object.fromEntries(inputActors(queued).map(id => [id, this.rightsOf(s, id)]));
 			return this.acceptInput(s, queued);
 		});
 	}
@@ -1463,11 +1555,16 @@ export class Harness {
 		}
 		const steer = q.when === "steer" && this.runtime()?.supports.inputDuringTurn === true && !s.running?.steeringClosed;
 		const taken = q.when === "propose" ? "proposed" : !s.isBusy() && !s.reopening && !s.followUps.length ? "now" : steer && !s.reopening ? "inTurn" : "after";
-		await this.commit(s, [{
+		this.reserveInput(s, q);
+		try { await this.commit(s, [{
 			kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: q.actorId, inputId: q.id, sources: q.sources,
 			jobId: q.startedBy.kind === "job" ? q.startedBy.id : undefined,
 			data: { inputId: q.id, key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, submittedBy: q.delegatedBy, taken, connectionRights: q.connectionRights },
-		}]);
+		}]); }
+		catch (error) {
+			if (!s.interruption.signal.aborted) this.reservations.release(s, `input:${q.id}`);
+			throw error;
+		}
 		const receipt: InputReceipt = { inputId: q.id, taken };
 		if (q.when !== "propose") {
 			if (taken === "now") this.startTurn(s, q);
@@ -1649,6 +1746,9 @@ export class Harness {
 		if (state?.toolResultError && outcome.outcome.kind !== "limit" && outcome.outcome.kind !== "cancelled") {
 			outcome = { ...outcome, outcome: { kind: "failed", error: state.toolResultError }, result: { openToolCalls: [] } };
 		}
+		if (state?.capacityLimit && outcome.outcome.kind !== "cancelled" && !signal?.aborted) {
+			outcome = { ...outcome, outcome: { kind: "limit", limit: "capacity" } };
+		}
 		const responses = s.order.map((id) => s.entries.get(id)!)
 			.filter((e) => e.turnId === turnId && e.kind === "response" && e.message?.role === "assistant");
 		if (responses.length && (state?.tenantLimit || outcome.outcome.kind === "failed" || outcome.outcome.kind === "cancelled")) {
@@ -1790,6 +1890,7 @@ export class Harness {
 			newId: async () => this.newId(),
 			callActor: () => state.actors.values().next().value ?? this.actorForJob(s, state.jobs),
 			prepareStep: async ({ stepId, usage }) => {
+				if (state.capacityLimit) throw turnLimit("capacity");
 				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 				const attempts = s.order.map((id) => s.entries.get(id)!).filter((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary).length;
 				if (state.settings.maxSteps !== undefined && attempts >= state.settings.maxSteps) throw turnLimit("steps");
@@ -1817,7 +1918,8 @@ export class Harness {
 					if (state.toolResultError && payload.outcome?.kind !== "cancelled" && payload.outcome?.kind !== "limit") {
 						payload = { ...payload, outcome: { kind: "failed", error: state.toolResultError }, result: {} };
 					}
-					if ((state.tenantLimit || await this.tenantBudgetReached(s)) && payload.outcome?.kind !== "cancelled") payload = { ...payload, outcome: { kind: "limit", limit: "tenantTokens" } };
+					if (state.capacityLimit && payload.outcome?.kind !== "cancelled") payload = { ...payload, outcome: { kind: "limit", limit: "capacity" } };
+					else if ((state.tenantLimit || await this.tenantBudgetReached(s)) && payload.outcome?.kind !== "cancelled") payload = { ...payload, outcome: { kind: "limit", limit: "tenantTokens" } };
 					const openToolCalls = payload.outcome?.kind === "cancelled" ? [] :
 						pendingToolCalls(s.branch(), turnId, s.order.map((id) => s.entries.get(id)!));
 					payload = { ...payload, result: { ...payload.result, openToolCalls } };
@@ -1899,7 +2001,7 @@ export class Harness {
 
 	// ---------- models ----------
 
-	private turnModel(s: Session, turnId: string | undefined, state: Pick<TurnState, "sources" | "actors" | "jobs" | "tenantLimit" | "connectionRights">,
+	private turnModel(s: Session, turnId: string | undefined, state: Pick<TurnState, "sources" | "actors" | "jobs" | "tenantLimit" | "capacityLimit" | "connectionRights">,
 		model: ModelAccess, authorize?: () => void): ModelAccess {
 		return { ...model, request: async (request, options) => {
 			return this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, async () => {
@@ -1907,6 +2009,14 @@ export class Harness {
 				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 				const stepId = options.stepId ?? [...state.sources.keys()].at(-1) ?? this.newId();
 
+				const attempt = `model:${stepId}`;
+				const bounds = this.reservations.limits;
+				const requestBytes = resourceBytes(request);
+				if (state.capacityLimit || requestBytes + 2048 > bounds.entryBytes ||
+					!this.reservations.reserve(s, attempt, { calls: 1, storageBytes: requestBytes + 3 * bounds.settlementBytes })) {
+					state.capacityLimit = true;
+					throw turnLimit("capacity");
+				}
 				const scope = { sessionId: s.id, turnId, stepId, provider: model.model.provider, model: { provider: model.model.provider, id: model.model.id } };
 				const safeToRepeat = !!turnId && (model.supports.safeToRepeat === true || (model.supports.keepsState === false && model.supports.runsTools === false));
 				let intentId: string | undefined;
@@ -1915,6 +2025,7 @@ export class Harness {
 					if (await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 					options.signal.throwIfAborted();
 					authorize?.();
+					if (!this.workRights(s, state.actors, state.jobs).includes("watch")) throw failure("forbidden", "Work lost authority");
 					this.checkWriter(s);
 				};
 				const prepareDispatch = async () => {
@@ -1938,6 +2049,10 @@ export class Harness {
 							return matches.length === 1 ? matches[0].message : message;
 						}),
 					};
+					if (resourceBytes(dispatched) + 2048 > bounds.entryBytes || model.supports.runsTools !== false && dispatched.providerTools !== "none") {
+						state.capacityLimit = true;
+						throw turnLimit("capacity");
+					}
 					const [intent] = await this.commit(s, [{
 						kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
 						actorId: turnId ? undefined : [...state.actors][0],
@@ -1972,11 +2087,28 @@ export class Harness {
 						message = options.signal.aborted ? { role: "assistant", stop: "aborted", content: [] }
 							: { role: "assistant", stop: "failed", content: [], error: { kind: "other", message: String(error) } };
 					}
+					const reserved: string[] = [];
+					this.reservations.release(s, attempt);
+					const calls = message.content.filter(isToolCall);
+					let fits = resourceBytes(message) + 2048 <= bounds.entryBytes;
+					if (fits && turnId) for (const call of calls) {
+						if (!this.reserveCall(s, call.id)) { fits = false; break; }
+						reserved.push(call.id);
+					}
+					if (!fits) {
+						for (const id of reserved) this.reservations.release(s, `call:${id}`);
+						state.capacityLimit = true;
+						message = { role: "assistant", content: [], usage: message.usage, stop: "failed",
+							error: { kind: "other", message: "Response exceeds reserved capacity" } };
+					}
 					if (!model.prepareOnWire) await this.hooks.observe("provider.response", { ...scope, message: withoutProviderData(message) });
 					if (!turnId && intentId) await this.commit(s, [{ kind: "response", writer: "harness", stepId,
 						actorId: [...state.actors][0], message, modelVisible: false, sources: [intentId] }]);
 					return message;
-				} finally { await observed; if (turnId) this.emit(s, "model.streamEnd", {}, "harness", { turnId, stepId }); }
+				} finally {
+					this.reservations.release(s, attempt);
+					await observed;
+					if (turnId) this.emit(s, "model.streamEnd", {}, "harness", { turnId, stepId }); }
 			});
 		} };
 	}
@@ -2165,6 +2297,9 @@ export class Harness {
 		signal: AbortSignal, depth: number, turnId: string | undefined, state: TurnState | undefined, parentStart: string): Promise<ToolResult> {
 		const call: ToolCall = { id: this.newId(), name, input, startedBy: "tool", parentCallId: parent.id, actorId: parent.actorId, stepId: parent.stepId };
 		const scope = { turnId, stepId: call.stepId, actorId: call.actorId, toolCallId: call.id };
+		if (resourceBytes(call) + 2048 > this.reservations.limits.entryBytes || !this.reserveCall(s, call.id)) {
+			throw failure("busy", "No capacity for nested call");
+		}
 		const [intent] = await this.commit(s, [{ ...scope, kind: "modular-agent.nestedCall", writer: "harness", modelVisible: false, sources: [parentStart], data: { call } }]);
 		const stop = (status: ToolResult["status"], reason: string): ToolResult => ({ callId: call.id, status, content: [text(reason)] });
 		let registration = this.findTool(s, name);
@@ -2275,10 +2410,16 @@ export class Harness {
 		if (s.closed) throw failure("not_open", "Session is closed");
 		if (s.suspended) throw failure("lost", "Session has lost its writer");
 		if (s.moving || s.closing || s.erasing) throw failure("busy", "Session cannot run tools right now");
+		if (resourceBytes(call) + 2048 > this.reservations.limits.entryBytes || !this.reserveCall(s, call.id)) {
+			throw failure("busy", "No capacity for tool call");
+		}
 		return untilAborted(s.interruption.signal, async () => {
 			s.outsideTools++;
 			try { return await this.callOutsideTurn(s, call); }
-			finally { s.outsideTools--; }
+			finally {
+				if (!s.interruption.signal.aborted) this.reservations.release(s, `call:${call.id}`);
+				s.outsideTools--;
+			}
 		});
 	}
 
@@ -2320,6 +2461,11 @@ export class Harness {
 			const shape = ((start || undefined)?.data as { definition?: ToolDefinition } | undefined)?.definition?.returns;
 			const violation = after.status === "completed" && shape ? shapeViolation(shape, after.value) : undefined;
 			if (violation) throw new Error(`Invalid tool output: ${violation}`);
+			if (resourceBytes(after) + 2048 > this.reservations.limits.settlementBytes) {
+				const error = failure("result_too_large", "Tool result exceeds reserved capacity");
+				return { error, result: { callId: after.callId, status: after.status === "completed" && shape ? "failed" as const : after.status,
+					content: [text("result_too_large")] } };
+			}
 			return { result: after };
 		} catch (cause) {
 			const error = cause instanceof Error ? cause : new Error(String(cause));
@@ -2737,8 +2883,10 @@ export class Harness {
 			const id = active?.job.id ?? s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "jobStarted" && e.writer === plugin && !s.copied.has(e.id) && (e.data as { key?: string } | undefined)?.key === key)?.jobId;
 			if (id) return { id, started: false, ready: active?.handle.ready ?? Promise.resolve(), finish: async () => {}, progress: () => {}, onCancel: () => {} };
 		}
+		if (resourceBytes(options) + 2048 > this.reservations.limits.settlementBytes) throw failure("busy", "Job start exceeds capacity");
 		const startEntryId = this.newId();
 		const job: Job = { id: this.newId(), kind: options.kind, sessionId: s.id, plugin, actorId, turnId: s.running?.turnId, state: "running", usage: zeroUsage() };
+		this.reserveJob(s, job.id);
 		const ready = this.commit(s, [{
 			id: startEntryId, kind: "jobStarted", writer: plugin, modelVisible: false, turnId: job.turnId,
 			toolCallId: options.toolCallId ?? this.toolWork.getStore()?.id, jobId: job.id, actorId,
@@ -2781,11 +2929,13 @@ export class Harness {
 				const work = async () => {
 					await ready;
 					if (s.closed || s.suspended) return;
-					const content = typeof result === "string" ? [text(result)] : result;
+					const raw = typeof result === "string" ? [text(result)] : result;
+					const oversized = resourceBytes(raw) + 2048 > this.reservations.limits.settlementBytes;
+					const content = oversized ? [text("result_too_large")] : raw;
 					const outcome = state === "outcomeUnknown"
 						? { kind: "failed", error: "Job outcome is unknown" }
 						: { kind: state, error: options?.error };
-					const report = options?.report !== false;
+					const report = options?.report !== false && !s.closing && this.workRights(s, [], [job.id]).includes("input");
 					await this.admit(s, async () => {
 						if (report && s.closing) throw failure("invalid_request", "Cannot report to a closing session");
 						const end: EntryDraft = { id: this.newId(), kind: "jobEnded", writer: plugin, modelVisible: false, jobId: job.id, sources: options?.sources, data: { outcome, result: content, report } };
@@ -2799,11 +2949,16 @@ export class Harness {
 								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose" } });
 						}
 						await this.commit(s, drafts);
+						if (queued) this.reservations.transfer(s, `job:${job.id}`, `input:${queued.id}`, {
+							inputs: 1, bufferedBytes: resourceBytes(queued), storageBytes: 5 * this.reservations.limits.settlementBytes,
+						});
+						else this.reservations.release(s, `job:${job.id}`);
 						job.state = state;
 						job.result = content;
 						this.emit(s, "job.ended", { state, result: content }, plugin, { jobId: job.id });
 						if (queued?.when === "after") { s.followUps.push(queued); this.startQueued(s); }
 					});
+					if (oversized) throw failure("result_too_large", "Job result exceeds reserved capacity");
 				};
 				record.ending = work().catch((error) => { if (job.state === "running") record.ending = undefined; throw error; });
 				return record.ending.finally(() => { if (job.state !== "running") s.jobs.delete(job.id); });
@@ -2881,6 +3036,7 @@ export class Harness {
 			pluginsDuringSession: false,
 			erasure: s?.ephemeral ? true : !!store?.erase,
 			inputKeys: true,
+			resourceReservations: this.reservations.declaration(),
 			portableSessions: true,
 			nestedToolCalls: runtime?.supports.nestedToolCalls === true,
 			mixedActorInput: "shared",
@@ -3066,7 +3222,7 @@ export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T
 	});
 }
 
-function failure(code: "invalid_params" | "invalid_request" | "not_open" | "not_found" | "forbidden" | "not_supported" | "busy" | "lost" | "conflict", message: string) {
+function failure(code: "invalid_params" | "invalid_request" | "not_open" | "not_found" | "forbidden" | "not_supported" | "busy" | "lost" | "conflict" | "result_too_large" | "unavailable", message: string) {
 	return Object.assign(new Error(message), { code });
 }
 
