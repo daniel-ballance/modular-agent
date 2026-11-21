@@ -83,7 +83,7 @@ class Function:
 
     @property
     def parameters(self) -> list[str]:
-        return self.required + [name for name in self.properties if name not in self.required]
+        return self.required + sorted(self.properties.keys() - self.required)
 
     @property
     def signature(self) -> str:
