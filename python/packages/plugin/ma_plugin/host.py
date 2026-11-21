@@ -1139,6 +1139,10 @@ class External(Plugin):
                 ),
             }
         if method == "host/history":
+            try:
+                await self.api._harness.guard_erasure(sid)
+            except AgentError as exc:
+                raise WireError("History pending state is unavailable", "internal") from exc
             if runtime_parent:
                 scope = d["runtime"]
                 if scope.ended:

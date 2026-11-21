@@ -8,15 +8,22 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from ma_core import AgentError, Plugin, clone
-from ma_core.wire import entry_in, entry_out
+from ma_core.wire import entry_out
 
+from . import pending
 from .portable import session_view
+from .service import tombstone
 
 
 class History(Plugin):
     name = "history"
     role = "history_store"
-    declarations = {"erasure": True, "retention": "indefinite", "single_writer": True}
+    declarations = {
+        "erasure": True,
+        "pending_erasure": True,
+        "retention": "indefinite",
+        "single_writer": True,
+    }
 
     def __init__(self, root):
         self.root = Path(root)
@@ -39,6 +46,7 @@ class History(Plugin):
         db.execute(
             "CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, session TEXT, record TEXT)"
         )
+        pending.schema(db)
         try:
             with db:
                 yield db
@@ -83,6 +91,8 @@ class History(Plugin):
         for flag in ("busy", "suspending", "closing", "moving", "writer_lost"):
             s.pop(flag, None)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            pending.check_batch(db, d["entries"])
             for e in d["entries"]:
                 value = json.dumps(entry_out(e), sort_keys=True)
                 old = db.execute("SELECT record FROM entries WHERE id=?", (e["id"],)).fetchone()
@@ -135,63 +145,71 @@ class History(Plugin):
                 if project is None or p == project
             ]
 
+    async def publish_erasure(self, d, emit):
+        if d["session"] not in self.locks or not self.db.exists():
+            raise AgentError("Pending-erasure state is unavailable", "unavailable")
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                intent = pending.publish(db, d["session"], d["entries"])
+                return pending.copies(db, intent=intent)
+        except (OSError, sqlite3.Error) as exc:
+            raise AgentError("Pending-erasure state is unavailable", "unavailable") from exc
+
+    async def pending_erasure(self, d, emit):
+        if not self.db.exists():
+            if self.locks:
+                raise AgentError("Pending-erasure state is unavailable", "unavailable")
+            return []
+        try:
+            with self._connect() as db:
+                return pending.copies(db, session=d["session"])
+        except (OSError, sqlite3.Error) as exc:
+            raise AgentError("Pending-erasure state is unavailable", "unavailable") from exc
+
+    async def erasure_revision(self, d, emit):
+        if not self.db.exists():
+            if self.locks:
+                raise AgentError("Pending-erasure state is unavailable", "unavailable")
+            return 0
+        try:
+            with self._connect() as db:
+                revision, unresolved = db.execute(
+                    "SELECT COUNT(DISTINCT intent), MAX(confirmed=0) FROM erase_copies WHERE session=?",
+                    (d["session"],),
+                ).fetchone()
+                if unresolved:
+                    raise AgentError("Session content is pending erasure", "unavailable")
+                return revision
+        except (OSError, sqlite3.Error) as exc:
+            raise AgentError("Pending-erasure state is unavailable", "unavailable") from exc
+
     async def erase(self, d, emit):
-        self._lock(d["session"])
+        sid = d["session"]
+        if sid not in self.locks:
+            raise AgentError("Erasure requires the current writer", "lost")
+        confirmed = []
         with self._connect() as db:
-            records = [
-                entry_in(json.loads(record), sid)
-                for sid, record in db.execute("SELECT session,record FROM entries")
-            ]
-            by_id = {e["id"]: e for e in records}
-            targets = set(d["entries"])
-            if any(x not in by_id or by_id[x]["session"] != d["session"] for x in targets):
-                raise AgentError("Unknown erasure entry")
-            # A visible input and its admission receipt contain the same payload.
-            # Erasing either must reach both, including receipts in copied branches.
-            targets.update(
-                by_id[x].get("data", {}).get("input")
-                for x in list(targets)
-                if by_id[x]["kind"] == "input"
-            )
-            targets.discard(None)
-            changed = True
-            while changed:
-                changed = False
-                for e in records:
-                    if e["id"] in targets:
-                        source = e.get("fork_source")
-                        receipt = e.get("data", {}).get("input") if e["kind"] == "input" else None
-                        for linked in (source, receipt):
-                            if linked in by_id and linked not in targets:
-                                targets.add(linked)
-                                changed = True
-                    if e["id"] not in targets and targets.intersection(e["copies"]):
-                        targets.add(e["id"])
-                        changed = True
-            # Copies held by another writer must not be changed behind its back.
-            acquired = []
-            try:
-                for sid in {by_id[x]["session"] for x in targets} - set(self.locks):
-                    self._lock(sid)
-                    acquired.append(sid)
-                for eid in targets:
-                    e = by_id[eid]
-                    e["data"] = {
-                        "erased": True,
-                        "originalKind": e["data"].get("originalKind", entry_out(e)["kind"]),
-                    }
+            db.execute("BEGIN IMMEDIATE")
+            for eid in dict.fromkeys(d["entries"]):
+                value = db.execute(
+                    "SELECT record FROM entries WHERE session=? AND id=?", (sid, eid)
+                ).fetchone()
+                if value is None:
+                    continue
+                row = json.loads(value[0])
+                if not row.get("erased"):
                     db.execute(
-                        "UPDATE entries SET record=? WHERE id=?", (json.dumps(entry_out(e)), eid)
+                        "UPDATE entries SET record=? WHERE session=? AND id=?",
+                        (json.dumps(tombstone(row)), sid, eid),
                     )
-                db.commit()
-                db.execute("VACUUM")
-            finally:
-                for sid in acquired:
-                    await self.close({"session": sid}, emit)
-        return {
-            "erased": sorted(targets),
-            "sessions": sorted({by_id[x]["session"] for x in targets}),
-        }
+                confirmed.append(eid)
+                if d.get("intent"):
+                    db.execute(
+                        "UPDATE erase_copies SET confirmed=1 WHERE intent=? AND session=? AND entry=?",
+                        (d["intent"], sid, eid),
+                    )
+        return {"erased": confirmed}
 
     async def close(self, d, emit):
         fd = self.locks.pop(d["session"], None)

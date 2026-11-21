@@ -273,8 +273,9 @@ class ACP(Plugin):
         if sid not in self.sessions:
             await self.require_visible_session(None, sid)
             raise protocol_error("not_open", "Session is not open on this connection")
-        if "watch" not in await self.rights(sid):
-            raise protocol_error("forbidden", "Session inaccessible")
+        # The Harness checks the right for each operation. A proposal or
+        # cancellation does not require watch.
+        await self.rights(sid)
 
     async def get(self, sid):
         await self.check_session(sid)
@@ -297,7 +298,13 @@ class ACP(Plugin):
         )
 
     async def check_delivery(self, sid, method=None):
-        if sid is None or method in {"session/close", "_modular-agent/leave"}:
+        if sid is None or method in {
+            "session/close",
+            "session/new",
+            "_modular-agent/leave",
+            "_modular-agent/input",
+            "_modular-agent/answer",
+        }:
             return
         if (
             sid not in self.sessions

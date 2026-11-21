@@ -7,10 +7,11 @@ from ma_core import API, AgentError, Stop, clone, content, identity, now, silent
 from ma_core.wire import provider_projection, recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
+from .erasure import Erasure
 from .output import gate
 
 
-class Harness(Authority):
+class Harness(Authority, Erasure):
     MAX_TOOL_DEPTH = 4
 
     def __init__(self, admin=None, tenant=None, process_plugins=None, *, tenants=None):
@@ -42,6 +43,7 @@ class Harness(Authority):
         self.tool_dispatches = {}
         self.followers = []
         self.output_streams = {}
+        self.erasure_locks = {}
         self.trace = []
         self.define_hook("@harness", "plugin.load", "gate")
         self.define_hook("@harness", "session.prepare", "observe")
@@ -164,6 +166,7 @@ class Harness(Authority):
                 # admitted connection for local defaults, not a synthetic user.
                 self.sessions[sid]["actor"] = actor
             self._session({"session": sid, "actor": actor or s["actor"]})
+            await self.guard_erasure(sid, reconcile=True)
             await self._resume_rewind(sid)
             if s["entries"] and not any(
                 e["kind"] == "plugins" and e["data"]["active"] == self.active_plugins()
@@ -513,6 +516,7 @@ class Harness(Authority):
         if not allow_provisional:
             self._require_materialized(self.sessions[sid])
         await self._assert_writable(sid)
+        await self.guard_erasure(sid, reconcile=True)
         tasks = self.effects.setdefault(sid, {})
         task = asyncio.current_task()
         own = task not in tasks
@@ -889,7 +893,16 @@ class Harness(Authority):
         return any(h[1] == "binding.output" for h in self.handlers)
 
     async def output(self, sid, recipient, events):
-        return await gate(self, sid, recipient, events)
+        if sid is None:
+            return await gate(self, sid, recipient, events)
+        try:
+            before = await self.erasure_revision(sid)
+            result = await gate(self, sid, recipient, events)
+            return result if before == await self.erasure_revision(sid) else []
+        except AgentError as exc:
+            if exc.code == "unavailable":
+                return []
+            raise
 
     async def _emit(self, event):
         event = provider_projection(event)
@@ -1304,6 +1317,7 @@ class Harness(Authority):
             await self.fire("@harness", "session.invalidate", {"session": sid, "reason": "move"})
             return {**e, "outOfReach": list(dict.fromkeys(out_of_reach))}
         if op == "fork":
+            await self.guard_erasure(sid)
             if s.get("busy"):
                 raise AgentError("Cannot fork during a turn")
             branch = await self.handle("branch", d, emit)
@@ -1409,147 +1423,7 @@ class Harness(Authority):
             )
             return child
         if op == "erase":
-            self._require_materialized(s)
-            ids = d.get("entries")
-            if (
-                not isinstance(ids, list)
-                or not ids
-                or any(not isinstance(i, str) or not i for i in ids)
-            ):
-                raise AgentError("Erasure requires entry IDs", "invalid_request")
-            kept = {e["id"]: e for e in s["entries"]}
-            if not set(ids) <= kept.keys():
-                raise AgentError("Unknown erasure entry", "not_found")
-            protected = {
-                "tenant",
-                "limit",
-                "authority",
-                "actor_joined",
-                "actor_left",
-                "position_move",
-                "erase",
-                "job_cleanup_unconfirmed",
-            }
-            if any(e["kind"] in protected and e["id"] in d["entries"] for e in s["entries"]):
-                raise AgentError("Cannot erase records of authority", "forbidden")
-            for opened in self.sessions.values():
-                started = {e["job"] for e in opened["entries"] if e["kind"] == "job_start"}
-                ended = {e["job"] for e in opened["entries"] if e["kind"] == "job_end"}
-                if started - ended:
-                    raise AgentError("Erasure requires all jobs to be idle")
-            if any(x.get("busy") for x in self.sessions.values()):
-                raise AgentError("Erasure requires all turns to be idle", "busy")
-            # Reserve the source's erased input keys before the store destroys its payload.
-            targets = set(ids)
-            while True:
-                more = targets | {
-                    e["id"] for e in s["entries"] if targets.intersection(e.get("copies", []))
-                }
-                for eid in targets:
-                    row = kept[eid]
-                    receipt = row.get("data", {}).get("input")
-                    if row["kind"] == "input" and receipt in kept:
-                        more.add(receipt)
-                if more == targets:
-                    break
-                targets = more
-            if any(kept[eid]["kind"] in protected for eid in targets):
-                raise AgentError("Cannot erase records of authority or topology", "forbidden")
-            reservations = [
-                {
-                    "inputId": row["data"].get("input", row["id"]),
-                    "key": row["data"]["key"],
-                    "actorId": row["actor"],
-                    "submittedBy": row["data"].get("submittedBy", row["actor"]),
-                }
-                for row in s["entries"]
-                if row["id"] in targets and row["kind"] == "input_queued" and row["data"].get("key")
-            ]
-            await self.handle(
-                "append",
-                {
-                    "session": sid,
-                    "writer": "@harness",
-                    "kind": "erase",
-                    "data": {
-                        "entryIds": [e["id"] for e in s["entries"] if e["id"] in targets],
-                        "inputKeys": reservations,
-                    },
-                },
-                emit,
-            )
-            by_session = {
-                opened["id"]: {e["id"]: e for e in opened["entries"]}
-                for opened in self.sessions.values()
-            }
-            result = await self.call("@harness", "history", "erase", d)
-            for open_id in list(self.sessions):
-                loaded = await self.call("@harness", "history", "read", {"session": open_id})
-                if loaded:
-                    self.sessions[open_id] = loaded
-                    previous = by_session[open_id]
-                    ids = [eid for eid in result["erased"] if eid in previous]
-                    if ids:
-                        tags = {
-                            "turn": "turnId",
-                            "step": "stepId",
-                            "call": "toolCallId",
-                            "job": "jobId",
-                        }
-                        identities = {
-                            eid: {
-                                wire: previous[eid][native]
-                                for native, wire in tags.items()
-                                if previous[eid].get(native) is not None
-                            }
-                            for eid in ids
-                        }
-                        await self.handle(
-                            "append",
-                            {
-                                "session": open_id,
-                                "kind": "erase",
-                                "writer": "@harness",
-                                "data": {"entryIds": ids, "identities": identities},
-                            },
-                            emit,
-                        )
-                        for e in self.sessions[open_id]["entries"]:
-                            for native, wire in tags.items():
-                                if wire in identities.get(e["id"], {}):
-                                    e[native] = identities[e["id"]][wire]
-                await self.fire(
-                    "@harness", "session.invalidate", {"session": open_id, "reason": "erasure"}
-                )
-            result.setdefault("pending", [])
-            origin = {eid: open_id for open_id, rows in by_session.items() for eid in rows}
-            origin.update(
-                {pair["id"]: pair["sessionId"] for pair in result.get("affectedPairs", [])}
-            )
-            for category in ("erased", "pending"):
-                result[category + "Pairs"] = [
-                    {"sessionId": origin[eid], "id": eid}
-                    for eid in dict.fromkeys(result[category])
-                    if eid in origin
-                    and origin[eid] in self.sessions
-                    and "watch"
-                    in self.permissions(self.sessions[origin[eid]], d.get("actor", s["actor"]))
-                ]
-            result["out_of_reach"] = ["Output already delivered to recipients"]
-            for plugin in self.plugins.values():
-                erase_provider = getattr(plugin, "erase_provider", None)
-                if erase_provider:
-                    for erased_sid in result.get("sessions", [sid]):
-                        ids = [
-                            eid for eid in result["erased"] if eid in by_session.get(erased_sid, {})
-                        ]
-                        if not ids and erased_sid == sid:
-                            ids = d["entries"]
-                        report = await erase_provider(erased_sid, ids)
-                        result["pending"].extend(report["pending"])
-                        result["out_of_reach"].extend(report["outOfReach"])
-            result["pending"] = list(dict.fromkeys(result["pending"]))
-            return result
+            return await self.erase_entries(s, d)
         if op == "close":
             # Closing an idle attachment is not cancellation. A close that
             # would stop work still needs cancel, just like an explicit cancel.

@@ -177,6 +177,23 @@ class Authority:
         if not data.get("session") or data["session"] not in self.sessions:
             return
         s = self.sessions[data["session"]]
+        if not self.connection_allows(s):
+            raise AgentError("Session inaccessible", "forbidden")
+        if operation not in {
+            "erase",
+            "cancel",
+            "leave",
+            "close",
+            "limit",
+            "grant",
+            "authority",
+            "disconnect",
+            "answer",
+            "withdraw",
+            "withdraw_proposal",
+        } and not (operation == "view" and data.get("method") == "_modular-agent/erase"):
+            await self.guard_erasure(s["id"], reconcile=True)
+            s = self.sessions[data["session"]]
         actor = data.get("actor", s["actor"])
         permission = "watch"
         if target == "runtime":

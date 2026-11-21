@@ -147,7 +147,7 @@ def declaration(plugins, provider=None):
         "outputBypassesAgent": False,
         "cancellingTurnCancelsJobs": False,
         "pluginsDuringSession": False,
-        "erasure": any(p.get("erasure") for p in plugins.values()),
+        "erasure": any(p.get("erasure") and p.get("pending_erasure") for p in plugins.values()),
         "inputKeys": bool(runtime.get("keyed_input")),
         "questionsOutlastTurns": bool(runtime.get("open_calls")),
         "startsTurnsUnasked": "jobReports",

@@ -876,7 +876,7 @@ class Agent:
             lateAnswersStartTurns=bool(
                 self._late_answers and runtime.get("open_calls") and "questions" in parts
             ),
-            erasure=bool(store.get("erasure")),
+            erasure=self._h.supports_erasure(),
             portableSessions=store.get("retention") != "process",
             settingsDuringTurn="refused",
             confinesFiles=bool(environment.get("confines_files")),
