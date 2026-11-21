@@ -38,6 +38,9 @@ const routes: Record<string, Scripted[]> = {
 
 let project: string;
 let history: { url: string; token: string };
+// A lease far shorter than the service default, only for the test of lease expiry. Ordinary turns
+// use the default: against an 800 ms lease, scheduling delay alone makes a healthy writer lose it.
+let shortLease: { url: string; token: string };
 let flakyHistory: { url: string; token: string };
 let historyDir: string;
 let flakyDir: string;
@@ -49,8 +52,9 @@ before(async () => {
 	writeFileSync(join(project, "note.txt"), "a note in the sandbox");
 	historyDir = mkdtempSync(join(tmpdir(), "ma-svc-history-"));
 	flakyDir = mkdtempSync(join(tmpdir(), "ma-svc-flaky-"));
-	[history, flakyHistory, environment, gateway] = await Promise.all([
-		startService("history", { dir: historyDir, leaseMs: 800 }),
+	[history, shortLease, flakyHistory, environment, gateway] = await Promise.all([
+		startService("history", { dir: historyDir }),
+		startService("history", { dir: mkdtempSync(join(tmpdir(), "ma-svc-short-")), leaseMs: 800 }),
 		startService("history", { dir: flakyDir, dropAppendResponses: 3 }),
 		startService("environment", { root: project, runDir: mkdtempSync(join(tmpdir(), "ma-svc-run-")) }),
 		startService("provider", { models: { module: new URL("./fixtures/scripted-models.js", import.meta.url).href, export: "scriptedModels", options: { routes } } }),
@@ -189,17 +193,17 @@ test("history service refuses encoded bodies and overlong leases without committ
 
 test("history service advertises lease expiry and a reopening writer waits for it", async () => {
 	const sid = "abandoned-lease";
-	await http(history, "PUT", `/v1/sessions/${sid}`, { project, created: Date.now() });
-	await http(history, "POST", `/v1/sessions/${sid}/lease`, { owner: "crashed-writer" });
-	const held = await fetch(`${history.url}/v1/sessions/${sid}/lease`, {
-		method: "POST", headers: { authorization: `Bearer ${history.token}`, "content-type": "application/json" },
+	await http(shortLease, "PUT", `/v1/sessions/${sid}`, { project, created: Date.now() });
+	await http(shortLease, "POST", `/v1/sessions/${sid}/lease`, { owner: "crashed-writer" });
+	const held = await fetch(`${shortLease.url}/v1/sessions/${sid}/lease`, {
+		method: "POST", headers: { authorization: `Bearer ${shortLease.token}`, "content-type": "application/json" },
 		body: JSON.stringify({ owner: "reopening-writer" }),
 	});
 	assert.equal(held.status, 409);
 	const error = await held.json() as { code: string; retryAfterMs: number };
 	assert.equal(error.code, "held");
 	assert.ok(error.retryAfterMs > 0 && error.retryAfterMs <= 800);
-	const client = new HttpHistoryStore(history);
+	const client = new HttpHistoryStore(shortLease);
 	await assert.rejects(client.openForWriting(sid), /held by another owner/);
 	await client.openForWriting(sid, { wait: true });
 	await client.close(sid);
