@@ -139,7 +139,7 @@ A **PromptResult** has:
 | `turnId` | the turn's id |
 | `toolResults()` | the recorded ToolResults of the calls the model made in this turn, in call order, each with its tool `name` and a `text()` helper that joins its text content. Nested calls are not listed; they are in the history. |
 
-An input that a hook handles, or that is handed back before a turn takes it, returns its disposition and no outcome. A failed turn is an outcome, not an error: `prompt` raises only when the input itself is refused.
+An input that a hook handles, or that is handed back before a turn takes it, returns its disposition and no outcome. A failed turn is an outcome, not an error. `prompt` raises only when the input itself is refused, or when the agent cannot settle the turn at all, as with `lost` when the session's writer is interrupted.
 
 A structured result is requested with `options.result`, a JSON Schema 2020-12 schema. A Runtime whose Provider returns only text parses the final answer as one JSON value, without removing surrounding markup. It submits the candidate to [`turn.result`](../contracts.md#hook-execution); a missing, malformed or schema-invalid value is refused with recorded feedback and retried under the usual rules. On completion `value` is the checked JSON value, including JSON null when the schema allows it.
 

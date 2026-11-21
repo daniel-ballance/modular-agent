@@ -234,6 +234,8 @@ A [nested call](../contracts.md#nested-calls) is displayed like any other call: 
 
 The agent MUST send a terminal `tool_call_update` after the final result is recorded, with status `completed` for a completed result and `failed` for each other terminal result. It MUST include the shared status in metadata and use ACP tool content blocks for renderable result content. Each result MUST settle its call exactly once; replay uses the same id. Final live updates for a turn MUST precede its prompt reply on that connection.
 
+**Session interrupted.** When the agent stops writing a session ([Recovery](../contracts.md#recovery-and-repeating-work)), it MUST send the notification `_modular-agent/interrupted` with params `{ sessionId, reason }`, `reason` being `commitFailed` or `writerLost`, to each connection attached to the session whose actor has `watch`. It MUST fail each waiting `session/prompt` for that session with `lost`. The notification is live only and is never replayed. A later `session/load` or `session/resume` reacquires writer access and installs recovery; it does not reuse the interrupted writer. The agent lists `interrupted` in `extensions`. A client that does not know the notification ignores it and still sees the failed prompt.
+
 ### Output gate
 
 The agent MUST gate each recipient's outbound session content, including replay, raw tool inputs, permission and form requests, metadata, result bodies and error data. It MUST gate the content of non-session replies, including `initialize`, with `sessionId: null`. The agent MUST use the acting actor as recipient for a reply and the configured actor as recipient for updates and replay. It MUST use the addressed actor as recipient for permission and form requests. It MUST recheck the delivery rights of all actors behind a recipient, including `watch` for updates and replay. The agent MUST map output to [shared events](data.md#output-events) before sending ACP messages:
@@ -244,6 +246,7 @@ The agent MUST gate each recipient's outbound session content, including replay,
 | Live tool start, progress and terminal result | `toolCall`, `toolOutput`, `toolResult` |
 | Replay or history item | `entry` before rendering it into ACP; the page also passes `reply` separately. See [history paging](#extension-methods) for withheld entries. |
 | Settlement of any turn | `turnEnded` before any related prompt `reply`; no separate ACP notification |
+| Session interrupted | `sessionInterrupted` before the `_modular-agent/interrupted` notification |
 | Request result or error containing content | `reply` with the method and complete `result` or `error`, including metadata |
 | Agent permission or form request | `request` with the method and complete ACP `params` |
 | Config update | `request` with method `session/update` and complete ACP `params` |
