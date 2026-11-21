@@ -1,5 +1,4 @@
 //! Values crossing the sandbox boundary, as JSON on the agent's side.
-use modular_agent::ToolStatus;
 use monty_types::{MontyObject, ObjectRef};
 use serde_json::{Value, json};
 
@@ -28,6 +27,11 @@ pub fn to_json(value: ObjectRef<'_>) -> Value {
     }
     if let Some(i) = value.as_int() {
         return json!(i);
+    }
+    if value.type_name() == "int"
+        && let Ok(number) = value.py_repr().parse::<serde_json::Number>()
+    {
+        return Value::Number(number);
     }
     if let Some(f) = value.as_float() {
         return serde_json::Number::from_f64(f)
@@ -58,12 +62,23 @@ pub fn to_json(value: ObjectRef<'_>) -> Value {
     }
 }
 
-pub fn status_word(status: &ToolStatus) -> &'static str {
-    match status {
-        ToolStatus::Refused => "was refused",
-        ToolStatus::Cancelled => "was cancelled",
-        ToolStatus::NotStarted => "did not start",
-        ToolStatus::OutcomeUnknown => "was interrupted, outcome unknown",
-        _ => "failed",
+pub(super) fn image(value: ObjectRef<'_>, text: &mut String) -> Option<Value> {
+    if value.type_name() != "dict" {
+        return None;
     }
+    let fields = value.pairs()?;
+    let field = |name| {
+        fields
+            .iter()
+            .find_map(|(k, v)| (k.as_str() == Some(name)).then(|| v.as_str()).flatten())
+    };
+    if field("type")? != "image" {
+        return None;
+    }
+    let image = json!({"type": "image", "mimeType": field("mimeType")?, "data": field("data")?});
+    if let Some(note) = field("note") {
+        text.push_str(note);
+        text.push('\n');
+    }
+    Some(image)
 }

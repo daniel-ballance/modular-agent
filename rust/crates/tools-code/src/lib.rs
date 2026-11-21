@@ -5,15 +5,20 @@
 use anyhow::{Result, ensure};
 use modular_agent::{Plugin, Tool, ToolContext, ToolOutput, ToolStatus};
 use monty_pool::Pool;
-use monty_types::{CallArgs, ExcType, MontyException};
+use monty_types::{
+    CallArgs, ExcType, MontyException,
+    unstable::{self, MontyNode},
+};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::OnceCell;
 
 pub mod catalog;
 pub mod convert;
+mod render;
 mod sandbox;
 use catalog::Function;
+use sandbox::RunError;
 
 pub const TOOL: &str = "codemode";
 /// The name the functions live under in the sandbox.
@@ -25,9 +30,9 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 pub struct CodeTool {
     /// A Monty worker executable. By default the pool re-executes `ma`.
     pub worker: Option<PathBuf>,
-    /// Longest stretch of Python between two function calls.
+    /// Active wall clock limit for one Monty turn.
     pub compute: Duration,
-    /// Most function calls one run may make.
+    /// Most nested tool calls one run may make.
     pub calls: usize,
     pub recursion: usize,
     /// Most bytes `print` may collect.
@@ -86,8 +91,27 @@ struct Run<'a> {
     tool: &'a CodeTool,
     cx: ToolContext,
     functions: BTreeMap<String, Function>,
+    calls: Calls,
+}
+
+struct Calls {
+    limit: usize,
     made: usize,
 }
+
+impl Calls {
+    fn start(&mut self) -> std::result::Result<(), MontyException> {
+        if self.made == self.limit {
+            return Err(raise(
+                ExcType::RuntimeError,
+                format!("this run made more than {} function calls", self.limit),
+            ));
+        }
+        self.made += 1;
+        Ok(())
+    }
+}
+
 impl Run<'_> {
     /// One function call from the sandbox, as a value or a Python exception.
     async fn call(
@@ -130,13 +154,7 @@ impl Run<'_> {
         let input = function
             .input(args)
             .map_err(|e| raise(ExcType::TypeError, format!("{name}(): {e}")))?;
-        self.made += 1;
-        if self.made > self.tool.calls {
-            return Err(raise(
-                ExcType::RuntimeError,
-                format!("this run made more than {} function calls", self.tool.calls),
-            ));
-        }
+        self.calls.start()?;
         let result = self
             .cx
             .tools()
@@ -161,40 +179,78 @@ impl Run<'_> {
         match (result.status, result.value) {
             (ToolStatus::Completed, Some(value)) => Ok(value),
             (ToolStatus::Completed, None) => Ok(json!(text)),
-            // A tool that reports in a shape reports its failures in it too.
+            // A command that ran to a non-zero exit still returns its dict.
+            // The exec tool marks deadlines separately from exit status.
             (ToolStatus::Failed, Some(value))
-                if function.tool.name == "exec" && value.is_object() =>
+                if function.tool.name == "exec"
+                    && value["timed_out"] != true
+                    && value["exit_code"].as_i64().is_some_and(|code| code != 0) =>
             {
                 Ok(value)
             }
-            (status, _) => Err(raise(
-                ExcType::RuntimeError,
-                format!("{name}() {}: {}", convert::status_word(&status), text),
-            )),
+            _ => Err(raise(ExcType::RuntimeError, text)),
         }
     }
 }
 
-fn bounded(text: String) -> String {
-    let lines = text.lines().count();
-    if lines <= MAX_OUTPUT_LINES && text.len() <= MAX_OUTPUT_BYTES {
-        return text;
-    }
-    let mut kept = String::new();
-    let mut count = 0;
-    for line in text.lines().take(MAX_OUTPUT_LINES) {
-        if kept.len() + line.len() + 1 > MAX_OUTPUT_BYTES {
-            break;
+const CUT: &str = "\n[Output cut. Return or print less, or write the rest to a file.]";
+
+fn prefix_end(text: &str, bytes: usize, lines: usize) -> usize {
+    let stop = text.floor_char_boundary(bytes);
+    text[..stop]
+        .split_inclusive('\n')
+        .take(lines)
+        .map(str::len)
+        .sum()
+}
+
+fn bounded(mut text: String) -> String {
+    if text.len() > MAX_OUTPUT_BYTES || text.lines().count() > MAX_OUTPUT_LINES {
+        text.truncate(prefix_end(
+            &text,
+            MAX_OUTPUT_BYTES - CUT.len(),
+            MAX_OUTPUT_LINES - 1,
+        ));
+        if text.ends_with('\n') {
+            text.pop();
         }
-        kept.push_str(line);
-        kept.push('\n');
-        count += 1;
+        text.push_str(CUT);
     }
-    format!(
-        "{kept}\n[Output cut: showing the first {count} of {lines} lines ({} of {} bytes). Return or print less, or write the rest to a file.]",
-        kept.len(),
-        text.len()
-    )
+    text
+}
+
+fn end_printed_line(printed: &mut String) {
+    if !printed.is_empty() && !printed.ends_with('\n') {
+        printed.push('\n');
+    }
+}
+
+fn append_error(printed: &mut String, error: &str) {
+    // Leave room for the traceback after the printed prefix. If the traceback
+    // itself is too large, keep its final line, which has the type and message.
+    let error = if error.len() >= MAX_OUTPUT_BYTES - CUT.len()
+        || error.lines().count() >= MAX_OUTPUT_LINES
+    {
+        error.lines().next_back().unwrap_or(error)
+    } else {
+        error
+    };
+    let end = prefix_end(
+        printed,
+        MAX_OUTPUT_BYTES.saturating_sub(error.len() + CUT.len() + 1),
+        MAX_OUTPUT_LINES.saturating_sub(error.lines().count() + 2),
+    );
+    if printed.len() + error.len() > MAX_OUTPUT_BYTES
+        || printed.lines().count() + error.lines().count() > MAX_OUTPUT_LINES
+    {
+        printed.truncate(end);
+        if printed.ends_with('\n') {
+            printed.pop();
+        }
+        printed.push_str(CUT);
+        printed.push('\n');
+    }
+    printed.push_str(error);
 }
 
 impl CodeTool {
@@ -212,74 +268,68 @@ impl CodeTool {
                 .map(|f| (f.name.clone(), f))
                 .collect(),
             cx,
-            made: 0,
+            calls: Calls {
+                limit: self.calls,
+                made: 0,
+            },
         };
         let (outcome, mut text) = run.sandbox(code, pool).await;
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
         Ok(match outcome {
             Ok(value) => {
-                let mut value = convert::to_json(value.as_ref());
-                // Images the code returns, alone or in a list, are attached
-                // to the result. The rest is shown as text.
-                let mut images = vec![];
-                let is_image = |v: &Value| {
-                    v["type"] == "image" && v["data"].is_string() && v["mimeType"].is_string()
-                };
-                if is_image(&value) {
-                    images.push(std::mem::take(&mut value));
-                } else if let Some(items) = value.as_array_mut() {
-                    let (found, rest): (Vec<Value>, Vec<Value>) =
-                        std::mem::take(items).into_iter().partition(|v| is_image(v));
-                    images = found;
-                    value = if rest.is_empty() && !images.is_empty() {
-                        Value::Null
-                    } else {
-                        Value::Array(rest)
-                    };
+                let (mut graph, root) = unstable::into_graph_parts(value);
+                if !matches!(graph.node(root), MontyNode::None) {
+                    end_printed_line(&mut text);
                 }
-                for image in &images {
-                    if let Some(note) = image["note"].as_str() {
-                        text.push_str(note);
-                        text.push('\n');
+                // Keep image parts separate from the text result.
+                let mut images = vec![];
+                if let Some(image) = convert::image(graph.value(root), &mut text) {
+                    images.push(image);
+                    *graph.node_mut(root) = MontyNode::None;
+                } else if let MontyNode::List(items) | MontyNode::Tuple(items) = graph.node(root) {
+                    let mut rest = Vec::new();
+                    for &id in items {
+                        if let Some(image) = convert::image(graph.value(id), &mut text) {
+                            images.push(image);
+                        } else {
+                            rest.push(id);
+                        }
+                    }
+                    if !images.is_empty() {
+                        let node = graph.node_mut(root);
+                        if rest.is_empty() {
+                            *node = MontyNode::None;
+                        } else if let MontyNode::List(items) | MontyNode::Tuple(items) = node {
+                            *items = rest;
+                        }
                     }
                 }
-                match &value {
-                    Value::Null => (),
-                    Value::String(string) => text.push_str(string),
-                    other => text.push_str(
-                        &serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
-                    ),
-                }
+                render::value(&mut text, &graph, root, MAX_OUTPUT_BYTES);
                 if text.is_empty() {
                     text = "(no output)".into();
                 }
                 let text = bounded(text);
                 let mut result = ToolOutput::from(text.clone());
-                result.value = Some(json!({"calls": run.made}));
+                result.value = Some(json!({"calls": run.calls.made}));
                 if images.is_empty() {
                     result
                 } else {
                     let mut content = vec![json!({"type":"text","text":text})];
-                    content.extend(images.into_iter().map(|image| {
-                        json!({"type":"image","mimeType":image["mimeType"],"data":image["data"]})
-                    }));
+                    content.extend(images);
                     result.with_content(content)
                 }
             }
             Err(error) => {
-                if text.len() + error.len() <= MAX_OUTPUT_BYTES
-                    && text.lines().count() + error.lines().count() <= MAX_OUTPUT_LINES
-                {
-                    text.push_str(&error);
-                } else {
-                    // Do not let printed output hide why the run stopped.
-                    // Monty puts the exception type and message on the last line.
-                    let reason = error.lines().next_back().unwrap_or(&error);
-                    let end = reason.floor_char_boundary(1024);
-                    text.insert(0, '\n');
-                    text.insert_str(0, &reason[..end]);
+                match error {
+                    RunError::PrintLimit(cap) => {
+                        text.insert_str(
+                            0,
+                            &format!("RuntimeError: printed output exceeded {cap} bytes\n"),
+                        );
+                    }
+                    RunError::Failed(error) => {
+                        end_printed_line(&mut text);
+                        append_error(&mut text, &error);
+                    }
                 }
                 ToolOutput {
                     status: ToolStatus::Failed,
@@ -287,5 +337,36 @@ impl CodeTool {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Calls, CodeTool, MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, bounded};
+
+    #[test]
+    fn the_default_allowance_admits_500_nested_calls_not_501() {
+        let mut calls = Calls {
+            limit: CodeTool::default().calls,
+            made: 0,
+        };
+        for _ in 0..500 {
+            calls.start().unwrap();
+        }
+        assert!(calls.start().is_err());
+        assert_eq!(calls.made, 500);
+    }
+
+    #[test]
+    fn the_result_cut_keeps_a_utf8_prefix_of_a_long_line() {
+        let text = format!(
+            "RuntimeError: printed output exceeded 1048576 bytes\n{}",
+            "é".repeat(MAX_OUTPUT_BYTES)
+        );
+        let cut = bounded(text);
+        assert!(cut.starts_with("RuntimeError: printed output exceeded 1048576 bytes\néé"));
+        assert!(cut.lines().nth(1).unwrap().chars().all(|ch| ch == 'é'));
+        assert!(cut.len() <= MAX_OUTPUT_BYTES);
+        assert!(cut.lines().count() <= MAX_OUTPUT_LINES);
     }
 }

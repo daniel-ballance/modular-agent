@@ -5,7 +5,7 @@ use monty_pool::{
 };
 use monty_types::{
     DateTimeSource, ExcType, IMPORT_CALL, ImportArgs, MontyObject, MontyUuid, NameLookupResult,
-    OsPolicy, PrintStream, ResourceLimits, SleepMode,
+    OsPolicy, PrintStream, ProcessTime, RandomStart, ResourceLimits, SleepMode,
 };
 use std::{
     future::{pending, ready},
@@ -15,6 +15,17 @@ use std::{
 use tokio::{io::unix::AsyncFd, sync::Notify};
 
 const MAX_MEMORY: usize = 256 * 1024 * 1024;
+
+pub(super) enum RunError {
+    Failed(String),
+    PrintLimit(usize),
+}
+
+fn keep_printed(printed: &mut String, text: &str, cap: usize) -> bool {
+    let left = cap - printed.len();
+    printed.push_str(&text[..text.floor_char_boundary(left)]);
+    text.len() <= left
+}
 
 pub(super) async fn pool(tool: &CodeTool) -> anyhow::Result<Pool> {
     let executable = match &tool.worker {
@@ -32,11 +43,13 @@ impl Run<'_> {
         &mut self,
         code: &str,
         pool: &Pool,
-    ) -> (Result<MontyObject, String>, String) {
+    ) -> (Result<MontyObject, RunError>, String) {
         let config = ReplConfig {
             limits: Some(
                 ResourceLimits::default()
                     .max_memory(MAX_MEMORY)
+                    // The pinned protocol resets this at every resume, not just
+                    // after nested tool calls. See the finding in rust/README.md.
                     .max_turn_duration(self.tool.compute)
                     .max_recursion_depth(self.tool.recursion)
                     // The agent counts nested calls, not name and catalog lookups.
@@ -45,13 +58,15 @@ impl Run<'_> {
             os_policy: OsPolicy {
                 datetime: DateTimeSource::CallHost,
                 sleep: SleepMode::CallHost,
+                process_time: ProcessTime::Zero,
+                random_start: RandomStart::CallHost,
                 ..OsPolicy::default()
             },
             ..ReplConfig::default()
         };
         let mut worker = match pool.checkout(&config).await {
             Ok(worker) => worker,
-            Err(error) => return (Err(error.to_string()), String::new()),
+            Err(error) => return (Err(RunError::Failed(error.to_string())), String::new()),
         };
         // Never finish this checkout back into the pool. On success, error or
         // cancellation, Drop kills the worker and releases its pool slot. In
@@ -61,12 +76,9 @@ impl Run<'_> {
         let cap = self.tool.print_bytes;
         let outcome = {
             let mut print = |_stream: PrintStream, text: &str| -> monty_pool::PrintFuture {
-                let left = cap - printed.len();
-                if text.len() <= left {
-                    printed.push_str(text);
+                if keep_printed(&mut printed, text, cap) {
                     Box::pin(ready(()))
                 } else {
-                    printed.push_str(&text[..text.floor_char_boundary(left)]);
                     // Stop reading this turn before it can dispatch another
                     // nested call. The sandbox has exceeded its print budget.
                     full.notify_one();
@@ -75,8 +87,8 @@ impl Run<'_> {
             };
             tokio::select! {
                 biased;
-                _ = full.notified() => Err(format!("RuntimeError: printed output exceeds the {cap}-byte limit")),
-                outcome = self.drive(code, &mut worker, &mut print) => outcome,
+                _ = full.notified() => Err(RunError::PrintLimit(cap)),
+                outcome = self.drive(code, &mut worker, &mut print) => outcome.map_err(RunError::Failed),
             }
         };
         (outcome, printed)
@@ -195,4 +207,20 @@ fn watch_exit(pid: u32) -> io::Result<AsyncFd<OwnedFd>> {
     // SAFETY: OwnedFd keeps this pollable descriptor open and exclusive
     // while it is registered with Tokio.
     unsafe { AsyncFd::register(OwnedFd::from_raw_fd(fd as i32)) }.map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keep_printed;
+
+    #[test]
+    fn the_print_limit_keeps_the_longest_utf8_prefix() {
+        let mut printed = String::new();
+        let cap = 1024 * 1024;
+        assert!(keep_printed(&mut printed, &"x".repeat(cap - 5), cap));
+        assert!(keep_printed(&mut printed, "é", cap));
+        assert!(!keep_printed(&mut printed, "😀x", cap));
+        assert_eq!(printed.len(), cap - 3);
+        assert!(printed.ends_with("xé"));
+    }
 }
