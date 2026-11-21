@@ -601,6 +601,11 @@ func appendEntry(next *api.Session, e api.Entry, writer string, advance bool) ap
 	return e
 }
 func (c *client) Record(ctx context.Context, id string, e api.Entry) (api.Entry, error) {
+	if e.Kind == "model.request" {
+		if err := c.checkProviderErasure(ctx, id); err != nil {
+			return e, err
+		}
+	}
 	s, err := c.find(id)
 	if err != nil {
 		return e, err

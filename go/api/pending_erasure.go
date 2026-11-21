@@ -9,14 +9,21 @@ var ErrErasureBusy = errors.New("erase refused while a turn, call or job runs")
 // ErasureIntent contains identities only. The session record owns key
 // reservations and the tombstones that prove deletion.
 type ErasureIntent struct {
-	ID      string        `json:"id"`
-	Source  string        `json:"source"`
-	Targets []string      `json:"targets"`
-	Copies  []ErasureCopy `json:"copies"`
+	ID        string            `json:"id"`
+	Source    string            `json:"source"`
+	Targets   []string          `json:"targets"`
+	Copies    []ErasureCopy     `json:"copies"`
+	Providers []ErasureProvider `json:"providers,omitempty"`
 }
 type ErasureCopy struct {
 	EntryPair
 	Complete bool `json:"complete,omitempty"`
+}
+
+type ErasureProvider struct {
+	SessionID string `json:"sessionId"`
+	Provider  string `json:"provider"`
+	Complete  bool   `json:"complete,omitempty"`
 }
 
 // ErasureCoordinator serializes intent publication and participating readers,
