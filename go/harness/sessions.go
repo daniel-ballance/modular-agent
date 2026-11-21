@@ -882,7 +882,7 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 		s.mu.Unlock()
 		return api.Receipt{}, errRewindUnresolved
 	}
-	if !c.canAdmit(s.data, in) {
+	if !api.SessionScopeAllows(ctx, s.data.Project, s.data.Tenant) || !c.canAdmit(s.data, in) {
 		s.mu.Unlock()
 		return api.Receipt{}, api.ErrAuthority
 	}
@@ -914,12 +914,20 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !c.canAdmit(s.data, in) {
+	if !api.SessionScopeAllows(ctx, s.data.Project, s.data.Tenant) || !c.canAdmit(s.data, in) {
 		return api.Receipt{}, api.ErrAuthority
 	}
 	if r, ok := duplicate(s.data, in); ok {
 		return r, nil
 	}
+	starting := []string{}
+	for _, right := range api.Rights {
+		if api.ConnectionAllows(ctx, right) && c.authorized(s.data, in.Actor, right) &&
+			(in.ViaActor == "" || c.authorized(s.data, in.ViaActor, right)) {
+			starting = append(starting, right)
+		}
+	}
+	in.ConnectionRights = &starting
 	return c.admitLocked(s, in)
 }
 func duplicate(s api.Session, input api.Input) (api.Receipt, bool) {
@@ -993,11 +1001,13 @@ func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 		if !errors.Is(context.Cause(ctx), api.ErrProcessStopped) && (ctx.Err() != nil || outcome.Status == "cancelled") {
 			outcome.Returned = append([]api.Input(nil), s.queue...)
 			if len(s.queue) > 0 {
-				ids := make([]string, 0, len(s.queue))
+				next := s.data
+				next.Entries = slices.Clip(next.Entries)
 				for _, queued := range s.queue {
-					ids = append(ids, queued.ID)
+					appendEntry(&next, api.Entry{Kind: "input.returned", Actor: queued.Actor, InputRef: queued.ID,
+						Data: api.JSON(map[string]string{"reason": "cancelled"})}, "harness", true)
 				}
-				if _, err := s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
+				if err := s.commitLocked(next); err != nil {
 					outcome.Error = err.Error()
 				}
 			}

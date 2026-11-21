@@ -68,6 +68,62 @@ func TestModelCallListCapacitySettlesResponseWithoutDispatch(t *testing.T) {
 	}
 }
 
+func TestRestartKeepsAnOutstandingProposalAboveTheNewCeiling(t *testing.T) {
+	ctx := t.Context()
+	project, state := t.TempDir(), t.TempDir()
+	build := func(l modular.CapacityLimits) *modular.Agent {
+		a, err := modular.New(ctx, modular.WithDataDir(state), modular.WithProject(project), modular.WithDurability(modular.Kept), modular.WithSeveralActors(true), modular.WithCapacityLimits(l))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = a.Close(ctx) })
+		return a
+	}
+	limits := modular.DefaultCapacityLimits()
+	a := build(limits)
+	s, err := a.Session(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := s.Send(ctx, "retain this proposal", modular.Propose, modular.WithInputKey("held"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Send(ctx, "retain this too", modular.Propose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	limits.Agent.Inputs = 1
+	b := build(limits)
+	other, err := b.Session(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused, err := other.Send(ctx, "unreserved", modular.Propose); refused.InputID != "" || err == nil {
+		t.Fatalf("fresh work stole a reservation: %+v, %v", refused, err)
+	}
+	old, err := b.OpenSession(ctx, s.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dup, err := old.Send(ctx, "different payload", modular.Propose, modular.WithInputKey("held"))
+	if err != nil || !dup.Duplicate || dup.InputID != held.InputID {
+		t.Fatal(dup, err)
+	}
+	if err := old.Withdraw(ctx, held.InputID); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Withdraw(ctx, second.InputID); err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := other.Send(ctx, "capacity returned", modular.Propose); err != nil || admitted.InputID == "" {
+		t.Fatal(admitted, err)
+	}
+}
+
 func TestConcurrentAdmissionsShareTheNoTenantBucket(t *testing.T) {
 	limits := modular.DefaultCapacityLimits()
 	limits.Tenant.Inputs = 1
