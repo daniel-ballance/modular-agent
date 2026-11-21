@@ -433,7 +433,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 			return nil, fault("not_supported", "working environment does not support points")
 		}
 		return pointRequest(ctx, s.Environment, s.project, method, v)
-	case "env/read", "env/write", "env/exists", "env/exec":
+	case "env/read", "env/write", "env/exists", "env/exec", "env/list":
 		if s.Environment == nil {
 			return nil, fault("invalid_request", "not the working environment")
 		}
