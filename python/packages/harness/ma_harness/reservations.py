@@ -114,7 +114,12 @@ class Reservations:
                 or any(type(v) is not int or not 0 <= v <= COUNT_MAX for v in overrides.values())
             ):
                 raise AgentError("Invalid resource reservation bounds", "invalid_composition")
-            self.limits[scope] = {**defaults, **overrides}
+            bounded = {**defaults, **overrides}
+            if "controlBytes" not in overrides:
+                bounded["controlBytes"] = min(bounded["controlBytes"], bounded["storageBytes"])
+            if bounded["controlBytes"] > bounded["storageBytes"]:
+                raise AgentError("Control headroom exceeds storage bounds", "invalid_composition")
+            self.limits[scope] = bounded
         self.current = {}
         self.inflight = {}
         self.responses = {}
@@ -169,7 +174,13 @@ class Reservations:
 
     def require(self, sid, tenant, delta, *, skip=None):
         for scope, usage in self._usage(sid, tenant, skip=skip).items():
-            if any(v > 0 and v + usage[k] > self.limits[scope][k] for k, v in delta.items()):
+            limits = self.limits[scope]
+            if any(
+                v > 0
+                and v + usage[k]
+                > limits[k] - (limits["controlBytes"] if k == "storageBytes" else 0)
+                for k, v in delta.items()
+            ):
                 raise AgentError("Resource reservation capacity exhausted", "busy")
 
     def stage(self, session, entries, *, response=None):

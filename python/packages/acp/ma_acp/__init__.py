@@ -1289,6 +1289,11 @@ class ACP(Plugin):
         if operation == "answer":
             attribution = await self.attribution(sid, actor)
             answer_base = {**base, **attribution}
+            rights = set(await self.rights(sid))
+            if actor != self.actor:
+                rights &= set(await self.api.session("authority", session=sid, actor=actor))
+            if not rights.intersection({"answer", "approve"}):
+                raise protocol_error("forbidden", "Actor cannot answer questions")
             try:
                 question = next(
                     (
