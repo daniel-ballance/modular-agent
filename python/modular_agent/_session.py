@@ -63,6 +63,7 @@ _EVENT_NAMES = {
     "history_entry": "entry",
     "session_started": "sessionStarted",
     "session_ended": "sessionEnded",
+    "session_interrupted": "sessionInterrupted",
 }
 _RECORD_EVENTS = {
     "turn_start": "turnStarted",
@@ -207,6 +208,7 @@ class Session:
         self._agent = agent
         self.id = session_id
         self._changed = asyncio.Event()
+        self._interruption: str | None = None
         self._streams: set[_Stream] = set()
         self._closed = False
         self._root = self
@@ -325,6 +327,10 @@ class Session:
             return PromptResult(receipt.input_id, receipt.disposition)
         while True:
             self._changed.clear()
+            if self._root._interruption:
+                raise AgentError(
+                    ErrorCode.LOST, "Session interrupted", {"reason": self._root._interruption}
+                )
             state = await self._agent._session("get", session=self.id)
             records = state["entries"]
             turn_id = next(
@@ -344,6 +350,10 @@ class Session:
                     entry["data"].get("inputIds") or [entry["data"].get("input")]
                 ):
                     return PromptResult(receipt.input_id, Disposition.HANDED_BACK)
+            if state.get("writer_lost"):
+                raise AgentError(
+                    ErrorCode.LOST, "Session interrupted", {"reason": state["interruption"]}
+                )
             if not state.get("busy"):
                 await self._agent._call("runtime", "wait", session=self.id)
                 raise AgentError(ErrorCode.LOST, "Input settled without a recorded outcome")
@@ -396,6 +406,8 @@ class Session:
             turn_id = None
             while True:
                 event = await stream.next()
+                if event.type == "sessionInterrupted":
+                    raise AgentError(ErrorCode.LOST, "Session interrupted", event.data.fields)
                 entry = event.data.fields.get("entry")
                 if isinstance(entry, dict) and entry.get("kind") == "turnStart":
                     data = entry.get("data")
@@ -477,7 +489,7 @@ class Session:
                     continue
                 stream.delivered(event)
                 yield event
-                if event.type == "sessionEnded":
+                if event.type in {"sessionEnded", "sessionInterrupted"}:
                     return
         finally:
             unsubscribe()

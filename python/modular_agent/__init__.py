@@ -20,6 +20,11 @@ from ._environment import (
     LocalEnvironment as LocalEnvironment,
     local_environment as local_environment,
 )
+from ._history_port import (
+    HistoryError as HistoryError,
+    HistoryPort as HistoryPort,
+    sqlite_history_port as sqlite_history_port,
+)
 from ._history import (
     HistoryStore as HistoryStore,
     file_history as file_history,

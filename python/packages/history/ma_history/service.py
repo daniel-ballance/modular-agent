@@ -9,6 +9,7 @@ import re
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager, nullcontext
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -322,15 +323,25 @@ def shape(route, method, body):
             invalid()
 
 
-def serve(directory, address, token_file, ttl_ms, *, ready=None):
+@contextmanager
+def sqlite_store(directory, ttl_ms):
+    root = Path(directory) / "history-service"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # One service instance per store: monotonic lease state is local. No other
+    # instance may serve the same records until the prior instance loses its lock.
+    with (root / "service.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with sqlite3.connect(root / "records.db") as db:
+            yield Store(db, ttl_ms)
+
+
+def serve(directory, address, token_file, ttl_ms, *, ready=None, custom_route=None):
     ip = ipaddress.ip_address(address[0])
     if not ip.is_loopback or type(ttl_ms) is not int or not 0 < ttl_ms <= 2**53 - 1:
         raise ValueError("History service requires a numeric loopback address and positive TTL")
     token = Path(token_file).read_bytes().strip(b" \t\r\n")
     if not re.fullmatch(rb"[A-Za-z0-9._~+/\-]{22,}=*", token):
         raise ValueError("Use a bearer token generated with at least 128 bits of entropy")
-    root = Path(directory) / "history-service"
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -343,8 +354,11 @@ def serve(directory, address, token_file, ttl_ms, *, ready=None):
 
         def handle_method(self):
             try:
-                with store.db:
+                if store is None:
                     result = self.route()
+                else:
+                    with store.db:
+                        result = self.route()
                 status, headers = 200, {}
             except Refusal as exc:
                 status, result, headers = exc.status, exc.body, exc.headers
@@ -354,7 +368,7 @@ def serve(directory, address, token_file, ttl_ms, *, ready=None):
                     {"error": "Invalid request", "code": "invalid_request"},
                     {},
                 )
-            except sqlite3.Error:
+            except Exception:
                 # The caller cannot use an error as evidence that commit did not happen.
                 self.close_connection = True
                 return
@@ -449,22 +463,18 @@ def serve(directory, address, token_file, ttl_ms, *, ready=None):
                 shape(route, method, body)
             elif size:
                 invalid()
-            return store.route(method, route, sid, generation, q, body)
+            route_handler = store.route if store is not None else custom_route
+            return route_handler(method, route, sid, generation, q, body)
 
-    # One service instance per store: monotonic lease state is local. No other
-    # instance may serve the same records until the prior instance loses its lock.
-    with (root / "service.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with sqlite3.connect(root / "records.db") as db:
-            store = Store(db, ttl_ms)
-            if ip.version == 6:
-                import socket
+    with sqlite_store(directory, ttl_ms) if custom_route is None else nullcontext() as store:
+        if ip.version == 6:
+            import socket
 
-                class Server(HTTPServer):
-                    address_family = socket.AF_INET6
-            else:
-                Server = HTTPServer
-            with Server(address, Handler) as server:
-                if ready is not None:
-                    ready(server.server_address)
-                server.serve_forever()
+            class Server(HTTPServer):
+                address_family = socket.AF_INET6
+        else:
+            Server = HTTPServer
+        with Server(address, Handler) as server:
+            if ready is not None:
+                ready(server.server_address)
+            server.serve_forever()

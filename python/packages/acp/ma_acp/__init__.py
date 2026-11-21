@@ -324,6 +324,10 @@ class ACP(Plugin):
         self.sessions.discard(sid)
         self.approval_views = {key for key in self.approval_views if key[0] != sid}
         await self._cancel_requests(sid)
+        if d.get("interrupted"):
+            self.tool_output = {k: v for k, v in self.tool_output.items() if k[0] != sid}
+            self.streamed = {k for k in self.streamed if k[0] != sid}
+            return  # Do not try to commit declines with a fenced writer.
         # Runtime suspension runs first. Closed transports cannot preserve an
         # unanswered approval as permission to execute after a restart.
         questions = (
@@ -791,6 +795,17 @@ class ACP(Plugin):
         if sid not in self.sessions or "watch" not in await self.rights(sid):
             return
         # This event is already a gated view, never retrieve the raw event here.
+        if e["kind"] == "session_interrupted":
+            await self.client.ext_notification(
+                "modular-agent/event",
+                {
+                    "type": "sessionInterrupted",
+                    "sessionId": sid,
+                    "time": e["time"],
+                    "data": {"reason": e["reason"]},
+                },
+            )
+            return
         if e["kind"] == "model_output" and e.get("text"):
             stream_type = e.get("stream_type", "text")
             self.streamed.add((sid, e.get("step"), stream_type))

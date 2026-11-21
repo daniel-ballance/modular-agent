@@ -11,6 +11,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Literal, NotRequired, TypedDict, cast, overload
 
+from ._history_port import HistoryPort
 from ._context import CallContext, HookContext
 from ._credentials import CredentialStore
 from ._jobs import Job, JobManager, JobOwner
@@ -140,6 +141,7 @@ class Registrar:
         self._credential_store: CredentialStore | None = None
         self._configuration: Configuration | None = None
         self._interface: Interface | None = None
+        self._history_store: HistoryPort | None = None
         self._environment: WorkingEnvironment | None = None
         self._job_owner: JobOwner | None = None
         self._defined_hooks: dict[str, HookRule] = {}
@@ -155,6 +157,11 @@ class Registrar:
         if self._job_owner is not None:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate job owner")
         self._job_owner = owner
+
+    def history_store(self, store: HistoryPort) -> None:
+        if self._history_store is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate history store")
+        self._history_store = store
 
     def environment(self, environment: WorkingEnvironment) -> None:
         if self._environment is not None:

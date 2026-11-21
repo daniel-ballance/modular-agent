@@ -7,6 +7,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Literal
 
+from ._history_port import HistoryPort, _route
 from ._types import AgentError, ErrorCode
 
 
@@ -30,22 +31,33 @@ def http_history(url: str, token_file: str | PathLike[str]) -> HistoryStore:
 
 
 def serve_history(
-    store: HistoryStore,
+    store: HistoryStore | HistoryPort,
     *,
     address: tuple[str, int],
     token_file: str | PathLike[str],
     ttl: float = 2.5,
 ) -> None:
     """Serve a dedicated opaque record store under the file store directory."""
+    import asyncio
     import math
 
     from ma_history.service import serve
 
-    if store._kind != "file" or store._path is None:
+    if isinstance(store, HistoryStore) and (store._kind != "file" or store._path is None):
         raise AgentError(ErrorCode.NOT_SUPPORTED, f"Cannot serve {store._kind} history")
+    if not isinstance(store, HistoryStore) and not store.persistent:
+        raise AgentError(ErrorCode.NOT_SUPPORTED, f"Cannot serve {type(store).__name__} history")
     if not math.isfinite(ttl) or ttl < 0.001:
         raise AgentError(ErrorCode.INVALID_PARAMS, "History TTL must be at least one millisecond")
     try:
-        serve(store._path, address, token_file, round(ttl * 1000))
+        if isinstance(store, HistoryStore):
+            serve(store._path, address, token_file, round(ttl * 1000))
+        else:
+            with asyncio.Runner() as runner:
+
+                def dispatch(*args: object) -> object:
+                    return runner.run(_route(store, *args))  # type: ignore[arg-type]
+
+                serve(None, address, token_file, store.ttl_ms, custom_route=dispatch)
     except (OSError, ValueError) as exc:
         raise AgentError(ErrorCode.INVALID_PARAMS, str(exc)) from exc

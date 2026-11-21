@@ -35,6 +35,7 @@ class Harness(Authority):
         self.handlers = []
         self.commands = {}
         self.sessions = {}
+        self.interruptions = {}
         self.reopening = set()
         self.append_locks = {}
         self.tool_dispatches = {}
@@ -190,11 +191,12 @@ class Harness(Authority):
             await self.fire("@harness", "session.start", opening)
         except BaseException:
             try:
-                await self.fire("@harness", "session.suspend", {"session": s["id"]})
+                if sid in self.interruptions:
+                    await self._end_interrupted(sid)
+                else:
+                    await self.suspend_session(sid)
             finally:
-                if "history" in self.capabilities:
-                    await self.call("@harness", "history", "close", {"session": s["id"]})
-                self.sessions.pop(s["id"], None)
+                self.sessions.pop(sid, None)
             raise
 
     async def unload(self, name):
@@ -221,7 +223,9 @@ class Harness(Authority):
         for s in self.sessions.values():
             s["suspending"] = True
         for sid in list(self.sessions):
-            if sid in self.sessions:
+            if sid in self.interruptions:
+                await self._end_interrupted(sid)
+            elif sid in self.sessions:
                 await self.fire("@harness", "session.suspend", {"session": sid})
         for sid in list(self.sessions):
             if "history" in self.capabilities:
@@ -491,12 +495,42 @@ class Harness(Authority):
                 silent,
             )
 
+    def _interrupt(self, sid, reason):
+        state = self.sessions.get(sid)
+        if state is None or state.get("writer_lost"):
+            return
+        # Fence dispatch synchronously. The commit caller may be the Runtime
+        # task that suspension needs to cancel and join.
+        state["writer_lost"] = True
+        state["interruption"] = reason
+        self.interruptions[sid] = asyncio.create_task(self._finish_interruption(sid, reason))
+
+    async def _finish_interruption(self, sid, reason):
+        await self._emit(
+            {"kind": "session_interrupted", "session": sid, "reason": reason, "time": now()}
+        )
+        await self.fire("@harness", "session.suspend", {"session": sid, "interrupted": True})
+
+    async def _end_interrupted(self, sid):
+        task = self.interruptions[sid]
+        await asyncio.shield(task)
+        if self.interruptions.get(sid) is not task:
+            return
+        if "history" in self.capabilities:
+            await self.call("@harness", "history", "close", {"session": sid})
+        self.interruptions.pop(sid, None)
+        self.sessions.pop(sid, None)
+
     async def _assert_writable(self, sid):
         if self.sessions[sid].get("writer_lost"):
             raise AgentError("Session writer was lost; reopen before continuing", "lost")
         history = self.capabilities.get("history")
         if history and self.plugins[history[0]].declarations.get("remote_lease"):
-            await self.call("@harness", "history", "writable", {"session": sid})
+            try:
+                await self.call("@harness", "history", "writable", {"session": sid})
+            except Exception as exc:
+                self._interrupt(sid, "writerLost")
+                raise AgentError("Session writer was lost", "lost") from exc
 
     def _session(self, data, *, check_actor=True):
         sid = data["session"]
@@ -526,14 +560,16 @@ class Harness(Authority):
                         if commit.cancelled():
                             raise
                         cancellation = exc
-            except (Exception, asyncio.CancelledError):
-                if sid in self.sessions:
-                    self.sessions[sid]["writer_lost"] = True
-                raise
+            except (Exception, asyncio.CancelledError) as exc:
+                reason = "writerLost" if getattr(exc, "writer_lost", False) else "commitFailed"
+                self._interrupt(sid, reason)
+                raise AgentError(
+                    "Cannot confirm the session commit; reopen to recover", "lost"
+                ) from exc
         # Calls to an out-of-process store yield. Preserve flags changed by a
         # concurrent cancellation/close while that durable write was in flight.
         current = self.sessions.get(session["id"], {})
-        for key in ("busy", "moving", "closing", "suspending", "writer_lost"):
+        for key in ("busy", "moving", "closing", "suspending", "writer_lost", "interruption"):
             if key in current:
                 session[key] = current[key]
         self.sessions[session["id"]] = session
@@ -606,7 +642,7 @@ class Harness(Authority):
                 or self.sessions[sid].get("writer_lost")
                 or getattr(exc, "code", None) == "lost"
             ):
-                self.sessions[sid]["writer_lost"] = True
+                self._interrupt(sid, "commitFailed")
                 raise AgentError("Cannot confirm project restoration", "lost") from exc
             rollback = await self._position(
                 sid,
@@ -845,10 +881,7 @@ class Harness(Authority):
             selection = self.capabilities.get("selection")
             return sorted(selection[1].providers) if selection else []
         if op == "writer_lost":
-            sid = d["session"]
-            if sid in self.sessions:
-                self.sessions[sid]["writer_lost"] = True
-                await self.fire("@harness", "session.suspend", {"session": sid})
+            self._interrupt(d["session"], "writerLost")
             return {}
         if op == "assert_writable":
             await self._assert_writable(d["session"])
@@ -884,7 +917,11 @@ class Harness(Authority):
             await self._start_session(s, {"mcp_servers": d.get("mcp_servers", [])})
             return self.sessions[s["id"]]
         if op == "open":
-            if d["session"] in self.sessions:
+            sid = d["session"]
+            if sid in self.interruptions:
+                self._session(d)
+                await self._end_interrupted(sid)
+            if sid in self.sessions:
                 s = self._session(d)
                 if "mcp_servers" in d:
                     self.require(s, d.get("actor", s["actor"]), "settings")
@@ -947,6 +984,7 @@ class Harness(Authority):
             self.require(
                 command_session, d.get("actor", command_session["actor"]), "input", ceiling
             )
+            await self._assert_writable(d["session"])
             name, _, args = d["text"].removeprefix("/").partition(" ")
             if name not in self.commands:
                 raise AgentError("Unknown command: /" + name)
@@ -1172,7 +1210,7 @@ class Harness(Authority):
                         try:
                             e = await self._finish_restore(sid, journal)
                         except asyncio.CancelledError:
-                            self.sessions[sid]["writer_lost"] = True
+                            self._interrupt(sid, "commitFailed")
                             raise
             finally:
                 self.sessions[sid]["moving"] = False
@@ -1434,6 +1472,9 @@ class Harness(Authority):
                 if represented_by := d.get("acting_for"):
                     self.require(s, represented_by, "cancel")
             self.sessions[sid]["closing"] = True
+            if sid in self.interruptions:
+                await self._end_interrupted(sid)
+                return {}
             await self.fire(
                 "@harness",
                 "session.suspend" if s.get("writer_lost") else "session.end",

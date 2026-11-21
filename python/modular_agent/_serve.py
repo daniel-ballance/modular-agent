@@ -185,6 +185,7 @@ async def _serve(
         items += [
             label
             for label, part in (
+                ("history store", registrar._history_store),
                 ("credential store", registrar._credential_store),
                 ("configuration", registrar._configuration),
                 ("interface", registrar._interface),
