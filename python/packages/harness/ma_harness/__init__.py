@@ -9,12 +9,15 @@ from ma_core.wire import provider_projection, recorded_as
 from .authority import Authority, PERMISSIONS, read_tenants
 from .erasure import Erasure
 from .output import gate
+from .reservations import Reservations, size
 
 
 class Harness(Authority, Erasure):
     MAX_TOOL_DEPTH = 4
 
-    def __init__(self, admin=None, tenant=None, process_plugins=None, *, tenants=None):
+    def __init__(
+        self, admin=None, tenant=None, process_plugins=None, *, tenants=None, reservations=None
+    ):
         import os
 
         placement = (
@@ -44,6 +47,7 @@ class Harness(Authority, Erasure):
         self.followers = []
         self.output_streams = {}
         self.erasure_locks = {}
+        self.capacity = Reservations(reservations)
         self.trace = []
         self.define_hook("@harness", "plugin.load", "gate")
         self.define_hook("@harness", "session.prepare", "observe")
@@ -602,10 +606,13 @@ class Harness(Authority, Erasure):
             entries = session["entries"]
 
         cancellation = None
+        sid = session["id"]
+        await self.capacity.rebuild(self)
+        if sid in self.sessions:
+            await self._assert_writable(sid)
+        response = next(((sid, e.get("step")) for e in entries if e["kind"] == "response"), None)
+        charged = self.capacity.stage(session, entries, response=response)
         if "history" in self.capabilities:
-            sid = session["id"]
-            if sid in self.sessions:
-                await self._assert_writable(sid)
             commit = asyncio.create_task(
                 self.call("@harness", "history", "keep", {"session": session, "entries": entries})
             )
@@ -626,6 +633,7 @@ class Harness(Authority, Erasure):
                 raise AgentError(
                     "Cannot confirm the session commit; reopen to recover", "lost"
                 ) from exc
+        self.capacity.finish(sid, session.get("tenant"), charged, response=response)
         # Calls to an out-of-process store yield. Preserve flags changed by a
         # concurrent cancellation/close while that durable write was in flight.
         current = self.sessions.get(session["id"], {})
@@ -913,10 +921,20 @@ class Harness(Authority, Erasure):
                 events = [{"type": kind, "data": event}]
                 if self.holds_output() and kind in {"model_output", "tool_progress"}:
                     key = (owner, recipient, sid, kind, event.get("step"), event.get("call"))
-                    self.output_streams.setdefault(key, []).extend(events)
-                    if not event.get("final"):
+                    if not event.get("final") and sid in self.sessions:
+                        buffered = self.output_streams.setdefault(key, [])
+                        try:
+                            reservation = self.capacity.hold(
+                                self.sessions[sid], bufferedBytes=size(events)
+                            )
+                        except AgentError:
+                            continue  # Optional output never spends settlement capacity.
+                        buffered.append((reservation, events[0]))
                         continue
-                    events = self.output_streams.pop(key)
+                    buffered = self.output_streams.pop(key, [])
+                    for reservation, _ in buffered:
+                        self.capacity.release(reservation)
+                    events = [piece for _, piece in buffered] + events
                 for item in await self.output(sid, recipient, events):
                     view = await self.fire(
                         "@harness", "output", {"recipient": recipient, "value": item["data"]}
@@ -953,6 +971,8 @@ class Harness(Authority, Erasure):
         return parts
 
     async def handle(self, op, d, emit):
+        if op == "bound_model_response":
+            return self.capacity.model_response(self._session(d), d["response"], d["step"])
         if op == "prepare_model_request":
             _, provider = self.capabilities[d["access"]["target"]]
             if prepare := getattr(type(provider), "prepare_request", None):
@@ -968,6 +988,7 @@ class Harness(Authority, Erasure):
             await self._assert_writable(d["session"])
             return {}
         if op == "create":
+            await self.capacity.rebuild(self)
             parent = self.sessions.get((d.get("origin") or {}).get("parent"))
             tenant = parent.get("tenant") if parent else d.get("tenant")
             self.tenant_config(tenant)
@@ -1011,6 +1032,7 @@ class Harness(Authority, Erasure):
             await self._start_session(s, {"mcp_servers": d.get("mcp_servers", [])})
             return self.sessions[s["id"]]
         if op == "open":
+            await self.capacity.rebuild(self)
             sid = d["session"]
             if sid in self.interruptions:
                 self._session(d)
@@ -1084,12 +1106,16 @@ class Harness(Authority, Erasure):
             name, _, args = d["text"].removeprefix("/").partition(" ")
             if name not in self.commands:
                 raise AgentError("Unknown command: /" + name)
-            return await self._effect(
-                d["session"],
-                self.commands[name][2],
-                {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()},
-                allow_provisional=True,
-            )
+            reservation = self.capacity.hold(command_session, calls=1, storageBytes=65536)
+            try:
+                return await self._effect(
+                    d["session"],
+                    self.commands[name][2],
+                    {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()},
+                    allow_provisional=True,
+                )
+            finally:
+                self.capacity.release(reservation)
         if op == "event":
             if d.get("kind") == "plugin_failed" and "session" not in d and self.sessions:
                 for sid in list(self.sessions):

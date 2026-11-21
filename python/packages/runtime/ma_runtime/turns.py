@@ -172,7 +172,7 @@ class Turns:
                 },
             )
         result, usage, structured = [], {}, {}
-        tenant_limit = False
+        tenant_limit = capacity_limit = False
         start = next(
             e
             for e in await self._entries(sid)
@@ -320,6 +320,8 @@ class Turns:
                         )
                 open_calls = await self._tools(sid, turn, step, calls, tools)
                 decision = await self._step_after(sid, turn, response_entry)
+                if response.get("hostLimit") == "capacity":
+                    raise AgentError("Resource reservation capacity exhausted", "capacity")
                 if await self.api.session("tenant_exhausted", session=sid):
                     raise AgentError("Tenant token budget reached", "tenantTokens")
                 if open_calls and not decision.get("refused"):
@@ -395,7 +397,11 @@ class Turns:
         except Exception as exc:
             tenant_limit = isinstance(exc, AgentError) and exc.code == "tenantTokens"
             step_limit = isinstance(exc, AgentError) and exc.code == "stepLimit"
-            outcome, error = ("limit" if tenant_limit or step_limit else "failed"), str(exc)
+            capacity_limit = isinstance(exc, AgentError) and exc.code in {"capacity", "busy"}
+            outcome, error = (
+                ("limit" if tenant_limit or step_limit or capacity_limit else "failed"),
+                str(exc),
+            )
             if not tenant_limit:
                 await self.api.session("invalidate", session=sid, reason="failure")
         finally:
@@ -427,8 +433,13 @@ class Turns:
             "open_calls": open_calls,
             **(structured if outcome == "completed" else {}),
             **(
-                {"shared_outcome": {"kind": "limit", "limit": "tenantTokens"}}
-                if tenant_limit
+                {
+                    "shared_outcome": {
+                        "kind": "limit",
+                        "limit": "capacity" if capacity_limit else "tenantTokens",
+                    }
+                }
+                if tenant_limit or capacity_limit
                 else {}
             ),
             "actor": actor,
@@ -659,6 +670,9 @@ class Turns:
             exact_replay = False
             retries += 1
             step = await self._retry_step(sid, turn, step, settings)
+        response = await self.api.session(
+            "bound_model_response", session=sid, step=step, response=response
+        )
         calls = response.get("calls", [])
         ids = [c["id"] for c in calls]
         existing = {e["call"] for e in await self._entries(sid) if e["kind"] == "tool_call"}

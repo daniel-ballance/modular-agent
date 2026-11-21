@@ -474,6 +474,8 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                         self._connections.projects.pop(selected, None)
                     await selected.close()
                 raise
+        if selected is not self._agent:
+            selected._h.capacity = self._agent._h.capacity
         self._scope.set(selected)
 
     async def session_started(self, payload: JsonObject) -> None:
@@ -877,6 +879,7 @@ class Agent:
                 self._late_answers and runtime.get("open_calls") and "questions" in parts
             ),
             erasure=self._h.supports_erasure(),
+            resourceReservations=self._h.capacity.declaration(),
             portableSessions=store.get("retention") != "process",
             settingsDuringTurn="refused",
             confinesFiles=bool(environment.get("confines_files")),
@@ -1161,6 +1164,7 @@ def create_agent(
     tenants: Mapping[str, Tenant] | None = None,
     job_reports_start_turns: bool = False,
     late_answers_start_turns: bool = False,
+    resource_reservations: Mapping[str, Mapping[str, int]] | None = None,
 ) -> AgentStart:
     async def build() -> Agent:
         return await build_with_store()
@@ -1204,7 +1208,17 @@ def create_agent(
                 ErrorCode.INVALID_COMPOSITION, "Service deadlines must be finite and positive"
             )
         scratch = TemporaryDirectory(prefix="modular-agent-")
-        h = Harness(process_plugins=(), tenants=tenants or {})
+        try:
+            h = Harness(
+                process_plugins=(),
+                tenants=tenants or {},
+                reservations={k: dict(v) for k, v in resource_reservations.items()}
+                if resource_reservations is not None
+                else None,
+            )
+        except Exception as exc:
+            scratch.cleanup()
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
         h.lazy_setup = True
         try:
             root = Path(data_dir).resolve() if data_dir is not None else Path(scratch.name)

@@ -25,6 +25,7 @@ class ErrorCode(StrEnum):
     NOT_FOUND = "not_found"
     NOT_OPEN = "not_open"
     BUSY = "busy"
+    UNAVAILABLE = "unavailable"
     HELD = "held"
     CONFLICT = "conflict"
     CANCELLED = "cancelled"

@@ -63,9 +63,9 @@ class Erasure:
         for p in pending:
             groups[p["intent"]].append(p["id"])
         s = self.sessions[sid]
-        self.output_streams = {
-            key: value for key, value in self.output_streams.items() if key[2] != sid
-        }
+        for key in [k for k in self.output_streams if k[2] == sid]:
+            for reservation, _ in self.output_streams.pop(key):
+                self.capacity.release(reservation)
         for operation, targets in groups.items():
             if not any(
                 e["kind"] == "erase" and e["data"].get("operation") == operation
@@ -119,6 +119,7 @@ class Erasure:
         if not loaded:
             return False
         self.sessions[sid] = {**s, **loaded}
+        self.capacity.restore(self.sessions[sid])
         await self.fire("@harness", "session.invalidate", {"session": sid, "reason": "erasure"})
         return not await self._pending_erasure(sid)
 
