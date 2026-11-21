@@ -307,13 +307,22 @@ fn watch_exit(pid: u32) -> io::Result<u32> {
 
 #[cfg(target_os = "macos")]
 async fn worker_exited(pid: &u32) -> io::Result<()> {
+    // `siginfo_t` holds a raw pointer on macOS, so it must not live across an await.
+    while !worker_has_exited(*pid)? {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn worker_has_exited(pid: u32) -> io::Result<bool> {
     loop {
         // Observe the owned child without reaping it; Monty's pool does that.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let result = unsafe {
             libc::waitid(
                 libc::P_PID,
-                *pid as libc::id_t,
+                pid as libc::id_t,
                 &mut info,
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
             )
@@ -321,15 +330,12 @@ async fn worker_exited(pid: &u32) -> io::Result<()> {
         if result < 0 {
             let error = io::Error::last_os_error();
             match error.raw_os_error() {
-                Some(libc::ECHILD) => return Ok(()),
+                Some(libc::ECHILD) => return Ok(true),
                 Some(libc::EINTR) => continue,
                 _ => return Err(error),
             }
         }
-        if unsafe { info.si_pid() } != 0 {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        return Ok(unsafe { info.si_pid() } != 0);
     }
 }
 
