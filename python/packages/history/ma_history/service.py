@@ -138,15 +138,16 @@ def page(envelope, field, rows, query, cursor_error):
         rows = rows[start:]
     limit = int(query.get("limit", "500"))
     used = len(encode({**envelope, field: []}))
-    result = []
+    count = 0
     for i, (key, row) in enumerate(rows[:limit]):
-        used += len(encode(row)) + bool(result)
+        used += len(encode(row)) + bool(i)
+        if used > PAGE:
+            break
         more = i + 1 < len(rows)
         size = used + (len(encode({"next": key})) - 1 if more else 0)
         if size <= PAGE:
-            result.append((key, row))
-        else:
-            break
+            count = i + 1
+    result = rows[:count]
     if rows and not result:
         raise Refusal(503, "unavailable")
     return {
@@ -157,7 +158,7 @@ def page(envelope, field, rows, query, cursor_error):
 
 
 class Store:
-    def __init__(self, db, ttl_ms, witness=None):
+    def __init__(self, db, ttl_ms, witness=None, *, previously_profiled=False):
         self.db, self.ttl_ms = db, ttl_ms
         self.witness = witness
         self.leases = {}
@@ -173,7 +174,7 @@ class Store:
             with self.db:
                 self.db.execute("BEGIN IMMEDIATE")
                 version = self.db.execute("PRAGMA user_version").fetchone()[0]
-                self.registry = Registry(self.db, initialized=version != 0)
+                self.registry = Registry(self.db, initialized=previously_profiled or version != 0)
         except (Unavailable, sqlite3.Error):
             pass
         if witness is not None:
@@ -250,12 +251,14 @@ class Store:
                 self.current_revision()
                 self.db.execute("INSERT INTO sessions VALUES (?,?)", (sid, encode(meta)))
             return {}
-        if existing is None:
-            raise Refusal(404, "unknown_session")
         if route == "registry" and method == "GET":
             revision = self.current_revision()
+            if existing is None:
+                raise Refusal(404, "unknown_session")
             rows = [(plan["intentId"], plan) for plan in self.registry.plans(sid)]
             return page({"revision": revision}, "plans", rows, q, "unknown_intent")
+        if existing is None:
+            raise Refusal(404, "unknown_session")
         meta = json.loads(existing[0])
         if route == "session":
             rows = [
@@ -498,14 +501,23 @@ def sqlite_store(directory, ttl_ms, *, check_same_thread=True, witness=None):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     # One service instance per store: monotonic lease state is local. No other
     # instance may serve the same records until the prior instance loses its lock.
-    with (root / "service.lock").open("a") as lock:
+    with (root / "service.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         from contextlib import closing
 
         with closing(
             sqlite3.connect(root / "records.db", check_same_thread=check_same_thread)
         ) as db:
-            yield Store(db, ttl_ms, witness)
+            lock.seek(0)
+            previously_profiled = bool(lock.read())
+            store = Store(db, ttl_ms, witness, previously_profiled=previously_profiled)
+            if not previously_profiled and db.execute("PRAGMA user_version").fetchone()[0] == 1:
+                import os
+
+                lock.write("pendingErasure: 1\n")
+                lock.flush()
+                os.fsync(lock.fileno())
+            yield store
 
 
 def serve(

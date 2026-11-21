@@ -1,6 +1,8 @@
 import asyncio
 import sqlite3
 from contextlib import closing
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -113,6 +115,49 @@ async def test_base_http_composition_does_not_declare_erasure(tmp_path):
                 assert exc.value.code is ErrorCode.NOT_SUPPORTED
         finally:
             server.close()
+
+
+@pytest.mark.loopback
+def test_service_does_not_replace_missing_registry_on_restart(tmp_path):
+    token = tmp_path / "token"
+    token.write_text("c79e2509a4395582e0fac55c25c18df1")
+    directory = tmp_path / "store"
+
+    def listen():
+        return serve_history(file_history(directory), address=("127.0.0.1", 0), token_file=token)
+
+    def request(server, route, data=None):
+        return urlopen(
+            Request(
+                server.url + route,
+                data=data,
+                method="PUT" if data else "GET",
+                headers={
+                    "Authorization": "Bearer " + token.read_text(),
+                    "Content-Type": "application/json",
+                },
+            )
+        )
+
+    server = listen()
+    assert server is not None
+    try:
+        with request(server, "/v1/sessions/saved", b'{"project":"project","created":0}') as reply:
+            assert reply.status == 200
+    finally:
+        server.close()
+    with closing(sqlite3.connect(directory / "history-service" / "records.db")) as db:
+        db.execute("DROP TABLE registry_plans")
+    server = listen()
+    assert server is not None
+    try:
+        with pytest.raises(HTTPError) as failure:
+            request(server, "/v1/sessions/saved/pending-erasure")
+        with failure.value as response:
+            assert response.status == 503
+            assert b'"code":"unavailable"' in response.read()
+    finally:
+        server.close()
 
 
 @pytest.mark.loopback
