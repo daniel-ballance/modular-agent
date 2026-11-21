@@ -2087,7 +2087,7 @@ export class Harness {
 					return job;
 				} },
 				progress: (content) => {
-					for (const part of content) this.emit(s, "tool.progress", { content: [part] }, found.source.id, { turnId, toolCallId: call.id });
+					this.emit(s, "tool.progress", { content }, found.source.id, { turnId, toolCallId: call.id });
 				},
 				environment: env,
 				tools: this.runtime()?.supports.nestedToolCalls === true ? {

@@ -45,7 +45,7 @@ export interface EventData {
   audio: { data: string; mimeType: string };
   toolCall: { call: ToolCall };
   toolStarted: { call: ToolCall };
-  toolOutput: { content: Content };
+  toolOutput: { toolCallId: string; chunk: string; content?: Content };
   toolResult: { status: ToolStatus; content: Content; value?: unknown };
   questionOpened: { request: InputRequest; waiting?: boolean };
   questionAnswered: { requestId: string; actorId: string; value?: string; stored?: string; declined?: boolean; reason?: string };
@@ -84,6 +84,7 @@ function eventOf(e: AgentEvent): Event | undefined {
     const { type, ...piece } = data;
     return { ...scope, type, data: piece };
   }
+  if (type === "tool.progress" && toolCallId) return { ...scope, type: "toolOutput", data: { toolCallId, chunk: textOf(data.content), content: data.content } };
   if (type === "entry" || type === "entry.added") return { ...scope, type: "entry", data };
   if (type === "turn.ended" && turnId) return { ...scope, type: "turnEnded", data: { turnId, outcome: data.outcome, result: data.result } };
   if (type === "session.joined" && data.actor) {

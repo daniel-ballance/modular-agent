@@ -142,7 +142,7 @@ export function conformanceHooks(): Plugin {
 						(name === type || (name === "model.output" && data?.type === type)) && typeof data?.delta === "string" ? [{ object: data, key: "delta" }] : []));
 				}
 				redactPieces(events.flatMap(({ type, data }) => type === "toolOutput" && typeof data?.chunk === "string" ? [{ object: data, key: "chunk" }] : []));
-				redactPieces(events.flatMap(({ type, data }) => type === "tool.progress" && Array.isArray(data?.content)
+				redactPieces(events.flatMap(({ type, data }) => (type === "tool.progress" || type === "toolOutput") && Array.isArray(data?.content)
 					? data.content.filter((part: any) => part?.type === "text" && typeof part.text === "string").map((part: any) => ({ object: part, key: "text" })) : []));
 				return { action: "pass", events: events.map((event) => ({ ...event, data: redactStrings(event.data) })) };
 			});
