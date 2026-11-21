@@ -21,7 +21,10 @@ func recovery(s api.Session) (*api.Entry, []api.Input) {
 			initial[in.ID] = in
 		}
 	}
-	for _, e := range s.Branch() {
+	// A fork's display prefix is context, not an interrupted turn to resume.
+	live := s
+	live.Entries = s.LiveEntries()
+	for _, e := range live.Branch() {
 		switch {
 		case e.WasKind("turn.end"):
 			orphan = nil
