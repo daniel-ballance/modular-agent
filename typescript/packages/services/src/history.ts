@@ -303,9 +303,13 @@ export class HttpHistoryStore extends HistoryWriter {
 	constructor(options: HistoryClientOptions) {
 		const client = historyClientOptions(options.url, options.token);
 		const path = (id: string, rest = "") => `/v1/sessions/${pathId(id)}${rest}`;
-		const query = ({ project, after, limit }: ListOptions) => `?${new URLSearchParams({
-			...(project === undefined ? {} : { project }), ...(after === undefined ? {} : { after }), limit: String(limit),
-		})}`;
+		const query = ({ project, after, limit }: ListOptions) => {
+			const params: string[] = [];
+			if (project !== undefined) params.push(`project=${segment(project)}`);
+			if (after !== undefined) params.push(`after=${segment(after)}`);
+			if (limit !== 500) params.push(`limit=${limit}`);
+			return params.length ? `?${params.join("&")}` : "";
+		};
 		super({
 			remote: true,
 			async initialize(signal) {
