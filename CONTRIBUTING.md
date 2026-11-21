@@ -35,6 +35,8 @@ scripts/check.sh go python    # only those languages; cross-language steps need 
 
 Each step writes its log to a folder the script names at the end. The checks need Linux with unprivileged user, PID and mount namespaces, [mise](https://mise.jdx.dev) (which pins Rust and Go), Node.js 22 or later, and [uv](https://docs.astral.sh/uv/) (which pins Python 3.13). Set `TMPDIR` to a folder on disk if `/tmp` is small; the script defaults to `~/.cache/ma-std-tmp`.
 
+On an Apple silicon Mac, run `scripts/macos-check.sh` from a fresh clone in a native arm64 shell. It checks for mise, Node.js 22 or later, uv and the Xcode command line tools. It builds all four `ma` programs, including the Go Monty worker, then runs the language suites, reference checks and ACP kits. It needs no sudo. It uses a temporary home, removes it when the run ends and leaves the logs at the paths in its summary table. The reference kit currently expects strong containment on every platform; that check reports a failure on macOS, where the local environments declare `processGroup`.
+
 What the full run covers:
 
 | Check | What it shows |

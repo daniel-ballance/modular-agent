@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,6 +41,11 @@ def pid_ready(path):
 
 
 def dead(pid):
+    if sys.platform == "darwin":
+        state = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="], capture_output=True, text=True
+        ).stdout.strip()
+        return not state or state.startswith("Z")
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] in {"Z", "X"}
     except (FileNotFoundError, ProcessLookupError):
@@ -73,6 +79,8 @@ async def spawn_driver(home, project, runtime, phase):
     ],
 )
 async def test_sigkill_at_committed_boundaries(tmp_path, runtime_kind, phase):
+    if sys.platform != "linux" and phase in {"read_effect", "bash_effect"}:
+        pytest.skip("checks strong-containment repeat policy or a Linux setsid escape")
     home = tmp_path / "store"
     p = await spawn_driver(home, tmp_path, runtime_kind, phase)
     command_pids = []

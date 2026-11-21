@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -179,6 +180,10 @@ func parse(args []string) (o options, err error) {
 }
 
 func main() {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		fmt.Fprintln(os.Stderr, "ma supports only Linux and macOS")
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 	interrupts := make(chan os.Signal, 1)

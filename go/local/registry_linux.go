@@ -1,9 +1,12 @@
 package local
 
 import (
+	"os/exec"
+
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/daniel-ballance/modular-agent/go/api"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -130,4 +133,32 @@ func (e *Environment) cleanup() error {
 		}
 	}
 	return nil
+}
+
+func (e *Environment) startSupervisor(cmd *exec.Cmd) (func(), error) {
+	// Linux kills every remaining namespace member if its PID 1 dies.
+	// https://man7.org/linux/man-pages/man7/pid_namespaces.7.html
+	cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
+		UidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1}},
+		GidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getgid(), HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false,
+		AmbientCaps: []uintptr{21}} // CAP_SYS_ADMIN only inside the new user namespace, for mounting its /proc
+	// Serialize startup with stale-owner cleanup, including registry publication.
+	unlock, err := e.registryLock()
+	if err != nil {
+		return nil, err
+	}
+	err = cmd.Start()
+	if err != nil {
+		unlock()
+		return nil, fmt.Errorf("Linux user/PID namespace required: %w", err)
+	}
+	journal := filepath.Join(e.root, api.ID()+".json")
+	err = saveRegistry(journal, ownership{Owner: identity(os.Getpid()), Guardian: identity(cmd.Process.Pid)})
+	unlock()
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, err
+	}
+	return func() { _ = os.Remove(journal) }, nil
 }

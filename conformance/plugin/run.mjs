@@ -17,7 +17,7 @@ const args = process.argv.slice(2);
 const dash = args.indexOf("--");
 const argv = dash < 0 ? args : args.slice(0, dash);
 const verbose = argv.includes("--verbose");
-let network;
+let network, isolation;
 try {
 	const options = websocketOptions(argv);
 	network = options && { ...options, protocol: PLUGIN_PROTOCOL };
@@ -32,8 +32,17 @@ try {
 		}
 	} else if (argv.includes("--runtime-url") || argv.includes("--durable-runtime-url")) throw new Error("--runtime-url and --durable-runtime-url need --connect");
 	if (network ? dash >= 0 : dash < 0 || dash === args.length - 1) throw new Error("choose a stdio command or a WebSocket URL");
+	const index = argv.indexOf("--isolation-checks");
+	if (index >= 0) {
+		const [otherFile, a, b, home] = argv.slice(index + 1, index + 5);
+		if (!network || !home || [otherFile, a, b, home].some((x) => x.startsWith("--"))) throw Error("--isolation-checks needs a service and SECOND_TOKEN_FILE PROJECT_A PROJECT_B HOME");
+		const { token } = websocketOptions(["--connect", network.url.href, "--token-file", otherFile]);
+		const projects = [a, b].map((path) => realpathSync(path));
+		if (token === network.token || projects[0] === projects[1]) throw Error("the isolation fixture needs distinct credentials and projects");
+		isolation = { projects, home: realpathSync(home), second: { ...network, token } };
+	}
 } catch (e) {
-	console.error(`${e.message}\nUsage: node run.mjs [--verbose] [--no-runtime] (-- <plugin command> [args...] | --connect URL --token-file FILE [--runtime-url URL] [--durable-runtime-url URL])`);
+	console.error(`${e.message}\nUsage: node run.mjs [--verbose] [--no-runtime] (-- <plugin command> [args...] | --connect URL --token-file FILE [--runtime-url URL] [--durable-runtime-url URL] [--isolation-checks SECOND_TOKEN_FILE PROJECT_A PROJECT_B HOME])`);
 	process.exit(2);
 }
 const command = args.slice(dash + 1);
@@ -69,10 +78,10 @@ const alive = (pid) => {
 };
 
 /** One plugin instance, and the kit as its host. */
-function start(extraEnv = {}) {
+function start(extraEnv = {}, connection = network) {
 	const child = network ? null : spawn(command[0], command.slice(1), { cwd: work, stdio: ["pipe", "pipe", verbose ? "inherit" : "ignore"], env: { ...safeEnv, ...extraEnv } });
 	const tierUrl = network && network.tiers[extraEnv.MODULAR_AGENT_PLUGIN_PARTS];
-	const wire = network && socketPeer(tierUrl ? { ...network, url: tierUrl } : network, (line, parsed) => receive(line, parsed));
+	const wire = connection && socketPeer(tierUrl ? { ...connection, url: tierUrl } : connection, (line, parsed) => receive(line, parsed));
 	const pending = new Map();
 	const notes = [];
 	const hostCalls = [];
@@ -134,6 +143,12 @@ function start(extraEnv = {}) {
 			case "host/env/exec": {
 				// This fixture accepts only its own commands, not arbitrary work from the peer.
 				if (!["echo kit-out; echo more", "sleep 30"].includes(p.command)) return fail(m.id, "invalid_request", "not a fixture command");
+				if (state.holdExec) {
+					const answer = await state.holdExec(m);
+					if (disconnected) return;
+					if (cancelledParents.has(p.parentRequestId)) return fail(m.id, "cancelled");
+					return reply(m.id, { exitCode: 0, output: answer, timedOut: false });
+				}
 				const proc = spawn("bash", ["-c", p.command], { cwd: envPath(p.cwd, "."), env: safeEnv, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 				let output = "", cancelled = false;
 				const out = (d) => {
@@ -505,6 +520,10 @@ const statusOf = (e) => e?.data?.status;
 const textOf = (content) => (content ?? []).filter((p) => p.type === "text").map((p) => p.text).join("");
 const initParams = { binding: BINDING, data: "modular-agent-data/1", host: { name: "conformance-kit", version: "1" }, project: work, home, config: {} };
 
+if (isolation) {
+	await attempt("plugin service isolation", checkIsolation);
+	finish();
+}
 if (network) await checkUpgrades(network, check, attempt);
 const p = start();
 let reg = {};
@@ -1094,6 +1113,77 @@ if (!argv.includes("--no-runtime")) {
 	}
 }
 
+async function checkIsolation() {
+	const [projectA, projectB] = isolation.projects;
+	const peers = [];
+	const attach = async (connection, project) => {
+		const peer = start({}, connection);
+		peers.push(peer);
+		peer.state.reg = await peer.request("plugin/initialize", { ...initParams, project, home: isolation.home });
+		return peer;
+	};
+	const deferred = () => { let finish; const wait = new Promise((resolve) => { finish = resolve; }); return { wait, finish }; };
+	try {
+		const toolSource = (p) => p.state.reg.toolSources.find((s) => s.tools.some((t) => t.name === "bash")).id;
+		for (const [label, credential, project] of [["same credential", network, projectA], ["different credentials", isolation.second, projectB]]) {
+			// Fresh peers allocate the same request ID on different connections.
+			const left = await attach(network, projectA);
+			const right = await attach(credential, project);
+			const waitLeft = deferred(), waitRight = deferred(), allowLeft = deferred(), allowRight = deferred();
+			left.state.holdExec = (m) => { waitLeft.finish(m); return allowLeft.wait; };
+			right.state.holdExec = (m) => { waitRight.finish(m); return allowRight.wait; };
+			const send = (p, cwd) => p.request("tools/call", { toolSource: toolSource(p), sessionId: "s1", project: cwd,
+				call: { id: "same-call", name: "bash", input: { command: "echo kit-out; echo more" } } });
+			const l = send(left, projectA), r = send(right, project);
+			const leftReply = l.catch((e) => e), rightReply = r.catch((e) => e);
+			try {
+				const seen = (barrier, reply) => Promise.race([barrier.wait, reply.then(() => { throw Error("call settled before its environment callback"); })]);
+				const [lc, rc] = await Promise.all([seen(waitLeft, leftReply), seen(waitRight, rightReply)]);
+				check(`plugin isolation (${label}): identical request, session and call IDs keep distinct callback routes`, l.id === r.id &&
+					lc.params.parentRequestId === l.id && rc.params.parentRequestId === r.id && lc.params.cwd === projectA && rc.params.cwd === project);
+				left.cancel(l.id);
+				allowLeft.finish("");
+				const cancelled = await leftReply;
+				await left.stop();
+				const marker = `only-right-${randomUUID()}`;
+				allowRight.finish(marker);
+				const done = await rightReply;
+				check(`plugin isolation (${label}): cancel and close leave the other call to settle once`,
+					(code(cancelled) === "cancelled" || cancelled.status === "cancelled") && done.status === "completed" && JSON.stringify(done.content).includes(marker) &&
+					right.hostCalls.filter((m) => m.method === "host/env/exec").length === 1);
+			} finally { allowLeft.finish(""); allowRight.finish(""); }
+		}
+		const b = await attach(isolation.second, projectB);
+		if (b.state.reg.workingEnvironment) {
+			const invalidScope = (e) => e?.code === -32602 && code(e) === "invalid_request";
+			const read = (peer, cwd, path) => peer.request("env/read", { cwd, sessionId: "s1", path }).catch((e) => e);
+			const name = `isolation-${randomUUID()}.txt`;
+			const markerA = Buffer.from("host A").toString("base64"), markerB = Buffer.from("host B").toString("base64");
+			const write = (peer, cwd, data) => peer.request("env/write", { cwd, sessionId: "s1", path: name, data });
+			const first = await attach(network, projectA);
+			await write(first, projectA, markerA);
+			await write(b, projectB, markerB);
+			const wrongInit = start({}, isolation.second);
+			peers.push(wrongInit);
+			const rejected = await wrongInit.request("plugin/initialize", { ...initParams, project: projectA, home: isolation.home }).catch((e) => e);
+			const denied = invalidScope(rejected) || code(rejected) === "not_supported" ||
+				(!!rejected.binding && invalidScope(await read(wrongInit, projectA, name)));
+			check("plugin isolation: host-supplied project does not grant access on initialize or operation", denied && invalidScope(await read(b, projectA, name)));
+			if (first.state.reg.workingEnvironment.points) {
+				const saved = await first.request("env/save", { cwd: projectA, sessionId: "s1" });
+				const restore = await b.request("env/restore", { cwd: projectA, sessionId: "s1", point: saved.point }).catch((e) => e);
+				check("plugin isolation: foreign point cannot be restored in the other project", invalidScope(restore));
+			}
+			await first.stop();
+			await b.stop();
+			const againA = await attach(network, projectA), againB = await attach(isolation.second, projectB);
+			check("plugin isolation: reconnect reads only the host's own retained fixture file",
+				(await read(againA, projectA, name)).data === markerA && (await read(againB, projectB, name)).data === markerB &&
+				invalidScope(await read(againB, projectA, name)));
+		}
+	} finally { await Promise.all(peers.map((p) => p.stop())); }
+}
+
 if (network) {
 	const containment = containmentOn(reg?.workingEnvironment, process.platform);
 	if (containment === "none") console.log("SKIP  WebSocket env/exec loss cleanup (no containment claim for fixture platform)");
@@ -1163,8 +1253,12 @@ await attempt("parts and stdin", async () => {
 	if (!ex) q.child.kill("SIGKILL");
 });
 
-rmSync(work, { recursive: true, force: true });
-rmSync(home, { recursive: true, force: true });
-const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
-process.exit(failed.length ? 1 : 0);
+finish();
+
+function finish() {
+	rmSync(work, { recursive: true, force: true });
+	rmSync(home, { recursive: true, force: true });
+	const failed = results.filter((r) => !r.ok);
+	console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+	process.exit(failed.length ? 1 : 0);
+}

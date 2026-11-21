@@ -24,6 +24,8 @@ To include the restart check, leave the port free and pass `--restart -- <servic
 
 If the service supports a change of TTL across restart, use `--restart-ttl` instead of `--restart`. Both flags set `MODULAR_AGENT_KIT_RESTART_PHASE` to `initial` on the first launch and `restart` on the second. Configure the same service address and store for both runs, with a longer TTL at first (for example, 6000 ms) and a shorter TTL on restart (for example, 1000 ms). The kit tests beyond the shorter TTL, while the old lease could still be live. Keep the startup time plus the shorter TTL well below the old TTL to exercise the check.
 
+For the ADR 0030 deployment check, run two disposable services with distinct endpoints, backing directories and credentials. Add `--isolation-checks SECOND_URL SECOND_TOKEN_FILE` after the first URL and token file. The kit seeds only the second service, checks both cross-credential refusals, and verifies that neither a project filter nor a foreign session ID routes reads, lease acquisition, append or erase to the other store. The second service's records must stay unchanged. This checks the two configured endpoints, not how an agent selects among raw stores. Pending erasure is a Harness check and does not add a `/1` service method.
+
 Stop any service you started and remove the scratch directory after use. Exit code 0 means all checks run passed.
 
 What it checks:

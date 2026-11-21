@@ -7,12 +7,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestSandboxPathsCommandsAndLifetime(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux strong containment and the setsid utility")
+	}
 	t.Setenv("HOME_SECRET", "private-environment-marker")
 	root := t.TempDir()
 	outside := t.TempDir()

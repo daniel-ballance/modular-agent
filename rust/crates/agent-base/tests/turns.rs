@@ -140,6 +140,10 @@ async fn bash_progress_arrives_before_the_command_finishes() {
     assert_eq!(rig.results()[0].text, "firstlast");
 }
 #[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "requires Linux process inspection or strong containment"
+)]
 async fn background_shell_returns_and_leaves_no_process() {
     let rig = Rig::new(vec![
         calls(vec![ToolCall::new(

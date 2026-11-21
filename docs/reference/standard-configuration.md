@@ -41,7 +41,9 @@ ma sessions [--all]          list saved sessions
 | `--history` | print the session's history, in the shared format |
 | `--declaration` | print the declaration (below) as one JSON object |
 | `--acp` | serve ACP on stdio, for an editor or host. With no operator project restriction this local mode serves any project the client names, each with its own trust. |
-| `--listen ADDR --token-file FILE` | with `--acp`, serve ACP on a WebSocket instead ([an agent service](../bindings/websocket.md#an-agent-service)). `ADDR` is `HOST:PORT` or a `ws:` URL, and must be a loopback address: `ma` has no TLS options. Connections must present the token in `FILE`. They act as `ma`'s local user, the actor a stdio connection has when `MODULAR_AGENT_ACTOR` is unset; `MODULAR_AGENT_ACTOR` does not apply to them. `ma` serves until it is stopped. |
+| `--listen ADDR` | with `--acp`, serve ACP on a WebSocket instead ([an agent service](../bindings/websocket.md#an-agent-service)). `ADDR` is a loopback `HOST:PORT` or `ws:` URL; `ma` has no TLS options. `ma` serves until stopped. |
+| `--token-file FILE` | with `--listen`, shorthand for one token acting as the local user. Do not combine with a policy `actors` list. |
+| `--policy FILE` | read this operator policy instead of `policy.json` in the configuration folder. |
 | `-h`, `--help`; `-V`, `--version` | help; the version, which names the implementation's language |
 
 ACP project scope, tenant reach and any narrower rights come from operator configuration, never from project files. `ma` MUST enforce an operator restriction before reading project settings or composing that project. Its single-user profile does not enable configured representation. The unrestricted local shorthand is for a trusted launcher, not an untrusted stdio proxy. See [ACP starting](../bindings/acp.md#starting) and [ACP authorization](../bindings/acp.md#authorization).
@@ -57,6 +59,7 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 | File, under the configuration folder | Purpose |
 |---|---|
 | `settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools` |
+| `policy.json` | Operator-owned [connection policy and limits](#connection-policy-and-limits). |
 | `auth.json` | Sign-ins, written by `ma login`. Mode 0600. Format below. |
 | `mcp.json` | `{"mcpServers": {...}}` in the form Pi and other clients use. `${NAME}` takes a value from the environment. |
 | `models.json` | Catalog additions or replacements: `{"openai-codex": [{"id", "name", "contextWindow", "maxTokens", "effort"}], "xai": [...]}` |
@@ -79,6 +82,27 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 - **Earlier Rust sessions.** Before this page, the Rust `ma` kept state directly in `modular-agent/`. To keep those sessions, stop the agent and move `sessions/` and `commands/` together into `modular-agent/rust/`.
 
 **`auth.json`** is `{"logins": {PROVIDER: LOGIN}, "answers": {NAME: VALUE}}`. A login is `{"type": "oauth", "access", "refresh", "expires", "account"?}`, with `expires` in milliseconds since the epoch already brought forward by the refresh margin, or `{"type": "api_key", "key"}`. Every implementation writes it with mode 0600 and, while refreshing a token, holds an exclusive lock on `auth.lock` beside it, so two agents in any languages never spend one refresh token.
+
+## Connection policy and limits
+
+`ma` reads one operator-owned JSON object for both ACP transports and for limits in all modes. Its optional keys are `stdio`, `actors` and `limits`. The file and referenced token files must be outside project and client control. Relative `tokenFile` paths resolve beside the policy. A malformed, unreadable or inconsistent policy MUST fail startup with a message naming the file and the problem. An explicitly named file must exist; only the default file may be absent.
+
+- `stdio`: `{ actor: { id, kind, rights }, tenants?, projects?, represents? }`. Without this entry, stdio acts as the local user with all prospective rights, using `MODULAR_AGENT_ACTOR` if set and retaining the recorded-actor fallback. It serves any project but no named tenant. An explicit `stdio.actor` sets the principal and rights ceiling.
+- `actors`: a list of `{ tokenFile, actor: { id, kind, rights }, tenants?, projects?, represents? }` as in [SDK placement](../sdk/placement.md#the-whole-agent). A listener requires this list or the single-token shorthand. Every token must be distinct. The shorthand acts as the local user with no named tenant and ignores `MODULAR_AGENT_ACTOR`.
+- `projects` lists exact canonical absolute paths, not subtrees. Omission uses the composition's project scope. `tenants` lists tenant IDs or `null` for no tenant; omission permits only no tenant. An empty list grants no scope. `rights` lists [core rights](../contracts.md#authority) and caps, but does not change, recorded grants. `represents` lists additional actor IDs, empty if omitted. `ma` does not declare `severalActors` and MUST reject a nonempty `represents` list.
+
+`limits` has `session`, `tenant` and `agent` objects. Each accepts the nonnegative integer fields below. Omitted fields use finite defaults. The unassigned tenant has its own bucket. `MiB` means 1,048,576 bytes.
+
+| Field | Unit | Session | Tenant | Agent |
+|---|---|---:|---:|---:|
+| `inputs` | Pending input slots, including reserved job reports | 32 | 128 | 512 |
+| `calls` | Unfinished model attempts and tool calls together | 64 | 256 | 1,024 |
+| `jobs` | Unfinished jobs | 16 | 64 | 256 |
+| `bufferedBytes` | Buffered bytes | 16 MiB | 64 MiB | 256 MiB |
+| `storageBytes` | Retained and reserved storage bytes | 1 GiB | 8 GiB | 32 GiB |
+| `controlBytes` | Bytes within `storageBytes` kept for control work | 8 MiB | 32 MiB | 128 MiB |
+
+The ordinary pool cannot use control headroom or outstanding settlement reservations. Operators MUST provision the write space and processing capacity these limits require, especially with shared history. See [Resource reservations](../contracts.md#resource-reservations).
 
 ## Providers
 
@@ -164,14 +188,14 @@ With the durable Runtime on Linux, every implementation declares the same values
 | `settingsDuringTurn` | `refused` | | `erasureDuringTurn` | `refused` |
 | `movingWithUnfinishedWork` | `refused` | | `mixedActorInput` | `refused` |
 | `rewinding` | true when the session's project is in a git work tree ([rewind points](#rewind-points)); false otherwise |
-| `forking`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` |
+| `forking`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` on Linux; `processGroup` on macOS, where a process that leaves its command's process group is not stopped |
 | `confinesFiles`, `severalActors`, `sessionLimits`, `tenants`, `holdsOutput`, `outputBypassesAgent`, `cancellingTurnCancelsJobs`, `pluginsDuringSession`, `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | false | | `projectRoot` | omitted |
 
 These are what the Rust implementation declares. An implementation that cannot meet one declares what it does meet, and the difference is a gap to close, not a choice.
 
 `ma` MUST declare `erasure` only when its history configuration supports [pending erasure](../contracts.md#cross-session-coordination) across its readers and writers. It MUST NOT infer that support from a configured history HTTP endpoint.
 
-The declaration MUST include the [reservation ceilings](../bindings/acp.md#the-declaration) enforced by the SDK. Operator limits are outside project settings; the project MUST NOT raise them.
+The declaration MUST include the [reservation count ceilings](../bindings/acp.md#the-declaration) enforced by the SDK under `resourceReservations`. `ma --declaration` also prints the effective operator configuration under `limits`, including byte bounds and control headroom, but no tokens, policy principals or live usage. Operator limits are outside project settings; the project MUST NOT raise them.
 
 The same values go out on every path, subject to the binding's projection for the declared scope: `ma --declaration`, the ACP `initialize` result, every session reply and every configuration update. Conformance mode changes none of them: the ACP kit checks the agent as shipped, so a test-only declaration would have it check a different agent.
 

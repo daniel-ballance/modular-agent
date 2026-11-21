@@ -5,6 +5,7 @@ import errno
 import json
 import os
 import signal
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,6 +17,11 @@ from ma_local import Local
 from ma_local.containment import delegated_root, journal, owner_identity, recover
 from ma_cli import build
 from test_swap import DRIVER_STARTUP, dead, pid_ready, spawn_driver, until
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="requires Linux cgroup v2, setsid utility, and /proc"
+)
 
 
 @pytest.fixture

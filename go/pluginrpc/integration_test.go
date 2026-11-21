@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -306,6 +307,9 @@ func (e *poisonEnvironment) Bash(context.Context, string, string, func(string)) 
 func (e *poisonEnvironment) Close() error { e.closed.Store(true); return nil }
 
 func TestPluginEOFStopsAnActiveEscapedCommand(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux strong containment and the setsid utility")
+	}
 	exe, _ := os.Executable()
 	cmd := exec.Command(exe, "-test.run=^TestBindingChild$")
 	cmd.Env = append(os.Environ(), "GO_PLUGIN_FIXTURE=conformance", "MODULAR_AGENT_PLUGIN_PARTS=environment")

@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")] // Needs Linux /proc, subreaper, and strong containment.
 mod support;
 use agent_api::*;
 use provider_fake::FakePlugin;

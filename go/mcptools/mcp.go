@@ -193,7 +193,7 @@ func (m *Manager) connect(ctx context.Context, id string, spec Server) (*connect
 		}
 		// MCP programs are trusted plugin code, not working-environment commands.
 		// The direct child dies with us. Close also terminates its process group.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+		cmd.SysProcAttr = processAttributes()
 		c.command = cmd
 		transport = &mcp.CommandTransport{Command: cmd, TerminateDuration: 250 * time.Millisecond}
 	} else {
