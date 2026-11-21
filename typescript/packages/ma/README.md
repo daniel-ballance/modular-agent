@@ -74,32 +74,6 @@ git diff --check
 
 Proposed replacement text; the shared documents are unchanged in this branch.
 
-**Reference — Tools, last value.** Monty 1.6.0 exports a sandbox class instance as its type and attributes, not its custom `__repr__`. For example, `print(repr(C()))` can print `custom repr` while a final `C()` is exported as `C()`. The image result also needs an exception to text rendering. Replace the paragraph starting “The result is everything printed” with:
-
-> Return everything printed, then the value of the last expression unless it is `None`, or `(no output)` if both are empty. Return strings unchanged. Format other values as `json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)` would, with tuples as lists, when the exported value can be encoded as JSON. Otherwise use the Python representation of Monty's exported value. This need not call a sandbox object's custom `__repr__`. Attach image dicts returned alone or in a list or tuple as image content instead of printing their encoded data. Each run starts fresh.
-
-**Reference — Tools, traceback.** Monty omits the colon and message if the exception has no message. Replace the exception bullet with:
-
-> An uncaught exception ends the run. Return what was printed, then Monty's traceback, ending in `Type: message` or just `Type` when the exception has no message.
-
-**Reference — Tools, execution and print limits.** Monty 1.6.0 reports active time at suspensions and feed completion. It cannot accept a different time limit on a resume. Its print events can arrive after Python has run more instructions; the host cannot stop it at the exact byte inside `print`. Replace the time and printed-output limit sentences with:
-
-> Allow 30 seconds of active interpreter wall time between nested tool calls, as reported by Monty. Waiting on the host does not count. Check the accumulated time at each suspension and at completion; reset it only for a dispatched nested tool call. A host watchdog may stop a worker that has not replied within the remaining time plus a bounded delivery allowance.
-
-> Allow 1 MiB of printed output. When a print event crosses the limit, retain only the UTF-8 prefix that fits and terminate the worker without servicing another call or using its final value. Start the result with `RuntimeError: printed output exceeded 1048576 bytes`, then the retained prefix.
-
-**Reference — Tools, worker message size.** The worker exports a whole typed value before `ma` cuts the result text. A large value can exceed the separate protocol frame and decode budgets. Add after the result text limit:
-
-> The host may refuse a worker message that exceeds its protocol frame or decode budget, before rendering and cutting the result text.
-
-**Reference — Tools, tool arguments.** TypeScript tool inputs are JSON values in the SDK. Python integers outside the JavaScript safe integer range cannot be carried reliably as JSON numbers through that SDK. Add after the argument binding rules:
-
-> Tool inputs must fit the host's JSON representation. If conversion would lose an integer's precision or cannot encode a value, raise `TypeError` without dispatching the call. This does not limit the integers that sandbox code can compute or return as its last value.
-
-**Reference — Tools, OS policy.** Monty 1.6.0 initializes `random.Random()` lazily; constructing it requests no system entropy. Its process and thread clocks return zero. Replace the OS policy bullet with:
-
-> The sandbox has no ambient file, network or process access, no wall clock, no sleep and no system entropy. Process and thread clocks return zero. A draw from an unseeded generator, or a request to seed it from system entropy, raises. A generator the script seeds itself, such as `random.Random(7)`, works.
-
 **ACP declarations.** The base Interface called the session API for proposals, actor joins, limits and tenant queries regardless of the SDK's session declaration. Its extension dispatcher now returns `not_supported` for disabled operations, while leaving `proposals`, `release` and `withdraw` available for parked job reports. The base declares all three features true and still passes the positive checks.
 
 **Reference — Checks.** Replace the ACP-kit bullet with:
