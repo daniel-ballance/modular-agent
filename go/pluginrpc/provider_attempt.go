@@ -3,6 +3,7 @@ package pluginrpc
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 )
@@ -15,6 +16,7 @@ type providerAttempt struct {
 	request                      object
 	requested, granted, answered bool
 	response                     object
+	streaming                    atomic.Bool
 }
 
 func (a *providerAttempt) hook(ctx context.Context, h *host, hook string, payload object) (any, error) {
@@ -27,6 +29,7 @@ func (a *providerAttempt) hook(ctx context.Context, h *host, hook string, payloa
 		}
 		a.response = asObject(payload["message"])
 		a.answered = true
+		a.streaming.Store(false)
 		_, err := h.h.API().Invoke(ctx, hookNames[hook], payload)
 		return nil, err
 	}
@@ -54,13 +57,12 @@ func (a *providerAttempt) hook(ctx context.Context, h *host, hook string, payloa
 		return nil, err
 	}
 	a.granted = true
+	a.streaming.Store(true)
 	return final, nil
 }
 
 func (a *providerAttempt) canStream() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.granted && !a.answered
+	return a.streaming.Load()
 }
 
 func (a *providerAttempt) matches(msg object) bool {

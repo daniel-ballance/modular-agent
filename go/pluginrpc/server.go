@@ -108,6 +108,17 @@ func (s *Server) serve(ctx context.Context, p *Peer) error {
 	}
 	s.peer = p
 	p.Handle = s.handle
+	p.admitNotification = func(ctx context.Context, m envelope) (string, bool) {
+		parent := capturedParent(ctx)
+		switch m.Method {
+		case "host/runtime/modelEvent":
+			return parent.key, parent.method == "host/runtime/model"
+		case "host/env/output":
+			return parent.key, parent.method == "host/env/exec"
+		default:
+			return "", false
+		}
+	}
 	p.notify = func(ctx context.Context, method string, raw json.RawMessage) {
 		if method == "host/runtime/modelEvent" {
 			v := obj(raw)

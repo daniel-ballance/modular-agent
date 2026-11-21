@@ -173,6 +173,8 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 		}
 		r.peer.Handle = r.callback
 		r.peer.notify = r.notification
+		r.peer.admitNotification = r.admitNotification
+		r.peer.requestBarrier = hostRequestBarrier
 		r.peer.OnClose = func() { r.active.Store(false); _ = r.Close() }
 		go func() {
 			_ = r.peer.Run()
@@ -452,6 +454,79 @@ func (r *remote) plugin(index int) api.Plugin {
 func (r *remote) call(ctx context.Context, method string, params any, out any) error {
 	return r.callTrackingTools(ctx, method, params, out, false)
 }
+
+// Only a request's own stream pieces delay delivery of its reply. Job
+// progress, emitted events and refreshes may all call back on this connection.
+func (r *remote) admitNotification(ctx context.Context, m envelope) (string, bool) {
+	if !r.active.Load() {
+		return "", false
+	}
+	parent := capturedParent(ctx)
+	switch m.Method {
+	case "host/jobs/progress":
+		return jobProgressKey(m.Params), true
+	case "host/emit":
+		// Capture permission to use a live parent at receipt, not after
+		// the emitter's reply has had time to cancel the parent context.
+		if has(obj(m.Params), "parentRequestId") && (!parent.ok || parent.ctx.Err() != nil) {
+			return "", false
+		}
+		return "", r.inOutput.Load() == 0
+	case "host/problem":
+		return "", true
+	case "tools/changed":
+		// A scoped invalidation only registers work here. Its caller will
+		// refresh after receiving the reply, possibly a nested hook reply.
+		if v := obj(m.Params); has(v, "parentRequestId") {
+			r.registerToolChange(ctx, v)
+			return "", false
+		}
+		return "", true
+	case "provider/event":
+		if parent.method != "provider/request" {
+			return "", false
+		}
+		w, _ := parent.ctx.Value(workKey{}).(work)
+		return parent.key, w.event != nil && w.attempt != nil && w.attempt.canStream()
+	case "host/runtime/report":
+		switch parent.method {
+		case "runtime/runTurn", "runtime/resumeTurn", "runtime/continueOpenCalls":
+			return parent.key, true
+		}
+	case "tools/progress":
+		return parent.key, parent.method == "tools/call"
+	case "env/output":
+		return parent.key, parent.method == "env/exec"
+	}
+	return "", false
+}
+
+func jobProgressKey(raw json.RawMessage) string {
+	var p struct{ JobID string }
+	_ = json.Unmarshal(raw, &p)
+	if p.JobID == "" {
+		return ""
+	}
+	return "job:" + p.JobID
+}
+
+func hostRequestBarrier(ctx context.Context, m envelope) string {
+	switch m.Method {
+	case "host/jobs/end", "host/jobs/resume":
+		// Validate and deliver progress received before the job changes state.
+		return jobProgressKey(m.Params)
+	case "host/hook":
+		if str(obj(m.Params), "hook") == "provider.response" {
+			// The response callback closes the Provider's stream grant.
+			parent := capturedParent(ctx)
+			if parent.method == "provider/request" {
+				return parent.key
+			}
+		}
+	}
+	return ""
+}
+
 func (r *remote) notification(ctx context.Context, method string, raw json.RawMessage) {
 	if !r.active.Load() {
 		return
@@ -466,11 +541,6 @@ func (r *remote) notification(ctx context.Context, method string, raw json.RawMe
 		return
 	}
 	if method == "host/emit" {
-		// Capture the parent before reading the reply that releases it.
-		// Delivery may run its own output hooks, so keep it off the peer reader.
-		if !r.active.Load() || r.inOutput.Load() != 0 {
-			return
-		}
 		kind, session := str(v, "type"), str(v, "sessionId")
 		if !strings.Contains(kind, ".") || session == "" {
 			return
@@ -478,7 +548,7 @@ func (r *remote) notification(ctx context.Context, method string, raw json.RawMe
 		var w work
 		if has(v, "parentRequestId") {
 			parent, ok := r.peer.requestParent(ctx, mustJSON(v["parentRequestId"]))
-			if !ok || parent.Err() != nil {
+			if !ok {
 				return
 			}
 			w, _ = parent.Value(workKey{}).(work)
@@ -486,23 +556,18 @@ func (r *remote) notification(ctx context.Context, method string, raw json.RawMe
 				return
 			}
 		}
-		go func() {
-			if w.actor != "" && !r.host.a.Authorize(session, w.actor, "watch") {
-				return
-			}
-			if _, err := r.host.a.Snapshot(session); err == nil {
-				r.a.Emit(ctx, api.Event{Kind: "plugin." + r.reg.Name + "." + kind, Session: session, Actor: w.actor, Call: w.call.ID, Data: mustJSON(v["data"])})
-			}
-		}()
+		if w.actor != "" && !r.host.a.Authorize(session, w.actor, "watch") {
+			return
+		}
+		if _, err := r.host.a.Snapshot(session); err == nil {
+			r.a.Emit(ctx, api.Event{Kind: "plugin." + r.reg.Name + "." + kind, Session: session, Actor: w.actor, Call: w.call.ID, Data: mustJSON(v["data"])})
+		}
 		return
 	}
 	if method == "host/problem" {
-		go func() {
-			_, err := r.callback(ctx, method, raw)
-			if err != nil {
-				r.host.a.Emit(context.Background(), api.Event{Kind: "plugin.problem", Data: mustJSON(err.Error())})
-			}
-		}()
+		if _, err := r.callback(ctx, method, raw); err != nil {
+			r.host.a.Emit(ctx, api.Event{Kind: "plugin.problem", Data: mustJSON(err.Error())})
+		}
 		return
 	}
 	ctx, ok := r.peer.requestParent(ctx, mustJSON(v["parentRequestId"]))
@@ -525,7 +590,7 @@ func (r *remote) notification(ctx context.Context, method string, raw json.RawMe
 			fn(str(v, "chunk"))
 		}
 	case "provider/event":
-		if w.event != nil && w.attempt != nil && w.attempt.canStream() {
+		if w.event != nil {
 			e := asObject(v["event"])
 			kind := str(e, "type")
 			if kind == "text" || kind == "reasoning" || kind == "toolInput" {

@@ -91,6 +91,7 @@ func TestServerProviderEraseAndCompleteResponseHook(t *testing.T) {
 			events <- str(asObject(obj(raw)["event"]), "delta")
 		}
 	}
+	p.requestBarrier = hostRequestBarrier
 	hookCalls := make(chan object, 4)
 	p.Handle = func(_ context.Context, method string, raw json.RawMessage) (any, error) {
 		if method != "host/hook" {
@@ -210,7 +211,8 @@ func TestPeerReadsCancellationAndTracksParentsWhileNotificationsRun(t *testing.T
 	}
 	p.Handle = func(ctx context.Context, method string, raw json.RawMessage) (any, error) {
 		if method == "host/cancel-this" {
-			return "unexpected work", nil
+			<-ctx.Done()
+			return nil, ctx.Err()
 		}
 		if _, live := p.requestParent(ctx, mustJSON(obj(raw)["parentRequestId"])); !live {
 			return nil, fault("invalid_request", "stale parent")
@@ -226,7 +228,7 @@ func TestPeerReadsCancellationAndTracksParentsWhileNotificationsRun(t *testing.T
 	}
 	id := string(mustJSON(obj(scan.Bytes())["id"]))
 	frames := []string{
-		`{"jsonrpc":"2.0","method":"pause"}`,
+		fmt.Sprintf(`{"jsonrpc":"2.0","method":"pause","params":{"parentRequestId":%s}}`, id),
 		fmt.Sprintf(`{"jsonrpc":"2.0","id":"before","method":"host/check","params":{"parentRequestId":%s}}`, id),
 		fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":null}`, id),
 		fmt.Sprintf(`{"jsonrpc":"2.0","id":"after","method":"host/check","params":{"parentRequestId":%s}}`, id),
@@ -238,31 +240,8 @@ func TestPeerReadsCancellationAndTracksParentsWhileNotificationsRun(t *testing.T
 		t.Fatal("reader stopped behind the notification", err)
 	}
 	<-pause
-	// A scanner ping would still be delivered behind the pause. Check that the
-	// reader itself has seen the cancel before letting queued handlers start.
-	for {
-		p.mu.Lock()
-		_, parent := p.pending[id]
-		_, active := p.active[`"tail"`]
-		p.mu.Unlock()
-		if !parent && active {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("frames did not reach the reader")
-		case <-time.After(time.Millisecond):
-		}
-	}
-	select {
-	case <-result:
-		t.Fatal("answer was delivered ahead of its preceding notification")
-	default:
-	}
-	close(resume)
-	if err := <-result; err != nil {
-		t.Fatal(err)
-	}
+	// Independent callbacks, ping and cancellation must complete even while
+	// the answer belonging to the paused stream is held at its barrier.
 	answers := map[string]envelope{}
 	for i := 0; i < 4; i++ {
 		if !scan.Scan() {
@@ -273,6 +252,15 @@ func TestPeerReadsCancellationAndTracksParentsWhileNotificationsRun(t *testing.T
 			t.Fatal(err)
 		}
 		answers[string(m.ID)] = m
+	}
+	select {
+	case <-result:
+		t.Fatal("answer was delivered ahead of its preceding notification")
+	default:
+	}
+	close(resume)
+	if err := <-result; err != nil {
+		t.Fatal(err)
 	}
 	if m := answers[`"before"`]; m.Error != nil || string(m.Result) != `"live parent"` {
 		t.Fatal(m)
