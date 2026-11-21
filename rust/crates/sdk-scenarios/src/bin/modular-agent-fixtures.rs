@@ -17,6 +17,7 @@ async fn main() {
                     listen: listen.clone(),
                     token_file: token_file.into(),
                     tls: None,
+                    projects: vec![],
                 }),
             )
         }

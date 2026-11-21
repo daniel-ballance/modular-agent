@@ -130,6 +130,7 @@ dependencies = [
  "agent-api",
  "anyhow",
  "async-trait",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -1793,6 +1794,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "fs2",
+ "serde",
  "serde_json",
 ]
 
@@ -4771,6 +4773,7 @@ dependencies = [
  "monty-proto",
  "monty-types",
  "provider-responses",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

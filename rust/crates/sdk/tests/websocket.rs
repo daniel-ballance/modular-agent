@@ -79,6 +79,7 @@ async fn acp_tokens_bind_independent_principals_and_scopes() {
         },
         tenants: Some(vec![None]),
         projects: Some(vec![project.path().into()]),
+        represents: vec![],
     };
     let denied = AcpActor {
         token_file: observer.clone(),
@@ -89,6 +90,7 @@ async fn acp_tokens_bind_independent_principals_and_scopes() {
         },
         tenants: None,
         projects: Some(vec![elsewhere.path().into()]),
+        represents: vec![],
     };
     let server = agent
         .serve_acp_websocket(
@@ -123,6 +125,8 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
     let bearer = token(&root, "scope", "408ea717c85a5a164598ec62edaad510");
     let subproject = root.join("nested");
     std::fs::create_dir_all(&subproject)?;
+    let alias = root.join("alias");
+    std::os::unix::fs::symlink(&root, &alias)?;
     let agent = Agent::builder()
         .project(&root)
         .plugin_host(true)
@@ -155,6 +159,7 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
                     },
                     tenants: None,
                     projects: Some(vec![root.clone()]),
+                    represents: vec![],
                 }],
                 listen: "127.0.0.1:0".into(),
                 tls: None,
@@ -165,7 +170,7 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
         .await
         .unwrap();
     transport_websocket::run(socket, CancellationToken::new(), |mut conn| {
-        let (id, root) = (&id, &root);
+        let (id, alias, subproject) = (&id, &alias, &subproject);
         async move {
             macro_rules! rpc {
                 ($id:expr, $method:expr, $params:expr) => {{
@@ -177,13 +182,21 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
                 }};
             }
             assert!(rpc!(1, "initialize", json!({"protocolVersion":1})).get("result").is_some());
-            let v = rpc!(2, "session/resume", json!({"sessionId":id,"cwd":root,"mcpServers":[]}));
+            let hidden = rpc!(8, "session/resume", json!({"sessionId":"unknown","cwd":alias,"mcpServers":[]}));
+            let denied = rpc!(9, "session/resume", json!({"sessionId":id,"cwd":subproject,"mcpServers":[]}));
+            assert_eq!(hidden["error"], denied["error"]);
+            assert_eq!(hidden["error"]["data"]["code"], "forbidden");
+            let v = rpc!(2, "session/resume", json!({"sessionId":id,"cwd":alias,"mcpServers":[]}));
             assert!(v.get("result").is_some(), "{v}");
             let v = rpc!(3, "session/prompt", json!({"sessionId":id,"prompt":[{"type":"text","text":"not allowed"}]}));
             assert_eq!(v["error"]["data"]["code"], "forbidden", "{v}");
             assert_eq!(rpc!(4, "$/ping", json!({}))["result"], json!({}));
             let v = rpc!(5, "session/close", json!({"sessionId":id}));
             assert!(v.get("result").is_some(), "{v}");
+            let v = rpc!(6, "_modular-agent/history", json!({"sessionId":id}));
+            assert_eq!(v["error"]["data"]["code"], "not_open", "{v}");
+            let v = rpc!(7, "_modular-agent/history", json!({"sessionId":"unknown"}));
+            assert_eq!(v["error"]["data"]["code"], "forbidden", "{v}");
         }
     }).await;
     service.close().await;
@@ -195,6 +208,36 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
         .await?;
     agent.close().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn invalid_stdio_scope_fails_before_serving() -> modular_agent::Result<()> {
+    let project = tempfile::tempdir()?;
+    let agent = Agent::builder()
+        .project(project.path())
+        .plugin_host(true)
+        .build()
+        .await?;
+    for options in [
+        modular_agent::AcpOptions {
+            projects: Some(vec![PathBuf::from("relative")]),
+            ..Default::default()
+        },
+        modular_agent::AcpOptions {
+            tenants: Some(vec![Some(String::new())]),
+            ..Default::default()
+        },
+        modular_agent::AcpOptions {
+            represents: vec!["job:invalid".into()],
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(
+            agent.serve_acp(options).await.unwrap_err().code(),
+            Code::InvalidComposition
+        );
+    }
+    agent.close().await
 }
 
 struct ComposedProject {
@@ -275,6 +318,7 @@ async fn acp_composition_keeps_ephemeral_agents_and_checks_project_trust()
                     project: project.path().canonicalize()?,
                     stopped: stopped.clone(),
                 })),
+                ..Default::default()
             },
             AcpServiceOptions {
                 listen: "127.0.0.1:0".into(),
@@ -329,6 +373,7 @@ async fn service_factory_creates_and_stops_one_instance_per_connection() -> modu
             listen: "127.0.0.1:0".into(),
             token_file: bearer.clone(),
             tls: None,
+            projects: vec![],
         },
     )
     .await?;
@@ -382,6 +427,7 @@ async fn service_registration_and_pending_tool_loss() -> modular_agent::Result<(
             listen: "127.0.0.1:0".into(),
             token_file: bearer.clone(),
             tls: None,
+            projects: vec![],
         },
     )
     .await?;

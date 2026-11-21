@@ -62,6 +62,11 @@ impl From<anyhow::Error> for Fault {
         }
         let code = if is_file_not_found(&error) {
             "not_found"
+        } else if matches!(
+            error.downcast_ref::<agent_api::OperationError>(),
+            Some(agent_api::OperationError::Busy(_))
+        ) {
+            "busy"
         } else if error
             .downcast_ref::<std::io::Error>()
             .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported)

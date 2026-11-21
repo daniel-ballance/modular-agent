@@ -1,5 +1,7 @@
 //! Hosts plugins and owns sessions. Inference, turns, I/O and presentation are delegated.
 use agent_api::*;
+mod capacity;
+pub use capacity::{Capacity, Pool as ReservationPool, ResourceLimits};
 mod output;
 pub use output::{apply_redactions, encode as output_event};
 mod rewind;
@@ -47,6 +49,7 @@ pub struct Harness {
     held_output: Mutex<HeldOutput>,
     admissions: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     erasure: tokio::sync::RwLock<()>,
+    reservations: RwLock<Arc<ReservationPool>>,
 }
 impl Harness {
     pub fn new() -> Arc<Self> {
@@ -70,7 +73,28 @@ impl Harness {
             held_output: Mutex::default(),
             admissions: Mutex::default(),
             erasure: tokio::sync::RwLock::default(),
+            reservations: RwLock::new(Arc::new(ReservationPool::new(ResourceLimits::default()))),
         })
+    }
+    pub fn configure_reservations(&self, pool: Arc<ReservationPool>) -> Result<()> {
+        ensure!(
+            self.sessions.lock().unwrap().is_empty(),
+            "capacity is fixed while sessions are open"
+        );
+        *self.reservations.write().unwrap() = pool;
+        Ok(())
+    }
+    pub fn reservations(&self) -> Arc<ReservationPool> {
+        self.reservations.read().unwrap().clone()
+    }
+    pub fn rebuild_reservations(&self) -> Result<()> {
+        if let Some(store) = self.store() {
+            let pool = self.reservations();
+            for data in store.list(None)? {
+                pool.rebuild(&data);
+            }
+        }
+        Ok(())
     }
     pub fn configure_tenants(&self, config: Option<&str>) -> Result<()> {
         ensure!(
@@ -305,12 +329,19 @@ impl Harness {
         );
         let store = self.store().ok_or_else(|| anyhow!("no history store"))?;
         let session_id = id.to_owned();
-        let (lease, mut data) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let (lease, mut data, erased) = tokio::task::spawn_blocking(move || -> Result<_> {
             let lease = store.acquire(&session_id)?;
-            let data = store.load(&session_id)?;
-            Ok((lease, data))
+            let (data, erased) = match store.reconcile_erasure(&session_id)? {
+                Some((data, _)) => (data, true),
+                None => (store.load(&session_id)?, false),
+            };
+            store.check_erasure(&data)?;
+            Ok((lease, data, erased))
         })
         .await??;
+        if erased {
+            self.invalidate_providers(id)?;
+        }
         if let Some(tenant) = tenants::name(&data) {
             self.check_tenant(tenant)?;
         }
@@ -560,6 +591,25 @@ impl Harness {
             .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
         Ok(())
     }
+    fn install_erased_data(&self, open: &mut OpenSession, data: SessionData) -> Result<()> {
+        let session = data.id.clone();
+        open.queue.retain(|q| {
+            data.entries
+                .iter()
+                .any(|e| e.id == q.id && e.content.is_some())
+        });
+        self.reservations().rebuild(&data);
+        open.data = data;
+        self.pending_events
+            .lock()
+            .unwrap()
+            .retain(|e| e.scope.session != session);
+        self.held_output
+            .lock()
+            .unwrap()
+            .retain(|(id, _, _), _| id != &session);
+        self.invalidate_providers(&session)
+    }
     fn invalidate_providers(&self, session: &str) -> Result<()> {
         for name in self.capability_names("provider.") {
             capability::<dyn Provider>(self, &name)?.invalidate(session);
@@ -678,6 +728,14 @@ impl Harness {
         Ok(())
     }
     fn commit(&self, open: &mut OpenSession, data: &SessionData) -> Result<()> {
+        self.commit_reserved(open, data, None)
+    }
+    fn commit_reserved(
+        &self,
+        open: &mut OpenSession,
+        data: &SessionData,
+        admission: Option<capacity::Reservation>,
+    ) -> Result<()> {
         self.check_open_writer(open)?;
         if open.provisional {
             let admitted = data
@@ -690,7 +748,15 @@ impl Harness {
             }
             open.lease = self.store().map(|s| s.acquire(&data.id)).transpose()?;
         }
-        if let Err(error) = self.save(data) {
+        let pool = self.reservations();
+        let mut write_failed = false;
+        let committed = pool.commit(&open.data, data, admission, || {
+            self.save(data).inspect_err(|_| write_failed = true)
+        });
+        if let Err(error) = committed {
+            if !write_failed {
+                return Err(error);
+            }
             let lost = error.is::<LostPart>()
                 || open
                     .lease
@@ -862,6 +928,7 @@ impl Harness {
                 });
             }
         }
+        let reservation = self.reservations().admit(&self.snapshot(session)?)?;
         // A proposal is data, not a command. Do not run input hooks with
         // broader authority than the connection and actor share.
         let input_payload = json!({"text":text,"content":content,"actor":actor,"timing":timing});
@@ -963,7 +1030,7 @@ impl Harness {
         }
         next.position = Some(entry.id.clone());
         next.entries.push(entry.clone());
-        self.commit(open, &next)?;
+        self.commit_reserved(open, &next, Some(reservation))?;
         open.data = next;
         open.queue.push_back(Input {
             id: entry.id.clone(),
@@ -1104,8 +1171,8 @@ impl Harness {
             .erasure
             .try_read()
             .map_err(|_| anyhow!("erasure in progress"))?;
-        let _workspace = self.begin_environment_work(session)?;
         let data = self.snapshot(session)?;
+        let _workspace = self.begin_environment_work(session)?;
         let branch = data.branch();
         let qs = questions(&data)?;
         let mut resume = vec![];
@@ -1513,11 +1580,12 @@ impl Harness {
     pub fn declaration(&self) -> Result<Value> {
         let runtime: Arc<dyn Runtime> = capability(self, "runtime")?;
         let env: Arc<dyn WorkingEnvironment> = capability(self, "environment")?;
-        let mut declaration = json!({"runtime":runtime.declaration(),"environment":env.declaration(),"forking":true,"erasure":self.store().is_some_and(|store|store.supports_erasure()),"several_actors":true,"rewinding":self.project.as_ref().map_or(env.declaration()["rewinding"] == true, |project| env.keeps_points(project)),"input_keys":true,"holds_output":false,"plugins_during_session":false,"live_sessions":false,"provider_state":false,"provider_tools":false,"starts_unasked_turns":false,"output_bypass":false,"questions_outlast_turn":false,"queued_input_after_restart":"handedBack","queued_job_reports_after_restart":"run","settings_during_turn":"refused","retention":"indefinite"});
+        let mut declaration = json!({"runtime":runtime.declaration(),"environment":env.declaration(),"forking":true,"erasure":self.store().is_some_and(|store|store.coordinates_erasure()),"several_actors":true,"rewinding":self.project.as_ref().map_or(env.declaration()["rewinding"] == true, |project| env.keeps_points(project)),"input_keys":true,"holds_output":false,"plugins_during_session":false,"live_sessions":false,"provider_state":false,"provider_tools":false,"starts_unasked_turns":false,"output_bypass":false,"questions_outlast_turn":false,"queued_input_after_restart":"handedBack","queued_job_reports_after_restart":"run","settings_during_turn":"refused","retention":"indefinite"});
         merge(
             &mut declaration,
             self.registry.read().unwrap().declaration(),
         );
+        declaration["resource_reservations"] = json!(self.reservations().limits());
         Ok(declaration)
     }
     pub async fn history_view(&self, session: &str) -> Result<Value> {
@@ -1903,14 +1971,24 @@ impl AgentApi for Harness {
         self.registry.read().unwrap().tool_registration(key)
     }
     fn snapshot(&self, session: &str) -> Result<SessionData> {
-        Ok(self
-            .sessions
-            .lock()
-            .unwrap()
-            .get(session)
-            .ok_or_else(|| anyhow!("session not open"))?
-            .data
-            .clone())
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get_mut(session)
+            .ok_or_else(|| anyhow!("session not open"))?;
+        if let Some(store) = self.store()
+            && let Err(error) = store.check_erasure(&open.data)
+        {
+            if open.active || open.environment_work > 0 || open.rewinding || open.lease.is_none() {
+                return Err(error);
+            }
+            self.check_open_writer(open)?;
+            let Some((data, _)) = store.reconcile_erasure(session)? else {
+                return Err(error);
+            };
+            store.check_erasure(&data)?;
+            self.install_erased_data(open, data)?;
+        }
+        Ok(open.data.clone())
     }
     fn authority(&self, session: &str, actor: &str) -> Result<Authority> {
         let data = self.snapshot(session).or_else(|_| {
@@ -2118,6 +2196,17 @@ impl AgentApi for Harness {
             .queue
             .iter()
             .any(|i| i.timing == Timing::Steer))
+    }
+    fn reserve_response_calls(&self, scope: &Scope, response: &ModelResponse) -> Result<()> {
+        let sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get(&scope.session)
+            .ok_or_else(|| anyhow!("session not open"))?;
+        self.reservations().stage_response(
+            &open.data,
+            (scope.turn.clone(), scope.step.clone()),
+            response,
+        )
     }
     fn take_steering(&self, scope: &Scope) -> Result<Vec<Input>> {
         self.take_steering_inner(scope, false)
@@ -2490,7 +2579,7 @@ impl AgentApi for Harness {
             .erasure
             .try_write()
             .map_err(|_| anyhow!("erasure requires idle turns and no other erasure"))?;
-        let (erased, affected) = {
+        let (erased, unresolved, affected) = {
             let mut sessions = self.sessions.lock().unwrap();
             ensure!(
                 sessions
@@ -2499,51 +2588,59 @@ impl AgentApi for Harness {
                     && self.blocked_projects.lock().unwrap().is_empty(),
                 "erasure requires all local turns to be idle"
             );
-            let held: Vec<_> = sessions.keys().cloned().collect();
             let store = self
                 .store()
-                .ok_or_else(|| anyhow!("ephemeral erasure not provided"))?;
-            ensure!(
-                !store
-                    .list(None)?
-                    .iter()
-                    .flat_map(|s| &s.entries)
-                    .any(|e| authority_record(e) && entries.contains(&e.id)),
-                "authority records cannot be erased to restore wider rights"
-            );
-            let changed = store.erase(entries, &held)?;
+                .filter(|s| s.coordinates_erasure())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "no coordinated erasure store",
+                    )
+                })?;
+            let mut affected = store.mark_erasure(&scope.session, &entries)?;
+            // An internal request with no record targets still asks the Provider
+            // to discard its copies of the source session.
+            affected.entry(scope.session.clone()).or_default();
             let mut erased = vec![];
-            let mut affected = BTreeMap::from([(scope.session.clone(), vec![])]);
-            for data in changed {
-                let ids = data
-                    .entries
-                    .last()
-                    .and_then(|e| e.content.as_ref())
-                    .and_then(|v| v["entryIds"].as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
-                erased.extend(ids.iter().cloned());
-                affected.insert(data.id.clone(), ids);
-                if let Some(open) = sessions.get_mut(&data.id) {
-                    open.queue.retain(|q| {
-                        data.entries
-                            .iter()
-                            .any(|e| e.id == q.id && e.content.is_some())
-                    });
-                    open.data = data;
+            let mut unresolved = std::collections::BTreeSet::new();
+            for (session, targets) in &affected {
+                let result = if let Some(open) = sessions.get_mut(session) {
+                    if self.check_open_writer(open).is_ok()
+                        && open.lease.is_some()
+                        && open.environment_work == 0
+                    {
+                        store
+                            .reconcile_erasure(session)
+                            .and_then(|result| match result {
+                                Some((data, ids)) => {
+                                    self.install_erased_data(open, data)?;
+                                    Ok(Some(ids))
+                                }
+                                None => Ok(None),
+                            })
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    store.acquire(session).and_then(|_lease| {
+                        store
+                            .reconcile_erasure(session)
+                            .map(|result| result.map(|(_, ids)| ids))
+                    })
+                };
+                let done = result.ok().flatten().unwrap_or_default();
+                for id in targets {
+                    if done.contains(id) {
+                        erased.push(id.clone());
+                    } else {
+                        unresolved.insert(id.clone());
+                    }
                 }
             }
-            self.pending_events.lock().unwrap().clear();
-            for session in affected.keys() {
-                self.invalidate_providers(session)?;
-            }
-            (erased, affected)
+            (erased, unresolved, affected)
         };
         let mut out_of_reach = vec!["output already delivered to recipients".into()];
-        let mut pending = std::collections::BTreeSet::new();
+        let mut pending = unresolved;
         for name in self.capability_names("provider.") {
             let report = capability::<dyn Provider>(self, &name)?
                 .erase_binding_copies(self.api(), &affected)
@@ -2671,6 +2768,9 @@ impl AgentApi for Harness {
     async fn command(&self, scope: &Scope, name: &str, args: &str) -> Result<Value> {
         let _workspace = self.begin_environment_work(&scope.session)?;
         require(self, scope, "input")?;
+        let _reservation = self
+            .reservations()
+            .command(&self.snapshot(&scope.session)?)?;
         let h = self.registry.read().unwrap().command(name)?;
         Ok(h.handle(self.api(), scope.clone(), json!({"args":args}))
             .await?

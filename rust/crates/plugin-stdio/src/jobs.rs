@@ -83,7 +83,8 @@ impl RemoteJobs {
                     scope,
                     authority,
                     key,
-                    report: false,
+                    // A binding job may choose to report when it ends.
+                    report: true,
                     kind: wire::string(p, "kind")?.into(),
                     detail: p["detail"].clone(),
                     state: JobState::Running,

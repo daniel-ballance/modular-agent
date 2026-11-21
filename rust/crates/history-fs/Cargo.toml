@@ -8,5 +8,6 @@ license.workspace = true
 agent-api.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 fs2.workspace = true

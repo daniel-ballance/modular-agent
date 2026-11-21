@@ -1981,6 +1981,10 @@ impl Callbacks {
                 return fault.clone();
             }
             if is_file_not_found(&e)
+                || matches!(
+                    e.downcast_ref::<OperationError>(),
+                    Some(OperationError::Busy(_))
+                )
                 || e.downcast_ref::<std::io::Error>()
                     .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported)
             {

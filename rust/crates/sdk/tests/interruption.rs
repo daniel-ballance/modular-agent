@@ -216,6 +216,7 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                             },
                             tenants: None,
                             projects: None,
+                            represents: vec![],
                         }],
                     },
                 )

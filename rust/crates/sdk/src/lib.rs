@@ -37,9 +37,10 @@ mod session;
 pub mod testing;
 mod tool;
 
-pub use acp::{AcpActor, AcpComposition, AcpOptions, AcpServiceOptions};
+pub use acp::{AcpActor, AcpComposition, AcpOptions, AcpServiceOptions, validate_acp_token_files};
 pub use agent::{
-    Agent, AgentBuilder, Approval, Durability, ProcessPlugin, ServicePlugin, SessionOptions,
+    Agent, AgentBuilder, Approval, Capacity, Durability, ProcessPlugin, ResourceLimits,
+    ServicePlugin, SessionOptions,
 };
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;

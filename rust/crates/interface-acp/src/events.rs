@@ -67,6 +67,7 @@ pub(crate) async fn pump(
                     Message::Event(event) => {
                         // A child has its own history. Only its routed questions surface here.
                         if event.scope.session != session.id && event.kind != "request.opened" { continue; }
+                        if session.check_view().is_err() { continue; }
                         let c = event.content;
                         match event.kind.as_str() {
                             "model.delta" => {
@@ -101,6 +102,7 @@ pub(crate) async fn pump(
                                 if !thoughts.remove(&event.scope.turn) {
                                     let _ = final_thoughts(&session,&event.scope,&cx).await;
                                 }
+                                if session.check_view().is_err() { continue; }
                                 if let Some(calls) = c["open_calls"].as_array() {
                                     for call in calls { let _ = notify(&cx,&session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":call["id"],"status":"pending"})); }
                                 }
@@ -119,7 +121,15 @@ pub(crate) async fn pump(
                             "command.result" => text(&cx,&session.id,"agent_message_chunk",&c.to_string()),
                             "request.opened" => {
                                 match serde_json::from_value::<Question>(c) {
-                                    Ok(q) => { questions.spawn(question(session.clone(),q,cx.clone(),capabilities.clone())); Ok(()) },
+                                    Ok(q) => {
+                                        let principal = PRINCIPAL.with(Clone::clone);
+                                        let ceiling = CONNECTION_CEILING.try_with(Clone::clone).ok();
+                                        questions.spawn(with_principal(
+                                            principal, ceiling,
+                                            question(session.clone(), q, cx.clone(), capabilities.clone()),
+                                        ));
+                                        Ok(())
+                                    },
                                     Err(e) => Err(e.into()),
                                 }
                             },
@@ -140,6 +150,9 @@ async fn question(
     cx: ConnectionTo<acp::Client>,
     capabilities: Value,
 ) {
+    if session.check_view().is_err() {
+        return;
+    }
     // Unsupported forms and questions past their turn use requests/answer.
     if q.kind != RequestKind::Approval
         && q.kind != RequestKind::Secret
@@ -182,6 +195,10 @@ async fn question(
                     }
                     return Ok((json!("refuse"), false));
                 }
+                session.check_view()?;
+                if !binding::answerable(&session, service.as_ref(), &q) {
+                    return std::future::pending().await;
+                }
                 let request: RequestPermissionRequest = serde_json::from_value(params)?;
                 session.approval_views.lock().unwrap().insert((connection_actor().as_str().into(), q.id.clone()));
                 let response = serde_json::to_value(cx.send_request(request).block_task().await?)?;
@@ -204,7 +221,9 @@ async fn question(
         tokio::select! { result = response => result, _ = cancel.cancelled() => Ok((Value::Null,true)), _ = session.stop.cancelled() => Ok((Value::Null,true)) }
     }.await;
     let (value, declined) = result.unwrap_or((Value::Null, true));
-    if let Ok(requests) = requests(session.api.as_ref()) {
+    if session.check_view().is_ok()
+        && let Ok(requests) = requests(session.api.as_ref())
+    {
         let _ = requests
             .answer(
                 session.api.clone(),
@@ -271,6 +290,7 @@ async fn final_thoughts(
             )
             .await?
     {
+        session.check_view()?;
         text(
             cx,
             &session.id,
@@ -291,6 +311,7 @@ pub(crate) async fn replay(api: Api, id: &str, cx: &ConnectionTo<acp::Client>) -
         else {
             continue;
         };
+        require(api.as_ref(), &scope, "watch")?;
         let message = &e["message"];
         match e["kind"].as_str() {
             Some("input") => text(

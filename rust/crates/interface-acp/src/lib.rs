@@ -33,6 +33,8 @@ pub struct Identity {
     pub rights: Authority,
     pub tenants: Option<Vec<Option<String>>>,
     pub projects: Option<Vec<PathBuf>>,
+    pub represents: Vec<String>,
+    pub explicit_rights: bool,
     pub join_on_open: bool,
     pub network: bool,
 }
@@ -44,21 +46,25 @@ impl Identity {
             rights: Authority::full(),
             tenants: None,
             projects: None,
+            represents: vec![],
+            explicit_rights: false,
             join_on_open: true,
             network: false,
         }
     }
+    fn has_ceiling(&self) -> bool {
+        self.network || self.explicit_rights
+    }
+
     fn allows_project(&self, path: &Path) -> bool {
         self.projects
             .as_ref()
             .is_none_or(|projects| projects.iter().any(|project| path == project))
     }
     fn allows_tenant(&self, tenant: Option<&str>) -> bool {
-        self.tenants
-            .as_ref()
-            .map_or(!self.network || tenant.is_none(), |list| {
-                list.iter().any(|name| name.as_deref() == tenant)
-            })
+        self.tenants.as_ref().map_or(tenant.is_none(), |list| {
+            list.iter().any(|name| name.as_deref() == tenant)
+        })
     }
 }
 
@@ -85,12 +91,8 @@ fn connection_actor() -> String {
 }
 
 fn represented_actors() -> Vec<String> {
-    if PRINCIPAL.try_with(|id| id.network).unwrap_or(false) {
-        return vec![];
-    }
-    std::env::var("MODULAR_AGENT_ACP_REPRESENTS")
-        .ok()
-        .and_then(|v| serde_json::from_str(&v).ok())
+    PRINCIPAL
+        .try_with(|id| id.represents.clone())
         .unwrap_or_default()
 }
 
@@ -177,12 +179,20 @@ struct State {
 }
 impl State {
     fn session(&self, p: &Value) -> Result<Arc<Session>> {
-        self.sessions
-            .lock()
-            .unwrap()
-            .get(string(p, "sessionId")?)
-            .cloned()
-            .ok_or_else(|| anyhow!("session not open on this connection"))
+        let id = string(p, "sessionId")?;
+        let attached = self.sessions.lock().unwrap().get(id).cloned();
+        if let Some(session) = attached {
+            session.check_view()?;
+            return Ok(session);
+        }
+        if self.factory.list(None)?.iter().any(|data| {
+            data.id == id
+                && self.factory.serves_project(&data.project)
+                && sessions::discoverable(&self.principal, data)
+        }) {
+            return Err(request_error("not_open", "session is not attached").into());
+        }
+        Err(request_error("forbidden", "session inaccessible").into())
     }
     fn project_in_use(&self, project: &Path, except: &str) -> bool {
         self.sessions
@@ -205,7 +215,13 @@ impl State {
     ) -> Result<Value> {
         let method = request.method.clone();
         let prompt = method == "session/prompt";
-        let before = self.session(&request.params).ok();
+        let before = if request.params["sessionId"].is_string()
+            && !matches!(method.as_str(), "session/load" | "session/resume")
+        {
+            self.session(&request.params).ok()
+        } else {
+            None
+        };
         if request.method == "session/close"
             && let Some(session) = &before
         {
@@ -229,15 +245,21 @@ impl State {
                 .ok_or_else(|| withheld().into());
         }
         let result = self.request(request, cx).await;
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.is::<acp::Error>() || e.is::<LostPart>())
-            || matches!(
-                method.as_str(),
-                "session/load" | "session/resume" | "session/new"
-            )
-        {
+        if result.as_ref().err().is_some_and(|e| {
+            e.is::<acp::Error>()
+                || e.is::<LostPart>()
+                || matches!(
+                    e.downcast_ref::<OperationError>(),
+                    Some(
+                        OperationError::Busy(_)
+                            | OperationError::Forbidden(_)
+                            | OperationError::Unavailable(_)
+                    )
+                )
+        }) || matches!(
+            method.as_str(),
+            "session/load" | "session/resume" | "session/new"
+        ) {
             return result;
         }
         let session = before.or_else(|| result.as_ref().ok().and_then(|v| self.session(v).ok()));
@@ -261,6 +283,7 @@ impl State {
                 .flatten()
                 .filter(|v| v.get("result").is_some())
                 .ok_or_else(withheld)?;
+            session.check_view()?;
             let mut value = gated["result"].clone();
             if method == "_modular-agent/requests"
                 && let Some(questions) = value["requests"].as_array_mut()
@@ -428,18 +451,18 @@ impl State {
                     p["cursor"].is_null(),
                     "no pagination cursor is issued by this agent"
                 );
-                let project = p["cwd"].as_str().map(PathBuf::from);
-                if let Some(project) = &project {
-                    ensure!(project.is_absolute(), "cwd must be absolute");
-                }
-                if self.principal.network
-                    && let Some(path) = &project
-                    && {
-                        let path = path.canonicalize()?;
-                        !self.principal.allows_project(&path) || !self.factory.serves_project(&path)
-                    }
+                let project = p["cwd"]
+                    .as_str()
+                    .map(|cwd| -> Result<_> {
+                        let path = Path::new(cwd);
+                        ensure!(path.is_absolute(), "cwd must be absolute");
+                        Ok(path.canonicalize()?)
+                    })
+                    .transpose()?;
+                if let Some(path) = &project
+                    && (!self.principal.allows_project(path) || !self.factory.serves_project(path))
                 {
-                    return Ok(json!({"sessions":[]}));
+                    return Ok(json!({"sessions": []}));
                 }
                 let mut sessions: BTreeMap<String, SessionData> = self
                     .factory
@@ -463,14 +486,12 @@ impl State {
                     }
                 }
                 Ok(
-                    json!({"sessions":sessions.values().filter(|s| !self.principal.network || (self.factory.serves_project(&s.project) && sessions::discoverable(&self.principal, s))).map(|s|json!({"sessionId":s.id,"cwd":s.project})).collect::<Vec<_>>()}),
+                    json!({"sessions":sessions.values().filter(|s| self.factory.serves_project(&s.project) && sessions::discoverable(&self.principal, s)).map(|s|json!({"sessionId":s.id,"cwd":s.project})).collect::<Vec<_>>()}),
                 )
             }
             "session/close" => {
                 let _: CloseSessionRequest = serde_json::from_value(p.clone())?;
-                let session = self
-                    .session(&p)
-                    .map_err(|_| request_error("not_open", "session is not attached"))?;
+                let session = self.session(&p)?;
                 session.begin_close(true)?;
                 let result = session.finish_close().await;
                 self.factory.detach(session.api.clone(), &session.id).await;
@@ -753,13 +774,48 @@ pub(crate) fn string<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
 /// Stdio is exclusively protocol output. Diagnostics belong on stderr.
 pub async fn run(factory: Arc<dyn Factory>) -> Result<()> {
     let mut identity = Identity::local();
+    // The base executable's operator-owned tenant configuration grants its
+    // local ACP launcher access. SDK callers provide the names explicitly.
+    if let Some(raw) = std::env::var_os("MODULAR_AGENT_TENANTS") {
+        let configured: BTreeMap<String, Value> = serde_json::from_str(
+            raw.to_str()
+                .ok_or_else(|| anyhow!("invalid tenant configuration"))?,
+        )?;
+        identity.tenants = Some(
+            std::iter::once(None)
+                .chain(configured.into_keys().map(Some))
+                .collect(),
+        );
+    }
+    if let Some(configured) = std::env::var_os("MODULAR_AGENT_ACP_REPRESENTS") {
+        identity.represents = serde_json::from_str(
+            configured
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid ACP representation"))?,
+        )?;
+    }
+    run_stdio(factory, stdio_identity(identity)?).await
+}
+
+pub fn stdio_identity(mut identity: Identity) -> Result<Identity> {
     if let Some(actor) = std::env::var_os("MODULAR_AGENT_ACTOR") {
         identity.id = actor
             .into_string()
             .ok()
-            .filter(|id| !id.is_empty())
+            .filter(|id| !id.is_empty() && !id.starts_with("job:"))
             .ok_or_else(|| anyhow!("MODULAR_AGENT_ACTOR must be a nonempty UTF-8 id"))?;
     }
+    ensure!(
+        identity
+            .represents
+            .iter()
+            .all(|id| !id.is_empty() && !id.starts_with("job:")),
+        "invalid ACP representation"
+    );
+    Ok(identity)
+}
+
+pub async fn run_stdio(factory: Arc<dyn Factory>, identity: Identity) -> Result<()> {
     run_connection(factory, identity, transport::stdio()).await
 }
 
@@ -783,7 +839,7 @@ async fn run_connection(
     } else {
         None
     };
-    let ceiling = identity.network.then(|| {
+    let ceiling = identity.has_ceiling().then(|| {
         Arc::new(ConnectionCeiling::new(
             identity.id.clone(),
             identity.rights.clone(),
@@ -830,7 +886,17 @@ async fn run_connection(
                                 acp::Error::method_not_found()
                             } else {
                                 let message = e.to_string();
-                                let code = if message.starts_with("actor lacks ")
+                                let code = if matches!(
+                                    e.downcast_ref::<OperationError>(),
+                                    Some(OperationError::Unavailable(_))
+                                ) {
+                                    "unavailable"
+                                } else if matches!(
+                                    e.downcast_ref::<OperationError>(),
+                                    Some(OperationError::Busy(_))
+                                ) {
+                                    "busy"
+                                } else if message.starts_with("actor lacks ")
                                     || message.starts_with("unknown tenant ")
                                 {
                                     "forbidden"

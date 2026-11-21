@@ -86,6 +86,32 @@ pub fn current_model_tools(
         .collect())
 }
 
+/// Replace an unrecordable call list before it can be published or dispatched.
+pub fn bound_model_response(
+    api: &dyn AgentApi,
+    scope: &Scope,
+    response: &mut ModelResponse,
+) -> Result<bool> {
+    match api.reserve_response_calls(scope, response) {
+        Ok(()) => Ok(false),
+        Err(e)
+            if matches!(
+                e.downcast_ref::<OperationError>(),
+                Some(OperationError::Busy(_))
+            ) =>
+        {
+            let mut minimal = wire::parse_response(json!({
+                "role":"assistant", "content":[], "stop":"failed",
+                "error": {"kind":"other","message":"call reservation capacity exhausted"}
+            }))?;
+            minimal.usage = response.usage.clone();
+            *response = minimal;
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 pub fn abort_attempt(api: &dyn AgentApi, writer: &str, old: &Entry) -> Result<()> {
     let aborted = wire::parse_response(json!({"role":"assistant","stop":"aborted","content":[]}))?;
     let mut recorded = json!(aborted);
@@ -178,7 +204,16 @@ impl ModelAttempt {
         if let Some(old) = &self.close_attempt {
             abort_attempt(api, self.writer, old)?;
         }
-        let entry = api.append(scope, self.writer, draft)?;
+        let entry = api.append(scope, self.writer, draft).map_err(|e| {
+            if matches!(
+                e.downcast_ref::<OperationError>(),
+                Some(OperationError::Busy(_))
+            ) {
+                ModelAttemptLimit("capacity").into()
+            } else {
+                e
+            }
+        })?;
         if api.tenant_budget_reached(&scope.session)? {
             abort_attempt(api, self.writer, &entry)?;
             return Err(ModelAttemptLimit("tenantTokens").into());

@@ -46,6 +46,11 @@ pub trait AcpComposition: Send + Sync + 'static {
 #[derive(Default)]
 pub struct AcpOptions {
     pub compose: Option<Arc<dyn AcpComposition>>,
+    pub actor: Option<crate::Actor>,
+    pub projects: Option<Vec<std::path::PathBuf>>,
+    pub tenants: Option<Vec<Option<String>>>,
+    pub rights: Option<crate::Rights>,
+    pub represents: Vec<String>,
 }
 
 /// A bearer-token principal. Omitted projects use the composition's scope.
@@ -56,6 +61,7 @@ pub struct AcpActor {
     pub actor: crate::Actor,
     pub tenants: Option<Vec<Option<String>>>,
     pub projects: Option<Vec<std::path::PathBuf>>,
+    pub represents: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,8 +82,77 @@ impl AcpActor {
             },
             tenants: None,
             projects: None,
+            represents: vec![],
         }
     }
+}
+
+/// Check operator token files without exposing credentials or starting a listener.
+pub async fn validate_acp_token_files<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Result<()> {
+    let mut distinct = std::collections::BTreeSet::new();
+    for path in paths {
+        let token = transport_websocket::read_token_file(path)
+            .await
+            .map_err(|error| {
+                Error::new(
+                    Code::InvalidComposition,
+                    format!("invalid token file {}: {error:#}", path.display()),
+                )
+            })?;
+        if !distinct.insert(token) {
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "token files contain duplicate credentials",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_actor(actor: &crate::Actor) -> Result<()> {
+    if actor.id.is_empty()
+        || actor.id.starts_with("job:")
+        || !matches!(actor.kind.as_str(), "user" | "host" | "agent" | "program")
+    {
+        return Err(Error::new(Code::InvalidComposition, "invalid ACP actor"));
+    }
+    Ok(())
+}
+
+fn validate_scope(
+    projects: Option<Vec<std::path::PathBuf>>,
+    tenants: &Option<Vec<Option<String>>>,
+    represents: &[String],
+) -> Result<Option<Vec<std::path::PathBuf>>> {
+    if tenants.iter().flatten().flatten().any(String::is_empty)
+        || represents
+            .iter()
+            .any(|id| id.is_empty() || id.starts_with("job:"))
+    {
+        return Err(Error::new(
+            Code::InvalidComposition,
+            "invalid ACP tenant or represented actor",
+        ));
+    }
+    projects
+        .map(|projects| {
+            projects
+                .into_iter()
+                .map(|path| {
+                    path.is_absolute()
+                        .then(|| path.canonicalize().ok())
+                        .flatten()
+                        .filter(|p| p.is_dir())
+                        .ok_or_else(|| {
+                            Error::new(
+                                Code::InvalidComposition,
+                                format!("invalid ACP project path: {}", path.display()),
+                            )
+                        })
+                })
+                .collect()
+        })
+        .transpose()
 }
 
 struct ProjectFactory(
@@ -126,6 +201,7 @@ impl interface_acp::Factory for ProjectFactory {
             ));
         }
         let harness = agent.inner.harness.clone();
+        harness.configure_reservations(self.1.inner.harness.reservations())?;
         if let Err(error) = harness
             .load(Arc::new(interface_acp::AcpPlugin { sink }))
             .await
@@ -198,13 +274,32 @@ impl Agent {
     /// Start the Interface before opening embedded sessions; stdout belongs to ACP.
     pub async fn serve_acp(&self, options: AcpOptions) -> Result<()> {
         self.check_acp_host()?;
+        let mut identity = interface_acp::Identity::local();
+        identity.projects =
+            validate_scope(options.projects, &options.tenants, &options.represents)?;
+        identity.tenants = options.tenants;
+        identity.represents = options.represents;
+        if let Some(actor) = options.actor {
+            validate_actor(&actor)?;
+            identity.kind = actor.kind;
+            identity.id = actor.id;
+            identity.rights = actor.rights;
+            identity.explicit_rights = true;
+        } else {
+            identity = interface_acp::stdio_identity(identity)
+                .map_err(|e| Error::new(Code::InvalidComposition, e.to_string()))?;
+        }
+        if let Some(rights) = options.rights {
+            identity.rights = identity.rights.intersect(&rights);
+            identity.explicit_rights = true;
+        }
         let routes = self.acp_routes();
         let _serving = routes
             .serving
             .try_lock()
             .map_err(|_| Error::new(Code::Busy, "ACP is already serving"))?;
         let factory = self.acp_factory(options.compose, routes.clone()).await?;
-        Ok(interface_acp::run(factory).await?)
+        Ok(interface_acp::run_stdio(factory, identity).await?)
     }
 
     /// Serve ACP over WebSocket, with a new connection and actor scope per upgrade.
@@ -220,21 +315,8 @@ impl Agent {
             if actor.kind == "plugin" {
                 actor.kind = "program".into();
             }
-            if actor.id.is_empty()
-                || actor.id.starts_with("job:")
-                || !matches!(actor.kind.as_str(), "user" | "host" | "agent" | "program")
-            {
-                return Err(Error::new(Code::InvalidComposition, "invalid ACP actor"));
-            }
-            let projects = token
-                .projects
-                .map(|projects| {
-                    projects
-                        .iter()
-                        .map(std::fs::canonicalize)
-                        .collect::<std::io::Result<Vec<_>>>()
-                })
-                .transpose()?;
+            validate_actor(&actor)?;
+            let projects = validate_scope(token.projects, &token.tenants, &token.represents)?;
             let join_on_open = actor.id == base::ACP_HOST_ACTOR && actor.kind == "host";
             entries.push((
                 token.token_file,
@@ -244,6 +326,8 @@ impl Agent {
                     rights: actor.rights,
                     tenants: token.tenants,
                     projects,
+                    represents: token.represents,
+                    explicit_rights: true,
                     join_on_open,
                     network: true,
                 },

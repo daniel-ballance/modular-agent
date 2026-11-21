@@ -171,6 +171,28 @@ fn lines(
     reader: WireReader,
     write: SendLine,
 ) -> impl agent_client_protocol::ConnectTo<agent_client_protocol::Agent> {
+    // The peer can close its read pipe before EOF on its write pipe. Treat a
+    // failed write to that pipe as disconnect, not a failed agent shutdown.
+    let disconnected = agent_api::CancellationToken::new();
+    let write: SendLine = Arc::new({
+        let disconnected = disconnected.clone();
+        move |line| {
+            let disconnected = disconnected.clone();
+            let write = write.clone();
+            Box::pin(async move {
+                if disconnected.is_cancelled() {
+                    return Ok(());
+                }
+                match write(line).await {
+                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                        disconnected.cancel();
+                        Ok(())
+                    }
+                    result => result,
+                }
+            })
+        }
+    });
     let (refuse, refusals) = mpsc::unbounded_channel();
     let input = Input {
         reader,
@@ -178,12 +200,16 @@ fn lines(
         refusals,
         seen: BTreeSet::new(),
     };
-    let incoming = stream::unfold(Some(input), |state| async move {
-        let mut input = state?;
-        match input.next().await {
-            Ok(Some(line)) => Some((Ok(line), Some(input))),
-            Ok(None) => None,
-            Err(e) => Some((Err(e), None)),
+    let incoming = stream::unfold(Some((input, disconnected)), |state| async move {
+        let (mut input, disconnected) = state?;
+        tokio::select! {
+            biased;
+            _ = disconnected.cancelled() => None,
+            result = input.next() => match result {
+                Ok(Some(line)) => Some((Ok(line), Some((input, disconnected)))),
+                Ok(None) => None,
+                Err(e) => Some((Err(e), None)),
+            }
         }
     });
     let outgoing = sink::unfold(

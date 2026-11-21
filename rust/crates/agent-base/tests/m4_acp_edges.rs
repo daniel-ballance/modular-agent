@@ -269,12 +269,9 @@ async fn unused_acp_sessions_leave_no_history_and_unsupported_input_is_refused()
   assert!(rpc(&cx,"session/prompt",json!({"sessionId":id,"prompt":[{"type":"image","mimeType":"image/png","data":"AA=="}]})).await.is_err());
   cx.send_request(CloseSessionRequest::new(id)).block_task().await?; Ok(())
  }).await;
-    assert_eq!(
-        std::fs::read_dir(r.root.path().join("sessions"))
-            .unwrap()
-            .count(),
-        0
-    );
+    use agent_api::HistoryStore;
+    let store = history_fs::FileHistory::new(&r.root.path().join("sessions")).unwrap();
+    assert!(store.list(None).unwrap().is_empty());
 }
 
 #[tokio::test]

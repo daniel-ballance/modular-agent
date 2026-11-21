@@ -209,6 +209,10 @@ impl TestAgentBuilder {
         self.builder = self.builder.durability(durability);
         self
     }
+    pub fn resource_limits(mut self, limits: crate::ResourceLimits) -> Self {
+        self.builder = self.builder.resource_limits(limits);
+        self
+    }
     pub fn several_actors(mut self, enabled: bool) -> Self {
         self.builder = self.builder.several_actors(enabled);
         self

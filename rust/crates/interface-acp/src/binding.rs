@@ -74,6 +74,9 @@ pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
         "confinesFiles":d["environment"]["confines_files"] == true,
         "commandContainment":if d["environment"]["stops_commands_after_sigkill"] == true {"strong"} else if d["environment"]["containment"] == "processGroup" {"processGroup"} else {"none"}
     });
+    if d["resource_reservations"].is_object() {
+        declaration["resourceReservations"] = d["resource_reservations"].clone();
+    }
     if queued_reports != queued {
         declaration["queuedJobReportsAfterRestart"] = json!(queued_reports);
     }
@@ -94,7 +97,7 @@ pub(crate) fn outcome(result: &TurnResult) -> Value {
     // completed turns with open calls; the call's pending status carries the wait.
     if !result.open_calls.is_empty()
         && result.outcome == Outcome::Limit
-        && result.limit.as_deref() != Some("tenantTokens")
+        && !matches!(result.limit.as_deref(), Some("tenantTokens" | "capacity"))
     {
         return json!({"kind":"completed"});
     }
@@ -483,7 +486,10 @@ pub(crate) async fn extension(
             .transpose()?
             .unwrap_or(connection_actor.as_str());
         let represented = represented_actors();
-        if actor != connection_actor.as_str() && !represented.iter().any(|id| id == actor) {
+        if actor != connection_actor.as_str()
+            && (!represented.iter().any(|id| id == actor)
+                || !actors(&session.api.snapshot(&session.id)?).contains_key(actor))
+        {
             return Err(
                 request_error("forbidden", "connection does not represent this actor").into(),
             );
@@ -670,6 +676,11 @@ pub(crate) async fn extension(
         }
         "requests" => poll_payload(&session),
         "answer" => {
+            let rights = api.authority(&session.id, connection_actor.as_str())?;
+            ensure!(
+                rights.has("answer") || rights.has("approve"),
+                request_error("forbidden", "actor lacks answer authority")
+            );
             let id = string(p, "requestId")?;
             let service = requests(session.api.as_ref())?;
             let question = service

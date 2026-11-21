@@ -10,6 +10,7 @@
 //! - Agent Skills, instruction files, compaction, model selection, commands.
 pub mod acp;
 pub mod mcp;
+pub mod policy;
 pub mod prompt;
 pub mod script;
 pub mod sink;
@@ -29,6 +30,8 @@ pub const PROVIDERS: [&str; 3] = ["openai-codex", "xai", "claude"];
 
 #[derive(Clone)]
 pub struct Standard {
+    pub limits: modular_agent::ResourceLimits,
+    pub tenant_scopes: bool,
     /// Settings, sign-ins, MCP servers, skills and the person's AGENTS.md.
     pub config: PathBuf,
     /// Sessions and working files.
@@ -66,6 +69,8 @@ impl Standard {
         Ok(Self {
             config,
             state,
+            limits: policy::Bounds::default().counts(),
+            tenant_scopes: false,
             durable: true,
             claude: false,
             scripted: std::env::var_os("MODULAR_AGENT_SCRIPT")
@@ -191,6 +196,7 @@ pub fn builder(
             Durability::Kept
         })
         .configuration(configuration)
+        .resource_limits(standard.limits.clone())
         .credentials(standard.auth())
         .history(standard.history()?)
         .default_prompt(false)
@@ -206,6 +212,14 @@ pub fn builder(
             }
             .plugin(skills),
         );
+    if standard.tenant_scopes
+        && let Some(tenants) = std::env::var_os("MODULAR_AGENT_TENANTS")
+    {
+        let raw = tenants
+            .to_str()
+            .ok_or_else(|| anyhow!("invalid MODULAR_AGENT_TENANTS"))?;
+        b = b.tenants(serde_json::from_str(raw)?);
+    }
     if !standard.conformance || standard.scripted.is_some() {
         b = b.plugin(modular_agent_files::files(standard.state.join("output")));
     }
