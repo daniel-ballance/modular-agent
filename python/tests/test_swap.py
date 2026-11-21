@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,6 +41,11 @@ def pid_ready(path):
 
 
 def dead(pid):
+    if sys.platform == "darwin":
+        state = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="], capture_output=True, text=True
+        ).stdout.strip()
+        return not state or state.startswith("Z")
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] in {"Z", "X"}
     except (FileNotFoundError, ProcessLookupError):

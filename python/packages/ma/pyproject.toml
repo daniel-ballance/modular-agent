@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ma = "ma_standard.cli:main"
+ma = "ma_standard:main"
 
 [tool.uv.sources]
 modular-agent = { workspace = true }

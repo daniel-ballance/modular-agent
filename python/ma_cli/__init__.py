@@ -11,7 +11,7 @@ from ma_credentials import Credentials
 from ma_guardrail import Guardrail
 from ma_harness import Harness
 from ma_history.http import configured_history
-from ma_local import Local
+from ma_local import local_for_platform
 from ma_prompt import Prompt
 from ma_runtime import Runtime
 from ma_selection import Selection
@@ -36,7 +36,7 @@ async def build(
             history,
             config,
             Credentials(root),
-            Local(root),
+            local_for_platform(root),
             Tools(),
             *([Nest()] if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1" else []),
             *providers,
