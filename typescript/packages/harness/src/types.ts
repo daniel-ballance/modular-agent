@@ -241,6 +241,8 @@ export interface RequestOptions {
 	onEvent?(event: ModelStreamEvent): void;
 	/** Host and adapter controls. These do not cross the wire. */
 	prepareDispatch?(): Promise<ModelRequest>;
+	/** Serialize the final request handoff with erasure publication. */
+	handoff?(send: () => void): Promise<void>;
 	requestPrepared?: boolean;
 	exactReplay?: boolean;
 	onEffectiveRequest?(request: ModelRequest): void;

@@ -47,7 +47,7 @@ export async function listDirectory(env: import("@modular-agent/harness").Workin
 }
 
 /** What handles one incoming request: its params, an abort signal for `$/cancel`, and the request's id. */
-export type Handler = (params: any, ctx: { signal: AbortSignal; id: number | string }) => unknown | Promise<unknown>;
+export type Handler = (params: any, ctx: { signal: AbortSignal; id: number | string; atReply(fence: (send: () => void) => Promise<void>): void }) => unknown | Promise<unknown>;
 export type NoteHandler = (params: any) => void;
 
 interface Message {
@@ -238,8 +238,10 @@ export class WirePeer {
 			await Promise.resolve();
 			if (abort.signal.aborted) throw new WireError("cancelled", "Cancelled");
 			if (this.allowRequest && !this.allowRequest(m.method!)) throw new WireError("invalid_request", "The plugin is not registered");
-			const result = await handler(m.params ?? {}, { signal: abort.signal, id: m.id! });
-			this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result });
+			let fence: ((send: () => void) => Promise<void>) | undefined;
+			const result = await handler(m.params ?? {}, { signal: abort.signal, id: m.id!, atReply: guard => { fence = guard; } });
+			const send = () => this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result });
+			if (fence) await fence(send); else send();
 			if (!this.closed) this.afterReply?.(m.method!);
 		} catch (error) {
 			const e = abort.signal.aborted && !(error instanceof WireError) ? new WireError("cancelled", "Cancelled") : error;

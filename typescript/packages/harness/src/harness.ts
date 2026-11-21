@@ -2272,15 +2272,23 @@ export class Harness {
 				const scope = { sessionId: s.id, turnId, stepId, provider: model.model.provider, model: { provider: model.model.provider, id: model.model.id } };
 				const safeToRepeat = !!turnId && (model.supports.safeToRepeat === true || (model.supports.keepsState === false && model.supports.runsTools === false));
 				let intentId: string | undefined;
-				const check = async () => {
-					options.signal.throwIfAborted();
-					if (await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
+				const finalCheck = () => {
 					options.signal.throwIfAborted();
 					authorize?.();
 					if (this.checkPending(s) !== freshness) throw failure("unavailable", "Erasure changed the model view");
 					this.checkScopedWork(s, "watch");
 					this.checkProviderErasure(s, model.model.provider);
 					this.checkWriter(s);
+				};
+				const check = async () => {
+					options.signal.throwIfAborted();
+					if (await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
+					finalCheck();
+				};
+				const handoff = async (send: () => void) => {
+					const publish = async () => { finalCheck(); send(); };
+					const registry = this.pendingRegistry();
+					if (registry) await registry.exclusive(publish); else await publish();
 				};
 				const prepareDispatch = async () => {
 					await check();
@@ -2336,8 +2344,20 @@ export class Harness {
 				try {
 					let message: AssistantMessage;
 					try {
-						message = model.prepareOnWire ? await model.request(request, { ...options, prepareDispatch, onEvent })
-							: await model.request(await prepareDispatch(), { ...options, requestPrepared: true, onEvent });
+						if (model.prepareOnWire) {
+							const work = { sessionId: s.id, actors: state.actors, jobs: state.jobs, state };
+							message = await model.request(request, { ...options, onEvent,
+								prepareDispatch: () => this.turnAuthority.run(work, prepareDispatch),
+								handoff: send => this.turnAuthority.run(work, () => handoff(send)) });
+						} else {
+							const dispatched = await prepareDispatch();
+							let result!: Promise<AssistantMessage>;
+							await handoff(() => {
+								result = model.request(dispatched, { ...options, requestPrepared: true, onEvent });
+								void result.catch(() => {});
+							});
+							message = await result;
+						}
 					} catch (error) {
 						if (turnId || !intentId) throw error;
 						message = options.signal.aborted ? { role: "assistant", stop: "aborted", content: [] }
