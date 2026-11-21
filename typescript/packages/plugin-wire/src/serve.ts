@@ -48,28 +48,38 @@ export interface ServeOptions {
 	output?: (line: string) => void;
 }
 
-export interface PluginListenOptions extends ListenOptions {
+interface PluginHostScope {
 	tokenFile: string;
 	/** Private service state; defaults to a sibling directory beside the token file. */
 	stateDir?: string;
-	/** Exact projects granted to this listener's single host trust scope. */
+	/** Exact projects granted to this host. */
 	projects?: readonly string[];
 }
+export type PluginListenOptions = ListenOptions & (PluginHostScope | {
+	/** Explicit operator provisioning; no client-supplied trust scopes. */
+	hosts: readonly (PluginHostScope & { projects: readonly string[] })[];
+});
 
 interface ServiceConnection { ws: WebSocket; stateDir: string; projects?: ReadonlySet<string> }
 
 /** Create fresh plugin registrations and handlers for each authenticated connection. */
 export async function servePluginService(makePlugins: () => ServeOptions, options: PluginListenOptions) {
-	if (options.projects !== undefined && (!Array.isArray(options.projects) || !Array.from(options.projects).every(p => typeof p === "string" && isAbsolute(p)))) {
-		throw new Error("Invalid served plugin project scope");
-	}
-	const projects = options.projects && new Set(await Promise.all(options.projects.map(async path => {
-		const project = await realpath(path);
-		if (!(await stat(project)).isDirectory()) throw new Error("Served plugin project must be a directory");
-		return project;
-	})));
-	return listenWebSocket(options, PLUGIN_PROTOCOL, [{ tokenFile: options.tokenFile, value: undefined }],
-		(ws, _, key) => servePlugins(makePlugins(), { ws, projects, stateDir: join(options.stateDir ?? `${options.tokenFile}.state`, key) }));
+	const scoped = "hosts" in options;
+	const hosts = scoped ? options.hosts : [options];
+	if (!Array.isArray(hosts) || !hosts.length || scoped && "tokenFile" in options) throw new Error("Invalid served plugin hosts");
+	const credentials = await Promise.all(hosts.map(async ({ tokenFile, stateDir, projects }: PluginHostScope) => {
+		if ((scoped || projects !== undefined) && (!Array.isArray(projects) || !Array.from(projects).every(p => typeof p === "string" && isAbsolute(p)))) {
+			throw new Error("Invalid served plugin project scope");
+		}
+		const allowed = projects && new Set(await Promise.all(projects.map(async path => {
+			const project = await realpath(path);
+			if (!(await stat(project)).isDirectory()) throw new Error("Served plugin project must be a directory");
+			return project;
+		})));
+		return { tokenFile, value: { allowed, stateDir: stateDir ?? `${tokenFile}.state` } };
+	}));
+	return listenWebSocket(options, PLUGIN_PROTOCOL, credentials, (ws, scope, key) =>
+		servePlugins(makePlugins(), { ws, projects: scope.allowed, stateDir: join(scope.stateDir, key) }));
 }
 
 async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: InterruptedTurn, runtime: Runtime) {
