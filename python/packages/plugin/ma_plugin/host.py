@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+from functools import partial
 from pathlib import Path
 
 from ma_core import AgentError, Plugin, identity, plain, silent
@@ -27,7 +28,7 @@ from ma_core.wire import (
     tool_in,
     tool_out,
 )
-from .rpc import MAX_FRAME, Peer, WireError
+from .rpc import MAX_FRAME, Peer, WireError, rpc_id
 from .runtime_host import HostedRuntime
 from .server import BINDING, DATA
 from .websocket import connect_plugin
@@ -281,7 +282,7 @@ class External(Plugin):
             frames = await connect_plugin(
                 self.spec["url"], self.spec["tokenFile"], timeout=self.control_timeout
             )
-            self.peer = Peer(None, None, self.callback, self.notification, self.name, frames=frames)
+            self.peer = self.connection(None, None, frames=frames)
             self.peer.start_liveness(self.ping_interval, self.control_timeout)
             return
         self.process = await asyncio.create_subprocess_exec(
@@ -300,8 +301,16 @@ class External(Plugin):
             stderr=None,
             limit=MAX_FRAME + 2,
         )
-        self.peer = Peer(
-            self.process.stdout, self.process.stdin, self.callback, self.notification, self.name
+        self.peer = self.connection(self.process.stdout, self.process.stdin)
+
+    def connection(self, reader, writer, *, frames=None):
+        return Peer(
+            reader,
+            writer,
+            self.callback,
+            label=self.name,
+            frames=frames,
+            prepare_notification=self.prepare_notification,
         )
 
     async def connect(self):
@@ -330,7 +339,8 @@ class External(Plugin):
             self.sources[source["id"]] = {
                 **source,
                 "cache": {None: source.get("tools", [])},
-                "invalid": set(),
+                "invalid": {},
+                "refresh_locks": {},
             }
         environment = self.registration.get("workingEnvironment")
         if environment:
@@ -460,7 +470,16 @@ class External(Plugin):
                         report[key].extend(result.get(key) or [])
         return report
 
-    async def request(self, method, params, context=None, emit=silent, *, return_on_cancel=False):
+    async def request(
+        self,
+        method,
+        params,
+        context=None,
+        emit=silent,
+        *,
+        return_on_cancel=False,
+        cancel_on_interrupt=True,
+    ):
         key = identity()
         self.active[key] = {
             "method": method,
@@ -471,9 +490,23 @@ class External(Plugin):
             "pending_questions": {},
         }
         try:
-            result = await self.peer.request(
-                method, params, key=key, return_on_cancel=return_on_cancel
-            )
+            try:
+                result = await self.peer.request(
+                    method,
+                    params,
+                    key=key,
+                    return_on_cancel=return_on_cancel,
+                    cancel_on_interrupt=cancel_on_interrupt,
+                )
+            finally:
+                # Catalog admission is synchronous. Fetch the new view here,
+                # not behind notifications that may need this very reply.
+                if not self.peer.closed.is_set():
+                    for source, sid in self.active[key].get("tool_changes", ()):
+                        try:
+                            await self.refresh(source, sid)
+                        except AgentError:
+                            continue  # Preserve the triggering result.
             if method == "provider/request":
                 parent = self.active[key]
                 if (
@@ -513,14 +546,26 @@ class External(Plugin):
         return tools
 
     async def refresh(self, source_id, sid):
-        r = await self.request(
-            "tools/list",
-            {"toolSource": source_id, **({"sessionId": sid} if sid else {})},
-            {"session": sid},
-        )
-        self.validate_tools(r["tools"], source_id, sid)
-        self.sources[source_id]["cache"][sid] = r["tools"]
-        self.sources[source_id]["invalid"].discard(sid)
+        source = self.sources[source_id]
+        try:
+            async with asyncio.timeout(self.control_timeout):
+                async with source["refresh_locks"].setdefault(sid, asyncio.Lock()):
+                    while sid not in source["cache"] or sid in source["invalid"]:
+                        version = source["invalid"].get(sid)
+                        r = await self.request(
+                            "tools/list",
+                            {"toolSource": source_id, **({"sessionId": sid} if sid else {})},
+                            {"session": sid},
+                            cancel_on_interrupt=False,
+                        )
+                        if source["invalid"].get(sid) is version:
+                            self.validate_tools(r["tools"], source_id, sid)
+                            source["cache"][sid] = r["tools"]
+                            source["invalid"].pop(sid, None)
+        except TimeoutError as exc:
+            # A late response to a retired request is not safe to accept.
+            self.peer.reader_task.cancel()
+            raise WireError("Tool catalog refresh timed out", "lost") from exc
 
     def validate_tools(self, tools, source_id, session=None):
         names = [t["name"] for t in tools]
@@ -545,31 +590,80 @@ class External(Plugin):
             self.h.external_tool_names.pop(name)
         self.h.external_tool_names.update({name: (self.name, source_id) for name in names})
 
-    async def notification(self, method, p):
-        parent = self.active.get(p.get("parentRequestId"))
+    def prepare_notification(self, method, p):
+        """Capture parent authority and catalog invalidations at wire receipt."""
+        key = p.get("parentRequestId")
+        parent = self.live_parent(p)
+        if key is not None and parent is None:
+            return None
         if method == "tools/changed":
-            source_id = p["toolSource"]
-            if source_id not in self.sources:
-                raise WireError("Unknown tool source", "invalid_request")
+            source_id = p.get("toolSource")
+            if not isinstance(source_id, str) or source_id not in self.sources:
+                return None
+            if parent and parent["method"] == "tools/list":
+                return None  # Listing is read-only.
             source = self.sources[source_id]
-            linked = p.get("parentRequestId") is not None
-            if linked and parent is None:
-                return
             if source.get("perSession"):
-                sid = (parent or {}).get("context", {}).get("session")
-                sessions = [sid] if sid else list(source["cache"])
+                context = (parent or {}).get("context", {})
+                sid = context.get("session") or context.get("sessionId")
+                sessions = [sid] if sid else list(self.h.sessions)
             else:
                 sessions = [None]
             for sid in sessions:
-                source["invalid"].add(sid)
-            for sid in sessions:
-                try:
-                    await self.refresh(source_id, sid)
-                except AgentError:
-                    continue  # Do not replace the completed result that triggered refresh.
-            return
+                source["invalid"][sid] = object()
+            if parent is not None:
+                parent.setdefault("tool_changes", set()).update(
+                    (source_id, sid) for sid in sessions
+                )
+                return None
+            return partial(self.refresh_changed, source_id, sessions)
+        if method == "host/emit" and (
+            key in self.peer.cancelled_outbound
+            or any(
+                request["method"] == "hook/handle"
+                and request["params"]["hook"] == "output"
+                and rid in self.peer.outgoing_methods
+                and rid not in self.peer.answered
+                for rid, request in self.active.items()
+            )
+        ):
+            return None
+        if method == "provider/event" and (
+            not parent or not parent.get("provider_committed") or "provider_response" in parent
+        ):
+            return None
+        if method == "host/runtime/report" and (
+            not parent
+            or parent["method"]
+            not in {
+                "runtime/runTurn",
+                "runtime/resumeTurn",
+                "runtime/continueOpenCalls",
+            }
+        ):
+            return None
+        if method not in {
+            "provider/event",
+            "tools/progress",
+            "env/output",
+            "host/emit",
+            "host/problem",
+            "host/runtime/report",
+            "host/jobs/progress",
+        }:
+            return None
+        return partial(self.notification, method, p, parent)
+
+    async def refresh_changed(self, source, sessions):
+        for sid in sessions:
+            try:
+                await self.refresh(source, sid)
+            except AgentError:
+                continue
+
+    async def notification(self, method, p, parent):
         if parent:
-            if method == "provider/event" and parent.get("provider_committed"):
+            if method == "provider/event":
                 event = p["event"]
                 ctx = parent["context"]
                 access = ctx["access"]
@@ -596,15 +690,13 @@ class External(Plugin):
                 await parent["emit"]({"text": p["chunk"]})
         if method in {"host/emit", "host/problem", "host/runtime/report", "host/jobs/progress"}:
             try:
-                await self.callback(method, p, None)
+                await self.callback(method, p, None, notification_parent=parent)
             except WireError:
                 return  # Notifications have no error reply.
 
-    def context(self, p, required=True):
-        parent = self.active.get(p.get("parentRequestId"))
-        if p.get("parentRequestId") is not None and (
-            parent is None or p["parentRequestId"] in self.peer.answered
-        ):
+    def context(self, p, required=True, *, notification_parent=None):
+        parent = notification_parent if notification_parent is not None else self.live_parent(p)
+        if p.get("parentRequestId") is not None and parent is None:
             raise WireError("Unknown parent request", "invalid_request")
         d = parent["context"] if parent else {}
         parent_session = d.get("session") or d.get("sessionId")
@@ -622,9 +714,15 @@ class External(Plugin):
             raise WireError("Plugin is not in this session", "invalid_request")
         return parent, d, s
 
-    async def callback(self, method, p, key):
+    def live_parent(self, p):
+        key = p.get("parentRequestId")
+        if rpc_id(key) and key in self.peer.outgoing_methods and key not in self.peer.answered:
+            return self.active.get(key)
+        return None
+
+    async def callback(self, method, p, key, *, notification_parent=None):
         try:
-            return await self.host_call(method, p, key)
+            return await self.host_call(method, p, key, notification_parent=notification_parent)
         except AgentError as exc:
             if isinstance(exc, WireError):
                 raise
@@ -636,7 +734,7 @@ class External(Plugin):
             }.get(exc.code, "invalid_request")
             raise WireError(str(exc), code) from exc
 
-    async def host_call(self, method, p, key):
+    async def host_call(self, method, p, key, *, notification_parent=None):
         direct = {
             "host/history",
             "host/session",
@@ -698,11 +796,11 @@ class External(Plugin):
             self.context(p)
             raise WireError("Parent request was cancelled", "cancelled")
         if method in runtime_only:
-            parent, d, _ = self.context(p)
+            parent, d, _ = self.context(p, notification_parent=notification_parent)
             if not parent or not parent["method"].startswith("runtime/") or "runtime" not in d:
                 raise WireError("Runtime callback needs parent turn work", "invalid_request")
             return await d["runtime"].callback(method.removeprefix("host/runtime/"), p, key)
-        parent = self.active.get(p.get("parentRequestId"))
+        parent = notification_parent if notification_parent is not None else self.live_parent(p)
         runtime_parent = parent is not None and parent["method"].startswith("runtime/")
         if runtime_parent and method != "host/history":
             raise WireError(
@@ -776,7 +874,9 @@ class External(Plugin):
                 access = await self.api.call("selection", "access", {"session": s["id"]})
                 provider = access["provider"]
             return declaration(self.h.declarations(), provider)
-        parent, d, s = self.context(p, required=method != "host/hook")
+        parent, d, s = self.context(
+            p, required=method != "host/hook", notification_parent=notification_parent
+        )
         if (
             method in parent_only
             and p.get("sessionId") is not None

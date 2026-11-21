@@ -1,5 +1,7 @@
 """A custom Runtime drives the host's checked turn callbacks in either placement."""
 
+import asyncio
+
 import pytest
 
 from modular_agent import (
@@ -9,8 +11,9 @@ from modular_agent import (
     Plugin,
     RuntimeContext,
     RuntimeDeclaration,
+    create_agent,
 )
-from modular_agent.testing import over_wire, test_agent as agent_fixture
+from modular_agent.testing import memory_environment, over_wire, scripted_provider
 
 
 class OneStep:
@@ -37,10 +40,14 @@ class OneStep:
         pieces = []
 
         async def receive(piece):
+            # A child task's callback reply must not wait behind modelEvent.
+            page = await asyncio.create_task(context.history())
+            assert any(e["kind"] == "turnStart" for e in page["entries"])
             pieces.append(piece)
 
         response = await context.model(request, step, on_piece=receive)
         assert pieces == [{"type": "text", "delta": "from model"}]
+        await context.report("model.verified", {"text": pieces[0]["delta"]}, step_id=step)
         saved = await context.record(
             {
                 "kind": "response",
@@ -74,12 +81,29 @@ class OneStep:
 @pytest.mark.parametrize("served", [False, True])
 async def test_custom_runtime_runs_one_step(served):
     port = OneStep()
-    plugin = Plugin("one-step", replaces=["runtime"], setup=lambda r: r.runtime(port))
-    async with agent_fixture(
-        script=[{"text": "from model"}], plugins=[over_wire(plugin) if served else plugin]
+    seen = asyncio.Event()
+
+    def output(payload):
+        for event in payload["events"]:
+            if event["type"] == "python.runtime_report":
+                assert event["data"]["type"] == "model.verified"
+                assert event["data"]["data"] == {"text": "from model"}
+                seen.set()
+
+    def setup(r):
+        r.runtime(port)
+        r.provider(scripted_provider([{"text": "from model"}]))
+        r.on("output", output)
+
+    plugin = Plugin("one-step", replaces=["runtime"], setup=setup)
+    async with create_agent(
+        environment=memory_environment(),
+        plugins=[over_wire(plugin) if served else plugin],
     ) as agent:
         session = await agent.session()
-        result = await session.prompt("hello")
+        async with asyncio.timeout(5):
+            result = await session.prompt("hello")
+            await seen.wait()
         assert result.outcome.kind == "completed", result.outcome
         assert result.text == "from model"
         assert port.used is not None
