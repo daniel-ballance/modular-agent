@@ -121,7 +121,7 @@ async fn hooks_commands_and_progress_have_wire_parity() -> Result<()> {
             }
         }
         assert!(progress, "wire={wire}");
-        let last = session.last_turn()?.unwrap();
+        let last = session.last_turn().await?.unwrap();
         assert_eq!(last.text, "done");
         assert_eq!(last.tool_results()[0].text(), "after");
         agent.close().await?;

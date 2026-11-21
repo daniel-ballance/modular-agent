@@ -140,7 +140,7 @@ async fn a_local_command_asks_without_a_turn() -> Result<()> {
         session.run_command("/choose").await?.as_deref(),
         Some("blue")
     );
-    assert!(session.last_turn()?.is_none());
+    assert!(session.last_turn().await?.is_none());
     agent.close().await
 }
 

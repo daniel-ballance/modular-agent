@@ -148,6 +148,43 @@ fn text_of(content: &Value) -> String {
         .collect()
 }
 struct Sink(Arc<Peer>);
+
+/// Run a native environment behind the same public bridge used by the binding kit.
+/// The isolated Harness only relays environment output; it is not the host Agent.
+pub struct EnvironmentServer {
+    api: Api,
+    project: PathBuf,
+}
+impl EnvironmentServer {
+    pub async fn new(peer: Arc<Peer>, params: &Value) -> std::result::Result<Self, Fault> {
+        let project = environment_cwd(params, "project")?;
+        let harness = agent_harness::Harness::new();
+        harness.load(Arc::new(Sink(peer))).await?;
+        Ok(Self {
+            api: harness,
+            project,
+        })
+    }
+    pub async fn request(
+        &self,
+        env: Arc<dyn WorkingEnvironment>,
+        id: &Value,
+        method: &str,
+        params: &Value,
+        cancel: CancellationToken,
+    ) -> Reply {
+        environment(
+            env,
+            self.api.clone(),
+            &self.project,
+            id,
+            method,
+            params,
+            cancel,
+        )
+        .await
+    }
+}
 impl EventSink for Sink {
     fn send(&self, event: Event) {
         if event.kind == "tool.progress" {

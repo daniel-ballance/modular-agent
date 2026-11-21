@@ -227,7 +227,8 @@ impl From<&str> for ToolOutput {
 }
 
 /// How a call ended (docs/bindings/data.md#tools).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ToolStatus {
     Completed,
     Failed,
@@ -275,6 +276,7 @@ impl ToolStatus {
 #[derive(Clone)]
 pub struct ToolContext {
     pub(crate) backend: Backend,
+    pub(crate) jobs: Option<(String, crate::jobs::Owner)>,
     pub(crate) session_id: String,
     pub(crate) actor_id: String,
     pub(crate) call_id: String,
@@ -297,7 +299,7 @@ pub(crate) enum Backend {
 }
 
 /// A question a tool asks.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ask {
     kind: base::RequestKind,
     text: String,
@@ -307,6 +309,15 @@ pub struct Ask {
 }
 
 impl Ask {
+    pub(crate) fn into_question(self, scope: base::Scope) -> base::Question {
+        let mut question = base::Question::new(scope, self.kind, &self.text);
+        question.options = self.options;
+        question.credential = self.credential;
+        if self.link {
+            question.extra["kind"] = json!("link");
+        }
+        question
+    }
     pub fn choice(question: impl Into<String>, options: &[&str]) -> Self {
         Ask {
             kind: base::RequestKind::Choice,
@@ -435,6 +446,32 @@ impl ToolContext {
         NestedTools(self)
     }
 
+    pub async fn start_job(
+        &self,
+        kind: &str,
+        detail: Value,
+        key: Option<&str>,
+    ) -> Result<crate::JobStart> {
+        self.check()?;
+        let (name, owner) = self.jobs.as_ref().ok_or_else(|| {
+            Error::new(
+                Code::InvalidRequest,
+                "this plugin did not register a job owner",
+            )
+        })?;
+        owner.start(self, name, kind, detail, key).await
+    }
+
+    pub async fn history(&self, after: Option<&str>) -> Result<crate::HistoryPage> {
+        self.check()?;
+        crate::context::history(&self.backend, &self.session_id, after).await
+    }
+
+    pub async fn emit(&self, kind: &str, data: Value) -> Result<()> {
+        self.check()?;
+        crate::context::emit(&self.backend, &self.session_id, kind, data).await
+    }
+
     /// Invoke a plugin-defined point using the token returned at setup.
     pub async fn call_hook(
         &self,
@@ -442,19 +479,7 @@ impl ToolContext {
         value: Value,
     ) -> Result<crate::HookReply> {
         self.check()?;
-        let Backend::Local { api, scope } = &self.backend else {
-            return Err(crate::plugin::cannot_serve("custom hooks"));
-        };
-        let point = hook
-            .0
-            .get()
-            .ok_or_else(|| Error::new(Code::InvalidRequest, "hook is not installed"))?;
-        let reply = api.invoke(point, scope, value).await?;
-        Ok(crate::HookReply {
-            value: reply.value,
-            answered: reply.answered,
-            refused: reply.refused,
-        })
+        crate::context::call_hook(&self.backend, hook, value).await
     }
 
     /// Ask an actor and wait for the answer.

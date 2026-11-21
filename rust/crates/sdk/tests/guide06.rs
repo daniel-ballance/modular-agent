@@ -189,7 +189,7 @@ async fn beacon_streams_and_records_failures() -> Result<()> {
                 pieces.push(event.data["delta"].as_str().unwrap().to_owned());
             }
         }
-        let turn = session.last_turn()?.expect("prompt settled");
+        let turn = session.last_turn().await?.expect("prompt settled");
         if key == "offline-key" {
             assert_eq!(pieces, ["Beacon ", "ready."]);
             assert_eq!(turn.text, "Beacon ready.");

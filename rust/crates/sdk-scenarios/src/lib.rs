@@ -355,7 +355,7 @@ async fn perform(
         session.answer(&question.id, answer).await?;
     } else if step["wait"] == true {
         session.wait_idle().await?;
-        return session.last_turn();
+        return session.last_turn().await;
     } else {
         return Err(Error::new(Code::InvalidParams, "unknown scenario step"));
     }
@@ -511,7 +511,12 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
             };
             match a.open_session(&id).await {
                 Ok(s) => {
-                    result = match s.wait_idle().await.and_then(|_| s.last_turn()) {
+                    let settled = async {
+                        s.wait_idle().await?;
+                        s.last_turn().await
+                    }
+                    .await;
+                    result = match settled {
                         Ok(last) => last,
                         Err(e) => {
                             fail(index, format!("read the last turn after reopen: {e}"));

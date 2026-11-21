@@ -123,6 +123,13 @@ pub trait Factory: Send + Sync {
     fn owns_session_agent(&self) -> bool {
         true
     }
+    /// Release a composition, including resources owned outside its Harness.
+    async fn dispose(&self, api: Api) -> Result<()> {
+        if self.owns_session_agent() {
+            api.shutdown().await?;
+        }
+        Ok(())
+    }
     fn session_declaration(&self, api: &dyn AgentApi, session: &str) -> Result<Value> {
         binding::declaration(api, Some(session))
     }
@@ -727,7 +734,8 @@ impl State {
         }
     }
 }
-fn request_error(code: &str, message: &str) -> acp::Error {
+/// A Factory refusal with a stable ACP error code.
+pub fn request_error(code: &str, message: &str) -> acp::Error {
     acp::Error::new(-32602, message).data(json!({"code":code}))
 }
 fn withheld() -> acp::Error {

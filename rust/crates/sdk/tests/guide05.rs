@@ -57,7 +57,10 @@ async fn reopens_an_interrupted_session() -> Result<()> {
 
         let agent = restart(agent).await?;
         let reopened = agent.open_session(&id).await?;
-        let turn = reopened.last_turn()?.expect("recovery settled the turn");
+        let turn = reopened
+            .last_turn()
+            .await?
+            .expect("recovery settled the turn");
         assert_eq!(turn.outcome.as_ref().map(Outcome::kind), Some(expected));
         assert_eq!(turn.tool_results()[0].status, ToolStatus::OutcomeUnknown);
         assert_eq!(starts.load(Ordering::Relaxed), 1);
