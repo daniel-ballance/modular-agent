@@ -44,6 +44,7 @@ type session struct {
 	resume           *api.Entry
 	external         []api.Call
 	responseClaim    *api.Entry
+	transferredInput string
 }
 
 func clone[T any](v T) T {
@@ -255,6 +256,10 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	if err = c.checkTenant(snap.Tenant); err != nil {
 		_ = lease.Close()
 		return err
+	}
+	if host != nil && (!api.ConnectionAllows(ctx, "watch") || !c.DiscoverForHost(snap, *host)) {
+		_ = lease.Close()
+		return api.ErrAuthority
 	}
 	savedApproval := snap.Settings.Approval
 	if conf, err := c.Get("configuration"); err == nil {
@@ -687,7 +692,7 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	allowed := c.authorizedBy(snap, ctx, "input") && c.authorizedBy(snap, ctx, "settings")
 	s.mu.Unlock()
 	if !allowed {
-		return "", errors.New("fork refused")
+		return "", api.ErrAuthority
 	}
 	if running {
 		return "", errors.New("cancel turn before forking")

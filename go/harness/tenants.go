@@ -38,6 +38,18 @@ func readTenants() (map[string]tenantConfig, error) {
 	return tenants, nil
 }
 
+// StdioTenantGrants returns the operator-defined standalone tenant grants.
+func (c *client) StdioTenantGrants() ([]string, error) {
+	if c.h.tenantConfigErr != nil {
+		return nil, c.h.tenantConfigErr
+	}
+	grants := []string{""}
+	for name := range c.h.tenants {
+		grants = append(grants, name)
+	}
+	return grants, nil
+}
+
 func (c *client) checkTenant(name string) error {
 	if name == "" {
 		return nil

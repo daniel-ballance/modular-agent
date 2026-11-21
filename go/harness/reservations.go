@@ -113,6 +113,16 @@ func (s *session) commitCapacity(next api.Session, save func() error) error {
 	}
 	p := s.h.capacity
 	charge := s.capacityCharges(next)
+	transferred := ""
+	if !s.running && !s.opening && len(next.Entries) > len(s.data.Entries) {
+		e := next.Entries[len(next.Entries)-1]
+		if e.Kind == "input.accepted" {
+			in := api.Decode[api.Input](e.Data)
+			if in.Taken == "now" {
+				transferred = in.ID
+			}
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.permits(next, charge) {
@@ -120,6 +130,13 @@ func (s *session) commitCapacity(next api.Session, save func() error) error {
 	}
 	if err := save(); err != nil {
 		return err
+	}
+	// Admission must fit before taking. Once handed to an idle Runtime the
+	// slot is no longer queued. Its payload and write space stay charged.
+	// On restart the record reconstructs the charge until the input is taken.
+	if transferred != "" {
+		s.transferredInput = transferred
+		charge.Inputs--
 	}
 	p.update(next, charge)
 	if s.responseClaim != nil {
@@ -144,16 +161,25 @@ func (s *session) capacityCharges(next api.Session) CapacityBounds {
 	if claim := s.responseClaim; claim != nil {
 		for _, e := range next.Entries {
 			if e.Kind == "model" && e.Step == claim.Step || e.Kind == "turn.end" && e.Turn == claim.Turn {
-				return s.withCommandBytes(snapshotCharges(next))
+				return s.liveCharges(next)
 			}
 		}
 		next.Entries = append(append([]api.Entry(nil), next.Entries...), *claim)
 	}
-	return s.withCommandBytes(snapshotCharges(next))
+	return s.liveCharges(next)
 }
 
-func (s *session) withCommandBytes(b CapacityBounds) CapacityBounds {
+func (s *session) liveCharges(snap api.Session) CapacityBounds {
+	b := snapshotCharges(snap)
 	b.BufferedBytes += s.commandBytes
+	if s.transferredInput != "" {
+		for _, e := range pendingAdmissions(snap) {
+			if api.Decode[api.Input](e.Data).ID == s.transferredInput {
+				b.Inputs--
+				break
+			}
+		}
+	}
 	return b
 }
 

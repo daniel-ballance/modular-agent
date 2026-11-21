@@ -86,7 +86,15 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 	if len(configs) > 0 {
 		config = configs[0]
 	}
-	return i.ServeStdio(ctx, in, out, declared, config, Principal{})
+	policy := Principal{}
+	if tenants, ok := i.a.(interface{ StdioTenantGrants() ([]string, error) }); ok {
+		grants, err := tenants.StdioTenantGrants()
+		if err != nil {
+			return err
+		}
+		policy.Tenants = grants
+	}
+	return i.ServeStdio(ctx, in, out, declared, config, policy)
 }
 
 // ServeStdio serves the configured local principal. A nil rights ceiling leaves

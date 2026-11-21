@@ -270,10 +270,15 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		if errors.Is(err, api.ErrResultTooLarge) {
 			return nil, acpError("result_too_large")
 		}
+		if errors.Is(err, api.ErrAuthority) {
+			return nil, acpError("forbidden")
+		}
 		if err != nil {
 			return nil, err
 		}
-		s.attach(id, false, st.actor)
+		if err := s.a.StopSession(id); err != nil {
+			return nil, err
+		}
 		return map[string]string{"sessionId": id}, nil
 	case "_modular-agent/move":
 		if p.EntryID == "" {
