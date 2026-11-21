@@ -186,6 +186,8 @@ class PendingErasure:
             return 0
         _, plans = await self.registry(d["session"])
         self.check_view(plans, set(d.get("tombstones", ())))
+        if not plans:
+            return 0  # The first append can materialize a provisional session.
         # The global revision changes on ordinary writes, including one's own
         # effect results. Compare applicable plans, not unrelated changes.
         return int.from_bytes(hashlib.sha256(json.dumps(plans, sort_keys=True).encode()).digest())
