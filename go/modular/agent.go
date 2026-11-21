@@ -126,11 +126,20 @@ func WithTool(t Tool) Option {
 func WithPlugin(p Plugin) Option {
 	return func(o *options) error { o.plugins = append(o.plugins, p); return nil }
 }
-func WithProcessPlugin(p ProcessPlugin) Option {
-	return func(o *options) error { o.process = append(o.process, p); return nil }
+func WithProcessPlugin(p ProcessPlugin) Option { return WithProcessPlugins(p) }
+
+// WithProcessPlugins appends process plugins in load order.
+func WithProcessPlugins(plugins ...ProcessPlugin) Option {
+	plugins = slices.Clone(plugins)
+	return func(o *options) error { o.process = append(o.process, plugins...); return nil }
 }
-func WithServicePlugin(p ServicePlugin) Option {
-	return func(o *options) error { o.services = append(o.services, p); return nil }
+
+func WithServicePlugin(p ServicePlugin) Option { return WithServicePlugins(p) }
+
+// WithServicePlugins appends service plugins in load order.
+func WithServicePlugins(plugins ...ServicePlugin) Option {
+	plugins = slices.Clone(plugins)
+	return func(o *options) error { o.services = append(o.services, plugins...); return nil }
 }
 
 func WithPluginHost(host bool) Option { return func(o *options) error { o.host = &host; return nil } }
@@ -291,12 +300,14 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	h.ConfigureSessions(o.jobReports, o.lateAnswers, o.refuseSettings)
 	a := &Agent{severalActors: o.severalActors, sessionLimits: o.sessionLimits, tenants: o.tenants != nil, jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
 	state := o.dataDir
-	if state == "" {
-		state, err = os.MkdirTemp("", "modular-go-")
+	if state == "" || (o.durability == Ephemeral && o.environment == nil) {
+		a.scratch, err = os.MkdirTemp("", "modular-go-")
 		if err != nil {
 			return nil, appError(err, InvalidComposition)
 		}
-		a.scratch = state
+		if state == "" {
+			state = a.scratch
+		}
 	}
 	success := false
 	defer func() {
@@ -332,7 +343,11 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	var environment api.Plugin
 	if o.environment == nil {
-		environment = local.GitPluginAt(filepath.Join(state, "commands"), state)
+		environmentState := state
+		if o.durability == Ephemeral {
+			environmentState = a.scratch
+		}
+		environment = local.GitPluginAt(filepath.Join(environmentState, "commands"), environmentState)
 	} else {
 		environment = api.Plugin{Name: "environment", Setup: func(a api.API) error { return a.Provide("working-environment", o.environment) }, Close: o.environment.Close}
 	}
@@ -571,6 +586,7 @@ func (a *Agent) Declaration() Declaration {
 	d["portableSessions"] = a.persistent
 	inputs, reports := a.h.QueuedRecoveryPolicy()
 	d["queuedInputAfterRestart"] = inputs
+	delete(d, "queuedJobReportsAfterRestart")
 	if reports != inputs {
 		d["queuedJobReportsAfterRestart"] = reports
 	}
