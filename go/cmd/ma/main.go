@@ -14,7 +14,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/codemode"
 	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/subscription"
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"golang.org/x/sys/unix"
@@ -180,12 +179,7 @@ func parse(args []string) (o options, err error) {
 }
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == codemode.WorkerArg {
-		if err := codemode.ServeWorker(os.Stdin, os.Stdout); err != nil {
-			os.Exit(1)
-		}
-		return
-	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 	interrupts := make(chan os.Signal, 1)

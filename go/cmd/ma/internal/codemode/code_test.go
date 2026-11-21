@@ -5,21 +5,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/files"
 )
 
-func TestMain(m *testing.M) {
-	if len(os.Args) == 2 && os.Args[1] == WorkerArg {
-		if err := ServeWorker(os.Stdin, os.Stdout); err != nil {
-			os.Exit(1)
-		}
-		return
+func testWorker(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.Abs("../../../../.bin/monty")
+	if err != nil {
+		t.Fatal(err)
 	}
-	os.Exit(m.Run())
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("test worker unavailable; run go/scripts/build-monty.sh: %v", err)
+	}
+	return path
+}
+
+func testRun(t *testing.T, code string, defs []modular.ToolDefinition, nested nestedFunc, limits Limits) (modular.ToolOutput, error) {
+	t.Helper()
+	return runAt(t.Context(), testWorker(t), code, defs, nested, limits)
 }
 
 func TestPromptCatalogThreshold(t *testing.T) {
@@ -40,7 +49,7 @@ func TestPromptCatalogThreshold(t *testing.T) {
 func TestStandardNestedCallBudget(t *testing.T) {
 	defs := []modular.ToolDefinition{files.Tools("")[0].Definition()}
 	calls := 0
-	result, err := run(t.Context(), `
+	result, err := testRun(t, `
 for i in range(500):
     search_tools('read')
     describe_tool('read')
@@ -70,8 +79,9 @@ func TestMontyCallsAndLimits(t *testing.T) {
 	}{
 		{"invoke", "print(tools.read(path='in.txt').upper())", "WHITBY", false, 1},
 		{"alias", "t = tools\nt.read('in.txt')", "whitby", false, 1},
-		{"import", "import tools", "ModuleNotFoundError", true, 0},
-		{"function value", "f = tools.read\nf('in.txt')", "AttributeError", true, 0},
+		{"import", "before = tools\nimport tools\nfrom tools import read as f\nassert before.read is tools.read\nf(path='in.txt')", "whitby", false, 1},
+		{"function value", "f = tools.read\nf('in.txt')", "whitby", false, 1},
+		{"bare name", "read('in.txt')", "NameError", true, 0},
 		{"positional and None", "tools.read('in.txt', None, None)", "whitby", false, 1},
 		{"count", "tools.read('in.txt')\ntools.read('in.txt')", "more than 1 function calls", true, 1},
 		{"bad args", "tools.read(other='x')", "unexpected argument other", true, 0},
@@ -82,38 +92,37 @@ func TestMontyCallsAndLimits(t *testing.T) {
 		{"syntax", "for", "SyntaxError", true, 0},
 		{"recursion", "def f():\n    return f()\nf()", "RecursionError", true, 0},
 		{"compute", "while True:\n    pass", "Timeout", true, 0},
-		{"print cap", "print('0123456789abcdef')", "0123456789", false, 0},
+		{"print cap", "print('éééééééé')", "ééééé\nRuntimeError: printed output exceeds the 10-byte limit", true, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l := StandardLimits()
 			l.Calls = 1
 			l.Recursion = 12
 			l.PrintBytes = 10
-			l.Compute = 50_000_000
+			if c.name == "compute" {
+				l.Compute = 50 * time.Millisecond
+			}
 			called := 0
-			got, err := run(t.Context(), c.code, defs, func(_ context.Context, name string, input any) (modular.ToolResult, error) {
+			got, err := testRun(t, c.code, defs, func(_ context.Context, name string, input any) (modular.ToolResult, error) {
 				called++
 				if name != "read" {
-					t.Fatalf("called %s", name)
+					t.Errorf("called %s", name)
 				}
 				var args map[string]string
 				if err := json.Unmarshal(input.(json.RawMessage), &args); err != nil {
-					t.Fatal(err)
+					t.Error(err)
 				}
 				p := args["path"]
 				if p == "missing" {
 					return modular.ToolResult{Status: modular.Failed, Content: modular.Text("file missing")}, nil
 				}
-				if p != "in.txt" {
-					t.Fatalf("unexpected path %v", p)
+				if p != "in.txt" || len(args) != 1 {
+					t.Errorf("unexpected arguments %v", args)
 				}
 				return modular.ToolResult{Status: modular.Completed, Content: modular.Text("whitby")}, nil
 			}, l)
 			if err != nil || (got.Status == modular.Failed) != c.fail || !strings.Contains(got.Content.Text(), c.want) || called != c.calls {
 				t.Fatalf("got %+v, %v (calls %d), want %q", got, err, called, c.want)
-			}
-			if c.name == "print cap" && got.Content.Text() != "0123456789\n" {
-				t.Fatal(got.Content.Text())
 			}
 		})
 	}

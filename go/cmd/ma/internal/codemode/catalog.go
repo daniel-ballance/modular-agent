@@ -1,6 +1,7 @@
 package codemode
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -8,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
-	monty "github.com/ewhauser/gomonty"
 )
 
 type parameter struct {
@@ -104,17 +104,19 @@ func (f function) describe(full bool) map[string]any {
 	d := map[string]any{"name": f.name, "signature": f.signature(), "description": firstLine(f.tool.Description)}
 	if full {
 		var schema any
-		_ = json.Unmarshal(f.tool.Parameters, &schema)
+		decoder := json.NewDecoder(bytes.NewReader(f.tool.Parameters))
+		decoder.UseNumber()
+		_ = decoder.Decode(&schema)
 		d["parameters"] = schema
 		d["read_only"] = f.tool.Hints.ReadOnly
 		d["description"] = f.tool.Description
 	}
 	return d
 }
-func (f function) bind(args []monty.Value, kwargs monty.Dict) (map[string]any, error) {
+func (f function) bind(args []any, kwargs []keyword) (map[string]any, error) {
 	in := map[string]any{}
 	if len(args) == 1 && (len(f.parameters) == 0 || f.properties[f.parameters[0]].Type != "object") {
-		if m, ok := toJSON(args[0]).(map[string]any); ok {
+		if m, ok := args[0].(map[string]any); ok {
 			in = m
 			args = nil
 		}
@@ -123,17 +125,14 @@ func (f function) bind(args []monty.Value, kwargs monty.Dict) (map[string]any, e
 		return nil, fmt.Errorf("takes at most %d arguments, got %d", len(f.parameters), len(args))
 	}
 	for i, v := range args {
-		in[f.parameters[i]] = toJSON(v)
+		in[f.parameters[i]] = v
 	}
 	for _, pair := range kwargs {
-		k, ok := pair.Key.Raw().(string)
-		if !ok {
-			return nil, fmt.Errorf("keyword names must be strings")
-		}
+		k := pair.name
 		if _, ok := in[k]; ok {
 			return nil, fmt.Errorf("got two values for %s", k)
 		}
-		in[k] = toJSON(pair.Value)
+		in[k] = pair.value
 	}
 	for k, v := range in {
 		if v == nil {

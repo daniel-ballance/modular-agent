@@ -3,8 +3,6 @@ package codemode
 import (
 	"context"
 	"errors"
-	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -15,23 +13,27 @@ import (
 
 func assertNextRunWorks(t *testing.T) {
 	t.Helper()
-	out, err := run(t.Context(), "print('still here')\n6 * 7", nil, nil, StandardLimits())
+	out, err := testRun(t, "print('still here')\n6 * 7", nil, nil, StandardLimits())
 	if err != nil || out.Status == modular.Failed || out.Content.Text() != "still here\n42" {
 		t.Fatalf("next run: %+v, %v", out, err)
 	}
 }
 
 func TestMemoryLimitDiscardsRun(t *testing.T) {
-	out, err := run(t.Context(), `
+	out, err := testRun(t, `
 print('before the limit')
 print('x' * 60000)
 x = []
-for i in range(200000):
-    x.append('y' * 10000)
+try:
+    for i in range(200000):
+        x.append('y' * 10000)
+except MemoryError:
+    print('caught the limit')
 print('finished allocation')
 `, nil, nil, StandardLimits())
 	if err != nil || out.Status != modular.Failed || !strings.Contains(out.Content.Text(), "MemoryError") ||
-		!strings.Contains(out.Content.Text(), "before the limit") || strings.Contains(out.Content.Text(), "finished allocation") {
+		!strings.Contains(out.Content.Text(), "before the limit") || strings.Contains(out.Content.Text(), "finished allocation") ||
+		strings.Contains(out.Content.Text(), "caught the limit") {
 		t.Fatalf("memory limit: %+v, %v", out, err)
 	}
 	assertNextRunWorks(t)
@@ -42,31 +44,29 @@ func TestWorkerDiesOrIsCancelledDuringRun(t *testing.T) {
 		t.Run(how, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			exe, err := os.Executable()
-			if err != nil {
-				t.Fatal(err)
-			}
-			cmd := exec.CommandContext(ctx, exe, WorkerArg)
-			req := runRequest{
-				Code:   "tools.read('fixture')\nwhile True:\n    pass",
-				Tools:  []modular.ToolDefinition{files.Tools("")[0].Definition()},
-				Limits: StandardLimits(),
-			}
-			called := false
-			out, err := runWorker(ctx, cmd, req, func(nestedCtx context.Context, _ string, _ any) (modular.ToolResult, error) {
-				called = true
+			cmd := command(ctx, testWorker(t), "subprocess")
+			called := make(chan struct{})
+			code := "tools.read('fixture')\nwhile True:\n    pass"
+			defs := []modular.ToolDefinition{files.Tools("")[0].Definition()}
+			out, err := runWorker(ctx, cmd, code, defs, func(nestedCtx context.Context, _ string, _ any) (modular.ToolResult, error) {
+				close(called)
 				if how == "death" {
 					if err := cmd.Process.Kill(); err != nil {
-						t.Fatal(err)
+						t.Error(err)
 					}
 				} else {
 					cancel()
 				}
 				<-nestedCtx.Done()
 				return modular.ToolResult{}, nestedCtx.Err()
-			})
-			if !called || cmd.ProcessState == nil || cmd.ProcessState.Success() {
-				t.Fatalf("nested call reached: %t; worker state: %v", called, cmd.ProcessState)
+			}, StandardLimits())
+			select {
+			case <-called:
+			default:
+				t.Fatal("nested call not reached")
+			}
+			if cmd.ProcessState == nil || cmd.ProcessState.Success() {
+				t.Fatalf("worker was not killed and reaped: %v", cmd.ProcessState)
 			}
 			if how == "death" {
 				if err != nil || out.Status != modular.Failed || !strings.Contains(out.Content.Text(), "worker process died") {

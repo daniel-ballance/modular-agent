@@ -2,15 +2,15 @@
 package codemode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
-	monty "github.com/ewhauser/gomonty"
 )
 
 const Name = "codemode"
@@ -39,119 +39,34 @@ func Tool(limits Limits) modular.Tool {
 
 type nestedFunc func(context.Context, string, any) (modular.ToolResult, error)
 
-type reply struct {
-	value     monty.Value
-	exception *monty.Exception
+func failedOutput(reason, printed string) modular.ToolOutput {
+	prefix := withNewline(printed)
+	text := prefix + reason
+	if cut := bounded(text); cut != text {
+		last := strings.LastIndex(strings.TrimSuffix(reason, "\n"), "\n")
+		text = bounded(utf8Prefix(strings.TrimSuffix(reason, "\n")[last+1:], 1024) + "\n" + prefix)
+	}
+	return modular.ToolOutput{Status: modular.Failed, Content: modular.Text(text)}
 }
-type callback func(context.Context, monty.Call) (reply, error)
 
-func raised(kind, message string) (reply, error) {
-	return reply{exception: &monty.Exception{Type: kind, Arg: &message}}, nil
+func withNewline(s string) string {
+	if s != "" && !strings.HasSuffix(s, "\n") {
+		return s + "\n"
+	}
+	return s
 }
-func evaluate(ctx context.Context, code string, fs []function, nested nestedFunc, l Limits) (modular.ToolOutput, error) {
-	// A Python assignment shadows the native print builtin so the host can
-	// bound each write before accumulating it.
-	compiled, err := monty.New("print = __ma_print\n"+code, monty.CompileOptions{ScriptName: "main.py", Inputs: []string{"tools", "__ma_print"}})
-	if err != nil {
-		return modular.ToolOutput{Status: modular.Failed, Content: modular.Text(err.Error())}, nil
+
+func utf8Prefix(s string, n int) string {
+	n = min(n, len(s))
+	for n > 0 && n < len(s) && !utf8.RuneStart(s[n]) {
+		n--
 	}
-	funcs := map[string]callback{}
-	made := 0
-	for _, f := range fs {
-		funcs[f.name] = func(ctx context.Context, c monty.Call) (reply, error) {
-			in, err := f.bind(c.Args, c.Kwargs)
-			if err != nil {
-				return raised("TypeError", f.name+"(): "+err.Error())
-			}
-			if made >= l.Calls {
-				return raised("RuntimeError", fmt.Sprintf("this run made more than %d function calls", l.Calls))
-			}
-			made++
-			res, err := nested(ctx, f.tool.Name, in)
-			if err != nil {
-				return raised("RuntimeError", fmt.Sprintf("%s() could not run: %v", f.name, err))
-			}
-			var value any
-			if res.Status == modular.Completed {
-				if len(res.Value) > 0 {
-					if err := json.Unmarshal(res.Value, &value); err != nil {
-						return reply{}, err
-					}
-				} else {
-					value = res.Text()
-					for _, p := range res.Content {
-						if p.Type == "image" {
-							value = map[string]any{"type": "image", "mimeType": partString(p, "mimeType"), "data": partString(p, "data"), "note": res.Text()}
-							break
-						}
-					}
-				}
-			} else if res.Status == modular.Failed && f.tool.Name == "exec" && len(res.Value) > 0 {
-				if err := json.Unmarshal(res.Value, &value); err != nil {
-					return reply{}, err
-				}
-			} else {
-				status := map[modular.ToolStatus]string{modular.Refused: "was refused", modular.Cancelled: "was cancelled", modular.NotStarted: "did not start", modular.OutcomeUnknown: "was interrupted, outcome unknown"}[res.Status]
-				if status == "" {
-					status = "failed"
-				}
-				return raised("RuntimeError", fmt.Sprintf("%s() %s: %s", f.name, status, res.Text()))
-			}
-			v, err := monty.ValueOf(value)
-			return reply{value: v}, err
-		}
-	}
-	// Dispatch method syntax through the same adapters as function values.
-	// The wire representation does not carry host method closures.
-	for _, def := range []struct {
-		name, key string
-		search    bool
-	}{{"describe_tool", "name", false}, {"search_tools", "query", true}} {
-		funcs[def.name] = func(_ context.Context, c monty.Call) (reply, error) {
-			var arg monty.Value
-			if len(c.Args) > 0 {
-				arg = c.Args[0]
-			} else {
-				for _, kv := range c.Kwargs {
-					if kv.Key.Raw() == def.key {
-						arg = kv.Value
-						break
-					}
-				}
-			}
-			s, ok := arg.Raw().(string)
-			if !ok {
-				return raised("TypeError", def.name+"() takes one string")
-			}
-			if def.search {
-				v, err := monty.ValueOf(search(fs, s))
-				return reply{value: v}, err
-			}
-			for _, f := range fs {
-				if f.name == s {
-					v, err := monty.ValueOf(f.describe(true))
-					return reply{value: v}, err
-				}
-			}
-			return raised("KeyError", "no function named "+s)
-		}
-	}
+	return s[:n]
+}
+
+func renderOutput(output any, made int, stream string) (modular.ToolOutput, error) {
 	var printed strings.Builder
-	value, err := drive(ctx, compiled, funcs, l, &printed)
-	if ctx.Err() != nil {
-		return modular.ToolOutput{}, ctx.Err()
-	}
-	if printed.Len() > 0 && !strings.HasSuffix(printed.String(), "\n") {
-		printed.WriteByte('\n')
-	}
-	if err != nil {
-		text := printed.String() + err.Error()
-		if cut := bounded(text); cut != text {
-			// Do not let a full print buffer hide why the run failed.
-			text = bounded(err.Error() + "\n" + printed.String())
-		}
-		return modular.ToolOutput{Status: modular.Failed, Content: modular.Text(text)}, nil
-	}
+	printed.WriteString(withNewline(stream))
 	var images modular.Content
 	takeImage := func(v any) bool {
 		m, ok := v.(map[string]any)
@@ -170,7 +85,6 @@ func evaluate(ctx context.Context, code string, fs []function, nested nestedFunc
 		images = append(images, modular.Part{Type: "image", Fields: map[string]json.RawMessage{"mimeType": raw(mime), "data": raw(data)}})
 		return true
 	}
-	output := toJSON(value)
 	switch v := output.(type) {
 	case []any:
 		rest := make([]any, 0, len(v))
@@ -193,11 +107,14 @@ func evaluate(ctx context.Context, code string, fs []function, nested nestedFunc
 	case string:
 		printed.WriteString(v)
 	default:
-		b, err := json.MarshalIndent(v, "", "  ")
-		if err != nil {
+		var b bytes.Buffer
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(v); err != nil {
 			return modular.ToolOutput{}, err
 		}
-		printed.Write(b)
+		printed.Write(b.Bytes()[:b.Len()-1])
 	}
 	if printed.Len() == 0 {
 		printed.WriteString("(no output)")
@@ -205,41 +122,6 @@ func evaluate(ctx context.Context, code string, fs []function, nested nestedFunc
 	return modular.ToolOutput{Content: append(modular.Text(bounded(printed.String())), images...), Value: map[string]int{"calls": made}}, nil
 }
 
-func toJSON(v monty.Value) any {
-	switch x := v.Raw().(type) {
-	case nil:
-		return nil
-	case string, bool, int64:
-		return x
-	case float64:
-		if !math.IsInf(x, 0) && !math.IsNaN(x) {
-			return x
-		}
-	case monty.Dict:
-		m := map[string]any{}
-		for _, pair := range x {
-			k, ok := pair.Key.Raw().(string)
-			if !ok {
-				k = pair.Key.String()
-			}
-			m[k] = toJSON(pair.Value)
-		}
-		return m
-	case []monty.Value:
-		out := make([]any, 0, len(x))
-		for _, v := range x {
-			out = append(out, toJSON(v))
-		}
-		return out
-	case monty.Tuple:
-		out := make([]any, 0, len(x))
-		for _, v := range x {
-			out = append(out, toJSON(v))
-		}
-		return out
-	}
-	return v.String()
-}
 func raw(s string) json.RawMessage { b, _ := json.Marshal(s); return b }
 func partString(p modular.Part, key string) string {
 	var s string
@@ -248,19 +130,19 @@ func partString(p modular.Part, key string) string {
 }
 func bounded(s string) string {
 	const maxLines, maxBytes = 2000, 50 * 1024
-	lines := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
-	if len(lines) <= maxLines && len(s) <= maxBytes {
+	lines := strings.Count(strings.TrimSuffix(s, "\n"), "\n") + 1
+	if lines <= maxLines && len(s) <= maxBytes {
 		return s
 	}
 	var kept strings.Builder
 	n := 0
-	for _, line := range lines[:min(maxLines, len(lines))] {
-		if kept.Len()+len(line)+1 > maxBytes {
+	for line := range strings.SplitSeq(strings.TrimSuffix(s, "\n"), "\n") {
+		if n == maxLines || kept.Len()+len(line)+1 > maxBytes {
 			break
 		}
 		kept.WriteString(line)
 		kept.WriteByte('\n')
 		n++
 	}
-	return fmt.Sprintf("%s\n[Output cut: showing the first %d of %d lines (%d of %d bytes). Return or print less, or write the rest to a file.]", kept.String(), n, len(lines), kept.Len(), len(s))
+	return fmt.Sprintf("%s\n[Output cut: showing the first %d of %d lines (%d of %d bytes). Return or print less, or write the rest to a file.]", kept.String(), n, lines, kept.Len(), len(s))
 }
