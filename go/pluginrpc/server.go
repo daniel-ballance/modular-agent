@@ -714,14 +714,36 @@ func (e *remoteEnvironment) Bash(ctx context.Context, cwd, command string, progr
 // supervised execution. Tools always obtain the environment from the host.
 func ConformanceServer() *Server { return conformanceServer("") }
 
-// ListenConformancePlugin serves the same fixture as ConformanceServer, with
-// a private command ledger per connection instead of trusting a host home path.
+// ListenConformancePlugin serves the same fixture as ConformanceServer, without
+// trusting the host home path. The operator can assign one project and state directory.
 func ListenConformancePlugin(ctx context.Context, address, tokenFile string) (*wswire.Server, error) {
 	token, err := wswire.ReadToken(tokenFile)
 	if err != nil {
 		return nil, err
 	}
+	project, hasProject := os.LookupEnv("MODULAR_AGENT_PLUGIN_PROJECT")
+	state, hasState := os.LookupEnv("MODULAR_AGENT_PLUGIN_STATE_DIR")
+	var projects []string
+	if hasProject || hasState {
+		if !filepath.IsAbs(project) || !filepath.IsAbs(state) {
+			return nil, errors.New("MODULAR_AGENT_PLUGIN_PROJECT and MODULAR_AGENT_PLUGIN_STATE_DIR must both be absolute")
+		}
+		project, err = filepath.EvalSymlinks(project)
+		if err != nil || !cwdInProject(project, project) {
+			return nil, errors.New("MODULAR_AGENT_PLUGIN_PROJECT must name a directory")
+		}
+		if err := os.MkdirAll(state, 0700); err != nil {
+			return nil, err
+		}
+		projects = []string{project}
+	}
 	return wswire.Listen(ctx, address, nil, wswire.Plugin, map[string]struct{}{token: {}}, func(ctx context.Context, c *wswire.Conn, _ struct{}) {
+		if state != "" {
+			s := conformanceServer(state)
+			s.Projects = projects
+			_ = s.ServeServiceConnection(ctx, c)
+			return
+		}
 		dir, err := os.MkdirTemp("", "go-conformance-plugin-")
 		if err != nil {
 			return

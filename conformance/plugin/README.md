@@ -24,7 +24,18 @@ node conformance/plugin/run.mjs --connect ws://127.0.0.1:PORT/ --token-file FILE
 
 The kit runs every check that applies to a connection, plus these transport checks: an upgrade with no token or a wrong token is refused with HTTP 401, an upgrade without the subprotocol is refused, a binary message closes with 1003, two connections are independent plugin instances, closing a connection stops a running `env/exec` within the declared containment, and `plugin/shutdown` closes with 1000 while the service keeps accepting connections. It skips the oversized-message check (a real 64 MiB transfer) and the `MODULAR_AGENT_PLUGIN_PARTS=tools` check, because a service chooses its parts when it starts. For the same reason the Runtime tiers need their own services: name them with `--runtime-url` and `--durable-runtime-url`; the kit uses the same token for them.
 
-For a plugin service configured to accept several isolated hosts on one listener, add `--isolation-checks SECOND_TOKEN_FILE PROJECT_A PROJECT_B HOME`. This runs the isolation checks instead of the default transcript. Provision both bearer tokens with distinct project grants. Supply two disposable absolute projects and the same host-supplied home name for both; the service, not `HOME` or the request, assigns retained state. The kit overlaps calls with the same IDs on two connections, using the same credential and then different credentials. It checks cancellation and callback routing, refused cross-project reads and restores, and the views after reconnect. The kit may leave fixture files in the two projects. A one-token listener or the stdio bridge cannot exercise the distinct-credential case; the standard deployment can use separate listeners instead.
+### Plugin service isolation
+
+[ADR 0030](../../docs/adr/0030-production-gaps.md#isolation-decisions) chose separate listeners for stateful plugin services. Run two copies of the conformance plugin, each with `--listen ADDR --token-file FILE`. For each copy set `MODULAR_AGENT_PLUGIN_PROJECT` to its granted project directory and `MODULAR_AGENT_PLUGIN_STATE_DIR` to its private state directory. Use distinct tokens, disjoint projects and disjoint state directories. Use absolute paths and keep the state directories outside both projects.
+
+```sh
+node conformance/plugin/run.mjs --connect URL_A --token-file TOKEN_A \
+  --second-connect URL_B --isolation-checks TOKEN_B PROJECT_A PROJECT_B HOME
+```
+
+This runs the isolation checks instead of the default transcript. Supply two disposable projects and a directory for the shared host-supplied home name. The listeners choose their state directories before handling that name. Each token must fail upgrade on the other listener. On each listener, two connections with the same credential overlap calls with identical IDs. The kit also overlaps calls with different credentials. It checks callback routing and that cancellation and loss of one connection leave the other call running. Each host must be unable to read the other project or look up or restore its saved point. The kit checks that the point exists on its owner's live connection and that each host can still read its own file after reconnect. The kit may leave fixture files in the projects. This is not a command sandbox test.
+
+For builds that provision several isolated hosts on one listener, omit `--second-connect` and use the same `--isolation-checks TOKEN_B PROJECT_A PROJECT_B HOME` arguments. The kit then uses both tokens on the first URL and does not check cross-listener upgrades.
 
 To serve a stdio plugin over WebSocket for the kit, use the bridge, `conformance/tools/ws-bridge.mjs`. It is a disposable, loopback-only test adapter that starts one plugin process per connection; it is not a service host.
 
@@ -37,7 +48,7 @@ node conformance/plugin/run.mjs --connect ws://127.0.0.1:39191/ --token-file FIL
   --runtime-url ws://127.0.0.1:39192/ --durable-runtime-url ws://127.0.0.1:39193/
 ```
 
-Against the Rust fixture plugin this passes 153/153; the same plugin on stdio passes 146/146. Each SDK's own conformance plugin also serves itself with `--listen ADDR --token-file FILE`; [`scripts/websocket-kits.sh`](../../scripts/websocket-kits.sh) runs the kit against each with no bridge: Rust, TypeScript and Python 153/153, Go 151/151 (its environment does not list directories).
+Each SDK's conformance plugin serves itself with `--listen ADDR --token-file FILE`. [`scripts/websocket-kits.sh`](../../scripts/websocket-kits.sh) runs the normal transcript and the separate-listener isolation checks against these services without the bridge.
 
 What it checks:
 - Handshake, supported version, selected parts, registration, replacement names, ping, framing, JSON nesting at 64 and 65 levels, error envelopes, shutdown and natural EOF exit.

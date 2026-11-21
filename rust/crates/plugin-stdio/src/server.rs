@@ -40,6 +40,7 @@ pub struct Conformance {
     initializing: tokio::sync::Mutex<()>,
     state: Mutex<Option<(Api, Value)>>,
     parts: BTreeSet<String>,
+    service_scope: Option<(PathBuf, PathBuf)>,
 }
 impl Conformance {
     pub fn from_env() -> Result<Self> {
@@ -64,14 +65,31 @@ impl Conformance {
             !(parts.contains("runtime") && parts.contains("durable-runtime")),
             "choose only one Runtime"
         );
+        let project = std::env::var_os("MODULAR_AGENT_PLUGIN_PROJECT");
+        let state_dir = std::env::var_os("MODULAR_AGENT_PLUGIN_STATE_DIR");
+        let service_scope = match (project, state_dir) {
+            (None, None) => None,
+            (Some(project), Some(state_dir)) => {
+                let (project, state_dir) = (PathBuf::from(project), PathBuf::from(state_dir));
+                ensure!(
+                    project.is_absolute() && project.is_dir() && state_dir.is_absolute(),
+                    "use an absolute project directory and absolute state path"
+                );
+                std::fs::create_dir_all(&state_dir)?;
+                Some((project.canonicalize()?, state_dir))
+            }
+            _ => bail!("set both MODULAR_AGENT_PLUGIN_PROJECT and MODULAR_AGENT_PLUGIN_STATE_DIR"),
+        };
         Ok(Self {
             parts,
+            service_scope,
             ..Self::default()
         })
     }
     pub fn new_instance(&self) -> Self {
         Self {
             parts: self.parts.clone(),
+            service_scope: self.service_scope.clone(),
             ..Self::default()
         }
     }
@@ -233,6 +251,15 @@ impl Endpoint for Conformance {
                 return Err(Fault::new("invalid_request", "already initialized"));
             }
             let mut p = p;
+            if let Some((project, state_dir)) = &self.service_scope {
+                if p["project"].as_str().map(Path::new) != Some(project.as_path()) {
+                    return Err(Fault::new(
+                        "invalid_request",
+                        "project is outside the service scope",
+                    ));
+                }
+                p["home"] = json!(state_dir);
+            }
             if self.has("environment") {
                 p["project"] = json!(environment_cwd(&p, "project")?);
             }
@@ -254,6 +281,18 @@ impl Endpoint for Conformance {
             return Ok(self.registration());
         }
         let api = self.state().map_err(|e| Fault::new("invalid_request", e))?;
+        if let Some((project, _)) = &self.service_scope
+            && matches!(method, "env/read" | "env/write" | "env/exists" | "env/list")
+        {
+            let cwd = environment_cwd(&p, "cwd")?;
+            let path = cwd.join(p["path"].as_str().unwrap_or(""));
+            if !service_path_in_project(project, &path) {
+                return Err(Fault::new(
+                    "invalid_request",
+                    "path is outside the service project",
+                ));
+            }
+        }
         let missing = |part| {
             Err(Fault::new(
                 "not_supported",
@@ -551,6 +590,17 @@ fn environment_cwd(p: &Value, key: &str) -> std::result::Result<PathBuf, Fault> 
             "invalid environment directory",
         )),
     }
+}
+
+// Check the nearest existing ancestor, including for a file that will be created.
+fn service_path_in_project(project: &Path, path: &Path) -> bool {
+    use std::{fs, io::ErrorKind, path::Component};
+    path.starts_with(project)
+        && !path.components().any(|part| part == Component::ParentDir)
+        && path
+            .ancestors()
+            .find(|p| !matches!(fs::symlink_metadata(p), Err(e) if e.kind() == ErrorKind::NotFound))
+            .is_some_and(|p| p.canonicalize().is_ok_and(|p| p.starts_with(project)))
 }
 
 pub(crate) async fn environment(

@@ -5,6 +5,7 @@ import { localEnvironment } from "@modular-agent/env-local";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import type { Plugin } from "@modular-agent/harness";
+import { isAbsolute } from "node:path";
 import { conformanceHooks, conformanceProvider, conformanceTools } from "./conformance.js";
 import { servePluginService, servePlugins } from "./serve.js";
 
@@ -33,8 +34,15 @@ if (args.length) {
 	if (args.length !== 4 || flag !== "--listen" || !["--token-file", "--fixture-hosts"].includes(credentialFlag)) {
 		throw new Error("Usage: ma-plugin [--listen ADDR (--token-file FILE | --fixture-hosts JSON)]");
 	}
+	const project = process.env.MODULAR_AGENT_PLUGIN_PROJECT;
+	const stateDir = process.env.MODULAR_AGENT_PLUGIN_STATE_DIR;
+	if ((project !== undefined || stateDir !== undefined) && (!project || !stateDir || credentialFlag !== "--token-file")) {
+		throw new Error("Set both MODULAR_AGENT_PLUGIN_PROJECT and MODULAR_AGENT_PLUGIN_STATE_DIR with --token-file");
+	}
+	if (stateDir && !isAbsolute(stateDir)) throw new Error("MODULAR_AGENT_PLUGIN_STATE_DIR must be absolute");
 	const server = await servePluginService(instance, credentialFlag === "--token-file"
-		? { listen, tokenFile: value } : { listen, hosts: JSON.parse(value) });
+		? { listen, tokenFile: value, projects: project ? [project] : undefined, stateDir }
+		: { listen, hosts: JSON.parse(value) });
 	process.stdout.write(server.url + "\n");
 	for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => void server.close());
 } else {
