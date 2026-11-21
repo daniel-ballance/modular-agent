@@ -13,39 +13,43 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type session struct {
-	id               string // immutable, safe for event routing while snapshots change
-	project          string // immutable canonical workspace for rewind exclusion
-	tenant           string // immutable capacity scope for output
-	rewindBlocked    bool
-	commandCancels   map[*commandCancellation]struct{}
-	commandBytes     int64
-	mu               sync.Mutex
-	data             api.Session
-	lease            api.Lease
-	pendingStore     api.Store // no persistent writer until first admission or fork publication
-	h                *Harness
-	interrupted      chan struct{}
-	interruptEmitted chan struct{}
-	writerWatchDone  chan struct{}
-	writerFailure    error
-	running, closing bool
-	stopping         bool // a detach is already settling work and closing the lease
-	opening          bool // job reports during session.start wait for recovery setup
-	cancel           context.CancelCauseFunc
-	done             chan struct{}
-	queue            []api.Input
-	activeActor      string
-	steeringClosed   bool
-	activeInput      api.Input
-	last             api.Outcome
-	resume           *api.Entry
-	external         []api.Call
-	responseClaim    *api.Entry
-	transferredInput string
+	id                string // immutable, safe for event routing while snapshots change
+	project           string // immutable canonical workspace for rewind exclusion
+	tenant            string // immutable capacity scope for output
+	rewindBlocked     bool
+	commandCancels    map[*commandCancellation]struct{}
+	commandBytes      int64
+	mu                sync.Mutex
+	data              api.Session
+	storageCharges    []int64 // encoded sizes for data.Entries, under mu
+	lease             api.Lease
+	pendingStore      api.Store // no persistent writer until first admission or fork publication
+	provisional       atomic.Bool
+	erasureTombstones atomic.Pointer[map[string]bool]
+	h                 *Harness
+	interrupted       chan struct{}
+	interruptEmitted  chan struct{}
+	writerWatchDone   chan struct{}
+	writerFailure     error
+	running, closing  bool
+	stopping          bool // a detach is already settling work and closing the lease
+	opening           bool // job reports during session.start wait for recovery setup
+	cancel            context.CancelCauseFunc
+	done              chan struct{}
+	queue             []api.Input
+	activeActor       string
+	steeringClosed    bool
+	activeInput       api.Input
+	last              api.Outcome
+	resume            *api.Entry
+	external          []api.Call
+	responseClaim     *api.Entry
+	transferredInput  string
 }
 
 func clone[T any](v T) T {
@@ -168,6 +172,7 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	}
 	if v, err := c.Get("history"); err == nil {
 		store := v.(api.Store)
+		s.provisional.Store(true)
 		if c.h.deferHistory {
 			s.pendingStore = store
 		} else {
@@ -286,11 +291,11 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = lease.Close()
 		return err
 	}
-	if _, err = c.h.API().Invoke(ctx, "session.prepare", api.SessionPrepare{Session: clone(snap), Reopened: true}); err != nil {
+	if _, err = s.invokeWithErasureView(ctx, "session.prepare", snap, api.SessionPrepare{Session: clone(snap), Reopened: true}); err != nil {
 		_ = c.StopSession(id)
 		return err
 	}
-	if _, err = c.h.API().Invoke(ctx, "session.recoverQuestions", clone(s.data)); err != nil {
+	if _, err = s.invokeWithErasureView(ctx, "session.recoverQuestions", snap, clone(snap)); err != nil {
 		_ = c.StopSession(id)
 		return err
 	}
@@ -306,7 +311,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = c.StopSession(id)
 		return err
 	}
-	_, err = c.h.API().Invoke(api.WithReopenedSession(ctx), "session.start", clone(snap))
+	_, err = s.invokeWithErasureView(api.WithReopenedSession(ctx), "session.start", snap, clone(snap))
 	if err != nil {
 		_ = c.CloseSession(id)
 		return err
@@ -413,7 +418,11 @@ func (c *client) List(project string) ([]api.Session, error) {
 		}
 	}
 	if v, err := c.Get("history"); err == nil {
-		return v.(api.Store).List(project)
+		rows, err := v.(api.Store).List(project)
+		if remote := api.RemoteRegistry(v); err == nil && remote != nil {
+			return listRemoteViews(remote, rows)
+		}
+		return rows, err
 	}
 	c.h.mu.RLock()
 	var sessions []*session
@@ -441,7 +450,11 @@ func (c *client) Snapshot(id string) (api.Session, error) {
 	if err := s.reconcileErasureLocked(); err != nil {
 		return api.Session{}, err
 	}
-	return copySession(s.data), nil
+	snap := copySession(s.data)
+	if err := s.admitErasureView(snap); err != nil {
+		return api.Session{}, err
+	}
+	return snap, nil
 }
 func (c *client) View(ctx context.Context, id string) (api.Session, error) {
 	return c.view(ctx, id, true)
@@ -519,12 +532,12 @@ func (s *session) publishInitialLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
-	return s.withErasureCheck(next, func(guard string) error {
-		return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next, guard) })
+	return s.withErasureCheck(next, func() error {
+		return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next) })
 	})
 }
 
-func (s *session) publishReservedInitialLocked(next api.Session, guard string) error {
+func (s *session) publishReservedInitialLocked(next api.Session) error {
 	l, err := acquireNew(s.pendingStore, s.id)
 	if err != nil {
 		return s.stopWriterLocked(err)
@@ -534,20 +547,21 @@ func (s *session) publishReservedInitialLocked(next api.Session, guard string) e
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
-	if err := guardedSave(l, next, guard); err != nil {
+	if err := l.Save(next); err != nil {
 		return s.stopWriterLocked(err)
 	}
 	s.pendingStore, s.data = nil, next
+	s.provisional.Store(false)
 	return nil
 }
 
 func (s *session) commitSnapshotLocked(next api.Session) error {
-	return s.withErasureCheck(next, func(guard string) error {
-		return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next, guard) })
+	return s.withErasureCheck(next, func() error {
+		return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next) })
 	})
 }
 
-func (s *session) commitReservedSnapshotLocked(next api.Session, guard string) error {
+func (s *session) commitReservedSnapshotLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
@@ -561,12 +575,13 @@ func (s *session) commitReservedSnapshotLocked(next api.Session, guard string) e
 	// Outside the public persistent lifecycle, keep the original lazy
 	// save rule. An attached public persistent lease saves all changes.
 	if s.lease != nil && (s.h.deferHistory || next.ForkedFrom != "" || slices.ContainsFunc(next.Entries, startsLegacyHistory)) {
-		if err := guardedSave(s.lease, next, guard); err != nil {
+		if err := s.lease.Save(next); err != nil {
 			if s.rewindBlocked && !errors.Is(err, api.ErrWriterLost) && s.reconcileRewindCommit(next) {
 				return nil
 			}
 			return s.stopWriterLocked(err)
 		}
+		s.provisional.Store(false)
 	}
 	s.data = next
 	return nil
@@ -788,7 +803,11 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	next.Position = parent
 	// Metadata belongs to its plugin. Invoke outside the session lock.
 	s.mu.Unlock()
-	transformed, hookErr := c.h.API().Invoke(ctx, "session.fork", api.Forked{Session: next, Mapping: mapping})
+	var transformed any
+	hookErr := c.admitForkView(snap)
+	if hookErr == nil {
+		transformed, hookErr = c.h.API().Invoke(ctx, "session.fork", api.Forked{Session: next, Mapping: mapping})
+	}
 	s.mu.Lock()
 	if hookErr == nil {
 		next = transformed.(api.Forked).Session
@@ -1589,7 +1608,11 @@ func (p *turnPorts) Snapshot() (api.Session, error) {
 	if err := p.s.reconcileErasureLocked(); err != nil {
 		return api.Session{}, err
 	}
-	return copySession(p.s.data), nil
+	snap := copySession(p.s.data)
+	if err := p.s.admitErasureView(snap); err != nil {
+		return api.Session{}, err
+	}
+	return snap, nil
 }
 func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) {
 	e.Turn = p.id

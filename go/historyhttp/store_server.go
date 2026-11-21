@@ -25,12 +25,11 @@ func NewStoreServer(store api.Store, ttl time.Duration) *Server {
 
 // NewFileStoreServer persists the restart exclusion bound alongside a file store.
 func NewFileStoreServer(store api.Store, dir string, ttl time.Duration) (*Server, error) {
-	server, err := New(filepath.Join(dir, ".http-history"), ttl)
+	server, err := newServer(filepath.Join(dir, ".http-history"), ttl, false)
 	if err != nil {
 		return nil, err
 	}
 	// Native writers do not take this server's registry lock.
-	server.registry = false
 	server.store = store
 	server.storeLeases = map[string]api.Lease{}
 	server.timers = map[string]*time.Timer{}

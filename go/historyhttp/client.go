@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -104,19 +105,8 @@ func (c *Client) Verify() error {
 	if out.Binding != Binding || leaseDuration(out.TTLMS) <= 0 || out.TTLMS != float64(leaseDuration(out.TTLMS).Milliseconds()) {
 		return errors.New("unsupported history binding or invalid history TTL")
 	}
-	var registry registryState
-	err = (httpBackend{c.wire}).call(c.ctx, "GET", registryPath, nil, &registry)
-	var response *servicehttp.ResponseError
-	if errors.As(err, &response) && (response.Status == http.StatusNotFound || response.Status == http.StatusBadRequest || response.Status == http.StatusMethodNotAllowed) {
-		return nil
-	}
-	if err != nil {
-		return errors.Join(api.ErrErasureUnavailable, err)
-	}
-	if registry.Guard == "" || registry.Revision == "" || registry.History == "" {
-		return api.ErrErasureUnavailable
-	}
-	c.coordinated.Store(true)
+	version, ok := count(out.PendingErasure)
+	c.coordinated.Store(ok && version == 1)
 	return nil
 }
 
@@ -360,6 +350,10 @@ func (l *lease) usable() error {
 	return l.CheckWriter()
 }
 func decodeSession(d document) (api.Session, error) {
+	return decodeHistory(d, false)
+}
+
+func decodeHistory(d document, physical bool) (api.Session, error) {
 	snap := api.Session{Version: 1, ID: d.Session.ID, Project: d.Session.Project, Parent: d.Session.ParentSessionID}
 	if origin := d.Session.ForkedFrom; origin != nil {
 		snap.ForkedFrom = origin.SessionID + ":" + origin.EntryID
@@ -371,7 +365,15 @@ func decodeSession(d document) (api.Session, error) {
 		}
 		snap.Entries = append(snap.Entries, e)
 	}
-	return portable.Session(snap), nil
+	var entries []api.Entry
+	if physical {
+		entries = slices.Clone(snap.Entries)
+	}
+	snap = portable.Session(snap)
+	if physical {
+		snap.Entries = entries
+	}
+	return snap, nil
 }
 func (l *lease) Load() (api.Session, error) {
 	l.mu.Lock()
@@ -384,14 +386,29 @@ func (l *lease) Load() (api.Session, error) {
 			return api.Session{}, err
 		}
 	}
-	return l.loadSnapshot()
+	return l.loadSnapshot(false)
 }
-func (l *lease) loadSnapshot() (api.Session, error) {
+
+// LoadErasure preserves physical records even when bookkeeping already masks
+// their payload in the normal portable view.
+func (l *lease) LoadErasure() (api.Session, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.usable(); err != nil {
+		return api.Session{}, err
+	}
+	if l.token == "" {
+		return api.Session{}, api.ErrErasureUnavailable
+	}
+	return l.loadSnapshot(true)
+}
+
+func (l *lease) loadSnapshot(physical bool) (api.Session, error) {
 	d, err := l.c.read(l.id)
 	if err != nil {
 		return api.Session{}, err
 	}
-	snap, err := decodeSession(d)
+	snap, err := decodeHistory(d, physical)
 	if err != nil {
 		return api.Session{}, err
 	}
@@ -403,9 +420,11 @@ func (l *lease) loadSnapshot() (api.Session, error) {
 	}
 	return snap, nil
 }
-func (l *lease) Save(s api.Session) error { return l.SaveGuarded(s, "") }
+func (l *lease) Save(s api.Session) error { return l.save(s, false) }
 
-func (l *lease) SaveGuarded(s api.Session, guard string) error {
+func (l *lease) SaveErasureRecords(s api.Session) error { return l.save(s, true) }
+
+func (l *lease) save(s api.Session, settling bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.usable(); err != nil {
@@ -424,7 +443,7 @@ func (l *lease) SaveGuarded(s api.Session, guard string) error {
 	if token == "" {
 		token = strings.Repeat("A", maxLeaseBytes)
 	}
-	size := len(guardedAppendBody(token, []json.RawMessage{}, guard))
+	size := len(appendBody(token, []json.RawMessage{}))
 	for _, e := range s.Entries {
 		if e.Session == "" {
 			e.Session = s.ID
@@ -449,6 +468,11 @@ func (l *lease) SaveGuarded(s api.Session, guard string) error {
 		return nil
 	}
 	if l.token == "" {
+		if l.c.ErasureCoordinated() && s.ForkedFrom != "" {
+			if _, err := l.appendRevision(s, entries, false, settling); err != nil {
+				return err
+			}
+		}
 		session := Metadata{Project: s.Project, Created: float64(time.Now().UnixMilli()), ParentSessionID: s.Parent}
 		if source, entry, ok := strings.Cut(s.ForkedFrom, ":"); ok {
 			session.ForkedFrom = &ForkOrigin{SessionID: source, EntryID: entry}
@@ -461,7 +485,7 @@ func (l *lease) SaveGuarded(s api.Session, guard string) error {
 		}
 	}
 	if l.known == nil {
-		if _, err := l.loadSnapshot(); err != nil {
+		if _, err := l.loadSnapshot(false); err != nil {
 			return err
 		}
 	}
@@ -473,15 +497,22 @@ func (l *lease) SaveGuarded(s api.Session, guard string) error {
 			}
 		}
 	}
+	var revision string
+	if l.c.ErasureCoordinated() {
+		var err error
+		revision, err = l.appendRevision(s, entries, true, settling)
+		if err != nil {
+			return err
+		}
+	}
 	if err := l.CheckWriter(); err != nil {
 		return err
 	}
 	writeCtx, cancel := context.WithTimeout(l.c.ctx, time.Duration(l.cutoff.Load()-leaseClock()))
 	defer cancel()
 	var err error
-	if guard != "" {
-		var reply struct{ Kept int }
-		err = (httpBackend{l.c.wire}).call(writeCtx, "POST", path(l.id)+"/entries", guardedAppendBody(l.token, entries, guard), &reply)
+	if revision != "" {
+		err = l.c.profileCall(writeCtx, "POST", path(l.id)+"/entries", appendBody(l.token, entries), nil, revision)
 	} else {
 		_, err = l.c.backend.Append(writeCtx, l.id, l.token, entries)
 	}
@@ -671,5 +702,10 @@ func (c *Client) Close() error {
 }
 func Plugin(wire *servicehttp.Client) api.Plugin {
 	c := NewClient(wire)
-	return api.Plugin{Name: "history-http", Setup: func(a api.API) error { return a.Provide("history", c) }, Close: c.Close}
+	return api.Plugin{Name: "history-http", Setup: func(a api.API) error {
+		if err := c.Verify(); err != nil {
+			return err
+		}
+		return a.Provide("history", c)
+	}, Close: c.Close}
 }

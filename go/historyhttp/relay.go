@@ -23,12 +23,12 @@ func (c *Client) Relay(token string) http.Handler {
 			failure(w, 401, "unauthorized", "authentication required")
 			return
 		}
-		if r.URL.Path != registryPath && r.URL.Path != "/v1" && !strings.HasPrefix(r.URL.Path, "/v1/") {
+		if r.URL.Path != "/v1" && !strings.HasPrefix(r.URL.Path, "/v1/") {
 			failure(w, 404, "not_found", "unknown operation")
 			return
 		}
 		var body io.Reader
-		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		if r.Body != nil {
 			payload, err := io.ReadAll(io.LimitReader(r.Body, appendLimit+1))
 			if err != nil {
 				invalid(w)
@@ -48,8 +48,10 @@ func (c *Client) Relay(token string) http.Handler {
 			return
 		}
 		req.Header.Set("Authorization", "Bearer "+c.wire.Token)
-		for _, value := range r.Header.Values("Content-Type") {
-			req.Header.Add("Content-Type", value)
+		for _, name := range []string{"Content-Type", "Content-Encoding", "Cache-Control", revisionHeader} {
+			for _, value := range r.Header.Values(name) {
+				req.Header.Add(name, value)
+			}
 		}
 		res, err := c.wire.HTTP.Do(req)
 		if err != nil {
@@ -57,8 +59,10 @@ func (c *Client) Relay(token string) http.Handler {
 			return
 		}
 		defer res.Body.Close()
-		if contentType := res.Header.Get("Content-Type"); contentType != "" {
-			w.Header().Set("Content-Type", contentType)
+		for _, name := range []string{"Content-Type", "Cache-Control", "Allow"} {
+			for _, value := range res.Header.Values(name) {
+				w.Header().Add(name, value)
+			}
 		}
 		w.WriteHeader(res.StatusCode)
 		_, _ = io.Copy(w, io.LimitReader(res.Body, pageLimit+1))

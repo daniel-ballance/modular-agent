@@ -32,23 +32,44 @@ type ErasureCoordinator interface {
 	PendingErasures(func(*[]ErasureIntent) error) error
 }
 
-// RemoteErasureCoordinator advertises a discovered service capability. Guard
-// obtains a revision that the service checks atomically with the append.
+// RemoteErasureCoordinator reads the history service's per-session plans.
+// The revision from a complete read can fence a subsequent discovery scan.
 type RemoteErasureCoordinator interface {
 	ErasureCoordinated() bool
-	GuardErasure(func([]ErasureIntent, string) error) error
+	ErasurePlans(sessionID string) ([]ErasurePlan, string, error)
+}
+
+type ErasurePlan struct {
+	IntentID string
+	SourceID string
+	RecordID string
+	Copies   []ErasureCopy
+}
+
+// ErasurePublication names the original intent and its destinations in publication order.
+// A destination may no longer have a live session.
+type ErasurePublication struct {
+	IntentID   string
+	SessionIDs []string
+}
+
+type RemoteErasureLease interface {
+	LoadErasure() (Session, error)
+	PublishErasure(revision string, intent ErasureIntent) (ErasurePublication, error)
+	CompleteErasure(intentID string, ids []string) error
 }
 
 func PendingRegistry(store any) ErasureCoordinator {
-	if r, ok := store.(RemoteErasureCoordinator); ok && !r.ErasureCoordinated() {
-		return nil
-	}
 	r, _ := store.(ErasureCoordinator)
 	return r
 }
 
-type GuardedErasureLease interface {
-	SaveGuarded(Session, string) error
+func RemoteRegistry(store any) RemoteErasureCoordinator {
+	r, _ := store.(RemoteErasureCoordinator)
+	if r != nil && r.ErasureCoordinated() {
+		return r
+	}
+	return nil
 }
 
 // ExactErasureLease installs tombstones without touching another session.

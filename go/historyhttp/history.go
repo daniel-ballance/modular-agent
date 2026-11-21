@@ -8,13 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/daniel-ballance/modular-agent/go/api"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
 const Binding = "modular-agent-history/1"
@@ -64,22 +66,27 @@ type held struct {
 }
 
 type Server struct {
-	mu          sync.Mutex
-	dir         string
-	ttl         time.Duration
-	holdUntil   time.Time
-	held        map[string]held
-	count       int
-	lock        *os.File
-	store       api.Store
-	storeLeases map[string]api.Lease
-	timers      map[string]*time.Timer
-	closed      bool
-	registry    bool
-	historyRev  string
+	mu            sync.Mutex
+	dir           string
+	ttl           time.Duration
+	holdUntil     time.Time
+	held          map[string]held
+	count         int
+	lock          *os.File
+	store         api.Store
+	storeLeases   map[string]api.Lease
+	timers        map[string]*time.Timer
+	closed        bool
+	registry      bool
+	revision      string
+	registryBytes []byte
 }
 
 func New(dir string, ttl time.Duration) (*Server, error) {
+	return newServer(dir, ttl, true)
+}
+
+func newServer(dir string, ttl time.Duration, registry bool) (*Server, error) {
 	if ttl < time.Millisecond {
 		ttl = 3 * time.Second
 	}
@@ -95,10 +102,12 @@ func New(dir string, ttl time.Duration) (*Server, error) {
 		f.Close()
 		return nil, errors.New("history service store already open")
 	}
-	s := &Server{dir: dir, ttl: ttl, held: map[string]held{}, lock: f, historyRev: api.ID()}
-	if err := s.startupRegistry(); err != nil {
-		f.Close()
-		return nil, err
+	s := &Server{dir: dir, ttl: ttl, held: map[string]held{}, lock: f, registry: registry}
+	if registry {
+		if err := s.startupRegistry(); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 	if err := s.startup(); err != nil {
 		f.Close()
@@ -247,7 +256,17 @@ func (s *Server) save(w http.ResponseWriter, d document, erasing bool) bool {
 		}
 		return true
 	}
-	err := atomicFile(s.dir, s.path(d.Session.ID), raw(d))
+	if !s.commit(w, s.path(d.Session.ID), raw(d)) {
+		return false
+	}
+	if s.registry {
+		s.revision = api.ID()
+	}
+	return true
+}
+
+func (s *Server) commit(w http.ResponseWriter, path string, b []byte) bool {
+	err := atomicFile(s.dir, path, b)
 	if errors.Is(err, uncertainCommit) {
 		_ = s.lock.Close()
 		s.lock = nil
@@ -273,11 +292,7 @@ func (s *Server) Handler(token string) http.Handler {
 			failure(w, 401, "unauthorized", "authentication required")
 			return
 		}
-		if r.URL.Path == registryPath {
-			s.serveRegistry(w, r)
-			return
-		}
-		q, ok := parseRequest(w, r)
+		q, ok := parseRequest(w, r, s.registry)
 		if !ok {
 			return
 		}
@@ -298,10 +313,11 @@ type request struct {
 	meta                                 Session
 	entries                              []json.RawMessage
 	erase                                []string
-	guard                                string
+	revision, intentID                   string
+	publish                              publication
 }
 
-func parseRequest(w http.ResponseWriter, r *http.Request) (q request, ok bool) {
+func parseRequest(w http.ResponseWriter, r *http.Request, registry bool) (q request, ok bool) {
 	p := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "/")
 	for i, part := range p {
 		decoded, err := url.PathUnescape(part)
@@ -327,6 +343,13 @@ func parseRequest(w http.ResponseWriter, r *http.Request) (q request, ok bool) {
 			}
 		case len(p) == 4 && (p[3] == "entries" || p[3] == "erase" || p[3] == "lease"):
 			q.op, method = p[3], "POST"
+		case registry && len(p) == 4 && p[3] == "pending-erasure":
+			q.op, method = "plans", "GET, POST"
+			if r.Method == "POST" {
+				q.op = "publish"
+			}
+		case registry && len(p) == 6 && p[3] == "pending-erasure" && p[4] != "" && p[5] == "complete":
+			q.op, q.intentID, method = "complete", p[4], "POST"
 		case len(p) == 5 && p[3] == "lease" && p[4] != "":
 			q.op, q.lease, method = "release", p[4], "DELETE"
 		case len(p) == 6 && p[3] == "lease" && p[4] != "" && p[5] == "renew":
@@ -337,7 +360,7 @@ func parseRequest(w http.ResponseWriter, r *http.Request) (q request, ok bool) {
 		failure(w, 404, "not_found", "unknown path")
 		return q, false
 	}
-	if r.Method != method && !(method == "GET, PUT" && (r.Method == "GET" || r.Method == "PUT")) {
+	if !slices.Contains(strings.Split(method, ", "), r.Method) {
 		w.Header().Set("Allow", method)
 		failure(w, 405, "method_not_allowed", "method not allowed")
 		return q, false
@@ -366,6 +389,15 @@ func parseRequest(w http.ResponseWriter, r *http.Request) (q request, ok bool) {
 			return q, false
 		}
 	}
+	if registry && q.op == "entries" {
+		if values := r.Header.Values(revisionHeader); len(values) != 0 {
+			if len(values) != 1 || !validLease(values[0]) {
+				invalid(w)
+				return q, false
+			}
+			q.revision = values[0]
+		}
+	}
 	if !q.query(r.URL.RawQuery) || !q.body(body) {
 		invalid(w)
 		return q, false
@@ -378,7 +410,7 @@ func (q *request) query(query string) bool {
 	if query == "" {
 		return true
 	}
-	if q.op != "read" && q.op != "list" {
+	if q.op != "read" && q.op != "list" && q.op != "plans" {
 		return false
 	}
 	seen := map[string]bool{}
@@ -426,7 +458,7 @@ func (q *request) query(query string) bool {
 
 func (q *request) body(body []byte) bool {
 	switch q.op {
-	case "put", "lease", "entries", "erase":
+	case "put", "lease", "entries", "erase", "publish", "complete":
 	default:
 		return len(body) == 0
 	}
@@ -463,12 +495,6 @@ func (q *request) body(body []byte) bool {
 		return q.owner != ""
 	case "entries":
 		q.lease = idOf(f["lease"])
-		if f["goErasureGuard"] != nil {
-			q.guard = idOf(f["goErasureGuard"])
-			if q.guard == "" {
-				return false
-			}
-		}
 		if !validLease(q.lease) || json.Unmarshal(f["entries"], &q.entries) != nil || q.entries == nil {
 			return false
 		}
@@ -478,6 +504,13 @@ func (q *request) body(body []byte) bool {
 				return false
 			}
 		}
+	case "publish":
+		return q.parsePublication(f)
+	case "complete":
+		q.lease = idOf(f["lease"])
+		var ok bool
+		q.erase, ok = distinctIDs(f["entryIds"], false)
+		return len(f) == 2 && validLease(q.lease) && ok
 	case "erase":
 		q.lease = idOf(f["lease"])
 		if f["lease"] != nil && !validLease(q.lease) {
@@ -493,11 +526,18 @@ func (q *request) body(body []byte) bool {
 func (s *Server) serve(w http.ResponseWriter, q request) {
 	switch q.op {
 	case "version":
-		respond(w, 200, map[string]any{"binding": Binding, "ttlMs": s.ttl.Milliseconds()})
+		out := map[string]any{"binding": Binding, "ttlMs": s.ttl.Milliseconds()}
+		if s.registry {
+			out["pendingErasure"] = 1
+		}
+		respond(w, 200, out)
 		return
 	case "list":
 		s.list(w, q)
 		return
+	}
+	if q.op == "plans" {
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	d, err := s.load(q.id)
 	if q.op == "put" {
@@ -505,11 +545,15 @@ func (s *Server) serve(w http.ResponseWriter, q request) {
 		return
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		failure(w, 404, "unknown_session", "unknown session")
+		unknownSession(w)
 		return
 	}
 	if err != nil {
 		unavailable(w)
+		return
+	}
+	if q.op == "plans" {
+		s.readPlans(w, q)
 		return
 	}
 	if q.op == "read" {
@@ -579,14 +623,27 @@ func (s *Server) serve(w http.ResponseWriter, q request) {
 			lost(w)
 			return
 		}
-		if q.guard != "" {
-			state, err := s.loadRegistry()
-			if err != nil || state.Guard != q.guard {
+		if q.revision != "" {
+			if _, err := s.loadRegistry(); err != nil {
 				unavailable(w)
+				return
+			}
+			if q.revision != s.revision {
+				staleRevision(w)
 				return
 			}
 		}
 		s.append(w, d, q.entries, current)
+	case "publish", "complete":
+		if !current() {
+			lost(w)
+			return
+		}
+		if q.op == "publish" {
+			s.publishPlans(w, d, q, current)
+		} else {
+			s.completePlan(w, d, q, current)
+		}
 	case "erase":
 		if q.lease != "" {
 			if !current() {
@@ -647,7 +704,7 @@ func (s *Server) append(w http.ResponseWriter, d document, entries []json.RawMes
 			}
 			continue
 		}
-		base := pageSize(meta, "entries", 1, 0, id)
+		base := pageSize("session", meta, "entries", 1, 0, id)
 		compact := raw(e)
 		if base+len(compact) > pageLimit || base+len(tombstone(f)) > pageLimit {
 			failure(w, 413, "entry_too_large", "entry cannot fit a page")
@@ -662,7 +719,6 @@ func (s *Server) append(w http.ResponseWriter, d document, entries []json.RawMes
 		return
 	}
 	if kept > 0 {
-		s.historyRev = api.ID()
 		if !s.save(w, d, false) {
 			return
 		}
@@ -696,7 +752,6 @@ func (s *Server) erase(w http.ResponseWriter, d document, ids []string, current 
 		return
 	}
 	if changed {
-		s.historyRev = api.ID()
 		if !s.save(w, d, true) {
 			return
 		}
@@ -756,18 +811,18 @@ func listPage(w http.ResponseWriter, q request, sessions []Session) {
 	for i, session := range sessions {
 		items[i] = raw(session)
 	}
-	page(w, q, nil, "sessions", items, "unknown_session")
+	page(w, q, "", nil, "sessions", items, "id", "unknown_session")
 }
 
 func read(w http.ResponseWriter, q request, d document) {
-	page(w, q, raw(d.Session), "entries", d.Entries, "unknown_entry")
+	page(w, q, "session", raw(d.Session), "entries", d.Entries, "id", "unknown_entry")
 }
 
-func pageSize(meta json.RawMessage, key string, n, payload int, next string) int {
+func pageSize(metaKey string, meta json.RawMessage, key string, n, payload int, next string) int {
 	// Account for the exact compact envelope used below, including the cursor.
 	size := len(`{"":[]}`) + len(key) + payload + max(n-1, 0)
 	if meta != nil {
-		size += len(`,"session":`) + len(meta)
+		size += len(`,"":`) + len(metaKey) + len(meta)
 	}
 	if next != "" {
 		size += len(`,"next":`) + len(raw(next))
@@ -775,10 +830,11 @@ func pageSize(meta json.RawMessage, key string, n, payload int, next string) int
 	return size
 }
 
-func page(w http.ResponseWriter, q request, meta json.RawMessage, key string, items []json.RawMessage, code string) {
+func page(w http.ResponseWriter, q request, metaKey string, meta json.RawMessage, key string, items []json.RawMessage, cursorKey, code string) {
+	id := func(item json.RawMessage) string { return idOf(objectOf(item)[cursorKey]) }
 	if q.after != "" {
 		i := 0
-		for ; i < len(items) && entryID(items[i]) != q.after; i++ {
+		for ; i < len(items) && id(items[i]) != q.after; i++ {
 		}
 		if i == len(items) {
 			failure(w, 404, code, "unknown cursor")
@@ -789,14 +845,14 @@ func page(w http.ResponseWriter, q request, meta json.RawMessage, key string, it
 	n, payload, cursor := 0, 0, ""
 	for i := 0; i < min(q.limit, len(items)); i++ {
 		payload += len(items[i])
-		if pageSize(meta, key, i+1, payload, "") > pageLimit {
+		if pageSize(metaKey, meta, key, i+1, payload, "") > pageLimit {
 			break
 		}
 		next := ""
 		if i+1 < len(items) {
-			next = entryID(items[i])
+			next = id(items[i])
 		}
-		if pageSize(meta, key, i+1, payload, next) <= pageLimit {
+		if pageSize(metaKey, meta, key, i+1, payload, next) <= pageLimit {
 			n, cursor = i+1, next
 		}
 	}
@@ -809,7 +865,7 @@ func page(w http.ResponseWriter, q request, meta json.RawMessage, key string, it
 	}
 	out := map[string]any{key: items[:n]}
 	if meta != nil {
-		out["session"] = meta
+		out[metaKey] = meta
 	}
 	if cursor != "" {
 		out["next"] = cursor

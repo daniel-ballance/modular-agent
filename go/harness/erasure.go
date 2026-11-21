@@ -12,6 +12,34 @@ import (
 // ErasureEpoch lets a delivery discard a view captured before the cutoff.
 func (c *client) ErasureEpoch(id string) (int, error) {
 	v, _ := c.Get("history")
+	if id != "" {
+		if remote := api.RemoteRegistry(v); remote != nil {
+			// An unpersisted session cannot have plans. Do not make a missing
+			// durable session look like a provisional one.
+			s, _ := c.find(id)
+			if s != nil && s.provisional.Load() {
+				return 0, nil
+			}
+			plans, _, err := remote.ErasurePlans(id)
+			if err != nil {
+				return 0, err
+			}
+			if len(plans) != 0 {
+				if s == nil {
+					return 0, api.ErrErasureUnavailable
+				}
+				tombstones := s.erasureTombstones.Load()
+				for _, p := range plans {
+					for _, copy := range p.Copies {
+						if !copy.Complete || tombstones == nil || !(*tombstones)[copy.ID] {
+							return 0, api.ErrErasureUnavailable
+						}
+					}
+				}
+			}
+			return len(plans), nil
+		}
+	}
 	registry := api.PendingRegistry(v)
 	if registry == nil || id == "" {
 		return 0, nil
@@ -42,7 +70,7 @@ func (c *client) SupportsErasure() bool {
 	if err != nil {
 		return false
 	}
-	return api.PendingRegistry(v) != nil
+	return api.PendingRegistry(v) != nil || api.RemoteRegistry(v) != nil && len(c.statefulErasureProviders()) == 0
 }
 
 func (c *client) Erase(ctx context.Context, id string, ids []string) error {
@@ -58,7 +86,8 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 	}
 	store := v.(api.Store)
 	registry := api.PendingRegistry(store)
-	if registry == nil {
+	remote := api.RemoteRegistry(store)
+	if registry == nil && (remote == nil || len(c.statefulErasureProviders()) != 0) {
 		return report, api.ErrErasureUnsupported
 	}
 	source, err := c.find(id)
@@ -70,6 +99,9 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 	ids = slices.Compact(ids)
 	if len(ids) == 0 {
 		return report, os.ErrNotExist
+	}
+	if remote != nil {
+		return c.eraseRemote(ctx, store, remote, source, ids)
 	}
 	providers := c.statefulErasureProviders()
 	var operation string
@@ -94,53 +126,11 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 					return nil
 				}
 			}
-			all, err := store.List("")
+			intent, err := discoverErasure(store, id, ids)
 			if err != nil {
-				return errors.Join(api.ErrErasureUnavailable, err)
+				return err
 			}
-			seen := map[string]bool{}
-			for _, row := range all {
-				if row.ID != id {
-					continue
-				}
-				for _, e := range row.Entries {
-					if !slices.Contains(ids, e.ID) {
-						continue
-					}
-					if !erasable(e) {
-						return api.ErrEraseForbidden
-					}
-					seen[e.ID] = true
-				}
-			}
-			if len(seen) != len(ids) {
-				return os.ErrNotExist
-			}
-			for changed := true; changed; {
-				changed = false
-				for _, row := range all {
-					inputs := map[string]bool{}
-					for _, e := range row.Entries {
-						if seen[e.ID] && recordedInputID(e) != "" {
-							inputs[recordedInputID(e)] = true
-						}
-					}
-					for _, e := range row.Entries {
-						if !seen[e.ID] && erasable(e) && (inputs[recordedInputID(e)] || slices.ContainsFunc(e.Copies, func(id string) bool { return seen[id] })) {
-							seen[e.ID], changed = true, true
-						}
-					}
-				}
-			}
-			operation = api.ID()
-			intent := api.ErasureIntent{ID: operation, Source: id, Targets: ids}
-			for _, row := range all {
-				for _, e := range row.Entries {
-					if seen[e.ID] {
-						intent.Copies = append(intent.Copies, api.ErasureCopy{EntryPair: api.EntryPair{SessionID: row.ID, ID: e.ID}})
-					}
-				}
-			}
+			operation = intent.ID
 			seenSessions := map[string]bool{}
 			for _, copy := range intent.Copies {
 				if seenSessions[copy.SessionID] {
@@ -244,6 +234,9 @@ func (s *session) erasureCoordinator() api.ErasureCoordinator {
 // Called with the session lock before use. Existing live work cannot continue
 // to read its cached view once the registry marks any of its session's content.
 func (s *session) reconcileErasureLocked() error {
+	if remote := s.remoteErasureCoordinator(); remote != nil {
+		return s.reconcileRemoteErasureLocked(remote)
+	}
 	registry := s.erasureCoordinator()
 	if registry == nil {
 		return nil
@@ -277,6 +270,7 @@ func (s *session) reconcileErasureLocked() error {
 			return api.ErrErasureUnavailable
 		}
 		s.data, s.last = snap, recordedOutcome(snap)
+		s.storageCharges = nil
 		_, queue := recovery(snap)
 		s.queue = slices.DeleteFunc(queue, parked)
 		if s.h != nil && s.h.capacity != nil {
@@ -294,7 +288,7 @@ func (s *session) reconcileErasureLocked() error {
 func needsErasure(row api.Session, intents []api.ErasureIntent) bool {
 	for _, intent := range intents {
 		for _, copy := range intent.Copies {
-			if copy.SessionID == row.ID && (!copy.Complete || slices.ContainsFunc(row.Entries, func(e api.Entry) bool { return e.ID == copy.ID && !e.IsErased() })) {
+			if copy.SessionID == row.ID && (!copy.Complete || !slices.ContainsFunc(row.Entries, func(e api.Entry) bool { return e.ID == copy.ID && e.IsErased() })) {
 				return true
 			}
 		}
@@ -303,20 +297,28 @@ func needsErasure(row api.Session, intents []api.ErasureIntent) bool {
 }
 
 func reconcileCopies(lease api.Lease, snap api.Session, intents *[]api.ErasureIntent) (api.Session, error) {
+	return reconcileCopyRecords(lease, snap, *intents, nil)
+}
+
+func reconcileCopyRecords(lease api.Lease, snap api.Session, intents []api.ErasureIntent, records map[string]string) (api.Session, error) {
 	exact, ok := lease.(api.ExactErasureLease)
 	if !ok {
 		return snap, api.ErrErasureUnsupported
 	}
-	if needsErasure(snap, *intents) {
+	save := lease.Save
+	if l, ok := lease.(interface{ SaveErasureRecords(api.Session) error }); ok {
+		save = l.SaveErasureRecords
+	}
+	if needsErasure(snap, intents) {
 		settled := settleForErasure(snap)
 		if len(settled.Entries) > len(snap.Entries) {
-			if err := lease.Save(settled); err != nil {
+			if err := save(settled); err != nil {
 				return snap, err
 			}
 			snap = settled
 		}
 	}
-	for _, intent := range *intents {
+	for _, intent := range intents {
 		var ids []string
 		for _, copy := range intent.Copies {
 			if copy.SessionID == snap.ID {
@@ -335,11 +337,14 @@ func reconcileCopies(lease api.Lease, snap api.Session, intents *[]api.ErasureIn
 				}
 			}
 		}
-		bookkeeping := intent.ID + "-" + snap.ID // distinct, stable per-session identity
+		bookkeeping := records[intent.ID]
+		if bookkeeping == "" {
+			bookkeeping = intent.ID + "-" + snap.ID
+		}
 		if !slices.ContainsFunc(snap.Entries, func(e api.Entry) bool { return e.ID == bookkeeping && e.Kind == "erasure" && !e.IsErased() }) {
 			snap.Entries = slices.Clip(snap.Entries)
 			appendEntry(&snap, api.Entry{ID: bookkeeping, Kind: "erasure", Data: api.JSON(record)}, "harness", true)
-			if err := lease.Save(snap); err != nil {
+			if err := save(snap); err != nil {
 				return snap, err
 			}
 		}
@@ -357,7 +362,11 @@ func reconcileCopies(lease api.Lease, snap api.Session, intents *[]api.ErasureIn
 			}
 		}
 		var err error
-		snap, err = lease.Load()
+		load := lease.Load
+		if l, ok := lease.(api.RemoteErasureLease); ok {
+			load = l.LoadErasure
+		}
+		snap, err = load()
 		if err != nil {
 			return snap, err
 		}
@@ -372,12 +381,12 @@ func reconcileCopies(lease api.Lease, snap api.Session, intents *[]api.ErasureIn
 
 // Prevent publication of a stale fork or new copy after the erasure cutoff.
 // The check and the save are ordered by the same registry lock as publication.
-func (s *session) withErasureCheck(next api.Session, save func(string) error) error {
+func (s *session) withErasureCheck(next api.Session, save func() error) error {
 	registry := s.erasureCoordinator()
 	if registry == nil {
-		return save("")
+		return save()
 	}
-	check := func(intents []api.ErasureIntent, guard string) error {
+	check := func(intents []api.ErasureIntent) error {
 		if needsErasure(s.data, intents) {
 			return api.ErrErasureUnavailable
 		}
@@ -396,20 +405,7 @@ func (s *session) withErasureCheck(next api.Session, save func(string) error) er
 				}
 			}
 		}
-		return save(guard)
+		return save()
 	}
-	if remote, ok := registry.(api.RemoteErasureCoordinator); ok {
-		return remote.GuardErasure(check)
-	}
-	return registry.PendingErasures(func(intents *[]api.ErasureIntent) error { return check(*intents, "") })
-}
-
-func guardedSave(lease api.Lease, next api.Session, guard string) error {
-	if guard == "" {
-		return lease.Save(next)
-	}
-	if lease, ok := lease.(api.GuardedErasureLease); ok {
-		return lease.SaveGuarded(next, guard)
-	}
-	return api.ErrErasureUnavailable
+	return registry.PendingErasures(func(intents *[]api.ErasureIntent) error { return check(*intents) })
 }
