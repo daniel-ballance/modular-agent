@@ -79,6 +79,8 @@ async def spawn_driver(home, project, runtime, phase):
     ],
 )
 async def test_sigkill_at_committed_boundaries(tmp_path, runtime_kind, phase):
+    if sys.platform != "linux" and phase in {"read_effect", "bash_effect"}:
+        pytest.skip("checks strong-containment repeat policy or a Linux setsid escape")
     home = tmp_path / "store"
     p = await spawn_driver(home, tmp_path, runtime_kind, phase)
     command_pids = []
