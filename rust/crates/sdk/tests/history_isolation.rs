@@ -62,3 +62,59 @@ async fn raw_history_isolated_by_instance_credential_and_namespace() -> modular_
     b.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_registry_stays_unavailable_after_restart() -> modular_agent::Result<()> {
+    let root = tempfile::tempdir()?;
+    let token = "Y7lSWvfTrVXoqDjufeu2ARTGQcHBq9w";
+    let token_file = root.path().join("token");
+    std::fs::write(&token_file, token)?;
+    let dir = root.path().join("history");
+    let opts = || ServeHistoryOptions::new("127.0.0.1:0".parse().unwrap(), &token_file);
+    let server = listen_history(file_history(&dir)?, opts()).await?;
+    let client = reqwest::Client::new();
+    assert!(
+        client
+            .put(format!("{}/v1/sessions/known", server.url))
+            .bearer_auth(token)
+            .json(&json!({"project":"/","created":0}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let read_plans = |url: &str| {
+        client
+            .get(format!("{url}/v1/sessions/known/pending-erasure"))
+            .bearer_auth(token)
+    };
+    assert!(
+        read_plans(&server.url)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let control = dir.join("history-service-control-v1.json");
+    std::fs::remove_file(&control)?;
+    let reply = read_plans(&server.url).send().await.unwrap();
+    assert_eq!(reply.status(), 503);
+    assert_eq!(
+        reply.json::<serde_json::Value>().await.unwrap()["code"],
+        "unavailable"
+    );
+    server.close().await;
+
+    let restarted = listen_history(file_history(&dir)?, opts()).await?;
+    let reply = read_plans(&restarted.url).send().await.unwrap();
+    assert_eq!(reply.status(), 503);
+    assert_eq!(
+        reply.json::<serde_json::Value>().await.unwrap()["code"],
+        "unavailable"
+    );
+    assert!(!control.exists());
+    restarted.close().await;
+    Ok(())
+}

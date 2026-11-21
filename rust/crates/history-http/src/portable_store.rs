@@ -32,6 +32,9 @@ pub struct EntryPage {
 pub enum HistoryFault {
     UnknownSession,
     UnknownEntry,
+    UnknownIntent,
+    StaleRevision,
+    RequestTooLarge,
     Held {
         retry_after_ms: u64,
     },
@@ -60,15 +63,36 @@ pub trait PortableHistoryStore: Send + Sync + 'static {
     fn supports_erasure(&self) -> bool {
         false
     }
-    /// A service-specific extension, separate from the raw history binding.
-    fn coordinates_erasure(&self) -> bool {
+    /// Opt in only if the store implements all operations of `pendingErasure: 1`.
+    fn pending_erasure_v1(&self) -> bool {
         false
     }
-    async fn pending_erasure(
+    async fn erasure_plans(
         &self,
         _session: &str,
-        _targets: Option<Vec<String>>,
+        _after: Option<&str>,
+        _limit: usize,
     ) -> HistoryResult<Value> {
+        Err(HistoryFault::Unavailable)
+    }
+    async fn publish_erasure(&self, _session: &str, _body: Value) -> HistoryResult<Value> {
+        Err(HistoryFault::Unavailable)
+    }
+    async fn complete_erasure(
+        &self,
+        _session: &str,
+        _intent: &str,
+        _body: Value,
+    ) -> HistoryResult<Value> {
+        Err(HistoryFault::Unavailable)
+    }
+    async fn guarded_append(
+        &self,
+        _session: &str,
+        _lease: &str,
+        _entries: Vec<Value>,
+        _revision: &str,
+    ) -> HistoryResult<u64> {
         Err(HistoryFault::Unavailable)
     }
     async fn create(&self, session: &str, metadata: Value) -> HistoryResult<()>;
@@ -103,30 +127,44 @@ pub trait PortableHistoryStore: Send + Sync + 'static {
     }
 }
 
+pub(super) struct RequestOptions<'a> {
+    pub project: Option<&'a Path>,
+    pub after: Option<&'a str>,
+    pub limit: usize,
+    pub revision: Option<&'a str>,
+}
+
 pub(super) async fn request(
     store: &dyn PortableHistoryStore,
     method: Method,
     path: &[&str],
-    project: Option<&Path>,
     body: Option<Value>,
-    after: Option<&str>,
-    limit: usize,
+    options: RequestOptions<'_>,
 ) -> Result<(StatusCode, Value)> {
+    let RequestOptions {
+        project,
+        after,
+        limit,
+        revision,
+    } = options;
     let body = body.unwrap_or_default();
     let reply: HistoryResult<Value> = match (method, path) {
         (Method::GET, ["v1"]) => {
             let mut declaration =
                 json!({"binding":"modular-agent-history/1", "ttlMs":store.ttl_ms()});
-            if store.coordinates_erasure() {
-                declaration["rustPendingErasure"] = json!(1);
+            if store.pending_erasure_v1() {
+                declaration["pendingErasure"] = json!(1);
             }
             Ok(declaration)
         }
-        (Method::GET, ["rust", "erasure", "v1", id]) => store.pending_erasure(id, None).await,
-        (Method::POST, ["rust", "erasure", "v1", id]) => {
-            store
-                .pending_erasure(id, Some(serde_json::from_value(body["entryIds"].clone())?))
-                .await
+        (Method::GET, ["v1", "sessions", id, "pending-erasure"]) => {
+            store.erasure_plans(id, after, limit).await
+        }
+        (Method::POST, ["v1", "sessions", id, "pending-erasure"]) => {
+            store.publish_erasure(id, body).await
+        }
+        (Method::POST, ["v1", "sessions", id, "pending-erasure", intent, "complete"]) => {
+            store.complete_erasure(id, intent, body).await
         }
         (Method::PUT, ["v1", "sessions", id]) => store.create(id, body).await.map(|()| json!({})),
         (Method::GET, ["v1", "sessions"]) => {
@@ -145,14 +183,16 @@ pub(super) async fn request(
         (Method::DELETE, ["v1", "sessions", id, "lease", token]) => {
             store.release(id, token).await.map(|()| json!({}))
         }
-        (Method::POST, ["v1", "sessions", id, "entries"]) => store
-            .append(
-                id,
-                wire::string(&body, "lease")?,
-                serde_json::from_value(body["entries"].clone())?,
-            )
-            .await
-            .map(|kept| json!({"kept":kept})),
+        (Method::POST, ["v1", "sessions", id, "entries"]) => {
+            let lease = wire::string(&body, "lease")?;
+            let entries = serde_json::from_value(body["entries"].clone())?;
+            let result = if let Some(revision) = revision.filter(|_| store.pending_erasure_v1()) {
+                store.guarded_append(id, lease, entries, revision).await
+            } else {
+                store.append(id, lease, entries).await
+            };
+            result.map(|kept| json!({"kept":kept}))
+        }
         (Method::POST, ["v1", "sessions", id, "erase"]) => store
             .erase(
                 id,
@@ -170,6 +210,9 @@ pub(super) async fn request(
     let (status, code) = match fault {
         HistoryFault::UnknownSession => (StatusCode::NOT_FOUND, "unknown_session"),
         HistoryFault::UnknownEntry => (StatusCode::NOT_FOUND, "unknown_entry"),
+        HistoryFault::UnknownIntent => (StatusCode::NOT_FOUND, "unknown_intent"),
+        HistoryFault::StaleRevision => (StatusCode::CONFLICT, "stale_revision"),
+        HistoryFault::RequestTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "request_too_large"),
         HistoryFault::Held { retry_after_ms } => {
             return Ok((
                 StatusCode::CONFLICT,

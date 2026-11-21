@@ -1,160 +1,186 @@
-//! Rust-only history coordination. The raw binding still reads opaque records.
-use agent_api::*;
+//! Wire and durable records for the pending-erasure profile. No payload or keys.
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Registry {
-    intents: Vec<Intent>,
+    pub intents: Vec<Intent>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct Intent {
-    source: String,
-    targets: Vec<String>,
-    copies: BTreeMap<String, Plan>,
+#[serde(deny_unknown_fields)]
+pub(crate) struct Intent {
+    pub id: String,
+    pub source: String,
+    pub targets: BTreeSet<String>,
+    pub plans: Vec<(String, Plan)>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Plan {
-    pub(crate) record: String,
-    pub(crate) targets: Vec<String>,
-    #[serde(default)]
-    pub(crate) confirmed: BTreeSet<String>,
+    pub intent_id: String,
+    pub source_session_id: String,
+    pub record_id: String,
+    pub copies: Vec<Copy>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Copy {
+    pub entry_id: String,
+    pub complete: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CopySet {
+    pub session_id: String,
+    pub record_id: String,
+    pub entry_ids: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Publication {
+    pub lease: String,
+    pub revision: String,
+    pub intent_id: String,
+    pub entry_ids: Vec<String>,
+    pub copies: Vec<CopySet>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PlansPage {
+    pub revision: String,
+    pub plans: Vec<Plan>,
+    pub next: Option<String>,
+}
+
+pub(crate) fn path_id(id: &str) -> bool {
+    !matches!(id, "" | "." | "..")
+}
+
+pub(crate) fn distinct_ids(ids: &[String]) -> bool {
+    !ids.is_empty()
+        && ids.iter().all(|id| !id.is_empty())
+        && ids.iter().collect::<HashSet<_>>().len() == ids.len()
+}
+
+impl Intent {
+    pub fn new(source: &str, id: String, targets: BTreeSet<String>, copies: Vec<CopySet>) -> Self {
+        let plans = copies
+            .into_iter()
+            .map(|set| {
+                (
+                    set.session_id,
+                    Plan {
+                        intent_id: id.clone(),
+                        source_session_id: source.into(),
+                        record_id: set.record_id,
+                        copies: set
+                            .entry_ids
+                            .into_iter()
+                            .map(|entry_id| Copy {
+                                entry_id,
+                                complete: false,
+                            })
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            id,
+            source: source.into(),
+            targets,
+            plans,
+        }
+    }
+
+    pub fn plan(&self, session: &str) -> Option<&Plan> {
+        self.plans
+            .iter()
+            .find(|(sid, _)| sid == session)
+            .map(|(_, plan)| plan)
+    }
+
+    pub fn same_copies(&self, copies: &[CopySet]) -> bool {
+        self.plans.len() == copies.len()
+            && copies.iter().all(|set| {
+                self.plan(&set.session_id).is_some_and(|plan| {
+                    plan.record_id == set.record_id
+                        && plan.copies.len() == set.entry_ids.len()
+                        && plan
+                            .copies
+                            .iter()
+                            .all(|copy| set.entry_ids.contains(&copy.entry_id))
+                })
+            })
+    }
 }
 
 impl Registry {
-    pub(crate) fn plans(&self, session: &str) -> Vec<Plan> {
+    pub fn plans(&self, session: &str) -> impl Iterator<Item = &Plan> {
         self.intents
             .iter()
-            .filter_map(|i| i.copies.get(session).cloned())
-            .collect()
+            .filter_map(move |intent| intent.plan(session))
     }
 
-    pub(crate) fn confirm(&mut self, session: &str, entries: &[Value], erased: &[&Value]) -> bool {
-        let mut changed = false;
-        for plan in self
-            .intents
-            .iter_mut()
-            .filter_map(|i| i.copies.get_mut(session))
-        {
-            for id in &plan.targets {
-                if erased.iter().any(|v| v.as_str() == Some(id))
-                    && entries.iter().any(|e| {
-                        e["kind"] == "erasure"
-                            && e["erased"] != true
-                            && e["data"]["entryIds"]
-                                .as_array()
-                                .is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(id)))
-                    })
-                {
-                    changed |= plan.confirmed.insert(id.clone());
-                }
-            }
+    // Adopt an existing Rust store without losing either pending or completed marks.
+    pub fn migrate(value: agent_api::Value) -> agent_api::Result<Self> {
+        #[derive(Deserialize)]
+        struct LegacyRegistry {
+            intents: Vec<LegacyIntent>,
         }
-        changed
-    }
-
-    pub(crate) fn affected(&self, entry: &Value) -> bool {
-        let ids = self
-            .intents
-            .iter()
-            .flat_map(|i| i.copies.values())
-            .flat_map(|p| &p.targets);
-        ids.into_iter().any(|id| {
-            entry["id"].as_str() == Some(id)
-                || entry["sources"]
-                    .as_array()
-                    .is_some_and(|sources| sources.iter().any(|source| source.as_str() == Some(id)))
-        })
-    }
-
-    pub(crate) fn mark(
-        &mut self,
-        source: &str,
-        mut targets: Vec<String>,
-        sessions: &[SessionData],
-    ) -> Result<BTreeMap<String, Vec<String>>> {
-        targets.sort();
-        targets.dedup();
-        if let Some(intent) = self
-            .intents
-            .iter()
-            .find(|i| i.source == source && i.targets == targets)
-        {
-            return Ok(intent
+        #[derive(Deserialize)]
+        struct LegacyIntent {
+            source: String,
+            targets: Vec<String>,
+            copies: BTreeMap<String, LegacyPlan>,
+        }
+        #[derive(Deserialize)]
+        struct LegacyPlan {
+            record: String,
+            targets: Vec<String>,
+            #[serde(default)]
+            confirmed: BTreeSet<String>,
+        }
+        let old: LegacyRegistry = serde_json::from_value(value)?;
+        let mut intents = Vec::new();
+        for old in old.intents {
+            let id = agent_api::id();
+            let plans = old
                 .copies
-                .iter()
-                .map(|(session, plan)| (session.clone(), plan.targets.clone()))
-                .collect());
-        }
-        let source_data = sessions
-            .iter()
-            .find(|s| s.id == source)
-            .ok_or_else(|| OperationError::NotFound("unknown erasure source".into()))?;
-        for target in &targets {
-            let entry = source_data
-                .entries
-                .iter()
-                .find(|entry| entry.id == *target)
-                .ok_or_else(|| OperationError::NotFound("unknown erasure target".into()))?;
-            ensure!(
-                entry.writer != "rust.derived"
-                    && !authority_record(entry)
-                    && entry.kind != "erasure",
-                OperationError::Forbidden("protected erasure target".into())
-            );
-        }
-        let mut ids: BTreeSet<String> = targets.iter().cloned().collect();
-        loop {
-            let before = ids.len();
-            for e in sessions.iter().flat_map(|s| &s.entries) {
-                if e.kind == "input" && ids.contains(&e.id) {
-                    ids.extend(e.copies.iter().cloned());
-                }
-                if e.copies.iter().any(|id| ids.contains(id)) {
-                    ids.insert(e.id.clone());
-                }
-            }
-            if before == ids.len() {
-                break;
-            }
-        }
-        let copies: BTreeMap<_, _> = sessions
-            .iter()
-            .filter_map(|s| {
-                let targets: Vec<_> = s
-                    .entries
-                    .iter()
-                    .filter(|e| {
-                        e.writer != "rust.derived"
-                            && !authority_record(e)
-                            && e.kind != "erasure"
-                            && ids.contains(&e.id)
-                    })
-                    .map(|e| e.id.clone())
-                    .collect();
-                (!targets.is_empty()).then(|| {
+                .into_iter()
+                .map(|(sid, plan)| {
                     (
-                        s.id.clone(),
+                        sid,
                         Plan {
-                            record: id(),
-                            targets,
-                            confirmed: BTreeSet::new(),
+                            intent_id: id.clone(),
+                            source_session_id: old.source.clone(),
+                            record_id: plan.record,
+                            copies: plan
+                                .targets
+                                .into_iter()
+                                .map(|entry_id| Copy {
+                                    complete: plan.confirmed.contains(&entry_id),
+                                    entry_id,
+                                })
+                                .collect(),
                         },
                     )
                 })
-            })
-            .collect();
-        let result = copies
-            .iter()
-            .map(|(session, plan)| (session.clone(), plan.targets.clone()))
-            .collect();
-        self.intents.push(Intent {
-            source: source.into(),
-            targets,
-            copies,
-        });
-        Ok(result)
+                .collect();
+            intents.push(Intent {
+                id,
+                source: old.source,
+                targets: old.targets.into_iter().collect(),
+                plans,
+            });
+        }
+        Ok(Self { intents })
     }
 }

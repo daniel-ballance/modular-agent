@@ -1,7 +1,9 @@
 //! Loopback HTTP transport for the opaque history binding.
 use super::{
     BODY_LIMIT, EntryPage, HistoryFault, HistoryResult, LeaseGrant, PAGE_LIMIT,
-    PortableHistoryStore, SessionPage, portable_store,
+    PortableHistoryStore, SessionPage,
+    pending::{self, Intent, Publication, Registry},
+    portable_store,
 };
 use agent_api::{
     Entry, HistoryStore, Lease, OperationError, Scope, SessionData, Value, anyhow, ensure, json,
@@ -185,8 +187,21 @@ pub struct SnapshotStore {
     _exclusive: Box<dyn Lease>,
     ttl_ms: u64,
     hold: Option<Instant>,
+    authoritative: bool,
     max_sessions: usize,
-    leases: Mutex<HashMap<String, Grant>>,
+    state: Mutex<State>,
+}
+struct State {
+    leases: HashMap<String, Grant>,
+    // Reads and mutations share this lock. A new random epoch on startup
+    // invalidates every old observation, even after an uncertain save.
+    revision: String,
+}
+impl State {
+    fn advance(revision: &mut String) -> std::result::Result<(), Failure> {
+        *revision = nonce()?;
+        Ok(())
+    }
 }
 struct Grant {
     token: String,
@@ -215,45 +230,73 @@ impl SnapshotStore {
         );
         ensure!(max_sessions > 0, "history session quota must be positive");
         let exclusive = store.acquire(CONTROL)?;
-        let (prior, registry) = match store.load(CONTROL) {
-            Ok(mut data) => (
-                Some(
-                    data.settings["historyTtlBound"]
-                        .as_u64()
-                        .filter(|ms| (1..=MAX_COUNT).contains(ms))
-                        .ok_or_else(|| anyhow!("unknown previous history lease bound"))?,
-                ),
-                data.settings["pendingErasure"].take(),
-            ),
-            Err(e) if missing(&e) => {
-                ensure!(
-                    store.list(None)?.is_empty(),
-                    "history service needs a dedicated store with a verifiable lease bound"
-                );
-                (None, Value::Null)
-            }
-            Err(e) => return Err(e),
-        };
-        let bound = ttl_ms.max(prior.unwrap_or(0));
-        if !registry.is_null() {
-            serde_json::from_value::<super::pending::Registry>(registry.clone())?;
-        }
-        if prior != Some(bound) || registry.is_null() {
-            store.save(&snapshot_data(
-                CONTROL.into(),
-                json!({"historyTtlBound": bound, "pendingErasure": if registry.is_null() { json!(super::pending::Registry::default()) } else { registry }}),
-                vec![],
-            ))?;
-        }
-        let hold = prior.map(|_| Instant::now() + Duration::from_millis(bound));
+        let (authoritative, hold) = Self::prepare_control(store.as_ref(), ttl_ms)?;
         Ok(Self {
             store,
             _exclusive: exclusive,
             ttl_ms,
             hold,
+            authoritative,
             max_sessions,
-            leases: Mutex::default(),
+            state: Mutex::new(State {
+                leases: HashMap::new(),
+                revision: nonce().map_err(|_| anyhow!("cannot generate history revision"))?,
+            }),
         })
+    }
+
+    fn prepare_control(
+        store: &dyn HistoryStore,
+        ttl_ms: u64,
+    ) -> agent_api::Result<(bool, Option<Instant>)> {
+        let (prior, mut control) = match store.load(CONTROL) {
+            Ok(data) => {
+                let Some(bound) = data.settings["historyTtlBound"]
+                    .as_u64()
+                    .filter(|ms| (1..=MAX_COUNT).contains(ms))
+                else {
+                    return Ok((false, None));
+                };
+                (Some(bound), data)
+            }
+            Err(e) if missing(&e) && store.list(None).is_ok_and(|rows| rows.is_empty()) => (
+                None,
+                snapshot_data(
+                    CONTROL.into(),
+                    json!({"pendingErasureV1": Registry::default()}),
+                    vec![],
+                ),
+            ),
+            // There is no proof that old leases have expired. Do not recreate
+            // the control record or serve any history until an operator repairs it.
+            Err(_) => return Ok((false, None)),
+        };
+        let bound = ttl_ms.max(prior.unwrap_or(0));
+        let migrated = if !control.settings["pendingErasure"].is_null() {
+            if control.settings.get("pendingErasureV1").is_none()
+                && let Ok(registry) = Registry::migrate(control.settings["pendingErasure"].clone())
+            {
+                control.settings["pendingErasureV1"] = json!(registry);
+                control
+                    .settings
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("pendingErasure");
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if prior != Some(bound) || migrated {
+            control.settings["historyTtlBound"] = json!(bound);
+            store.save(&control)?;
+        }
+        Ok((
+            true,
+            prior.map(|_| Instant::now() + Duration::from_millis(bound)),
+        ))
     }
 
     fn load(&self, id: &str) -> std::result::Result<Option<Snapshot>, Failure> {
@@ -277,57 +320,152 @@ impl SnapshotStore {
         self.store.save(&data).map_err(|_| Failure::Uncertain)
     }
 
-    fn registry(&self) -> std::result::Result<(SessionData, super::pending::Registry), Failure> {
+    fn registry(&self) -> std::result::Result<(SessionData, Registry), Failure> {
         let control = self
             .store
             .load(CONTROL)
             .map_err(|_| Failure::unavailable())?;
-        let registry = serde_json::from_value(control.settings["pendingErasure"].clone())
+        let registry = serde_json::from_value(control.settings["pendingErasureV1"].clone())
             .map_err(|_| Failure::unavailable())?;
         Ok((control, registry))
     }
 
-    // Runs under the same lock as append. Publication cannot miss a committed copy.
-    fn pending(&self, session: &str, targets: Option<Vec<String>>) -> Answer {
-        let (mut control, mut registry) = self.registry()?;
-        let Some(targets) = targets else {
-            return Ok(json!({"plans":registry.plans(session)}));
-        };
-        let mut sessions = Vec::new();
-        for snapshot in self.store.list(None).map_err(|_| Failure::unavailable())? {
-            if !snapshot.id.starts_with(PREFIX) {
-                continue;
-            }
-            let snapshot = unpack(snapshot)?;
-            // The raw API can store non-Harness records. Preserve its opaque
-            // behavior; do not infer authority or lineage from malformed rows.
-            if snapshot.entries.is_empty() && snapshot.metadata["id"] != session {
-                continue;
-            }
-            let data = agent_api::portable::session(&snapshot.metadata, &snapshot.entries)
-                .map_err(|_| Failure::unavailable())?;
-            sessions.push(data);
-        }
-        let copies = registry
-            .mark(session, targets, &sessions)
-            .map_err(|error| match error.downcast_ref::<OperationError>() {
-                Some(OperationError::NotFound(_)) => Failure::http(404, "unknown_entry"),
-                Some(OperationError::Forbidden(_)) => Failure::http(403, "forbidden"),
-                _ => Failure::unavailable(),
-            })?;
-        control.settings["pendingErasure"] = json!(registry);
+    fn save_registry(
+        &self,
+        mut control: SessionData,
+        registry: Registry,
+        revision: &mut String,
+    ) -> Answer {
+        State::advance(revision)?;
+        control.settings["pendingErasureV1"] = json!(registry);
         self.store.save(&control).map_err(|_| Failure::Uncertain)?;
-        Ok(json!({"copies":copies}))
+        Ok(json!({}))
+    }
+
+    fn publish(&self, session: &str, request: Publication, revision: &mut String) -> Answer {
+        let (control, mut registry) = self.registry()?;
+        let targets = request.entry_ids.into_iter().collect();
+        if let Some(intent) = registry.intents.iter().find(|i| i.id == request.intent_id) {
+            return if intent.source == session
+                && intent.targets == targets
+                && intent.same_copies(&request.copies)
+            {
+                Ok(json!({"intentId":intent.id}))
+            } else {
+                Err(Failure::conflict())
+            };
+        }
+        if let Some(intent) = registry
+            .intents
+            .iter()
+            .find(|i| i.source == session && i.targets == targets)
+        {
+            return Ok(json!({"intentId":intent.id}));
+        }
+        if request.revision != *revision {
+            return Err(Failure::http(409, "stale_revision"));
+        }
+        let intent = Intent::new(session, request.intent_id, targets, request.copies);
+        for (sid, plan) in &intent.plans {
+            let record = self
+                .load(sid)?
+                .ok_or_else(|| Failure::http(404, "unknown_session"))?;
+            let entries: HashSet<_> = record
+                .entries
+                .iter()
+                .filter_map(|e| e["id"].as_str())
+                .collect();
+            if plan
+                .copies
+                .iter()
+                .any(|copy| !entries.contains(copy.entry_id.as_str()))
+            {
+                return Err(Failure::http(404, "unknown_entry"));
+            }
+            if entries.contains(plan.record_id.as_str())
+                || registry.plans(sid).any(|p| p.record_id == plan.record_id)
+            {
+                return Err(Failure::conflict());
+            }
+            if !fits(&json!({"revision":"A".repeat(128),"plans":[plan],"next":intent.id})) {
+                return Err(Failure::http(413, "request_too_large"));
+            }
+        }
+        let reply = json!({"intentId":intent.id});
+        registry.intents.push(intent);
+        self.save_registry(control, registry, revision)?;
+        Ok(reply)
+    }
+
+    fn complete(
+        &self,
+        session: &str,
+        intent: &str,
+        record: &Snapshot,
+        ids: Value,
+        revision: &mut String,
+    ) -> Answer {
+        let (control, mut registry) = self.registry()?;
+        let plan = registry
+            .intents
+            .iter_mut()
+            .find(|i| i.id == intent)
+            .and_then(|i| i.plans.iter_mut().find(|(sid, _)| sid == session))
+            .map(|(_, plan)| plan)
+            .ok_or_else(|| Failure::http(404, "unknown_intent"))?;
+        let ids: Vec<String> = serde_json::from_value(ids).map_err(|_| Failure::invalid())?;
+        let ids: HashSet<_> = ids.iter().map(String::as_str).collect();
+        if plan
+            .copies
+            .iter()
+            .filter(|c| ids.contains(c.entry_id.as_str()))
+            .count()
+            != ids.len()
+        {
+            return Err(Failure::invalid());
+        }
+        let bookkeeping = record
+            .entries
+            .iter()
+            .find(|e| e["id"] == plan.record_id && e["kind"] == "erasure" && e["erased"] != true)
+            .and_then(|e| e["data"]["entryIds"].as_array())
+            .ok_or_else(Failure::conflict)?;
+        let listed: HashSet<_> = bookkeeping.iter().filter_map(Value::as_str).collect();
+        let tombstones: HashSet<_> = record
+            .entries
+            .iter()
+            .filter(|e| e["erased"] == true)
+            .filter_map(|e| e["id"].as_str())
+            .collect();
+        if !ids.is_subset(&listed) || !ids.is_subset(&tombstones) {
+            return Err(Failure::conflict());
+        }
+        let mut changed = false;
+        for copy in &mut plan.copies {
+            if ids.contains(copy.entry_id.as_str()) && !copy.complete {
+                copy.complete = true;
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_registry(control, registry, revision)
+        } else {
+            Ok(json!({}))
+        }
     }
 
     fn apply(&self, route: Route, op: Op, query: Query, mut body: Value) -> Answer {
-        let mut leases = self.leases.lock().map_err(|_| Failure::unavailable())?;
+        if !self.authoritative && !matches!(route, Route::Root) {
+            return Err(Failure::unavailable());
+        }
+        let mut state = self.state.lock().map_err(|_| Failure::unavailable())?;
+        let State { leases, revision } = &mut *state;
         let now = Instant::now();
         leases.retain(|_, lease| lease.until > now);
         let id = match route {
             Route::Root => {
                 return Ok(
-                    json!({"binding":"modular-agent-history/1","ttlMs":self.ttl_ms,"rustPendingErasure":1}),
+                    json!({"binding":"modular-agent-history/1","ttlMs":self.ttl_ms,"pendingErasure":1}),
                 );
             }
             Route::Sessions => {
@@ -347,13 +485,19 @@ impl SnapshotStore {
                 });
                 return page(json!({}), "sessions", &rows, query, "unknown_session");
             }
-            Route::Pending(ref id) => {
-                return self.pending(
-                    id,
-                    matches!(op, Op::Mark).then(|| {
-                        serde_json::from_value(body["entryIds"].take())
-                            .expect("validated erasure IDs")
-                    }),
+            Route::Pending(ref id) if matches!(op, Op::Get) => {
+                let (_, registry) = self.registry()?;
+                if self.load(id)?.is_none() {
+                    return Err(Failure::http(404, "unknown_session"));
+                }
+                let plans: Vec<_> = registry.plans(id).map(|p| json!(p)).collect();
+                return page_with_cursor(
+                    json!({"revision":revision}),
+                    "plans",
+                    &plans,
+                    query,
+                    "intentId",
+                    "unknown_intent",
                 );
             }
             Route::Session(ref id)
@@ -361,7 +505,9 @@ impl SnapshotStore {
             | Route::Lease(ref id, _)
             | Route::Renew(ref id, _)
             | Route::Entries(ref id)
-            | Route::Erase(ref id) => id,
+            | Route::Erase(ref id)
+            | Route::Pending(ref id)
+            | Route::Complete(ref id, _) => id,
         };
         if matches!(op, Op::Put) {
             body["id"] = json!(id);
@@ -386,6 +532,7 @@ impl SnapshotStore {
             {
                 return Err(Failure::unavailable());
             }
+            State::advance(revision)?;
             self.save(
                 id,
                 Snapshot {
@@ -422,9 +569,7 @@ impl SnapshotStore {
                     }
                     return Ok(json!({"lease":grant.token,"ttlMs":self.ttl_ms}));
                 }
-                let mut bytes = [0_u8; 32];
-                getrandom::fill(&mut bytes).map_err(|_| Failure::unavailable())?;
-                let token = hex(&bytes);
+                let token = nonce()?;
                 leases.insert(
                     id.clone(),
                     Grant {
@@ -458,14 +603,17 @@ impl SnapshotStore {
                 if !active.is_some_and(|g| body["lease"] == g.token) {
                     return Err(Failure::lost());
                 }
+                if let Some(guard) = &query.revision {
+                    self.registry()?;
+                    if guard != revision {
+                        return Err(Failure::http(409, "stale_revision"));
+                    }
+                }
                 let more = body["entries"].take();
                 let added = stage(&record, more.as_array().unwrap())?;
                 let kept = added.len();
                 if kept != 0 {
-                    let (_, registry) = self.registry()?;
-                    if added.iter().any(|e| registry.affected(e)) {
-                        return Err(Failure::unavailable());
-                    }
+                    State::advance(revision)?;
                     record.entries.extend(added);
                     self.save(id, record)?;
                 }
@@ -495,22 +643,29 @@ impl SnapshotStore {
                         }
                     }
                 }
-                if body.get("lease").is_some() {
-                    let (mut control, mut registry) = self.registry()?;
-                    let progress = registry.confirm(id, &record.entries, &erased);
-                    if changed {
-                        self.save(id, record)?;
-                    }
-                    if progress {
-                        control.settings["pendingErasure"] = json!(registry);
-                        self.store.save(&control).map_err(|_| Failure::Uncertain)?;
-                    }
-                } else if changed {
+                if changed {
+                    State::advance(revision)?;
                     self.save(id, record)?;
                 }
                 Ok(json!({"erased":erased}))
             }
-            Op::Put | Op::Mark => unreachable!(),
+            Op::Mark | Op::Complete => {
+                if !active.is_some_and(|g| body["lease"] == g.token) {
+                    return Err(Failure::lost());
+                }
+                match route {
+                    Route::Pending(_) => self.publish(
+                        id,
+                        serde_json::from_value(body).map_err(|_| Failure::invalid())?,
+                        revision,
+                    ),
+                    Route::Complete(_, ref intent) => {
+                        self.complete(id, intent, &record, body["entryIds"].take(), revision)
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Op::Put => unreachable!(),
         }
     }
 }
@@ -529,10 +684,13 @@ impl From<Failure> for HistoryFault {
             Failure::Http(_, code, _) => match code {
                 "unknown_session" => Self::UnknownSession,
                 "unknown_entry" => Self::UnknownEntry,
+                "unknown_intent" => Self::UnknownIntent,
+                "stale_revision" => Self::StaleRevision,
                 "invalid_request" => Self::InvalidRequest,
                 "lost" => Self::Lost,
                 "conflict" => Self::Conflict,
-                "entry_too_large" | "request_too_large" => Self::EntryTooLarge,
+                "entry_too_large" => Self::EntryTooLarge,
+                "request_too_large" => Self::RequestTooLarge,
                 _ => Self::Unavailable,
             },
         }
@@ -549,6 +707,7 @@ impl SnapshotStore {
     ) -> HistoryResult<Value> {
         route.validate()?;
         op.validate_body(&body, body.is_null())?;
+        validate_source(&route, &op, &body)?;
         tokio::task::spawn_blocking(move || self.apply(route, op, query, body))
             .await
             .map_err(|_| HistoryFault::Uncertain)?
@@ -568,20 +727,76 @@ impl PortableHistoryStore for Arc<SnapshotStore> {
         true
     }
 
-    fn coordinates_erasure(&self) -> bool {
+    fn pending_erasure_v1(&self) -> bool {
         true
     }
-    async fn pending_erasure(
+    async fn erasure_plans(
         &self,
         session: &str,
-        targets: Option<Vec<String>>,
+        after: Option<&str>,
+        limit: usize,
     ) -> HistoryResult<Value> {
-        let (op, body) = targets.map_or((Op::Get, Value::Null), |ids| {
-            (Op::Mark, json!({"entryIds":ids}))
-        });
         self.clone()
-            .portable(Route::Pending(session.into()), op, Query::default(), body)
+            .portable(
+                Route::Pending(session.into()),
+                Op::Get,
+                Query {
+                    after: after.map(str::to_owned),
+                    limit: limit.clamp(1, 500),
+                    ..Query::default()
+                },
+                Value::Null,
+            )
             .await
+    }
+    async fn publish_erasure(&self, session: &str, body: Value) -> HistoryResult<Value> {
+        self.clone()
+            .portable(
+                Route::Pending(session.into()),
+                Op::Mark,
+                Query::default(),
+                body,
+            )
+            .await
+    }
+    async fn complete_erasure(
+        &self,
+        session: &str,
+        intent: &str,
+        body: Value,
+    ) -> HistoryResult<Value> {
+        self.clone()
+            .portable(
+                Route::Complete(session.into(), intent.into()),
+                Op::Complete,
+                Query::default(),
+                body,
+            )
+            .await
+    }
+    async fn guarded_append(
+        &self,
+        session: &str,
+        lease: &str,
+        entries: Vec<Value>,
+        revision: &str,
+    ) -> HistoryResult<u64> {
+        if !valid_lease(revision) {
+            return Err(HistoryFault::InvalidRequest);
+        }
+        let reply = self
+            .clone()
+            .portable(
+                Route::Entries(session.into()),
+                Op::Append,
+                Query {
+                    revision: Some(revision.into()),
+                    ..Query::default()
+                },
+                json!({"lease":lease,"entries":entries}),
+            )
+            .await?;
+        reply["kept"].as_u64().ok_or(HistoryFault::Unavailable)
     }
 
     async fn create(&self, session: &str, metadata: Value) -> HistoryResult<()> {
@@ -657,6 +872,7 @@ impl PortableHistoryStore for Arc<SnapshotStore> {
                     after: after.map(str::to_owned),
                     limit: limit.clamp(1, 500),
                     project: None,
+                    revision: None,
                 },
                 Value::Null,
             )
@@ -678,6 +894,7 @@ impl PortableHistoryStore for Arc<SnapshotStore> {
                     after: after.map(str::to_owned),
                     limit: limit.clamp(1, 500),
                     project: project.map(|p| p.to_string_lossy().into_owned()),
+                    revision: None,
                 },
                 Value::Null,
             )
@@ -736,15 +953,25 @@ fn fits(value: &Value) -> bool {
     serde_json::to_vec(value).is_ok_and(|v| v.len() <= PAGE_LIMIT)
 }
 fn page(
-    mut envelope: Value,
+    envelope: Value,
     field: &str,
     rows: &[Value],
     query: Query,
     unknown: &'static str,
 ) -> Answer {
+    page_with_cursor(envelope, field, rows, query, "id", unknown)
+}
+fn page_with_cursor(
+    mut envelope: Value,
+    field: &str,
+    rows: &[Value],
+    query: Query,
+    cursor: &str,
+    unknown: &'static str,
+) -> Answer {
     let start = if let Some(after) = query.after {
         rows.iter()
-            .position(|e| e["id"] == after)
+            .position(|e| e[cursor] == after)
             .ok_or_else(|| Failure::http(404, unknown))?
             + 1
     } else {
@@ -766,7 +993,7 @@ fn page(
             break;
         }
         let cursor_size = if i + 1 < rows.len() {
-            8 + serde_json::to_vec(&row["id"])
+            8 + serde_json::to_vec(&row[cursor])
                 .map_err(|_| Failure::unavailable())?
                 .len()
         } else {
@@ -781,7 +1008,7 @@ fn page(
     }
     envelope[field] = json!(&rows[..best]);
     if best < rows.len() {
-        envelope["next"] = rows[best - 1]["id"].clone();
+        envelope["next"] = rows[best - 1][cursor].clone();
     }
     Ok(envelope)
 }
@@ -865,6 +1092,11 @@ fn missing(e: &anyhow::Error) -> bool {
 }
 fn storage_key(id: &str) -> String {
     format!("{PREFIX}{}", hex(&Sha256::digest(id)))
+}
+fn nonce() -> std::result::Result<String, Failure> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| Failure::unavailable())?;
+    Ok(hex(&bytes))
 }
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -965,7 +1197,8 @@ async fn handle(
     };
     let mut response = Response::builder()
         .status(StatusCode::from_u16(status).unwrap())
-        .header(header::CONTENT_TYPE, "application/json");
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "no-store");
     if let Some((key, value)) = header {
         response = response.header(key, value);
     }
@@ -992,6 +1225,13 @@ async fn request(server: Arc<Server>, req: Request<Incoming>) -> Answer {
         ));
     }
     let mut route = Route::parse(parts.uri.path())?;
+    let profile = match &server.backend {
+        Backend::Snapshot(_) => true,
+        Backend::Portable(store) => store.pending_erasure_v1(),
+    };
+    if !profile && matches!(route, Route::Pending(_) | Route::Complete(..)) {
+        return Err(Failure::http(404, "not_found"));
+    }
     let op = route.method(&parts.method)?;
     let mut bytes = Vec::new();
     while let Some(frame) = stream.frame().await {
@@ -1015,13 +1255,28 @@ async fn request(server: Arc<Server>, req: Request<Incoming>) -> Answer {
         return Err(Failure::http(415, "unsupported_media_type"));
     }
     route.validate()?;
-    let query = Query::parse(parts.uri.query(), &route, &op)?;
+    let mut query = Query::parse(parts.uri.query(), &route, &op)?;
+    if profile && matches!(op, Op::Append) {
+        let mut headers = parts.headers.get_all("history-revision").iter();
+        if let Some(revision) = headers.next() {
+            let revision = revision
+                .to_str()
+                .ok()
+                .filter(|s| valid_lease(s))
+                .ok_or_else(Failure::invalid)?;
+            if headers.next().is_some() {
+                return Err(Failure::invalid());
+            }
+            query.revision = Some(revision.into());
+        }
+    }
     let body = if bytes.is_empty() {
         Value::Null
     } else {
         wire::decode_json(&bytes).map_err(|_| Failure::invalid())?
     };
     op.validate_body(&body, bytes.is_empty())?;
+    validate_source(&route, &op, &body)?;
     match &server.backend {
         Backend::Snapshot(store) => {
             let store = store.clone();
@@ -1035,10 +1290,13 @@ async fn request(server: Arc<Server>, req: Request<Incoming>) -> Answer {
                 store.as_ref(),
                 parts.method,
                 &path,
-                query.project.as_deref().map(std::path::Path::new),
                 (!bytes.is_empty()).then_some(body),
-                query.after.as_deref(),
-                query.limit,
+                portable_store::RequestOptions {
+                    project: query.project.as_deref().map(std::path::Path::new),
+                    after: query.after.as_deref(),
+                    limit: query.limit,
+                    revision: query.revision.as_deref(),
+                },
             )
             .await
             .map_err(|_| Failure::Uncertain)?;
@@ -1062,6 +1320,9 @@ async fn request(server: Arc<Server>, req: Request<Incoming>) -> Answer {
                     Some("conflict") => Failure::conflict(),
                     Some("entry_too_large") => Failure::http(413, "entry_too_large"),
                     Some("unknown_entry") => Failure::http(404, "unknown_entry"),
+                    Some("unknown_intent") => Failure::http(404, "unknown_intent"),
+                    Some("stale_revision") => Failure::http(409, "stale_revision"),
+                    Some("request_too_large") => Failure::http(413, "request_too_large"),
                     Some("unknown_session") => Failure::http(404, "unknown_session"),
                     Some("invalid_request") => Failure::invalid(),
                     _ => Failure::unavailable(),
@@ -1082,6 +1343,7 @@ enum Route {
     Entries(String),
     Erase(String),
     Pending(String),
+    Complete(String, String),
 }
 impl Route {
     fn segments(&self) -> Vec<&str> {
@@ -1094,7 +1356,10 @@ impl Route {
             Self::Renew(id, token) => vec!["v1", "sessions", id, "lease", token, "renew"],
             Self::Entries(id) => vec!["v1", "sessions", id, "entries"],
             Self::Erase(id) => vec!["v1", "sessions", id, "erase"],
-            Self::Pending(id) => vec!["rust", "erasure", "v1", id],
+            Self::Pending(id) => vec!["v1", "sessions", id, "pending-erasure"],
+            Self::Complete(id, intent) => {
+                vec!["v1", "sessions", id, "pending-erasure", intent, "complete"]
+            }
         }
     }
 
@@ -1117,7 +1382,16 @@ impl Route {
             }
             ["", "v1", "sessions", id, "entries"] => Self::Entries((*id).into()),
             ["", "v1", "sessions", id, "erase"] => Self::Erase((*id).into()),
-            ["", "rust", "erasure", "v1", id] => Self::Pending((*id).into()),
+            ["", "v1", "sessions", id, "pending-erasure"] => Self::Pending((*id).into()),
+            [
+                "",
+                "v1",
+                "sessions",
+                id,
+                "pending-erasure",
+                intent,
+                "complete",
+            ] => Self::Complete((*id).into(), (*intent).into()),
             _ => return Err(Failure::http(404, "not_found")),
         })
     }
@@ -1137,6 +1411,7 @@ impl Route {
             Self::Renew(..) => ("POST", (*method == Method::POST).then_some(Op::Renew)),
             Self::Entries(_) => ("POST", (*method == Method::POST).then_some(Op::Append)),
             Self::Erase(_) => ("POST", (*method == Method::POST).then_some(Op::Erase)),
+            Self::Complete(..) => ("POST", (*method == Method::POST).then_some(Op::Complete)),
             Self::Pending(_) => (
                 "GET, POST",
                 match *method {
@@ -1154,6 +1429,13 @@ impl Route {
     }
     fn validate(&mut self) -> std::result::Result<(), Failure> {
         let (id, lease) = match self {
+            Self::Complete(id, intent) => {
+                *intent = decode(intent)?;
+                if !pending::path_id(intent) {
+                    return Err(Failure::invalid());
+                }
+                (id, None)
+            }
             Self::Root | Self::Sessions => return Ok(()),
             Self::Session(id)
             | Self::Acquire(id)
@@ -1163,7 +1445,7 @@ impl Route {
             Self::Lease(id, key) | Self::Renew(id, key) => (id, Some(key)),
         };
         *id = decode(id)?;
-        if id.is_empty() {
+        if !pending::path_id(id) {
             return Err(Failure::invalid());
         }
         if let Some(key) = lease {
@@ -1185,6 +1467,7 @@ enum Op {
     Append,
     Erase,
     Mark,
+    Complete,
 }
 impl Op {
     fn validate_body(&self, body: &Value, empty: bool) -> std::result::Result<(), Failure> {
@@ -1220,7 +1503,27 @@ impl Op {
                         })
                     })
             }
-            Self::Erase | Self::Mark => {
+            Self::Mark => serde_json::from_value::<Publication>(body.clone()).is_ok_and(|p| {
+                let mut sessions = HashSet::new();
+                valid_lease(&p.lease)
+                    && valid_lease(&p.revision)
+                    && pending::path_id(&p.intent_id)
+                    && pending::distinct_ids(&p.entry_ids)
+                    && !p.copies.is_empty()
+                    && p.copies.iter().all(|c| {
+                        pending::path_id(&c.session_id)
+                            && sessions.insert(&c.session_id)
+                            && !c.record_id.is_empty()
+                            && pending::distinct_ids(&c.entry_ids)
+                    })
+            }),
+            Self::Complete => {
+                body.as_object().is_some_and(|b| b.len() == 2)
+                    && lease_field(&body["lease"])
+                    && serde_json::from_value::<Vec<String>>(body["entryIds"].clone())
+                        .is_ok_and(|ids| pending::distinct_ids(&ids))
+            }
+            Self::Erase => {
                 body.get("lease").is_none_or(lease_field)
                     && body["entryIds"]
                         .as_array()
@@ -1234,6 +1537,30 @@ impl Op {
             Err(Failure::invalid())
         }
     }
+}
+fn validate_source(route: &Route, op: &Op, body: &Value) -> std::result::Result<(), Failure> {
+    if let (Route::Pending(source), Op::Mark) = (route, op) {
+        let copies = body["copies"].as_array().unwrap();
+        let set = copies
+            .iter()
+            .find(|set| set["sessionId"] == *source)
+            .ok_or_else(Failure::invalid)?;
+        let ids: HashSet<_> = set["entryIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        if !body["entryIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|target| ids.contains(target.as_str().unwrap()))
+        {
+            return Err(Failure::invalid());
+        }
+    }
+    Ok(())
 }
 fn count(value: &Value) -> Option<u64> {
     let n = value.as_f64()?;
@@ -1255,6 +1582,7 @@ struct Query {
     after: Option<String>,
     project: Option<String>,
     limit: usize,
+    revision: Option<String>,
 }
 impl Query {
     fn parse(query: Option<&str>, route: &Route, op: &Op) -> std::result::Result<Self, Failure> {
@@ -1262,9 +1590,15 @@ impl Query {
             after: None,
             project: None,
             limit: 500,
+            revision: None,
         };
         if let Some(query) = query {
-            if !matches!(op, Op::Get) || !matches!(route, Route::Sessions | Route::Session(_)) {
+            if !matches!(op, Op::Get)
+                || !matches!(
+                    route,
+                    Route::Sessions | Route::Session(_) | Route::Pending(_)
+                )
+            {
                 return Err(Failure::invalid());
             }
             let mut seen = HashSet::new();
