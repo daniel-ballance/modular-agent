@@ -28,7 +28,7 @@ from ma_core import plain
 from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
-from ma_harness.authority import CONNECTION_AUTHORITY, PERMISSIONS
+from ma_harness.authority import CONNECTION_AUTHORITY, PERMISSIONS, read_tenants
 from ma_history import History
 from ma_history.http import HTTPHistory
 from ma_jobs import Jobs
@@ -43,6 +43,7 @@ from ma_plugin.websocket import (
     WebSocketServer,
     WebSocketTLS,
     listen_websocket,
+    read_token,
 )
 from ma_questions import Questions
 from ma_runtime import Runtime
@@ -82,6 +83,22 @@ from ._types import (
     QuestionHandler,
     Tenant,
 )
+
+
+ACP_RIGHTS = tuple(sorted(PERMISSIONS))
+
+
+def read_service_token(path: str | PathLike[str]) -> str:
+    """Read an operator-owned service token with the binding's file checks."""
+    return read_token(path)
+
+
+def tenants_from_environment() -> dict[str, Tenant]:
+    """Read the operator's tenant configuration, outside client settings."""
+    try:
+        return cast(dict[str, Tenant], read_tenants(os.getenv("MODULAR_AGENT_TENANTS", "{}")))
+    except Exception as exc:
+        raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
 
 
 def run[T](coro: Coroutine[Any, Any, T]) -> T:
@@ -249,14 +266,16 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
         *,
         principal: AcpActor | None = None,
+        stdio_actor: Actor | None = None,
         connections: _AcpConnections | None = None,
         scope: Mapping[str, Any],
         rights: frozenset[str] | None = None,
     ) -> None:
-        actor = (
-            principal["actor"]["id"] if principal else os.environ.get("MODULAR_AGENT_ACTOR", "user")
-        )
+        configured = principal["actor"] if principal else stdio_actor
+        actor = configured["id"] if configured else os.environ.get("MODULAR_AGENT_ACTOR", "user")
         super().__init__(agent._project, agent._settings, actor=actor)
+        if configured is not None:
+            self.principal = configured
         self.network = principal is not None
         self._allowed_projects: frozenset[Path] | None = scope.get("projects")
         self._allowed_tenants: frozenset[str | None] = scope["tenants"]
@@ -924,6 +943,7 @@ class Agent:
         tenants: Sequence[str | None] | None = None,
         rights: Sequence[str] | None = None,
         represents: Sequence[str] | None = None,
+        actor: Actor | None = None,
     ) -> None: ...
 
     @overload
@@ -953,6 +973,7 @@ class Agent:
         tenants: Sequence[str | None] | None = None,
         rights: Sequence[str] | None = None,
         represents: Sequence[str] | None = None,
+        actor: Actor | None = None,
     ) -> WebSocketServer | None:
         """Serve ACP on stdio or start an authenticated WebSocket listener."""
         options = {
@@ -964,12 +985,28 @@ class Agent:
             )
             if value is not None
         }
-        if listen is not None and (options or rights is not None):
+        if listen is not None and (options or rights is not None or actor is not None):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Set network ACP scope on each token")
         stdio_scope = _acp_scope(options)
         stdio_rights = _acp_rights(rights) if rights is not None else None
-        if listen is None and not _actor_id(os.environ.get("MODULAR_AGENT_ACTOR", "user")):
-            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Invalid MODULAR_AGENT_ACTOR")
+        if actor is not None:
+            try:
+                if not _actor_id(actor["id"]) or actor["kind"] not in (
+                    "user",
+                    "host",
+                    "agent",
+                    "program",
+                ):
+                    raise ValueError("Invalid stdio principal")
+                maximum = _acp_rights(actor["rights"])
+                stdio_rights = maximum if stdio_rights is None else stdio_rights & maximum
+                stdio_actor = deepcopy(actor)
+            except (ValueError, TypeError, KeyError) as exc:
+                raise AgentError(ErrorCode.INVALID_COMPOSITION, "Invalid stdio principal") from exc
+        else:
+            stdio_actor = None
+            if listen is None and not _actor_id(os.environ.get("MODULAR_AGENT_ACTOR", "user")):
+                raise AgentError(ErrorCode.INVALID_COMPOSITION, "Invalid MODULAR_AGENT_ACTOR")
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         if self._handler is not None:
@@ -1043,6 +1080,7 @@ class Agent:
                 project_mcp,
                 scope=stdio_scope,
                 rights=stdio_rights,
+                stdio_actor=stdio_actor,
             )
             await self._h.load(interface)
         try:
