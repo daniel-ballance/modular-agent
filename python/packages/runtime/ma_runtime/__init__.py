@@ -6,7 +6,7 @@ from datetime import datetime
 from ma_core import AgentError, Plugin, content, identity
 from ma_core.wire import recorded_as
 
-from .turns import Turns
+from .turns import Turns, require_processed_result
 
 
 class Runtime(Turns, Plugin):
@@ -518,6 +518,7 @@ class Runtime(Turns, Plugin):
         )
         answer = await self._tool(sid, None, "ui:" + c["id"], c, definition)
         await self._result(sid, None, "ui:" + c["id"], c, answer)
+        require_processed_result(answer)
         return answer
 
     async def _opened(self, d):

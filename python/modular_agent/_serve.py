@@ -71,7 +71,7 @@ async def _serve(
         ]
         items += [f"command:{c.name}" for c in registrar._commands.values() if c.in_process_only]
         if items:
-            raise AgentError(ErrorCode.NOT_SUPPORTED, "Cannot serve " + ", ".join(items))
+            raise WireError("Cannot serve " + ", ".join(items), "not_supported")
         registration["toolSources"] = (
             [
                 {

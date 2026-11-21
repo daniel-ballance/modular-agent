@@ -524,6 +524,7 @@ class Agent:
         self._lock = asyncio.Lock()
         self._closed = False
         self._plugin_host = False
+        self._enable_plugin_host: Callable[[], Awaitable[None]] | None = None
         self._acp_server: WebSocketServer | None = None
         self._conformance = False
         self._late_answers = False
@@ -846,8 +847,6 @@ class Agent:
         """Serve ACP on stdio or start an authenticated WebSocket listener."""
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
-        if not self._plugin_host:
-            raise AgentError(ErrorCode.INVALID_COMPOSITION, "ACP requires plugin_host=True")
         if self._handler is not None:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "ACP answers its own questions")
         async with self._lock:
@@ -855,6 +854,12 @@ class Agent:
                 raise AgentError(ErrorCode.BUSY, "ACP must start before any sessions open")
             if listen is None and (actors or tls is not None):
                 raise ValueError("Network ACP options require listen")
+            if not self._plugin_host and self._enable_plugin_host is not None:
+                try:
+                    await self._enable_plugin_host()
+                except Exception as exc:
+                    raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
+                self._plugin_host = True
             if listen is not None:
                 rights: dict[str, set[str]] = {}
                 kinds: dict[str, str] = {}
@@ -1053,7 +1058,7 @@ def create_agent(
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Runtime does not match durability")
         if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "History does not match durability")
-        external_placement = process_plugins is not None or service_plugins is not None
+        external_placement = bool(process_plugins or service_plugins)
         if plugin_host is False and external_placement:
             raise AgentError(
                 ErrorCode.INVALID_COMPOSITION,
@@ -1096,12 +1101,13 @@ def create_agent(
                 store_root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 store = History(store_root)
             await h.load(store)
-            local = Local(root, point_store="git")
+            local_root = Path(scratch.name) if durability == "ephemeral" else root
+            local = Local(local_root, point_store="git")
             if not isinstance(environment, MemoryEnvironment) and local_process_groups:
                 try:
                     delegated_root()
                 except Exception:
-                    local = ProcessGroupLocal(root, point_store="git")
+                    local = ProcessGroupLocal(local_root, point_store="git")
             await h.load(environment if isinstance(environment, MemoryEnvironment) else local)
             dispatcher = _SdkTools()
             dispatcher.conformance = conformance
@@ -1175,6 +1181,14 @@ def create_agent(
                             raise AgentError(
                                 ErrorCode.NOT_SUPPORTED, f"Unsupported hook: {hook.point}"
                             )
+                    replacements = set(plugin.replaces)
+                    items = {
+                        *(f"provider:{key}" for key in registrar._providers),
+                        *(f"tool:{key}" for key in registrar._tools),
+                        *(f"command:{key}" for key in registrar._commands),
+                    }
+                    if len(replacements) != len(plugin.replaces) or not replacements <= items:
+                        raise ValueError(f"Invalid replacements for plugin {plugin.name}")
                     for provider in registrar._providers.values():
                         prior_provider = h.capabilities.get(provider.id)
                         if prior_provider is not None:
@@ -1209,7 +1223,13 @@ def create_agent(
                 for p in plugins
                 if isinstance(p, _OverWire)
             ]
-            if agent._plugin_host:
+
+            async def load_configured_plugins(initial: list[dict[str, Any]], *, host: bool) -> None:
+                configured = list(initial)
+                if not host:
+                    if configured:
+                        await load_plugins(h, configured, folder, root, external_factory=factory)
+                    return
                 processes = [
                     p._wire() if isinstance(p, ProcessPlugin) else p for p in process_plugins or ()
                 ]
@@ -1224,22 +1244,26 @@ def create_agent(
                     }
                     for p in service_plugins or ()
                 ]
-                specs.extend([*processes, *services, *env])
-            if specs:
+                configured.extend([*processes, *services, *env])
+                if configured:
+                    await load_plugins(h, configured, folder, root, external_factory=factory)
 
-                def factory(
-                    harness: Any, spec: dict[str, Any], project: Path, home: Path, index: int
-                ) -> Any:
-                    kind = (
-                        _MemoryExternal if isinstance(spec.get("_over_wire"), Plugin) else External
-                    )
-                    plugin = kind(harness, spec, project, home, index)
-                    if "url" in spec:
-                        plugin.ping_interval = service_ping_interval
-                        plugin.control_timeout = service_control_timeout
-                    return plugin
+            def factory(
+                harness: Any, spec: dict[str, Any], project: Path, home: Path, index: int
+            ) -> Any:
+                kind = _MemoryExternal if isinstance(spec.get("_over_wire"), Plugin) else External
+                plugin = kind(harness, spec, project, home, index)
+                if "url" in spec:
+                    plugin.ping_interval = service_ping_interval
+                    plugin.control_timeout = service_control_timeout
+                return plugin
 
-                await load_plugins(h, specs, folder, root, external_factory=factory)
+            await load_configured_plugins(specs, host=agent._plugin_host)
+
+            async def enable_plugin_host() -> None:
+                await load_configured_plugins([], host=True)
+
+            agent._enable_plugin_host = enable_plugin_host
             wrap_native_providers(h)
             runtime_owner = h.capabilities["runtime"][0]
             continues = bool(h.plugins[runtime_owner].declarations.get("durable"))

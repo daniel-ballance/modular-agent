@@ -1154,7 +1154,7 @@ async def load_plugins(harness, specs, project, home, *, external_factory=Extern
         for t in await harness.api().call("tools", "definitions")
     }
     wrap_native_providers(harness)
-    for index, spec in enumerate(specs):
+    for spec in specs:
         if not isinstance(spec, dict) or not isinstance(spec.get("config", {}), dict):
             raise WireError("Plugin entry and its config must be objects", "invalid_request")
         if "url" in spec:
@@ -1174,6 +1174,13 @@ async def load_plugins(harness, specs, project, home, *, external_factory=Extern
             or not all(isinstance(s, str) for s in spec["command"])
         ):
             raise WireError("Plugin command must be a nonempty string array", "invalid_request")
+        env = spec.get("env", {})
+        if not isinstance(env, dict) or any(
+            not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()
+        ):
+            raise WireError("Plugin env must map strings to strings", "invalid_request")
+    offset = sum(isinstance(plugin, External) for plugin in harness.plugins.values())
+    for index, spec in enumerate(specs, offset):
         plugin = external_factory(
             harness, spec, project, Path(home) / "external" / str(index), index
         )

@@ -282,11 +282,11 @@ class Tool:
                 result = {"status": "completed", "value": value, "content": []}
             else:
                 raise ValueError("A structured tool value needs an output schema")
-            if self._output is not None and result["status"] == "completed":
-                checked = self._output.validate_python(result.get("value"), strict=True)
-                encoded = cast(Json, self._output.dump_python(checked, mode="json"))
-                Draft202012Validator(self.definition["returns"], registry=Registry()).validate(
-                    encoded
+            if self._output is not None and result["status"] == "completed" and "value" in result:
+                # Serialization is local; validation belongs to the settling host,
+                # because tool.after can add or change the value.
+                encoded = cast(
+                    Json, self._output.dump_python(result["value"], mode="json", warnings=False)
                 )
                 result["value"] = encoded
                 if not result["content"]:

@@ -2,6 +2,9 @@
 
 import asyncio
 
+from jsonschema import Draft202012Validator, ValidationError
+from referencing import Registry
+
 from ma_core import lower_reasoning, AgentError, content, identity
 from ma_core.recovery import STEP_AFTER, step_checkpoint
 from ma_core.wire import (
@@ -18,6 +21,26 @@ from ma_core.wire import (
 
 
 UNKNOWN = "Call did not finish. Its outcome is unknown. Check outside state before relying on it."
+
+
+def checked_tool_result(definition, result):
+    schema = (definition or {}).get("returns")
+    if result["status"] != "completed" or schema is None:
+        return result
+    error = "Completed tool result is missing its value"
+    if "value" in result:
+        try:
+            Draft202012Validator(schema, registry=Registry()).validate(result["value"])
+        except ValidationError as exc:
+            error = "Invalid completed tool value: " + exc.message
+        else:
+            return result
+    return {"call": result["call"], "status": "completed", "content": [], "_result_error": error}
+
+
+def require_processed_result(result):
+    if error := result.get("_result_error"):
+        raise AgentError(error, "internal")
 
 
 async def ordered_tools(calls, parallel, execute, record):
@@ -693,7 +716,9 @@ class Turns:
             content=answer["content"],
             copies=sources,
             data={
-                **{k: v for k, v in answer.items() if k not in {"call", "content"}},
+                **{
+                    k: v for k, v in answer.items() if k not in {"call", "content", "_result_error"}
+                },
                 "toolName": call.get("name")
                 or next(
                     (
@@ -772,6 +797,7 @@ class Turns:
 
         async def record(c, answer):
             await self._result(sid, turn, step, c, answer)
+            require_processed_result(answer)
             if answer.get("open"):
                 opened.append(c["id"])
 
@@ -900,6 +926,7 @@ class Turns:
             )
         finally:
             self.active_calls.discard((sid, call["id"]))
+        answer = checked_tool_result(definition, answer)
         await self._receipt(sid, turn, step, call, answer)
         return answer
 
