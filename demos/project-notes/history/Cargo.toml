@@ -1,0 +1,9 @@
+[package]
+name = "project-notes-history"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+modular-agent = { path = "../../../rust/crates/sdk" }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "signal"] }
