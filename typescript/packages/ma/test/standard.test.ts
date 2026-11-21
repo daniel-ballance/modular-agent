@@ -142,6 +142,33 @@ test("codemode reports when its worker dies and the next run works", { timeout: 
   assert.equal(next.text(), "7");
 });
 
+test("cancelling codemode ends an active turn and frees its worker", { timeout: 10_000, skip: process.platform !== "linux" }, async t => {
+  const { session, running, pid } = await spinningSandbox(t);
+  try {
+    await Promise.race([session.cancel(), delay(5_000, undefined, { ref: false, signal: t.signal }).then(() => {
+      assert.fail("Cancellation did not stop the active worker");
+    })]);
+    assert.equal((await running).status, "cancelled");
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    const next = await session.callTool("codemode", { code: "print('after cancellation')" });
+    assert.equal(next.status, "completed", next.text());
+    assert.equal(next.text(), "after cancellation\n");
+  } finally {
+    if (await readFile(`/proc/${pid}/stat`).catch(() => undefined)) process.kill(pid, "SIGKILL");
+  }
+});
+
+test("codemode ends a turn at the computation time limit", { timeout: 40_000 }, async t => {
+  const { session, result } = await sandbox(t, "print('started')\nwhile True: pass");
+  const r = await result();
+  assert.equal(r.status, "failed");
+  assert.match(r.text(), /^started\n/);
+  assert.match(r.text(), /TimeoutError/);
+  const next = await session.callTool("codemode", { code: "21 * 2" });
+  assert.equal(next.status, "completed", next.text());
+  assert.equal(next.text(), "42");
+});
+
 test("codemode dispatches no more than 500 nested calls", async t => {
   const { result } = await sandbox(t, `for _ in range(500):
     describe_tool('fixture')
