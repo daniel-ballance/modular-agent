@@ -20,6 +20,9 @@ struct Record {
 struct Database {
     records: BTreeMap<String, Record>,
     appends: Vec<String>,
+    creates: Vec<(String, Value)>,
+    reads: Vec<(Option<String>, usize)>,
+    lists: Vec<(Option<String>, usize)>,
     next: usize,
     reject: bool,
     renewal_ms: Option<u64>,
@@ -33,8 +36,10 @@ impl PortableHistoryStore for Store {
         self.0.lock().unwrap().renewal_ms.unwrap_or(30_000)
     }
     async fn create(&self, id: &str, mut metadata: Value) -> HistoryResult<()> {
-        metadata["id"] = json!(id);
+        assert!(metadata.get("id").is_none(), "PUT metadata must omit id");
         let mut db = self.0.lock().unwrap();
+        db.creates.push((id.into(), metadata.clone()));
+        metadata["id"] = json!(id);
         let row = db.records.entry(id.into()).or_default();
         if !row.metadata.is_null() && row.metadata != metadata {
             return Err(HistoryFault::Conflict);
@@ -107,8 +112,10 @@ impl PortableHistoryStore for Store {
         db.appends.push(lease.to_owned());
         Ok(added as u64)
     }
-    async fn read(&self, id: &str, after: Option<&str>, _: usize) -> HistoryResult<EntryPage> {
-        let db = self.0.lock().unwrap();
+    async fn read(&self, id: &str, after: Option<&str>, limit: usize) -> HistoryResult<EntryPage> {
+        assert!((1..=500).contains(&limit));
+        let mut db = self.0.lock().unwrap();
+        db.reads.push((after.map(str::to_owned), limit));
         let row = db.records.get(id).ok_or(HistoryFault::UnknownSession)?;
         let at = if let Some(after) = after {
             row.entries
@@ -124,7 +131,7 @@ impl PortableHistoryStore for Store {
             .entries
             .iter()
             .skip(at)
-            .take(2)
+            .take(limit.min(2))
             .cloned()
             .collect::<Vec<_>>();
         let next = (at + entries.len() < row.entries.len())
@@ -138,23 +145,45 @@ impl PortableHistoryStore for Store {
     async fn list(
         &self,
         project: Option<&Path>,
-        _: Option<&str>,
-        _: usize,
+        after: Option<&str>,
+        limit: usize,
     ) -> HistoryResult<SessionPage> {
-        let db = self.0.lock().unwrap();
-        Ok(SessionPage {
-            sessions: db
-                .records
-                .values()
-                .filter(|r| {
-                    !r.entries.is_empty()
-                        && project
-                            .is_none_or(|p| r.metadata["project"] == p.to_string_lossy().as_ref())
-                })
-                .map(|r| r.metadata.clone())
-                .collect(),
-            next: None,
-        })
+        assert!((1..=500).contains(&limit));
+        let mut db = self.0.lock().unwrap();
+        db.lists.push((after.map(str::to_owned), limit));
+        let mut rows: Vec<_> = db
+            .records
+            .values()
+            .filter(|r| {
+                !r.entries.is_empty()
+                    && project.is_none_or(|p| r.metadata["project"] == p.to_string_lossy().as_ref())
+            })
+            .collect();
+        rows.sort_by_key(|r| {
+            (
+                std::cmp::Reverse(r.metadata["created"].as_u64()),
+                r.metadata["id"].as_str(),
+            )
+        });
+        let at = match after {
+            Some(cursor) => {
+                rows.iter()
+                    .position(|r| r.metadata["id"] == cursor)
+                    .ok_or(HistoryFault::UnknownSession)?
+                    + 1
+            }
+            None => 0,
+        };
+        // Use short pages so a two-session test exercises the next cursor.
+        let sessions: Vec<_> = rows
+            .iter()
+            .skip(at)
+            .take(limit.min(1))
+            .map(|r| r.metadata.clone())
+            .collect();
+        let next = (at + sessions.len() < rows.len())
+            .then(|| sessions.last().unwrap()["id"].as_str().unwrap().into());
+        Ok(SessionPage { sessions, next })
     }
 }
 
@@ -216,6 +245,75 @@ async fn portable_registrar_store_keeps_only_appends_with_the_current_lease() ->
         Code::Lost
     );
     second.close().await
+}
+
+#[tokio::test]
+async fn portable_registrar_store_receives_metadata_and_binding_pagination() -> Result<()> {
+    let store = Store::default();
+    let part = store.clone();
+    let project = tempfile::tempdir()?;
+    let path = project.path().canonicalize()?;
+    let agent = test_agent()
+        .project(&path)
+        .durability(Durability::Kept)
+        .plugin(
+            Plugin::new("portable-pages")
+                .setup(move |r| r.history_store(History::from_portable(part.clone(), true)?)),
+        )
+        .script(json!([{"text":"Saved"}]))
+        .build()
+        .await?;
+    let first = agent.session().await?;
+    let second = agent.session().await?;
+    assert!(store.0.lock().unwrap().creates.is_empty());
+    assert_eq!(first.prompt("First session").await?.text, "Saved");
+    assert_eq!(second.prompt("Second session").await?.text, "Saved");
+    let listed = agent.sessions(Some(&path))?;
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().any(|s| s.id == first.id()));
+    assert!(listed.iter().any(|s| s.id == second.id()));
+    {
+        let db = store.0.lock().unwrap();
+        assert_eq!(db.creates.len(), 2);
+        for ((id, metadata), session) in db.creates.iter().zip([first, second]) {
+            assert_eq!(id, session.id());
+            assert_eq!(metadata["project"], json!(path));
+            assert!(metadata["created"].is_u64());
+            assert!(metadata.get("id").is_none());
+        }
+        let first_listed = db
+            .records
+            .values()
+            .min_by_key(|r| {
+                (
+                    std::cmp::Reverse(r.metadata["created"].as_u64()),
+                    r.metadata["id"].as_str(),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            db.lists,
+            [
+                (None, 500),
+                (
+                    Some(first_listed.metadata["id"].as_str().unwrap().into()),
+                    500
+                )
+            ]
+        );
+        assert_eq!(
+            db.reads
+                .iter()
+                .filter(|(cursor, _)| cursor.is_none())
+                .count(),
+            2
+        );
+        for session in listed {
+            let first_cursor = db.records[&session.id].entries[1]["id"].as_str().unwrap();
+            assert!(db.reads.contains(&(Some(first_cursor.into()), 500)));
+        }
+    }
+    agent.close().await
 }
 
 #[tokio::test]
