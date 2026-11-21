@@ -124,7 +124,14 @@ async def test_wait_and_followup_keep_child_history_without_duplicate_report(
 
 
 @pytest.mark.parametrize("kind", ["choice", "secret"])
-async def test_child_questions_reach_top_user_through_two_parents(tmp_path, runtime_type, kind):
+async def test_child_questions_reach_top_user_through_two_parents(
+    tmp_path, runtime_type, kind, monkeypatch
+):
+    from modular_agent._native import _MemoryHistory
+
+    # The forwarding deadline should not include dozens of filesystem commits.
+    # Crash/reopen behavior is covered separately with real durable history.
+    monkeypatch.setattr("ma_cli.configured_history", lambda _: _MemoryHistory())
     root = None
 
     async def route(d, index):
