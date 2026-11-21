@@ -639,13 +639,12 @@ func (a *Agent) Declaration() Declaration {
 			d["confinesFiles"] = e.ConfinesFiles()
 		}
 	}
+	// The SDK 0.1 Provider port supports request and discardState only.
+	d["runsToolsAtProvider"], d["liveSessions"] = false, false
 	for _, p := range a.a.All("provider.") {
 		for _, m := range p.(api.Provider).Catalog() {
 			if m.Stateful {
 				d["keepsStateAtProvider"] = true
-			}
-			if m.RunsTools {
-				d["runsToolsAtProvider"] = true
 			}
 		}
 	}

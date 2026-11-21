@@ -171,6 +171,26 @@ func TestDeclarationUsesSelectedParts(t *testing.T) {
 	}
 }
 
+func TestDeclarationLimitsSDKProviderModes(t *testing.T) {
+	for _, placement := range []string{"inProcess", "served"} {
+		t.Run(placement, func(t *testing.T) {
+			provider := modulartest.ScriptedProvider([]modulartest.Reply{{Text: "offline"}})
+			provider.Supports.KeepsState = true
+			provider.DiscardState = func(context.Context, string) error { return nil }
+			plugin := modular.Plugin{Name: "stateful-provider", Setup: func(r *modular.Registrar) error { return r.Provider(provider) }}
+			opt := modular.WithPlugin(plugin)
+			if placement == "served" {
+				opt = modulartest.OverWire(plugin)
+			}
+			a := modulartest.Agent(t, opt)
+			d := a.Declaration()
+			if d["keepsStateAtProvider"] != true || d["runsToolsAtProvider"] != false || d["liveSessions"] != false {
+				t.Fatalf("Provider declaration: %v", d)
+			}
+		})
+	}
+}
+
 func assertCode(t *testing.T, err error, code modular.Code) {
 	t.Helper()
 	var e *modular.Error
