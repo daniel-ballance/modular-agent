@@ -317,8 +317,14 @@ export async function capacity(kit) {
 			if (scope === "agent") mkdirSync(otherProject, { recursive: true });
 			const sid2 = scope === "session" ? sid1 : scope === "tenant" ? await create(tenantA) : await create(undefined, otherProject);
 			const ids = [...new Set([sid1, sid2])];
-			const turns = ids.map((sid) => settled(prompt(a, sid, "tool:probe-question {}")));
-			const questions = await Promise.all(ids.map((sid, i) => question(kit, a, sid, turns[i])));
+			const turns = [], questions = [];
+			// A seed prompt uses a pending slot until the turn takes it. Hold
+			// each turn before starting the next; only the admissions below race.
+			for (const sid of ids) {
+				const turn = settled(prompt(a, sid, "tool:probe-question {}"));
+				turns.push(turn);
+				questions.push(await question(kit, a, sid, turn));
+			}
 			const keys = [randomUUID(), randomUUID()];
 			const admit = (i) => input(a, [sid1, sid2][i], `concurrent capacity ${i}`, keys[i]);
 			const outcomes = await Promise.all(keys.map((_, i) => settled(admit(i))));
