@@ -14,7 +14,7 @@ export interface ErasurePublication {
 }
 export interface HistoryErasureRegistry {
 	read(id: string): Promise<{ revision: string; plans: ErasurePlan[] }>;
-	publish(id: string, intent: ErasurePublication): Promise<string>;
+	publish(id: string, intent: ErasurePublication): Promise<{ intentId: string; sessionIds: string[] }>;
 	complete(id: string, intentId: string, entryIds: string[]): Promise<void>;
 }
 export interface ErasureCopy { sessionId: string; id: string; erased: boolean }

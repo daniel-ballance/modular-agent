@@ -1565,7 +1565,7 @@ export class Harness {
 	private async eraseHttp(s: Session, entryIds: string[], actorId: string, writer: string, store: HistoryStore, registry: HistoryErasureRegistry): Promise<ErasureReport> {
 		const requested = [...new Set(entryIds)].sort();
 		if (!requested.length) throw failure("invalid_request", "Erasure requires at least one entry");
-		let operation: string;
+		let publication: Awaited<ReturnType<HistoryErasureRegistry["publish"]>>;
 		let sessions: Map<string, Session>;
 		for (;;) {
 			this.checkWriter(s);
@@ -1582,7 +1582,7 @@ export class Harness {
 			const targets = eraseCopies(sessions.get(s.id)!, requested, sessions);
 			this.requireAuthority(s, actorId, "erase");
 			try {
-				operation = await registry.publish(s.id, { revision, intentId: this.newId(), entryIds: requested,
+				publication = await registry.publish(s.id, { revision, intentId: this.newId(), entryIds: requested,
 					copies: [...targets].map(([view, ids]) => ({ sessionId: view.id, recordId: this.newId(), entryIds: [...ids] })) });
 				break;
 			} catch (error) {
@@ -1591,9 +1591,25 @@ export class Harness {
 		}
 		const report: ErasureReport = { erased: [], pending: [], erasedPairs: [], pendingPairs: [], outOfReach: [] };
 		const note = (value: string) => { if (!report.outOfReach.includes(value)) report.outOfReach.push(value); };
-		for (const [id, view] of sessions) {
-			let plan = (await registry.read(id)).plans.find(p => p.intentId === operation);
-			if (!plan) continue;
+		const { intentId, sessionIds } = publication;
+		const readPlan = async (id: string) => {
+			const plan = (await registry.read(id)).plans.find(p => p.intentId === intentId && p.sourceSessionId === s.id);
+			if (!plan) throw failure("unavailable", "Published erasure plan is missing");
+			return plan;
+		};
+		for (const id of sessionIds) {
+			let plan = await readPlan(id);
+			// Retention can remove the history, but not its plan. Without the
+			// history we cannot verify the actor's right to see its copy IDs.
+			const view = sessions.get(id) ?? await this.loadInto(id).catch(error => {
+				if ((error as { code?: string }).code !== "unknown_session") throw error;
+				return undefined;
+			});
+			if (!view) {
+				s.interruption.signal.throwIfAborted();
+				note("copies in other sessions");
+				continue;
+			}
 			let session = this.sessions.get(id);
 			let acquired = false;
 			try {
@@ -1606,11 +1622,11 @@ export class Harness {
 					if (session) await this.completeHttpErasure(session, plan, actorId);
 				}
 			} catch (error) {
-				if ((error as { code?: string }).code !== "held") this.problem(writer, "reconcile erasure", error);
+				const code = (error as { code?: string }).code;
+				if (code !== "held" && code !== "unknown_session") this.problem(writer, "reconcile erasure", error);
 			} finally { if (acquired) await store.close(id); }
 			s.interruption.signal.throwIfAborted();
-			plan = (await registry.read(id)).plans.find(p => p.intentId === operation);
-			if (!plan) throw failure("unavailable", "Published erasure plan disappeared");
+			plan = await readPlan(id);
 			if (id !== s.id && !this.actorRights(view, actorId).includes("watch")) { note("copies in other sessions"); continue; }
 			for (const copy of plan.copies) {
 				(copy.complete ? report.erased : report.pending).push(copy.entryId);

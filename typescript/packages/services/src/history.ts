@@ -118,8 +118,12 @@ class HistoryWriter implements HistoryStore {
 					if (!lease) throw new ServiceError(409, "Erasure requires a source lease", "lost");
 					let reply: unknown;
 					await this.mutate(id, async signal => { reply = await this.port.publish!(id, lease.value, intent, signal); }, lease);
-					if (!shape(reply, ["intentId"]) || !pathName(reply.intentId)) throw unavailable("Invalid erasure publication reply");
-					return reply.intentId;
+					if (!shape(reply, ["intentId", "sessionIds"]) || !pathName(reply.intentId) ||
+						!Array.isArray(reply.sessionIds) || !reply.sessionIds.every(pathName) ||
+						!reply.sessionIds.includes(id) || new Set(reply.sessionIds).size !== reply.sessionIds.length) {
+						throw unavailable("Invalid erasure publication reply");
+					}
+					return { intentId: reply.intentId, sessionIds: reply.sessionIds };
 				},
 				complete: async (id, intentId, entryIds) => {
 					const lease = this.leases.get(id);
