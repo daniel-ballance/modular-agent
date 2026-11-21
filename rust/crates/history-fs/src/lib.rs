@@ -1,4 +1,5 @@
 //! Atomic JSON snapshots with OS-owned, diskless session writer leases (Linux).
+mod erasure;
 use agent_api::*;
 use fs2::FileExt;
 use std::{
@@ -77,9 +78,11 @@ impl Drop for StoreLock {
 impl FileHistory {
     pub fn new(root: &Path) -> Result<Self> {
         fs::create_dir_all(root)?;
-        Ok(Self {
+        let history = Self {
             root: root.canonicalize()?,
-        })
+        };
+        history.initialize_registry()?;
+        Ok(history)
     }
     fn path(&self, id: &str) -> Result<PathBuf> {
         ensure!(
@@ -114,18 +117,21 @@ impl FileHistory {
         Ok(result)
     }
     fn save_unlocked(&self, data: &SessionData) -> Result<()> {
-        let target = self.path(&data.id)?;
-        let tmp = self.root.join(format!(".{}.tmp", id()));
+        self.replace(&self.path(&data.id)?, &serde_json::to_vec(&encode(data)?)?)
+    }
+    fn replace(&self, target: &Path, bytes: &[u8]) -> Result<()> {
+        let dir = target.parent().expect("history path has a parent");
+        let tmp = dir.join(format!(".{}.tmp", id()));
         let result = (|| -> Result<()> {
             let mut f = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(&tmp)?;
-            f.write_all(&serde_json::to_vec(&encode(data)?)?)?;
+            f.write_all(bytes)?;
             f.sync_all()?;
-            fs::rename(&tmp, &target)?;
-            File::open(&self.root)?.sync_all()?;
+            fs::rename(&tmp, target)?;
+            File::open(dir)?.sync_all()?;
             Ok(())
         })();
         if result.is_err() {
@@ -137,6 +143,25 @@ impl FileHistory {
 impl HistoryStore for FileHistory {
     fn supports_erasure(&self) -> bool {
         true
+    }
+    fn coordinates_erasure(&self) -> bool {
+        true
+    }
+    fn mark_erasure(
+        &self,
+        source: &str,
+        targets: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+        self.mark(source, targets)
+    }
+    fn reconcile_erasure(&self, session: &str) -> Result<Option<(SessionData, Vec<String>)>> {
+        self.reconcile(session)
+    }
+    fn check_erasure(&self, data: &SessionData) -> Result<()> {
+        let _lock = self
+            .lock()
+            .map_err(|e| OperationError::Unavailable(e.to_string()))?;
+        self.check_unlocked(data)
     }
     fn supports_service_snapshots(&self) -> bool {
         true
@@ -178,6 +203,7 @@ impl HistoryStore for FileHistory {
     }
     fn save(&self, data: &SessionData) -> Result<()> {
         let _lock = self.lock()?;
+        self.check_unlocked(data)?;
         self.save_unlocked(data)
     }
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {

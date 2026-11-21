@@ -329,12 +329,19 @@ impl Harness {
         );
         let store = self.store().ok_or_else(|| anyhow!("no history store"))?;
         let session_id = id.to_owned();
-        let (lease, mut data) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let (lease, mut data, erased) = tokio::task::spawn_blocking(move || -> Result<_> {
             let lease = store.acquire(&session_id)?;
-            let data = store.load(&session_id)?;
-            Ok((lease, data))
+            let (data, erased) = match store.reconcile_erasure(&session_id)? {
+                Some((data, _)) => (data, true),
+                None => (store.load(&session_id)?, false),
+            };
+            store.check_erasure(&data)?;
+            Ok((lease, data, erased))
         })
         .await??;
+        if erased {
+            self.invalidate_providers(id)?;
+        }
         if let Some(tenant) = tenants::name(&data) {
             self.check_tenant(tenant)?;
         }
@@ -583,6 +590,25 @@ impl Harness {
             .remove(id)
             .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
         Ok(())
+    }
+    fn install_erased_data(&self, open: &mut OpenSession, data: SessionData) -> Result<()> {
+        let session = data.id.clone();
+        open.queue.retain(|q| {
+            data.entries
+                .iter()
+                .any(|e| e.id == q.id && e.content.is_some())
+        });
+        self.reservations().rebuild(&data);
+        open.data = data;
+        self.pending_events
+            .lock()
+            .unwrap()
+            .retain(|e| e.scope.session != session);
+        self.held_output
+            .lock()
+            .unwrap()
+            .retain(|(id, _, _), _| id != &session);
+        self.invalidate_providers(&session)
     }
     fn invalidate_providers(&self, session: &str) -> Result<()> {
         for name in self.capability_names("provider.") {
@@ -1142,8 +1168,8 @@ impl Harness {
             .erasure
             .try_read()
             .map_err(|_| anyhow!("erasure in progress"))?;
-        let _workspace = self.begin_environment_work(session)?;
         let data = self.snapshot(session)?;
+        let _workspace = self.begin_environment_work(session)?;
         let branch = data.branch();
         let qs = questions(&data)?;
         let mut resume = vec![];
@@ -1551,7 +1577,7 @@ impl Harness {
     pub fn declaration(&self) -> Result<Value> {
         let runtime: Arc<dyn Runtime> = capability(self, "runtime")?;
         let env: Arc<dyn WorkingEnvironment> = capability(self, "environment")?;
-        let mut declaration = json!({"runtime":runtime.declaration(),"environment":env.declaration(),"forking":true,"erasure":self.store().is_some_and(|store|store.supports_erasure()),"several_actors":true,"rewinding":self.project.as_ref().map_or(env.declaration()["rewinding"] == true, |project| env.keeps_points(project)),"input_keys":true,"holds_output":false,"plugins_during_session":false,"live_sessions":false,"provider_state":false,"provider_tools":false,"starts_unasked_turns":false,"output_bypass":false,"questions_outlast_turn":false,"queued_input_after_restart":"handedBack","queued_job_reports_after_restart":"run","settings_during_turn":"refused","retention":"indefinite"});
+        let mut declaration = json!({"runtime":runtime.declaration(),"environment":env.declaration(),"forking":true,"erasure":self.store().is_some_and(|store|store.coordinates_erasure()),"several_actors":true,"rewinding":self.project.as_ref().map_or(env.declaration()["rewinding"] == true, |project| env.keeps_points(project)),"input_keys":true,"holds_output":false,"plugins_during_session":false,"live_sessions":false,"provider_state":false,"provider_tools":false,"starts_unasked_turns":false,"output_bypass":false,"questions_outlast_turn":false,"queued_input_after_restart":"handedBack","queued_job_reports_after_restart":"run","settings_during_turn":"refused","retention":"indefinite"});
         merge(
             &mut declaration,
             self.registry.read().unwrap().declaration(),
@@ -1941,14 +1967,24 @@ impl AgentApi for Harness {
         self.registry.read().unwrap().tool_registration(key)
     }
     fn snapshot(&self, session: &str) -> Result<SessionData> {
-        Ok(self
-            .sessions
-            .lock()
-            .unwrap()
-            .get(session)
-            .ok_or_else(|| anyhow!("session not open"))?
-            .data
-            .clone())
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get_mut(session)
+            .ok_or_else(|| anyhow!("session not open"))?;
+        if let Some(store) = self.store()
+            && let Err(error) = store.check_erasure(&open.data)
+        {
+            if open.active || open.environment_work > 0 || open.rewinding || open.lease.is_none() {
+                return Err(error);
+            }
+            self.check_open_writer(open)?;
+            let Some((data, _)) = store.reconcile_erasure(session)? else {
+                return Err(error);
+            };
+            store.check_erasure(&data)?;
+            self.install_erased_data(open, data)?;
+        }
+        Ok(open.data.clone())
     }
     fn authority(&self, session: &str, actor: &str) -> Result<Authority> {
         let data = self.snapshot(session).or_else(|_| {
@@ -2528,7 +2564,7 @@ impl AgentApi for Harness {
             .erasure
             .try_write()
             .map_err(|_| anyhow!("erasure requires idle turns and no other erasure"))?;
-        let (erased, affected) = {
+        let (erased, unresolved, affected) = {
             let mut sessions = self.sessions.lock().unwrap();
             ensure!(
                 sessions
@@ -2537,51 +2573,56 @@ impl AgentApi for Harness {
                     && self.blocked_projects.lock().unwrap().is_empty(),
                 "erasure requires all local turns to be idle"
             );
-            let held: Vec<_> = sessions.keys().cloned().collect();
             let store = self
                 .store()
-                .ok_or_else(|| anyhow!("ephemeral erasure not provided"))?;
-            ensure!(
-                !store
-                    .list(None)?
-                    .iter()
-                    .flat_map(|s| &s.entries)
-                    .any(|e| authority_record(e) && entries.contains(&e.id)),
-                "authority records cannot be erased to restore wider rights"
-            );
-            let changed = store.erase(entries, &held)?;
+                .filter(|s| s.coordinates_erasure())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "no coordinated erasure store",
+                    )
+                })?;
+            let affected = store.mark_erasure(&scope.session, &entries)?;
             let mut erased = vec![];
-            let mut affected = BTreeMap::from([(scope.session.clone(), vec![])]);
-            for data in changed {
-                let ids = data
-                    .entries
-                    .last()
-                    .and_then(|e| e.content.as_ref())
-                    .and_then(|v| v["entryIds"].as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
-                erased.extend(ids.iter().cloned());
-                affected.insert(data.id.clone(), ids);
-                if let Some(open) = sessions.get_mut(&data.id) {
-                    open.queue.retain(|q| {
-                        data.entries
-                            .iter()
-                            .any(|e| e.id == q.id && e.content.is_some())
-                    });
-                    open.data = data;
+            let mut unresolved = std::collections::BTreeSet::new();
+            for (session, targets) in &affected {
+                let result = if let Some(open) = sessions.get_mut(session) {
+                    if self.check_open_writer(open).is_ok()
+                        && open.lease.is_some()
+                        && open.environment_work == 0
+                    {
+                        store
+                            .reconcile_erasure(session)
+                            .and_then(|result| match result {
+                                Some((data, ids)) => {
+                                    self.install_erased_data(open, data)?;
+                                    Ok(Some(ids))
+                                }
+                                None => Ok(None),
+                            })
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    store.acquire(session).and_then(|_lease| {
+                        store
+                            .reconcile_erasure(session)
+                            .map(|result| result.map(|(_, ids)| ids))
+                    })
+                };
+                let done = result.ok().flatten().unwrap_or_default();
+                for id in targets {
+                    if done.contains(id) {
+                        erased.push(id.clone());
+                    } else {
+                        unresolved.insert(id.clone());
+                    }
                 }
             }
-            self.pending_events.lock().unwrap().clear();
-            for session in affected.keys() {
-                self.invalidate_providers(session)?;
-            }
-            (erased, affected)
+            (erased, unresolved, affected)
         };
         let mut out_of_reach = vec!["output already delivered to recipients".into()];
-        let mut pending = std::collections::BTreeSet::new();
+        let mut pending = unresolved;
         for name in self.capability_names("provider.") {
             let report = capability::<dyn Provider>(self, &name)?
                 .erase_binding_copies(self.api(), &affected)

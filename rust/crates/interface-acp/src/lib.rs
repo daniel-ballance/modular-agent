@@ -869,6 +869,11 @@ async fn run_connection(
                                 let message = e.to_string();
                                 let code = if matches!(
                                     e.downcast_ref::<OperationError>(),
+                                    Some(OperationError::Unavailable(_))
+                                ) {
+                                    "unavailable"
+                                } else if matches!(
+                                    e.downcast_ref::<OperationError>(),
                                     Some(OperationError::Busy(_))
                                 ) {
                                     "busy"

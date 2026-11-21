@@ -5,6 +5,7 @@ use crate::*;
 pub enum OperationError {
     NotFound(String),
     Busy(String),
+    Unavailable(String),
     Forbidden(String),
     Conflict(String),
     InvalidParams(String),
@@ -15,6 +16,7 @@ impl std::fmt::Display for OperationError {
         match self {
             Self::NotFound(message)
             | Self::Busy(message)
+            | Self::Unavailable(message)
             | Self::Forbidden(message)
             | Self::Conflict(message)
             | Self::InvalidParams(message) => f.write_str(message),
@@ -260,6 +262,28 @@ pub trait HistoryStore: Send + Sync {
     fn save(&self, session: &SessionData) -> Result<()>;
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>>;
     fn erase(&self, entries: Vec<String>, held: &[String]) -> Result<Vec<SessionData>>;
+    /// This store has a shared pending registry, not just an erase operation.
+    fn coordinates_erasure(&self) -> bool {
+        false
+    }
+    /// Publish the durable intent and return the exact known copies by session.
+    /// All callers use the same registry for this backend.
+    fn mark_erasure(
+        &self,
+        _source: &str,
+        _targets: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+        bail!("pending erasure is not supported")
+    }
+    /// Check a retained view against the authoritative registry.
+    fn check_erasure(&self, _data: &SessionData) -> Result<()> {
+        Ok(())
+    }
+    /// Reconcile under an already acquired writer lease. The return value contains
+    /// the latest record and the IDs whose tombstones and bookkeeping are confirmed.
+    fn reconcile_erasure(&self, _session: &str) -> Result<Option<(SessionData, Vec<String>)>> {
+        Ok(None)
+    }
 }
 pub trait Configuration: Send + Sync {
     fn settings(&self, project: &Path) -> Result<Value>;

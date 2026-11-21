@@ -13,6 +13,7 @@ pub enum Code {
     NotFound,
     NotOpen,
     Busy,
+    Unavailable,
     Held,
     Conflict,
     Cancelled,
@@ -37,6 +38,7 @@ impl Code {
             Code::NotFound => "not_found",
             Code::NotOpen => "not_open",
             Code::Busy => "busy",
+            Code::Unavailable => "unavailable",
             Code::Held => "held",
             Code::Conflict => "conflict",
             Code::Cancelled => "cancelled",
@@ -137,6 +139,7 @@ impl From<anyhow::Error> for Error {
             let code = match cause {
                 NotFound(_) => Code::NotFound,
                 Busy(_) => Code::Busy,
+                Unavailable(_) => Code::Unavailable,
                 Forbidden(_) => Code::Forbidden,
                 Conflict(_) => Code::Conflict,
                 InvalidParams(_) => Code::InvalidParams,
