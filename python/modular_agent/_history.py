@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
+from threading import Lock, Thread
 from typing import Literal
 
 from ._history_port import HistoryPort, _route
@@ -30,14 +33,28 @@ def http_history(url: str, token_file: str | PathLike[str]) -> HistoryStore:
     return HistoryStore("http", Path(token_file), url)
 
 
+class HistoryListener:
+    def __init__(self, url: str, stop: Callable[[], None], thread: Thread) -> None:
+        self.url = url
+        self._stop = stop
+        self._thread = thread
+        self._lock = Lock()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._thread.is_alive():
+                self._stop()
+                self._thread.join()
+
+
 def serve_history(
     store: HistoryStore | HistoryPort,
     *,
     address: tuple[str, int],
     token_file: str | PathLike[str],
     ttl: float = 2.5,
-) -> None:
-    """Serve a dedicated opaque record store under the file store directory."""
+) -> HistoryListener | None:
+    """Serve opaque history. Port zero starts a listener and returns its handle."""
     import asyncio
     import math
 
@@ -49,15 +66,48 @@ def serve_history(
         raise AgentError(ErrorCode.NOT_SUPPORTED, f"Cannot serve {type(store).__name__} history")
     if not math.isfinite(ttl) or ttl < 0.001:
         raise AgentError(ErrorCode.INVALID_PARAMS, "History TTL must be at least one millisecond")
-    try:
-        if isinstance(store, HistoryStore):
-            serve(store._path, address, token_file, round(ttl * 1000))
-        else:
-            with asyncio.Runner() as runner:
 
-                def dispatch(*args: object) -> object:
-                    return runner.run(_route(store, *args))  # type: ignore[arg-type]
+    def run(started: Callable[[tuple[str, int], Callable[[], None]], None] | None) -> None:
+        try:
+            if isinstance(store, HistoryStore):
+                serve(store._path, address, token_file, round(ttl * 1000), started=started)
+            else:
+                with asyncio.Runner() as runner:
 
-                serve(None, address, token_file, store.ttl_ms, custom_route=dispatch)
-    except (OSError, ValueError) as exc:
-        raise AgentError(ErrorCode.INVALID_PARAMS, str(exc)) from exc
+                    def dispatch(*args: object) -> object:
+                        return runner.run(_route(store, *args))  # type: ignore[arg-type]
+
+                    serve(
+                        None,
+                        address,
+                        token_file,
+                        store.ttl_ms,
+                        custom_route=dispatch,
+                        started=started,
+                    )
+        except (OSError, ValueError) as exc:
+            raise AgentError(ErrorCode.INVALID_PARAMS, str(exc)) from exc
+
+    if address[1] != 0:
+        run(None)
+        return None
+
+    ready: Future[tuple[str, Callable[[], None]]] = Future()
+
+    def started(bound: tuple[str, int], stop: Callable[[], None]) -> None:
+        host, port = bound[:2]
+        authority = f"[{host}]" if ":" in host else host
+        ready.set_result((f"http://{authority}:{port}", stop))
+
+    def background() -> None:
+        try:
+            run(started)
+        except Exception as exc:
+            if ready.done():
+                raise
+            ready.set_exception(exc)
+
+    thread = Thread(target=background, name="history-service", daemon=True)
+    thread.start()
+    url, stop = ready.result()
+    return HistoryListener(url, stop, thread)

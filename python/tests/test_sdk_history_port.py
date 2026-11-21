@@ -1,7 +1,40 @@
 """The embedded history adapter talks to custom stores in binding shapes."""
 
-from modular_agent import Plugin, sqlite_history_port
+import json
+from urllib.request import Request, urlopen
+
+import pytest
+
+from modular_agent import Plugin, file_history, serve_history, sqlite_history_port
 from modular_agent.testing import test_agent as make_agent
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("custom", [False, True])
+def test_serve_history_port_zero(tmp_path, custom):
+    from contextlib import nullcontext
+
+    token_file = tmp_path / "token"
+    token = "2a6230d8df016fe824ddaee0ab763999"
+    token_file.write_text(token)
+    directory = tmp_path / "records"
+    backend = sqlite_history_port(directory) if custom else nullcontext(file_history(directory))
+    with backend as store:
+        server = serve_history(store, address=("127.0.0.1", 0), token_file=token_file)
+        assert server is not None
+        try:
+            assert server.url.startswith("http://127.0.0.1:")
+            assert not server.url.endswith(":0")
+            headers = {"Authorization": f"Bearer {token}"}
+            with urlopen(Request(server.url + "/v1", headers=headers), timeout=2) as response:
+                assert json.load(response)["binding"] == "modular-agent-history/1"
+            with urlopen(
+                Request(server.url + "/v1/sessions", headers=headers), timeout=2
+            ) as response:
+                assert json.load(response)["sessions"] == []
+        finally:
+            server.close()
+            server.close()
 
 
 async def test_history_port_create_and_paging(tmp_path):

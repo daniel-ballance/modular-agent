@@ -324,18 +324,22 @@ def shape(route, method, body):
 
 
 @contextmanager
-def sqlite_store(directory, ttl_ms):
+def sqlite_store(directory, ttl_ms, *, check_same_thread=True):
     root = Path(directory) / "history-service"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     # One service instance per store: monotonic lease state is local. No other
     # instance may serve the same records until the prior instance loses its lock.
     with (root / "service.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with sqlite3.connect(root / "records.db") as db:
+        from contextlib import closing
+
+        with closing(
+            sqlite3.connect(root / "records.db", check_same_thread=check_same_thread)
+        ) as db:
             yield Store(db, ttl_ms)
 
 
-def serve(directory, address, token_file, ttl_ms, *, ready=None, custom_route=None):
+def serve(directory, address, token_file, ttl_ms, *, ready=None, custom_route=None, started=None):
     ip = ipaddress.ip_address(address[0])
     if not ip.is_loopback or type(ttl_ms) is not int or not 0 < ttl_ms <= 2**53 - 1:
         raise ValueError("History service requires a numeric loopback address and positive TTL")
@@ -477,4 +481,6 @@ def serve(directory, address, token_file, ttl_ms, *, ready=None, custom_route=No
         with Server(address, Handler) as server:
             if ready is not None:
                 ready(server.server_address)
+            if started is not None:
+                started(server.server_address, server.shutdown)
             server.serve_forever()
