@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./dist/src/index.js",
-    "./testing": "./dist/src/testing.js"
+    "./testing": "./dist/src/testing.js",
+    "./internal-cli": "./dist/src/internal-cli.js"
   },
   "dependencies": {
     "@earendil-works/pi-mcp": "1.5.2",

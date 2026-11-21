@@ -157,6 +157,7 @@ export const memoryHistory = (): MemoryHistory => new MemoryHistory();
 
 export let createAgent: (options?: AgentOptions) => Promise<Agent>;
 export let restart: (agent: Agent) => Promise<Agent>;
+export let cliAgentFromHarness: (harness: Harness, project: string) => Promise<Agent>;
 
 export class Agent {
   #open = new Map<string, Session>();
@@ -191,6 +192,14 @@ export class Agent {
   }
   static {
     createAgent = options => Agent.#create(options ?? {});
+    cliAgentFromHarness = async (harness, project) => {
+      const agent = new Agent(harness, await mkdtemp(join(tmpdir(), "ma-cli-acp-")), project, {});
+      agent.#hostEnabled = true; // The base composition owns plugin loading.
+      agent.#approval = true;
+      agent.#portable = harness.use<HistoryStore>("history-store") !== undefined;
+      agent.#authority = { severalActors: true, sessionLimits: true, tenants: true };
+      return agent;
+    };
     restart = async agent => {
       agent.#check();
       if (!agent.#rebuild || agent.#hostEnabled || agent.#acp || agent.#external.size || agent.#startedInterfaces.length) {

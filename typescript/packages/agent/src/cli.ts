@@ -7,13 +7,18 @@ import { subagents } from "@modular-agent/subagents";
 import { mcpTools } from "@modular-agent/tools-mcp";
 import { httpInterface } from "@modular-agent/interface-http";
 import { randomUUID } from "node:crypto";
+import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { defaultAcpActor } from "@modular-agent/core";
+import { cliAgentFromHarness, loadPolicy } from "@modular-agent/core/internal-cli";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { questionTool } from "@modular-agent/tools-question";
 import { conformanceProvider, createAgent } from "./index.js";
 import { conformanceTools } from "@modular-agent/plugin-wire";
 
 function parse(argv: string[]) {
-	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; approvalWait?: number; questionWait?: number; acp: boolean; plain: boolean; serve?: number; help: boolean } = {
+	const out: { mode: TerminalMode; prompt?: string; model?: string; session?: string; piAuth: boolean; ephemeral: boolean; durable: boolean; approval?: ApprovalPolicy; approvalWait?: number; questionWait?: number; acp: boolean; listen?: string; tokenFile?: string; plain: boolean; serve?: number; help: boolean } = {
 		mode: "interactive", piAuth: false, ephemeral: false, durable: false, acp: false, plain: false, help: false,
 	};
 	const rest: string[] = [];
@@ -27,6 +32,11 @@ function parse(argv: string[]) {
 		else if (a === "--ephemeral") out.ephemeral = true;
 		else if (a === "--durable") out.durable = true;
 		else if (a === "--acp") out.acp = true;
+		else if (a === "--listen" || a === "--token-file") {
+			const value = argv[++i];
+			if (!value) throw new Error(`${a} needs a value`);
+			if (a === "--listen") out.listen = value; else out.tokenFile = value;
+		}
 		else if (a === "--plain") out.plain = true;
 		else if (a === "--serve") out.serve = Number(argv[++i] ?? 0);
 		else if (a === "--approval") out.approval = argv[++i] as ApprovalPolicy;
@@ -73,6 +83,31 @@ async function main() {
 		console.log = (...m: unknown[]) => process.stderr.write(m.join(" ") + "\n");
 		const actorId = process.env.MODULAR_AGENT_ACTOR;
 		if (actorId === "") throw new Error("MODULAR_AGENT_ACTOR must be a nonempty id");
+		if (process.env.MODULAR_AGENT_CONFORMANCE === "1" &&
+			(process.env.MODULAR_AGENT_CONFORMANCE_POLICY !== undefined || args.listen !== undefined)) {
+			const policy = await loadPolicy(homedir(), { ...args, policy: process.env.MODULAR_AGENT_CONFORMANCE_POLICY, allowRepresentation: true });
+			const project = await realpath(process.cwd());
+			const compose = async (cwd: string) => {
+				const harness = await createAgent({ project: cwd, model: args.model ?? "conformance/echo", ephemeral: args.ephemeral,
+					resourceReservations: policy.resourceReservations, plugins: [...common.filter(p => p.name !== "tools-mcp"),
+						...(args.approval ? [] : [approval({ policy: "off", waitMs: args.approvalWait })]), conformanceProvider(), conformanceTools(true)] });
+				try { return await cliAgentFromHarness(harness, cwd); } catch (error) { await harness.stop(); throw error; }
+			};
+			const agent = await compose(project);
+			try {
+				const options = { compose: (cwd: string) => cwd === project ? Promise.resolve(agent) : compose(cwd) };
+				if (args.listen) {
+					const actors = policy.actors ?? [{ tokenFile: args.tokenFile!, actor: defaultAcpActor() }];
+					const server = await agent.serveAcp({ ...options, listen: args.listen, actors });
+					process.stdout.write(server.url + "\n");
+					await new Promise<void>(resolve => {
+						process.once("SIGINT", resolve);
+						process.once("SIGTERM", resolve);
+					});
+				} else await agent.serveAcp({ ...options, ...policy.stdio });
+				return 0;
+			} finally { await agent.close(); }
+		}
 		const acp = acpInterface({ actorId });
 		// Over ACP, approval is a session setting (the "approval" option), so the plugin is always loaded; it starts off.
 		const withApproval = args.approval ? [] : [approval({ policy: "off", waitMs: args.approvalWait })];

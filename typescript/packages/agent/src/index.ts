@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { MutableModels } from "@earendil-works/pi-ai";
-import { Harness, type Plugin } from "@modular-agent/harness";
+import { Harness, filePendingErasure, type ReservationOptions, type Plugin } from "@modular-agent/harness";
 import { configuration } from "./config.js";
 import { contextCompaction } from "@modular-agent/context-compaction";
 import { fileCredentials } from "@modular-agent/credentials-file";
@@ -33,6 +33,7 @@ export interface AgentOptions {
 	/** Extra plugins, loaded after the standard set. */
 	plugins?: Plugin[];
 	settings?: Record<string, unknown>;
+	resourceReservations?: ReservationOptions;
 	/**
 	 * Plugins to run each in a process of its own, by name, such as
 	 * ["runtime-transient", "tools-files", "env-local"]. Defaults to the
@@ -65,7 +66,7 @@ export function vanillaPlugins(options: AgentOptions = {}): Plugin[] {
 export async function createAgent(options: AgentOptions = {}): Promise<Harness> {
 	const project = options.project ?? process.cwd();
 	const home = options.home ?? process.env.MODULAR_AGENT_DATA_DIR ?? process.env.MA_HOME ?? join(homedir(), ".modular-agent");
-	const harness = new Harness({ project, home });
+	const harness = new Harness({ project, home, resourceReservations: options.resourceReservations });
 	const fromSettings = await pluginsFromSettings(home, project);
 	for (const problem of fromSettings.problems) harness.problems.push({ plugin: "settings", where: "load", error: problem });
 	// The trust check loads first, so it can refuse project plugins loaded after it.
@@ -77,6 +78,9 @@ export async function createAgent(options: AgentOptions = {}): Promise<Harness> 
 		const client = { url: historyUrl, token: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "")) };
 		const store = new HttpHistoryStore(client);
 		await store.initialize();
+		const erasure = process.env.MODULAR_AGENT_PENDING_ERASURE_DIR ?? (process.env.MODULAR_AGENT_CONFORMANCE === "1"
+			? process.env.MODULAR_AGENT_CONFORMANCE_ERASURE_DIR : undefined);
+		if (erasure) Object.assign(store, { pendingErasure: filePendingErasure(erasure) });
 		historyService.push(historyHttp(client, store));
 	}
 	// Load local items first, then validate each external registration against them.
