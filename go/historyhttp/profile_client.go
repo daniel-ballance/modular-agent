@@ -206,7 +206,7 @@ func isTombstone(entry json.RawMessage) bool {
 	return bytes.Equal(objectOf(entry)["erased"], []byte("true"))
 }
 
-func (l *lease) PublishErasure(revision string, intent api.ErasureIntent) (string, error) {
+func (l *lease) PublishErasure(revision string, intent api.ErasureIntent) (api.ErasurePublication, error) {
 	p := publication{Revision: revision, IntentID: intent.ID, EntryIDs: intent.Targets}
 	indices := map[string]int{}
 	for _, copy := range intent.Copies {
@@ -226,14 +226,14 @@ func (l *lease) CompleteErasure(intentID string, ids []string) error {
 	return err
 }
 
-func (l *lease) mutateRegistry(path string, body func(string) any, publish bool) (string, error) {
+func (l *lease) mutateRegistry(path string, body func(string) any, publish bool) (result api.ErasurePublication, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.usable(); err != nil {
-		return "", err
+		return result, err
 	}
 	if l.token == "" || !l.c.ErasureCoordinated() {
-		return "", api.ErrErasureUnavailable
+		return result, api.ErrErasureUnavailable
 	}
 	ctx, cancel := context.WithTimeout(l.c.ctx, time.Duration(l.cutoff.Load()-leaseClock()))
 	defer cancel()
@@ -242,23 +242,28 @@ func (l *lease) mutateRegistry(path string, body func(string) any, publish bool)
 		var refusal *servicehttp.ResponseError
 		if errors.As(err, &refusal) && refusal.Code == "lost" {
 			l.fence()
-			return "", errors.Join(api.ErrWriterLost, err)
+			return result, errors.Join(api.ErrWriterLost, err)
 		}
 		if !errors.As(err, &refusal) && !errors.Is(err, os.ErrNotExist) {
 			l.fence()
 		}
-		return "", errors.Join(api.ErrErasureUnavailable, err)
+		return result, errors.Join(api.ErrErasureUnavailable, err)
 	}
 	if err := l.CheckWriter(); err != nil {
-		return "", err
+		return result, err
 	}
 	if !publish && len(out) == 0 {
-		return "", nil
+		return result, nil
 	}
-	if id := idOf(out["intentId"]); publish && len(out) == 1 && validSegment(id) {
-		return id, nil
+	if publish && len(out) == 2 {
+		id := idOf(out["intentId"])
+		sessions, ok := distinctIDs(out["sessionIds"])
+		if validSegment(id) && ok && slices.Contains(sessions, l.id) &&
+			!slices.ContainsFunc(sessions, func(id string) bool { return !validSegment(id) }) {
+			return api.ErasurePublication{IntentID: id, SessionIDs: sessions}, nil
+		}
 	}
-	return "", api.ErrErasureUnavailable
+	return result, api.ErrErasureUnavailable
 }
 
 // SaveErasure sends only exact tombstones. Reconciliation reloads the

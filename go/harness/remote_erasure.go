@@ -117,7 +117,8 @@ func (c *client) eraseRemote(ctx context.Context, store api.Store, remote api.Re
 		if err != nil {
 			return err
 		}
-		operation, err = writer.PublishErasure(revision, intent)
+		published, err := writer.PublishErasure(revision, intent)
+		operation = published.IntentID
 		return err
 	}()
 	source.mu.Unlock()

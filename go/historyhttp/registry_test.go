@@ -6,12 +6,68 @@ import (
 	"errors"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 )
+
+func TestPublicationReturnsOriginalDestinationsInOrder(t *testing.T) {
+	s, err := New(t.TempDir(), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	server := httptest.NewServer(s.Handler("test-token"))
+	defer server.Close()
+	c := NewClient(servicehttp.NewClient(server.URL, "test-token"))
+	defer c.Close()
+	if err := c.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	entry := api.Entry{ID: "entry", Kind: "input", Writer: "harness", Time: time.Now().UTC()}
+	project := t.TempDir()
+	seed := func(id string) *lease {
+		t.Helper()
+		l, err := c.AcquireNew(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Save(api.Session{ID: id, Project: project, Version: 1, Entries: []api.Entry{entry}}); err != nil {
+			l.Close()
+			t.Fatal(err)
+		}
+		return l.(*lease)
+	}
+	source := seed("source")
+	defer source.Close()
+	if err := seed("destination").Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, revision, err := c.ErasurePlans("source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := publication{Lease: source.token, Revision: revision, IntentID: "original", EntryIDs: []string{"entry"},
+		Copies: []copySet{{SessionID: "source", RecordID: "source-record", EntryIDs: []string{"entry"}},
+			{SessionID: "destination", RecordID: "destination-record", EntryIDs: []string{"entry"}}}}
+	want := fields{"intentId": raw("original"), "sessionIds": raw([]string{"source", "destination"})}
+	publish := func() {
+		t.Helper()
+		var out fields
+		if err := c.profileCall(t.Context(), "POST", path("source")+"/pending-erasure", p, &out, ""); err != nil || !reflect.DeepEqual(out, want) {
+			t.Fatalf("publication %s: got %s, want %s; error: %v", p.IntentID, raw(out), raw(want), err)
+		}
+	}
+	publish()
+	p.Copies[0], p.Copies[1] = p.Copies[1], p.Copies[0]
+	publish() // An identical operation may resend the sets in another order.
+	p.IntentID = "replacement"
+	p.Copies = p.Copies[1:] // Rediscovery no longer includes the destination.
+	publish()
+}
 
 func TestRegistryOrdersIntentAndAppend(t *testing.T) {
 	s, err := New(t.TempDir(), 3*time.Second)
@@ -60,9 +116,10 @@ func TestRegistryOrdersIntentAndAppend(t *testing.T) {
 	if err != nil || len(plans) != 0 {
 		t.Fatalf("stale publication changed plans: %v, %v", plans, err)
 	}
-	id, err := writer.PublishErasure(fresh, intent)
-	if err != nil || id != intent.ID {
-		t.Fatalf("publish: %s, %v", id, err)
+	published, err := writer.PublishErasure(fresh, intent)
+	want := api.ErasurePublication{IntentID: intent.ID, SessionIDs: []string{next.ID}}
+	if err != nil || !reflect.DeepEqual(published, want) {
+		t.Fatalf("publish: %+v, %v", published, err)
 	}
 	entries := []json.RawMessage{json.RawMessage(`{"id":"three","parentId":null,"sources":["one"]}`)}
 	err = c.profileCall(context.Background(), "POST", path(next.ID)+"/entries", appendBody(l.(*lease).token, entries), nil, fresh)

@@ -46,9 +46,16 @@ type ErasurePlan struct {
 	Copies   []ErasureCopy
 }
 
+// ErasurePublication names the original intent and its destinations in publication order.
+// A destination may no longer have a live session.
+type ErasurePublication struct {
+	IntentID   string
+	SessionIDs []string
+}
+
 type RemoteErasureLease interface {
 	LoadErasure() (Session, error)
-	PublishErasure(revision string, intent ErasureIntent) (string, error)
+	PublishErasure(revision string, intent ErasureIntent) (ErasurePublication, error)
 	CompleteErasure(intentID string, ids []string) error
 }
 

@@ -53,10 +53,15 @@ type planPage struct {
 }
 
 type intentRecord struct {
-	ID      string          `json:"intentId"`
-	Source  string          `json:"sourceSessionId"`
-	Targets []string        `json:"entryIds"`
-	Plans   map[string]plan `json:"plans"`
+	ID         string          `json:"intentId"`
+	Source     string          `json:"sourceSessionId"`
+	Targets    []string        `json:"entryIds"`
+	SessionIDs []string        `json:"sessionIds"`
+	Plans      map[string]plan `json:"plans"`
+}
+
+func (row intentRecord) publicationResult() fields {
+	return fields{"intentId": raw(row.ID), "sessionIds": raw(row.SessionIDs)}
 }
 
 func (s *Server) registryFile() string { return filepath.Join(s.dir, ".history-erasure-v1") }
@@ -92,6 +97,11 @@ func (s *Server) loadRegistry() ([]intentRecord, error) {
 	var records []intentRecord
 	if json.Unmarshal(b, &records) != nil || records == nil || !bytes.Equal(b, raw(records)) {
 		return nil, api.ErrErasureUnavailable
+	}
+	for _, row := range records {
+		if len(row.SessionIDs) == 0 || len(row.SessionIDs) != len(row.Plans) {
+			return nil, api.ErrErasureUnavailable
+		}
 	}
 	s.registryBytes = b
 	return records, nil
@@ -193,19 +203,20 @@ func (s *Server) publishPlans(w http.ResponseWriter, source document, q request,
 	p := q.publish
 	targets := slices.Clone(p.EntryIDs)
 	slices.Sort(targets)
-	var existing string
-	for _, row := range rows {
+	var existing *intentRecord
+	for i := range rows {
+		row := &rows[i]
 		sameOp := row.Source == q.id && slices.Equal(row.Targets, targets)
 		if row.ID == p.IntentID && (!sameOp || !sameCopySets(row.Plans, p.Copies)) {
 			failure(w, 409, "conflict", "intent ID already names another publication")
 			return
 		}
 		if sameOp {
-			existing = row.ID
+			existing = row
 		}
 	}
-	if existing != "" {
-		respond(w, 200, fields{"intentId": raw(existing)})
+	if existing != nil {
+		respond(w, 200, existing.publicationResult())
 		return
 	}
 	if p.Revision != s.revision {
@@ -243,6 +254,7 @@ func (s *Server) publishPlans(w http.ResponseWriter, source document, q request,
 			failure(w, 413, "request_too_large", "plan cannot fit a page")
 			return
 		}
+		row.SessionIDs = append(row.SessionIDs, set.SessionID)
 		row.Plans[set.SessionID] = result
 	}
 	if !current() {
@@ -250,7 +262,7 @@ func (s *Server) publishPlans(w http.ResponseWriter, source document, q request,
 		return
 	}
 	if s.saveRegistry(w, append(rows, row)) {
-		respond(w, 200, fields{"intentId": raw(p.IntentID)})
+		respond(w, 200, row.publicationResult())
 	}
 }
 
