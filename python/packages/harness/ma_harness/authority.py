@@ -245,7 +245,14 @@ class Authority:
                 "fork": "input",
                 "close": "watch",
             }.get(operation, "watch")
-            if operation in {"authority", "config_view", "declaration", "close", "view"}:
+            if operation in {
+                "authority",
+                "config_view",
+                "declaration",
+                "close",
+                "view",
+                "erasure_cutoff",
+            }:
                 return  # Control replies and configuration do not read session history.
         elif target in {"tools", "environment", "history", "subagents"}:
             raise AgentError("Use the checked Runtime or session API", "forbidden")

@@ -19,6 +19,7 @@ from modular_agent import (
     Answer,
     file_credentials,
     Durability,
+    ErrorCode,
     Event,
     JsonObject,
     Provider,
@@ -546,12 +547,19 @@ async def _run(args: argparse.Namespace) -> int:
                 return await _agent(paths, folder, args, acp_session=True)
 
             async def reopen(folder: Path, id: str) -> Agent:
-                saved = await agent.session_info(id)
-                if saved["project"] != str(folder):
+                if not any(s["id"] == id for s in await agent.sessions(project=folder)):
                     raise ValueError("Session is not in this project")
                 if folder == project and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
                     return agent
-                old = cast(JsonObject, saved["settings"]).get("model")
+                try:
+                    saved = await agent.session_info(id)
+                    old = cast(JsonObject, saved["settings"]).get("model")
+                except AgentError as exc:
+                    if exc.code is not ErrorCode.UNAVAILABLE:
+                        raise
+                    # Open under a lease to reconcile pending history before
+                    # using its saved model selection.
+                    old = None
                 selected = f"{old['provider']}/{old['id']}" if isinstance(old, dict) else None
                 return await _agent(paths, folder, args, saved_model=selected, acp_session=True)
 
