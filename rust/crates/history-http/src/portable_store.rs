@@ -63,6 +63,11 @@ pub trait PortableHistoryStore: Send + Sync + 'static {
     async fn create(&self, session: &str, metadata: Value) -> HistoryResult<()>;
     async fn acquire(&self, session: &str, owner: &str) -> HistoryResult<LeaseGrant>;
     async fn renew(&self, session: &str, lease: &str) -> HistoryResult<u64>;
+    /// If the backend detects revocation independently of renewal, expose a
+    /// level-triggered signal, including for a lease already revoked.
+    fn writer_lost(&self, _session: &str, _lease: &str) -> Option<CancellationToken> {
+        None
+    }
     async fn release(&self, session: &str, lease: &str) -> HistoryResult<()>;
     async fn append(&self, session: &str, lease: &str, entries: Vec<Value>) -> HistoryResult<u64>;
     async fn read(

@@ -22,13 +22,15 @@ struct Database {
     appends: Vec<String>,
     next: usize,
     reject: bool,
+    renewal_ms: Option<u64>,
+    revoked: Option<tokio_util::sync::CancellationToken>,
 }
 #[derive(Clone, Default)]
 struct Store(Arc<Mutex<Database>>);
 #[async_trait]
 impl PortableHistoryStore for Store {
     fn ttl_ms(&self) -> u64 {
-        30_000
+        self.0.lock().unwrap().renewal_ms.unwrap_or(30_000)
     }
     async fn create(&self, id: &str, mut metadata: Value) -> HistoryResult<()> {
         metadata["id"] = json!(id);
@@ -53,7 +55,7 @@ impl PortableHistoryStore for Store {
         row.lease = Some(proposed.clone());
         Ok(LeaseGrant {
             lease: proposed,
-            ttl_ms: self.ttl_ms(),
+            ttl_ms: db.renewal_ms.unwrap_or(30_000),
         })
     }
     async fn renew(&self, id: &str, lease: &str) -> HistoryResult<u64> {
@@ -62,7 +64,10 @@ impl PortableHistoryStore for Store {
         if row.lease.as_deref() != Some(lease) {
             return Err(HistoryFault::Lost);
         }
-        Ok(self.ttl_ms())
+        Ok(db.renewal_ms.unwrap_or(30_000))
+    }
+    fn writer_lost(&self, _: &str, _: &str) -> Option<tokio_util::sync::CancellationToken> {
+        self.0.lock().unwrap().revoked.clone()
     }
     async fn release(&self, id: &str, lease: &str) -> HistoryResult<()> {
         let mut db = self.0.lock().unwrap();
@@ -211,4 +216,56 @@ async fn portable_registrar_store_keeps_only_appends_with_the_current_lease() ->
         Code::Lost
     );
     second.close().await
+}
+
+#[tokio::test]
+async fn writer_loss_interrupts_an_idle_session_without_another_write() -> Result<()> {
+    use futures_util::StreamExt;
+    use modular_agent::{Event, InterruptionReason};
+    use std::time::Duration;
+
+    for push in [true, false] {
+        let store = Store::default();
+        if push {
+            store.0.lock().unwrap().revoked = Some(tokio_util::sync::CancellationToken::new());
+        } else {
+            store.0.lock().unwrap().renewal_ms = Some(900);
+        }
+        let agent = test_agent()
+            .durability(Durability::Kept)
+            .history(History::from_portable(store.clone(), true)?)
+            .script(json!([{"text":"Ready"}]))
+            .build()
+            .await?;
+        let session = agent.session().await?;
+        assert_eq!(session.prompt("Ready?").await?.text, "Ready");
+        session.wait_idle().await?;
+        let mut events = session.events(None)?;
+        let appends = {
+            let mut db = store.0.lock().unwrap();
+            db.records.get_mut(session.id()).unwrap().lease = Some("revoked".into());
+            if let Some(signal) = &db.revoked {
+                signal.cancel();
+            }
+            db.appends.len()
+        };
+        let interruption = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = events.next().await {
+                if let Event::SessionInterrupted(e) = event? {
+                    return Ok::<_, modular_agent::Error>(e.data.reason);
+                }
+            }
+            panic!("event stream ended before interruption");
+        })
+        .await
+        .expect("writer loss was reported without a write")?;
+        assert_eq!(interruption, InterruptionReason::WriterLost);
+        assert_eq!(store.0.lock().unwrap().appends.len(), appends);
+        assert_eq!(
+            session.prompt("Stale writer").await.unwrap_err().code(),
+            Code::Lost
+        );
+        agent.close().await?;
+    }
+    Ok(())
 }

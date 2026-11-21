@@ -417,7 +417,25 @@ impl State {
         let service = self.service.clone();
         let session = self.session.clone();
         let lease_id = lease.clone();
+        let backend_lost = match &service.transport {
+            Transport::Embedded(store) => store.writer_lost(&session, &lease),
+            Transport::Http { .. } => None,
+        };
         let stop = remote.stop.clone();
+        if let Some(signal) = backend_lost {
+            if signal.is_cancelled() {
+                self.lost.cancel();
+                bail!(LostPart("history writer lease was lost".into()));
+            }
+            let (stop, lost) = (stop.clone(), self.lost.clone());
+            io().spawn(async move {
+                tokio::select! {
+                    _ = stop.cancelled() => {},
+                    _ = lost.cancelled() => {},
+                    _ = signal.cancelled() => lost.cancel(),
+                }
+            });
+        }
         let lost = self.lost.clone();
         let cutoff = remote.cutoff.clone();
         io().spawn(async move {
