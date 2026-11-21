@@ -106,6 +106,9 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	if err = c.checkProject(project); err != nil {
 		return "", err
 	}
+	if !api.SessionScopeAllows(ctx, project, tenant) {
+		return "", api.ErrAuthority
+	}
 	info, err := os.Stat(project)
 	if err != nil {
 		return "", err
@@ -244,6 +247,10 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 		_ = lease.Close()
 		return err
 	}
+	if !api.SessionScopeAllows(ctx, snap.Project, snap.Tenant) {
+		_ = lease.Close()
+		return api.ErrAuthority
+	}
 	if err = c.checkTenant(snap.Tenant); err != nil {
 		_ = lease.Close()
 		return err
@@ -261,6 +268,11 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	}
 	s := c.newSessionState(id, project)
 	s.data, s.lease, s.last, s.opening = snap, lease, recordedOutcome(snap), true
+	if err = s.reconcileErasureLocked(); err != nil {
+		_ = lease.Close()
+		return err
+	}
+	snap = s.data
 	if err = c.registerOpen(ctx, s, host, savedApproval); err != nil {
 		_ = lease.Close()
 		return err
@@ -417,6 +429,9 @@ func (c *client) Snapshot(id string) (api.Session, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reconcileErasureLocked(); err != nil {
+		return api.Session{}, err
+	}
 	return copySession(s.data), nil
 }
 func (c *client) View(ctx context.Context, id string) (api.Session, error) {
@@ -485,7 +500,9 @@ func (s *session) publishInitialLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
-	return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next) })
+	return s.withErasureCheck(next, func() error {
+		return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next) })
+	})
 }
 
 func (s *session) publishReservedInitialLocked(next api.Session) error {
@@ -506,7 +523,9 @@ func (s *session) publishReservedInitialLocked(next api.Session) error {
 }
 
 func (s *session) commitSnapshotLocked(next api.Session) error {
-	return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next) })
+	return s.withErasureCheck(next, func() error {
+		return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next) })
+	})
 }
 
 func (s *session) commitReservedSnapshotLocked(next api.Session) error {
@@ -648,6 +667,10 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 		return "", err
 	}
 	s.mu.Lock()
+	if err := s.reconcileErasureLocked(); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
 	snap := s.data
 	running := s.running
 	allowed := c.authorizedBy(snap, ctx, "input") && c.authorizedBy(snap, ctx, "settings")
@@ -755,217 +778,6 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	}
 	return fork, nil
 }
-func (c *client) Erase(ctx context.Context, id string, ids []string) error {
-	_, err := c.EraseDetails(ctx, id, ids)
-	return err
-}
-
-// EraseDetails waits for stateful Providers before an Interface reports erasure.
-func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api.ProviderErasure, error) {
-	affected, err := c.eraseLocal(ctx, id, ids)
-	var report api.ProviderErasure
-	if err != nil {
-		return report, err
-	}
-	for session, entryIDs := range affected {
-		visible := id == session || c.Authorize(session, api.Acting(ctx), "watch")
-		if visible {
-			for _, entryID := range entryIDs {
-				report.ErasedPairs = append(report.ErasedPairs, api.EntryPair{SessionID: session, ID: entryID})
-			}
-		} else {
-			report.OutOfReach = append(report.OutOfReach, "copies in other sessions")
-		}
-		for _, value := range c.All("provider.") {
-			provider := value.(api.Provider)
-			if !slices.ContainsFunc(provider.Catalog(), func(m api.Model) bool { return m.Stateful }) {
-				continue
-			}
-			eraser, ok := provider.(api.ProviderEraser)
-			if !ok {
-				report.OutOfReach = append(report.OutOfReach, "Provider remote copies")
-				continue
-			}
-			answer, err := eraser.EraseState(ctx, session, entryIDs)
-			if err != nil {
-				report.Pending = append(report.Pending, entryIDs...)
-				if visible {
-					for _, entryID := range entryIDs {
-						report.PendingPairs = append(report.PendingPairs, api.EntryPair{SessionID: session, ID: entryID})
-					}
-				}
-			} else {
-				for _, pending := range answer.Pending {
-					if slices.Contains(entryIDs, pending) {
-						report.Pending = append(report.Pending, pending)
-						if visible {
-							report.PendingPairs = append(report.PendingPairs, api.EntryPair{SessionID: session, ID: pending})
-						}
-					}
-				}
-			}
-			report.OutOfReach = append(report.OutOfReach, answer.OutOfReach...)
-		}
-	}
-	sort.Strings(report.Pending)
-	report.Pending = slices.Compact(report.Pending)
-	sort.Strings(report.OutOfReach)
-	report.OutOfReach = slices.Compact(report.OutOfReach)
-	return report, nil
-}
-
-func (c *client) eraseLocal(ctx context.Context, id string, ids []string) (map[string][]string, error) {
-	if !api.ConnectionAllows(ctx, "erase") || !c.Authorize(id, api.Acting(ctx), "erase") {
-		return nil, errors.New("erasure refused")
-	}
-	if _, err := c.find(id); err != nil {
-		return nil, err
-	}
-	c.h.mu.RLock()
-	var sessionIDs []string
-	for id := range c.h.sessions {
-		sessionIDs = append(sessionIDs, id)
-	}
-	sort.Strings(sessionIDs)
-	var sessions []*session
-	for _, id := range sessionIDs {
-		sessions = append(sessions, c.h.sessions[id])
-	}
-	c.h.mu.RUnlock()
-	// Erasure is a quiescent operation. Hold every session to prevent stale snapshots.
-	for _, s := range sessions {
-		s.mu.Lock()
-	}
-	defer func() {
-		for _, s := range sessions {
-			s.mu.Unlock()
-		}
-	}()
-	for _, s := range sessions {
-		if s.id == id && s.pendingStore != nil {
-			return nil, errProvisionalSession
-		}
-		if s.rewindBlocked {
-			return nil, errRewindUnresolved
-		}
-		if s.running || unfinished(s.data) {
-			return nil, errors.New("erase refused while a turn, call or job runs")
-		}
-	}
-	v, err := c.Get("history")
-	if err != nil {
-		return nil, errors.New("erasure requires a history store")
-	}
-	store := v.(api.Store)
-	all, err := store.List("")
-	if err != nil {
-		return nil, err
-	}
-	for _, entryID := range ids {
-		found := false
-		for _, snap := range all {
-			i := slices.IndexFunc(snap.Entries, func(e api.Entry) bool { return e.ID == entryID })
-			if i < 0 {
-				continue
-			}
-			found = true
-			e := snap.Entries[i]
-			if e.AuthorityRecord() || e.Kind == "position" || e.Kind == "erasure" && !e.IsErased() {
-				return nil, api.ErrEraseForbidden
-			}
-		}
-		if !found {
-			return nil, os.ErrNotExist
-		}
-	}
-	affected := map[string][]string{}
-	selected := map[string]bool{}
-	for _, entryID := range ids {
-		selected[entryID] = true
-	}
-	// Include every admission of the same input, and follow copies.
-	for changed := true; changed; {
-		changed = false
-		for _, snap := range all {
-			logical := map[string]bool{}
-			for _, e := range snap.Entries {
-				if selected[e.ID] {
-					if input := recordedInputID(e); input != "" {
-						logical[input] = true
-					}
-				}
-			}
-			for _, e := range snap.Entries {
-				if selected[e.ID] || e.AuthorityRecord() {
-					continue
-				}
-				if logical[recordedInputID(e)] || slices.ContainsFunc(e.Copies, func(origin string) bool { return selected[origin] }) {
-					selected[e.ID], changed = true, true
-				}
-			}
-		}
-	}
-	ids = nil
-	for _, snap := range all {
-		for _, e := range snap.Entries {
-			if selected[e.ID] {
-				ids = append(ids, e.ID)
-				affected[snap.ID] = append(affected[snap.ID], e.ID)
-			}
-		}
-	}
-	for _, s := range sessions {
-		if len(affected[s.id]) == 0 {
-			continue
-		}
-		record := api.ErasureRecord{EntryIDs: []string{}}
-		for _, e := range s.data.Entries {
-			if selected[e.ID] && e.Kind == "input.accepted" {
-				in := api.Decode[api.Input](e.Data)
-				if in.Key != "" {
-					record.InputKeys = append(record.InputKeys, api.ErasedInputKey{InputID: in.ID, Key: in.Key, ActorID: in.Actor, SubmittedBy: in.ViaActor})
-				}
-			}
-		}
-		if len(record.InputKeys) > 0 {
-			if _, err := s.recordLocked(api.Entry{Kind: "erasure", Data: api.JSON(record)}, "harness", true); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if err = store.Erase(ids); err != nil {
-		return nil, err
-	}
-	for _, s := range sessions {
-		if s.lease != nil {
-			snap, err := s.lease.Load()
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			var newlyErased []string
-			for i, entry := range snap.Entries {
-				if entry.Kind != "erasure" || len(entry.Data) != 0 {
-					continue
-				}
-				fresh := i < len(s.data.Entries) && s.data.Entries[i].Kind != "erasure"
-				if fresh {
-					newlyErased = append(newlyErased, entry.ID)
-				}
-			}
-			s.data = snap
-			s.last = recordedOutcome(snap)
-			if len(newlyErased) > 0 {
-				if _, err := s.recordLocked(api.Entry{Kind: "erasure", Data: api.JSON(newlyErased)}, c.owner, true); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-	return affected, nil
-}
 func recordedInputID(e api.Entry) string {
 	switch e.Kind {
 	case "input":
@@ -1046,6 +858,10 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 		in.When = "now"
 	}
 	s.mu.Lock()
+	if err := s.reconcileErasureLocked(); err != nil {
+		s.mu.Unlock()
+		return api.Receipt{}, err
+	}
 	if s.rewindBlocked {
 		s.mu.Unlock()
 		return api.Receipt{}, errRewindUnresolved
@@ -1664,6 +1480,9 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 func (p *turnPorts) CheckWriter() error {
 	p.s.mu.Lock()
 	defer p.s.mu.Unlock()
+	if err := p.s.reconcileErasureLocked(); err != nil {
+		return err
+	}
 	return p.s.checkWriterLocked()
 }
 
@@ -1718,6 +1537,9 @@ func (p *turnPorts) ResultShape() json.RawMessage { return p.input.ResultSchema 
 func (p *turnPorts) Snapshot() (api.Session, error) {
 	p.s.mu.Lock()
 	defer p.s.mu.Unlock()
+	if err := p.s.reconcileErasureLocked(); err != nil {
+		return api.Session{}, err
+	}
 	return copySession(p.s.data), nil
 }
 func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) {

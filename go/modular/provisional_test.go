@@ -165,8 +165,13 @@ func (f provisionalFixture) unpublished(t *testing.T, a *modular.Agent, id strin
 		}
 	}
 	files, err := os.ReadDir(filepath.Join(f.root, "store"))
-	if err != nil || len(files) != 0 {
-		t.Errorf("unused session touched the store: %v, %v", files, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if name := file.Name(); name != ".pending-erasure" && name != ".pending-erasure.lock" {
+			t.Errorf("unused session left %s in the store", name)
+		}
 	}
 }
 

@@ -374,7 +374,7 @@ func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.N
 		}
 		ctx = api.WithSessionSettings(ctx, defaults)
 	}
-	id, err := s.a.(actorSessions).NewForHost(api.AsActor(ctx, s.actor), p.Cwd, tenant, s.hostActor())
+	id, err := s.a.(actorSessions).NewForHost(s.acting(ctx, "", s.actor), p.Cwd, tenant, s.hostActor())
 	if errors.Is(err, api.ErrTenantForbidden) {
 		return acp.NewSessionResponse{}, acpError("forbidden")
 	}

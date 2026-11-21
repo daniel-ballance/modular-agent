@@ -69,6 +69,9 @@ func Declaration(a api.API, project, id string) map[string]any {
 		"mixedActorInput": "refused", "settingsDuringTurn": "nextTurn", "erasureDuringTurn": "refused",
 		"commandContainment": containment, "nestedToolCalls": true,
 	}
+	if store, ok := a.(interface{ SupportsErasure() bool }); ok {
+		d["erasure"] = store.SupportsErasure()
+	}
 	if caps, ok := a.(interface{ ReservationDeclaration() any }); ok {
 		d["resourceReservations"] = caps.ReservationDeclaration()
 	}

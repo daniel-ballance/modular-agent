@@ -62,7 +62,7 @@ func (c *client) authorized(snap api.Session, who, right string) bool {
 }
 func (c *client) authorizedBy(s api.Session, ctx context.Context, right string) bool {
 	via := api.ActingVia(ctx)
-	return api.ConnectionAllows(ctx, right) && c.authorized(s, api.Acting(ctx), right) && (via == "" || c.authorized(s, via, right))
+	return api.SessionScopeAllows(ctx, s.Project, s.Tenant) && api.ConnectionAllows(ctx, right) && c.authorized(s, api.Acting(ctx), right) && (via == "" || c.authorized(s, via, right))
 }
 func (c *client) Grant(ctx context.Context, id string, actor api.Actor) error {
 	who := api.Acting(ctx)

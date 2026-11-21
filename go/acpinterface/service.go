@@ -87,7 +87,9 @@ func (s *server) discoverable(sess api.Session) bool {
 }
 
 func (s *server) acting(ctx context.Context, id, who string) context.Context {
-	ctx = api.AsActor(ctx, who)
+	ctx = api.WithSessionScope(api.AsActor(ctx, who), func(project, tenant string) bool {
+		return (s.projects != nil || project == s.project) && s.allowsProject(project) && s.allowsTenant(tenant)
+	})
 	if s.principal != nil && s.principal.Actor.Rights != nil {
 		rights := s.principal.Actor.Rights
 		if value, ok := s.connectionRights.Load(id); ok {

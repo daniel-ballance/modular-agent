@@ -23,6 +23,12 @@ func heldError(err error) error {
 }
 
 func outputReplyError(err error) error {
+	if errors.Is(err, api.ErrErasureUnavailable) {
+		return acpError("unavailable")
+	}
+	if errors.Is(err, api.ErrErasureBusy) {
+		return acpError("busy")
+	}
 	if errors.Is(err, api.ErrSessionLost) {
 		return &acp.RequestError{Code: -32000, Message: api.ErrSessionLost.Error(), Data: map[string]string{"code": "lost"}}
 	}

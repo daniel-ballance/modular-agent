@@ -280,6 +280,9 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		}
 		return map[string]any{}, nil
 	case "_modular-agent/erase":
+		if s.declaration(p.SessionID)["erasure"] != true {
+			return nil, acpError("not_supported")
+		}
 		if !s.authorize(p.SessionID, st.actor, "erase") {
 			return nil, acpError("forbidden")
 		}

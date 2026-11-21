@@ -467,6 +467,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		}
 		a.erasure = history.erasure
 	}
+	a.erasure = a.erasure && a.a.(interface{ SupportsErasure() bool }).SupportsErasure()
 	selectedRuntime, err := a.a.Get("runtime")
 	if err != nil {
 		return nil, appError(err, InvalidComposition)
