@@ -16,6 +16,7 @@ export class LocalEnvironment implements WorkingEnvironment {
 	readonly id: string;
 	get containment() { return this.processes.platform === "linux" ? "strong" : "processGroup"; }
 	get safeToRepeat() { return this.containment === "strong"; }
+	get platforms() { return [this.processes.platform]; }
 	get points(): boolean { return this.keepsPoints(this.cwd); }
 	keepsPoints(cwd: string): boolean {
 		return !(this.snapshots instanceof GitPoints) || this.snapshots.keepsPoints(cwd);

@@ -58,6 +58,42 @@ for (const platform of new Set<NodeJS.Platform>([process.platform, "darwin"])) t
 	if (escaped !== undefined) assert.ok(await until(() => !alive(escaped!)), "the process that left its group died too");
 });
 
+test("Darwin groups stop on timeout, cancellation and session close", async t => {
+	const dir = mkdtempSync(join(tmpdir(), "ma-proc-"));
+	const { LocalEnvironment, ProcessTracker } = await import(envLocal);
+	const tracker = new ProcessTracker(undefined, "darwin");
+	t.after(async () => { await tracker.stopAll(); });
+	const local = new LocalEnvironment(dir, tracker);
+	assert.equal(local.containment, "processGroup");
+	assert.deepEqual(local.platforms, ["darwin"]);
+	assert.equal(local.safeToRepeat, false);
+	const one = local.forSession("one"), two = local.forSession("two");
+	const signal = new AbortController().signal;
+	await one.exec("sleep 60 >/dev/null 2>&1 & echo $! > one", { signal });
+	await two.exec("sleep 60 >/dev/null 2>&1 & echo $! > two", { signal });
+	const onePid = Number(readFileSync(join(dir, "one"), "utf8"));
+	const twoPid = Number(readFileSync(join(dir, "two"), "utf8"));
+	assert.ok(alive(onePid) && alive(twoPid));
+	await local.sessionEnded("one");
+	assert.ok(await until(() => !alive(onePid)));
+	assert.ok(alive(twoPid));
+
+	const abort = new AbortController();
+	let started!: () => void;
+	const ready = new Promise<void>(resolve => { started = resolve; });
+	const task = one.exec("trap '' TERM; echo $$ > foreground; printf ready; while :; do sleep 60; done", {
+		signal: abort.signal, onOutput: started,
+	});
+	await ready;
+	abort.abort();
+	assert.deepEqual(await task, { exitCode: null, output: "ready", timedOut: false });
+	assert.ok(await until(() => !alive(Number(readFileSync(join(dir, "foreground"), "utf8")))));
+
+	const timeout = await one.exec("exec sleep 60", { signal, timeoutMs: 50 });
+	assert.equal(timeout.exitCode, null);
+	assert.equal(timeout.timedOut, true);
+});
+
 test("if the watcher dies too, the next agent to start cleans up", { skip: process.platform !== "linux" && "reads /proc" }, async () => {
 	const dir = mkdtempSync(join(tmpdir(), "ma-proc-"));
 	const home = mkdtempSync(join(tmpdir(), "ma-h-"));

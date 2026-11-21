@@ -61,6 +61,8 @@ func (e *Environment) Containment() string {
 	}
 	return "none"
 }
+func (e *Environment) Platforms() []string { return []string{runtime.GOOS} }
+
 func Plugin() api.Plugin { return PluginAt(defaultRoot()) }
 func PluginAt(root string, stateDirs ...string) api.Plugin {
 	return environmentPlugin(NewAt(root, stateDirs...))
