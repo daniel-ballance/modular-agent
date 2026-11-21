@@ -96,10 +96,9 @@ for (const reason of ["commitFailed", "writerLost"] as const) {
     const events = [a, b].map(socket => new Promise<unknown>(resolve => {
       const handler = (bytes: Buffer) => {
         const message = JSON.parse(bytes.toString());
-        const interruption = message.params?.update?._meta?.["modular-agent"]?.sessionInterrupted;
-        if (message.method !== "session/update" || !interruption || message.params.sessionId !== sessionId) return;
+        if (message.method !== "_modular-agent/interrupted" || message.params?.sessionId !== sessionId) return;
         socket.off("message", handler);
-        resolve(interruption);
+        resolve({ reason: message.params.reason });
       };
       socket.on("message", handler);
     }));

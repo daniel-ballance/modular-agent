@@ -33,7 +33,7 @@ const BINDING_V2 = "modular-agent-acp/2";
 const MAX_LINE_BYTES = 64 * 1024 * 1024;
 const bindingError = (code: string, message = code) => new RequestError(code === "lost" ? -32000 : -32602, message, { code });
 const notOpen = () => ({ accepted: false, reason: "not_open" });
-const EXTENSIONS = ["history", "input", "requests", "answer", "actors", "join", "leave", "release", "proposals", "withdraw", "limit", "tenant", "fork", "move", "jobs", "cancel-job", "erase"];
+const EXTENSIONS = ["history", "input", "requests", "answer", "actors", "join", "leave", "release", "proposals", "withdraw", "limit", "tenant", "fork", "move", "jobs", "cancel-job", "erase", "interrupted"];
 
 interface Outcome { kind: string; error?: string; limit?: string }
 interface Waiter {
@@ -769,9 +769,8 @@ export class AcpInterface implements InterfaceCapability {
 		if (!state || !this.hasRight(sessionId, this.actorId, "watch")) return;
 		switch (e.type) {
 			case "session.interrupted":
-				// ACP has no interruption update variant. Carry the event in binding metadata, not model text.
-				return this.update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "" },
-					_meta: { [NS]: { sessionInterrupted: e.data } } });
+				// ACP has no interruption update; the binding's extension notification carries it (docs/bindings/acp.md, Updates).
+				return this.client ? this.client.notify("_modular-agent/interrupted" as never, { sessionId, reason: e.data?.reason } as never).catch(() => undefined) : undefined;
 			case "model.output":
 				if (e.data?.type === "text") return this.update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: e.data.delta } });
 				if (e.data?.type === "reasoning") return this.update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: e.data.delta } });
