@@ -92,7 +92,6 @@ The base suites use Linux with unprivileged user, PID and mount namespaces. The 
 
 - [API, The other parts](../../docs/sdk/api.md#the-other-parts) does not specify how a snapshot store advertises HTTP lease and tombstone support. Add: “A service adapter for a snapshot store may require an explicit exact-erasure capability and private persistent state for restart lease exclusion. Its native and served records may share a namespace if both paths preserve the same leases and tombstones.”
 
-- [API, The other parts](../../docs/sdk/api.md#the-other-parts) does not define how local adapters report revocation when no store call is in progress. Add: “A history adapter whose writer access can be revoked MUST notify the host when revocation is detected, including when there is no pending write. Go exposes `WatchedHistoryLease` with `WriterLost` and `CheckWriter` for this purpose.”
 
 ### Remaining Go gaps
 
