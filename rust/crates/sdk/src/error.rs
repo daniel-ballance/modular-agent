@@ -138,6 +138,8 @@ impl From<anyhow::Error> for Error {
                 NotFound(_) => Code::NotFound,
                 Busy(_) => Code::Busy,
                 Forbidden(_) => Code::Forbidden,
+                Conflict(_) => Code::Conflict,
+                InvalidParams(_) => Code::InvalidParams,
             };
             return Error::new(code, format!("{error:#}"));
         }

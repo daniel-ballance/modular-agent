@@ -436,17 +436,17 @@ pub(crate) fn mark_history_views(
     }
     Ok(())
 }
-fn input_timing_for_release(
-    api: &dyn AgentApi,
-    session: &str,
-    timing: Timing,
-    declined: bool,
-) -> &'static str {
-    if declined {
-        "handedBack"
-    } else {
-        input_taken(api.is_running(session), timing)
-    }
+fn proposal_result<T>(result: Result<T>) -> Result<T> {
+    result.map_err(|error| {
+        let code = match error.downcast_ref::<OperationError>() {
+            Some(OperationError::NotFound(_)) => "not_found",
+            Some(OperationError::Conflict(_)) => "conflict",
+            Some(OperationError::Forbidden(_)) => "forbidden",
+            Some(OperationError::InvalidParams(_)) => "invalid_params",
+            _ => return error,
+        };
+        request_error(code, &error.to_string()).into()
+    })
 }
 pub(crate) async fn extension(
     factory: &dyn Factory,
@@ -577,10 +577,13 @@ pub(crate) async fn extension(
         "release" => {
             let input = string(p, "inputId")?;
             let timing = serde_json::from_value(p["when"].clone())?;
-            let taken = input_timing_for_release(api, &session.id, timing, p["declined"] == true);
-            api.release(&scope, input, timing, p["declined"] == true)
-                .await?;
-            session.wake.notify_one();
+            let taken = proposal_result(
+                api.release(&scope, input, timing, p["declined"] == true)
+                    .await,
+            )?;
+            if taken != "handedBack" {
+                session.wake.notify_one();
+            }
             Ok(json!({"inputId":input,"taken":taken}))
         }
         "proposals" => {
@@ -612,8 +615,10 @@ pub(crate) async fn extension(
                 actor: actor.into(),
                 ..scope
             };
-            api.withdraw_proposal(&proposer, connection_actor.as_str(), string(p, "inputId")?)
-                .await?;
+            proposal_result(
+                api.withdraw_proposal(&proposer, connection_actor.as_str(), string(p, "inputId")?)
+                    .await,
+            )?;
             Ok(json!({}))
         }
         "limit" => {

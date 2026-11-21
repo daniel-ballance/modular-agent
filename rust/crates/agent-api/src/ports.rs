@@ -6,14 +6,18 @@ pub enum OperationError {
     NotFound(String),
     Busy(String),
     Forbidden(String),
+    Conflict(String),
+    InvalidParams(String),
 }
 
 impl std::fmt::Display for OperationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(message) | Self::Busy(message) | Self::Forbidden(message) => {
-                f.write_str(message)
-            }
+            Self::NotFound(message)
+            | Self::Busy(message)
+            | Self::Forbidden(message)
+            | Self::Conflict(message)
+            | Self::InvalidParams(message) => f.write_str(message),
         }
     }
 }
@@ -138,7 +142,7 @@ pub trait AgentApi: Send + Sync {
         _input: &str,
         _timing: Timing,
         _declined: bool,
-    ) -> Result<()> {
+    ) -> Result<&'static str> {
         bail!("proposed input is not supported")
     }
     async fn withdraw_proposal(&self, _scope: &Scope, _sponsor: &str, _input: &str) -> Result<()> {
