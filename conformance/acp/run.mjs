@@ -264,14 +264,31 @@ async function history(agent, sessionId, params = {}) {
 }
 
 /** Wait until fn(entries) is true, reading the full history; returns the entries. */
-async function waitFor(a, sid, fn, ms = 15000) {
+async function waitFor(a, sid, fn, ms = 15000, stats) {
 	let entries = [];
-	for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(150)) {
-		entries = (await history(a, sid, { all: true })).entries;
+	const t0 = performance.now();
+	for (; performance.now() - t0 < ms; await sleep(150)) {
+		const started = performance.now();
+		const page = await history(a, sid, { all: true });
+		entries = page.entries;
+		if (stats) {
+			stats.reads++;
+			stats.lastReadStartedMs = Math.round(started - t0);
+			stats.lastReadMs = Math.round(performance.now() - started);
+			stats.nextEntryId = page.nextEntryId;
+		}
 		if (fn(entries)) break;
 	}
+	if (stats) stats.elapsedMs = Math.round(performance.now() - t0);
 	return entries;
 }
+
+function toolUpdates(a, sid, since, callId) {
+	return a.updates.slice(since).filter(({ sessionId, update }) => sessionId === sid &&
+		["tool_call", "tool_call_update"].includes(update.sessionUpdate) && (!callId || update.toolCallId === callId))
+		.slice(-12).map(({ update: { toolCallId, title, status } }) => ({ toolCallId, title, status }));
+}
+
 const said = (entries, text) => entries.some((e) => e.kind === "response" && JSON.stringify(e.message ?? {}).includes(text));
 
 // ACP: Prompts and Conformance mode. Contracts: Tool dispatch and Recovery and repeating work.
@@ -723,18 +740,37 @@ if (decl.tenants) {
 // ACP: Cancelling; Plugin binding: Command lifetime. Witness execution, not a tool announcement.
 await attempt("cancel", async () => {
 	const marker = join(project, "cancel-test.txt");
+	const markerState = () => existsSync(marker) ? readFileSync(marker, "utf8").trim() : "missing";
+	const since = agent.updates.length;
+	const sent = performance.now();
 	const pending = prompt(agent, sessionId, 'tool:bash {"command":"echo started > cancel-test.txt; sleep 6; echo finished >> cancel-test.txt"}');
 	void pending.catch(() => undefined);
 	for (let i = 0; i < 100 && !existsSync(marker); i++) await sleep(50);
-	check("cancel: fixture command actually started", existsSync(marker));
-	const t0 = Date.now();
-	await agent.ctx.notify(methods.agent.session.cancel, { sessionId });
-	const r = await within(10000, pending, "cancelled prompt");
-	check("cancel: stopReason and outcome are cancelled", r.stopReason === "cancelled" && meta(r)?.outcome?.kind === "cancelled");
-	check("cancel: prompt answers within five seconds", Date.now() - t0 <= 5000);
+	const before = markerState();
+	const startedMs = Math.round(performance.now() - sent);
+	check("cancel: fixture command actually started", before !== "missing", JSON.stringify({ startedMs, marker: before, updates: toolUpdates(agent, sessionId, since) }));
+	let notifyMs;
+	const state = () => JSON.stringify({
+		startedMs, notifyMs, cancelMs: Math.round(performance.now() - t0), before, marker: markerState(),
+		exit: agent.child?.exitCode, signal: agent.child?.signalCode, updates: toolUpdates(agent, sessionId, since),
+	});
+	let r;
+	const t0 = performance.now();
+	try {
+		await agent.ctx.notify(methods.agent.session.cancel, { sessionId });
+		notifyMs = Math.round(performance.now() - t0);
+		r = await within(10000, pending, "cancelled prompt");
+	} catch (error) {
+		check("cancel", false, `${error instanceof Error ? error.message : String(error)}; ${state()}`);
+		return;
+	}
+	const elapsed = performance.now() - t0;
+	const reply = meta(r)?.outcome;
+	check("cancel: stopReason and outcome are cancelled", r.stopReason === "cancelled" && reply?.kind === "cancelled", JSON.stringify({ stopReason: r.stopReason, outcome: reply?.kind }));
+	check("cancel: prompt answers within five seconds", elapsed <= 5000, state());
 	if (["strong", "processGroup"].includes(decl.commandContainment)) {
 		await sleep(6500);
-		check("cancel: the managed command does not finish", existsSync(marker) && readFileSync(marker, "utf8").trim() === "started");
+		check("cancel: the managed command does not finish", markerState() === "started", state());
 	}
 });
 
@@ -894,6 +930,7 @@ if (probeChecks) {
 
 	// ACP: Questions; Shared data: Questions and Context and interrupted work.
 	for (const late of decl.questionsOutlastTurns && decl.lateAnswersStartTurns ? [false, true] : [false]) await attempt(late ? "late text question" : "in-turn text question", async () => {
+		const since = agent.updates.length;
 		const pending = prompt(agent, sessionId, `tool:probe-question {"late":${late}}`);
 		void pending.catch(() => undefined);
 		const requests = () => agent.ctx.request(`_${NS}/requests`, { sessionId }).then((r) => r.requests);
@@ -907,19 +944,46 @@ if (probeChecks) {
 		let originatingTurn;
 		if (late) {
 			await within(10000, pending, "original turn leaves a question open");
-			originatingTurn = (await history(agent, sessionId, { all: true })).entries.find((e) => e.kind === "turnEnd" && e.data?.result?.openToolCalls?.includes(question.toolCallId))?.turnId;
+			const originatingEnd = (await history(agent, sessionId, { all: true })).entries.find((e) => e.kind === "turnEnd" && e.data?.result?.openToolCalls?.includes(question.toolCallId));
+			originatingTurn = originatingEnd?.turnId;
 			check("late question: the original turn ends with its call open", typeof originatingTurn === "string");
 			// Contracts, Hook execution: step.after runs once the step's calls are settled or left open, so leaving a call open is a normal end.
-			const originatingEnd = (await history(agent, sessionId, { all: true })).entries.find((e) => e.kind === "turnEnd" && e.turnId === originatingTurn);
 			check("late question: the original turn completed, with step.after accepted for its open call", originatingEnd?.data?.outcome?.kind === "completed", JSON.stringify(originatingEnd?.data?.outcome ?? null));
 		}
 		const answer = () => agent.ctx.request(`_${NS}/answer`, { sessionId, requestId: question.id, value: "fixture value" });
+		const answering = performance.now();
 		const pair = await Promise.all([answer(), answer()]);
-		check(`${late ? "late" : "in-turn"} question: two valid replies produce one acceptance`, pair.filter((r) => r.accepted === true).length === 1 && pair.some((r) => equal(r, { accepted: false, reason: "not_open" })));
+		const answerMs = Math.round(performance.now() - answering);
+		check(`${late ? "late" : "in-turn"} question: two valid replies produce one acceptance`, pair.filter((r) => r.accepted === true).length === 1 && pair.some((r) => equal(r, { accepted: false, reason: "not_open" })), JSON.stringify(pair));
 		if (!late) await within(10000, pending, "tool receives its text answer");
-		const entries = await waitFor(agent, sessionId, (es) => es.some((e) => e.kind === "toolResult" && e.toolCallId === question.toolCallId && JSON.stringify(e.message?.content).includes("fixture answer: fixture value")), 8000);
-		check(`${late ? "late" : "in-turn"} question: one value record and one tool result for the original call`, entries.filter((e) => e.kind === "inputAnswer" && (e.requestId ?? e.data?.requestId) === question.id && e.data?.value === "fixture value").length === 1 && entries.filter((e) => e.kind === "toolResult" && e.toolCallId === question.toolCallId).length === 1);
-		if (late) check("late question: exactly one continuation names the originating turn", !!originatingTurn && entries.filter((e) => e.kind === "turnStart" && (e.continuesTurnId ?? e.data?.continuesTurnId) === originatingTurn && e.data?.startedBy?.id === question.id).length === 1);
+		const hasValue = (e) => JSON.stringify(e.message?.content)?.includes("fixture answer: fixture value") === true;
+		const isResult = (e) => e.kind === "toolResult" && e.toolCallId === question.toolCallId;
+		const stats = { reads: 0 };
+		const entries = await waitFor(agent, sessionId, (es) => es.some((e) => isResult(e) && hasValue(e)), 8000, stats);
+		const answers = entries.filter((e) => e.kind === "inputAnswer" && (e.requestId ?? e.data?.requestId) === question.id);
+		const results = entries.filter(isResult);
+		const starts = late ? entries.filter((e) => e.kind === "turnStart").map((e) => ({
+			turnId: e.turnId, continues: e.continuesTurnId ?? e.data?.continuesTurnId, startedBy: e.data?.startedBy?.id,
+		})).filter((e) => e.startedBy === question.id || (originatingTurn && e.continues === originatingTurn)) : [];
+		const valueAndResult = answers.length === 1 && answers[0].data?.value === "fixture value" && results.length === 1 && hasValue(results[0]);
+		const oneContinuation = !!originatingTurn && starts.filter((e) => e.continues === originatingTurn && e.startedBy === question.id).length === 1;
+		let detail;
+		if (!valueAndResult || (late && !oneContinuation) || verbose) {
+			let probeReplies;
+			try {
+				probeReplies = trace("probe-events").filter((e) => e.callId === question.toolCallId && e.questionResult)
+					.map((e) => ({ requestId: e.questionResult, declined: e.declined, expectedValue: e.value === "fixture value" }));
+			} catch { /* The probe may still be writing the trace. */ }
+			detail = JSON.stringify({
+				requestId: question.id, callId: question.toolCallId, originatingTurn, answerMs, history: stats,
+				entries: entries.length, tail: entries.slice(-6).map((e) => ({ kind: e.kind, turnId: e.turnId })),
+				answers: answers.map((e) => ({ turnId: e.turnId, expectedValue: e.data?.value === "fixture value" })),
+				results: results.map((e) => ({ turnId: e.turnId, status: e.data?.status, expectedValue: hasValue(e) })),
+				starts, updates: toolUpdates(agent, sessionId, since, question.toolCallId), probeReplies,
+			});
+		}
+		check(`${late ? "late" : "in-turn"} question: one value record and one tool result for the original call`, valueAndResult, detail);
+		if (late) check("late question: exactly one continuation names the originating turn", oneContinuation, detail);
 		if (late && portableChecks && decl.portableSessions) {
 			const raw = await store.pages(sessionId);
 			const callRows = raw.filter((e) => e.toolCallId === question.toolCallId);
