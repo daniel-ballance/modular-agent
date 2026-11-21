@@ -899,6 +899,40 @@ tools.read('after')
     assert text.endswith("RuntimeError: this run made more than 500 function calls")
 
 
+def test_codemode_positional_order_for_mcp_schema() -> None:
+    name = "mcp_example__lookup"
+    catalog = functions(
+        [
+            {
+                "name": name,
+                "description": "Look up a record",
+                "parameters": {
+                    "type": "object",
+                    "required": ["source", "key"],
+                    "properties": {
+                        "key": {"type": "string"},
+                        "offset": {"type": "integer"},
+                        "source": {"type": "string"},
+                        "limit": {"type": "integer"},
+                        "detailed": {"type": "boolean"},
+                    },
+                },
+            }
+        ]
+    )
+    assert catalog[name].bind(("archive", "record-42", True, 3, 10), {}) == {
+        "source": "archive",
+        "key": "record-42",
+        "detailed": True,
+        "limit": 3,
+        "offset": 10,
+    }
+    assert (
+        f"tools.{name}(source: str, key: str, detailed: bool = None, "
+        "limit: int = None, offset: int = None)"
+    ) in function_prompt(catalog)
+
+
 def test_codemode_large_catalog_keeps_every_signature_and_shortens_descriptions() -> None:
     definitions = [
         {
@@ -919,7 +953,7 @@ def test_codemode_large_catalog_keeps_every_signature_and_shortens_descriptions(
     catalog = functions(definitions)
     listing = function_prompt(catalog)
     assert listing.count("- `tools.") == 13
-    assert "tools.tool_12(first: str, zed: int = None, alpha: bool = None)" in listing
+    assert "tools.tool_12(first: str, alpha: bool = None, zed: int = None)" in listing
     assert "x" * 160 in listing and "x" * 161 not in listing
     assert (
         "Detailed notes" not in listing
