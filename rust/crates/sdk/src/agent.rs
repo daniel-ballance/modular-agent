@@ -125,6 +125,7 @@ pub struct AgentBuilder {
     configuration: Option<crate::FilesConfiguration>,
     credentials: Option<Arc<dyn crate::CredentialStore>>,
     tenants: Option<Value>,
+    resource_limits: ResourceLimits,
     several_actors: bool,
     session_limits: bool,
     pub(crate) acp_conformance: bool,
@@ -383,7 +384,14 @@ pub(crate) fn require_model(api: &dyn base::AgentApi, model: &str) -> Result<()>
     }
 }
 
+pub use agent_harness::{Capacity, ResourceLimits};
+
 impl AgentBuilder {
+    /// Set the operator's admission bounds.
+    pub fn resource_limits(mut self, limits: ResourceLimits) -> Self {
+        self.resource_limits = limits;
+        self
+    }
     pub fn project(mut self, project: impl Into<PathBuf>) -> Self {
         self.project = Some(project.into());
         self
@@ -668,6 +676,9 @@ impl AgentBuilder {
             own.push((Arc::new(InProcess::new(&plugin)?), vec![]));
         }
         let harness = Harness::for_project(project.clone());
+        harness.configure_reservations(Arc::new(agent_harness::ReservationPool::new(
+            self.resource_limits,
+        )))?;
         let tenants = self.tenants.as_ref().map(Value::to_string);
         harness
             .configure_tenants(tenants.as_deref())
@@ -839,6 +850,7 @@ impl AgentBuilder {
                 "the local working environment needs a data_dir for recovery bookkeeping",
             ));
         }
+        harness.rebuild_reservations()?;
         hub.harness.set(Arc::downgrade(&harness)).ok();
 
         let model = match self.model {

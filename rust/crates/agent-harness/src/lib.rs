@@ -1,5 +1,7 @@
 //! Hosts plugins and owns sessions. Inference, turns, I/O and presentation are delegated.
 use agent_api::*;
+mod capacity;
+pub use capacity::{Capacity, Pool as ReservationPool, ResourceLimits};
 mod output;
 pub use output::{apply_redactions, encode as output_event};
 mod rewind;
@@ -47,6 +49,7 @@ pub struct Harness {
     held_output: Mutex<HeldOutput>,
     admissions: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     erasure: tokio::sync::RwLock<()>,
+    reservations: RwLock<Arc<ReservationPool>>,
 }
 impl Harness {
     pub fn new() -> Arc<Self> {
@@ -70,7 +73,28 @@ impl Harness {
             held_output: Mutex::default(),
             admissions: Mutex::default(),
             erasure: tokio::sync::RwLock::default(),
+            reservations: RwLock::new(Arc::new(ReservationPool::new(ResourceLimits::default()))),
         })
+    }
+    pub fn configure_reservations(&self, pool: Arc<ReservationPool>) -> Result<()> {
+        ensure!(
+            self.sessions.lock().unwrap().is_empty(),
+            "capacity is fixed while sessions are open"
+        );
+        *self.reservations.write().unwrap() = pool;
+        Ok(())
+    }
+    pub fn reservations(&self) -> Arc<ReservationPool> {
+        self.reservations.read().unwrap().clone()
+    }
+    pub fn rebuild_reservations(&self) -> Result<()> {
+        if let Some(store) = self.store() {
+            let pool = self.reservations();
+            for data in store.list(None)? {
+                pool.rebuild(&data);
+            }
+        }
+        Ok(())
     }
     pub fn configure_tenants(&self, config: Option<&str>) -> Result<()> {
         ensure!(
@@ -678,6 +702,14 @@ impl Harness {
         Ok(())
     }
     fn commit(&self, open: &mut OpenSession, data: &SessionData) -> Result<()> {
+        self.commit_reserved(open, data, None)
+    }
+    fn commit_reserved(
+        &self,
+        open: &mut OpenSession,
+        data: &SessionData,
+        admission: Option<capacity::InputReservation>,
+    ) -> Result<()> {
         self.check_open_writer(open)?;
         if open.provisional {
             let admitted = data
@@ -702,6 +734,11 @@ impl Harness {
         if open.provisional {
             open.provisional = false;
             self.watch_open_writer(open);
+        }
+        if let Some(admission) = admission {
+            admission.transfer(data);
+        } else {
+            self.reservations().rebuild(data);
         }
         Ok(())
     }
@@ -862,6 +899,7 @@ impl Harness {
                 });
             }
         }
+        let reservation = self.reservations().reserve(&self.snapshot(session)?)?;
         // A proposal is data, not a command. Do not run input hooks with
         // broader authority than the connection and actor share.
         let input_payload = json!({"text":text,"content":content,"actor":actor,"timing":timing});
@@ -963,7 +1001,7 @@ impl Harness {
         }
         next.position = Some(entry.id.clone());
         next.entries.push(entry.clone());
-        self.commit(open, &next)?;
+        self.commit_reserved(open, &next, Some(reservation))?;
         open.data = next;
         open.queue.push_back(Input {
             id: entry.id.clone(),

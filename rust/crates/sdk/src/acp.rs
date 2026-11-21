@@ -168,6 +168,7 @@ impl interface_acp::Factory for ProjectFactory {
             ));
         }
         let harness = agent.inner.harness.clone();
+        harness.configure_reservations(self.1.inner.harness.reservations())?;
         if let Err(error) = harness
             .load(Arc::new(interface_acp::AcpPlugin { sink }))
             .await

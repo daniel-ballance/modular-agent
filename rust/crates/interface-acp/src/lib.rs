@@ -867,7 +867,12 @@ async fn run_connection(
                                 acp::Error::method_not_found()
                             } else {
                                 let message = e.to_string();
-                                let code = if message.starts_with("actor lacks ")
+                                let code = if matches!(
+                                    e.downcast_ref::<OperationError>(),
+                                    Some(OperationError::Busy(_))
+                                ) {
+                                    "busy"
+                                } else if message.starts_with("actor lacks ")
                                     || message.starts_with("unknown tenant ")
                                 {
                                     "forbidden"
