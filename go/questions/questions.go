@@ -500,6 +500,11 @@ func (m *Manager) Present(id, actor string) bool {
 }
 
 func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized bool) error {
+	// Leave a refused answer open for a bounded replacement. Even the worst
+	// JSON escaping of this value fits the reserved closing record.
+	if len(a.Value) > 256<<10 {
+		return api.ErrResultTooLarge
+	}
 	m.mu.Lock()
 	s, err := m.a.Snapshot(id)
 	if err != nil {

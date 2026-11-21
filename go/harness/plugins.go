@@ -452,7 +452,24 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("unknown command /%s", fields[0])
 	}
+	check := func(right string) error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if s.closing || !c.authorizedBy(s.data, ctx, right) {
+			return api.ErrAuthority
+		}
+		if err := s.reconcileErasureLocked(); err != nil {
+			return err
+		}
+		return s.checkWriterLocked()
+	}
 	ctx = api.WithExecution(ctx, api.Execution{Session: id, Step: api.ID()})
+	if err := check("input"); err != nil {
+		return "", err
+	}
 	result, err := r.value.(api.Command)(ctx, id, fields[1:])
 	if errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 		return "", api.ErrSessionLost
@@ -465,6 +482,9 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 	}
 	out, err := c.OutputValue(ctx, api.Event{Kind: "command.result", Session: id, Data: api.JSON(result)})
 	if err != nil {
+		return "", err
+	}
+	if err := check("watch"); err != nil {
 		return "", err
 	}
 	return api.Decode[string](out.Data), nil

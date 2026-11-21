@@ -285,6 +285,7 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 	}
 	jobs := map[string]struct{}{}
 	turns := map[string]bool{}
+	questions := map[string]bool{}
 	// The second map tracks model attempts; a committed response transfers
 	// the call reservation to all call IDs it contains.
 	attempts := map[string]string{}
@@ -314,8 +315,13 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 					delete(attempts, step)
 				}
 			}
-		case e.Kind == "tool.call":
+		case e.Kind == "tool.call" || e.Kind == "external.start":
 			calls[e.Call] = true
+		case e.Kind == "question.open":
+			q := api.Decode[struct{ Question api.Question }](e.Data).Question
+			questions[q.ID] = true
+		case e.Kind == "question.answer":
+			delete(questions, api.Decode[api.Answer](e.Data).Request)
 		case e.WasKind("tool.result"):
 			delete(calls, e.Call)
 		}
@@ -326,6 +332,6 @@ func snapshotCharges(row api.Session) (b CapacityBounds) {
 	b.BufferedBytes += b.Jobs * api.JobReportBytes
 	// Keep enough room for a bounded disposition or result in addition to
 	// the committed intent. Taken inputs transfer their slot to a live turn.
-	b.StorageBytes += 2*b.BufferedBytes + (b.Inputs+int64(len(turns)))*(4<<20) + b.Calls*(4<<20) + b.Jobs*(8<<20)
+	b.StorageBytes += 2*b.BufferedBytes + (b.Inputs+int64(len(turns)))*(4<<20) + b.Calls*(4<<20) + b.Jobs*(8<<20) + int64(len(questions))*(2<<20)
 	return b
 }

@@ -255,6 +255,9 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		if errors.Is(err, api.ErrInvalidAnswer) {
 			return nil, acpError("invalid_params")
 		}
+		if errors.Is(err, api.ErrResultTooLarge) {
+			return nil, acpError("result_too_large")
+		}
 		if err != nil {
 			return map[string]any{"accepted": false, "reason": "not_open"}, nil
 		}

@@ -1471,6 +1471,13 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 			result.Structured, result.Data, result.Wire = nil, nil, nil
 			result.ProcessingError = errors.Join(result.ProcessingError, err)
 		}
+		// Validate the original result first. If it cannot fit the
+		// settlement reservation, preserve dispatch status, not its data.
+		if len(api.JSON(result)) > 1<<20 {
+			result.Content = api.Text(api.ErrResultTooLarge.Error())
+			result.Structured, result.Data, result.Wire, result.Copies = nil, nil, nil, nil
+			result.ProcessingError = errors.Join(result.ProcessingError, api.ErrResultTooLarge)
+		}
 		before.Result = result
 		return before, nil
 	}
@@ -1702,11 +1709,11 @@ func (p *turnPorts) RunTool(ctx context.Context, call api.Call) api.ToolResult {
 	if !found || !api.CanCall(def, call.Origin) || !p.canRunTools(call.Actor) {
 		return api.ToolResult{Call: call.ID, Status: "refused", NotDispatched: true}
 	}
-	if ctx.Err() != nil || p.CheckWriter() != nil {
-		return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
-	}
 	if err := validateToolInput(def, call.Input); err != nil {
 		return api.ToolResult{Call: call.ID, Status: "failed", Content: api.Text(err.Error()), NotDispatched: true}
+	}
+	if ctx.Err() != nil || p.CheckWriter() != nil || !p.canRunTools(call.Actor) {
+		return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
 	}
 	result, err := p.executeTool(ctx, source, snap, call, api.ToolRegistration{Plugin: plugin, ToolSource: id}, 0)
 	result.Returns = def.Output

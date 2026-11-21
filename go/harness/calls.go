@@ -12,6 +12,14 @@ func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.To
 		return api.ToolResult{}, err
 	}
 	s.mu.Lock()
+	if ctx.Err() != nil || !c.authorizedBy(s.data, ctx, "tools") {
+		s.mu.Unlock()
+		return api.ToolResult{}, api.ErrAuthority
+	}
+	if err := s.reconcileErasureLocked(); err != nil {
+		s.mu.Unlock()
+		return api.ToolResult{}, err
+	}
 	if s.pendingStore != nil {
 		s.mu.Unlock()
 		return api.ToolResult{}, errProvisionalSession
