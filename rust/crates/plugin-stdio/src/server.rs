@@ -17,13 +17,22 @@ pub async fn serve_websocket(
     tls: Option<transport_websocket::TlsOptions>,
     endpoint: impl Fn() -> Arc<dyn Endpoint> + Send + Sync + 'static,
 ) -> Result<transport_websocket::Server> {
+    serve_websocket_hosts(listen, tls, vec![(token_file, ())], move |()| endpoint()).await
+}
+
+pub async fn serve_websocket_hosts<T: Clone + Send + Sync + 'static>(
+    listen: &str,
+    tls: Option<transport_websocket::TlsOptions>,
+    hosts: Vec<(PathBuf, T)>,
+    endpoint: impl Fn(T) -> Arc<dyn Endpoint> + Send + Sync + 'static,
+) -> Result<transport_websocket::Server> {
     transport_websocket::serve(
         listen,
         tls,
         transport_websocket::PLUGIN,
-        vec![(token_file, ())],
-        move |(), conn| {
-            let endpoint = endpoint();
+        hosts,
+        move |host, conn| {
+            let endpoint = endpoint(host);
             async move {
                 Peer::websocket(conn, endpoint, true)
                     .finished
@@ -40,6 +49,7 @@ pub struct Conformance {
     initializing: tokio::sync::Mutex<()>,
     state: Mutex<Option<(Api, Value)>>,
     parts: BTreeSet<String>,
+    host: Option<(PathBuf, PathBuf)>,
 }
 impl Conformance {
     pub fn from_env() -> Result<Self> {
@@ -73,6 +83,12 @@ impl Conformance {
         Self {
             parts: self.parts.clone(),
             ..Self::default()
+        }
+    }
+    pub fn for_host(&self, project: PathBuf, state: PathBuf) -> Self {
+        Self {
+            host: Some((project, state)),
+            ..self.new_instance()
         }
     }
     fn has(&self, part: &str) -> bool {
@@ -233,19 +249,33 @@ impl Endpoint for Conformance {
                 return Err(Fault::new("invalid_request", "already initialized"));
             }
             let mut p = p;
-            if self.has("environment") {
-                p["project"] = json!(environment_cwd(&p, "project")?);
+            if self.has("environment") || self.host.is_some() {
+                let project = environment_cwd(&p, "project")?;
+                if self
+                    .host
+                    .as_ref()
+                    .is_some_and(|(allowed, _)| *allowed != project)
+                {
+                    return Err(Fault::new(
+                        "invalid_request",
+                        "project is outside the host scope",
+                    ));
+                }
+                p["project"] = json!(project);
             }
             let h = agent_harness::Harness::new();
             // Reuse this build's environment, including its ptrace containment.
             if self.has("environment") {
                 h.load(Arc::new(environment_local::ServedEnvironment {
-                    state: PathBuf::from(
-                        p["home"]
-                            .as_str()
-                            .ok_or_else(|| Fault::new("invalid_request", "home required"))?,
-                    )
-                    .join("commands"),
+                    state: match &self.host {
+                        Some((_, state)) => state.clone(),
+                        None => PathBuf::from(
+                            p["home"]
+                                .as_str()
+                                .ok_or_else(|| Fault::new("invalid_request", "home required"))?,
+                        )
+                        .join("commands"),
+                    },
                 }))
                 .await?;
             }
@@ -300,6 +330,14 @@ impl Endpoint for Conformance {
                 }
                 if p["toolSource"] != "conformance-tools" {
                     return Err(Fault::new("invalid_request", "unknown tool source"));
+                }
+                if let Some((project, _)) = &self.host
+                    && environment_cwd(&p, "project")? != *project
+                {
+                    return Err(Fault::new(
+                        "invalid_request",
+                        "project is outside the host scope",
+                    ));
                 }
                 let call = &p["call"];
                 let name = call["name"].as_str().unwrap_or("");

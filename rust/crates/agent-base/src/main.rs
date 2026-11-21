@@ -1,3 +1,4 @@
+mod policy;
 use agent_api::*;
 use agent_base::{Options, compose_project};
 use interface_terminal::{Mode, TerminalOptions, TerminalPlugin, TerminalSink};
@@ -33,7 +34,25 @@ async fn start() -> Result<()> {
                 server.close().await;
                 stopped?;
             }
-            _ => bail!("usage: modular-agent --serve-plugin [--listen ADDR --token-file FILE]"),
+            [flag, address, policy_flag, path]
+                if flag == "--listen" && policy_flag == "--host-policy" =>
+            {
+                let hosts = policy::plugin_hosts(&PathBuf::from(path))?;
+                let server = plugin_stdio::server::serve_websocket_hosts(
+                    address,
+                    None,
+                    hosts,
+                    move |(project, state)| Arc::new(plugin.for_host(project, state)),
+                )
+                .await?;
+                println!("{}", server.url);
+                let stopped = tokio::signal::ctrl_c().await;
+                server.close().await;
+                stopped?;
+            }
+            _ => bail!(
+                "usage: --serve-plugin [--listen ADDR --token-file FILE | --listen ADDR --host-policy FILE]"
+            ),
         }
         return Ok(());
     }
@@ -155,13 +174,21 @@ async fn start() -> Result<()> {
             subagents.is_none(),
             "configure ACP subagents in plugin settings"
         );
-        return interface_acp::run(Arc::new(agent_base::acp::Factory {
+        let (identity, limits) = policy::load()?.map_or_else(
+            || (None, agent_harness::ResourceLimits::default()),
+            |(identity, limits)| (Some(identity), limits),
+        );
+        let factory = Arc::new(agent_base::acp::Factory {
             options,
             provider,
             runtime,
             settings: terminal.settings,
-        }))
-        .await;
+            pool: Arc::new(agent_harness::ReservationPool::new(limits)),
+        });
+        return match identity {
+            Some(identity) => interface_acp::run_stdio(factory, identity).await,
+            None => interface_acp::run(factory).await,
+        };
     }
     let interface = Arc::new(TerminalPlugin {
         sink: Arc::new(TerminalSink::new(terminal.mode)),

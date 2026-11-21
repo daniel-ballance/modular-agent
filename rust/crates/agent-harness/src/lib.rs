@@ -743,7 +743,15 @@ impl Harness {
                 .entries
                 .iter()
                 .skip(open.data.entries.len())
-                .any(|entry| entry.kind == "input.accepted");
+                .any(|entry| {
+                    entry.kind == "input.accepted"
+                        || (entry.kind == "actor.grant"
+                            && entry.writer == "interface.acp"
+                            && entry
+                                .content
+                                .as_ref()
+                                .is_some_and(|v| v["operatorAdmission"] != true))
+                });
             if !admitted {
                 return Ok(());
             }
@@ -777,7 +785,11 @@ impl Harness {
         // must not leave an unused session in the store.
         if data.entries.iter().all(|e| {
             matches!(e.kind.as_str(), "command" | "plugins.changed" | "tenant")
-                || (e.kind == "actor.grant" && e.writer == "interface.acp")
+                || (e.kind == "actor.grant"
+                    && e.writer == "interface.acp"
+                    && e.content
+                        .as_ref()
+                        .is_some_and(|v| v["operatorAdmission"] == true))
         }) {
             return Ok(());
         }

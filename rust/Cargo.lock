@@ -67,6 +67,7 @@ dependencies = [
  "rmcp",
  "runtime-durable",
  "runtime-transient",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
