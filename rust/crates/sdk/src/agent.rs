@@ -108,7 +108,8 @@ pub(crate) struct Inner {
     pub drivers: std::sync::Mutex<
         std::collections::HashMap<String, std::sync::Weak<crate::session::Driver>>,
     >,
-    pub _scratch: Option<tempfile::TempDir>,
+    pub(crate) scratch: std::sync::Mutex<Option<tempfile::TempDir>>,
+    closed: tokio::sync::Mutex<bool>,
     pub kept: std::sync::Mutex<Vec<tempfile::TempDir>>,
 }
 
@@ -324,7 +325,27 @@ impl Agent {
     /// Close every session and stop the plugins.
     pub async fn close(&self) -> Result<()> {
         use base::AgentApi;
-        Ok(self.inner.harness.shutdown().await?)
+        let mut closed = self.inner.closed.lock().await;
+        if *closed {
+            return Ok(());
+        }
+        let mut result = Ok(());
+        for id in self.inner.harness.open_session_ids() {
+            if let Err(e) = Session::new(self.inner.clone(), id).close_owned().await
+                && result.is_ok()
+            {
+                result = Err(e);
+            }
+        }
+        if let Err(e) = self.inner.harness.shutdown().await
+            && result.is_ok()
+        {
+            result = Err(e.into());
+        }
+        self.inner.scratch.lock().unwrap().take();
+        self.inner.kept.lock().unwrap().clear();
+        *closed = true;
+        result
     }
 }
 
@@ -448,6 +469,18 @@ impl AgentBuilder {
     }
     /// Whether the agent hosts plugin programs. A plugin host also starts the programs
     /// named in `MODULAR_AGENT_PLUGINS`. Default: when process or service plugins are given.
+    /// Append a list of process plugins, in load order.
+    pub fn process_plugins(mut self, plugins: impl IntoIterator<Item = ProcessPlugin>) -> Self {
+        self.process_plugins.extend(plugins);
+        self
+    }
+
+    /// Append a list of service plugins, in load order.
+    pub fn service_plugins(mut self, plugins: impl IntoIterator<Item = ServicePlugin>) -> Self {
+        self.service_plugins.extend(plugins);
+        self
+    }
+
     pub fn plugin_host(mut self, host: bool) -> Self {
         self.plugin_host = Some(host);
         self
@@ -621,10 +654,6 @@ impl AgentBuilder {
             let plugin = Plugin::new(tool.name().to_string()).tool(tool);
             own.push((Arc::new(InProcess::new(&plugin)?), vec![]));
         }
-        for plugin in &self.plugins {
-            own.push((Arc::new(InProcess::new(plugin)?), plugin.replaces.clone()));
-        }
-
         own.push((Arc::new(feature_commands::CommandsPlugin), vec![]));
         let harness = Harness::for_project(project.clone());
         let tenants = self.tenants.as_ref().map(Value::to_string);
@@ -638,12 +667,29 @@ impl AgentBuilder {
             } else {
                 harness.load_replacing(plugin, &replaces).await
             };
-            loaded.map_err(|e| {
-                Error::new(
+            if let Err(e) = loaded {
+                let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                return Err(Error::new(
                     Code::InvalidComposition,
                     format!("plugin {name} could not load: {e:#}"),
-                )
-            })?;
+                ));
+            }
+        }
+        for plugin in &self.plugins {
+            let loaded = match InProcess::new(plugin) {
+                Ok(registered) => harness
+                    .load_replacing(Arc::new(registered), &plugin.replaces)
+                    .await
+                    .map_err(Error::from),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = loaded {
+                let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                return Err(Error::new(
+                    Code::InvalidComposition,
+                    format!("plugin {} could not load: {e}", plugin.name()),
+                ));
+            }
         }
         use plugin_stdio::ExternalLaunch;
         let mut launches: Vec<_> = self
@@ -664,13 +710,17 @@ impl AgentBuilder {
             .collect();
         let plugin_host = self.plugin_host.unwrap_or(!launches.is_empty());
         if plugin_host && let Some(value) = std::env::var_os("MODULAR_AGENT_PLUGINS") {
-            let named: Vec<ExternalLaunch> = serde_json::from_slice(value.as_encoded_bytes())
-                .map_err(|e| {
-                    Error::new(
+            let named: Vec<ExternalLaunch> = match serde_json::from_slice(value.as_encoded_bytes())
+            {
+                Ok(named) => named,
+                Err(e) => {
+                    let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                    return Err(Error::new(
                         Code::InvalidComposition,
                         format!("MODULAR_AGENT_PLUGINS is malformed: {e}"),
-                    )
-                })?;
+                    ));
+                }
+            };
             launches.extend(named);
         }
         let wire_count = self.wire_plugins.len();
@@ -762,7 +812,8 @@ impl AgentBuilder {
                 session_limits: self.session_limits,
                 tenants: tenants.is_some(),
                 drivers: Default::default(),
-                _scratch: scratch,
+                scratch: std::sync::Mutex::new(scratch),
+                closed: tokio::sync::Mutex::default(),
                 kept: Default::default(),
             }),
         })

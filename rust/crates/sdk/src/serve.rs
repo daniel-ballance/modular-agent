@@ -50,6 +50,21 @@ pub async fn serve_websocket(
     .await?)
 }
 
+/// Build fresh plugin state for each authenticated connection. Static registrations
+/// are checked during that connection's initialize, not by calling the factory twice.
+pub async fn serve_websocket_factory(
+    factory: impl Fn() -> Plugin + Send + Sync + 'static,
+    options: ServeOptions,
+) -> Result<crate::WebSocketServer> {
+    Ok(plugin_stdio::server::serve_websocket(
+        &options.listen,
+        options.token_file,
+        options.tls,
+        move || Served::new(factory()),
+    )
+    .await?)
+}
+
 pub(crate) struct Served {
     plugin: Plugin,
     registered: Mutex<Option<Arc<Registrar>>>,
@@ -116,6 +131,16 @@ fn tools(r: &Registrar) -> Vec<Value> {
 
 #[async_trait::async_trait]
 impl Endpoint for Served {
+    async fn disconnected(&self) {
+        let loaded = self.registered.lock().unwrap().take().is_some();
+        if loaded
+            && let Some(stop) = &self.plugin.stop
+            && let Err(e) = stop().await
+        {
+            eprintln!("plugin {} failed to stop: {e}", self.plugin.name());
+        }
+    }
+
     async fn request(
         &self,
         peer: Arc<Peer>,
@@ -128,6 +153,12 @@ impl Endpoint for Served {
             "plugin/initialize" => {
                 if p["binding"] != BINDING || p["data"] != "modular-agent-data/1" {
                     return Err(Fault::new("not_supported", "unsupported binding"));
+                }
+                if let Some(item) = self.plugin.local_items.first() {
+                    let e = cannot_serve(item);
+                    let fault = Fault::new(e.code().as_str(), e.message());
+                    *self.startup.lock().unwrap() = Some(e);
+                    return Err(fault);
                 }
                 let mut registered = self.registered.lock().unwrap();
                 if registered.is_some() {

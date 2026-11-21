@@ -979,7 +979,12 @@ impl Session {
 
     /// Close the session after cancelling and settling any queued or running work.
     pub async fn close(&self) -> Result<()> {
-        self.cancel().await?;
+        self.require("cancel")?;
+        self.close_owned().await
+    }
+
+    pub(crate) async fn close_owned(&self) -> Result<()> {
+        self.inner.harness.cancel(&self.id).await?;
         let _run = self.driver.run.lock().await;
         self.inner.harness.close(&self.id).await?;
         self.inner

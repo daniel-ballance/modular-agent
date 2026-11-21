@@ -482,6 +482,10 @@ impl Harness {
             .validate_tools(&self.snapshot(id)?)?;
         Ok(())
     }
+    pub fn open_session_ids(&self) -> Vec<String> {
+        self.sessions.lock().unwrap().keys().cloned().collect()
+    }
+
     pub async fn close(&self, id: &str) -> Result<()> {
         {
             let mut sessions = self.sessions.lock().unwrap();
@@ -1444,10 +1448,15 @@ impl AgentApi for Harness {
     }
     async fn shutdown(&self) -> Result<()> {
         let plugins = self.plugins.lock().unwrap().clone();
+        let mut result = Ok(());
         for plugin in plugins.iter().rev() {
-            plugin.shutdown().await?;
+            if let Err(e) = plugin.shutdown().await
+                && result.is_ok()
+            {
+                result = Err(e);
+            }
         }
-        Ok(())
+        result
     }
     async fn create(&self, project: &Path, settings: Value) -> Result<String> {
         Harness::create(self, project, settings).await

@@ -53,7 +53,7 @@ pub use hooks::*;
 pub use parts::{Environment, Runtime, durable_runtime, local_environment, transient_runtime};
 pub use plugin::{Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource};
 pub use provider::*;
-pub use serve::{ServeOptions, serve, serve_websocket};
+pub use serve::{ServeOptions, serve, serve_websocket, serve_websocket_factory};
 pub use session::{
     Actor, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome, PromptOptions,
     PromptResult, Rights, Session, Timing, ToolResult,

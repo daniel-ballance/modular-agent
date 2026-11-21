@@ -104,6 +104,76 @@ async fn acp_tokens_bind_independent_principals_and_scopes() {
 }
 
 #[tokio::test]
+async fn service_factory_creates_and_stops_one_instance_per_connection() -> modular_agent::Result<()>
+{
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let dir = tempfile::tempdir()?;
+    let bearer = token(dir.path(), "factory", "af712a1174815937db47ebb99cc64e83");
+    let created = Arc::new(AtomicUsize::new(0));
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let service = modular_agent::serve_websocket_factory(
+        {
+            let (created, stopped) = (created.clone(), stopped.clone());
+            move || {
+                let id = created.fetch_add(1, Ordering::SeqCst) + 1;
+                let stopped = stopped.clone();
+                Plugin::new("factory")
+                    .setup(move |r| {
+                        let suffix = r.config()["suffix"].as_str().unwrap();
+                        let reply = format!("{id}/{suffix}");
+                        r.tool(Tool::new("instance", "Report the instance.").run(
+                            move |_: Value, _| {
+                                let reply = reply.clone();
+                                async move { Ok(reply) }
+                            },
+                        ));
+                        Ok(())
+                    })
+                    .stop(move || {
+                        stopped.fetch_add(1, Ordering::SeqCst);
+                        std::future::ready(Ok(()))
+                    })
+            }
+        },
+        ServeOptions {
+            listen: "127.0.0.1:0".into(),
+            token_file: bearer.clone(),
+            tls: None,
+        },
+    )
+    .await?;
+    assert_eq!(created.load(Ordering::SeqCst), 0);
+    let mut agents = Vec::new();
+    for (index, suffix) in [(1, "first"), (2, "second")] {
+        let agent = Agent::builder()
+            .service_plugins([
+                ServicePlugin::new(&service.url, &bearer).config(json!({"suffix": suffix}))
+            ])
+            .build()
+            .await?;
+        assert_eq!(
+            agent
+                .session()
+                .await?
+                .call_tool("instance", json!({}))
+                .await?
+                .text(),
+            format!("{index}/{suffix}")
+        );
+        agents.push(agent);
+    }
+    service.close().await;
+    assert_eq!(stopped.load(Ordering::SeqCst), 2);
+    for agent in agents {
+        agent.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn service_registration_and_pending_tool_loss() -> modular_agent::Result<()> {
     use std::{sync::Arc, time::Duration};
     use tokio::{sync::Notify, time::timeout};

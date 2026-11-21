@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{future::Future, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
+type Stop = Arc<dyn Fn() -> BoxFuture<'static, Result<()>> + Send + Sync>;
 type Setup = Arc<dyn Fn(&mut Registrar) -> Result<()> + Send + Sync>;
 type CommandHandler =
     Arc<dyn Fn(String, CommandContext) -> BoxFuture<'static, Result<Option<String>>> + Send + Sync>;
@@ -36,6 +37,7 @@ pub struct Plugin {
     pub(crate) config: Value,
     pub(crate) local_items: Vec<String>,
     setups: Vec<Setup>,
+    pub(crate) stop: Option<Stop>,
 }
 
 /// What a plugin registers, once, when it is loaded.
@@ -96,6 +98,7 @@ impl Plugin {
             config: json!({}),
             local_items: vec![],
             setups: vec![],
+            stop: None,
         }
     }
     pub fn name(&self) -> &str {
@@ -173,6 +176,15 @@ impl Plugin {
         self.setups.push(Arc::new(setup));
         self
     }
+    /// Release this plugin's resources when the agent or its served instance stops.
+    pub fn stop<F, Fut>(mut self, stop: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.stop = Some(Arc::new(move || Box::pin(stop())));
+        self
+    }
     pub(crate) fn register(&self, config: &Value) -> Result<Registrar> {
         let mut r = Registrar {
             config: config.clone(),
@@ -234,12 +246,14 @@ pub(crate) fn cannot_serve(item: &str) -> Error {
 pub(crate) struct InProcess {
     pub name: String,
     pub registered: Registrar,
+    stop: Option<Stop>,
 }
 
 impl InProcess {
     pub fn new(plugin: &Plugin) -> Result<Self> {
         Ok(InProcess {
             name: plugin.name.clone(),
+            stop: plugin.stop.clone(),
             registered: plugin.register(&plugin.config).map_err(|e| {
                 Error::new(
                     Code::InvalidComposition,
@@ -254,6 +268,15 @@ impl base::Plugin for InProcess {
     fn name(&self) -> &str {
         &self.name
     }
+    fn shutdown(&self) -> BoxFuture<'_, base::Result<()>> {
+        Box::pin(async {
+            if let Some(stop) = &self.stop {
+                stop().await?;
+            }
+            Ok(())
+        })
+    }
+
     fn install(&self, r: &mut base::Registrar<'_>) -> base::Result<()> {
         for provider in &self.registered.providers {
             base::Plugin::install(
