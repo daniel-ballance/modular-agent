@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Groups } from "./groups.js";
 
 /** Every command this agent starts carries this variable, so its processes can be found after the agent dies. */
 export const RUN_MARKER = "MODULAR_AGENT_RUN";
@@ -89,8 +90,11 @@ export class ProcessTracker {
 	private commands = new Map<number, { commandId: string; sessionId?: string }>();
 	private file?: string;
 	private watcher = false;
+	readonly groups?: Groups;
 
-	constructor(private runDir?: string) {
+	constructor(private runDir?: string, readonly platform = process.platform) {
+		if (platform !== "linux" && platform !== "darwin") throw new Error("The local environment supports only Linux and macOS");
+		if (platform === "darwin") { this.groups = new Groups(); return; }
 		if (!runDir) return;
 		mkdirSync(runDir, { recursive: true });
 		for (const name of readdirSync(runDir)) {
@@ -126,6 +130,7 @@ export class ProcessTracker {
 	}
 
 	async stopSession(sessionId: string): Promise<void> {
+		if (this.groups) return this.groups.stop(sessionId);
 		const commands = [...this.commands].filter(([, c]) => c.sessionId === sessionId);
 		for (const [pgid, c] of commands) this.stop(pgid, c.commandId);
 		// Wait until the killed processes can no longer do work. Zombies have no environment.
@@ -137,7 +142,8 @@ export class ProcessTracker {
 	}
 
 	/** Stop everything still running. Called when the agent stops cleanly. */
-	stopAll(): void {
+	stopAll(): void | Promise<void> {
+		if (this.groups) return this.groups.stop();
 		for (const [pgid, c] of this.commands) this.stop(pgid, c.commandId);
 		this.commands.clear();
 		if (this.file) rmSync(this.file, { force: true });

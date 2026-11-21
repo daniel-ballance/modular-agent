@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,8 @@ const envLocal = import.meta.resolve("@modular-agent/env-local");
 const alive = (pid: number) => {
 	try {
 		process.kill(pid, 0);
-		return true;
+		if (process.platform === "linux") return !/\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
+		return !/^Z/.test(spawnSync("ps", ["-p", String(pid), "-o", "state="], { encoding: "utf8" }).stdout.trim());
 	} catch {
 		return false;
 	}
@@ -20,34 +21,41 @@ const until = async (check: () => boolean, ms = 5000) => {
 };
 
 /** An agent process that starts commands, then is killed with SIGKILL. */
-function agentScript(dir: string, home: string): string {
+function agentScript(dir: string, home: string, platform = process.platform): string {
 	const file = join(dir, "agent.mjs");
 	writeFileSync(file, `
 import { LocalEnvironment, ProcessTracker } from ${JSON.stringify(envLocal)};
-const env = new LocalEnvironment(${JSON.stringify(dir)}, new ProcessTracker(${JSON.stringify(join(home, "run"))}));
+const env = new LocalEnvironment(${JSON.stringify(dir)}, new ProcessTracker(${JSON.stringify(join(home, "run"))}, ${JSON.stringify(platform)}));
 const signal = new AbortController().signal;
 // A command that leaves a process behind in its group, and one that escapes its group entirely.
 await env.exec("sleep 60 & echo $! > bg.pid", { signal });
-void env.exec("setsid sleep 61 & echo $! > escaped.pid; sleep 62", { signal });
+${platform === "linux" ? 'void env.exec("setsid sleep 61 & echo $! > escaped.pid; sleep 62", { signal });' : ""}
 setInterval(() => {}, 1000);
 console.log("ready");
 `);
 	return file;
 }
 
-test("no command outlives an agent killed with SIGKILL", async () => {
+for (const platform of new Set<NodeJS.Platform>([process.platform, "darwin"])) test(`${platform}: agent SIGKILL stops background commands in their group`, async t => {
 	const dir = mkdtempSync(join(tmpdir(), "ma-proc-"));
 	const home = mkdtempSync(join(tmpdir(), "ma-h-"));
-	const agent = spawn(process.execPath, [agentScript(dir, home)], { stdio: ["ignore", "pipe", "inherit"] });
-	await new Promise<void>((r) => agent.stdout.on("data", (d) => String(d).includes("ready") && r()));
-	assert.ok(await until(() => existsSync(join(dir, "escaped.pid"))));
+	const agent = spawn(process.execPath, [agentScript(dir, home, platform)], { stdio: ["ignore", "pipe", "inherit"] });
+	t.after(() => { agent.kill("SIGKILL"); });
+	await new Promise<void>((r, reject) => {
+		agent.once("exit", code => reject(new Error(`agent exited before ready: ${code}`)));
+		agent.stdout.on("data", (d) => String(d).includes("ready") && r());
+	});
+	let escaped: number | undefined;
+	if (platform === "linux") {
+		assert.ok(await until(() => /^\d+\n$/.test(existsSync(join(dir, "escaped.pid")) ? readFileSync(join(dir, "escaped.pid"), "utf8") : "")));
+		escaped = Number(readFileSync(join(dir, "escaped.pid"), "utf8"));
+		assert.ok(alive(escaped));
+	}
 	const bg = Number(readFileSync(join(dir, "bg.pid"), "utf8"));
-	const escaped = Number(readFileSync(join(dir, "escaped.pid"), "utf8"));
-	assert.ok(alive(bg) && alive(escaped), "both are running while the agent lives");
+	assert.ok(alive(bg));
 	agent.kill("SIGKILL");
 	assert.ok(await until(() => !alive(bg)), "the background process in the command's group died with the agent");
-	if (process.platform === "linux") assert.ok(await until(() => !alive(escaped)), "the process that left its group died too");
-	else process.kill(escaped, "SIGKILL");
+	if (escaped !== undefined) assert.ok(await until(() => !alive(escaped!)), "the process that left its group died too");
 });
 
 test("if the watcher dies too, the next agent to start cleans up", { skip: process.platform !== "linux" && "reads /proc" }, async () => {
