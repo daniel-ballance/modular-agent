@@ -48,6 +48,20 @@ const checks = [
     },
   },
   {
+    name: "sandbox-memory",
+    about: "Code that outgrows the 256 MiB sandbox limit fails with MemoryError; the agent carries on and the next run works.",
+    // Bounded at about 2 GB, so a build without the limit fails this check rather than exhausting the machine.
+    script: [codemode("x = []\nfor i in range(200000):\n    x.append('y' * 10000)\nprint(len(x))"), codemode("print('still here')"), { text: "Done." }],
+    runs: [{ args: ["-p", "Fill memory."], expect: { stdout: "Done.", exit: 0 } }],
+    log: (log, ok) => {
+      const result = (req) => (req?.messages ?? []).filter((m) => m.role === "toolResult").at(-1)?.text ?? "";
+      ok(log.length === 3, "three model requests", log.length);
+      ok(result(log[1]).includes("MemoryError"), "the first run fails with MemoryError", result(log[1]).slice(0, 300));
+      ok(!result(log[1]).includes("200000"), "the first run did not finish", result(log[1]).slice(0, 300));
+      ok(result(log[2]).includes("still here"), "the next run works", result(log[2]).slice(0, 300));
+    },
+  },
+  {
     name: "one-offer",
     about: "A direct call to a tool the model was not offered does not run.",
     script: [{ toolCalls: [{ name: "write", input: { path: "direct.txt", content: "x" } }] }, { text: "ok" }],
