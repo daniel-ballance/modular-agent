@@ -1580,8 +1580,7 @@ export class Harness {
 		const scope = this.turnAuthority.getStore();
 		const ceilings = [connectionRights.getStore(), scope?.state?.connectionRights].flatMap(rights =>
 			rights && Object.hasOwn(rights, actorId) ? [rights[actorId]] : []);
-		const starting = scope?.sessionId === s.id ? scope.state?.startingRights : undefined;
-		const allowed = (s.actors.get(actorId)?.authority ?? []).filter(right => (!starting || starting.includes(right)) && ceilings.every(ceiling => ceiling.includes(right)) && this.withinLimits(s, right));
+		const allowed = (s.actors.get(actorId)?.authority ?? []).filter(right => ceilings.every(ceiling => ceiling.includes(right)) && this.withinLimits(s, right));
 		if (!s.meta.parentSessionId) return allowed;
 		const parent = this.sessions.get(s.meta.parentSessionId);
 		const link = s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "harness.parentAuthority");
