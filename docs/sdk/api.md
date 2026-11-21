@@ -62,7 +62,7 @@ On stdio, `serveAcp` accepts operator-supplied `projects`, `tenants`, `rights` (
 
 Without a composition factory, ACP serves only the Agent's configured project. A factory builds an Agent for a canonical project and can use the saved session's identity or metadata when reopening. The serving agent needs access to the saved session's history before choosing a composition. It MUST authorize the saved project and tenant before passing saved metadata to a factory or invoking project configuration callbacks. SDKs MUST reject malformed operator scope or representation configuration with `invalid_composition`, before serving. Project settings supply defaults for new sessions, not replacements on reopen. Keep trusted project MCP configuration separate from attaching client-supplied servers under the [host MCP policy](../contracts.md#mcp-servers). See [Languages](languages.md) for the factory and callback signatures.
 
-An Agent is safe to use from several tasks at once. Sessions are independent of each other.
+An Agent is safe to use from several tasks at once. Sessions have separate work and history, but share [tenant and agent capacity](../contracts.md#resource-reservations).
 
 ### The declaration
 

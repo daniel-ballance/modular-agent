@@ -1,5 +1,17 @@
 # Status: the description against the code
 
+## Outstanding production work
+
+[ADR 0021](adr/0021-production-edition.md) listed four gaps. [Secret staging and recovery](contracts.md#secrets) have shipped in all four SDKs and `ma`; see the [changelog](../CHANGELOG.md). [ADR 0029](adr/0029-sdk-decisions-after-four-builds.md) settled ACP service token scope and rights ceilings. [ADR 0030](adr/0030-production-gaps.md) proposes the remaining rules and the checks needed to verify them:
+
+| Gap | Where the proposed rule is set | What is not established |
+|---|---|---|
+| Per-connection isolation | [Authority](contracts.md#authority), [ACP authorization](bindings/acp.md#authorization), [plugin service isolation](bindings/websocket.md#a-plugin-service), [raw history isolation](bindings/history-http.md#the-basics) | Configured stdio reach and ACP representation, scope checks on every action and delivery, and isolation across service hosts and storage namespaces. |
+| Resource reservations | [Resource reservations](contracts.md#resource-reservations) and [Security](security.md#resource-limits-and-denial-of-service) | Atomic admission at all three scopes and enough capacity for settlement and control work under concurrent load and restart. |
+| Cross-session erasure coordination | [Cross-session coordination](contracts.md#cross-session-coordination) | Durable pending state across readers, lease handoff and restart, with evidence that reported deletion is confirmed. |
+
+The new checks are proposed, not results. Historical results below describe the indicated builds and revisions.
+
 ## SDK 0.1 and edition 4
 
 Recorded on 2026-11-20 at the commit that tags [0.1.0](../CHANGELOG.md). [ADR 0027](adr/0027-sdk-0-1-and-edition-4.md) explains what these results establish.
@@ -104,7 +116,7 @@ The history client uses `/proc/uptime` on Linux where available. On platforms wi
 
 The portable runs declare `queuedInputAfterRestart: handedBack`; the kit skips the receipt check for the alternative `run` policy. The tests used scripted models and disposable processes and stores. The service uses a local SQLite store (`node:sqlite`), a single exclusive writer process, and a persisted TTL upper bound. Use only a fresh service directory or one written by this implementation; old JSONL service directories lack a verifiable lease bound. Plain HTTP is loopback only and assumes trusted local accounts.
 
-**Outstanding production work.** In particular, the matrix does not establish full project and tenant isolation or configured ACP representation, secret staging and recovery, durable coordination for pending cross-session erasure, comprehensive portable-record validation, or all dispatch, metering and cancellation rules under failure. Full production readiness is not claimed. The round-seven handoff records the specific gaps in `/tmp/ma-tools/r7/ts-gaps.md`.
+**Outstanding production work at this checkpoint.** In particular, the matrix does not establish full project and tenant isolation or configured ACP representation, secret staging and recovery, durable coordination for pending cross-session erasure, comprehensive portable-record validation, or all dispatch, metering and cancellation rules under failure. Full production readiness is not claimed. The round-seven handoff records the specific gaps in `/tmp/ma-tools/r7/ts-gaps.md`.
 
 ## Historical evidence before the production edition
 
