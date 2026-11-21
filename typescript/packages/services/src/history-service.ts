@@ -320,7 +320,7 @@ export class HistoryArchive {
 			if (this.local.get(id) !== owner) throw new BindingError(409, "lost", "No history writer");
 		};
 		return {
-			supports: { portableSessions: this.dir !== undefined, erasure: true },
+			supports: { portableSessions: this.dir !== undefined, persistent: this.dir !== undefined, erasure: true },
 			create: async ({ id, ...meta }) => read(db => {
 				const initial = parseJson(JSON.stringify(meta)) as JsonObject;
 				validateMetadata(id, initial);

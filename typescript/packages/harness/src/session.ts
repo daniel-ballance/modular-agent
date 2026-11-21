@@ -84,6 +84,8 @@ export class Session {
 	readonly recent: AgentEvent[] = [];
 	/** Recipients following this session, each through the output gate. */
 	readonly followers = new Set<{ recipient: string; push(event: AgentEvent): void; idle(): Promise<void> }>();
+	/** A new persistent session with setup in memory but no durable writer yet. */
+	provisional = false;
 	closed = false;
 	closing = false;
 	reopening = false;

@@ -90,6 +90,7 @@ test("a tool that can't wait outside a turn fails instead of staying open", asyn
 	const h = await agent(dirs(), [], ui.plugin, 10);
 	const api = h.api("t");
 	const s = await api.startSession();
+	await api.input(s, { actorId: "user", when: "propose", content: "Keep this session" });
 	// ask_user may only be called by the model, so a UI call is refused before it runs.
 	const refused = await api.callTool(s, { name: "ask_user", input: { question: "?" }, startedBy: "ui" });
 	assert.equal(refused.status, "refused");

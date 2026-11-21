@@ -155,16 +155,19 @@ test("steering joins the running turn; cancelling hands queued input back and le
 });
 
 test("a job's report enters the session as input and starts a turn", async () => {
-	const { make } = setup([(context) => fauxAssistantMessage([fauxText(`got: ${JSON.stringify(context.messages.at(-1))}`)])]);
+	const { make } = setup([fauxAssistantMessage([fauxText("Ready")]),
+		(context) => fauxAssistantMessage([fauxText(`got: ${JSON.stringify(context.messages.at(-1))}`)])]);
 	const h = await make();
 	const api = h.api("test");
 	const s = await api.startSession();
+	await api.input(s, { actorId: "user", content: "Start" });
+	await api.waitForIdle(s);
 	const job = api.startJob(s, { kind: "dev-server" });
 	await job.finish("failed", "server crashed: port in use");
 	await api.waitForIdle(s);
 	const report = api.history(s).find((e) => e.kind === "input" && e.jobId);
 	assert.ok(report);
-	const start = api.history(s).find((e) => e.kind === "turnStart");
+	const start = api.history(s).find((e) => e.kind === "turnStart" && e.turnId === report.turnId);
 	assert.deepEqual((start!.data as { startedBy: unknown }).startedBy, { kind: "job", id: job.id });
 	assert.match(lastTurn(h, s).result.text ?? "", /port in use/);
 	await h.stop();

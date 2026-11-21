@@ -566,12 +566,13 @@ export class Agent {
           if (!(await stat(project)).isDirectory()) throw new AgentError("invalid_params", "Project must be a directory");
           if (scope && !scope.allowProject(project)) throw new AgentError("forbidden", "Project is outside the actor's scope");
           const inaccessible = () => new AgentError("forbidden", "Session is inaccessible");
-          const saved = id ? await this.sessionInfo(id).catch(error => {
+          const owner = id && sessions.get(id) || this;
+          const saved = id ? owner.#h.liveSessionInfo(id) ?? await this.sessionInfo(id).catch(error => {
             if (scope && error instanceof AgentError && error.code === "not_found") throw inaccessible();
             throw error;
           }) : undefined;
           if (saved && scope && actor && (!scope.allowTenant(saved.tenant ?? null) || !scope.allowProject(saved.project) ||
-              !await this.#h.canDiscoverSession(id!, actor, this.#authority.severalActors))) throw inaccessible();
+              !await owner.#h.canDiscoverSession(id!, actor, owner.#authority.severalActors))) throw inaccessible();
           if (saved && saved.project !== project || !options.compose && project !== this.#project) {
             throw new AgentError("invalid_params", "Session belongs to a different project");
           }

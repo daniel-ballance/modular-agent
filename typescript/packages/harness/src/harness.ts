@@ -645,6 +645,14 @@ export class Harness {
 		return s;
 	}
 
+	/** Live metadata for another connection attaching to a session in this process. */
+	liveSessionInfo(id: string) {
+		const s = this.sessions.get(id);
+		if (!s || s.closing || s.closed || s.interruption.signal.aborted) return undefined;
+		return { ...s.meta, updated: s.entries.get(s.order.at(-1) ?? "")?.time ?? s.meta.created,
+			settings: { ...s.settings }, tenant: s.tenant };
+	}
+
 	private defaultActor(): Actor {
 		return { id: "user", kind: "user", authority: ALL_AUTHORITY };
 	}
@@ -658,7 +666,8 @@ export class Harness {
 		const cwd = options.settings?.cwd;
 		const meta: StoredSession = { id: this.newId(), created: this.now(), project: ancestor?.meta.project ?? (typeof cwd === "string" ? cwd : this.project), forkedFrom: options.forkFrom, parentSessionId: options.parentSessionId };
 		const s = new Session(meta, !store);
-		if (store) {
+		s.provisional = !!store && store.supports.persistent !== false && !options.forkFrom;
+		if (store && !s.provisional) {
 			await store.create(meta);
 			await store.openForWriting(meta.id);
 		}
@@ -936,11 +945,11 @@ export class Harness {
 
 	private async closeWriter(s: Session): Promise<void> {
 		s.unwatchWriter?.();
-		await this.use<HistoryStore>("history-store")?.close(s.id);
+		if (!s.provisional) await this.use<HistoryStore>("history-store")?.close(s.id);
 	}
 
 	private watchWriter(s: Session): void {
-		if (s.ephemeral) return;
+		if (s.ephemeral || s.provisional) return;
 		const signal = this.use<HistoryStore>("history-store")?.writerSignal?.(s.id);
 		if (!signal) return;
 		const subscription = addAbortListener(signal, () => this.interruptSession(s, "writerLost", signal.reason));
@@ -959,7 +968,7 @@ export class Harness {
 
 	private checkWriter(s: Session): void {
 		s.interruption.signal.throwIfAborted();
-		if (s.ephemeral) return;
+		if (s.ephemeral || s.provisional) return;
 		const store = this.use<HistoryStore>("history-store");
 		try {
 			store?.writerSignal?.(s.id)?.throwIfAborted();
@@ -1021,6 +1030,10 @@ export class Harness {
 	private async commitNow(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]> {
 		s.interruption.signal.throwIfAborted();
 		if (s.suspended) return [];
+		const firstAdmission = s.provisional && drafts.some(d => d.kind === "inputAccepted");
+		if (s.provisional && !firstAdmission && drafts.some(d => !PROVISIONAL_SETUP.has(d.kind))) {
+			throw failure("invalid_request", "Session has not admitted its first input");
+		}
 		let position = s.position;
 		const entries: HistoryEntry[] = drafts.map((d) => {
 			const entry: HistoryEntry = { ...d, id: d.id ?? this.newId(), parentId: position, sessionId: s.id, time: this.now() };
@@ -1029,7 +1042,18 @@ export class Harness {
 			position = entry.kind === "position" ? (entry.data as { to: string | null }).to : entry.id;
 			return entry;
 		});
-		if (!s.ephemeral) {
+		if (firstAdmission) {
+			const store = this.use<HistoryStore>("history-store")!;
+			const initial = [...s.order.map(id => s.entries.get(id)!), ...entries];
+			await this.write(s, async () => {
+				await store.create(s.meta);
+				await store.openForWriting(s.id);
+				s.provisional = false;
+				this.watchWriter(s);
+				this.checkWriter(s);
+				await store.append(s.id, initial);
+			});
+		} else if (!s.ephemeral && !s.provisional) {
 			const store = this.use<HistoryStore>("history-store");
 			await this.write(s, () => store?.append(s.id, entries));
 		}
@@ -1076,6 +1100,7 @@ export class Harness {
 		const s = this.session(sessionId);
 		return this.admit(s, async () => {
 			if (options.actorId) this.requireAuthority(s, options.actorId, "settings");
+			if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 			if (s.isBusy() || s.outsideTools || s.erasing || s.settling || s.requests.size || this.waitingRequests(s).length || this.openCalls(s).length || this.runningJobs(s).length) {
 				throw failure("busy", "Can't move while work is unfinished");
 			}
@@ -1160,6 +1185,7 @@ export class Harness {
 
 	private async erase(s: Session, entryIds: string[], actorId: string, writer: string): Promise<ErasureReport> {
 		this.requireAuthority(s, actorId, "erase");
+		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 		const store = this.use<HistoryStore>("history-store");
 		const sessions = new Map(this.sessions);
 		for (const meta of await store?.list() ?? []) {
@@ -2244,6 +2270,7 @@ export class Harness {
 
 	/** A tool call a UI or plugin starts. The same checks apply. */
 	private async callTool(s: Session, call: ToolCall): Promise<ToolResult> {
+		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 		if (s.closed) throw failure("not_open", "Session is closed");
 		if (s.suspended) throw failure("lost", "Session has lost its writer");
 		if (s.moving || s.closing || s.erasing) throw failure("busy", "Session cannot run tools right now");
@@ -2695,6 +2722,7 @@ export class Harness {
 	}
 
 	private startJob(s: Session, options: JobStart, plugin: string): JobHandle {
+		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 		if (s.moving || s.closing || s.closed || s.suspended || s.erasing) throw failure("invalid_request", "Session cannot start jobs right now");
 		const current = [...this.workActors(s), ...(options.actors ?? [])];
 		const actorId = current[0] ?? options.actorId ?? [...s.actors.keys()][0];
@@ -2982,6 +3010,8 @@ export function parseModel(value: unknown): { provider: string; id: string } | u
 	if (value && typeof value === "object" && "provider" in value && "id" in value) return value as { provider: string; id: string };
 	return undefined;
 }
+
+const PROVISIONAL_SETUP = new Set(["tenant", "actorJoined", "actorLeft", "setting", "limit", "plugins", "harness.parentAuthority"]);
 
 const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting inputAccepted inputHandedBack input turnStart modelRequest response toolStarted toolPending toolResult inputRequest secretAnswerAccepted inputAnswer resultFeedback modular-agent.stepAfter turnEnd summary position erasure jobStarted jobCleanupUnconfirmed jobEnded plugins".split(" "));
 

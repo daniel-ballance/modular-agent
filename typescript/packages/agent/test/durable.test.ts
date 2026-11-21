@@ -23,6 +23,8 @@ async function crashedSession() {
 	const h = await agent(dirs, [], false);
 	const api = h.api("test");
 	const s = await api.startSession();
+	await api.append(s, { kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: "user", inputId: "foreign-input",
+		data: { inputId: "foreign-input", content: [{ type: "text", text: "do three things" }], when: "now", taken: "now" } });
 	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t1", actorId: "user", data: { startedBy: { kind: "actor", id: "user" }, model: { provider: "faux", id: "faux-1" }, system: "", tools: api.tools(s), settings: {} } });
 	await api.append(s, { kind: "input", writer: "test", modelVisible: true, turnId: "t1", actorId: "user", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, data: { inputId: "foreign-input" } });
 	const calls = [fauxToolCall("read", { path: "notes.txt" }), fauxToolCall("bash", { command: "echo charged >> payments.log" }), fauxToolCall("write", { path: "done.txt", content: "ok" })];
