@@ -50,6 +50,4 @@ The Go SDK loads the Provider as a stdio plugin. Claude Code finds the login und
 
 ## SDK finding
 
-[Placement](../../docs/sdk/placement.md#services) does not specify how to get a history listener's bound address. The demo uses Rust's public `listen_history` so it can bind directly to port `0`, without picking and releasing a port first. Proposed SDK spec text:
-
-> The history service API MUST offer a listener form that accepts port `0` and returns a handle when the listener is ready. The handle exposes the bound base URL and an operation to stop accepting connections and close the listener. SDKs may retain a separate blocking form.
+[Placement](../../docs/sdk/placement.md#services) did not say how to learn a history listener's bound address. It now does: `serveHistory` with port `0` returns a server with `url` and `close()`. The demo uses Rust's `listen_history`, which already behaves that way.
