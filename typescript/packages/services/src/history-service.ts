@@ -280,7 +280,7 @@ export class HistoryArchive {
 	private exclusion?: { epoch: number; until: number };
 	private local = new Map<string, symbol>();
 	private remote?: { leased(id: string): boolean; ttl: number };
-	constructor(private dir?: string) {}
+	constructor(private dir?: string, private pendingErasureDir = dir) {}
 
 	private db() {
 		if (!this.records) {
@@ -323,7 +323,7 @@ export class HistoryArchive {
 		};
 		return {
 			supports: { portableSessions: this.dir !== undefined, persistent: this.dir !== undefined, erasure: true },
-			pendingErasure: this.registry ??= this.dir ? filePendingErasure(this.dir) : memoryPendingErasure(),
+			pendingErasure: this.registry ??= this.pendingErasureDir ? filePendingErasure(this.pendingErasureDir) : memoryPendingErasure(),
 			create: async ({ id, ...meta }) => read(db => {
 				const initial = parseJson(JSON.stringify(meta)) as JsonObject;
 				validateMetadata(id, initial);

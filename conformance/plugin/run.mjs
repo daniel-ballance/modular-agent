@@ -3,9 +3,9 @@
 // Usage: node run.mjs [--verbose] -- <command that serves the build's conformance plugin> [args...]
 // The kit plays the host. It starts the plugin, serves the host/* callbacks from a temporary folder,
 // and checks every applicable part of the conformance plugin. No external model. Exit code 0 means all passed.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync, mkdirSync } from "node:fs";
+import { closeSync, constants, existsSync, mkdtempSync, openSync, readSync, readFileSync, rmSync, writeFileSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
@@ -862,30 +862,49 @@ await attempt("environment", async () => {
 		}
 	}
 
-	// A session's background processes outlive the call, and stop at env/sessionEnded for that session only.
-	const beat = (sessionId) => join(work, `beat-${sessionId}`);
-	const bg = (sessionId) => p.request("env/exec", { cwd: work, sessionId, command: `(${heartbeatCommand(beat(sessionId))}) >/dev/null 2>&1 &` });
-	const heartbeatDelta = async (sessionId) => {
-		const f = beat(sessionId);
-		const a = heartbeatSize(f);
-		await sleep(600);
-		return heartbeatSize(f) - a;
-	};
 	// Plugin binding: Command lifetime. No descendant cleanup guarantee under containment none.
 	if (containment === "none") {
 		check("env/sessionEnded: acknowledges an unused session", equal(await p.request("env/sessionEnded", { sessionId: "kit-unused" }), {}));
 		return;
 	}
-	await bg("kit-session-1");
-	await bg("kit-session-2");
-	await sleep(300);
-	const both = [await heartbeatDelta("kit-session-1"), await heartbeatDelta("kit-session-2")];
-	check("env/exec: a background process outlives the call", both[0] > 0 && both[1] > 0, `heartbeat growth: ${JSON.stringify(both)}`);
-	const ended = await p.request("env/sessionEnded", { sessionId: "kit-session-1" }, 10000).catch((e) => ({ error: e }));
-	const oneAfter = await heartbeatDelta("kit-session-1");
-	check("env/sessionEnded: answers {}, with the session's background processes stopped", JSON.stringify(ended) === "{}" && oneAfter === 0, JSON.stringify({ ended, heartbeatDelta: oneAfter }));
-	check("env/sessionEnded: another session's processes keep running", await heartbeatDelta("kit-session-2") > 0);
-	await p.request("env/sessionEnded", { sessionId: "kit-session-2" }, 10000).catch(() => undefined);
+	const sessions = ["kit-session-1", "kit-session-2"];
+	const readers = [];
+	const observe = async (fd, expected) => {
+		const deadline = performance.now() + 10000; // Hang guard, not a liveness sample.
+		const byte = Buffer.alloc(1);
+		do {
+			try {
+				const n = readSync(fd, byte);
+				if (n === 0 ? expected === null : byte.toString() === expected) return true;
+			} catch (error) {
+				if (error.code !== "EAGAIN") throw error;
+			}
+			await sleep(20);
+		} while (performance.now() < deadline);
+		return false;
+	};
+	try {
+		for (const id of sessions) {
+			const path = join(work, `${id}.fifo`);
+			const fifo = spawnSync("mkfifo", [path]);
+			if (fifo.status !== 0) throw Error(`mkfifo: ${fifo.error ?? fifo.stderr}`);
+			readers.push(openSync(path, constants.O_RDONLY | constants.O_NONBLOCK));
+			// The background shell holds fd 3 until it exits. EOF works even across PID namespaces.
+			await p.request("env/exec", { cwd: work, sessionId: id, command:
+				`(exec 3>${id}.fifo; printf R >&3; while [ ! -f ${id}.marker ]; do sleep 0.05; done; ` +
+				`printf A >&3; while :; do sleep 1; done) >/dev/null 2>&1 &` });
+		}
+		const started = await Promise.all(readers.map(fd => observe(fd, "R")));
+		if (!check("env/exec: a background process outlives the call", started.every(Boolean), JSON.stringify(started))) return;
+		const ended = await p.request("env/sessionEnded", { sessionId: sessions[0] }, 10000).catch((error) => ({ error }));
+		const exited = await observe(readers[0], null);
+		check("env/sessionEnded: answers {}, with the session's background processes stopped", equal(ended, {}) && exited, JSON.stringify({ ended, exited }));
+		writeFileSync(join(work, `${sessions[1]}.marker`), "continue\n");
+		check("env/sessionEnded: another session's processes keep running", await observe(readers[1], "A"));
+	} finally {
+		for (const id of sessions) await p.request("env/sessionEnded", { sessionId: id }, 10000).catch(() => undefined);
+		for (const fd of readers) closeSync(fd);
+	}
 });
 
 await attempt("hooks", async () => {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -53,10 +54,19 @@ test("hands off a session over HTTP", { timeout: 10_000 }, async () => {
     await writeFile(tokenFile, randomBytes(32).toString("hex") + "\n", { mode: 0o600 });
     const service = await serveStore("127.0.0.1:0", join(tmp, "history"), tokenFile);
     try {
+      const url = new URL(service.url);
+      assert.equal(url.hostname, "127.0.0.1");
+      assert.ok(Number(url.port) > 0, "serveHistory returns the selected port");
       await handoff(project, join(tmp, "writer"), join(tmp, "reader"), service.url, tokenFile);
     } finally {
       await service.close();
     }
+    const url = new URL(service.url);
+    await assert.rejects(new Promise<void>((resolve, reject) => {
+      const socket = createConnection({ host: url.hostname, port: Number(url.port) });
+      socket.once("error", reject);
+      socket.once("connect", () => { socket.destroy(); resolve(); });
+    }), { code: "ECONNREFUSED" });
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

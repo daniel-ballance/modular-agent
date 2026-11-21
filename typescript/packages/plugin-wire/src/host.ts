@@ -226,6 +226,7 @@ interface ProviderAttempt {
 	model: ModelRef;
 	request: unknown;
 	prepare?: () => Promise<ModelRequest>;
+	handoff?: RequestOptions["handoff"];
 	begun?: boolean;
 	committed?: boolean;
 	response?: unknown;
@@ -325,7 +326,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				if (signal.aborted) throw new WireError("cancelled", "Parent or callback was cancelled");
 				return result;
 			});
-			peer.handle("host/hook", async (p) => {
+			peer.handle("host/hook", async (p, ctx) => {
 				const parent = parentOf(p);
 				const attempt = parent.provider;
 				if (!attempt || !["provider.request", "provider.response"].includes(p.hook)
@@ -345,7 +346,18 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 					const result = attempt.prepare ? { ...p.payload, request: toWire(await attempt.prepare()) } : toWire(await api.runHook(p.hook, fromWire(p.payload)));
 					parent.signal?.throwIfAborted();
 					if (!peer.isWaiting(p.parentRequestId)) throw invalidState("Parent is no longer live");
-					attempt.committed = true;
+					ctx.atReply(async send => {
+						const deliver = () => {
+							ctx.signal.throwIfAborted();
+							parent.signal?.throwIfAborted();
+							if (!peer.isWaiting(p.parentRequestId)) throw invalidState("Parent is no longer live");
+							send();
+							attempt.committed = true;
+						};
+						try {
+							if (attempt.handoff) await attempt.handoff(deliver); else deliver();
+						} catch (error) { attempt.failure = error; throw error; }
+					});
 					return result;
 				} catch (error) {
 					attempt.failure = error;
@@ -885,7 +897,7 @@ class WireProvider implements Provider {
 		return (await this.peer.request<{ available: boolean }>("provider/available", { provider: this.id })).available === true;
 	}
 	async request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
-		const attempt: ProviderAttempt = { model, request: toWire(request), prepare: options.prepareDispatch };
+		const attempt: ProviderAttempt = { model, request: toWire(request), prepare: options.prepareDispatch, handoff: options.handoff };
 		const req = this.peer.request("provider/request", { provider: this.id, model, request: attempt.request, sessionId: options.sessionId }, options.signal);
 		const onEvent = (p: { parentRequestId: number; event: { type: "text" | "reasoning" | "toolInput"; delta: string } }) => {
 			if (p.parentRequestId === req.id && attempt.committed && !attempt.response && !options.signal.aborted) options.onEvent?.(p.event);

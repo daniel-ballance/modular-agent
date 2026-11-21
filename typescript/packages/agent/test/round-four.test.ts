@@ -39,7 +39,7 @@ test("the agent reopens standard history with session settings, actors, keys and
 	const drafts: Partial<HistoryEntry>[] = [
 		{ kind: "actorJoined", data: { actor: { id: "friend", kind: "user", rights: fullRights } } },
 		{ kind: "setting", data: { key: "settings", value: { model: { provider: "conformance", id: "echo" }, reasoning: "low", maxSteps: 7 } } },
-		{ kind: "turnStart", turnId: "foreign-turn", actorId: "friend", data: { startedBy: { kind: "actor", id: "friend" }, model: { provider: "conformance", id: "echo" }, system: "retained", tools: [], settings: {} } },
+		{ kind: "turnStart", turnId: "foreign-turn", actorId: "friend", data: { startedBy: { kind: "actor", id: "friend" }, model: { provider: "conformance", id: "echo" }, system: "retained", tools: [], settings: {}, rights: fullRights, authorizers: [{ sessionId: sid, actorId: "friend" }] } },
 		{ kind: "input", turnId: "foreign-turn", actorId: "friend", data: { inputId: "original", key: "one" }, modelVisible: true, message: { role: "user", content: [{ type: "text", text: 'tool:read {"path":"note"}' }] } },
 		{ kind: "response", turnId: "foreign-turn", stepId: "foreign-step", modelVisible: true, message: { role: "assistant", stop: "toolUse", content: [call] } },
 		{ kind: "inputRequest", turnId: "foreign-turn", toolCallId: call.id, data: { request: { id: "foreign-question", sessionId: sid, kind: "approval", question: "Allow read?", details: '{\n  "path": "note"\n}', key: `approval:${call.id}`, toolCallId: call.id, answerable: true } } },
@@ -118,6 +118,45 @@ test("a stateful Provider is asked to delete remote copies before erasure return
 	assert.ok(report.outOfReach.includes("provider logs"));
 });
 
+test("unconfirmed Provider deletion blocks model reuse after reopen", async (t) => {
+	let confirmed = false;
+	let requests = 0;
+	let discards = 0;
+	const provider: Provider = {
+		id: "kept", supports: { keepsState: true },
+		models: () => [{ provider: "kept", id: "model", contextWindow: 100_000, maxOutput: 100, input: ["text"], reasoning: false }],
+		request: async () => {
+			requests++;
+			return { role: "assistant", stop: "finished", content: [{ type: "text", text: "done" }] };
+		},
+		async discardState(_id, options) {
+			if (options?.erase) {
+				discards++;
+				if (!confirmed) throw Error("Deletion not confirmed");
+			}
+		},
+	};
+	const options = { model: "kept/model", plugins: [{ name: "kept", setup(api: import("@modular-agent/harness").PluginApi) { api.provide("provider", provider); } }] };
+	const first = await start(t, options);
+	const id = await first.api.startSession();
+	await first.api.input(id, { content: "Private input", actorId: "user" });
+	await first.api.waitForIdle(id);
+	const input = first.api.history(id).find(e => e.kind === "input")!;
+	assert.ok((await first.api.erase(id, [input.id], "user")).outOfReach.includes("Unconfirmed deletion at kept"));
+	await first.h.stop();
+	const second = await start(t, { ...options, home: first.home });
+	await second.api.openSession(id);
+	await second.api.input(id, { content: "Do not contact the Provider", actorId: "user" });
+	await second.api.waitForIdle(id);
+	assert.equal(requests, 1);
+	assert.equal(discards, 2);
+	confirmed = true;
+	await second.api.input(id, { content: "Start with clean state", actorId: "user" });
+	await second.api.waitForIdle(id);
+	assert.equal(requests, 2);
+	assert.equal(discards, 3);
+});
+
 test("permission grants and revocations cannot be erased", async (t) => {
 	const { api } = await start(t);
 	const sid = await api.startSession();
@@ -173,7 +212,7 @@ test("steering from a second actor cannot borrow settings rights from the first"
 	} };
 	const { api } = await start(t, { plugins: [tools] });
 	const sid = await api.startSession();
-	await api.join(sid, { id: "guest", kind: "user", authority: ["input", "tools"] }, "user");
+	await api.join(sid, { id: "guest", kind: "user", authority: ["watch", "input", "tools"] }, "user");
 	await api.input(sid, { actorId: "user", content: "tool:hold {}" });
 	try {
 		await until(() => entered);

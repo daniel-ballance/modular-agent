@@ -224,7 +224,7 @@ function intersectConnectionRights(...scopes: (ConnectionRights | undefined)[]):
 	}
 	return rights.size ? Object.fromEntries(rights) : undefined;
 }
-interface TurnState extends TurnSnapshot { connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
+interface TurnState extends TurnSnapshot { startingRights?: Authority[]; connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
 /**
  * The Harness: hosts plugins, offers the plugin API, keeps sessions.
@@ -252,7 +252,7 @@ export class Harness {
 	private newId: () => string;
 	private jobCancels = new Map<string, (jobId: string) => Promise<void>>();
 	private refusedTools = new Set<string>();
-	private turnAuthority = new AsyncLocalStorage<{ sessionId: string; actors: Set<string>; jobs: Set<string>; state?: Pick<TurnState, "connectionRights"> }>();
+	private turnAuthority = new AsyncLocalStorage<{ sessionId: string; actors: Set<string>; jobs: Set<string>; state?: Pick<TurnState, "connectionRights" | "startingRights"> }>();
 	private toolWork = new AsyncLocalStorage<ToolCall>();
 	private gateSignal = new AsyncLocalStorage<AbortSignal | undefined>();
 	readonly problems: { plugin: string; where: string; error: string }[] = [];
@@ -433,10 +433,11 @@ export class Harness {
 			checkPending: id => this.checkPending(this.session(id)),
 			history: (sessionId, options) => {
 				const s = this.session(sessionId);
+				this.checkScopedWork(s, "watch");
 				this.checkPending(s);
 				return options?.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
 			},
-			append: async (sessionId, draft) => (await this.commit(this.session(sessionId), [{ ...draft, writer: draft.writer ?? pluginName }]))[0],
+			append: async (sessionId, draft) => (await this.commit(this.session(sessionId), [{ ...draft, writer: draft.writer ?? pluginName }], true))[0],
 			transaction: (sessionId, fn) => this.transaction(this.session(sessionId), pluginName, fn),
 			erase: (sessionId, ids, actorId) => this.erase(this.session(sessionId), ids, actorId, pluginName),
 			tools: (sessionId) => this.toolDefinitions(sessionId ? this.session(sessionId) : undefined),
@@ -618,6 +619,8 @@ export class Harness {
 		const commandReservation = `command:${stepId}`;
 		if (!this.reservations.reserve(session, commandReservation, { calls: 1, bufferedBytes: resourceBytes(line),
 			storageBytes: this.reservations.limits.settlementBytes })) throw failure("busy", "No capacity for command");
+		const authority = { startingRights: this.rightsOf(session, actorId) };
+		const scope = { sessionId, actors: new Set([actorId]), jobs: new Set<string>(), state: authority };
 		const abort = new AbortController();
 		const signal = AbortSignal.any([abort.signal, session.interruption.signal]);
 		const live = () => {
@@ -625,11 +628,13 @@ export class Harness {
 				throw Object.assign(new Error("Command context has settled"), { code: "invalid_request" });
 			}
 			signal.throwIfAborted();
+			this.checkPending(session);
+			this.checkWriter(session);
 			this.requireAuthority(session, actorId, "input");
 		};
 		let tail = Promise.resolve();
 		try {
-			return await command.run(match[2], { sessionId, actorId, stepId, signal, api: this.api(command.plugin),
+			return await this.turnAuthority.run(scope, () => command.run(match[2], { sessionId, actorId, stepId, signal, api: this.api(command.plugin),
 				requestModel: async (request) => {
 					live();
 					if (!command.usesModel) throw Object.assign(new Error("Command did not declare usesModel"), { code: "not_supported" });
@@ -647,7 +652,7 @@ export class Harness {
 						const maxOutput = Math.min(settings.maxOutput ?? Infinity, snapshot.settings.maxOutput ?? Infinity);
 						const request = { ...snapshot, tools, providerTools: "none" as const, settings: { ...snapshot.settings,
 							reasoning: snapshot.settings.reasoning ?? settings.reasoning, maxOutput: Number.isFinite(maxOutput) ? maxOutput : undefined } };
-						return this.turnModel(session, undefined, { sources: new Map(), actors: new Set([actorId]), jobs: new Set() }, model, live)
+						return this.turnModel(session, undefined, { ...authority, sources: new Map(), actors: scope.actors, jobs: scope.jobs }, model, live)
 							.request(request, { signal, stepId });
 					});
 					tail = pending.then(() => {}, () => {});
@@ -664,9 +669,9 @@ export class Harness {
 					live();
 					authorize();
 					if (!environment) throw Object.assign(new Error("No working environment"), { code: "not_supported" });
-					return environment;
+					return this.scopedEnvironment(environment, () => { live(); authorize(); });
 				},
-			});
+			}));
 		} finally {
 			abort.abort();
 			await tail;
@@ -693,7 +698,21 @@ export class Harness {
 				this.reservations.retain(s, entries.reduce((n, entry) => n + resourceBytes(entry), 0), true);
 				for (const q of s.admissions.values()) this.reserveInput(s, q, true);
 				for (const { job } of this.runningJobs(s)) this.reserveJob(s, job.id, true);
-				const results = new Set(entries.filter(e => e.kind === "toolResult" && !s.copied.has(e.id)).map(e => e.toolCallId));
+				const own = entries.filter(e => !s.copied.has(e.id));
+				const results = new Set(own.filter(e => e.kind === "toolResult").map(e => e.toolCallId));
+				const ended = new Set(own.filter(e => e.kind === "turnEnd").map(e => e.turnId));
+				const answered = new Set(own.filter(e => e.kind === "response").map(e => e.stepId));
+				const closed = new Set(own.filter(e => e.kind === "inputAnswer").map(requestIdOf));
+				const unit = this.reservations.limits.settlementBytes;
+				for (const e of own) {
+					if (e.kind === "inputRequest" && !e.erased && !closed.has(requestIdOf(e))) {
+						this.reservations.reserve(s, `question:${requestIdOf(e) ?? readRequest(e).id}`, { storageBytes: 3 * unit }, true);
+					}
+					if (e.kind === "turnStart" && e.turnId && !ended.has(e.turnId)) this.reservations.reserve(s, `turn:${e.turnId}`, { storageBytes: 2 * unit }, true);
+					if (e.kind === "modelRequest" && e.stepId && !answered.has(e.stepId) && !ended.has(e.turnId)) {
+						this.reservations.reserve(s, `model:${e.stepId}`, { calls: 1, storageBytes: 2 * unit }, true);
+					}
+				}
 				for (const entry of entries) {
 					if (s.copied.has(entry.id)) continue;
 					if (entry.kind === "response" && entry.message?.role === "assistant") {
@@ -793,7 +812,7 @@ export class Harness {
 			const actors = ancestor ? this.workActors(ancestor) : [];
 			const work = this.turnAuthority.getStore();
 			const jobs = work?.sessionId === ancestor?.id && work ? [...work.jobs] : [];
-			if (actors.length || jobs.length) drafts.push({ kind: "harness.parentAuthority", writer: "harness", modelVisible: false, data: { actors, jobs } });
+			if (actors.length || jobs.length) drafts.push({ kind: "harness.parentAuthority", writer: "harness", modelVisible: false, data: { actors, jobs, rights: this.workRights(ancestor!, actors, jobs) } });
 		}
 		this.watchWriter(s);
 		try {
@@ -1119,17 +1138,17 @@ export class Harness {
 	// ---------- the record ----------
 
 	/** Commit drafts to the session. All are kept, or none are. */
-	commit(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]> {
+	commit(s: Session, drafts: EntryDraft[], pluginRecord = false): Promise<HistoryEntry[]> {
 		// A suspended session's process has stopped: nothing more is recorded for it here.
 		const run = s.committing.then(() => {
 			const registry = this.pendingRegistry();
-			return registry ? registry.exclusive(() => this.commitNow(s, drafts)) : this.commitNow(s, drafts);
+			return registry ? registry.exclusive(() => this.commitNow(s, drafts, pluginRecord)) : this.commitNow(s, drafts, pluginRecord);
 		});
 		s.committing = run.catch(() => undefined);
 		return run;
 	}
 
-	private async commitNow(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]> {
+	private async commitNow(s: Session, drafts: EntryDraft[], pluginRecord = false): Promise<HistoryEntry[]> {
 		s.interruption.signal.throwIfAborted();
 		if (s.suspended) return [];
 		const firstAdmission = s.provisional && drafts.some(d => d.kind === "inputAccepted");
@@ -1154,21 +1173,29 @@ export class Harness {
 			}
 			throw error;
 		}
-		const control = entries.every(e => ["actorLeft", "limit", "erasure", "jobCleanupUnconfirmed", "inputHandedBack"].includes(e.kind));
-		const holders = entries.flatMap(entry => {
-			if (!["input", "inputAccepted", "inputHandedBack", "turnStart", "turnEnd", "modelRequest", "response", "toolStarted",
-				"toolResult", "toolPending", "toolOutput", "inputRequest", "inputAnswer", "secretAnswerAccepted", "jobStarted", "jobEnded",
-				"jobCleanupUnconfirmed", "modular-agent.nestedCall", "modular-agent.stepAfter", "resultFeedback"].includes(entry.kind)) return [];
-			const inputId = inputIdOf(entry);
-			return [
-				...(inputId ? [`input:${inputId}`] : []),
-				...(entry.stepId ? [`model:${entry.stepId}`, `command:${entry.stepId}`] : []),
-				...(entry.toolCallId ? [`call:${entry.toolCallId}`] : []),
-				...(entry.jobId ? [`job:${entry.jobId}`] : []),
-				...(entry.turnId ? [`turn:${entry.turnId}`] : []),
-			];
+		const inputId = entries.find(e => e.kind === "input" && e.turnId)?.inputId;
+		const allocations = entries.map(entry => {
+			const control = !pluginRecord && ["actorLeft", "limit", "erasure", "jobCleanupUnconfirmed", "inputHandedBack"].includes(entry.kind);
+			const keys: string[] = [];
+			const add = (kind: string, id: string | undefined) => { if (id) keys.push(`${kind}:${id}`); };
+			if (!pluginRecord) switch (entry.kind) {
+				case "input": case "inputAccepted": case "inputHandedBack":
+					add("input", inputIdOf(entry)); add("job", entry.jobId); break;
+				case "turnStart": add("input", inputId); add("turn", entry.turnId); break;
+				case "turnEnd":
+					add("turn", entry.turnId); break;
+				case "modelRequest": case "response":
+					add("model", entry.stepId); break;
+				case "jobStarted": case "jobEnded": case "jobCleanupUnconfirmed":
+					add("job", entry.jobId); break;
+				case "toolStarted": case "toolResult": case "toolPending": case "modular-agent.nestedCall":
+					add("call", entry.toolCallId); break;
+				case "inputRequest": case "inputAnswer": case "secretAnswerAccepted":
+					add("question", requestIdOf(entry)); break;
+			}
+			return { bytes: resourceBytes(entry), keys, control };
 		});
-		if (!this.reservations.write(s, bytes, holders, control)) {
+		if (!this.reservations.writeBatch(s, allocations)) {
 			const error = failure("busy", "No history capacity for this write");
 			if (entries.some(e => ["turnEnd", "toolResult", "inputAnswer", "inputHandedBack", "jobEnded", "response"].includes(e.kind))) {
 				this.interruptSession(s, "commitFailed", error);
@@ -1196,8 +1223,8 @@ export class Harness {
 			const inputId = inputIdOf(e);
 			if (inputId && e.kind === "input" && e.turnId) {
 				const unit = this.reservations.limits.settlementBytes;
-				this.reservations.release(s, `input:${inputId}`);
-				if (!this.reservations.has(s, `turn:${e.turnId}`)) this.reservations.reserve(s, `turn:${e.turnId}`, { storageBytes: 2 * unit }, true);
+				if (this.reservations.has(s, `turn:${e.turnId}`)) this.reservations.release(s, `input:${inputId}`);
+				else this.reservations.transfer(s, `input:${inputId}`, `turn:${e.turnId}`, { storageBytes: 2 * unit });
 			}
 			if (inputId && e.kind === "inputHandedBack") this.reservations.release(s, `input:${inputId}`);
 			if (e.kind === "turnEnd" && e.turnId) {
@@ -1208,6 +1235,7 @@ export class Harness {
 				}
 			}
 			if (e.kind === "response" && e.stepId) this.reservations.release(s, `model:${e.stepId}`);
+			if (e.kind === "inputAnswer" && requestIdOf(e)) this.reservations.release(s, `question:${requestIdOf(e)}`);
 			if (e.kind === "toolResult" && e.toolCallId) this.reservations.release(s, `call:${e.toolCallId}`);
 			const ids = { turnId: e.turnId, stepId: e.stepId, toolCallId: e.toolCallId, actorId: e.actorId };
 			this.emit(s, "entry.added", e, e.writer, ids);
@@ -1235,7 +1263,7 @@ export class Harness {
 			input: (o) => inputs.push(o),
 		});
 		// Nothing is kept unless the callback finished; then the entries are kept together.
-		if (drafts.length) await this.commit(s, drafts);
+		if (drafts.length) await this.commit(s, drafts, true);
 		for (const o of inputs) await this.input(s.id, o);
 	}
 
@@ -1358,6 +1386,39 @@ export class Harness {
 		this.checkPending(s);
 	}
 
+	private checkProviderErasure(s: Session, provider: string): void {
+		if (this.pendingRegistry()?.intents().some(intent =>
+			intent.providers?.some(copy => copy.sessionId === s.id && copy.provider === provider && !copy.confirmed))) {
+			throw failure("unavailable", "Provider deletion is unconfirmed");
+		}
+	}
+
+	private async reconcileProviderErasure(s: Session, providerId?: string, observe?: (provider: string, reply: { pending?: string[]; outOfReach?: string[] }) => void): Promise<void> {
+		const registry = this.pendingRegistry();
+		if (!registry) return;
+		const providers = this.useAll<Provider>("provider");
+		for (const intent of registry.intents()) {
+			for (const copy of intent.providers ?? []) {
+				if (copy.sessionId !== s.id || copy.confirmed || providerId !== undefined && copy.provider !== providerId) continue;
+				const provider = providers.find(p => p.id === copy.provider);
+				if (!provider?.discardState) continue;
+				try {
+					this.checkWriter(s);
+					const entryIds = intent.copies.filter(c => c.sessionId === s.id).map(c => c.id);
+					const reply = await provider.discardState(s.id, { erase: true, entryIds });
+					if (reply) observe?.(copy.provider, reply);
+					if (reply?.pending?.length || reply?.outOfReach?.length) continue;
+					this.checkWriter(s);
+					await registry.exclusive(async () => {
+						const current = registry.intents().find(i => i.id === intent.id);
+						const mark = current?.providers?.find(m => m.sessionId === s.id && m.provider === copy.provider);
+						if (mark && current) { mark.confirmed = true; registry.keep(current); }
+					});
+				} catch (error) { this.problem("harness", `erase at ${copy.provider}`, error); }
+			}
+		}
+	}
+
 	private async reconcileErasure(s: Session, operation: string): Promise<void> {
 		const registry = this.pendingRegistry()!;
 		const store = this.use<HistoryStore>("history-store");
@@ -1425,7 +1486,19 @@ export class Harness {
 				}
 			}
 			const targets = eraseCopies(s, requested, sessions);
-			const intent: ErasureIntent = { id: this.newId(), sessionId: s.id, targets: requested, actorId,
+			const stateful = new Set(this.useAll<Provider>("provider").filter(p => p.supports.keepsState).map(p => p.id));
+			const providers = [...targets].flatMap(([session, ids]) => {
+				// A kept-state Provider may have retained data not named in a request record.
+				const used = new Set(stateful);
+				for (const id of ids) {
+					const entry = session.entries.get(id);
+					const data = entry?.data as { model?: { provider?: string }; keepsState?: boolean } | undefined;
+					const provider = data?.model?.provider;
+					if (entry?.kind === "modelRequest" && provider && (data?.keepsState === true || stateful.has(provider))) used.add(provider);
+				}
+				return [...used].map(provider => ({ sessionId: session.id, provider, confirmed: false }));
+			});
+			const intent: ErasureIntent = { id: this.newId(), sessionId: s.id, targets: requested, actorId, providers,
 				copies: [...targets].flatMap(([session, ids]) =>
 					[...ids].map(id => ({ sessionId: session.id, id, erased: false }))) };
 			registry.keep(intent);
@@ -1435,6 +1508,7 @@ export class Harness {
 		const add = (description: string) => { if (!report.outOfReach.includes(description)) report.outOfReach.push(description); };
 		for (const id of new Set(operation.copies.map(copy => copy.sessionId))) {
 			let session = this.sessions.get(id);
+			const replies = new Map<string, { pending?: string[]; outOfReach?: string[] }>();
 			let acquired = false;
 			try {
 				if (!session && store) {
@@ -1442,7 +1516,10 @@ export class Harness {
 					acquired = true;
 					session = await this.loadInto(id);
 				}
-				if (session) await this.reconcileErasure(session, operation.id);
+				if (session) {
+					await this.reconcileErasure(session, operation.id);
+					await this.reconcileProviderErasure(session, undefined, (provider, reply) => replies.set(provider, reply));
+				}
 			} catch (error) {
 				if ((error as { code?: string }).code !== "held") this.problem(writer, "reconcile erasure", error);
 			} finally { if (acquired) await store!.close(id); }
@@ -1455,18 +1532,13 @@ export class Harness {
 				(mark.erased ? report.erased : report.pending).push(mark.id);
 				(mark.erased ? report.erasedPairs : report.pendingPairs).push({ sessionId: id, id: mark.id });
 			}
-			if (marks.some(mark => !mark.erased)) continue;
-			for (const provider of this.useAll<Provider>("provider").filter(p => p.supports.keepsState === true)) {
-				try {
-					const remote = await provider.discardState?.(id, { erase: true, entryIds: marks.map(mark => mark.id) });
-					if (!provider.discardState) add(`Copies held by ${provider.id}`);
-					if (visible) report.pending.push(...(remote?.pending ?? []));
-					else if (remote?.pending?.length) add("copies in other sessions");
-					for (const item of remote?.outOfReach ?? []) if (visible) add(item);
-				} catch (error) {
-					add(`Unconfirmed deletion at ${provider.id}`);
-					this.problem(writer, `erase at ${provider.id}`, error);
-				}
+			for (const remote of registry.intents().find(intent => intent.id === operation.id)?.providers ?? []) {
+				if (remote.sessionId !== id || remote.confirmed) continue;
+				if (!visible) { add("copies in other sessions"); continue; }
+				const reply = replies.get(remote.provider);
+				report.pending.push(...(reply?.pending ?? []));
+				for (const description of reply?.outOfReach ?? []) add(description);
+				add(`Unconfirmed deletion at ${remote.provider}`);
 			}
 		}
 		if (report.erased.length) add("Output already delivered and copies beyond the agent");
@@ -1512,9 +1584,9 @@ export class Harness {
 		if (!s.meta.parentSessionId) return allowed;
 		const parent = this.sessions.get(s.meta.parentSessionId);
 		const link = s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "harness.parentAuthority");
-		const work = link?.data as { actors?: string[]; jobs?: string[] } | undefined;
+		const work = link?.data as { actors?: string[]; jobs?: string[]; rights?: Authority[] } | undefined;
 		return allowed.filter((right) => parent
-			? this.workRights(parent, work?.actors ?? [], work?.jobs).includes(right)
+			? (work?.rights ?? ["watch"]).includes(right) && this.workRights(parent, work?.actors ?? [], work?.jobs).includes(right)
 			: right === "watch");
 	}
 
@@ -1529,9 +1601,18 @@ export class Harness {
 			const kept = s.jobs.get(jobId) ?? (start && this.readJob(s, start));
 			return { rights: kept?.rights ?? ["watch"], ancestors: [...new Set([...(kept?.actors ?? []), ...(kept?.job.actorId ? [kept.job.actorId] : [])])].map((id) => this.actorRights(s, id)) };
 		});
-		return ALL_AUTHORITY.filter((right) => this.withinLimits(s, right) &&
+		const scope = this.turnAuthority.getStore();
+		const starting = scope?.sessionId === s.id ? scope.state?.startingRights : undefined;
+		return ALL_AUTHORITY.filter((right) => (!starting || starting.includes(right)) && this.withinLimits(s, right) &&
 			owners.every((owner) => owner.includes(right)) &&
 			recordedJobs.every((job) => job.rights.includes(right) && job.ancestors.every((owner) => owner.includes(right))));
+	}
+
+	private checkScopedWork(s: Session, right: Authority): void {
+		const work = this.turnAuthority.getStore();
+		if (work?.sessionId === s.id && (!work.actors.size && !work.jobs.size || !this.workRights(s, work.actors, work.jobs).includes(right))) {
+			throw failure("forbidden", `Starting work cannot ${right}`);
+		}
 	}
 
 	private rightsOf(s: Session, actorId: string): Authority[] {
@@ -1594,6 +1675,7 @@ export class Harness {
 		this.checkWriter(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		const right = options.when === "propose" ? "propose" : "input";
+		this.checkScopedWork(s, right);
 		if (options.startedBy?.kind !== "job") {
 			this.requireAuthority(s, options.actorId, right);
 			if (options.delegatedBy) this.requireAuthority(s, options.delegatedBy, right);
@@ -1666,6 +1748,13 @@ export class Harness {
 			await this.providerFor(s)?.refreshModels?.();
 			if (!this.modelAccess(s)) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
 		}
+		this.checkPending(s);
+		if (q.startedBy.kind !== "job" && !q.releasedBy) {
+			const right = q.when === "propose" ? "propose" : "input";
+			for (const actor of inputActors(q)) this.requireAuthority(s, actor, right);
+		}
+		const authorizers = inputActors(q);
+		q.startingRights ??= this.workRights(s, authorizers, q.startedBy.kind === "job" ? [q.startedBy.id] : []);
 		const steer = q.when === "steer" && this.runtime()?.supports.inputDuringTurn === true && !s.running?.steeringClosed;
 		const taken = q.when === "propose" ? "proposed" : !s.isBusy() && !s.reopening && !s.followUps.length ? "now" : steer && !s.reopening ? "inTurn" : "after";
 		// A selected turn already owns this input; only input still waiting for
@@ -1674,7 +1763,8 @@ export class Harness {
 		try { await this.commit(s, [{
 			kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: q.actorId, inputId: q.id, sources: q.sources,
 			jobId: q.startedBy.kind === "job" ? q.startedBy.id : undefined,
-			data: { inputId: q.id, key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, submittedBy: q.delegatedBy, taken, connectionRights: q.connectionRights },
+			data: { inputId: q.id, key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, submittedBy: q.delegatedBy, taken, connectionRights: q.connectionRights, rights: q.startingRights,
+				authorizers: authorizers.map(actorId => ({ sessionId: s.id, actorId })) },
 		}]); }
 		catch (error) {
 			if (!s.interruption.signal.aborted) this.reservations.release(s, `input:${q.id}`);
@@ -1697,7 +1787,8 @@ export class Harness {
 			const receipt = declined
 				? (await this.handBack(s, [q], "declined"), { inputId, taken: "handedBack" as const })
 				: await this.acceptInput(s, { ...q, when, releasedBy: actorId,
-					connectionRights: intersectConnectionRights(q.connectionRights, connectionRights.getStore()) });
+					connectionRights: intersectConnectionRights(q.connectionRights, { [actorId]: this.rightsOf(s, actorId) }),
+					startingRights: intersectRights(q.startingRights ?? [], this.rightsOf(s, actorId)) });
 			s.proposals.delete(inputId);
 			return receipt;
 		});
@@ -1811,6 +1902,10 @@ export class Harness {
 			(modelTools == null || (Array.isArray(modelTools) && modelTools.includes(t.name))));
 		const resultShape = queued.resultShape ?? s.settings.resultShape as Record<string, unknown> | undefined;
 		let point: string | undefined;
+		const actors = new Set(inputActors(queued));
+		const jobs = new Set([...(queued.authorityJobs ?? []), ...(queued.startedBy.kind === "job" ? [queued.startedBy.id] : [])]);
+		const authority = { startingRights: queued.startingRights ?? [], connectionRights: queued.connectionRights };
+		const withAuthority = <T>(work: () => T) => this.turnAuthority.run({ sessionId: s.id, actors, jobs, state: authority }, work);
 		let contributions: { system?: string; context?: ContentPart[] }[] = [];
 		let failure: string | undefined;
 		let limited = false;
@@ -1818,19 +1913,33 @@ export class Harness {
 			limited = await this.tenantBudgetReached(s);
 			if (!limited && !signal.aborted) {
 				const env = await this.environmentFor(s);
-				if (env?.save && (env.keepsPoints?.(this.projectOf(s)) ?? env.points)) point = await env.save();
-				contributions = await this.hooks.collect("turn.before", { sessionId: s.id, turnId, input: queued.content });
+				if (env?.save && (env.keepsPoints?.(this.projectOf(s)) ?? env.points)) {
+					withAuthority(() => this.checkScopedWork(s, "watch"));
+					this.checkPending(s);
+					point = await env.save();
+				}
+				contributions = await withAuthority(() => this.hooks.collect("turn.before", { sessionId: s.id, turnId, input: queued.content }));
 			}
 		} catch (error) { failure = String(error); }
 		const context = contributions.flatMap((c) => c.context ?? []);
-		const snapshot: TurnSnapshot = {
+		let snapshot: TurnSnapshot = {
 			model: ref ?? null,
 			system: contributions.map((c) => c.system).filter(Boolean).join("\n\n"), tools, settings,
 			...(context.length ? { context } : {}),
 		};
-		const state: TurnState = { ...snapshot, connectionRights: queued.connectionRights, sources: new Map(), actors: new Set(inputActors(queued)), jobs: new Set([...(queued.authorityJobs ?? []), ...(queued.startedBy.kind === "job" ? [queued.startedBy.id] : [])]) };
+		const unit = this.reservations.limits.settlementBytes;
+		if (resourceBytes({ ...snapshot, resultShape, point }) + 2048 > unit) {
+			failure = "Turn preparation exceeds reserved capacity";
+			snapshot = { model: ref ?? null, system: "", settings: {}, tools: [] };
+		}
+		const state: TurnState = { ...snapshot, ...authority, sources: new Map(), actors, jobs };
+		if (continuing && !this.reservations.reserve(s, `turn:${turnId}`, { storageBytes: 3 * unit })) {
+			// Leave existing open calls intact when a continuation cannot reserve its own turn.
+			return;
+		}
 		await this.commit(s, [
-			{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, data: { ...snapshot, startedBy: queued.startedBy, resultShape, point, ...(continuing ? { authorityActors: inputActors(queued), authorityJobs: queued.authorityJobs } : {}) } },
+			{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, data: { ...snapshot, startedBy: queued.startedBy, resultShape: failure ? undefined : resultShape, point, rights: state.startingRights,
+				authorizers: [...actors].map(actorId => ({ sessionId: s.id, actorId })), ...(continuing ? { authorityActors: [...actors], authorityJobs: [...jobs] } : {}) } },
 			...(continuing ? [] : [this.inputEntry(s, queued, turnId)]),
 		]);
 		this.emit(s, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
@@ -1905,6 +2014,11 @@ export class Harness {
 			this.emitAnswer(s, request, answer);
 		}
 		const sources = s.branch().filter((e) => e.turnId === turnId && (e.kind === "response" || e.kind === "toolResult")).map((e) => e.id);
+		if (resourceBytes({ outcome: outcome.outcome, result: outcome.result, usage: outcome.usage, sources }) + 2048 > this.reservations.limits.settlementBytes) {
+			this.problem("harness", "settle turn", failure("result_too_large", "Turn result exceeds reserved capacity"));
+			outcome = { ...outcome, outcome: outcome.outcome.kind === "completed" ? { kind: "failed", error: "result_too_large" } : outcome.outcome,
+				result: { openToolCalls: [...open] } };
+		}
 		await this.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId, sources, data: { outcome: outcome.outcome, result: outcome.result, usage: outcome.usage } }]);
 		if (!state?.endedHook) await this.hooks.observe("turn.end", { sessionId: s.id, turnId, outcome: outcome.outcome, result: outcome.result });
 		this.emit(s, "turn.ended", outcome, "harness", { turnId });
@@ -1927,6 +2041,7 @@ export class Harness {
 			settings: snapshot?.settings ? { ...snapshot.settings, reasoning: lowerReasoning(snapshot.settings.reasoning, model.model) } : this.turnSettings(s, model.model),
 			sources: new Map(), actors: new Set(this.recordedTurnActors(branch, turnId)),
 			jobs: new Set(this.recordedTurnJobs(branch, turnId)),
+			startingRights: this.recordedTurnRights(branch, turnId),
 			connectionRights: intersectConnectionRights(...branch.filter(e => e.turnId === turnId && e.kind === "input" && !e.erased)
 				.map(e => (e.data as QueuedInput | undefined)?.connectionRights)),
 		};
@@ -1939,7 +2054,7 @@ export class Harness {
 			const eligible = calls.filter((c) => {
 				const offer = branch.find((e) => e.kind === "modelRequest" && e.stepId === c.stepId && !e.erased);
 				return runtime.supports.continuesAfterRestart && !restored?.lastStep.decision && !c.started && this.findTool(s, c.name) &&
-					(offer?.data as { tools?: string[] } | undefined)?.tools?.includes(c.name) && this.workRights(s, [...state.actors], state.jobs).includes("tools");
+					(offer?.data as { tools?: string[] } | undefined)?.tools?.includes(c.name) && state.startingRights?.includes("tools") && this.workRights(s, [...state.actors], state.jobs).includes("tools");
 			});
 			await this.endInterruptedTurn(s, { turnId, calls: calls.filter((c) => !eligible.includes(c)) });
 			outcome = await runtime.resumeTurn(
@@ -1958,6 +2073,17 @@ export class Harness {
 			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !terminal.has(c.id) && !open.has(c.id)) });
 		}
 		await this.finishTurn(s, turnId, outcome, state, signal, snapshot?.resultShape);
+	}
+
+	private recordedTurnRights(branch: HistoryEntry[], turnId: string): Authority[] {
+		const records = branch.filter(e => e.turnId === turnId && !e.erased && (e.kind === "turnStart" || e.kind === "input"));
+		const start = records.find(e => e.kind === "turnStart");
+		const explicit = (start?.data as { rights?: Authority[] } | undefined)?.rights;
+		const inputs = records.filter(e => e.kind === "input").map(e => {
+			const data = e.data as { rights?: Authority[]; connectionRights?: ConnectionRights } | undefined;
+			return data?.rights ?? (data?.connectionRights && intersectRights(...Object.values(data.connectionRights))) ?? explicit ?? [];
+		});
+		return explicit || inputs.length ? intersectRights(...(explicit ? [explicit] : []), ...inputs) : [];
 	}
 
 	private recordedTurnActors(branch: HistoryEntry[], turnId: string): string[] {
@@ -1991,7 +2117,7 @@ export class Harness {
 		const sources = jobId ? s.order.filter((id) => { const e = s.entries.get(id)!; return e.jobId === jobId && e.kind === "jobEnded"; }) : undefined;
 		return {
 			kind: "input", writer: "harness", modelVisible: true, turnId, actorId: q.actorId, jobId, inputId: q.id, sources: [...(sources ?? []), ...(q.sources ?? [])],
-			message: { role: "user", content: q.content }, data: { inputId: q.id, key: q.key, releasedBy: q.releasedBy, delegatedBy: q.delegatedBy, authorityActors: q.authorityActors, connectionRights: q.connectionRights },
+			message: { role: "user", content: q.content }, data: { inputId: q.id, key: q.key, releasedBy: q.releasedBy, delegatedBy: q.delegatedBy, authorityActors: q.authorityActors, connectionRights: q.connectionRights, rights: q.startingRights },
 		};
 	}
 
@@ -2001,11 +2127,12 @@ export class Harness {
 
 	private runtimeHost(s: Session, turnId: string, state: TurnState, resultShape?: Record<string, unknown>): RuntimeHost {
 		const withAuthority = <T>(fn: () => T): T => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, fn);
+		const checkRead = () => { this.checkPending(s); withAuthority(() => this.checkScopedWork(s, "watch")); };
 		return {
 			newId: async () => this.newId(),
 			callActor: () => state.actors.values().next().value ?? this.actorForJob(s, state.jobs),
 			prepareStep: async ({ stepId, usage }) => {
-				this.checkPending(s);
+				checkRead();
 				if (state.capacityLimit) throw turnLimit("capacity");
 				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
 				const attempts = s.order.map((id) => s.entries.get(id)!).filter((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary).length;
@@ -2020,6 +2147,7 @@ export class Harness {
 				};
 				const payload = { sessionId: s.id, turnId, stepId, usage, model: model?.model, history: s.branch(), request };
 				const transformed = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
+				checkRead();
 				if (!Array.isArray(transformed?.tools) || transformed.tools.some(t => !request.tools.some(offered => isDeepStrictEqual(offered, t)))) throw new Error("step.before cannot widen the tool offer");
 				const prepared: ModelRequest = feedback.length ? { ...transformed, messages: [...transformed.messages,
 					...feedback.map((e): ModelMessage => ({ role: "user", content: [text((e.data as { reason: string }).reason)] }))] } : transformed;
@@ -2086,7 +2214,7 @@ export class Harness {
 				return found && { source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition };
 			},
 			history: async options => {
-				this.checkPending(s);
+				checkRead();
 				return options?.all ? s.order.map(id => s.entries.get(id)!) : s.branch();
 			},
 			record: async (draft) => {
@@ -2111,6 +2239,7 @@ export class Harness {
 				if (!items.length) return [];
 				for (const q of items) for (const id of inputActors(q)) state.actors.add(id);
 				state.connectionRights = intersectConnectionRights(state.connectionRights, ...items.map(q => q.connectionRights));
+				state.startingRights = intersectRights(state.startingRights ?? [], ...items.map(q => q.startingRights ?? []));
 				return this.commit(s, items.map((q) => this.inputEntry(s, q, turnId)));
 			}),
 			hasSteering: async () => s.steering.length > 0,
@@ -2120,7 +2249,7 @@ export class Harness {
 
 	// ---------- models ----------
 
-	private turnModel(s: Session, turnId: string | undefined, state: Pick<TurnState, "sources" | "actors" | "jobs" | "tenantLimit" | "capacityLimit" | "connectionRights">,
+	private turnModel(s: Session, turnId: string | undefined, state: Pick<TurnState, "sources" | "actors" | "jobs" | "tenantLimit" | "capacityLimit" | "connectionRights" | "startingRights">,
 		model: ModelAccess, authorize?: () => void): ModelAccess {
 		return { ...model, request: async (request, options) => {
 			return this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, async () => {
@@ -2129,25 +2258,36 @@ export class Harness {
 				const stepId = options.stepId ?? [...state.sources.keys()].at(-1) ?? this.newId();
 
 				const freshness = this.checkPending(s);
+				await this.reconcileProviderErasure(s, model.model.provider);
+				this.checkProviderErasure(s, model.model.provider);
 				const attempt = `model:${stepId}`;
 				const bounds = this.reservations.limits;
 				const requestBytes = resourceBytes(request);
 				if (state.capacityLimit || requestBytes + 2048 > bounds.entryBytes ||
-					!this.reservations.reserve(s, attempt, { calls: 1, storageBytes: requestBytes + 3 * bounds.settlementBytes })) {
+					!this.reservations.reserve(s, attempt, { calls: 1, bufferedBytes: requestBytes, storageBytes: requestBytes + 3 * bounds.settlementBytes })) {
 					state.capacityLimit = true;
 					throw turnLimit("capacity");
 				}
 				const scope = { sessionId: s.id, turnId, stepId, provider: model.model.provider, model: { provider: model.model.provider, id: model.model.id } };
 				const safeToRepeat = !!turnId && (model.supports.safeToRepeat === true || (model.supports.keepsState === false && model.supports.runsTools === false));
 				let intentId: string | undefined;
-				const check = async () => {
-					options.signal.throwIfAborted();
-					if (await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
+				const finalCheck = () => {
 					options.signal.throwIfAborted();
 					authorize?.();
 					if (this.checkPending(s) !== freshness) throw failure("unavailable", "Erasure changed the model view");
-					if ([...state.actors].some(id => !s.actors.has(id))) throw failure("forbidden", "A contributing actor left");
+					this.checkScopedWork(s, "watch");
+					this.checkProviderErasure(s, model.model.provider);
 					this.checkWriter(s);
+				};
+				const check = async () => {
+					options.signal.throwIfAborted();
+					if (await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
+					finalCheck();
+				};
+				const handoff = async (send: () => void) => {
+					const publish = async () => { finalCheck(); send(); };
+					const registry = this.pendingRegistry();
+					if (registry) await registry.exclusive(publish); else await publish();
 				};
 				const prepareDispatch = async () => {
 					await check();
@@ -2172,14 +2312,14 @@ export class Harness {
 					};
 					const size = resourceBytes(dispatched);
 					if (size + 2048 > bounds.entryBytes || model.supports.runsTools !== false && dispatched.providerTools !== "none" ||
-						!this.reservations.resize(s, attempt, { calls: 1, storageBytes: size + 3 * bounds.settlementBytes })) {
+						!this.reservations.resize(s, attempt, { calls: 1, bufferedBytes: size, storageBytes: size + 3 * bounds.settlementBytes })) {
 						state.capacityLimit = true;
 						throw turnLimit("capacity");
 					}
 					const [intent] = await this.commit(s, [{
 						kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
 						actorId: turnId ? undefined : [...state.actors][0],
-						data: { model: scope.model, safeToRepeat, tracksStepAfter: !!turnId, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat || !turnId ? { request: dispatched } : {}) },
+						data: { model: scope.model, ...(model.supports.keepsState === true ? { keepsState: true } : {}), safeToRepeat, tracksStepAfter: !!turnId, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat || !turnId ? { request: dispatched } : {}) },
 						sources: state.sources.get(stepId),
 					}]);
 					try { await check(); }
@@ -2203,8 +2343,20 @@ export class Harness {
 				try {
 					let message: AssistantMessage;
 					try {
-						message = model.prepareOnWire ? await model.request(request, { ...options, prepareDispatch, onEvent })
-							: await model.request(await prepareDispatch(), { ...options, requestPrepared: true, onEvent });
+						if (model.prepareOnWire) {
+							const work = { sessionId: s.id, actors: state.actors, jobs: state.jobs, state };
+							message = await model.request(request, { ...options, onEvent,
+								prepareDispatch: () => this.turnAuthority.run(work, prepareDispatch),
+								handoff: send => this.turnAuthority.run(work, () => handoff(send)) });
+						} else {
+							const dispatched = await prepareDispatch();
+							let result!: Promise<AssistantMessage>;
+							await handoff(() => {
+								result = model.request(dispatched, { ...options, requestPrepared: true, onEvent });
+								void result.catch(() => {});
+							});
+							message = await result;
+						}
 					} catch (error) {
 						if (turnId || !intentId) throw error;
 						message = options.signal.aborted ? { role: "assistant", stop: "aborted", content: [] }
@@ -2268,6 +2420,30 @@ export class Harness {
 	}
 
 	/** The working environment, in the session's project when it has its own. */
+	private scopedEnvironment(env: WorkingEnvironment, check: () => void): WorkingEnvironment {
+		return new Proxy(env, {
+			get: (environment, key) => {
+				const member: unknown = Reflect.get(environment, key, environment);
+				if (typeof member !== "function") return member;
+				if (key === "at" || key === "forSession") return async (...args: unknown[]) => {
+					check();
+					const next = await member.apply(environment, args) as WorkingEnvironment;
+					check();
+					return this.scopedEnvironment(next, check);
+				};
+				return (...args: unknown[]) => {
+					check();
+					const result: unknown = member.apply(environment, args);
+					// A read begun before a revocation cannot disclose its reply afterwards.
+					if (key === "readFile" || key === "exists" || key === "list" || key === "hasPoint") {
+						return Promise.resolve(result).then(value => { check(); return value; });
+					}
+					return result;
+				};
+			},
+		});
+	}
+
 	private async environmentFor(s: Session): Promise<WorkingEnvironment | undefined> {
 		const base = this.use<WorkingEnvironment>("working-environment");
 		const env = await base?.forSession?.(s.id) ?? base;
@@ -2343,6 +2519,7 @@ export class Harness {
 		if (!eligible(current)) return refused();
 		this.checkWriter(s);
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
+		this.checkPending(s);
 		this.emit(s, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
 		let asked = 0;
 		const pendingQuestions: string[] = [];
@@ -2351,6 +2528,7 @@ export class Harness {
 		let live = true;
 		const check = () => {
 			if (!live) throw Object.assign(new Error("There is no live parent"), { code: "invalid_request" });
+			this.checkPending(s);
 			if (signal.aborted) throw Object.assign(new Error("The parent was cancelled"), { code: "cancelled" });
 			if (!allowed() || s.erasing || s.suspended) throw Object.assign(new Error("The parent cannot run tools"), { code: "invalid_request" });
 			this.checkWriter(s);
@@ -2372,9 +2550,10 @@ export class Harness {
 					return job;
 				} },
 				progress: (content) => {
+					try { check(); } catch { return; }
 					this.emit(s, "tool.progress", { content }, found.source.id, { turnId, toolCallId: call.id });
 				},
-				environment: env,
+				environment: env && this.scopedEnvironment(env, check),
 				tools: this.runtime()?.supports.nestedToolCalls === true ? {
 					list: async () => {
 						check();
@@ -2393,6 +2572,7 @@ export class Harness {
 					},
 				} : undefined,
 				ask: (request, askingSignal) => {
+					check();
 					const n = ++asked;
 					return this.ask(s, { ...request, toolCallId: call.id, key: request.key ?? `call:${call.id}:${n}` }, found.source.id, askingSignal ? AbortSignal.any([signal, askingSignal]) : signal)
 						.then((answer) => { if (answer.pending) pendingQuestions.push(answer.requestId); return answer; });
@@ -2552,7 +2732,9 @@ export class Harness {
 
 	private async callOutsideTurn(s: Session, call: ToolCall): Promise<ToolResult> {
 		const definition = this.findTool(s, call.name)?.definition;
-		const gate = definition?.callers && call.startedBy !== "tool" && !definition.callers.includes(call.startedBy as "ui" | "plugin")
+		const gate = call.actorId && !this.rightsOf(s, call.actorId).includes("tools")
+			? { refused: "No tools right", value: { call } }
+			: definition?.callers && call.startedBy !== "tool" && !definition.callers.includes(call.startedBy as "ui" | "plugin")
 			? { refused: `${call.name} can't be called by a ${call.startedBy}`, value: { call } }
 			: await this.toolGate({ sessionId: s.id, call, definition });
 		let result: ToolResult;
@@ -2751,6 +2933,7 @@ export class Harness {
 		const gateSignal = this.gateSignal.getStore();
 		signal = signal && gateSignal ? AbortSignal.any([signal, gateSignal]) : signal ?? gateSignal;
 		signal?.throwIfAborted();
+		this.checkPending(s);
 		if (draft.whenTimeLimit === "leaveOpen" && !this.questionsOutlastTurns) throw Object.assign(new Error("Questions cannot outlast the turn"), { code: "not_supported" });
 		const call = this.toolWork.getStore();
 		if (call && call.id === draft.toolCallId) draft = { ...draft, boundCall: { name: call.name, input: call.input } };
@@ -2789,7 +2972,20 @@ export class Harness {
 		}
 		const viewers = this.viewersFor(s, request);
 		if (!reopened) {
-			await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId, requestId: request.id, toolCallId: request.toolCallId, data: { request: { ...request, answerable: viewers.length > 0 }, ...approval } }]);
+			const data = { request: { ...request, answerable: viewers.length > 0 }, ...approval };
+			const bytes = resourceBytes(data) + 2048;
+			const key = `question:${request.id}`;
+			const unit = this.reservations.limits.settlementBytes;
+			if (bytes > this.reservations.limits.entryBytes || !this.reservations.reserve(s, key, { storageBytes: bytes + 3 * unit })) {
+				throw failure("busy", "No capacity for the question and its closing records");
+			}
+			try {
+				await this.commit(s, [{ kind: "inputRequest", writer: askedBy, modelVisible: false, turnId: request.turnId, stepId,
+					requestId: request.id, toolCallId: request.toolCallId, data }]);
+			} catch (error) {
+				if (!s.interruption.signal.aborted) this.reservations.release(s, key);
+				throw error;
+			}
 		}
 		if (!this.hasAnswerer(s, request)) {
 			const approval = request.kind === "approval";
@@ -2909,13 +3105,15 @@ export class Harness {
 		const branch = s.branch();
 		const owners = new Set<string>();
 		const jobs = new Set<string>();
+		const ceilings: Authority[][] = [];
 		for (const e of branch) {
 			if (!e.turnId || e.message?.role !== "assistant" || !e.message.content.some((p) => isToolCall(p) && callIds.has(p.id))) continue;
+			ceilings.push(this.recordedTurnRights(branch, e.turnId));
 			for (const actorId of this.recordedTurnActors(branch, e.turnId)) owners.add(actorId);
 			for (const jobId of this.recordedTurnJobs(branch, e.turnId)) jobs.add(jobId);
 		}
 		const queued: QueuedInput = {
-			id: this.newId(), content: [], actorId: [...owners][0] ?? answer.actorId, authorityActors: [...owners], authorityJobs: [...jobs],
+			id: this.newId(), content: [], actorId: [...owners][0] ?? answer.actorId, authorityActors: [...owners], authorityJobs: [...jobs], startingRights: intersectRights(...ceilings),
 			when: "after", startedBy: { kind: "answer", id: answer.requestId }, kind: "continue", continueCalls: [...callIds],
 		};
 		if (s.isBusy()) {
@@ -2931,6 +3129,8 @@ export class Harness {
 	}
 
 	private async submitAnswer(s: Session, answer: Answer): Promise<{ accepted: boolean; reason?: string }> {
+		this.checkPending(s);
+		if (resourceBytes(answer) + 2048 > this.reservations.limits.settlementBytes) throw failure("result_too_large", "Answer exceeds reserved capacity");
 		const find = () => s.requests.get(answer.requestId)?.request ?? this.waitingRequests(s).find(r => r.id === answer.requestId);
 		const may = (request: InputRequest) => this.mayAnswer(s, request, answer.actorId) &&
 			(!answer.delegatedBy || this.mayAnswer(s, { ...request, answerers: [] }, answer.delegatedBy));
@@ -3018,7 +3218,7 @@ export class Harness {
 		const ready = this.commit(s, [{
 			id: startEntryId, kind: "jobStarted", writer: plugin, modelVisible: false, turnId: job.turnId,
 			toolCallId: options.toolCallId ?? this.toolWork.getStore()?.id, jobId: job.id, actorId,
-			data: { kind: job.kind, key, detail: detail ?? null, actors, rights },
+			data: { kind: job.kind, key, detail: detail ?? null, actors, rights, authorizers: actors.map(actorId => ({ sessionId: s.id, actorId })) },
 		}]).then(() => this.emit(s, "job.started", { job }, plugin, { jobId: job.id }));
 		void ready.catch((error) => { s.jobs.delete(job.id); this.problem(plugin, "record job", error); });
 		return this.jobHandle(s, { job, key, detail, actors, rights }, startEntryId, ready);
@@ -3063,18 +3263,18 @@ export class Harness {
 					const outcome = state === "outcomeUnknown"
 						? { kind: "failed", error: "Job outcome is unknown" }
 						: { kind: state, error: options?.error };
-					const report = options?.report !== false && !s.closing && this.workRights(s, [], [job.id]).includes("input");
 					await this.admit(s, async () => {
-						if (report && s.closing) throw failure("invalid_request", "Cannot report to a closing session");
+						const rights = this.workRights(s, [], [job.id]);
+						const report = options?.report !== false && !s.closing && !s.erasing && rights.includes("input");
 						const end: EntryDraft = { id: this.newId(), kind: "jobEnded", writer: plugin, modelVisible: false, jobId: job.id, sources: options?.sources, data: { outcome, result: content, report } };
 						let queued: QueuedInput | undefined;
 						const drafts = [end];
 						if (report && !s.keys.has(`job:${job.id}`)) {
 							if (!this.workRights(s, [], [job.id]).includes("input")) throw failure("invalid_request", 'Job report requires the "input" right');
 							queued = { id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key: `job:${job.id}`, kind: "input",
-								startedBy: { kind: "job", id: job.id }, sources: [end.id!], content: content ?? [] };
+								startedBy: { kind: "job", id: job.id }, startingRights: rights, sources: [end.id!], content: content ?? [] };
 							drafts.push({ kind: "inputAccepted", writer: "harness", modelVisible: false, inputId: queued.id, actorId: queued.actorId, jobId: job.id,
-								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose" } });
+								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose", rights, authorizers: (kept.actors ?? []).map(actorId => ({ sessionId: s.id, actorId })) } });
 						}
 						await this.commit(s, drafts);
 						if (queued) this.reservations.transfer(s, `job:${job.id}`, `input:${queued.id}`, {
@@ -3102,7 +3302,7 @@ export class Harness {
 		const data = end.data as { result?: ContentPart[]; outcome: { kind: JobState } };
 		const key = `job:${job.id}`;
 		await this.admit(s, async () => {
-			if (s.keys.has(key) || s.closed || s.closing || s.suspended) return;
+			if (s.keys.has(key) || s.closed || s.closing || s.suspended || !this.workRights(s, [], [job.id]).includes("input")) return;
 			await this.acceptInput(s, {
 				id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key, kind: "input",
 				startedBy: { kind: "job", id: job.id }, sources: [end.id],
@@ -3498,6 +3698,10 @@ export function normalizeSetting({ key, value }: { key: string; value: unknown }
 		})) };
 	}
 	return { key, value: value ?? null };
+}
+
+function intersectRights(...ceilings: readonly Authority[][]): Authority[] {
+	return ceilings.length ? ALL_AUTHORITY.filter(right => ceilings.every(ceiling => Array.isArray(ceiling) && ceiling.includes(right))) : [];
 }
 
 function inputActors(q: QueuedInput): string[] {

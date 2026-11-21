@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@modular-agent/harness": "0.1.0",
+    "@modular-agent/core": "0.1.0",
     "@modular-agent/runtime-transient": "0.1.0",
     "@modular-agent/provider-pi-ai": "0.1.0",
     "@modular-agent/env-local": "0.1.0",

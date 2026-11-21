@@ -102,21 +102,36 @@ export class Reservations {
 
 	/** Moving reserved write space to retained storage never needs another free slot. */
 	write(owner: ReservationOwner, bytes: number, keys: string[], control: boolean): boolean {
+		return this.writeBatch(owner, [{ bytes, keys, control }]);
+	}
+
+	/** An ordinary entry in a mixed batch cannot draw on its neighbor's reservation. */
+	writeBatch(owner: ReservationOwner, records: { bytes: number; keys: string[]; control: boolean }[]): boolean {
 		const { session, usage } = this.accounts(owner);
-		let remaining = bytes;
-		const transfers: [Charge, number][] = [];
-		for (const id of new Set(keys)) {
-			const charge = session.work.get(id);
-			if (!charge?.storageBytes) continue;
-			const used = Math.min(charge.storageBytes, remaining);
-			transfers.push([charge, used]);
-			remaining -= used;
+		const transfers = new Map<Charge, number>();
+		let ordinary = 0, control = 0, retained = 0;
+		for (const record of records) {
+			let left = record.bytes;
+			retained += left;
+			for (const id of new Set(record.keys)) {
+				const charge = session.work.get(id);
+				if (!charge?.storageBytes || !left) continue;
+				const already = transfers.get(charge) ?? 0;
+				const used = Math.min(charge.storageBytes - already, left);
+				transfers.set(charge, already + used);
+				left -= used;
+			}
+			if (record.control) control += left; else ordinary += left;
 		}
-		if (remaining && scopes.some((scope, index) =>
-			usage[index].storageBytes + remaining > this.limits[scope].storageBytes - (control ? 0 : this.limits[scope].controlBytes))) return false;
+		if (scopes.some((scope, index) => {
+			const stored = usage[index].storageBytes;
+			const limit = this.limits[scope];
+			return ordinary > 0 && stored + ordinary > limit.storageBytes - limit.controlBytes ||
+				control > 0 && stored + ordinary + control > limit.storageBytes;
+		})) return false;
 		for (const [charge, used] of transfers) charge.storageBytes! -= used;
-		this.adjust(usage, { storageBytes: remaining }, 1);
-		session.retained += bytes;
+		this.adjust(usage, { storageBytes: ordinary + control }, 1);
+		session.retained += retained;
 		return true;
 	}
 

@@ -29,9 +29,12 @@ function instance() {
 		containment: process.platform === "linux" ? "strong" as const : "processGroup" as const };
 }
 if (args.length) {
-	const [flag, listen, tokenFlag, tokenFile] = args;
-	if (args.length !== 4 || flag !== "--listen" || tokenFlag !== "--token-file") throw new Error("Usage: ma-plugin [--listen ADDR --token-file FILE]");
-	const server = await servePluginService(instance, { listen, tokenFile });
+	const [flag, listen, credentialFlag, value] = args;
+	if (args.length !== 4 || flag !== "--listen" || !["--token-file", "--fixture-hosts"].includes(credentialFlag)) {
+		throw new Error("Usage: ma-plugin [--listen ADDR (--token-file FILE | --fixture-hosts JSON)]");
+	}
+	const server = await servePluginService(instance, credentialFlag === "--token-file"
+		? { listen, tokenFile: value } : { listen, hosts: JSON.parse(value) });
 	process.stdout.write(server.url + "\n");
 	for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => void server.close());
 } else {

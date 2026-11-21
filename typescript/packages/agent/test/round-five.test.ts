@@ -84,7 +84,7 @@ for (const scenario of ["due", "allow", "refuse", "unknown"] as const) {
 		const { api, store, dirs } = await open(t, folders(t), [durableRuntime(), hook]);
 		const ids = { turnId: "turn", stepId: "step" };
 		const sid = await seed(store, dirs.project, [joined(), setting("model", model),
-			draft("turnStart", { turnId: ids.turnId, actorId: "user", data: { model, startedBy: { kind: "actor", id: "user" }, tools: [], settings: {}, system: "" } }),
+			draft("turnStart", { turnId: ids.turnId, actorId: "user", data: { model, startedBy: { kind: "actor", id: "user" }, tools: [], settings: {}, system: "", rights: ALL_AUTHORITY } }),
 			draft("modelRequest", { ...ids, data: { model, safeToRepeat: false, tools: [], ...(scenario === "unknown" ? {} : { tracksStepAfter: true }) } }),
 			draft("response", { ...ids, modelVisible: true, message: { role: "assistant", stop: "finished", content: [text("answer")] } }),
 			...(scenario === "allow" || scenario === "refuse" ? [draft("modular-agent.stepAfter", { ...ids, data: { decision: scenario === "allow" ? null : { refuse: "committed denial" } } })] : []),
@@ -157,7 +157,7 @@ test("an unsafe in-flight model request is not repeated even by the durable Runt
 	};
 	const { api, store, dirs } = await open(t, folders(t), [durableRuntime(), { name: "stateful", setup(api) { api.provide("provider", provider); } }]);
 	const sid = await seed(store, dirs.project, [joined(), setting("model", chosen),
-		draft("turnStart", { turnId: "turn", actorId: "user", data: { model: chosen, startedBy: { kind: "actor", id: "user" }, system: "", tools: [], settings: {} } }),
+		draft("turnStart", { turnId: "turn", actorId: "user", data: { model: chosen, startedBy: { kind: "actor", id: "user" }, system: "", tools: [], settings: {}, rights: ALL_AUTHORITY } }),
 		draft("modelRequest", { turnId: "turn", stepId: "step", data: { model: chosen, safeToRepeat: false } }),
 	]);
 	await api.openSession(sid);
@@ -174,7 +174,7 @@ test("durable reopen sends committed result feedback in its next request", async
 	const sid = await seed(store, dirs.project, [
 		joined(), setting("model", model),
 		draft("inputAccepted", { inputId: "admission", actorId: "user", data: { when: "now", taken: "now", content: [text("Question")] } }),
-		draft("turnStart", { turnId, actorId: "user", data: { model, tools: [], system: "", settings: {}, startedBy: { kind: "actor", id: "user" } } }),
+		draft("turnStart", { turnId, actorId: "user", data: { model, tools: [], system: "", settings: {}, startedBy: { kind: "actor", id: "user" }, rights: ALL_AUTHORITY } }),
 		draft("input", { turnId, inputId: "admission", actorId: "user", modelVisible: true, message: { role: "user", content: [text("Question")] } }),
 		draft("modelRequest", { turnId, stepId: "first", data: { model, tools: [], safeToRepeat: false, tracksStepAfter: true } }),
 		draft("response", { turnId, stepId: "first", modelVisible: true, message: { role: "assistant", content: [text("An answer")], stop: "finished" } }),
