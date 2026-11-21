@@ -81,7 +81,7 @@ type Question struct {
 	Options, Allowed, Path                                              []string
 	Wait                                                                time.Duration
 	Deadline                                                            *time.Time `json:",omitempty"`
-	Defer                                                               bool
+	Defer, Pause                                                        bool
 	Answerable                                                          bool
 }
 type Answer struct {

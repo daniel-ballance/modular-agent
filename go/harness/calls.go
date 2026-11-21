@@ -12,10 +12,6 @@ func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.To
 		return api.ToolResult{}, err
 	}
 	s.mu.Lock()
-	if !c.authorizedBy(s.data, ctx, "tools") {
-		s.mu.Unlock()
-		return api.ToolResult{}, api.ErrAuthority
-	}
 	if s.rewindBlocked {
 		s.mu.Unlock()
 		return api.ToolResult{}, errRewindUnresolved

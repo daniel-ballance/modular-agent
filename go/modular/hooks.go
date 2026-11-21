@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
@@ -20,10 +21,10 @@ type HookAnswer map[string]any
 // On registers a standard hook using the binding's shared payload and answer.
 // Use the typed OnToolBefore and OnToolAfter methods for tool gates and results.
 func (r *Registrar) On(point string, fn func(context.Context, HookPayload) (HookAnswer, error), opts ...HookOption) error {
-	if !pluginrpc.IsHook(point) || fn == nil {
+	if (!pluginrpc.IsHook(point) && !strings.Contains(point, ".")) || fn == nil {
 		return r.fail(&Error{Code: InvalidParams, Message: "unknown hook or missing handler: " + point})
 	}
-	return r.on(hookRegistration{point: point, handle: func(ctx context.Context, p pluginrpc.Object) (any, error) {
+	return r.on(hookRegistration{point: point, only: !pluginrpc.IsHook(point), handle: func(ctx context.Context, p pluginrpc.Object) (any, error) {
 		var payload HookPayload
 		decoder := json.NewDecoder(bytes.NewReader(api.JSON(p)))
 		decoder.UseNumber()

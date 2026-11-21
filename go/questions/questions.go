@@ -230,7 +230,11 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 			return api.Answer{Declined: true, Reason: "secret destination unavailable"}, nil
 		}
 	}
-	if !m.a.Authorize(q.Session, q.Actor, "tools") {
+	right := "tools"
+	if q.Turn == "" && q.Call == "" && q.Step != "" {
+		right = "input"
+	}
+	if !api.ConnectionAllows(ctx, right) || !m.a.Authorize(q.Session, q.Actor, right) {
 		return api.Answer{}, errors.New("asker lacks authority")
 	}
 	m.mu.Lock()
@@ -289,7 +293,9 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 	}
 	if q.ID == "" {
 		q.ID = api.ID()
-		q.Step = api.Executing(ctx).Call.Step
+		if step := api.Executing(ctx).Call.Step; step != "" {
+			q.Step = step
+		}
 		q.Answerable = true
 		st := stored{Question: q}
 		if r, ok := ctx.Value(relayKey{}).(relay); ok {
@@ -392,6 +398,9 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 		}
 		if q.Kind == "approval" && s.Parent == "" && !present {
 			return api.Answer{}, m.decline(q, "refused")
+		}
+		if q.Pause {
+			return api.Answer{}, api.ErrQuestionOpen
 		}
 		select {
 		case <-ctx.Done():

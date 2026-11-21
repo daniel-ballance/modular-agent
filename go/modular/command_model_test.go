@@ -20,7 +20,7 @@ func TestCommandAuxiliaryRequests(t *testing.T) {
 		return modular.AssistantMessage{Role: "assistant", Stop: "toolUse", Usage: modular.Usage{Input: 5, Output: 3}, Content: modular.Content{{Type: "toolCall", Fields: map[string]json.RawMessage{"id": json.RawMessage(`"not-dispatched"`), "name": json.RawMessage(`"unavailable"`), "arguments": json.RawMessage(`{}`)}}}}, nil
 	}
 	var saved *modular.CommandContext
-	var requests, responses int
+	var requests, responses, pieces int
 	plug := modular.Plugin{Name: "auxiliary", Setup: func(r *modular.Registrar) error {
 		return errors.Join(r.Command(modular.Command{Name: "aux", Description: "Make auxiliary requests.", UsesModel: true, Run: func(ctx context.Context, _ string, c *modular.CommandContext) (string, error) {
 			saved = c
@@ -38,7 +38,13 @@ func TestCommandAuxiliaryRequests(t *testing.T) {
 			requests++
 			p.Request.SystemPrompt = "transformed"
 			return &p.Request, nil
-		}), r.OnProviderResponse(func(context.Context, modular.ProviderResponse) error { responses++; return nil }))
+		}), r.OnProviderResponse(func(context.Context, modular.ProviderResponse) error { responses++; return nil }),
+			r.OnProviderPiece(func(_ context.Context, p modular.ProviderPiece) error {
+				if p.Piece.Text == "auxiliary" && p.StepID != "" {
+					pieces++
+				}
+				return nil
+			}))
 	}}
 	a := modulartest.Agent(t, modular.WithProvider(p), modular.WithPlugin(plug))
 	s, err := a.Session(t.Context())
@@ -49,8 +55,8 @@ func TestCommandAuxiliaryRequests(t *testing.T) {
 	if err != nil || out != "done" {
 		t.Fatalf("command: %q %v", out, err)
 	}
-	if requests != 2 || responses != 2 {
-		t.Fatalf("Provider hooks: %d / %d", requests, responses)
+	if requests != 2 || responses != 2 || pieces != 2 {
+		t.Fatalf("Provider hooks: %d / %d / %d", requests, responses, pieces)
 	}
 	if _, err = saved.RequestModel(t.Context(), modular.ModelRequest{}); err == nil {
 		t.Fatal("settled context allowed dispatch")

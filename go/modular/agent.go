@@ -407,7 +407,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 				return stop()
 			}
 		}
-		if err := loadPlugin(h, p); err != nil {
+		if err := loadPlugin(h, p, &defaults, o.durability); err != nil {
 			var e *Error
 			if errors.As(err, &e) && e.Code == NotSupported {
 				return nil, e
@@ -448,6 +448,16 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		}
 		return nil, &Error{Code: InvalidComposition, Message: err.Error()}
 	}
+	if selected, e := a.a.Get("sdk-history-selection"); e == nil {
+		history := selected.(HistoryStore)
+		if o.durability == Ephemeral && history.persistent {
+			return nil, &Error{Code: InvalidComposition, Message: "ephemeral history cannot survive a restart; choose kept or durable"}
+		}
+		if o.durability != Ephemeral && !history.persistent {
+			return nil, &Error{Code: InvalidComposition, Message: "kept and durable require persistent history"}
+		}
+		a.erasure = history.erasure
+	}
 	selectedRuntime, err := a.a.Get("runtime")
 	if err != nil {
 		return nil, appError(err, InvalidComposition)
@@ -467,12 +477,18 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	if len(specs) == 0 {
 		options := append([]Option{}, opts...)
-		if memory, ok := hs.(*memoryStore); ok {
+		selected, _ := a.a.Get("history")
+		if memory, ok := selected.(*memoryStore); ok {
 			options = append(options, WithHistory(memoryHistory(memory)))
 		}
 		a.restart = func(ctx context.Context) (*Agent, error) { return New(ctx, options...) }
 	}
 	a.defaults = defaults
+	for _, v := range a.a.All("sdk-interface.") {
+		if err := v.(Interface).Start(ctx, a); err != nil {
+			return nil, appError(err, InvalidComposition)
+		}
+	}
 	success = true
 	return a, nil
 }
@@ -518,6 +534,13 @@ func (a *Agent) Session(ctx context.Context, options ...SessionOptions) (*Sessio
 		return nil, &Error{Code: NotSupported, Message: "session feature disabled"}
 	}
 	settings := a.defaults
+	if c, e := a.a.Get("configuration"); e == nil {
+		var err error
+		settings, err = c.(api.Configuration).Settings(a.project)
+		if err != nil {
+			return nil, appError(err, InvalidParams)
+		}
+	}
 	for key, value := range opt.Settings {
 		if err := applySetting(&settings, key, value); err != nil {
 			return nil, err

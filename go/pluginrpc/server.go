@@ -72,6 +72,7 @@ type Server struct {
 	Environment  api.WorkingEnvironment
 	Handlers     map[int]func(context.Context, string, object) (any, error)
 	Commands     map[string]func(context.Context, object) (any, error)
+	JobCancel    api.JobCanceller
 	Initialize   func(object) error
 	peer         *Peer
 	service      bool
@@ -180,6 +181,27 @@ func (s *Server) Notify(ctx context.Context, method string, params Object) error
 	}
 	params["parentRequestId"] = id
 	return s.peer.Send(method, params)
+}
+
+// Project is the canonical project supplied during initialization.
+func (s *Server) Project() string { return s.project }
+
+// JobCall makes an independent owner callback.
+func (s *Server) JobCall(ctx context.Context, method string, p Object, out any) error {
+	return s.peer.Call(ctx, method, p, out)
+}
+func (s *Server) JobNotify(method string, p Object) error { return s.peer.Send(method, p) }
+
+// ToolsChanged announces a changed catalog, optionally within its causing request.
+func (s *Server) ToolsChanged(ctx context.Context, id string) error {
+	params := Object{"toolSource": id}
+	if request := RequestID(ctx); len(request) != 0 {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		params["parentRequestId"] = request
+	}
+	return s.peer.Send("tools/changed", params)
 }
 
 func (s *Server) ownEnvironment(env api.WorkingEnvironment) {
@@ -450,6 +472,11 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 			return nil, fault("unknown_handler", "unknown handler")
 		}
 		return fn(ctx, str(v, "hook"), asObject(v["payload"]))
+	case "jobs/cancel":
+		if s.JobCancel == nil {
+			return nil, fault("invalid_request", "no job owner registered")
+		}
+		return object{}, s.JobCancel(ctx, str(v, "jobId"))
 	case "command/run":
 		fn, ok := s.Commands[str(v, "name")]
 		if !ok {

@@ -197,9 +197,6 @@ func messages(entries, branch []api.Entry, provider string) ([]api.Message, []st
 		case "input", "summary":
 			m = api.Message{Role: "user", Content: e.Content}
 		case "model":
-			if e.Turn == "" {
-				continue
-			}
 			stop := api.Decode[struct{ Stop string }](e.Data).Stop
 			if len(e.Content) == 0 && (stop == "failed" || stop == "aborted") {
 				continue

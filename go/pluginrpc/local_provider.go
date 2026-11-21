@@ -85,7 +85,7 @@ func (a *localAccess) Generate(ctx context.Context, request api.Request, emit fu
 		if ctx.Err() != nil {
 			return
 		}
-		_, _ = p.host.Invoke(ctx, "provider.piece", object{"sessionId": execution.Session, "turnId": execution.Turn, "stepId": execution.Step, "provider": p.id, "model": modelOut(model), "piece": portable.Content(api.Content{piece})})
+		_, _ = p.host.Invoke(ctx, "provider.piece", object{"sessionId": execution.Session, "turnId": execution.Turn, "stepId": execution.Step, "provider": p.id, "model": modelOut(model), "piece": portable.Content(api.Content{piece})[0]})
 		emit(piece)
 	})
 	if ctx.Err() != nil {

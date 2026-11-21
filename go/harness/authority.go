@@ -80,7 +80,13 @@ func (c *client) Grant(ctx context.Context, id string, actor api.Actor) error {
 			return api.ErrAuthority
 		}
 	}
-	return s.joinActorLocked(who, actor, c.owner)
+	err = s.joinActorLocked(who, actor, c.owner)
+	if err == nil {
+		s.mu.Unlock()
+		c.actorChanged(ctx, "session.join", id, actor, who)
+		s.mu.Lock()
+	}
+	return err
 }
 
 func (s *session) joinActorLocked(who string, actor api.Actor, writer string) error {
@@ -108,13 +114,26 @@ func (c *client) LeaveActor(ctx context.Context, id, who string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	by := api.Acting(ctx)
-	if _, ok := actors(s.data)[who]; !ok || (by != who && !c.authorizedBy(s.data, ctx, "grant")) {
+	actor, exists := actors(s.data)[who]
+	if !exists || (by != who && !c.authorizedBy(s.data, ctx, "grant")) {
 		return errors.New("actor leave refused")
 	}
 	next := clone(s.data)
 	next.Actors = actors(next)
 	delete(next.Actors, who)
-	return s.updateActorsLocked(next, api.Entry{Kind: "actor.left", Actor: by, Data: api.JSON(who)}, c.owner)
+	err = s.updateActorsLocked(next, api.Entry{Kind: "actor.left", Actor: by, Data: api.JSON(who)}, c.owner)
+	if err == nil {
+		s.mu.Unlock()
+		c.actorChanged(ctx, "session.leave", id, actor, by)
+		s.mu.Lock()
+	}
+	return err
+}
+
+func (c *client) actorChanged(ctx context.Context, point, session string, actor api.Actor, by string) {
+	payload := map[string]any{"sessionId": session, "actorId": actor.ID, "actor": actor, "grantedBy": by}
+	_, _ = c.h.API().Invoke(ctx, point, payload)
+	c.Emit(ctx, api.Event{Kind: point, Session: session, Actor: actor.ID, Data: api.JSON(payload)})
 }
 
 // JoinHost serves the authenticated Interface, not any client-supplied actor.

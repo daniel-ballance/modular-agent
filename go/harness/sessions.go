@@ -401,7 +401,7 @@ func (c *client) ViewForOutput(ctx context.Context, id string) (api.Session, err
 }
 
 func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Session, error) {
-	if !c.Authorize(id, api.Acting(ctx), "watch") {
+	if !api.ConnectionAllows(ctx, "watch") || !c.Authorize(id, api.Acting(ctx), "watch") {
 		return api.Session{}, errors.New("watch refused")
 	}
 	snap, err := c.Snapshot(id)
@@ -748,7 +748,7 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 }
 
 func (c *client) eraseLocal(ctx context.Context, id string, ids []string) (map[string][]string, error) {
-	if !c.Authorize(id, api.Acting(ctx), "erase") {
+	if !api.ConnectionAllows(ctx, "erase") || !c.Authorize(id, api.Acting(ctx), "erase") {
 		return nil, errors.New("erasure refused")
 	}
 	if _, err := c.find(id); err != nil {

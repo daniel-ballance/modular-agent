@@ -381,6 +381,9 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		}
 		return map[string]any{}, nil
 	case "_modular-agent/call_tool":
+		if !api.ConnectionAllows(ctx, "tools") {
+			return nil, acpError("forbidden")
+		}
 		return s.a.CallTool(ctx, p.SessionID, api.Call{Name: p.Call.Name, Input: p.Call.Input})
 	default:
 		return nil, acp.NewMethodNotFound(method)
