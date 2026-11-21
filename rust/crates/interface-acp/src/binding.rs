@@ -559,7 +559,7 @@ pub(crate) async fn extension(
                 || id == connection_actor.as_str()
                 || represented.iter().any(|actor| actor == id)
             {
-                requests(api)?.presence(&session.id, id, present);
+                requests(api)?.presence_route(&session.id, id, &session.route, present);
             }
             Ok(json!({}))
         }
@@ -577,7 +577,7 @@ pub(crate) async fn extension(
                 "interface.acp",
                 Draft::new("actor.left", false, json!({"actorId":id})),
             )?;
-            requests(api)?.presence(&session.id, id, false);
+            requests(api)?.presence_route(&session.id, id, &session.route, false);
             Ok(json!({}))
         }
         "release" => {
@@ -803,10 +803,8 @@ pub(crate) async fn extension(
             }
         }
         "erase" => {
-            let _guard = session
-                .gate
-                .try_lock()
-                .map_err(|_| anyhow!("session busy"))?;
+            // The Harness owns the turn/erasure cutoff. The driver may hold
+            // the ACP gate just to check an empty queue after reopening.
             require(api, &scope, "erase")?;
             let ids: std::collections::BTreeSet<String> =
                 serde_json::from_value(p["entryIds"].clone())?;

@@ -317,6 +317,10 @@ pub trait InputRequests: Send + Sync {
     fn eligible(&self, api: &dyn AgentApi, question: &Question, session: &str, actor: &str)
     -> bool;
     fn presence(&self, session: &str, actor: &str, present: bool);
+    fn presence_route(&self, session: &str, actor: &str, _route: &str, present: bool) {
+        self.presence(session, actor, present);
+    }
+    fn detach_presence(&self, _session: &str, _route: &str) {}
     fn present(&self, _session: &str) -> Vec<String> {
         vec![]
     }

@@ -31,6 +31,7 @@ pub const PROVIDERS: [&str; 3] = ["openai-codex", "xai", "claude"];
 #[derive(Clone)]
 pub struct Standard {
     pub limits: modular_agent::ResourceLimits,
+    pub byte_limits: modular_agent::ByteLimits,
     pub tenant_scopes: bool,
     /// Settings, sign-ins, MCP servers, skills and the person's AGENTS.md.
     pub config: PathBuf,
@@ -70,6 +71,7 @@ impl Standard {
             config,
             state,
             limits: policy::Bounds::default().counts(),
+            byte_limits: policy::Bounds::default().bytes(),
             tenant_scopes: false,
             durable: true,
             claude: false,
@@ -197,6 +199,7 @@ pub fn builder(
         })
         .configuration(configuration)
         .resource_limits(standard.limits.clone())
+        .byte_limits(standard.byte_limits)
         .credentials(standard.auth())
         .history(standard.history()?)
         .default_prompt(false)

@@ -223,6 +223,10 @@ pub trait AgentApi: Send + Sync {
     async fn erase(&self, scope: &Scope, entries: Vec<String>) -> Result<ErasureReport>;
     async fn invoke(&self, point: &HookPoint, scope: &Scope, value: Value) -> Result<HookResult>;
     async fn emit(&self, event: Event) -> Result<()>;
+    /// Hold buffer capacity until the recipient queue consumes or drops the item.
+    fn reserve_output(&self, _session: &str, _bytes: u64) -> Result<Box<dyn Send>> {
+        Ok(Box::new(()))
+    }
     async fn output(&self, scope: &Scope, output: Output) -> Result<Option<Value>>;
     async fn command(&self, scope: &Scope, name: &str, args: &str) -> Result<Value>;
     fn commands(&self) -> Vec<String>;

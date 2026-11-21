@@ -340,6 +340,7 @@ impl Agent {
                 .await?;
         }
         let agent = self.clone();
+        let open_routes = Arc::new(interface_acp::OpenRoutes::default());
         Ok(transport_websocket::serve(
             &service.listen,
             service.tls,
@@ -347,8 +348,10 @@ impl Agent {
             entries,
             move |identity, conn| {
                 let factory = agent.connection_factory(options.compose.clone(), routes.clone());
+                let open_routes = open_routes.clone();
                 async move {
-                    let _ = interface_acp::run_websocket(factory, identity, conn).await;
+                    let _ =
+                        interface_acp::run_websocket(factory, identity, conn, open_routes).await;
                 }
             },
         )

@@ -86,6 +86,44 @@ pub fn plugin_hosts(path: &std::path::Path) -> Result<PluginHosts> {
     read().with_context(|| format!("host policy {}", path.display()))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpHost {
+    token_file: PathBuf,
+    #[serde(flatten)]
+    principal: Principal,
+}
+pub fn network() -> Result<(Vec<(PathBuf, Identity)>, ResourceLimits)> {
+    ensure!(
+        std::env::var("MODULAR_AGENT_CONFORMANCE").as_deref() == Ok("1"),
+        "ACP policy listener is a conformance option"
+    );
+    let path = std::env::var_os("MODULAR_AGENT_CONFORMANCE_POLICY")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("missing ACP policy"))?;
+    let read = || -> Result<_> {
+        let mut raw: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let hosts: Vec<AcpHost> =
+            serde_json::from_value(raw["actors"].take()).context("actors must be a list")?;
+        ensure!(!hosts.is_empty(), "at least one actor is required");
+        let limits = if raw["limits"].is_null() {
+            ResourceLimits::default()
+        } else {
+            serde_json::from_value(raw["limits"].take())?
+        };
+        let base = path.parent().unwrap_or(std::path::Path::new("."));
+        let mut entries = Vec::new();
+        for host in hosts {
+            let mut identity = identity(host.principal)?;
+            identity.network = true;
+            identity.join_on_open = false;
+            entries.push((base.join(host.token_file), identity));
+        }
+        Ok((entries, limits))
+    };
+    read().with_context(|| format!("policy {}", path.display()))
+}
+
 fn read(path: &std::path::Path) -> Result<(Identity, ResourceLimits)> {
     let raw: Value = serde_json::from_slice(&std::fs::read(path)?)?;
     ensure!(
@@ -96,10 +134,11 @@ fn read(path: &std::path::Path) -> Result<(Identity, ResourceLimits)> {
         raw["stdio"].get("projects").is_none_or(|p| p.is_array()),
         "stdio.projects must be a list"
     );
-    let Policy {
-        stdio: mut p,
-        limits,
-    } = serde_json::from_value(raw)?;
+    let Policy { stdio, limits } = serde_json::from_value(raw)?;
+    Ok((identity(stdio)?, limits))
+}
+
+fn identity(mut p: Principal) -> Result<Identity> {
     let actor_id = |id: &str| !id.is_empty() && !id.starts_with("job:");
     ensure!(
         actor_id(&p.actor.id) && p.represents.iter().all(|id| actor_id(id)),
@@ -139,24 +178,21 @@ fn read(path: &std::path::Path) -> Result<(Identity, ResourceLimits)> {
             project.display()
         );
     }
-    Ok((
-        Identity {
-            id: p.actor.id,
-            kind: p.actor.kind,
-            rights: Authority::only(
-                &p.actor
-                    .rights
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-            ),
-            tenants: p.tenants,
-            projects: p.projects,
-            represents: p.represents,
-            explicit_rights: true,
-            join_on_open: true,
-            network: false,
-        },
-        limits,
-    ))
+    Ok(Identity {
+        id: p.actor.id,
+        kind: p.actor.kind,
+        rights: Authority::only(
+            &p.actor
+                .rights
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        ),
+        tenants: p.tenants,
+        projects: p.projects,
+        represents: p.represents,
+        explicit_rights: true,
+        join_on_open: true,
+        network: false,
+    })
 }

@@ -255,6 +255,7 @@ async fn start() -> Result<()> {
     let mut policy = Policy::read(&policy_file, required).await?;
     let bounds = policy.bounds()?;
     standard.limits = bounds.counts();
+    standard.byte_limits = bounds.bytes();
     standard.tenant_scopes = policy.named_tenants();
     let mut args = remaining.into_iter().peekable();
     let mut project = std::env::current_dir()?;

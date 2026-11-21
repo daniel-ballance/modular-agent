@@ -42,6 +42,7 @@ feature-commands = { path = "../feature-commands" }
 guardrail = { path = "../guardrail" }
 interface-terminal = { path = "../interface-terminal" }
 interface-acp = { path = "../interface-acp" }
+transport-websocket = { path = "../transport-websocket" }
 tools-mcp = { path = "../tools-mcp" }
 
 [dev-dependencies]

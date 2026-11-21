@@ -1,24 +1,100 @@
 use super::*;
-use crate::events::{Message, Sink};
+use crate::events::Message;
+use crate::routes::Fanout;
 use tokio::sync::{mpsc, oneshot};
-pub(crate) struct Session {
+pub(crate) struct SharedSession {
     pub id: String,
     pub project: PathBuf,
     pub api: Api,
-    factory: Arc<dyn Factory>,
+    pub factory: Arc<dyn Factory>,
+    fanout: Arc<Fanout>,
     pub gate: tokio::sync::Mutex<()>,
-    pub stop: CancellationToken,
-    pub tx: mpsc::UnboundedSender<Message>,
-    pub worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub(crate) drive_stop: CancellationToken,
     pub driver: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub wake: tokio::sync::Notify,
     pub closing: std::sync::atomic::AtomicBool,
     pub cancellation: tokio::sync::Mutex<()>,
     pub completed: tokio::sync::Notify,
+}
+
+pub(crate) struct Session {
+    pub shared: Arc<SharedSession>,
+    pub route: String,
+    pub stop: CancellationToken,
+    pub tx: mpsc::Sender<Message>,
+    pub worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub approval_views: Mutex<std::collections::BTreeSet<(String, String)>>,
 }
+impl std::ops::Deref for Session {
+    type Target = SharedSession;
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
+}
 impl Session {
+    fn new(shared: Arc<SharedSession>) -> (Arc<Session>, mpsc::Receiver<Message>) {
+        let (tx, rx) = mpsc::channel(64);
+        let route = id();
+        shared.fanout.add(&route, tx.clone());
+        let session = Arc::new(Session {
+            shared,
+            route,
+            stop: CancellationToken::new(),
+            tx,
+            worker: Mutex::new(None),
+            approval_views: Mutex::default(),
+        });
+        (session, rx)
+    }
+    fn start_route(
+        self: &Arc<Self>,
+        state: &State,
+        rx: mpsc::Receiver<Message>,
+        cx: ConnectionTo<acp::Client>,
+    ) -> Result<()> {
+        let requests = requests(self.api.as_ref())?;
+        requests.presence_route(&self.id, &state.principal.id, &self.route, true);
+        if let Ok(data) = self.api.snapshot(&self.id) {
+            let members = actors(&data);
+            for id in state
+                .principal
+                .represents
+                .iter()
+                .filter(|id| members.contains_key(*id))
+            {
+                requests.presence_route(&self.id, id, &self.route, true);
+            }
+        }
+        let worker = tokio::spawn(with_principal(
+            state.principal.clone(),
+            state.ceiling.clone(),
+            events::pump(
+                self.clone(),
+                rx,
+                cx,
+                state.client.lock().unwrap().clone().unwrap_or_default(),
+            ),
+        ));
+        *self.worker.lock().unwrap() = Some(worker);
+        Ok(())
+    }
+    pub async fn detach_route(&self) -> bool {
+        let last = self.fanout.remove(&self.route);
+        self.stop.cancel();
+        if let Ok(requests) = requests(self.api.as_ref()) {
+            requests.detach_presence(&self.id, &self.route);
+        }
+        let worker = self.worker.lock().unwrap().take();
+        if let Some(worker) = worker {
+            let _ = worker.await;
+        }
+        last
+    }
     pub fn check_view(&self) -> Result<()> {
+        ensure!(
+            !self.stop.is_cancelled() && !self.drive_stop.is_cancelled(),
+            request_error("not_open", "session is detached")
+        );
         let data = self.api.snapshot(&self.id)?;
         let allowed = PRINCIPAL
             .try_with(|identity| {
@@ -40,6 +116,7 @@ impl Session {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Message::Flush(tx))
+            .await
             .map_err(|_| anyhow!("ACP output disconnected"))?;
         rx.await.map_err(|_| anyhow!("ACP output disconnected"))
     }
@@ -96,12 +173,18 @@ impl Session {
         self.finish_close().await
     }
     pub async fn finish_close(&self) -> Result<()> {
-        requests(self.api.as_ref())?.presence(&self.id, connection_actor().as_str(), false);
+        self.drive_stop.cancel();
+        let routes = self.fanout.clear();
+        if let Ok(service) = requests(self.api.as_ref()) {
+            for route in routes {
+                service.detach_presence(&self.id, &route);
+            }
+        }
+        self.detach_route().await;
         let open = self.api.snapshot(&self.id).is_ok();
         if open && self.api.is_running(&self.id) {
             self.cancel().await?;
         }
-        self.stop.cancel();
         let driver = self.driver.lock().unwrap().take();
         if let Some(driver) = driver {
             let _ = driver.await;
@@ -112,10 +195,7 @@ impl Session {
         } else {
             Ok(())
         };
-        let worker = self.worker.lock().unwrap().take();
-        if let Some(worker) = worker {
-            let _ = worker.await;
-        }
+        self.factory.detach(self.api.clone(), &self.id).await;
         result.and(self.factory.dispose(self.api.clone()).await)
     }
     pub async fn prompt(&self, text: &str, key: Option<String>) -> Result<Value> {
@@ -256,15 +336,14 @@ impl Session {
             self.wake.notify_one();
         }
         loop {
-            tokio::select! { _ = self.stop.cancelled() => break, _ = self.wake.notified() => () }
-            let _guard = tokio::select! { _ = self.stop.cancelled() => break, guard = self.gate.lock() => guard };
+            tokio::select! { _ = self.drive_stop.cancelled() => break, _ = self.wake.notified() => () }
+            let _guard = tokio::select! { _ = self.drive_stop.cancelled() => break, guard = self.gate.lock() => guard };
             if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
             if let Err(e) = self.drain_inner().await {
                 eprintln!("ACP input driver failed: {e}");
             }
-            let _ = self.flush().await;
         }
     }
     pub async fn drain(&self) -> Result<Value> {
@@ -307,7 +386,7 @@ fn recorded_rights(data: &SessionData, id: &str) -> Option<Option<Authority>> {
     })
 }
 
-fn in_scope(identity: &Identity, data: &SessionData) -> bool {
+pub(crate) fn in_scope(identity: &Identity, data: &SessionData) -> bool {
     let tenant = data
         .entries
         .iter()
@@ -510,14 +589,14 @@ impl State {
         let _opening = if reopening {
             let id = string(&p, "sessionId")?.to_owned();
             ensure!(
-                self.opening.lock().unwrap().insert(id.clone()),
+                self.routes.opening.lock().unwrap().insert(id.clone()),
                 request_error("busy", "session is already opening")
             );
-            Some(Opening(&self.opening, id))
+            Some(Opening(&self.routes.opening, id))
         } else {
             None
         };
-        let _guard = self.setup.lock().await;
+        let _guard = self.routes.setup.lock().await;
         let existing = if let Some(Opening(_, id)) = &_opening {
             let opened = self.sessions.lock().unwrap().get(id).cloned();
             if let Some(session) = opened {
@@ -531,6 +610,50 @@ impl State {
                     request_error("busy", "session is closing")
                 );
                 return self.open_response(&session, method, &cx, &[]).await;
+            }
+            let shared = self
+                .routes
+                .sessions
+                .lock()
+                .unwrap()
+                .get(id)
+                .and_then(std::sync::Weak::upgrade);
+            if let Some(shared) = shared {
+                let data = shared.api.snapshot(id)?;
+                ensure!(
+                    discoverable(&self.principal, &data)
+                        && self.factory.serves_project(&data.project),
+                    request_error("forbidden", "session inaccessible")
+                );
+                ensure!(
+                    shared.project == project,
+                    request_error("wrong_project", "cwd differs from recorded session project")
+                );
+                ensure!(
+                    !shared.closing.load(std::sync::atomic::Ordering::SeqCst),
+                    request_error("busy", "session is closing")
+                );
+                ensure!(
+                    !p["mcpServers"]
+                        .as_array()
+                        .is_some_and(|servers| !servers.is_empty()),
+                    request_error("busy", "cannot attach MCP to an open session")
+                );
+                join_host(shared.api.as_ref(), id)?;
+                let (session, rx) = Session::new(shared);
+                session.start_route(self, rx, cx.clone())?;
+                self.delivery_views
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), Arc::downgrade(&session));
+                let result = self.open_response(&session, method, &cx, &[]).await;
+                if result.is_ok() {
+                    self.sessions.lock().unwrap().insert(id.clone(), session);
+                } else {
+                    self.delivery_views.lock().unwrap().remove(id);
+                    session.detach_route().await;
+                }
+                return result;
             }
             let data = self
                 .factory
@@ -555,7 +678,7 @@ impl State {
             .as_ref()
             .is_some_and(|s| s.unresolved_rewind().is_some());
         {
-            let mut blocked = self.rewind_blocks.lock().unwrap();
+            let mut blocked = self.routes.rewind_blocks.lock().unwrap();
             ensure!(
                 blocked
                     .get(&project)
@@ -571,11 +694,12 @@ impl State {
                 blocked.insert(project.clone(), id.into());
             }
         }
-        let (tx, rx) = mpsc::unbounded_channel();
+        let fanout = Arc::new(Fanout::default());
         let api = self
             .factory
-            .build_for(&project, reopening_id, Arc::new(Sink(tx.clone())))
+            .build_for(&project, reopening_id, fanout.clone())
             .await?;
+        fanout.bind(&api);
         let id = if let Some(data) = existing {
             data.id
         } else {
@@ -592,34 +716,21 @@ impl State {
                 }
             }
         };
-        let session = Arc::new(Session {
+        let (session, rx) = Session::new(Arc::new(SharedSession {
             id: id.clone(),
             project: project.clone(),
             api: api.clone(),
             factory: self.factory.clone(),
+            fanout,
             gate: tokio::sync::Mutex::new(()),
-            stop: CancellationToken::new(),
-            tx,
-            worker: Mutex::new(None),
+            drive_stop: CancellationToken::new(),
             driver: Mutex::new(None),
             wake: tokio::sync::Notify::new(),
             closing: std::sync::atomic::AtomicBool::new(false),
             cancellation: tokio::sync::Mutex::new(()),
             completed: tokio::sync::Notify::new(),
-            approval_views: Mutex::default(),
-        });
-        requests(api.as_ref())?.presence(&id, connection_actor().as_str(), true);
-        let worker = tokio::spawn(with_principal(
-            self.principal.clone(),
-            self.ceiling.clone(),
-            events::pump(
-                session.clone(),
-                rx,
-                cx.clone(),
-                self.client.lock().unwrap().clone().unwrap_or_default(),
-            ),
-        ));
-        *session.worker.lock().unwrap() = Some(worker);
+        }));
+        session.start_route(self, rx, cx.clone())?;
         let setup: Result<Value> = async {
             // On reopen, host sources must exist before durable Runtime recovery.
             self.factory
@@ -634,11 +745,15 @@ impl State {
                 .await?;
             let handed_back = if reopening {
                 let inputs = api.install_recovery(&id).await?;
-                self.rewind_blocks.lock().unwrap().remove(&project);
+                self.routes.rewind_blocks.lock().unwrap().remove(&project);
                 inputs
             } else {
                 vec![]
             };
+            self.delivery_views
+                .lock()
+                .unwrap()
+                .insert(id.clone(), Arc::downgrade(&session));
             self.open_response(&session, method, &cx, &handed_back)
                 .await
         }
@@ -649,6 +764,11 @@ impl State {
                 self.ceiling.clone(),
                 session.clone().drive(reopening),
             )));
+            self.routes
+                .sessions
+                .lock()
+                .unwrap()
+                .insert(id.clone(), Arc::downgrade(&session.shared));
             self.sessions.lock().unwrap().insert(id, session);
         } else {
             // Release the writer even if an error after installation stranded an
@@ -657,8 +777,8 @@ impl State {
                 let _ = api.cancel(&id).await;
                 let _ = api.run_recovery(&id).await;
             }
+            self.delivery_views.lock().unwrap().remove(&id);
             let _ = session.close().await;
-            self.factory.detach(api, &id).await;
         }
         setup
     }
