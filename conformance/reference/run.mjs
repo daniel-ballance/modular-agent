@@ -19,6 +19,18 @@ const fixture = join(here, "mcp-fixture.mjs");
 // ---------- the checks ----------
 
 const codemode = (code) => ({ toolCalls: [{ name: "codemode", input: { code } }] });
+const CODEMODE_VALUES = [
+  ["{'a': 1, 'b': [1, 2.5, None, True]}", '{\n  "a": 1,\n  "b": [\n    1,\n    2.5,\n    null,\n    true\n  ]\n}'],
+  ["(1, 'x')", '[\n  1,\n  "x"\n]'],
+  ["1.0", "1.0"],
+  ["2**70", "1180591620717411303424"],
+  ["b'hi'", "b'hi'"],
+  ["{1}", "{1}"],
+  ["float('nan')", "nan"],
+  ["{'k': 'é'}", '{\n  "k": "é"\n}'],
+  ["'text'", "text"],
+  ["None", "(no output)"],
+];
 const SIX = ["read", "exec", "edit", "write", "find", "list"];
 
 const checks = [
@@ -57,6 +69,79 @@ const checks = [
       const results = (log[1]?.messages ?? []).filter((m) => m.role === "toolResult");
       ok(results.length === 1 && results[0].name === "codemode", "the model sees one result, codemode's", results.map((r) => r.name));
       ok(results[0]?.text?.includes("same"), "the alias and the direct call read the same text", results[0]?.text);
+    },
+  },
+  {
+    name: "codemode-no-ambient-access",
+    about: "The sandbox refuses wall clocks, sleep, unseeded randomness and files; a seeded generator works.",
+    script: [codemode([
+      "def attempt(name, f):",
+      "    try:",
+      "        f()",
+      "        print(name, 'allowed')",
+      "    except Exception as e:",
+      "        print(name, 'denied')",
+      "import time",
+      "import random",
+      "attempt('clock', lambda: time.time())",
+      "attempt('sleep', lambda: time.sleep(0))",
+      "attempt('entropy', lambda: random.random())",
+      "attempt('file', lambda: open('in.txt'))",
+      "r = random.Random(7)",
+      "print('seeded', r.random() == random.Random(7).random())",
+    ].join("\n")), { text: "Done." }],
+    runs: [{ args: ["-p", "Probe."], expect: { stdout: "Done.", exit: 0 } }],
+    log: (log, ok) => {
+      const text = (log[1]?.messages ?? []).filter((m) => m.role === "toolResult").at(-1)?.text ?? "";
+      for (const what of ["clock", "sleep", "entropy", "file"]) ok(text.includes(`${what} denied`), `${what} is denied`, text.slice(0, 400));
+      ok(text.includes("seeded True"), "a seeded generator works and repeats", text.slice(0, 400));
+    },
+  },
+  {
+    name: "codemode-results",
+    about: "exec returns its dict for a non-zero exit and raises for a timeout; a bare tool name is not a function; printing past 1 MiB stops the run with the error first.",
+    script: [
+      codemode([
+        "r = tools.exec(command='exit 3')",
+        "print('exit', type(r).__name__, r['exit_code'])",
+        "try:",
+        "    tools.exec(command='sleep 5', timeout=1)",
+        "    print('timeout returned')",
+        "except RuntimeError:",
+        "    print('timeout RuntimeError')",
+        "try:",
+        "    read(path='x')",
+        "    print('bare allowed')",
+        "except NameError:",
+        "    print('bare NameError')",
+      ].join("\n")),
+      codemode("for i in range(2000):\n    print('x' * 1000)\nprint('after')"),
+      { text: "Done." },
+    ],
+    runs: [{ args: ["-p", "Probe."], expect: { stdout: "Done.", exit: 0 } }],
+    log: (log, ok) => {
+      const result = (req) => (req?.messages ?? []).filter((m) => m.role === "toolResult").at(-1)?.text ?? "";
+      const first = result(log[1]), second = result(log[2]);
+      ok(first.includes("exit dict 3"), "a non-zero exit returns the dict", first.slice(0, 400));
+      ok(first.includes("timeout RuntimeError"), "a timed-out exec raises RuntimeError", first.slice(0, 400));
+      ok(first.includes("bare NameError"), "a bare tool name raises NameError", first.slice(0, 400));
+      ok(second.startsWith("RuntimeError: printed output exceeded 1048576 bytes\nxxx") && !second.includes("after"), "printing past 1 MiB stops the run; the result starts with the error, then the output", second.slice(0, 200));
+    },
+  },
+  {
+    name: "codemode-values",
+    about: "The last expression's value is given as JSON when it can be, otherwise as its repr; a TypeError for bad arguments; an uncaught error ends with its traceback.",
+    script: [...CODEMODE_VALUES.map(([code]) => codemode(code)),
+      codemode("tools.write('a.txt', 'hi', None)"), codemode("tools.write({'path': 'b.txt', 'content': 'by name'})"),
+      codemode("print('before')\nraise ValueError('stop here')"), { text: "Done." }],
+    runs: [{ args: ["-p", "Values."], expect: { stdout: "Done.", exit: 0, files: { "project/a.txt": { absent: true }, "project/b.txt": "by name" } } }],
+    log: (log, ok) => {
+      const result = (req) => (req?.messages ?? []).filter((m) => m.role === "toolResult").at(-1)?.text ?? "";
+      CODEMODE_VALUES.forEach(([code, want], i) => ok(result(log[i + 1]) === want, `${code} is given as ${JSON.stringify(want)}`, result(log[i + 1])));
+      const n = CODEMODE_VALUES.length;
+      ok(result(log[n + 1]).trimEnd().split("\n").at(-1).startsWith("TypeError:"), "too many arguments raises TypeError", result(log[n + 1]).slice(-300));
+      const raised = result(log[n + 3]);
+      ok(raised.startsWith("before\nTraceback") && raised.trimEnd().endsWith("ValueError: stop here"), "an uncaught error gives the output, then the traceback ending Type: message", raised.slice(0, 400));
     },
   },
   {
