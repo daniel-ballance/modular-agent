@@ -487,7 +487,7 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
   }
   try {
     await request("initialize", { protocolVersion: 1 });
-    const location = { cwd: p.work, mcpServers: [], _meta: { "modular-agent": { tenant: "demo" } } };
+    const location = { cwd: p.work, mcpServers: [] };
     const unused = await request("session/new", location);
     await assertUnpublished(unused.sessionId);
     await request("session/close", { sessionId: unused.sessionId });
@@ -496,7 +496,7 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
     const { sessionId } = await request("session/new", location);
     await assertUnpublished(sessionId);
     const initial = (await request("_modular-agent/history", { sessionId })).entries as HistoryEntry[];
-    assert.equal(initial[0]?.kind, "tenant");
+    assert.equal(initial[0]?.kind, "actorJoined");
     assert.equal((await request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Hello" }] })).stopReason, "end_turn");
     await request("session/close", { sessionId });
     const listed = await request("session/list", { cwd: p.work });

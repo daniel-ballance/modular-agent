@@ -151,7 +151,7 @@ export interface PluginApi {
 	forkSession(sessionId: string, entryId: string): Promise<string>;
 	closeSession(sessionId: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void>;
 	sessionInterruption(sessionId: string): AbortSignal;
-	session(sessionId: string): { id: string; project: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
+	session(sessionId: string): { id: string; project: string; tenant?: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
 	// input and turns
 	input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }>;
 	withdraw(sessionId: string, inputId: string): QueuedInput | undefined;
@@ -405,7 +405,7 @@ export class Harness {
 			closeSession: (id, actorId, delegatedBy, authority) => this.closeSession(id, actorId, delegatedBy, authority),
 			session: (id) => {
 				const s = this.session(id);
-				return { id: s.id, project: s.meta.project, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
+				return { id: s.id, project: s.meta.project, tenant: s.tenant, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
 			},
 			input: (sessionId, options) => this.input(sessionId, options),
 			withdraw: (sessionId, inputId) => this.withdraw(sessionId, inputId),
@@ -744,6 +744,7 @@ export class Harness {
 			const pending = [...new Set(entries.flatMap((e) => e.kind === "erasure" && !e.erased ? (e.data as { entryIds: string[] }).entryIds : []).filter((eid) => live.has(eid)))];
 			if (pending.length) await store.erase(id, pending);
 		}
+		if (!entries.length) return undefined;
 		const s = new Session(meta, false);
 		for (const e of entries) s.apply(e);
 		return s;
@@ -841,7 +842,7 @@ export class Harness {
 	async canDiscoverSession(id: string, actor: Actor, severalActors: boolean): Promise<boolean> {
 		const s = this.sessions.get(id) ?? await this.loadInto(id);
 		if (!s || s.tenant !== undefined && !this.tenants.has(s.tenant)) return false;
-		if (s.actors.has(actor.id)) return this.actorRights(s, actor.id).includes("watch");
+		if (s.actors.has(actor.id)) return actor.authority.includes("watch") && this.actorRights(s, actor.id).includes("watch");
 		return severalActors && actor.authority.includes("watch") && this.withinLimits(s, "watch") &&
 			!s.order.some(id => { const e = s.entries.get(id)!; return e.kind === "actorLeft" && (e.data as { actorId?: string }).actorId === actor.id; });
 	}

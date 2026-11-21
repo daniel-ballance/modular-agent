@@ -2,7 +2,7 @@ import { ServiceError } from "@modular-agent/services";
 
 export type ErrorCode =
   | "invalid_params" | "invalid_request" | "invalid_composition" | "forbidden"
-  | "not_found" | "not_open" | "busy" | "held" | "conflict" | "cancelled"
+  | "not_found" | "not_open" | "wrong_project" | "unavailable" | "busy" | "held" | "conflict" | "cancelled"
   | "not_supported" | "turn_limit" | "unknown_handler" | "withheld"
   | "result_too_large" | "message_too_large" | "lost" | "internal";
 
@@ -15,7 +15,7 @@ export class AgentError extends Error {
 
 const codes = new Set<string>([
   "invalid_params", "invalid_request", "invalid_composition", "forbidden", "not_found",
-  "not_open", "busy", "held", "conflict", "cancelled", "not_supported", "turn_limit",
+  "not_open", "wrong_project", "unavailable", "busy", "held", "conflict", "cancelled", "not_supported", "turn_limit",
   "unknown_handler", "withheld", "result_too_large", "message_too_large", "lost", "internal",
 ]);
 
