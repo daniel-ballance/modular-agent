@@ -21,12 +21,14 @@ import (
 )
 
 type Client struct {
-	wire   *servicehttp.Client
-	owner  string
-	ctx    context.Context
-	cancel context.CancelFunc
-	mu     sync.Mutex
-	leases []*lease
+	wire     *servicehttp.Client
+	owner    string
+	ctx      context.Context
+	cancel   context.CancelFunc
+	mu       sync.Mutex
+	leases   []*lease
+	backend  operations
+	localTTL time.Duration
 }
 type lease struct {
 	c          *Client
@@ -36,6 +38,7 @@ type lease struct {
 	lost       chan struct{}
 	lose       sync.Once
 	cutoff     atomic.Int64
+	revoked    atomic.Pointer[<-chan struct{}]
 	stop, done chan struct{}
 	known      map[string]json.RawMessage
 }
@@ -56,8 +59,25 @@ func TokenFile(path string) (string, error) {
 }
 
 func NewClient(wire *servicehttp.Client) *Client {
+	c := newClient(httpBackend{wire})
+	c.wire = wire
+	return c
+}
+
+// NewLocalClient adapts a local binding-shaped store without an HTTP server.
+func NewLocalClient(backend Backend) (*Client, error) {
+	ttl := backend.LeaseTTL()
+	if ttl <= 0 || ttl%time.Millisecond != 0 {
+		return nil, errors.New("history store lease TTL must be a positive number of milliseconds")
+	}
+	c := newClient(backend)
+	c.localTTL = ttl
+	return c, nil
+}
+
+func newClient(backend operations) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Client{wire: wire, owner: api.ID(), ctx: ctx, cancel: cancel}
+	return &Client{backend: backend, owner: api.ID(), ctx: ctx, cancel: cancel}
 }
 func escape(id string) string { return strings.ReplaceAll(url.QueryEscape(id), "+", "%20") }
 func path(id string) string   { return "/v1/sessions/" + escape(id) }
@@ -73,30 +93,26 @@ func leaseClock() int64 {
 
 // Verify checks the history binding before the launcher exposes the agent.
 func (c *Client) Verify() error {
-	var out struct {
-		Binding string  `json:"binding"`
-		TTL     float64 `json:"ttlMs"`
+	if c.wire == nil {
+		return nil // NewLocalClient validated the local declaration.
 	}
-	if err := c.call(c.ctx, "GET", "/v1", nil, &out); err != nil {
+	out, err := (httpBackend{c.wire}).info(c.ctx)
+	if err != nil {
 		return err
 	}
-	if out.Binding != Binding || leaseDuration(out.TTL) <= 0 || out.TTL != float64(leaseDuration(out.TTL).Milliseconds()) {
+	if out.Binding != Binding || leaseDuration(out.TTLMS) <= 0 || out.TTLMS != float64(leaseDuration(out.TTLMS).Milliseconds()) {
 		return errors.New("unsupported history binding or invalid history TTL")
 	}
 	return nil
 }
 
-func (c *Client) call(ctx context.Context, method, path string, in, out any) error {
-	// Every operation in this binding is safe to resend, including body reads.
-	return c.wire.CallMethod(ctx, method, path, api.ID(), in, out)
-}
 func (c *Client) read(id string) (document, error) {
 	var d document
-	p := path(id)
+	after := ""
 	seen := map[string]bool{}
 	for {
-		var page document
-		if err := c.call(c.ctx, "GET", p, nil, &page); err != nil {
+		page, err := c.backend.Read(c.ctx, id, after, defaultPageLimit)
+		if err != nil {
 			return document{}, err
 		}
 		d.Session = page.Session
@@ -108,7 +124,7 @@ func (c *Client) read(id string) (document, error) {
 			return document{}, errors.New("history cursor did not advance")
 		}
 		seen[page.Next] = true
-		p = path(id) + "?after=" + escape(page.Next)
+		after = page.Next
 	}
 }
 func (c *Client) Acquire(id string) (api.Lease, error) {
@@ -138,9 +154,8 @@ func (c *Client) track(l *lease) (api.Lease, error) {
 }
 
 type leaseReply struct {
-	Lease string  `json:"lease"`
-	TTL   float64 `json:"ttlMs"`
-	sent  int64
+	Grant
+	sent int64
 }
 
 func (c *Client) takeLease(id string, wait bool) (leaseReply, error) {
@@ -154,21 +169,22 @@ func (c *Client) takeLease(id string, wait bool) (leaseReply, error) {
 		if !deadline.IsZero() {
 			ctx, cancel = context.WithDeadline(ctx, deadline)
 		}
-		err := c.wire.CallMethod(ctx, "POST", path(id)+"/lease", "", map[string]string{"owner": c.owner}, &out)
+		grant, err := c.backend.Acquire(ctx, id, c.owner)
+		out.Grant = grant
 		canRetry := ctx.Err() == nil
 		cancel()
 		if err == nil {
-			half := int64(leaseDuration(out.TTL) / 2)
-			if !validLease(out.Lease) || half <= 0 || leaseClock() >= out.sent+half {
+			ttl := leaseDuration(out.TTLMS)
+			half := int64(ttl / 2)
+			if !validLease(out.Lease) || half <= 0 || leaseClock() >= out.sent+half || c.localTTL != 0 && ttl != c.localTTL {
 				return leaseReply{}, errors.New("invalid or late history lease response")
 			}
 			if ambiguous {
 				sent := leaseClock()
 				ctx, cancel := context.WithTimeout(c.ctx, time.Duration(out.sent+half-sent))
-				var renewal leaseReply
-				err := c.wire.CallMethod(ctx, "POST", path(id)+"/lease/"+escape(out.Lease)+"/renew", "", nil, &renewal)
+				renewedTTL, err := c.backend.Renew(ctx, id, out.Lease)
 				cancel()
-				if err != nil || renewal.TTL != out.TTL || leaseClock() >= min(out.sent+half, sent+half) {
+				if err != nil || renewedTTL != out.TTLMS || leaseClock() >= min(out.sent+half, sent+half) {
 					return leaseReply{}, errors.New("repeated acquire did not establish writer access")
 				}
 				out.sent = sent
@@ -190,10 +206,12 @@ func (c *Client) takeLease(id string, wait bool) (leaseReply, error) {
 		delay := leaseDuration(held.RetryAfterMS)
 		received := time.Now()
 		if deadline.IsZero() {
-			var info leaseReply
-			ttl := delay // GET /v1 is allowed to omit ttlMs.
-			if e := c.call(c.ctx, "GET", "/v1", nil, &info); e == nil && leaseDuration(info.TTL) > 0 {
-				ttl = leaseDuration(info.TTL)
+			ttl := c.localTTL
+			if c.wire != nil {
+				ttl = delay // Older services omit ttlMs.
+				if info, e := (httpBackend{c.wire}).info(c.ctx); e == nil && leaseDuration(info.TTLMS) > 0 {
+					ttl = leaseDuration(info.TTLMS)
+				}
 			}
 			if ttl <= 0 {
 				return leaseReply{}, err
@@ -230,8 +248,18 @@ func (l *lease) acquire(wait bool) error {
 	l.token = out.Lease
 	l.stop = make(chan struct{})
 	l.done = make(chan struct{})
-	ttl := leaseDuration(out.TTL)
+	ttl := leaseDuration(out.TTLMS)
 	l.cutoff.Store(out.sent + int64(ttl/2))
+	if out.WriterLost != nil {
+		l.revoked.Store(&out.WriterLost)
+		go func() {
+			select {
+			case <-out.WriterLost:
+				l.fence()
+			case <-l.lost:
+			}
+		}()
+	}
 	go func() {
 		defer close(l.done)
 		due := out.sent + int64(ttl/3)
@@ -256,11 +284,10 @@ func (l *lease) acquire(wait bool) error {
 				return
 			}
 			ctx, cancel := context.WithTimeout(l.c.ctx, time.Duration(previous-sent))
-			var reply leaseReply
-			err := l.c.wire.CallMethod(ctx, "POST", path(l.id)+"/lease/"+escape(out.Lease)+"/renew", "", nil, &reply)
+			renewedTTL, err := l.c.backend.Renew(ctx, l.id, out.Lease)
 			cancel()
 			cutoff := sent + int64(ttl/2)
-			if err != nil || leaseDuration(reply.TTL) != ttl || leaseClock() >= min(previous, cutoff) {
+			if err != nil || leaseDuration(renewedTTL) != ttl || leaseClock() >= min(previous, cutoff) {
 				l.fence()
 				return
 			}
@@ -278,6 +305,13 @@ func leaseDuration(ms float64) time.Duration {
 }
 
 func (l *lease) CheckWriter() error {
+	if revoked := l.revoked.Load(); revoked != nil {
+		select {
+		case <-*revoked:
+			l.fence()
+		default:
+		}
+	}
 	cutoff := l.cutoff.Load()
 	if l.isFenced() || cutoff != 0 && leaseClock() >= cutoff || l.c.ctx.Err() != nil {
 		l.fence()
@@ -391,12 +425,11 @@ func (l *lease) Save(s api.Session) error {
 		return nil
 	}
 	if l.token == "" {
-		session := Session{Project: s.Project, Created: float64(time.Now().UnixMilli()), ParentSessionID: s.Parent}
+		session := Metadata{Project: s.Project, Created: float64(time.Now().UnixMilli()), ParentSessionID: s.Parent}
 		if source, entry, ok := strings.Cut(s.ForkedFrom, ":"); ok {
 			session.ForkedFrom = &ForkOrigin{SessionID: source, EntryID: entry}
 		}
-		var out any
-		if err := l.c.call(l.c.ctx, "PUT", path(l.id), session, &out); err != nil {
+		if err := l.c.backend.Create(l.c.ctx, l.id, session); err != nil {
 			return err
 		}
 		if err := l.acquire(false); err != nil {
@@ -416,13 +449,16 @@ func (l *lease) Save(s api.Session) error {
 			}
 		}
 	}
-	var out any
+	if err := l.CheckWriter(); err != nil {
+		return err
+	}
 	writeCtx, cancel := context.WithTimeout(l.c.ctx, time.Duration(l.cutoff.Load()-leaseClock()))
 	defer cancel()
-	if err := l.c.call(writeCtx, "POST", path(l.id)+"/entries", appendBody(l.token, entries), &out); err != nil {
+	if _, err := l.c.backend.Append(writeCtx, l.id, l.token, entries); err != nil {
+		writerLost := l.CheckWriter() != nil
 		l.fence()
 		var response *servicehttp.ResponseError
-		if errors.As(err, &response) && response.Code == "lost" {
+		if writerLost || errors.As(err, &response) && response.Code == "lost" {
 			return errors.Join(api.ErrWriterLost, err)
 		}
 		return err
@@ -436,19 +472,12 @@ func (l *lease) Save(s api.Session) error {
 	return nil
 }
 func (c *Client) List(project string) ([]api.Session, error) {
-	p, separator := "/v1/sessions", "?"
-	if project != "" {
-		p, separator = p+"?project="+escape(project), "&"
-	}
-	first := p
+	after := ""
 	var sessions []Session
 	seen := map[string]bool{}
 	for {
-		var out struct {
-			Sessions []Session `json:"sessions"`
-			Next     string    `json:"next"`
-		}
-		if err := c.call(c.ctx, "GET", p, nil, &out); err != nil {
+		out, err := c.backend.List(c.ctx, project, after, defaultPageLimit)
+		if err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, out.Sessions...)
@@ -459,7 +488,7 @@ func (c *Client) List(project string) ([]api.Session, error) {
 			return nil, errors.New("history list cursor did not advance")
 		}
 		seen[out.Next] = true
-		p = first + separator + "after=" + escape(out.Next)
+		after = out.Next
 	}
 	snaps := []api.Session{}
 	for _, session := range sessions {
@@ -547,23 +576,17 @@ func (c *Client) Erase(ids []string) error {
 		}
 		// Preflight every affected session before any destructive request.
 		if q.token == "" {
-			var out struct {
-				Lease string `json:"lease"`
-			}
-			if err = c.call(c.ctx, "POST", path(s.ID)+"/lease", map[string]string{"owner": c.owner}, &out); err != nil {
+			grant, err := c.backend.Acquire(c.ctx, s.ID, c.owner)
+			if err != nil {
 				return err
 			}
-			q.token = out.Lease
-			defer func(id, token string) {
-				var out any
-				_ = c.call(context.Background(), "DELETE", path(id)+"/lease/"+url.PathEscape(token), nil, &out)
-			}(q.id, q.token)
+			q.token = grant.Lease
+			defer c.backend.Release(context.Background(), q.id, q.token)
 		}
 		targets = append(targets, q)
 	}
 	for _, q := range targets {
-		var out any
-		if err = c.call(c.ctx, "POST", path(q.id)+"/erase", map[string]any{"entryIds": q.entries, "lease": q.token}, &out); err != nil {
+		if _, err = c.backend.Erase(c.ctx, q.id, q.token, q.entries); err != nil {
 			return err
 		}
 	}
@@ -586,8 +609,7 @@ func (l *lease) Close() error {
 		return nil
 	}
 	<-l.done
-	var out any
-	return l.c.call(context.Background(), "DELETE", path(l.id)+"/lease/"+url.PathEscape(token), nil, &out)
+	return l.c.backend.Release(context.Background(), l.id, token)
 }
 
 // Abort simulates process death without releasing server leases.
