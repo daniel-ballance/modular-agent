@@ -284,10 +284,15 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             }
             value
         }
-        "input.returned" | "input.withdrawn" => c
-            .get("inputIds")
-            .map(|ids| json!({"inputIds":ids}))
-            .unwrap_or_else(|| json!({"inputIds":[c["input"]]})),
+        "input.returned" | "input.withdrawn" => {
+            if let Some(ids) = c["inputIds"].as_array() {
+                v["inputIds"] = json!(ids);
+                json!({"inputIds":ids})
+            } else {
+                v["inputId"] = c["input"].clone();
+                json!({"inputIds":[c["input"]]})
+            }
+        }
         "model.request" => {
             let model = optional(c, "model")
                 .cloned()
@@ -697,7 +702,12 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
             }
             "inputHandedBack" => (
                 "input.returned",
-                json!({"inputIds":d["inputIds"],"input":d["inputIds"][0]}),
+                if let Some(id) = v["inputId"].as_str().or_else(|| d["inputId"].as_str()) {
+                    json!({"input":id})
+                } else {
+                    let ids = v.get("inputIds").unwrap_or(&d["inputIds"]);
+                    json!({"inputIds":ids,"input":ids[0]})
+                },
             ),
             "modelRequest" => ("model.request", d.clone()),
             "toolPending" => ("tool.pending", d.clone()),
