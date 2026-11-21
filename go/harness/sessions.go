@@ -401,7 +401,7 @@ func (c *client) ViewForOutput(ctx context.Context, id string) (api.Session, err
 }
 
 func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Session, error) {
-	if !c.Authorize(id, api.Acting(ctx), "watch") {
+	if !api.ConnectionAllows(ctx, "watch") || !c.Authorize(id, api.Acting(ctx), "watch") {
 		return api.Session{}, errors.New("watch refused")
 	}
 	snap, err := c.Snapshot(id)
@@ -748,7 +748,7 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 }
 
 func (c *client) eraseLocal(ctx context.Context, id string, ids []string) (map[string][]string, error) {
-	if !c.Authorize(id, api.Acting(ctx), "erase") {
+	if !api.ConnectionAllows(ctx, "erase") || !c.Authorize(id, api.Acting(ctx), "erase") {
 		return nil, errors.New("erasure refused")
 	}
 	if _, err := c.find(id); err != nil {
@@ -925,7 +925,7 @@ func (c *client) SettingsDuringTurn() string {
 }
 
 func (c *client) SetSettings(ctx context.Context, id string, settings api.Settings) error {
-	if !c.Authorize(id, api.Acting(ctx), "settings") {
+	if !api.ConnectionAllows(ctx, "settings") || !c.Authorize(id, api.Acting(ctx), "settings") {
 		return errors.New("settings refused")
 	}
 	s, err := c.find(id)
@@ -955,6 +955,7 @@ func (c *client) SetSettings(ctx context.Context, id string, settings api.Settin
 	return s.commitLocked(next)
 }
 func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Receipt, error) {
+	in.ConnectionRights = api.ConnectionRights(ctx)
 	if in.Job != "" {
 		return api.Receipt{}, api.ErrJobReportRefused
 	}
@@ -1002,7 +1003,7 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 		if event.Handled {
 			return api.Receipt{ID: in.ID, When: "command", Command: event.Result}, nil
 		}
-		event.Input.Actor, event.Input.ViaActor = in.Actor, in.ViaActor
+		event.Input.Actor, event.Input.ViaActor, event.Input.ConnectionRights = in.Actor, in.ViaActor, in.ConnectionRights
 		in = event.Input
 	}
 	s.mu.Lock()
@@ -1169,7 +1170,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 		turnID = resume.Turn
 	}
 	ctx = api.WithExecution(api.AsActor(ctx, in.Actor), api.Execution{Session: snap.ID, Turn: turnID})
-	ctx = api.WithJobContributors(ctx, in.Actor, in.ViaActor, in.ReleasedBy)
+	ctx = api.WithJobContributors(api.WithConnectionRights(ctx, in.ConnectionRights), in.Actor, in.ViaActor, in.ReleasedBy)
 	var tools []api.Tool
 	seen := map[string]bool{}
 	for _, source := range h.API().All("tools.") {

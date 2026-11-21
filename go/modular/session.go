@@ -137,7 +137,11 @@ func (s *Session) Send(ctx context.Context, input any, timing Timing, opts ...Pr
 	if errors.Is(err, api.ErrInputConflict) {
 		return InputReceipt{}, appError(err, Conflict)
 	}
-	return InputReceipt{InputID: r.ID, Disposition: r.When, Duplicate: r.Duplicate, Erased: r.Erased}, appError(err, Busy)
+	receipt := InputReceipt{InputID: r.ID, Disposition: r.When, Duplicate: r.Duplicate, Erased: r.Erased}
+	if err == nil && !r.Duplicate && r.When != "command" {
+		s.emitOperation(ctx, "input.accepted", receipt)
+	}
+	return receipt, appError(err, Busy)
 }
 func (s *Session) Prompt(ctx context.Context, input any, opts ...PromptOption) (PromptResult, error) {
 	return s.prompt(ctx, input, nil, opts)

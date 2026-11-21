@@ -11,31 +11,39 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daniel-ballance/modular-agent/go/internal/apikeymodels"
 	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/internal/modelcatalog"
 )
 
 const defaultEndpoint = "https://api.openai.com/v1/responses"
-const defaultModel = "gpt-6-luna"
 
 type Option func(*options)
 type options struct {
 	endpoint string
 	client   *http.Client
 	model    string
+	custom   []modular.ModelInfo
 }
 
 func WithEndpoint(url string) Option            { return func(o *options) { o.endpoint = url } }
 func WithHTTPClient(client *http.Client) Option { return func(o *options) { o.client = client } }
 func WithModel(id string) Option                { return func(o *options) { o.model = id } }
+
+// WithModels enrolls additional models, including their limits and input types.
+func WithModels(models ...modular.ModelInfo) Option {
+	return func(o *options) { o.custom = append(o.custom, models...) }
+}
+
 func New(opts ...Option) modular.Provider {
-	o := options{endpoint: defaultEndpoint, model: defaultModel, client: &http.Client{Timeout: 2 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("Provider redirects refused") }}}
+	o := options{endpoint: defaultEndpoint, client: &http.Client{Timeout: 2 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("Provider redirects refused") }}}
 	for _, opt := range opts {
 		opt(&o)
 	}
 	return modular.Provider{
 		ID: "openai",
 		Models: func() []modular.ModelInfo {
-			return []modular.ModelInfo{{ModelRef: modular.ModelRef{Provider: "openai", ID: o.model}, ContextWindow: 128000, MaxOutput: 16000, Input: []string{"text"}, Reasoning: true, Thinking: []string{"off", "low", "medium", "high"}}}
+			return modelcatalog.Models("openai", o.model, o.custom)
 		},
 		Request: o.request,
 	}
@@ -62,9 +70,8 @@ func (o options) request(ctx context.Context, model modular.ModelRef, request mo
 		}
 	}
 	payload := map[string]any{"model": model.ID, "input": input, "stream": true, "store": false}
-	if effort, ok := request.Settings["reasoning"].(string); ok && effort != "" && effort != "off" {
-		payload["reasoning"] = map[string]any{"effort": effort}
-	}
+	level, _ := request.Settings["reasoning"].(string)
+	apikeymodels.Apply(payload, "openai", model.ID, level, 0)
 	if request.SystemPrompt != "" {
 		payload["instructions"] = request.SystemPrompt
 	}

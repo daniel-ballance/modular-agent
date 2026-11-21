@@ -168,7 +168,7 @@ func (m *Manager) start(ctx context.Context, j api.Job, run func(context.Context
 	if err := ctx.Err(); err != nil {
 		return j, false, err
 	}
-	if j.Owner == "" || j.Kind == "" || !m.a.Authorize(j.Session, j.Actor, "jobs") {
+	if j.Owner == "" || j.Kind == "" || !api.ConnectionAllows(ctx, "jobs") || !m.a.Authorize(j.Session, j.Actor, "jobs") {
 		return j, false, errors.New("job start refused")
 	}
 	j.Contributors = nil
@@ -183,7 +183,7 @@ func (m *Manager) start(ctx context.Context, j api.Job, run func(context.Context
 	}
 	j.Rights = []string{}
 	for _, right := range api.Rights {
-		if m.a.Authorize(j.Session, j.Actor, right) && !slices.ContainsFunc(j.Contributors, func(who string) bool { return !m.a.Authorize(j.Session, who, right) }) {
+		if api.ConnectionAllows(ctx, right) && m.a.Authorize(j.Session, j.Actor, right) && !slices.ContainsFunc(j.Contributors, func(who string) bool { return !m.a.Authorize(j.Session, who, right) }) {
 			j.Rights = append(j.Rights, right)
 		}
 	}
@@ -341,7 +341,7 @@ func (m *Manager) Wait(ctx context.Context, id, job string) (api.Job, error) {
 	return j, err
 }
 func (m *Manager) Cancel(ctx context.Context, id, job string) error {
-	if !m.a.Authorize(id, api.Acting(ctx), "cancel") {
+	if !api.ConnectionAllows(ctx, "cancel") || !m.a.Authorize(id, api.Acting(ctx), "cancel") {
 		return errors.New("job cancel refused")
 	}
 	return m.cancelJob(ctx, id, job, true)
@@ -429,6 +429,9 @@ func (m *Manager) ownerGone(owner string) bool {
 }
 
 func (m *Manager) remoteCanceller(owner string) api.JobCanceller {
+	if local, err := m.a.Get("job-owner." + owner); err == nil {
+		return local.(api.JobCanceller)
+	}
 	lookup, err := m.a.Get("job-owner-lookup")
 	if err != nil {
 		return nil

@@ -69,19 +69,16 @@ func (s *server) permitsMembership(sess api.Session) bool {
 	if s.principal == nil {
 		return true
 	}
-	if !s.allowsProject(sess.Project) || !s.allowsTenant(sess.Tenant) {
-		return false
-	}
-	// Do not reuse a durable grant broader than the authenticated token.
-	if current, ok := sess.Actors[s.actor]; ok {
-		for _, right := range current.Rights {
-			if !s.hasRight(right) {
-				return false
-			}
-		}
-	}
-	return true
+	return (s.projects != nil || sess.Project == s.project) && s.allowsProject(sess.Project) && s.allowsTenant(sess.Tenant)
 }
+func (s *server) intersectRecorded(sess api.Session) []string {
+	token := s.principal.Actor.Rights
+	if recorded, ok := sess.Actors[s.actor]; ok {
+		return *api.IntersectConnectionRights(&token, &recorded.Rights)
+	}
+	return token
+}
+
 func (s *server) discoverable(sess api.Session) bool {
 	if s.principal == nil {
 		return true
@@ -94,10 +91,22 @@ func (s *server) discoverable(sess api.Session) bool {
 	}).DiscoverForHost(sess, s.hostActor())
 }
 
+func (s *server) acting(ctx context.Context, id, who string) context.Context {
+	ctx = api.AsActor(ctx, who)
+	if s.principal != nil {
+		rights := s.principal.Actor.Rights
+		if value, ok := s.connectionRights.Load(id); ok {
+			rights = value.([]string)
+		}
+		ctx = api.WithConnectionRights(ctx, &rights)
+	}
+	return ctx
+}
+
 func (s *server) authorize(id, who, right string) bool {
 	if s.principal != nil {
 		snap, err := s.a.Snapshot(id)
-		if err != nil || !s.permitsMembership(snap) || !s.hasRight(right) {
+		if err != nil || !s.permitsMembership(snap) || !api.ConnectionAllows(s.acting(s.ctx, id, who), right) {
 			return false
 		}
 	}

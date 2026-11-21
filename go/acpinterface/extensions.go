@@ -25,9 +25,6 @@ func uniquePairs(pairs []api.EntryPair) []api.EntryPair {
 }
 
 func (s *server) HandleExtensionMethod(ctx context.Context, method string, b json.RawMessage) (any, error) {
-	if s.principal != nil && method == "$/ping" {
-		return map[string]any{}, nil
-	}
 	var p struct {
 		SessionID string `json:"sessionId"`
 	}
@@ -107,7 +104,10 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 	if feature != "" && s.declaration(p.SessionID)[feature] != true {
 		return nil, acpError("not_supported")
 	}
-	ctx = api.AsActor(ctx, st.actor)
+	ctx = s.acting(ctx, p.SessionID, st.actor)
+	if method == "_modular-agent/history" && !api.ConnectionAllows(ctx, "watch") {
+		return nil, acpError("forbidden")
+	}
 	switch method {
 	case "_modular-agent/input":
 		if !validTiming(p.When) && p.When != "propose" {
@@ -381,6 +381,9 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		}
 		return map[string]any{}, nil
 	case "_modular-agent/call_tool":
+		if !api.ConnectionAllows(ctx, "tools") {
+			return nil, acpError("forbidden")
+		}
 		return s.a.CallTool(ctx, p.SessionID, api.Call{Name: p.Call.Name, Input: p.Call.Input})
 	default:
 		return nil, acp.NewMethodNotFound(method)

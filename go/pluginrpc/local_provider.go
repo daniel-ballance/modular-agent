@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/harness"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 // Local Providers get the same standard hook payloads as external Providers.
@@ -80,7 +81,13 @@ func (a *localAccess) Generate(ctx context.Context, request api.Request, emit fu
 	if err := ctx.Err(); err != nil {
 		return api.Response{}, err
 	}
-	response, err := a.ModelAccess.Generate(ctx, requestIn(final), emit)
+	response, err := a.ModelAccess.Generate(ctx, requestIn(final), func(piece api.Part) {
+		if ctx.Err() != nil {
+			return
+		}
+		_, _ = p.host.Invoke(ctx, "provider.piece", object{"sessionId": execution.Session, "turnId": execution.Turn, "stepId": execution.Step, "provider": p.id, "model": modelOut(model), "piece": portable.Content(api.Content{piece})[0]})
+		emit(piece)
+	})
 	if ctx.Err() != nil {
 		return api.Response{}, ctx.Err()
 	}

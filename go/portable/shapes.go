@@ -210,15 +210,12 @@ func modelOut(m api.Model) object {
 	if !has(v, "reasoning") {
 		v["reasoning"] = len(m.Thinking) > 1
 	}
-	v["thinking"] = m.Thinking
+	set(v, "thinking", m.Thinking, len(m.Thinking) != 0)
 	return v
 }
 func modelIn(v object) api.Model {
 	var levels []string
 	_ = json.Unmarshal(api.JSON(v["thinking"]), &levels)
-	if len(levels) == 0 {
-		levels = []string{"off"}
-	}
 	return api.Model{ID: str(v, "provider") + "/" + str(v, "id"), Provider: str(v, "provider"), Context: number(v, "contextWindow"), Output: number(v, "maxOutput"), Thinking: levels, Wire: api.JSON(v)}
 }
 func requestOut(r api.Request) object {

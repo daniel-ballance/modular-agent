@@ -39,12 +39,13 @@ func (d *display) event(e modular.Event) error {
 		if d.line && e.Outcome.Error != "" {
 			fmt.Fprintln(d.err, e.Outcome.Error)
 		}
-	case modular.DataEvent:
-		id := e.CallID
-		switch e.Type {
+	case interface{ Raw() modular.DataEvent }:
+		raw := e.Raw()
+		id := raw.CallID
+		switch raw.Type {
 		case "toolCall":
 			var v struct{ Call modular.ToolCall }
-			if json.Unmarshal(e.Data, &v) == nil {
+			if json.Unmarshal(raw.Data, &v) == nil {
 				d.calls[v.Call.ID] = v.Call
 			}
 		case "toolStarted":
@@ -74,7 +75,7 @@ func (d *display) event(e modular.Event) error {
 		case "toolOutput":
 			if d.verbose {
 				var v struct{ Chunk string }
-				if json.Unmarshal(e.Data, &v) == nil {
+				if json.Unmarshal(raw.Data, &v) == nil {
 					fmt.Fprint(d.err, v.Chunk)
 				}
 			}
@@ -88,12 +89,12 @@ func (d *display) event(e modular.Event) error {
 				Status  string
 				Content modular.Content
 			}
-			if json.Unmarshal(e.Data, &v) == nil && v.Status != "completed" {
+			if json.Unmarshal(raw.Data, &v) == nil && v.Status != "completed" {
 				line, _, _ := strings.Cut(strings.TrimSpace(v.Content.Text()), "\n")
 				fmt.Fprintf(d.err, "  %s: %s\n", v.Status, line)
 			}
 		case "inputHandedBack":
-			fmt.Fprintln(d.err, "Returned input:", string(e.Data))
+			fmt.Fprintln(d.err, "Returned input:", string(raw.Data))
 		}
 	}
 	return nil

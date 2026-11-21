@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/apikeymodels"
 	"io"
 	"net/http"
 	"sort"
@@ -26,11 +27,13 @@ const ModelID = "claude-haiku-5-5"
 const Endpoint = "https://api.anthropic.com/v1/messages"
 
 type Provider struct {
-	a          api.API
-	credential func(context.Context) (string, error)
-	endpoint   string
-	model      string
-	http       *http.Client
+	a           api.API
+	credential  func(context.Context) (string, error)
+	endpoint    string
+	model       string
+	http        *http.Client
+	maxOutput   int
+	apiKeyModel bool
 }
 
 func newProvider(endpoint string, client *http.Client) *Provider {
@@ -56,6 +59,13 @@ func NewModelAccess(model, endpoint string, client *http.Client, credential func
 	if model != "" {
 		a.p.model = model
 	}
+	return a
+}
+
+// NewModelAccessWithLimit uses the API-key catalog reasoning settings.
+func NewModelAccessWithLimit(model string, maxOutput int, endpoint string, client *http.Client, credential func(context.Context) (string, error)) api.ModelAccess {
+	a := NewModelAccess(model, endpoint, client, credential).(*access)
+	a.p.apiKeyModel, a.p.maxOutput = true, maxOutput
 	return a
 }
 
@@ -94,24 +104,32 @@ func (a *access) Generate(ctx context.Context, r api.Request, emit func(api.Part
 		}
 		r = prepared.(api.Request)
 	}
-	if r.MaxOutput <= 0 || r.MaxOutput > a.Model().Output {
-		return api.Response{}, errors.New("invalid output limit")
+	maxOutput := a.Model().Output
+	if p.apiKeyModel {
+		maxOutput = p.maxOutput
 	}
-	thinking := map[string]any{"type": "adaptive"}
-	effort := r.Thinking
-	switch effort {
-	case "off":
-		thinking["type"] = "disabled"
-		effort = "low"
-	case "low", "medium", "high":
-	default:
-		return api.Response{}, errors.New("unsupported thinking level")
+	if r.MaxOutput <= 0 || (maxOutput > 0 && r.MaxOutput > maxOutput) {
+		return api.Response{}, errors.New("invalid output limit")
 	}
 	messages, err := encodeMessages(r.Messages)
 	if err != nil {
 		return api.Response{}, err
 	}
-	body := map[string]any{"model": p.model, "stream": true, "max_tokens": r.MaxOutput, "messages": messages, "thinking": thinking, "output_config": map[string]any{"effort": effort}}
+	body := map[string]any{"model": p.model, "stream": true, "max_tokens": r.MaxOutput, "messages": messages}
+	if p.apiKeyModel {
+		apikeymodels.Apply(body, "anthropic", p.model, r.Thinking, r.MaxOutput)
+	} else {
+		thinking := map[string]any{"type": "adaptive"}
+		effort := r.Thinking
+		switch effort {
+		case "off":
+			thinking["type"], effort = "disabled", "low"
+		case "low", "medium", "high":
+		default:
+			return api.Response{}, errors.New("unsupported thinking level")
+		}
+		body["thinking"], body["output_config"] = thinking, map[string]any{"effort": effort}
+	}
 	if r.System != "" {
 		body["system"] = r.System
 	}

@@ -155,6 +155,7 @@ type ToolOutput struct {
 	Value   any        `json:"value,omitempty"`
 }
 type ToolContext struct {
+	Jobs                       JobCalls
 	Tools                      ToolCalls
 	Environment                ToolEnvironment
 	SessionID, ActorID, CallID string
@@ -231,15 +232,25 @@ func (t *ToolContext) Log(message string) {
 }
 
 type toolSource struct {
-	tools  []Tool
-	a      api.API
-	server *pluginrpc.Server
-	plugin string
+	tools   []Tool
+	dynamic func(string) []Tool
+	jobs    *jobAdapter
+	a       api.API
+	server  *pluginrpc.Server
+	plugin  string
 }
 
-func (s *toolSource) Tools(api.Session) []api.Tool {
-	defs := make([]api.Tool, 0, len(s.tools))
-	for _, t := range s.tools {
+func (s *toolSource) list(id string) []Tool {
+	if s.dynamic != nil {
+		return s.dynamic(id)
+	}
+	return s.tools
+}
+
+func (s *toolSource) Tools(session api.Session) []api.Tool {
+	tools := s.list(session.ID)
+	defs := make([]api.Tool, 0, len(tools))
+	for _, t := range tools {
 		var obj portable.Object
 		_ = decodeInto(t.definition, &obj)
 		defs = append(defs, portable.ReadTool(obj))
@@ -249,6 +260,7 @@ func (s *toolSource) Tools(api.Session) []api.Tool {
 func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call, progress func(string)) api.ToolResult {
 	tc := &ToolContext{SessionID: session.ID, ActorID: call.Actor, CallID: call.ID, ctx: ctx, progress: progress, host: s.a, server: s.server, plugin: s.plugin}
 	tc.Tools = ToolCalls{tc: tc, port: api.InvocationTools(ctx)}
+	tc.Jobs = JobCalls{work: tc, jobs: s.jobs}
 	tc.Environment = ToolEnvironment{tc: tc, project: session.Project}
 	if s.server != nil {
 		tc.Environment.port = s.server.HostEnvironment()
@@ -309,9 +321,12 @@ func (s *toolSource) Run(ctx context.Context, session api.Session, call api.Call
 		}
 		return Answer{Value: ans.Value, Declined: ans.Declined, Reason: ans.Reason, Stored: ans.Stored}, appError(err, InvalidRequest)
 	}
-	for _, t := range s.tools {
-		if t.definition.Name != call.Name {
+	for _, t := range s.list(session.ID) {
+		if t.invalid != nil || t.run == nil || t.definition.Name != call.Name {
 			continue
+		}
+		if s.server != nil && t.only {
+			return api.ToolResult{Call: call.ID, Name: call.Name, Status: "refused", Content: api.Text("tool is in-process only")}
 		}
 		tc.only = t.only
 		output, err := t.run(ctx, call.Input, tc)

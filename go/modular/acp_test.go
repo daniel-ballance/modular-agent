@@ -108,7 +108,7 @@ func TestServeACPComposesProjects(t *testing.T) {
 		return AssistantMessage{Content: Text("Hello."), Stop: "finished"}, nil
 	}}
 	compose := func(ctx context.Context, project string) (*Agent, error) {
-		return New(ctx, WithProject(project), WithHistory(store), WithPluginHost(true), WithProvider(provider))
+		return New(ctx, WithProject(project), WithHistory(store), WithPluginHost(true), WithProvider(provider), WithSettings(Settings{"reasoning": "off"}))
 	}
 	a, err := compose(t.Context(), first)
 	if err != nil {

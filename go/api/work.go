@@ -81,7 +81,7 @@ type Question struct {
 	Options, Allowed, Path                                              []string
 	Wait                                                                time.Duration
 	Deadline                                                            *time.Time `json:",omitempty"`
-	Defer                                                               bool
+	Defer, Pause                                                        bool
 	Answerable                                                          bool
 }
 type Answer struct {
@@ -195,9 +195,9 @@ type questionOrder struct {
 	n    atomic.Uint64
 }
 type Execution struct {
-	Session, Turn string
-	Call          Call
-	ToolSource    *ToolRegistration
+	Session, Turn, Step string
+	Call                Call
+	ToolSource          *ToolRegistration
 }
 
 func WithExecution(ctx context.Context, e Execution) context.Context {
@@ -228,6 +228,9 @@ func SessionUsage(s Session) Usage {
 	turns := map[string]Usage{}
 	jobs := map[string]Usage{}
 	for _, e := range s.Branch() {
+		if e.Kind == "model" && e.Turn == "" {
+			total.Add(Decode[struct{ Usage Usage }](e.Data).Usage)
+		}
 		if e.Kind == "turn.end" {
 			turns[e.Turn] = Decode[Outcome](e.Data).Usage
 		}
@@ -265,6 +268,9 @@ func OpenCalls(s Session) []Call {
 		case "tool.call", "tool.started":
 			add(Decode[Call](e.Data))
 		case "model":
+			if e.Turn == "" {
+				continue
+			}
 			for _, part := range e.Content {
 				if part.Call == nil {
 					continue

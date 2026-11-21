@@ -126,11 +126,20 @@ func WithTool(t Tool) Option {
 func WithPlugin(p Plugin) Option {
 	return func(o *options) error { o.plugins = append(o.plugins, p); return nil }
 }
-func WithProcessPlugin(p ProcessPlugin) Option {
-	return func(o *options) error { o.process = append(o.process, p); return nil }
+func WithProcessPlugin(p ProcessPlugin) Option { return WithProcessPlugins(p) }
+
+// WithProcessPlugins appends process plugins in load order.
+func WithProcessPlugins(plugins ...ProcessPlugin) Option {
+	plugins = slices.Clone(plugins)
+	return func(o *options) error { o.process = append(o.process, plugins...); return nil }
 }
-func WithServicePlugin(p ServicePlugin) Option {
-	return func(o *options) error { o.services = append(o.services, p); return nil }
+
+func WithServicePlugin(p ServicePlugin) Option { return WithServicePlugins(p) }
+
+// WithServicePlugins appends service plugins in load order.
+func WithServicePlugins(plugins ...ServicePlugin) Option {
+	plugins = slices.Clone(plugins)
+	return func(o *options) error { o.services = append(o.services, plugins...); return nil }
 }
 
 func WithPluginHost(host bool) Option { return func(o *options) error { o.host = &host; return nil } }
@@ -219,6 +228,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if o.host != nil && !*o.host && (len(o.process) > 0 || len(o.services) > 0) {
 		return nil, &Error{Code: InvalidComposition, Message: "process and service plugins require a plugin host"}
 	}
+	if o.durability == Ephemeral && (o.history.persistent || o.history.serviceDir != "") {
+		return nil, &Error{Code: InvalidComposition, Message: "ephemeral history cannot survive a restart; choose kept or durable"}
+	}
 	if o.history.serviceDir != "" {
 		return nil, &Error{Code: InvalidComposition, Message: "use HTTPHistory to connect to a history service"}
 	}
@@ -244,7 +256,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err != nil || !info.IsDir() {
 		return nil, &Error{Code: InvalidParams, Message: "project must be a directory"}
 	}
-	defaults := api.Settings{Thinking: "off", MaxSteps: 12, MaxOutput: 1024}
+	defaults := api.Settings{MaxSteps: 12, MaxOutput: 1024}
 	if o.conformance {
 		defaults.Model, defaults.Approval = conformancemodel.ID, "off"
 	}
@@ -291,12 +303,14 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	h.ConfigureSessions(o.jobReports, o.lateAnswers, o.refuseSettings)
 	a := &Agent{severalActors: o.severalActors, sessionLimits: o.sessionLimits, tenants: o.tenants != nil, jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
 	state := o.dataDir
-	if state == "" {
-		state, err = os.MkdirTemp("", "modular-go-")
+	if state == "" || (o.durability == Ephemeral && o.environment == nil) {
+		a.scratch, err = os.MkdirTemp("", "modular-go-")
 		if err != nil {
 			return nil, appError(err, InvalidComposition)
 		}
-		a.scratch = state
+		if state == "" {
+			state = a.scratch
+		}
 	}
 	success := false
 	defer func() {
@@ -332,7 +346,11 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	var environment api.Plugin
 	if o.environment == nil {
-		environment = local.GitPluginAt(filepath.Join(state, "commands"), state)
+		environmentState := state
+		if o.durability == Ephemeral {
+			environmentState = a.scratch
+		}
+		environment = local.GitPluginAt(filepath.Join(environmentState, "commands"), environmentState)
 	} else {
 		environment = api.Plugin{Name: "environment", Setup: func(a api.API) error { return a.Provide("working-environment", o.environment) }, Close: o.environment.Close}
 	}
@@ -389,7 +407,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 				return stop()
 			}
 		}
-		if err := loadPlugin(h, p); err != nil {
+		if err := loadPlugin(h, p, &defaults, o.durability); err != nil {
 			var e *Error
 			if errors.As(err, &e) && e.Code == NotSupported {
 				return nil, e
@@ -430,6 +448,16 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		}
 		return nil, &Error{Code: InvalidComposition, Message: err.Error()}
 	}
+	if selected, e := a.a.Get("sdk-history-selection"); e == nil {
+		history := selected.(HistoryStore)
+		if o.durability == Ephemeral && history.persistent {
+			return nil, &Error{Code: InvalidComposition, Message: "ephemeral history cannot survive a restart; choose kept or durable"}
+		}
+		if o.durability != Ephemeral && !history.persistent {
+			return nil, &Error{Code: InvalidComposition, Message: "kept and durable require persistent history"}
+		}
+		a.erasure = history.erasure
+	}
 	selectedRuntime, err := a.a.Get("runtime")
 	if err != nil {
 		return nil, appError(err, InvalidComposition)
@@ -449,12 +477,18 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	if len(specs) == 0 {
 		options := append([]Option{}, opts...)
-		if memory, ok := hs.(*memoryStore); ok {
+		selected, _ := a.a.Get("history")
+		if memory, ok := selected.(*memoryStore); ok {
 			options = append(options, WithHistory(memoryHistory(memory)))
 		}
 		a.restart = func(ctx context.Context) (*Agent, error) { return New(ctx, options...) }
 	}
 	a.defaults = defaults
+	for _, v := range a.a.All("sdk-interface.") {
+		if err := v.(Interface).Start(ctx, a); err != nil {
+			return nil, appError(err, InvalidComposition)
+		}
+	}
 	success = true
 	return a, nil
 }
@@ -500,6 +534,13 @@ func (a *Agent) Session(ctx context.Context, options ...SessionOptions) (*Sessio
 		return nil, &Error{Code: NotSupported, Message: "session feature disabled"}
 	}
 	settings := a.defaults
+	if c, e := a.a.Get("configuration"); e == nil {
+		var err error
+		settings, err = c.(api.Configuration).Settings(a.project)
+		if err != nil {
+			return nil, appError(err, InvalidParams)
+		}
+	}
 	for key, value := range opt.Settings {
 		if err := applySetting(&settings, key, value); err != nil {
 			return nil, err
@@ -571,6 +612,7 @@ func (a *Agent) Declaration() Declaration {
 	d["portableSessions"] = a.persistent
 	inputs, reports := a.h.QueuedRecoveryPolicy()
 	d["queuedInputAfterRestart"] = inputs
+	delete(d, "queuedJobReportsAfterRestart")
 	if reports != inputs {
 		d["queuedJobReportsAfterRestart"] = reports
 	}
@@ -622,6 +664,7 @@ type ServeACPOptions struct {
 	Listen          string
 	Actors          []ACPActor
 	TLS             *TLSOptions
+	ControlDeadline time.Duration
 }
 
 // ServeACP serves stdio (or the supplied streams), or blocks until its
@@ -642,7 +685,7 @@ func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error 
 		<-service.Done()
 		return service.Close()
 	}
-	if opt.TLS != nil || opt.Actors != nil {
+	if opt.TLS != nil || opt.Actors != nil || opt.ControlDeadline != 0 {
 		return &Error{Code: InvalidParams, Message: "ACP actors and TLS require Listen"}
 	}
 	if opt.Input == nil {

@@ -80,6 +80,12 @@ func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 	var initialized, closed bool
 	var startupErr error
 	server := &pluginrpc.Server{}
+	var unsub []func()
+	defer func() {
+		for _, f := range unsub {
+			f()
+		}
+	}()
 	server.Initialize = func(init pluginrpc.Object) error {
 		startup.Lock()
 		defer startup.Unlock()
@@ -105,6 +111,11 @@ func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 			return serveFault(startupErr)
 		}
 		reg := pluginrpc.Registration{Binding: pluginrpc.Binding, Name: plugin.Name, Replaces: plugin.Replaces}
+		var owner *jobAdapter
+		if r.jobOwner != nil {
+			owner = &jobAdapter{name: plugin.Name, owner: *r.jobOwner, server: server}
+			server.JobCancel = owner.cancel
+		}
 		if r.runtime != nil {
 			d := r.runtime.Declaration()
 			reg.Runtime = &pluginrpc.RuntimeRegistration{ID: plugin.Name, Supports: pluginrpc.RuntimeSupports{
@@ -123,13 +134,26 @@ func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 			server.Environment = env
 		}
 		if len(r.tools) > 0 {
-			source := &toolSource{tools: r.tools, server: server, plugin: plugin.Name}
+			source := &toolSource{tools: r.tools, server: server, plugin: plugin.Name, jobs: owner}
 			sr := pluginrpc.SourceRegistration{ID: "tools"}
 			for _, t := range source.Tools(api.Session{}) {
 				sr.Tools = append(sr.Tools, portable.Tool(t))
 			}
 			reg.ToolSources = []pluginrpc.SourceRegistration{sr}
 			server.Sources = map[string]api.ToolSource{sr.ID: source}
+		}
+		for _, source := range r.sources {
+			adapter := &toolSource{dynamic: source.Tools, server: server, plugin: plugin.Name, jobs: owner}
+			sr := pluginrpc.SourceRegistration{ID: source.ID, PerSession: source.PerSession}
+			for _, t := range adapter.Tools(api.Session{}) {
+				sr.Tools = append(sr.Tools, portable.Tool(t))
+			}
+			reg.ToolSources = append(reg.ToolSources, sr)
+			if server.Sources == nil {
+				server.Sources = map[string]api.ToolSource{}
+			}
+			server.Sources[sr.ID] = adapter
+			unsub = append(unsub, bindToolChanges(server, source))
 		}
 		server.Providers = map[string]api.Provider{}
 		for _, p := range r.providers {
@@ -150,8 +174,25 @@ func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 				if point != hook.point {
 					return nil, serveFault(&Error{Code: UnknownHandler, Message: "unknown handler"})
 				}
-				answer, err := hook.handle(ctx, p)
+				answer, err := withHookContext(ctx, nil, server, plugin.Name, p, hook.handle)
+				if x, ok := answer.(pluginrpc.Object); ok && (x["pending"] != nil || x["command"] != nil) {
+					return nil, serveFault(&Error{Code: NotSupported, Message: "hook answer is in-process only"})
+				}
 				return answer, serveFault(err)
+			}
+		}
+		if owner != nil && owner.owner.Resume != nil {
+			id := len(r.hooks) + 1
+			reg.Hooks = append(reg.Hooks, pluginrpc.HookRegistration{Hook: "session.start", ID: id, Order: "first"})
+			server.Handlers[id] = func(ctx context.Context, point string, p pluginrpc.Object) (any, error) {
+				if point != "session.start" {
+					return nil, serveFault(&Error{Code: UnknownHandler, Message: "unknown handler"})
+				}
+				if p["resumed"] != true {
+					return nil, nil
+				}
+				session, _ := p["sessionId"].(string)
+				return nil, serveFault(owner.resume(ctx, session))
 			}
 		}
 		server.Commands = map[string]func(context.Context, pluginrpc.Object) (any, error){}
@@ -167,7 +208,7 @@ func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 					}
 					args = strings.Join(legacy, " ")
 				}
-				text, err := c.Run(ctx, args, &CommandContext{SessionID: str("sessionId"), ActorID: str("actorId")})
+				text, err := runSDKCommand(ctx, nil, server, plugin.Name, str("sessionId"), str("actorId"), c, args, owner)
 				return pluginrpc.Object{"output": text}, serveFault(err)
 			}
 		}
@@ -187,6 +228,24 @@ func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 	return appError(err, Lost)
 }
 func canServe(r *Registrar) error {
+	for name := range r.defined {
+		return &Error{Code: NotSupported, Message: "in-process-only hook " + name}
+	}
+	for _, part := range []struct {
+		name  string
+		local bool
+	}{{"history", r.history.make != nil}, {"credential store", r.credentials != nil}, {"configuration", r.configuration != nil}, {"Interface", r.front != nil}} {
+		if part.local {
+			return &Error{Code: NotSupported, Message: "in-process-only " + part.name}
+		}
+	}
+	for _, source := range r.sources {
+		for _, tool := range source.Tools("") {
+			if tool.only {
+				return &Error{Code: NotSupported, Message: "in-process-only tool " + tool.definition.Name}
+			}
+		}
+	}
 	for _, t := range r.tools {
 		if t.only {
 			return &Error{Code: NotSupported, Message: "in-process-only tool " + t.definition.Name}

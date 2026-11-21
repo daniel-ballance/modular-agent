@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/harness"
@@ -41,23 +43,37 @@ type hookRegistration struct {
 	only   bool
 	handle func(context.Context, pluginrpc.Object) (any, error)
 }
-type CommandContext struct{ SessionID, ActorID string }
+type CommandContext struct {
+	SessionID, ActorID, StepID string
+	requestModel               func(context.Context, ModelRequest) (AssistantMessage, error)
+	work                       *ToolContext
+	Environment                ToolEnvironment
+	Jobs                       JobCalls
+	active                     *atomic.Bool
+}
 type Command struct {
 	Name, Description        string
 	Run                      func(context.Context, string, *CommandContext) (string, error)
 	InProcessOnly, UsesModel bool
 }
 type Registrar struct {
-	config      map[string]any
-	tools       []Tool
-	hooks       []hookRegistration
-	commands    []Command
-	providers   []Provider
-	runtime     Runtime
-	environment Environment
-	items       map[string]bool
-	stopped     bool
-	err         error
+	config        map[string]any
+	tools         []Tool
+	sources       []ToolSource
+	defined       map[string]HookRule
+	hooks         []hookRegistration
+	commands      []Command
+	providers     []Provider
+	runtime       Runtime
+	environment   Environment
+	history       HistoryStore
+	credentials   CredentialStore
+	configuration Configuration
+	front         Interface
+	jobOwner      *JobOwner
+	items         map[string]bool
+	stopped       bool
+	err           error
 }
 
 func (r *Registrar) Config() map[string]any {
@@ -117,6 +133,9 @@ func (r *Registrar) Command(c Command) error {
 	if c.Name == "" || strings.ContainsAny(c.Name, "/ \t\r\n") || c.Description == "" || c.Run == nil {
 		return r.fail(fmt.Errorf("invalid command %q", c.Name))
 	}
+	if c.UsesModel {
+		c.InProcessOnly = true
+	}
 	if err := r.add("command:" + c.Name); err != nil {
 		return err
 	}
@@ -145,8 +164,9 @@ type ToolBefore struct {
 	Definition ToolDefinition `json:"definition"`
 }
 type Gate struct {
-	Refuse string
-	Input  json.RawMessage
+	Refuse  string
+	Input   json.RawMessage
+	Pending *Question
 }
 
 func (r *Registrar) OnToolBefore(fn func(context.Context, ToolBefore) (Gate, error), opts ...HookOption) error {
@@ -158,6 +178,9 @@ func (r *Registrar) OnToolBefore(fn func(context.Context, ToolBefore) (Gate, err
 		g, err := fn(ctx, in)
 		if err != nil {
 			return nil, err
+		}
+		if g.Pending != nil {
+			return pluginrpc.Object{"pending": g.Pending}, nil
 		}
 		if g.Refuse != "" {
 			return pluginrpc.Object{"refuse": g.Refuse}, nil
@@ -317,7 +340,7 @@ func register(p Plugin, config map[string]any) (*Registrar, error) {
 	}
 	return r, nil
 }
-func loadPlugin(h *harness.Harness, p Plugin) error {
+func loadPlugin(h *harness.Harness, p Plugin, defaults *api.Settings, durability Durability) error {
 	r, err := register(p, p.Config)
 	if err != nil {
 		if p.Stop != nil {
@@ -335,7 +358,77 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 			return err
 		}
 	}
+	var hs api.Store
+	if r.history.make != nil {
+		if durability == Ephemeral && r.history.persistent {
+			if stop != nil {
+				_ = stop()
+			}
+			return &Error{Code: InvalidComposition, Message: "ephemeral history cannot survive a restart; choose kept or durable"}
+		}
+		hs, err = r.history.make()
+		if err != nil {
+			if stop != nil {
+				_ = stop()
+			}
+			return err
+		}
+	}
+	if r.front != nil || hs != nil {
+		previous := stop
+		stop = func() error {
+			var err error
+			if r.front != nil {
+				err = r.front.Stop()
+			}
+			if closer, ok := hs.(io.Closer); ok {
+				err = errors.Join(err, closer.Close())
+			}
+			if previous != nil {
+				err = errors.Join(err, previous())
+			}
+			return err
+		}
+	}
 	err = h.LoadItems(api.Plugin{Name: p.Name, Close: stop, Setup: func(a api.API) error {
+		var owner *jobAdapter
+		if r.jobOwner != nil {
+			owner = &jobAdapter{name: p.Name, owner: *r.jobOwner, host: a}
+			if err := a.Provide("job-owner."+p.Name, api.JobCanceller(owner.cancel)); err != nil {
+				return err
+			}
+			if err := a.Handle("session.start", "", func(ctx context.Context, v any) (api.Decision, error) {
+				if !api.IsReopenedSession(ctx) {
+					return api.Decision{}, nil
+				}
+				return api.Decision{}, owner.resume(ctx, v.(api.Session).ID)
+			}); err != nil {
+				return err
+			}
+		}
+		if hs != nil {
+			if err := a.Provide("history", hs); err != nil {
+				return err
+			}
+			if err := a.Provide("sdk-history-selection", r.history); err != nil {
+				return err
+			}
+		}
+		if r.credentials != nil {
+			if err := a.Provide("credentials", r.credentials); err != nil {
+				return err
+			}
+		}
+		if r.configuration != nil {
+			if err := a.Provide("configuration", configurationAdapter{source: r.configuration, defaults: defaults}); err != nil {
+				return err
+			}
+		}
+		if r.front != nil {
+			if err := a.Provide("sdk-interface."+p.Name, r.front); err != nil {
+				return err
+			}
+		}
 		if r.runtime != nil {
 			if err := runtimeSetup(a, r.runtime); err != nil {
 				return err
@@ -347,7 +440,12 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 			}
 		}
 		if len(r.tools) > 0 {
-			if err := a.Provide("tools.sdk."+p.Name, &toolSource{a: a, tools: r.tools, plugin: p.Name}); err != nil {
+			if err := a.Provide("tools.sdk."+p.Name, &toolSource{a: a, tools: r.tools, plugin: p.Name, jobs: owner}); err != nil {
+				return err
+			}
+		}
+		for _, source := range r.sources {
+			if err := a.Provide("tools.sdk."+p.Name+"."+source.ID, &toolSource{a: a, dynamic: source.Tools, plugin: p.Name, jobs: owner}); err != nil {
 				return err
 			}
 		}
@@ -364,12 +462,20 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 		}
 		for _, c := range r.commands {
 			if err := a.RegisterCommand(c.Name, func(ctx context.Context, s string, args []string) (string, error) {
-				return c.Run(ctx, strings.Join(args, " "), &CommandContext{SessionID: s, ActorID: api.Acting(ctx)})
+				return runSDKCommand(ctx, a, nil, p.Name, s, api.Acting(ctx), c, strings.Join(args, " "), owner)
 			}); err != nil {
 				return err
 			}
 		}
+		for name, rule := range r.defined {
+			if err := a.Define(name, coreHookRule(rule)); err != nil {
+				return err
+			}
+		}
 		for _, hook := range r.hooks {
+			run := func(ctx context.Context, payload pluginrpc.Object) (any, error) {
+				return withHookContext(ctx, a, nil, p.Name, payload, hook.handle)
+			}
 			order := string(hook.order)
 			if hook.order == Normal {
 				order = ""
@@ -377,7 +483,7 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 			if hook.point == "session.end" {
 				for _, point := range []string{"session.end", "session.stop"} {
 					if err := a.Handle(point, order, func(ctx context.Context, v any) (api.Decision, error) {
-						_, err := hook.handle(ctx, pluginrpc.Object{"sessionId": v.(string)})
+						_, err := run(ctx, pluginrpc.Object{"sessionId": v.(string)})
 						return api.Decision{}, err
 					}); err != nil {
 						return err
@@ -386,7 +492,7 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 			} else if hook.point == "session.prepare" {
 				if err := a.Handle(hook.point, order, func(ctx context.Context, v any) (api.Decision, error) {
 					prepare := v.(api.SessionPrepare)
-					_, err := hook.handle(ctx, pluginrpc.Object{"SessionID": prepare.Session.ID, "Project": prepare.Session.Project, "Reopened": prepare.Reopened})
+					_, err := run(ctx, pluginrpc.Object{"sessionId": prepare.Session.ID, "project": prepare.Session.Project, "reopened": prepare.Reopened})
 					return api.Decision{}, err
 				}); err != nil {
 					return err
@@ -400,7 +506,7 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 							tools = append(tools, portable.Tool(def))
 						}
 					}
-					result, err := hook.handle(ctx, pluginrpc.Object{"sessionId": before.Session.ID, "turnId": before.Turn, "input": portable.Content(before.Input), "project": before.Session.Project, "tools": tools})
+					result, err := run(ctx, pluginrpc.Object{"sessionId": before.Session.ID, "turnId": before.Turn, "input": portable.Content(before.Input), "project": before.Session.Project, "tools": tools})
 					if err != nil {
 						return api.Decision{}, err
 					}
@@ -422,8 +528,24 @@ func loadPlugin(h *harness.Harness, p Plugin) error {
 				}); err != nil {
 					return err
 				}
-			} else if err := pluginrpc.RegisterLocalHook(a, hook.point, order, hook.handle); err != nil {
-				return err
+			} else if pluginrpc.IsHook(hook.point) {
+				if err := pluginrpc.RegisterLocalHook(a, hook.point, order, run); err != nil {
+					return err
+				}
+			} else {
+				if err := a.Handle(hook.point, order, func(ctx context.Context, v any) (api.Decision, error) {
+					var payload pluginrpc.Object
+					if err := decodeInto(v, &payload); err != nil {
+						return api.Decision{}, err
+					}
+					answer, err := run(ctx, payload)
+					if err != nil {
+						return api.Decision{}, err
+					}
+					return customDecision(answer)
+				}); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

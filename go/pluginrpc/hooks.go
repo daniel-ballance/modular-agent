@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 var hookNames = map[string]string{
@@ -93,9 +94,53 @@ func RegisterLocalHook(a api.API, point, order string, handle func(context.Conte
 				return json.Unmarshal(mustJSON(answer), out)
 			})
 		}
-		answer, err := handle(ctx, hookPayload(ctx, "", point, v))
+		payload := hookPayload(ctx, "", point, v)
+		if point == "step.before" {
+			s := v.(api.StepContext)
+			if snap, err := a.Snapshot(s.Turn.Session); err == nil {
+				history := []Object{}
+				for _, e := range snap.Entries {
+					history = append(history, portable.Entry(e))
+				}
+				payload["history"], payload["usage"] = history, s.Usage
+			}
+		}
+		answer, err := handle(ctx, payload)
 		if err != nil {
 			return api.Decision{}, err
+		}
+		result := asObject(answer)
+		if point == "input" && str(result, "command") != "" {
+			input := v.(api.InputEvent)
+			if input.Input.ViaActor != "" {
+				return api.Decision{}, api.ErrAuthority
+			}
+			output, err := a.Command(ctx, input.Session, str(result, "command"))
+			input.Handled, input.Result = true, output
+			return api.Decision{Value: input, Stop: true}, err
+		}
+		if point == "tool.before" && has(result, "pending") {
+			check := v.(api.ToolCheck)
+			policy, ok := a.(interface{ LateQuestions() bool })
+			if !ok || !policy.LateQuestions() || check.Call.ParentCall != "" {
+				return api.Decision{}, errors.New("leaving this call pending is not supported")
+			}
+			q := asObject(result["pending"])
+			if str(q, "kind") == "approval" {
+				return api.Decision{}, errors.New("approval cannot be left pending")
+			}
+			value, err := a.Get("questions")
+			if err != nil {
+				return api.Decision{}, err
+			}
+			ans, err := value.(api.Questions).Ask(ctx, api.Question{Session: check.Session, Turn: check.Turn, Step: check.Call.Step, Call: check.Call.ID, Actor: check.Call.Actor, Kind: str(q, "kind"), Prompt: str(q, "question"), Options: api.Decode[[]string](mustJSON(q["options"])), Details: mustJSON(q["details"]), Credential: str(q, "credential"), Defer: true, Pause: true})
+			if err != nil {
+				return api.Decision{}, err
+			}
+			if ans.Declined {
+				return api.Decision{}, errors.New("pending question declined")
+			}
+			return api.Decision{}, nil
 		}
 		return hookAnswer(point, v, answer)
 	})

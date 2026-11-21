@@ -48,7 +48,7 @@ func (h *Harness) loadItems(p api.Plugin, replaces []string, external bool) erro
 			h.mu.Unlock()
 			return fmt.Errorf("cannot replace another external item %s", item)
 		}
-		if item != "runtime" && item != "working-environment" && !strings.HasPrefix(item, "provider:") && !strings.HasPrefix(item, "command:") && !strings.HasPrefix(item, "tool:") {
+		if item != "runtime" && item != "working-environment" && (external || item != "history" && item != "credentials" && item != "configuration" && item != "interface") && !strings.HasPrefix(item, "provider:") && !strings.HasPrefix(item, "command:") && !strings.HasPrefix(item, "tool:") {
 			h.mu.Unlock()
 			return fmt.Errorf("unknown replacement item %q", item)
 		}
@@ -76,6 +76,11 @@ func (h *Harness) loadItems(p api.Plugin, replaces []string, external bool) erro
 			if r, ok := h.caps[item]; ok {
 				oldEnv = r.value.(api.WorkingEnvironment)
 				delete(h.caps, item)
+			}
+		case item == "history" || item == "credentials" || item == "configuration":
+			delete(h.caps, item)
+			if item == "history" {
+				delete(h.caps, "sdk-history-selection")
 			}
 		case strings.HasPrefix(item, "provider:"):
 			delete(h.caps, "provider."+strings.TrimPrefix(item, "provider:"))
