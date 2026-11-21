@@ -52,12 +52,13 @@ def publish(db, source, targets):
             edges[parent].add(eid)
         if row.get("fork_source"):
             edges[row["fork_source"]].add(eid)
+            edges[eid].add(row["fork_source"])
         if row["kind"] == "input_queued":
             admission = row["data"].get("input") or eid
             if admission != eid:
                 edges[admission].add(eid)
                 edges[eid].add(admission)
-        if row["kind"] in {"input", "input_handled", "input_returned"}:
+        if row["kind"] in {"input", "input_handled", "input_withdrawn"}:
             admission = row["data"].get("input")
             if admission:
                 edges[admission].add(eid)

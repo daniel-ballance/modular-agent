@@ -180,4 +180,6 @@ class Erasure:
             )
         if hidden:
             result["out_of_reach"].append("copies in other sessions")
+        for state in ("erased", "pending"):
+            result[state] = [p["id"] for p in result[state + "Pairs"]]
         return result
