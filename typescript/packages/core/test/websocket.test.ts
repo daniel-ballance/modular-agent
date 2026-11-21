@@ -7,6 +7,7 @@ import { test, type TestContext } from "node:test";
 import { definePlugin, memoryHistory, serve, tool } from "@modular-agent/core";
 import { testAgent } from "@modular-agent/core/testing";
 import { ACP_PROTOCOL, connectWebSocket } from "@modular-agent/plugin-wire";
+import { interruptedHistory } from "./fixtures/interrupted-history.js";
 
 async function token(t: TestContext) {
   const dir = await mkdtemp(join(tmpdir(), "sdk-websocket-"));
@@ -64,6 +65,56 @@ function request(socket: Awaited<ReturnType<typeof connectWebSocket>>, method: s
     };
     socket.on("message", listener);
     socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+  });
+}
+
+for (const reason of ["commitFailed", "writerLost"] as const) {
+  test(`ACP broadcasts ${reason} to both followers and fails the waiting prompt with lost`, { timeout: 10_000 }, async t => {
+    const { dir, tokenFile } = await token(t);
+    const { store, revoke, failNextAppend } = interruptedHistory();
+    let started!: () => void;
+    const running = new Promise<void>(resolve => { started = resolve; });
+    const hold = tool({ name: "hold", description: "Wait for interruption", input: { type: "object" },
+      run: async (_, cx) => {
+        started();
+        if (!cx.cancelled.aborted) await new Promise<void>(resolve => cx.cancelled.addEventListener("abort", () => resolve(), { once: true }));
+      },
+    });
+    const agent = await testAgent({ project: dir, dataDir: dir, durability: "kept", tools: [hold],
+      plugins: [definePlugin({ name: "lease-fixture", replaces: ["history-store"], setup: r => r.historyStore(store) })],
+      script: [{ toolCalls: [{ name: "hold", input: {} }] }, { text: "Recovered" }],
+    });
+    t.after(() => agent.close());
+    const server = await agent.serveAcp({ listen: "127.0.0.1:0", actors: [
+      { tokenFile, actor: { id: "local", kind: "user", rights: ["watch", "input", "tools", "settings"] } },
+    ] });
+    t.after(() => server.close());
+    const [a, b] = await Promise.all([1, 2].map(() => connectWebSocket(server.url, tokenFile, ACP_PROTOCOL, 5000)));
+    await Promise.all([a, b].map(socket => request(socket, "initialize", { protocolVersion: 1 })));
+    const { sessionId } = await request(a, "session/new", { cwd: dir, mcpServers: [] });
+    await request(b, "session/load", { sessionId, cwd: dir, mcpServers: [] });
+    const events = [a, b].map(socket => new Promise<unknown>(resolve => {
+      const handler = (bytes: Buffer) => {
+        const message = JSON.parse(bytes.toString());
+        const interruption = message.params?.update?._meta?.["modular-agent"]?.sessionInterrupted;
+        if (message.method !== "session/update" || !interruption || message.params.sessionId !== sessionId) return;
+        socket.off("message", handler);
+        resolve(interruption);
+      };
+      socket.on("message", handler);
+    }));
+    const prompt = (text: string) => request(a, "session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+    const pending = assert.rejects(prompt("Start"), { code: "lost" });
+    await running;
+    if (reason === "writerLost") revoke(sessionId);
+    else {
+      failNextAppend();
+      await assert.rejects(request(b, "_modular-agent/input", { sessionId, content: "Do not start", when: "after" }), { code: "lost" });
+    }
+    assert.deepEqual(await Promise.all(events), [{ reason }, { reason }]);
+    await pending;
+    await request(a, "session/resume", { sessionId, cwd: dir });
+    assert.equal((await prompt("Fresh input")).stopReason, "end_turn");
   });
 }
 

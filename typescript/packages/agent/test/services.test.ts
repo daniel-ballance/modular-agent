@@ -68,11 +68,11 @@ after(async () => {
 
 // ---------- an agent that uses them, served over HTTP ----------
 
-async function agent(options: { history?: { url: string; token: string } } = {}): Promise<{ h: Harness; url: string; token: string; home: string }> {
+async function agent(options: { history?: { url: string; token: string }; store?: HttpHistoryStore } = {}): Promise<{ h: Harness; url: string; token: string; home: string }> {
 	const home = mkdtempSync(join(tmpdir(), "ma-svc-home-"));
 	const t = token();
 	const web = httpInterface({ token: t });
-	const h = await createAgent({ project, home, model: "faux/faux-1", plugins: [historyHttp(options.history ?? history), environmentHttp(environment), providerHttp(gateway), web] });
+	const h = await createAgent({ project, home, model: "faux/faux-1", plugins: [historyHttp(options.history ?? history, options.store), environmentHttp(environment), providerHttp(gateway), web] });
 	agents.push(h);
 	return { h, url: web.http!.url, token: t, home };
 }
@@ -89,8 +89,12 @@ function events(a: { url: string; token: string }, sessionId: string, lastEventI
 	const seen: (AgentEvent & { eventId?: string })[] = [];
 	const abort = new AbortController();
 	let wake = () => {};
+	let ready!: () => void;
+	const following = new Promise<void>(resolve => { ready = resolve; });
 	const done = (async () => {
 		const res = await fetch(`${a.url}/sessions/${sessionId}/events`, { headers: { authorization: `Bearer ${a.token}`, ...(lastEventId ? { "last-event-id": lastEventId } : {}) }, signal: abort.signal });
+		assert.equal(res.status, 200);
+		ready();
 		let buffer = "";
 		for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
 			buffer += Buffer.from(chunk).toString("utf8");
@@ -104,7 +108,7 @@ function events(a: { url: string; token: string }, sessionId: string, lastEventI
 		}
 	})().catch(() => undefined);
 	return {
-		seen,
+		seen, following, done,
 		async until(check: (e: AgentEvent) => boolean, ms = 10_000) {
 			const end = Date.now() + ms;
 			while (!seen.some(check)) {
@@ -218,6 +222,41 @@ test("services: when the history service's answers are lost, appends are sent ag
 	assert.equal(new Set(stored.map((e) => e.id)).size, stored.length, "no entry was kept twice");
 	assert.ok(stored.some((e) => e.kind === "turnEnd"), "the turn was kept in full");
 	assert.equal(stored.filter((e) => e.kind === "turnEnd").length, 1);
+	await a.h.stop();
+});
+
+test("services: an interrupted writer delivers an unrecorded SSE event and ends the stream", { timeout: 10_000 }, async t => {
+	let failAppend = false;
+	class FailingStore extends HttpHistoryStore {
+		override async append(id: string, batch: HistoryEntry[]) {
+			if (failAppend) { failAppend = false; throw new Error("fixture append failure"); }
+			await super.append(id, batch);
+		}
+	}
+	const store = new FailingStore(history);
+	await store.initialize();
+	const a = await agent({ store });
+	const { sessionId } = await http(a, "POST", "/sessions");
+	const stream = events(a, sessionId);
+	t.after(() => stream.close());
+	await stream.following;
+	await http(a, "POST", `/sessions/${sessionId}/input`, { content: "sleep a long time" });
+	await stream.until(e => e.type === "tool.started");
+	failAppend = true;
+	await assert.rejects(http(a, "POST", `/sessions/${sessionId}/input`, { content: "say goodbye", when: "after" }), /Session was interrupted/);
+	await stream.done;
+	const interrupted = stream.seen.filter(e => e.type === "session.interrupted");
+	assert.equal(interrupted.length, 1);
+	assert.deepEqual(interrupted[0].data, { reason: "commitFailed" });
+	assert.equal(interrupted[0].eventId, undefined);
+	assert.ok(!(await storedEntries(sessionId)).some(e => e.kind === "turnEnd"));
+	await http(a, "POST", `/sessions/${sessionId}/open`);
+	const recovered = events(a, sessionId, stream.seen.findLast(e => e.eventId)?.eventId);
+	t.after(() => recovered.close());
+	await recovered.following;
+	await http(a, "POST", `/sessions/${sessionId}/input`, { content: "say hello" });
+	await recovered.until(e => e.type === "turn.ended" && e.data.outcome.kind === "completed");
+	assert.ok(!recovered.seen.some(e => e.type === "session.interrupted"));
 	await a.h.stop();
 });
 

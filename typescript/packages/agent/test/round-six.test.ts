@@ -151,10 +151,11 @@ test("rewind commits intent before touching files, reports open-world calls, and
 		}
 		await append(id, entries);
 	};
-	await assert.rejects(api.moveTo(s, mark, { rewind: true }), /lease lost/);
+	await assert.rejects(api.moveTo(s, mark, { rewind: true }), { code: "lost" });
 	assert.equal(api.session(s).position, after);
 	assert.equal(readFileSync(note, "utf8"), "after");
 	store.append = append;
+	await api.openSession(s);
 	assert.deepEqual(await api.moveTo(s, mark, { rewind: true }), { outOfReach: [call.callId] });
 	assert.equal(readFileSync(note, "utf8"), "before");
 	await assert.rejects(api.moveTo(s, after, { rewind: true }), /current branch/);

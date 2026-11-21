@@ -1,4 +1,4 @@
-import { inputHandedBackIds, inputIdOf, isToolCall, textOf, type AgentEvent, type InputRequest, type PluginApi, type TurnOutcome } from "@modular-agent/harness";
+import { untilAborted, inputHandedBackIds, inputIdOf, isToolCall, textOf, type AgentEvent, type InputRequest, type PluginApi, type TurnOutcome } from "@modular-agent/harness";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Actor, Answer, Content, Question, Right, ToolCall, HistoryEntry, InputTiming, InputReceipt, Input, Outcome, QuestionHandler, Settings, ToolStatus, TurnResult, Usage } from "./data.js";
 import { AgentError, checked, sdkError } from "./errors.js";
@@ -29,6 +29,7 @@ type Empty = Record<string, never>;
 export interface EventData {
   sessionStarted: { meta: { id: string; created: number; project: string }; resumed?: boolean };
   sessionEnded: Empty;
+  sessionInterrupted: { reason: "commitFailed" | "writerLost" };
   actorJoined: { actor: Actor };
   actorLeft: { actorId: string };
   inputAccepted: { inputId: string; taken: InputReceipt["taken"] };
@@ -67,7 +68,7 @@ export type Event = Scope & ({ [K in StandardEvent]: { type: K; data: EventData[
 
 const names: Record<string, StandardEvent> = {
   "session.started": "sessionStarted", "session.ended": "sessionEnded", "session.joined": "actorJoined",
-  "session.left": "actorLeft", "input.accepted": "inputAccepted", "input.withdrawn": "inputWithdrawn",
+  "session.interrupted": "sessionInterrupted", "session.left": "actorLeft", "input.accepted": "inputAccepted", "input.withdrawn": "inputWithdrawn",
   "turn.started": "turnStarted", "step.started": "stepStarted", "step.ended": "stepEnded",
   "tool.call": "toolCall", "tool.started": "toolStarted", "tool.progress": "toolOutput",
   "tool.result.delivered": "toolResult", "input.request.opened": "questionOpened", "input.request.closed": "questionClosed",
@@ -225,16 +226,17 @@ export class Session {
   async #run(input: Input, options: PromptOptions, stream?: { event(e: AgentEvent): void; admitted(id: string): void; lag(): void }): Promise<PromptResult> {
     this.#check();
     const view = options.actor === undefined ? this : this.as(options.actor);
+    const signal = AbortSignal.any([this.#api.sessionInterruption(this.id), this.#owner.interruption]);
     let wake: () => void = () => {};
     const off = this.#api.follow(this.id, { recipient: view.actor, onLag: stream?.lag }, e => { stream?.event(e); wake(); });
-    try {
+    try { return await untilAborted(signal, async () => {
       const receipt = await this.send(input, "now", options) as InputReceipt & { handled?: boolean };
       const id = receipt.inputId;
       stream?.admitted(id);
       if (receipt.handled) return noTurn(id, "handled");
       if (receipt.erased) throw new AgentError("not_found", "Input key refers to erased input");
       for (;;) {
-        if (this.#owner.interruption.aborted) throw new AgentError("lost", "Agent was interrupted");
+        signal.throwIfAborted();
         const changed = new Promise<void>(r => { wake = r; });
         const raw = this.#api.history(this.id, { all: true });
         const entries = await view.history();
@@ -251,7 +253,7 @@ export class Session {
         }
         await Promise.race([changed, delay(25)]);
       }
-    } finally { off(); }
+    }); } finally { off(); }
   }
 
   async prompt(input: Input, options: PromptOptions = {}): Promise<PromptResult> {
@@ -322,6 +324,10 @@ export class Session {
       } else queue.push(e);
       wake();
     });
+    const writer = this.#api.sessionInterruption(this.id);
+    let interrupted = writer.aborted;
+    const stopFollowing = () => { void off.idle().then(() => { interrupted = true; wake(); }); };
+    writer.addEventListener("abort", stopFollowing, { once: true });
     const interruption = () => wake();
     this.#owner.interruption.addEventListener("abort", interruption, { once: true });
     const check = () => {
@@ -342,14 +348,19 @@ export class Session {
       for (;;) {
         check();
         const next = queue.shift();
-        if (!next) { await new Promise<void>(r => { wake = r; }); continue; }
+        if (!next) {
+          if (interrupted) return;
+          await new Promise<void>(r => { wake = r; });
+          continue;
+        }
         const event = eventOf(next);
         if (!event) continue;
         if (event.type === "entry") cursor = event.data.id;
         yield structuredClone(event);
-        if (event.type === "sessionEnded") return;
+        if (event.type === "sessionEnded" || event.type === "sessionInterrupted") return;
       }
     } finally {
+      writer.removeEventListener("abort", stopFollowing);
       this.#owner.interruption.removeEventListener("abort", interruption);
       off();
     }

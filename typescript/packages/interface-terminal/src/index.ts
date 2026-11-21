@@ -93,7 +93,7 @@ export class TerminalInterface implements InterfaceCapability {
 		}
 		if (this.options.mode === "print") {
 			if (event.type === "turn.ended") this.lastText = event.data?.result?.text ?? this.lastText;
-			if (event.type === "turn.ended" && event.data?.outcome?.kind === "failed") this.exitCode = 1;
+			if (event.type === "session.interrupted" || event.type === "turn.ended" && event.data?.outcome?.kind === "failed") this.exitCode = 1;
 			return;
 		}
 		switch (event.type) {
@@ -123,6 +123,9 @@ export class TerminalInterface implements InterfaceCapability {
 				break;
 			case "job.ended":
 				this.line(dim(`[job ${event.jobId?.slice(0, 8)} ${event.data.state}]`));
+				break;
+			case "session.interrupted":
+				this.line(red(`Session interrupted (${event.data.reason}); reopen it to recover.`));
 				break;
 			case "turn.ended": {
 				const outcome = event.data.outcome;

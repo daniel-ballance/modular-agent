@@ -16,6 +16,7 @@ import {
 	type Provider,
 	inputHandedBackIds,
 	inputIdOf,
+	untilAborted,
 	isToolCall,
 	lowerReasoning,
 	parseModel,
@@ -30,7 +31,7 @@ export const BINDING = "modular-agent-acp/1";
 const NS = "modular-agent";
 const BINDING_V2 = "modular-agent-acp/2";
 const MAX_LINE_BYTES = 64 * 1024 * 1024;
-const bindingError = (code: string, message = code) => new RequestError(-32602, message, { code });
+const bindingError = (code: string, message = code) => new RequestError(code === "lost" ? -32000 : -32602, message, { code });
 const notOpen = () => ({ accepted: false, reason: "not_open" });
 const EXTENSIONS = ["history", "input", "requests", "answer", "actors", "join", "leave", "release", "proposals", "withdraw", "limit", "tenant", "fork", "move", "jobs", "cancel-job", "erase"];
 
@@ -52,6 +53,7 @@ function promptResponse(inputId: string, outcome: Outcome, extra: Record<string,
 
 interface SessionState {
 	unfollow?: () => void;
+	writer?: AbortSignal;
 	waiters: Waiter[];
 	/** Input handed back by the last cancel, for the cancelled prompt's response. */
 	handedBack?: { inputId: string; content: unknown }[];
@@ -295,7 +297,13 @@ export class AcpInterface implements InterfaceCapability {
 			return this.gateReply(params.sessionId, "session/set_config_option", { configOptions: await this.configOptions(params.sessionId), _meta: { [NS]: { declaration: this.bindingDeclaration(params.sessionId) } } });
 		});
 
-		app.onRequest(methods.agent.session.prompt, async ({ params }) => this.prompt(params));
+		app.onRequest(methods.agent.session.prompt, async ({ params }) => {
+			const state = this.sessions.get(params.sessionId);
+			if (!state) throw bindingError("not_open");
+			this.requireRight(params.sessionId, this.actorId, "input");
+			const writer = state.writer ?? this.apiFor(params.sessionId).sessionInterruption(params.sessionId);
+			return this.checked(() => untilAborted(writer, () => this.prompt(params, state, writer)));
+		});
 
 		app.onNotification(methods.agent.session.cancel, async ({ params }) => {
 			const state = this.sessions.get(params.sessionId);
@@ -314,14 +322,15 @@ export class AcpInterface implements InterfaceCapability {
 
 	private async openForClient(params: { sessionId: string; cwd: string; mcpServers?: acp.McpServer[] }, replay: boolean) {
 		const id = params.sessionId;
-		const attached = this.sessions.has(id);
-		await this.reopen(id, params.cwd, attached ? undefined : params.mcpServers);
+		const previous = this.sessions.get(id);
+		const attached = !!previous && !previous.writer?.aborted;
+		await this.reopen(id, params.cwd, previous ? undefined : params.mcpServers);
 		try {
 			const result = await this.gateReply(id, replay ? "session/load" : "session/resume", await this.openResponse(id));
 			if (replay && !attached && this.hasRight(id, this.actorId, "watch")) await this.replay(id);
 			if (!attached) this.open(id);
 			return result;
-		} catch (e) { if (!attached) this.sessions.delete(id); throw e; }
+		} catch (e) { if (!previous) this.sessions.delete(id); throw e; }
 	}
 
 	private async reopen(sessionId: string, cwd: string, servers?: acp.McpServer[]): Promise<void> {
@@ -572,7 +581,7 @@ export class AcpInterface implements InterfaceCapability {
 			if (code === "held" && Number.isSafeInteger(retryAfterMs) && retryAfterMs! > 0) {
 				throw new RequestError(-32000, message, { code, retryAfterMs });
 			}
-			throw bindingError(code === "result_too_large" || code === "conflict" || code === "not_found" || code === "forbidden" || code === "busy" || code === "wrong_project" ? code : /Unknown tenant|forbidden/i.test(message) ? "forbidden" : "invalid_params", message);
+			throw bindingError(code === "lost" || code === "result_too_large" || code === "conflict" || code === "not_found" || code === "forbidden" || code === "busy" || code === "wrong_project" ? code : /Unknown tenant|forbidden/i.test(message) ? "forbidden" : "invalid_params", message);
 		}
 	}
 
@@ -636,6 +645,7 @@ export class AcpInterface implements InterfaceCapability {
 		const state = this.sessions.get(sessionId) ?? this.state();
 		this.sessions.set(sessionId, state);
 		state.unfollow?.();
+		state.writer = this.apiFor(sessionId).sessionInterruption(sessionId);
 		state.unfollow = this.apiFor(sessionId).follow(sessionId, { recipient: this.actorId }, (e) => this.scoped(() => this.forward(sessionId, e)));
 		void this.update(sessionId, {
 			sessionUpdate: "available_commands_update",
@@ -643,13 +653,10 @@ export class AcpInterface implements InterfaceCapability {
 		});
 	}
 
-	private async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
+	private async prompt(params: acp.PromptRequest, state: SessionState, writer: AbortSignal): Promise<acp.PromptResponse> {
 		const sessionId = params.sessionId;
-		const state = this.sessions.get(sessionId);
-		if (!state) throw new Error(`Session ${sessionId} is not open on this connection`);
 		const m = params._meta as Record<string, any> | undefined;
 		const key = m?.[NS]?.key ?? m?.["modular-agent/key"];
-		this.requireRight(sessionId, this.actorId, "input");
 		const busy = this.apiFor(sessionId).session(sessionId).busy;
 		const receipt = await this.apiFor(sessionId).input(sessionId, {
 			content: fromAcp(params.prompt),
@@ -657,6 +664,7 @@ export class AcpInterface implements InterfaceCapability {
 			when: busy ? "after" : "now",
 			key: typeof key === "string" ? key : undefined,
 		});
+		writer.throwIfAborted();
 		if (receipt.erased) return this.gateReply(sessionId, "session/prompt", { stopReason: "end_turn", _meta: { [NS]: { duplicate: true, erased: true } } });
 		if (receipt.handled) {
 			if (receipt.output && !receipt.duplicate) {
@@ -699,6 +707,10 @@ export class AcpInterface implements InterfaceCapability {
 	private track(e: AgentEvent): void {
 		const state = this.sessions.get(e.sessionId);
 		if (!state) return;
+		if (e.type === "session.interrupted") {
+			for (const waiter of [...state.waiters]) this.settle(e.sessionId, waiter, bindingError("lost", "Session was interrupted; reopen it to recover"));
+			return;
+		}
 		if (e.type === "input.withdrawn" && e.data?.reason === "cancelled") {
 			(state.handedBack ??= []).push({ inputId: e.data.inputId, content: e.data.content });
 		}
@@ -756,6 +768,10 @@ export class AcpInterface implements InterfaceCapability {
 		const state = this.sessions.get(sessionId);
 		if (!state || !this.hasRight(sessionId, this.actorId, "watch")) return;
 		switch (e.type) {
+			case "session.interrupted":
+				// ACP has no interruption update variant. Carry the event in binding metadata, not model text.
+				return this.update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "" },
+					_meta: { [NS]: { sessionInterrupted: e.data } } });
 			case "model.output":
 				if (e.data?.type === "text") return this.update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: e.data.delta } });
 				if (e.data?.type === "reasoning") return this.update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: e.data.delta } });

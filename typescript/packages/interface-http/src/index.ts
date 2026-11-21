@@ -62,8 +62,16 @@ export class HttpInterface implements InterfaceCapability {
 						const id = e.type === "entry" || e.type === "entry.added" ? e.data?.id : undefined;
 						res.write(`${id ? `id: ${id}\n` : ""}event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
 					};
-					const stop = api.follow(sessionId, { recipient: actor.id, fromEntry: at + 1 }, write);
-					return new Promise<void>((resolve) => res.on("close", () => (stop(), resolve())));
+					const writer = api.sessionInterruption(sessionId);
+					const stop = api.follow(sessionId, { recipient: actor.id, fromEntry: at + 1, onLag: () => res.end() }, write);
+					const interrupted = () => { void stop.idle().then(() => res.end()); };
+					if (writer.aborted) interrupted();
+					else writer.addEventListener("abort", interrupted, { once: true });
+					return new Promise<void>((resolve) => res.on("close", () => {
+						writer.removeEventListener("abort", interrupted);
+						stop();
+						resolve();
+					}));
 				}],
 			],
 			{ port: this.options.port, token: this.options.token },
