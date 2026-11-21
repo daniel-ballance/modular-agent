@@ -4,6 +4,8 @@ import json
 import uuid
 from datetime import UTC, datetime
 
+TOOL_RESULT_BYTES = 64 * 1024
+
 
 def identity():
     return uuid.uuid4().hex

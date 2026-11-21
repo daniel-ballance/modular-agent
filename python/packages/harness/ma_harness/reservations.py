@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections import Counter
 
-from ma_core import AgentError
+from ma_core import AgentError, TOOL_RESULT_BYTES
 from ma_core.wire import entry_out, recorded_as
 
 MIB = 1 << 20
@@ -37,6 +37,8 @@ DEFAULTS = {
     ),
 }
 MAX_ENTRY = 4 * MIB
+# A result can be kept in a receipt and a terminal record, with envelopes.
+CALL_BYTES = 4 * TOOL_RESULT_BYTES
 CONTROL = {"limit", "authority", "actor_left", "erase", "position_move", "job_cleanup_unconfirmed"}
 
 
@@ -91,7 +93,7 @@ def fold(entries):
         jobs=len(jobs),
         storageBytes=stored
         + sum(n + 64 * 1024 for n in pending.values())
-        + len(calls) * 64 * 1024
+        + len(calls) * CALL_BYTES
         + len(attempts) * (MAX_ENTRY + 65536)
         + len(jobs) * 128 * 1024
         + len(turns) * 64 * 1024
@@ -203,7 +205,7 @@ class Reservations:
         sid, tenant = session["id"], session.get("tenant")
         key = (sid, step)
         calls = response.get("calls", [])
-        extra = Counter(calls=max(0, len(calls) - 1), storageBytes=len(calls) * 64 * 1024)
+        extra = Counter(calls=max(0, len(calls) - 1), storageBytes=len(calls) * CALL_BYTES)
         try:
             if size(response) > MAX_ENTRY - 16384:
                 raise AgentError("Model result exceeds the record size", "result_too_large")

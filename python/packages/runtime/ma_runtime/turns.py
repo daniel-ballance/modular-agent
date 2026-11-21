@@ -6,7 +6,7 @@ import json
 from jsonschema import Draft202012Validator, ValidationError
 from referencing import Registry
 
-from ma_core import lower_reasoning, AgentError, content, identity
+from ma_core import TOOL_RESULT_BYTES, lower_reasoning, AgentError, content, identity
 from ma_core.recovery import STEP_AFTER, step_checkpoint
 from ma_core.wire import (
     entry_out,
@@ -42,9 +42,7 @@ def checked_tool_result(definition, result):
             "content": [],
             "_result_error": error,
         }
-    # A local Runtime records both the receipt and the terminal result. Leave
-    # room in the call's 64 KiB obligation for both envelopes and bookkeeping.
-    if len(json.dumps(result, ensure_ascii=True, separators=(",", ":"))) > 16 * 1024:
+    if len(json.dumps(result, ensure_ascii=True, separators=(",", ":"))) > TOOL_RESULT_BYTES:
         return {
             "call": result["call"],
             "status": result["status"],
