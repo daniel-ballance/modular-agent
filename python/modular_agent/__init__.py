@@ -13,6 +13,7 @@ from ._agent import (
     tenants_from_environment as tenants_from_environment,
     transient_runtime as transient_runtime,
 )
+from ._acp_policy import AcpPolicy as AcpPolicy
 from ._context import CallContext as CallContext, HookContext as HookContext
 from ._credentials import (
     CredentialStore as CredentialStore,

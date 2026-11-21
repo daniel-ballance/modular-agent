@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 from typing import Any, TypedDict, NotRequired, cast
 
-from modular_agent import ACP_RIGHTS, AcpActor, Actor, read_service_token, tenants_from_environment
+from ._agent import ACP_RIGHTS, AcpActor, read_service_token, tenants_from_environment
+from ._types import Actor
 
 MIB = 1 << 20
 FIELDS = ("inputs", "calls", "jobs", "bufferedBytes", "storageBytes", "controlBytes")
@@ -26,8 +27,8 @@ class StdioPolicy(TypedDict):
     represents: NotRequired[list[str]]
 
 
-class Policy:
-    def __init__(self, path: Path, *, required: bool):
+class AcpPolicy:
+    def __init__(self, path: Path, *, required: bool, several_actors: bool = False):
         self.path = path
         try:
             try:
@@ -43,7 +44,11 @@ class Policy:
                     raise
                 raw = {}
             _shape(raw, {"stdio", "actors", "limits"}, "policy")
-            self.stdio = cast(StdioPolicy, _principal(raw["stdio"])) if "stdio" in raw else None
+            self.stdio = (
+                cast(StdioPolicy, _principal(raw["stdio"], several_actors=several_actors))
+                if "stdio" in raw
+                else None
+            )
             self.actors: list[AcpActor] | None = None
             if "actors" in raw:
                 self.actors = []
@@ -52,7 +57,7 @@ class Policy:
                 if not isinstance(raw["actors"], list) or not raw["actors"]:
                     raise ValueError("actors must be a nonempty array")
                 for value in raw["actors"]:
-                    item = _principal(value, network=True)
+                    item = _principal(value, network=True, several_actors=several_actors)
                     filename = item.pop("tokenFile", None)
                     if not isinstance(filename, str) or not filename:
                         raise ValueError("actors requires a tokenFile path")
@@ -91,7 +96,9 @@ def _shape(value: Any, keys: set[str], name: str) -> None:
         raise ValueError(f"unknown {name} key: {sorted(extra)[0]}")
 
 
-def _principal(value: Any, *, network: bool = False) -> dict[str, Any]:
+def _principal(
+    value: Any, *, network: bool = False, several_actors: bool = False
+) -> dict[str, Any]:
     _shape(
         value,
         {"actor", "projects", "tenants", "represents", *(["tokenFile"] if network else [])},
@@ -108,7 +115,10 @@ def _principal(value: Any, *, network: bool = False) -> dict[str, Any]:
         not isinstance(r, str) or r not in ACP_RIGHTS for r in rights
     ):
         raise ValueError("rights must be an array of known rights")
-    if value.get("represents", []) != []:
+    represents = value.get("represents", [])
+    if not isinstance(represents, list) or any(not isinstance(a, str) or not a for a in represents):
+        raise ValueError("represents must be an array of actor IDs")
+    if represents and not several_actors:
         raise ValueError("ma requires represents to be an empty array")
     if "tenants" in value and (
         not isinstance(value["tenants"], list)

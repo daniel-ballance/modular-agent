@@ -5,7 +5,9 @@ import ipaddress
 import json
 import os
 import re
+import sqlite3
 import time
+from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
@@ -14,6 +16,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from ma_core import AgentError, Plugin, identity
 from ma_core.wire import entry_out
 
+from . import freshness, pending
 from .portable import session_view
 
 
@@ -46,7 +49,11 @@ class HTTPHistory(Plugin):
         "remote_lease": True,
     }
 
-    def __init__(self, url, token_file):
+    def __init__(self, url, token_file, coordination=None, witness=None):
+        self.witness = Path(witness) if witness is not None else None
+        self.coordination = Path(coordination) if coordination is not None else None
+        if self.coordination is not None:
+            self.declarations = {**self.declarations, "erasure": True, "pending_erasure": True}
         parsed = urlsplit(url)
         if (
             parsed.scheme not in {"http", "https"}
@@ -89,6 +96,9 @@ class HTTPHistory(Plugin):
         self.ttl = info.get("ttlMs")
         if type(self.ttl) is not int or self.ttl <= 0:
             raise AgentError("Invalid history lease TTL")
+        if self.coordination is not None:
+            with self._registry():
+                pass
         api.provide("history", self)
 
     @staticmethod
@@ -368,7 +378,55 @@ class HTTPHistory(Plugin):
             self._lose(sid, self.leases[sid], notify=False)
             raise
 
+    @contextmanager
+    def _registry(self, *, write=False):
+        if self.coordination is None:
+            raise AgentError("No pending erasure coordinator", "not_supported")
+        try:
+            uri = self.coordination.resolve().as_uri() + "?mode=rw"
+            with closing(sqlite3.connect(uri, uri=True)) as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                freshness.check(db, self.witness)
+                changes = db.total_changes
+                yield db
+                if write and db.total_changes != changes:
+                    freshness.advance(db, self.witness)
+        except (OSError, sqlite3.Error) as exc:
+            raise AgentError("Pending erasure registry is unavailable", "unavailable") from exc
+
+    async def publish_erasure(self, d, emit):
+        await self.writable(d, emit)
+        with self._registry(write=True) as db:
+            intent = pending.publish(db, d["session"], d["entries"])
+            return pending.copies(db, intent=intent)
+
+    async def pending_erasure(self, d, emit):
+        with self._registry() as db:
+            return pending.copies(db, session=d["session"])
+
+    async def erasure_revision(self, d, emit):
+        with self._registry() as db:
+            return pending.revision(db, d["session"])
+
     async def erase(self, d, emit):
+        if self.coordination is not None and d.get("intent"):
+            sid = d["session"]
+            lease = self.leases.get(sid)
+            if lease is None:
+                raise AgentError("Erasure requires the current writer", "lost")
+            generation = await self.acquire(sid)
+            result = await self.request(
+                "POST", self.path(sid) + "/erase", {"lease": generation, "entryIds": d["entries"]}
+            )
+            self._check(sid, lease)
+            with self._registry(write=True) as db:
+                self._check(sid, lease)
+                for entry_id in result["erased"]:
+                    db.execute(
+                        "UPDATE erase_copies SET confirmed=1 WHERE intent=? AND session=? AND entry=?",
+                        (d["intent"], sid, entry_id),
+                    )
+            return result
         sessions = {}
         for item in await self.list({}, emit):
             sid = item["id"]

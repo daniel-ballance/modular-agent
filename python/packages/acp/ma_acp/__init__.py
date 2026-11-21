@@ -365,6 +365,8 @@ class ACP(Plugin):
                 if value is not None:
                     await self.entry(sid, value, replay=True)
         await self.set_presence(sid, self.actor, True)
+        for actor in sorted(self.represents & (await self.get(sid))["actors"].keys()):
+            await self.set_presence(sid, actor, True)
         if replay:
             for q in await self.api.call(
                 "questions", "list", {"session": sid, "actor": self.actor}
@@ -909,8 +911,31 @@ class ACP(Plugin):
             await self.check_delivery(sid)
             await self.client.ext_notification("modular-agent/event", e)
 
+    async def question_route(self, sid, q):
+        for actor in (self.actor, *sorted(self.represents - {self.actor})):
+            if actor not in self.presence.get(sid, ()):
+                continue
+            attribution = await self.attribution(sid, actor)
+            questions = await self.api.call(
+                "questions",
+                "list",
+                {"session": sid, **attribution, "recipientView": True, "openOnly": True},
+            )
+            if any(item["id"] == q["id"] and item["answerable"] for item in questions):
+                return attribution
+        return None
+
     async def answer_request(self, sid, q):
         value = "declined"
+        attribution = await self.question_route(sid, q)
+        if attribution is None:
+            return
+        answer = {"session": sid, "request": q["id"], **attribution}
+
+        async def current_route():
+            await self.check_delivery(sid)
+            return attribution == await self.question_route(sid, q)
+
         try:
             if q["kind"] == "approval":
                 exact = q.get("approval_call") or {}
@@ -930,27 +955,17 @@ class ACP(Plugin):
                     "options": [
                         o.model_dump(mode="json", by_alias=True, exclude_none=True) for o in options
                     ],
-                    "_meta": {NAMESPACE: {"requestId": q["id"], "actorId": self.actor}},
+                    "_meta": {NAMESPACE: {"requestId": q["id"], "actorId": attribution["actor"]}},
                 }
                 view = await self.view(
                     {"method": "session/request_permission", "params": params},
                     sid,
                     event_type="request",
                 )
-                if view is None or view["params"] != params:
-                    await self.api.call(
-                        "questions",
-                        "answer",
-                        {
-                            "session": sid,
-                            "actor": self.actor,
-                            "request": q["id"],
-                            "value": "declined",
-                        },
-                    )
+                if not await current_route():
                     return
-                await self.check_delivery(sid)
-                if "approve" not in await self.rights(sid):
+                if view is None or view["params"] != params:
+                    await self.api.call("questions", "answer", {**answer, "value": "declined"})
                     return
                 self.approval_views.add((sid, q["id"]))
                 response = await self.client.request_permission(
@@ -974,8 +989,7 @@ class ACP(Plugin):
                         prop["enum"] = q["options"]
                     # Form mode is for non-sensitive data only, never secret questions.
                     view = await self.view(q, sid)
-                    await self.check_delivery(sid)
-                    if view is None or "answer" not in await self.rights(sid):
+                    if view is None or not await current_route():
                         return
                     response = await self.client.create_elicitation(
                         message=view["question"],
@@ -993,31 +1007,13 @@ class ACP(Plugin):
                             q["kind"] == "text" or submitted in q["options"]
                         ):
                             value = submitted
-            await self.check_delivery(sid)
-            await self.api.call(
-                "questions",
-                "answer",
-                {"session": sid, "actor": self.actor, "request": q["id"], "value": value},
-            )
-        except (asyncio.CancelledError, acp.RequestError):
+            if await current_route():
+                await self.api.call("questions", "answer", {**answer, "value": value})
+        except asyncio.CancelledError:
             raise
-        except (ConnectionError, EOFError):
-            if q["kind"] == "approval":
-                await self.api.call(
-                    "questions",
-                    "answer",
-                    {"session": sid, "actor": self.actor, "request": q["id"], "value": "declined"},
-                )
+        except (AgentError, acp.RequestError, ConnectionError, EOFError):
+            # A stale route or lost connection cannot stand in for an answer.
             return
-        except Exception:
-            try:
-                await self.api.call(
-                    "questions",
-                    "answer",
-                    {"session": sid, "actor": self.actor, "request": q["id"], "value": "declined"},
-                )
-            except Exception:
-                pass
 
     async def _cancel_requests(self, sid=None):
         tasks = [

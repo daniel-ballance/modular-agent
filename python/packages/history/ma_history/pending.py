@@ -96,12 +96,27 @@ def copies(db, *, intent=None, session=None):
     ]
 
 
+def revision(db, session):
+    version, unresolved = db.execute(
+        "SELECT COUNT(DISTINCT intent), MAX(confirmed=0) FROM erase_copies WHERE session=?",
+        (session,),
+    ).fetchone()
+    if unresolved:
+        raise AgentError("Session content is pending erasure", "unavailable")
+    return version
+
+
 def check_batch(db, entries):
     for entry in entries:
-        if entry.get("data", {}).get("erased") or entry["kind"] == "erase":
+        if (entry.get("data") or {}).get("erased") or entry["kind"] in {"erase", "erasure"}:
             continue
-        deps = set(entry.get("copies", []))
-        if entry.get("fork_source"):
+        copies = entry.get("copies")
+        deps = (
+            {item for item in copies if isinstance(item, str)}
+            if isinstance(copies, list)
+            else set()
+        )
+        if isinstance(entry.get("fork_source"), str):
             deps.add(entry["fork_source"])
         if any(
             db.execute("SELECT 1 FROM erase_copies WHERE entry=? LIMIT 1", (source,)).fetchone()

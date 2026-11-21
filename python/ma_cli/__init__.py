@@ -89,6 +89,19 @@ async def cli(args):
     from ma_fake import Fake
     from ma_terminal import Terminal
 
+    import os
+
+    if (
+        args.mode == "acp"
+        and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1"
+        and not args.fake_script
+        and (args.acp or os.environ.get("MODULAR_AGENT_CONFORMANCE_POLICY"))
+    ):
+        from .acp_fixture import serve
+
+        return await serve(args)
+    if args.listen is not None or args.token_file is not None:
+        raise ValueError("This base build serves WebSocket only in ACP conformance mode")
     if args.project is None:
         from pathlib import Path
 
@@ -109,8 +122,6 @@ async def cli(args):
         if args.fake_script
         else Claude()
     )
-    import os
-
     actor = os.environ.get("MODULAR_AGENT_ACTOR", "user")
     if args.mode == "acp" and (not actor or any(0xD800 <= ord(c) <= 0xDFFF for c in actor)):
         raise SystemExit("MODULAR_AGENT_ACTOR must be a nonempty Unicode Id")
@@ -217,9 +228,14 @@ def main():
     parser.add_argument("--model")
     parser.add_argument("-p", "--print", dest="prompt")
     parser.add_argument("--mode", choices=["line", "json", "acp"], default="line")
+    parser.add_argument("--acp", action="store_true")
+    parser.add_argument("--listen")
+    parser.add_argument("--token-file", type=Path)
     parser.add_argument("--list", choices=["project", "all"])
     parser.add_argument("--fake-script", type=Path, help="Offline scripted Provider JSON file")
     args = parser.parse_args()
+    if args.acp:
+        args.mode = "acp"
     if os.environ.get("MODULAR_AGENT_DATA_DIR"):
         args.home = Path(os.environ["MODULAR_AGENT_DATA_DIR"])
     if args.mode == "acp" and (args.prompt is not None or args.session or args.list):

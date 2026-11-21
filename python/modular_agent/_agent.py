@@ -1281,7 +1281,9 @@ def create_agent(
             if history is not None and not isinstance(history, HistoryStore):
                 store = _PortHistory(history)
             elif isinstance(history, HistoryStore) and history._kind == "http":
-                store = HTTPHistory(history._url, history._path)
+                store = HTTPHistory(
+                    history._url, history._path, history._coordination, history._witness
+                )
             elif durability == "ephemeral" or (history is None and data_dir is None):
                 store = agent._memory_store = memory_store or _MemoryHistory()
             else:

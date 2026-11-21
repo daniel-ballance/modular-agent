@@ -82,7 +82,6 @@ class Erasure:
                     if row["id"] in targets
                     and row["kind"] == "input_queued"
                     and row["data"].get("key")
-                    and not row.get("fork_source")
                 ]
                 await self.handle(
                     "append",

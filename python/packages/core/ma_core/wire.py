@@ -436,12 +436,16 @@ def entry_out(e):
     if kind == "inputAccepted":
         r["inputId"] = d.get("input", e["id"])
         r["data"] = {
-            **{k: v for k, v in d.items() if v is not None},
+            **{k: v for k, v in d.items() if v is not None and k not in {"input", "authority"}},
+            **({"rights": d["authority"]} if d.get("authority") is not None else {}),
             "inputId": r["inputId"],
             "content": e["content"],
         }
     elif kind == "inputHandedBack":
-        r["data"] = {"inputIds": d.get("inputIds") or [d["input"]]}
+        ids = d.get("inputIds") or [d["input"]]
+        r["data"] = {"inputIds": ids}
+        if len(ids) == 1:
+            r["inputId"] = ids[0]
     elif kind == "input":
         r["inputId"] = d.get("input", e["id"])
         r["message"] = {"role": "user", "content": e["content"]}

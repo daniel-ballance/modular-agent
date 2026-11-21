@@ -41,7 +41,7 @@ from .auth import AuthFile
 from .code import code_tool
 from .config import Paths, claude_launch
 from .prompt import discover, prompt_plugin
-from .policy import Policy
+from modular_agent import AcpPolicy
 
 
 class Script(ScriptedProvider):
@@ -340,8 +340,17 @@ async def _agent(
     )
     if bool(url) != bool(token):
         raise ValueError("set both MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE")
-    history = http_history(url, token) if url and token else file_history(paths.state / "sessions")
-    policy: Policy = args.operator_policy
+    history = (
+        http_history(
+            url,
+            token,
+            coordination=os.environ.get("MODULAR_AGENT_HISTORY_COORDINATION"),
+            witness=os.environ.get("MODULAR_AGENT_HISTORY_WITNESS"),
+        )
+        if url and token
+        else file_history(paths.state / "sessions")
+    )
+    policy: AcpPolicy = args.operator_policy
     if history_only:
         return await create_agent(
             project=project,
@@ -465,7 +474,7 @@ async def _agent(
 
 async def _run(args: argparse.Namespace) -> int:
     paths = Paths.from_env()
-    policy = args.operator_policy = Policy(
+    policy = args.operator_policy = AcpPolicy(
         args.policy or paths.config / "policy.json", required=args.policy is not None
     )
     project = args.project.resolve(strict=True)
