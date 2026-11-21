@@ -59,9 +59,12 @@ func (s *Server) expireStoreLease(id string, h held) {
 	s.timers[id] = time.AfterFunc(time.Until(h.until), func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if s.held[id] == h && !time.Now().Before(h.until) {
+		s.leaseMu.Lock()
+		same := s.held[id] == h
+		s.leaseMu.Unlock()
+		if same && !time.Now().Before(h.until) {
 			if s.closeStoreLease(id) == nil {
-				delete(s.held, id)
+				s.setLease(id, held{})
 			}
 		}
 	})

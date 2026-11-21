@@ -31,12 +31,16 @@ export function historyService(raw, tokenFile) {
 			throw new Error("history fixture exceeded the page watchdog");
 		},
 		// Shared data: Job reports. Observe actual append boundaries, not just two adjacent records.
-		async observe({ onRequest, beforeReply, fixtureReply } = {}) {
+		async observe({ onRequest, beforeReply, fixtureReply, onTrace } = {}) {
 			const batches = [];
 			const server = createServer(async (req, res) => {
+				const info = { method: req.method, path: req.url };
+				let upstreamStatus, upstreamMs;
+				const start = onTrace && performance.now();
+				if (onTrace) res.once("close", () => onTrace({ ...info, start, upstreamStatus, upstreamMs,
+					replyMs: performance.now() - start, sent: res.writableFinished }));
 				try {
 					if (!timingSafeEqual(digest(req.headers.authorization ?? ""), digest(`Bearer ${token}`))) return res.writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" }).end(JSON.stringify({ error: "Unauthorized", code: "unauthorized" }));
-					const info = { method: req.method, path: req.url };
 					onRequest?.(info);
 					const chunks = [];
 					let size = 0;
@@ -58,6 +62,10 @@ export function historyService(raw, tokenFile) {
 					}
 					const headers = Object.fromEntries(["content-type", "www-authenticate", "cache-control"].flatMap((k) => r.headers.has(k) ? [[k, r.headers.get(k)]] : []));
 					const bytes = Buffer.from(await r.arrayBuffer());
+					if (onTrace) {
+						upstreamStatus = r.status;
+						upstreamMs = performance.now() - start;
+					}
 					await beforeReply?.({ method: req.method, path: req.url, ok: r.ok, entries });
 					res.writeHead(r.status, headers).end(bytes);
 				} catch { res.destroy(); }
