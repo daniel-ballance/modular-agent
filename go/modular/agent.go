@@ -78,6 +78,7 @@ type options struct {
 	credentials                             CredentialStore
 	severalActors, sessionLimits            bool
 	tenants                                 map[string]Tenant
+	capacity                                *CapacityLimits
 	host                                    *bool
 	settings                                Settings
 	approval                                Approval
@@ -302,6 +303,11 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		h.DeferPersistentHistory()
 	}
 	h.ConfigureTenants(o.tenants)
+	if capacity, _ := ctx.Value(servingCapacityKey{}).(*harness.Capacity); capacity != nil {
+		h.UseCapacity(capacity)
+	} else if o.capacity != nil {
+		h.UseCapacity(harness.NewCapacity(*o.capacity))
+	}
 	h.HandBackQueuedOnOpen()
 	h.ConfigureSessions(o.jobReports, o.lateAnswers, o.refuseSettings)
 	a := &Agent{severalActors: o.severalActors, sessionLimits: o.sessionLimits, tenants: o.tenants != nil, jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
@@ -733,6 +739,7 @@ func (a *Agent) acpResources(opt ServeACPOptions) (func() map[string]any, acpint
 	projects := acpinterface.Projects{MCP: opt.ProjectMCP, WarnMCP: opt.WarnMCP}
 	if opt.Compose != nil {
 		projects.Compose = func(ctx context.Context, project, id string) (acpinterface.Project, error) {
+			ctx = context.WithValue(ctx, servingCapacityKey{}, a.h.Capacity())
 			child, err := opt.Compose(context.WithValue(ctx, reopeningSessionKey{}, id), project)
 			if err != nil {
 				return acpinterface.Project{}, err
@@ -743,6 +750,7 @@ func (a *Agent) acpResources(opt ServeACPOptions) (func() map[string]any, acpint
 				}
 				return acpinterface.Project{}, &Error{Code: InvalidComposition, Message: "Compose must return a separate agent bound to the requested project"}
 			}
+			child.h.UseCapacity(a.h.Capacity())
 			return acpinterface.Project{API: child.a, Declaration: func() map[string]any { return child.Declaration() }, Close: func() error { return child.Close(context.Background()) }}, nil
 		}
 	}
@@ -764,6 +772,7 @@ func (a *Agent) acpResources(opt ServeACPOptions) (func() map[string]any, acpint
 }
 
 type reopeningSessionKey struct{}
+type servingCapacityKey struct{}
 
 // ACPReopeningSession returns the stored session ID when a factory is called for a reopen.
 // The call does not grant access to the session or start its recovery.

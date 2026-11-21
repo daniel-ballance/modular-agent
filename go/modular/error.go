@@ -55,6 +55,8 @@ func appError(err error, fallback Code) error {
 		return &Error{Code: Lost, Message: api.ErrSessionLost.Error()}
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		fallback = CancelledCode
+	case errors.Is(err, api.ErrCapacity):
+		fallback = Busy
 	case errors.Is(err, api.ErrAuthority), errors.Is(err, api.ErrTenantForbidden):
 		fallback = Forbidden
 	case errors.Is(err, fs.ErrNotExist):

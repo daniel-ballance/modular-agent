@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+var ErrCapacity = errors.New("capacity limit")
+
+// JobReportBytes bounds the encoded input reserved for a reporting job.
+const JobReportBytes = 1 << 20
+
 var ErrTenantTokens = errors.New("tenantTokens limit")
 var ErrAuthority = errors.New("authority refused")
 var ErrTenantForbidden = errors.New("tenant access forbidden")

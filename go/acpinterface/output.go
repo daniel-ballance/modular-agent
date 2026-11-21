@@ -26,7 +26,7 @@ func outputReplyError(err error) error {
 	if errors.Is(err, api.ErrSessionLost) {
 		return &acp.RequestError{Code: -32000, Message: api.ErrSessionLost.Error(), Data: map[string]string{"code": "lost"}}
 	}
-	if errors.Is(err, api.ErrSettingsBusy) {
+	if errors.Is(err, api.ErrSettingsBusy) || errors.Is(err, api.ErrCapacity) {
 		return &acp.RequestError{Code: -32000, Message: err.Error(), Data: map[string]string{"code": "busy"}}
 	}
 	if errors.Is(err, api.ErrUnknownModel) {

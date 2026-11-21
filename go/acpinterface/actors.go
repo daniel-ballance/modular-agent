@@ -18,6 +18,9 @@ type actorSessions interface {
 }
 
 func invalidActorRequest(err error) error {
+	if errors.Is(err, api.ErrCapacity) {
+		return acpError("busy")
+	}
 	if errors.Is(err, api.ErrAuthority) || errors.Is(err, api.ErrAnswerAuthority) {
 		return acpError("forbidden")
 	}

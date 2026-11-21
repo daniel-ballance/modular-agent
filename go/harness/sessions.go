@@ -42,6 +42,7 @@ type session struct {
 	last             api.Outcome
 	resume           *api.Entry
 	external         []api.Call
+	responseClaim    *api.Entry
 }
 
 func clone[T any](v T) T {
@@ -92,6 +93,9 @@ func (c *client) NewEmbedded(ctx context.Context, project, tenant string, actors
 }
 
 func (c *client) newSession(ctx context.Context, project, tenant string, limit *[]string, forking bool, host *api.Actor, initial []api.Actor) (string, error) {
+	if err := c.seedCapacity(); err != nil {
+		return "", err
+	}
 	project, err := filepath.Abs(project)
 	if err == nil {
 		project, err = filepath.EvalSymlinks(project)
@@ -220,6 +224,9 @@ func (c *client) OpenForHost(ctx context.Context, id string, host api.Actor) err
 }
 
 func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
+	if err := c.seedCapacity(); err != nil {
+		return err
+	}
 	v, err := c.Get("history")
 	if err != nil {
 		return err
@@ -478,6 +485,10 @@ func (s *session) publishInitialLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
+	return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next) })
+}
+
+func (s *session) publishReservedInitialLocked(next api.Session) error {
 	l, err := acquireNew(s.pendingStore, s.id)
 	if err != nil {
 		return s.stopWriterLocked(err)
@@ -495,6 +506,10 @@ func (s *session) publishInitialLocked(next api.Session) error {
 }
 
 func (s *session) commitSnapshotLocked(next api.Session) error {
+	return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next) })
+}
+
+func (s *session) commitReservedSnapshotLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}

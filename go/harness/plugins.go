@@ -36,6 +36,7 @@ type Harness struct {
 	inTurnQuestions bool
 	tenants         map[string]tenantConfig
 	tenantConfigErr error
+	capacity        *Capacity
 	mu              sync.RWMutex
 	plugins         map[string]api.Plugin
 	external        map[string]bool
@@ -63,6 +64,7 @@ func New() *Harness { return NewWithLocalActor("local-user") }
 // NewWithLocalActor sets the principal for new embedded sessions.
 func NewWithLocalActor(actor string) *Harness {
 	h := &Harness{external: map[string]bool{}, externalPlugins: map[string]bool{}, plugins: map[string]api.Plugin{}, caps: map[string]registration{}, hooks: map[string]*hook{}, commands: map[string]registration{}, sessions: map[string]*session{}, listeners: map[int]outputListener{}, outputStreams: map[outputStream][]api.Event{}}
+	h.capacity = NewCapacity(DefaultCapacityLimits())
 	h.localActor = actor
 	h.tenants, h.tenantConfigErr = readTenants()
 	for name, rule := range map[string]api.Rule{"plugin.load": api.Gate, "process.stop": api.Observe, "session.recoverQuestions": api.Collect, "session.prepare": api.Observe, "session.start": api.Observe, "session.ready": api.Observe, "session.join": api.Observe, "session.leave": api.Observe, "session.stop": api.Observe, "session.end": api.Observe, "session.fork": api.Transform, "input": api.Transform, "turn.prepare": api.Transform, "output": api.Transform, "output.batch": api.Gate, "binding.provider.request": api.Transform, "binding.provider.response": api.Observe, "provider.piece": api.Observe} {
