@@ -82,6 +82,16 @@ func (i *Interface) Serve(ctx context.Context, in io.ReadCloser, out io.Writer) 
 
 // ServeWithDeclaration serves this composition's public capability declaration.
 func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any, configs ...Projects) error {
+	var config Projects
+	if len(configs) > 0 {
+		config = configs[0]
+	}
+	return i.ServeStdio(ctx, in, out, declared, config, Principal{})
+}
+
+// ServeStdio serves the configured local principal. A nil rights ceiling leaves
+// recorded grants unchanged and uses the normal prospective rights on creation.
+func (i *Interface) ServeStdio(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any, config Projects, policy Principal) error {
 	who := actor
 	if id, set := os.LookupEnv("MODULAR_AGENT_ACTOR"); set {
 		if id == "" || !utf8.ValidString(id) {
@@ -89,11 +99,13 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 		}
 		who = id
 	}
-	var config Projects
-	if len(configs) > 0 {
-		config = configs[0]
+	policy.Actor.ID, policy.Actor.Kind = who, "host"
+	if raw := os.Getenv("MODULAR_AGENT_ACP_REPRESENTS"); policy.Represents == nil && raw != "" {
+		if err := json.Unmarshal([]byte(raw), &policy.Represents); err != nil || policy.Represents == nil {
+			return errors.New("MODULAR_AGENT_ACP_REPRESENTS must be a JSON array of principal IDs")
+		}
 	}
-	return i.serve(ctx, in, out, declared, config, who, nil)
+	return i.serve(ctx, in, out, declared, config, who, &policy)
 }
 
 func (i *Interface) serve(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any, config Projects, who string, principal *Principal) error {
@@ -104,17 +116,11 @@ func (i *Interface) serve(ctx context.Context, in io.ReadCloser, out io.Writer, 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	represented := map[string]bool{}
-	if config := os.Getenv("MODULAR_AGENT_ACP_REPRESENTS"); principal == nil && config != "" {
-		var ids []string
-		if err := json.Unmarshal([]byte(config), &ids); err != nil || ids == nil {
-			return errors.New("MODULAR_AGENT_ACP_REPRESENTS must be a JSON array of principal IDs")
+	for _, id := range principal.Represents {
+		if id == "" || !utf8.ValidString(id) {
+			return errors.New("invalid ACP represented principal")
 		}
-		for _, id := range ids {
-			if id == "" {
-				return errors.New("empty ACP represented principal")
-			}
-			represented[id] = true
-		}
+		represented[id] = true
 	}
 	s := &server{declared: declared, a: i.a, project: project, actor: who, principal: principal, ctx: ctx, represents: represented, sessions: map[string]*attachment{}, resources: config}
 	if config.Compose != nil {
@@ -260,7 +266,7 @@ func (s *server) attach(id string, loading bool, identity ...string) *attachment
 	if len(identity) > 0 && identity[0] != "" {
 		who = identity[0]
 	}
-	if s.principal != nil {
+	if s.principal != nil && s.principal.Actor.Rights != nil {
 		rights := s.principal.Actor.Rights
 		if snap, err := s.a.Snapshot(id); err == nil {
 			rights = s.intersectRecorded(snap)
@@ -293,10 +299,11 @@ func (s *server) detach(id string, st *attachment) bool {
 	return last
 }
 func (s *server) hostActor() api.Actor {
-	if s.principal != nil {
-		return s.principal.Actor
+	host := s.principal.Actor
+	if host.Rights == nil {
+		host.Rights = api.Rights
 	}
-	return api.Actor{ID: s.actor, Kind: "host", Rights: api.Rights}
+	return host
 }
 func convertServers(in []acp.McpServer) ([]mcptools.Server, error) {
 	out := make([]mcptools.Server, 0, len(in))
@@ -330,6 +337,13 @@ func convertServers(in []acp.McpServer) ([]mcptools.Server, error) {
 	return out, nil
 }
 func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+	tenant, err := s.newTenant(p.Meta[Namespace])
+	if err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	if !s.hasRight("input") || len(p.McpServers) != 0 && !s.hasRight("tools") {
+		return acp.NewSessionResponse{}, acpError("forbidden")
+	}
 	if s.projects != nil {
 		host, err := s.projectHost(p.Cwd, "", p.AdditionalDirectories, p.SystemPrompt)
 		if err != nil {
@@ -346,22 +360,6 @@ func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.N
 	specs, err := convertServers(p.McpServers)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
-	}
-	var meta struct {
-		Tenant *string `json:"tenant"`
-	}
-	if raw := p.Meta[Namespace]; len(raw) > 0 && json.Unmarshal(raw, &meta) != nil {
-		return acp.NewSessionResponse{}, acp.NewInvalidParams(nil)
-	}
-	tenant := ""
-	if meta.Tenant != nil {
-		tenant = *meta.Tenant
-		if tenant == "" {
-			return acp.NewSessionResponse{}, acp.NewInvalidParams(nil)
-		}
-	}
-	if !s.allowsTenant(tenant) || !s.hasRight("input") || (len(specs) != 0 && !s.hasRight("tools")) {
-		return acp.NewSessionResponse{}, acpError("forbidden")
 	}
 	if s.resources.Settings != nil {
 		var defaults api.Settings
@@ -401,6 +399,27 @@ func (s *server) NewSession(ctx context.Context, p acp.NewSessionRequest) (acp.N
 	}
 	return acp.NewSessionResponse{SessionId: acp.SessionId(id), ConfigOptions: opts, Meta: s.sessionMeta(ctx, id)}, nil
 }
+
+func (s *server) newTenant(raw json.RawMessage) (string, error) {
+	var meta struct {
+		Tenant *string `json:"tenant"`
+	}
+	if len(raw) > 0 && json.Unmarshal(raw, &meta) != nil {
+		return "", acp.NewInvalidParams(nil)
+	}
+	tenant := ""
+	if meta.Tenant != nil {
+		tenant = *meta.Tenant
+		if tenant == "" {
+			return "", acp.NewInvalidParams(nil)
+		}
+	}
+	if !s.allowsTenant(tenant) {
+		return "", acpError("forbidden")
+	}
+	return tenant, nil
+}
+
 func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpServer, extra []string, prompt *acp.SystemPrompt, replay bool) (acp.LoadSessionResponse, error) {
 	var result acp.LoadSessionResponse
 	if err := s.root(cwd, extra, prompt); err != nil {
@@ -422,7 +441,7 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 	found := false
 	for _, snap := range list {
 		if snap.ID == id && s.discoverable(snap) {
-			if s.principal != nil {
+			if s.principal.Actor.Rights != nil {
 				s.connectionRights.Store(id, s.intersectRecorded(snap))
 			}
 			found = true
@@ -515,7 +534,7 @@ func (s *server) openReply(ctx context.Context, id, who string, replay bool) (ac
 	if replay {
 		method = "session/load"
 	}
-	gated, err := s.gateAnswer(api.AsActor(ctx, who), id, method, result)
+	gated, err := s.gateAnswer(s.acting(ctx, id, who), id, method, result)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
@@ -580,8 +599,10 @@ func (s *server) CloseSession(ctx context.Context, p acp.CloseSessionRequest) (a
 			return acp.CloseSessionResponse{}, acpError("forbidden")
 		}
 	}
-	if closer, ok := s.a.(interface{ CloseAs(string, string) error }); ok {
-		err = closer.CloseAs(id, st.actor)
+	if closer, ok := s.a.(interface {
+		CloseFor(context.Context, string) error
+	}); ok {
+		err = closer.CloseFor(s.acting(ctx, id, st.actor), id)
 	} else {
 		err = s.a.CloseSession(id)
 	}

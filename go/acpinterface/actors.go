@@ -18,6 +18,9 @@ type actorSessions interface {
 }
 
 func invalidActorRequest(err error) error {
+	if errors.Is(err, api.ErrAuthority) || errors.Is(err, api.ErrAnswerAuthority) {
+		return acpError("forbidden")
+	}
 	if errors.Is(err, api.ErrInputConflict) {
 		return acpError("conflict")
 	}
@@ -108,6 +111,11 @@ func (s *server) setPresence(id, who string, present bool) {
 	if present {
 		st.joined[who] = s.questions().Connect(id, who)
 	} else {
+		for k := range st.polled {
+			if k.actor == who {
+				delete(st.polled, k)
+			}
+		}
 		for k, cancel := range st.requests {
 			if k.actor == who {
 				cancel()

@@ -2,6 +2,7 @@ package modular
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"unicode/utf8"
@@ -19,6 +20,44 @@ type ACPActor struct {
 	TokenFile         string
 	Actor             Actor
 	Tenants, Projects []string
+	Represents        []string
+}
+
+func acpPolicy(projects, tenants, rights, represents []string) (acpinterface.Principal, error) {
+	p := acpinterface.Principal{Tenants: slices.Clone(tenants), Projects: slices.Clone(projects), Represents: slices.Clone(represents)}
+	p.Actor.Rights = slices.Clone(rights)
+	bad := func(message string) (acpinterface.Principal, error) {
+		return acpinterface.Principal{}, &Error{Code: InvalidComposition, Message: message}
+	}
+	for _, right := range rights {
+		if !slices.Contains(api.Rights, right) {
+			return bad("unknown ACP connection right")
+		}
+	}
+	for _, tenant := range tenants {
+		if !utf8.ValidString(tenant) {
+			return bad("invalid ACP tenant name")
+		}
+	}
+	for _, id := range represents {
+		if id == "" || !utf8.ValidString(id) {
+			return bad("invalid ACP represented actor ID")
+		}
+	}
+	for i, project := range projects {
+		if !utf8.ValidString(project) || !filepath.IsAbs(project) {
+			return bad("ACP project scope requires absolute paths")
+		}
+		canonical, err := configuration.Canonical(project)
+		if err != nil {
+			return bad("cannot resolve ACP project scope")
+		}
+		if info, err := os.Stat(canonical); err != nil || !info.IsDir() {
+			return bad("ACP project scope requires directories")
+		}
+		p.Projects[i] = canonical
+	}
+	return p, nil
 }
 
 // LocalACPActor is the operator identity used by stdio ACP when no override is set.
@@ -32,6 +71,9 @@ func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, e
 	if opt.Listen == "" || opt.Input != nil || opt.Output != nil {
 		return nil, &Error{Code: InvalidParams, Message: "ACP service requires Listen and no stdio streams"}
 	}
+	if opt.Projects != nil || opt.Tenants != nil || opt.Rights != nil || opt.Represents != nil {
+		return nil, &Error{Code: InvalidComposition, Message: "WebSocket scope belongs to each ACP actor"}
+	}
 	iface, err := a.acpInterface()
 	if err != nil {
 		return nil, err
@@ -40,29 +82,13 @@ func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, e
 	for _, entry := range opt.Actors {
 		id := entry.Actor.ID
 		if id == "" || !utf8.ValidString(id) || !slices.Contains([]string{"user", "host", "agent", "program"}, entry.Actor.Kind) {
-			return nil, &Error{Code: InvalidParams, Message: "invalid ACP actor identity or kind"}
+			return nil, &Error{Code: InvalidComposition, Message: "invalid ACP actor identity or kind"}
 		}
-		rights := append([]string{}, entry.Actor.Rights...)
-		for _, r := range rights {
-			if !slices.Contains(api.Rights, r) {
-				return nil, &Error{Code: InvalidParams, Message: "unknown ACP actor right"}
-			}
+		policy, err := acpPolicy(entry.Projects, entry.Tenants, append([]string{}, entry.Actor.Rights...), entry.Represents)
+		if err != nil {
+			return nil, err
 		}
-		entry.Actor.Rights = rights
-		var scope []string
-		if entry.Projects != nil {
-			scope = []string{}
-		}
-		for _, project := range entry.Projects {
-			if !filepath.IsAbs(project) {
-				return nil, &Error{Code: InvalidParams, Message: "ACP project scope requires absolute paths"}
-			}
-			p, err := configuration.Canonical(project)
-			if err != nil {
-				return nil, appError(err, InvalidParams)
-			}
-			scope = append(scope, p)
-		}
+		policy.Actor.ID, policy.Actor.Kind = id, entry.Actor.Kind
 		token, err := wswire.ReadToken(entry.TokenFile)
 		if err != nil {
 			return nil, appError(err, InvalidParams)
@@ -70,7 +96,7 @@ func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, e
 		if _, duplicate := actors[token]; duplicate {
 			return nil, &Error{Code: InvalidParams, Message: "duplicate ACP bearer token"}
 		}
-		actors[token] = acpinterface.Principal{Actor: entry.Actor, Tenants: slices.Clone(entry.Tenants), Projects: scope}
+		actors[token] = policy
 	}
 	declared, projects := a.acpResources(opt)
 	service, err := wswire.Listen(ctx, opt.Listen, opt.TLS, wswire.ACP, actors, func(ctx context.Context, c *wswire.Conn, p acpinterface.Principal) {

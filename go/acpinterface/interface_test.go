@@ -66,7 +66,7 @@ func timeout(t *testing.T) context.Context {
 	t.Cleanup(cancel)
 	return ctx
 }
-func connection(t *testing.T, a api.API, c *client) (*acp.ClientSideConnection, func()) {
+func connection(t *testing.T, a api.API, c *client, scope ...acpinterface.Principal) (*acp.ClientSideConnection, func()) {
 	t.Helper()
 	v, err := a.Get("interface.acp")
 	if err != nil {
@@ -75,7 +75,13 @@ func connection(t *testing.T, a api.API, c *client) (*acp.ClientSideConnection, 
 	agent, peer := net.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- v.(*acpinterface.Interface).Serve(ctx, agent, agent) }()
+	go func() {
+		if len(scope) == 0 {
+			done <- v.(*acpinterface.Interface).Serve(ctx, agent, agent)
+		} else {
+			done <- v.(*acpinterface.Interface).ServeStdio(ctx, agent, agent, nil, acpinterface.Projects{}, scope[0])
+		}
+	}()
 	conn := acp.NewClientSideConnection(c, peer, peer)
 	var once sync.Once
 	close := func() {

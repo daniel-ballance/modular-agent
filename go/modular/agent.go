@@ -665,8 +665,11 @@ type ServeACPOptions struct {
 	Output          io.Writer
 	Listen          string
 	Actors          []ACPActor
-	TLS             *TLSOptions
-	ControlDeadline time.Duration
+	// Stdio-only scope. Empty project or tenant lists deny that scope.
+	Projects, Tenants  []string
+	Rights, Represents []string
+	TLS                *TLSOptions
+	ControlDeadline    time.Duration
 }
 
 // ServeACP serves stdio (or the supplied streams), or blocks until its
@@ -701,7 +704,11 @@ func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error 
 		return err
 	}
 	declared, projects := a.acpResources(opt)
-	return appError(iface.ServeWithDeclaration(ctx, opt.Input, opt.Output, declared, projects), Lost)
+	policy, err := acpPolicy(opt.Projects, opt.Tenants, opt.Rights, opt.Represents)
+	if err != nil {
+		return err
+	}
+	return appError(iface.ServeStdio(ctx, opt.Input, opt.Output, declared, projects, policy), Lost)
 }
 
 func (a *Agent) acpInterface() (*acpinterface.Interface, error) {

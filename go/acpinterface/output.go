@@ -53,6 +53,10 @@ func (s *server) historyView(ctx context.Context, session string) (api.Session, 
 }
 
 func (s *server) gateAnswer(ctx context.Context, session, method string, result any) (any, error) {
+	st, err := s.attached(session)
+	if err != nil || !s.canDeliver(st, session, api.Acting(ctx)) {
+		return nil, acpError("forbidden")
+	}
 	gate, ok := s.a.(outputGate)
 	if !ok {
 		return result, nil
@@ -60,6 +64,9 @@ func (s *server) gateAnswer(ctx context.Context, session, method string, result 
 	event, err := gate.OutputValue(ctx, api.Event{Kind: "interface.answer", Method: method, Session: session, Data: api.JSON(result)})
 	if err != nil {
 		return nil, err
+	}
+	if !s.canDeliver(st, session, api.Acting(ctx)) {
+		return nil, acpError("forbidden")
 	}
 	if !json.Valid(event.Data) {
 		return nil, api.ErrOutputWithheld

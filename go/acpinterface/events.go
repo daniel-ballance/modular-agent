@@ -13,6 +13,10 @@ import (
 )
 
 func (s *server) update(ctx context.Context, id string, u acp.SessionUpdate) error {
+	st, err := s.attached(id)
+	if err != nil || ctx.Err() != nil || !s.canDeliver(st, id, st.actor) {
+		return acpError("forbidden")
+	}
 	return s.peer.SessionUpdate(ctx, acp.SessionNotification{SessionId: acp.SessionId(id), Update: u})
 }
 func (s *server) outputRecipient(e api.Event) string {
@@ -31,7 +35,10 @@ func (s *server) event(e api.Event) {
 		return
 	}
 	if st.loading {
-		st.pending = append(st.pending, e)
+		// Optional live updates may be dropped while replay is blocked.
+		if len(st.pending) < 256 && len(e.Data) <= 64<<10 {
+			st.pending = append(st.pending, e)
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -127,6 +134,9 @@ func (s *server) event(e api.Event) {
 		Events bool `json:"events"`
 	}
 	_ = json.Unmarshal(events, &cap)
+	if !s.canDeliver(st, e.Session, st.actor) {
+		return
+	}
 	if e.Kind == api.SessionInterrupted {
 		// The binding's projection of session interrupted (docs/bindings/acp.md, Updates).
 		var data struct {
@@ -338,6 +348,9 @@ func (s *server) askActor(st *attachment, q api.Question, who string) bool {
 		defer s.wg.Done()
 		defer cancel()
 		defer func() { s.mu.Lock(); delete(st.requests, key); s.mu.Unlock() }()
+		if !s.canDeliver(st, q.Session, who) || !s.eligible(st, q, who) {
+			return
+		}
 		answer := api.Answer{Request: q.ID, Declined: true}
 		meta := map[string]json.RawMessage{Namespace: api.JSON(q), "modular-agent/answeringActor": api.JSON(who)}
 		switch q.Kind {
@@ -373,8 +386,8 @@ func (s *server) askActor(st *attachment, q api.Question, who string) bool {
 			// silently downgraded to free text. A secure out-of-band flow can answer
 			// through the explicit extension instead.
 		}
-		if ctx.Err() == nil {
-			_ = s.answerFor(api.AsActor(ctx, st.actor), q.Session, who, answer)
+		if ctx.Err() == nil && s.canDeliver(st, q.Session, who) && s.eligible(st, q, who) {
+			_ = s.answerFor(s.acting(ctx, q.Session, st.actor), q.Session, who, answer)
 		}
 	}()
 	return true

@@ -1398,17 +1398,17 @@ func (c *client) Wait(ctx context.Context, id string) (api.Outcome, error) {
 func (c *client) CloseSession(id string) error { return c.stopSession(id, true) }
 func (c *client) StopSession(id string) error  { return c.stopSession(id, false) }
 func (c *client) CloseAs(id, who string) error {
-	return c.stopSessionAs(id, true, who)
+	return c.CloseFor(api.AsActor(context.Background(), who), id)
 }
 func (c *client) CloseFor(ctx context.Context, id string) error {
-	return c.stopSessionAs(id, true, api.Acting(ctx), api.ActingVia(ctx))
+	return c.stopSessionAs(ctx, id, true, api.Acting(ctx), api.ActingVia(ctx))
 }
 
 func (c *client) stopSession(id string, closing bool) error {
-	return c.stopSessionAs(id, closing, "")
+	return c.stopSessionAs(context.Background(), id, closing, "", "")
 }
 
-func (c *client) stopSessionAs(id string, closing bool, who string, via ...string) error {
+func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who, via string) error {
 	s, err := c.find(id)
 	if err != nil {
 		return err
@@ -1416,14 +1416,14 @@ func (c *client) stopSessionAs(id string, closing bool, who string, via ...strin
 	s.mu.Lock()
 	if who != "" {
 		_, member := actors(s.data)[who]
-		if !member || (s.running || hasUnfinishedJobs(s.data)) && !c.authorized(s.data, who, "cancel") {
+		if !member || (s.running || hasUnfinishedJobs(s.data)) && !c.authorizedBy(s.data, ctx, "cancel") {
 			s.mu.Unlock()
 			return api.ErrCloseForbidden
 		}
 	}
-	if len(via) > 0 && via[0] != "" {
-		_, member := actors(s.data)[via[0]]
-		if !member || (s.running || hasUnfinishedJobs(s.data)) && !c.authorized(s.data, via[0], "cancel") {
+	if via != "" {
+		_, member := actors(s.data)[via]
+		if !member {
 			s.mu.Unlock()
 			return api.ErrCloseForbidden
 		}

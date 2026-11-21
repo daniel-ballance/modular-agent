@@ -36,7 +36,7 @@ func (s *server) HandleExtensionMethod(ctx context.Context, method string, b jso
 	if err == nil {
 		if st, e := s.attached(p.SessionID); e == nil {
 			if method != "_modular-agent/requests" {
-				result, err = s.gateAnswer(api.AsActor(ctx, st.actor), p.SessionID, method, result)
+				result, err = s.gateAnswer(s.acting(ctx, p.SessionID, st.actor), p.SessionID, method, result)
 			}
 		}
 	}
@@ -85,6 +85,12 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 	// Proposals, release and withdraw also serve parked job reports.
 	feature := ""
 	represented := p.ActorID != "" && p.ActorID != st.actor
+	if represented && (method == "_modular-agent/input" || method == "_modular-agent/answer") {
+		snap, err := s.a.Snapshot(p.SessionID)
+		if err != nil || !s.represents[p.ActorID] || snap.Actors[p.ActorID].ID == "" {
+			return nil, acpError("forbidden")
+		}
+	}
 	switch method {
 	case "_modular-agent/actors", "_modular-agent/join", "_modular-agent/leave":
 		feature = "severalActors"

@@ -63,15 +63,17 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 			}
 			return host, nil
 		}
-		// A client cannot start another project's composition by pairing its
-		// path with a saved ID belonging to a different directory.
-		list, err := s.a.List(project)
+		// Authorize the stored scope before passing the ID to the factory.
+		list, err := s.a.List("")
 		if err != nil {
 			return nil, err
 		}
 		found := false
 		for _, row := range list {
 			if row.ID == id && s.discoverable(row) {
+				if row.Project != project {
+					return nil, acpError("wrong_project")
+				}
 				found = true
 				key.savedModel = row.Settings.Model
 				break

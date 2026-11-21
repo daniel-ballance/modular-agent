@@ -27,6 +27,38 @@ func (c *testACPClient) SessionUpdate(_ context.Context, p acp.SessionNotificati
 func (c *testACPClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{Outcome: "cancelled"}}}, nil
 }
+func TestServeACPDenyTenantBeforeCompose(t *testing.T) {
+	t.Setenv("MODULAR_AGENT_PLUGINS", "")
+	project := t.TempDir()
+	a, err := New(t.Context(), WithProject(project), WithPluginHost(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(context.Background())
+	err = a.ServeACP(t.Context(), ServeACPOptions{Projects: []string{"relative"}})
+	if e, ok := err.(*Error); !ok || e.Code != InvalidComposition {
+		t.Fatalf("invalid project: %v", err)
+	}
+	agent, peer := net.Pipe()
+	var composed atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- a.ServeACP(t.Context(), ServeACPOptions{Input: agent, Output: agent, Projects: []string{project}, Compose: func(context.Context, string) (*Agent, error) {
+			composed.Add(1)
+			return nil, nil
+		}})
+	}()
+	conn := acp.NewClientSideConnection(&testACPClient{}, peer, peer)
+	defer func() { conn.Close(); <-done }()
+	if _, err := conn.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = conn.NewSession(t.Context(), acp.NewSessionRequest{Cwd: project, Meta: map[string]json.RawMessage{"modular-agent": json.RawMessage(`{"tenant":"other"}`)}})
+	if err == nil || !strings.Contains(err.Error(), "forbidden") || composed.Load() != 0 {
+		t.Fatalf("project composed for denied tenant: %v (factory calls: %d)", err, composed.Load())
+	}
+}
+
 func TestServeACPResumeDoesNotWaitForRecovery(t *testing.T) {
 	t.Setenv("MODULAR_AGENT_PLUGINS", "")
 	t.Setenv("MODULAR_AGENT_ACTOR", localActor)
