@@ -135,7 +135,7 @@ export class AcpInterface implements InterfaceCapability {
 	private deliveredPollApprovals = new Set<string>();
 	private clientCaps: acp.ClientCapabilities = {};
 	private sessions = new Map<string, SessionState>();
-	private pending = new Map<string, AbortController>();
+	private pending = new Map<string, { abort(): void; sessionId: string; actorId: string }>();
 
 	constructor(private readonly options: AcpOptions = {}) {
 		this.actorId = options.actor?.id ?? options.actorId ?? "acp-user";
@@ -604,7 +604,7 @@ export class AcpInterface implements InterfaceCapability {
 	}
 
 	private async gateReply<T>(sessionId: string, method: string, result: T): Promise<T> {
-		const gated = await this.apiFor(sessionId).gateOutput(sessionId, this.actorId, "reply", { method, result });
+		const gated = await this.checked(() => this.apiFor(sessionId).gateOutput(sessionId, this.actorId, "reply", { method, result }));
 		if (sessionId && !this.attached(sessionId)) throw bindingError("forbidden");
 		if (["session/load", "session/resume", "_modular-agent/history", "_modular-agent/requests",
 			"_modular-agent/actors", "_modular-agent/jobs", "_modular-agent/proposals"].includes(method)) this.requireRight(sessionId, this.actorId, "watch");
@@ -752,6 +752,9 @@ export class AcpInterface implements InterfaceCapability {
 		if (!state) return;
 		if (e.type === "entry.added" && e.data?.kind === "actorLeft") {
 			state.present.delete(e.data.actorId);
+			for (const route of this.pending.values()) {
+				if (route.sessionId === e.sessionId && route.actorId === e.data.actorId) route.abort();
+			}
 		}
 		if (e.type === "session.interrupted") {
 			for (const waiter of [...state.waiters]) this.settle(e.sessionId, waiter, bindingError("lost", "Session was interrupted; reopen it to recover"));
@@ -942,7 +945,7 @@ export class AcpInterface implements InterfaceCapability {
 		// Without form support, free text and choices stay open for the binding's requests/answer extensions.
 		if ((request.kind === "text" || request.kind === "choice") && !this.clientCaps.elicitation?.form) return;
 		const abort = new AbortController();
-		this.pending.set(request.id, abort);
+		this.pending.set(request.id, { abort: () => abort.abort(), sessionId: request.sessionId, actorId });
 		const send = request.kind === "approval" ? this.offerApproval(request, actorId, abort.signal) : this.apiFor(request.sessionId).gateOutput(request.sessionId, this.actorId, "input.request", request)
 			.then((gated) => gated && !abort.signal.aborted && this.canAnswer(request.sessionId, request.id, actorId) ? this.ask(gated, actorId, abort.signal) : undefined);
 		void send
@@ -1062,8 +1065,43 @@ export class AcpInterface implements InterfaceCapability {
 
 	serveStream(stream: Stream): Promise<void> {
 		const output = stream.writable.getWriter();
+		const interfacePart = this;
+		const replies = new Map<number | string, { sessionId: string; method: string; right?: Authority }>();
+		stream.readable = stream.readable.pipeThrough(new TransformStream({
+			transform(message, controller) {
+				if ("method" in message && "id" in message && message.id !== null && message.params && typeof message.params === "object") {
+					const { sessionId, when, actorId } = message.params as { sessionId?: unknown; when?: unknown; actorId?: unknown };
+					if (typeof sessionId === "string" && replies.size < 1024) {
+						const method = message.method;
+						const watch = ["session/load", "session/resume", "_modular-agent/history", "_modular-agent/requests", "_modular-agent/jobs",
+							"_modular-agent/tenant", "_modular-agent/proposals", "_modular-agent/actors"].includes(method);
+						const right = watch ? "watch" : method === "session/prompt" ? "input" :
+							method === "_modular-agent/input" ? (when === "propose" ? "propose" : "input") : undefined;
+						replies.set(message.id, { sessionId, method, right });
+					} else if (typeof sessionId === "string" && replies.size >= 1024) {
+						throw new Error("Too many outstanding ACP requests");
+					}
+				}
+				controller.enqueue(message);
+			},
+		}));
 		stream.writable = new WritableStream({
 			async write(message) {
+				if ("id" in message && ("result" in message || "error" in message) && message.id !== null) {
+					const route = replies.get(message.id);
+					replies.delete(message.id);
+					const payload = "result" in message || ("error" in message && message.error.data && typeof message.error.data === "object" && "_meta" in message.error.data);
+					if (route && payload && route.right) {
+						const allowed = interfacePart.scoped(() => {
+							try {
+								interfacePart.apiFor(route.sessionId).checkPending(route.sessionId);
+								return interfacePart.attached(route.sessionId) && interfacePart.hasRight(route.sessionId, interfacePart.actorId, route.right!);
+							} catch { return false; }
+						});
+						if (!allowed) return output.write({ jsonrpc: "2.0", id: message.id,
+							error: { code: -32602, message: "Session reply is no longer available", data: { code: "forbidden" } } });
+					}
+				}
 				if (Buffer.byteLength(JSON.stringify(message)) <= MAX_LINE_BYTES) return output.write(message);
 				if ("result" in message || "error" in message) {
 					const replacement = { jsonrpc: "2.0" as const, id: message.id, error: { code: -32000, message: "Result is too large", data: { code: "result_too_large" } } };

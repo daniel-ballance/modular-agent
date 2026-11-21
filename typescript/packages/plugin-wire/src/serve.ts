@@ -272,7 +272,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 					if (!project || !service.projects.has(project)) throw new WireError("invalid_request", "Project is not granted to this host");
 				}
 				init.home = join(service.stateDir, createHash("sha256").update(init.home).digest("hex"));
-				pointDir = join(service.stateDir, ".points");
+				pointDir = join(init.home, ".points");
 				await mkdir(init.home, { recursive: true, mode: 0o700 });
 			}
 			for (const plugin of options.plugins) {
@@ -429,7 +429,8 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	peer.handle("env/exists", async (p) => ({ exists: await (await filesAt(p)).exists(p.path) }));
 	const scopedPoint = async (p: { cwd: string; point: string }) => {
 		if (!pointDir) return p.point;
-		if (typeof p.point !== "string" || !/^[0-9a-f-]{36}$/.test(p.point)) throw new WireError("invalid_request", "Point is not granted to this host");
+		if (typeof p.point !== "string" || !p.point) throw new WireError("invalid_request", "Invalid point");
+		if (!/^[0-9a-f-]{36}$/.test(p.point)) throw new WireError("not_found", "Unknown point");
 		const saved = await readFile(join(pointDir, p.point), "utf8").catch(error => { throw missing(error); });
 		const { point, cwd, project } = JSON.parse(saved) as { point: string; cwd: string; project: string };
 		if (project !== projectRoot || cwd !== await realpath(p.cwd)) throw new WireError("invalid_request", "Point is outside the host project");
