@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use standard::{Standard, script::Script};
 use std::{
     collections::BTreeMap,
+    os::fd::{FromRawFd, OwnedFd},
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -62,6 +63,9 @@ impl Rig {
                     .map(|id| (id.into(), format!("call-{i}-0")))
             })
             .collect();
+        // Give each rig a distinct command line so tests can find their own worker.
+        let worker = root.path().join("sandbox-worker");
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ma"), &worker).unwrap();
         let standard = Standard {
             config: root.path().join("config"),
             state: root.path().join("state"),
@@ -70,6 +74,7 @@ impl Rig {
             conformance: false,
             scripted: Some(Script::new(json!(scripts), None)),
             code: tools_code::CodeTool {
+                worker: Some(worker),
                 compute: Duration::from_millis(300),
                 calls: 5,
                 ..Default::default()
@@ -145,7 +150,7 @@ async fn the_model_is_offered_one_tool_and_its_calls_are_nested_and_private() {
     let rig = Rig::new(vec![
         code(
             "c1",
-            "tools.write(path='a.txt', content='one\\ntwo\\n')\ntools.edit('a.txt', [{'oldText': 'two', 'newText': '2'}])\nprint('printed')\ntools.read('a.txt')",
+            "import tools as t\nt.write(path='a.txt', content='one\\ntwo\\n')\ntools.edit('a.txt', [{'oldText': 'two', 'newText': '2'}])\nprint('printed')\nread = t.read\nread('a.txt')",
         ),
         text("done"),
     ])
@@ -249,7 +254,9 @@ async fn the_sandbox_reaches_nothing_itself_and_is_bounded() {
             "fs",
             "from pathlib import Path\nPath('/etc/hostname').read_text()",
         ),
+        code("clock", "import time\ntime.time()"),
         code("spin", "while True:\n    pass"),
+        code("after-spin", "print('still here')"),
         code("many", "for i in range(9):\n    tools.list()"),
         code("deep", "def f(n):\n    return f(n + 1)\nf(0)"),
         text("done"),
@@ -259,13 +266,15 @@ async fn the_sandbox_reaches_nothing_itself_and_is_bounded() {
     let fs = rig.result("fs").await;
     assert_eq!(fs.status, "failed");
     assert!(fs.text.contains("no direct access"), "{}", fs.text);
+    let clock = rig.result("clock").await;
+    assert_eq!(clock.status, "failed");
+    assert!(clock.text.contains("no direct access"), "{}", clock.text);
     let spin = rig.result("spin").await;
     assert_eq!(spin.status, "failed");
-    assert!(
-        spin.text.to_lowercase().contains("time limit"),
-        "{}",
-        spin.text
-    );
+    assert!(spin.text.contains("TimeoutError"), "{}", spin.text);
+    let after = rig.result("after-spin").await;
+    assert_eq!(after.status, "completed");
+    assert_eq!(after.text, "still here\n");
     let many = rig.result("many").await;
     assert_eq!(many.status, "failed");
     assert!(
@@ -276,6 +285,124 @@ async fn the_sandbox_reaches_nothing_itself_and_is_bounded() {
     let deep = rig.result("deep").await;
     assert_eq!(deep.status, "failed");
     assert!(deep.text.contains("RecursionError"), "{}", deep.text);
+}
+
+#[tokio::test]
+async fn the_memory_limit_fails_the_run_and_the_next_run_works() {
+    let rig = Rig::new(vec![
+        code(
+            "fill",
+            "print('x' * 60000)\nx = []\nfor i in range(300):\n    x.append('y' * 1048576)\nprint('unreachable')",
+        ),
+        code("next", "print('still here')"),
+        text("done"),
+    ])
+    .await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    let fill = rig.result("fill").await;
+    assert_eq!(fill.status, "failed");
+    assert!(fill.text.contains("MemoryError"), "{}", fill.text);
+    assert!(!fill.text.contains("unreachable"));
+    let next = rig.result("next").await;
+    assert_eq!(next.status, "completed");
+    assert_eq!(next.text, "still here\n");
+}
+
+/// Stop at a known point in a run, without guessing how long worker startup takes.
+async fn suspended_rig(scripts: Vec<Value>) -> (Rig, Arc<tokio::sync::Notify>) {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let signal = started.clone();
+    let plugin = Plugin::new("checkpoint").tool(Tool::new("hold", "Wait at a checkpoint").run(
+        move |_: Value, _| {
+            signal.notify_one();
+            std::future::pending::<modular_agent::Result<ToolOutput>>()
+        },
+    ));
+    (
+        Rig::with(scripts, vec![plugin], json!({}), |_| ()).await,
+        started,
+    )
+}
+
+fn sandbox_pid(rig: &Rig) -> i32 {
+    use std::os::unix::ffi::OsStrExt;
+    let path = rig.root.path().join("sandbox-worker");
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let argv0 = cmdline.split(|b| *b == 0).next()?;
+            (argv0 == path.as_os_str().as_bytes()).then_some(pid)
+        })
+        .expect("the suspended sandbox worker is running")
+}
+
+#[tokio::test]
+async fn a_worker_death_fails_its_call_without_waiting_for_the_nested_tool() {
+    let (rig, held) = suspended_rig(vec![
+        code("lost", "tools.hold()"),
+        code("next", "print('new worker')"),
+        text("done"),
+    ])
+    .await;
+    let rig = Arc::new(rig);
+    let turn = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.run("go").await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), held.notified())
+        .await
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(sandbox_pid(&rig), libc::SIGKILL) }, 0);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), turn)
+            .await
+            .unwrap()
+            .unwrap(),
+        Outcome::Completed
+    );
+    let lost = rig.result("lost").await;
+    assert_eq!(lost.status, "failed");
+    assert!(lost.text.contains("worker died"), "{}", lost.text);
+    let next = rig.result("next").await;
+    assert_eq!(next.status, "completed");
+    assert_eq!(next.text, "new worker\n");
+}
+
+#[tokio::test]
+async fn cancelling_a_run_kills_the_worker_and_a_new_run_can_start() {
+    let (rig, held) = suspended_rig(vec![
+        code("held", "tools.hold()"),
+        code("next", "print('after cancellation')"),
+        text("done"),
+    ])
+    .await;
+    let rig = Arc::new(rig);
+    let turn = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.run("go").await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), held.notified())
+        .await
+        .unwrap();
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, sandbox_pid(&rig), 0) };
+    assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+    // The pidfd stays open and is owned by the registration.
+    let worker =
+        unsafe { tokio::io::unix::AsyncFd::register(OwnedFd::from_raw_fd(fd as i32)) }.unwrap();
+    rig.session.cancel().await.unwrap();
+    assert_eq!(turn.await.unwrap(), Outcome::Cancelled);
+    assert_eq!(rig.result("held").await.status, "cancelled");
+    let _ready = tokio::time::timeout(Duration::from_secs(10), worker.readable())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rig.run("go again").await, Outcome::Completed);
+    let next = rig.result("next").await;
+    assert_eq!(next.status, "completed");
+    assert_eq!(next.text, "after cancellation\n");
 }
 
 /// A gate that refuses one tool, as an approval or policy plugin would.

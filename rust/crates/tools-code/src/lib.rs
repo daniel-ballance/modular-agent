@@ -3,17 +3,16 @@
 //! leaves the sandbox as a nested tool call, so it passes the same gates and
 //! is recorded like any other call. The sandbox itself reaches nothing.
 use anyhow::{Result, ensure};
-use modular_agent::{Code, Error, Plugin, Tool, ToolContext, ToolOutput, ToolStatus};
-use monty::{MontyRun, RunProgress};
-use monty_types::{
-    CallArgs, CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, MontyUuid,
-    NameLookupResult, OsFunctionCall, PrintWriter, ResourceLimits, ResourceTracker,
-};
+use modular_agent::{Plugin, Tool, ToolContext, ToolOutput, ToolStatus};
+use monty_pool::Pool;
+use monty_types::{CallArgs, ExcType, MontyException};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::OnceCell;
 
 pub mod catalog;
 pub mod convert;
+mod sandbox;
 use catalog::Function;
 
 pub const TOOL: &str = "codemode";
@@ -24,6 +23,8 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
 #[derive(Clone)]
 pub struct CodeTool {
+    /// A Monty worker executable. By default the pool re-executes `ma`.
+    pub worker: Option<PathBuf>,
     /// Longest stretch of Python between two function calls.
     pub compute: Duration,
     /// Most function calls one run may make.
@@ -35,6 +36,7 @@ pub struct CodeTool {
 impl Default for CodeTool {
     fn default() -> Self {
         Self {
+            worker: None,
             compute: Duration::from_secs(30),
             calls: 500,
             recursion: 200,
@@ -46,12 +48,14 @@ impl Default for CodeTool {
 impl CodeTool {
     pub fn plugin(&self) -> Plugin {
         let tool = self.clone();
+        let pool = Arc::new(OnceCell::new());
         Plugin::new("code").tool(
             Tool::new(TOOL, "Run Python in a sandbox. The functions listed under \"Functions in codemode\" in the system prompt are the only way to reach files, commands and other tools. Call them on `tools`, for example `text = tools.read(path=\"README.md\")`. The value of the last expression and anything printed come back as the result. Each run starts fresh: no variables carry over. The sandbox runs a subset of Python: no classes with inheritance, no third-party packages, and no direct file, network or process access.")
                 .input_schema(json!({"type":"object","properties":{"code":{"type":"string","description":"Python source to run"}},"required":["code"],"additionalProperties":false}))
                 .run(move |input: Value, cx| {
                     let tool = tool.clone();
-                    async move { tool.run(input["code"].as_str().expect("validated code").into(), cx).await }
+                    let pool = pool.clone();
+                    async move { tool.run(input["code"].as_str().expect("validated code"), cx, &pool).await }
                 })
         )
     }
@@ -74,26 +78,6 @@ pub fn functions(tools: Vec<Value>) -> Result<Vec<Function>> {
     Ok(functions)
 }
 
-enum Next {
-    Progress(Box<RunProgress>),
-    Raised(MontyException),
-}
-/// Monty runs on a blocking thread: a step is plain computation until the
-/// next function call, bounded by the compute limit.
-async fn step<F>(printed: String, cap: usize, run: F) -> Result<(Next, String)>
-where
-    F: FnOnce(PrintWriter<'_>) -> std::result::Result<RunProgress, MontyException> + Send + 'static,
-{
-    Ok(tokio::task::spawn_blocking(move || {
-        let mut printed = printed;
-        let next = match run(PrintWriter::CollectString(&mut printed, Some(cap))) {
-            Ok(progress) => Next::Progress(Box::new(progress)),
-            Err(error) => Next::Raised(error),
-        };
-        (next, printed)
-    })
-    .await?)
-}
 fn raise(kind: ExcType, text: impl Into<String>) -> MontyException {
     MontyException::new(kind, Some(text.into()))
 }
@@ -105,24 +89,6 @@ struct Run<'a> {
     made: usize,
 }
 impl Run<'_> {
-    /// The `tools` object: one function per tool. Tools sit under a name of
-    /// their own because some share a name with a Python builtin, such as
-    /// `exec` and `list`.
-    fn module(&self) -> MontyObject {
-        MontyObject::module(
-            MODULE,
-            MontyUuid::from_u128(1),
-            self.functions.values().map(|function| {
-                (
-                    MontyObject::string(function.name.as_str()),
-                    MontyObject::function(
-                        function.name.as_str(),
-                        Some(function.tool.description.clone()),
-                    ),
-                )
-            }),
-        )
-    }
     /// One function call from the sandbox, as a value or a Python exception.
     async fn call(
         &mut self,
@@ -207,89 +173,6 @@ impl Run<'_> {
             )),
         }
     }
-    async fn drive(
-        &mut self,
-        code: String,
-    ) -> Result<(std::result::Result<MontyObject, MontyException>, String)> {
-        let limits = ResourceLimits::default()
-            .max_turn_duration(self.tool.compute)
-            .max_recursion_depth(self.tool.recursion);
-        let cap = self.tool.print_bytes;
-        let (mut next, mut printed) = step(String::new(), cap, move |print| {
-            MontyRun::new(code, "main.py", vec![], CompileOptions::default())?.start(
-                vec![],
-                ResourceTracker::new(limits),
-                print,
-            )
-        })
-        .await?;
-        loop {
-            let progress = match next {
-                Next::Raised(error) => return Ok((Err(error), printed)),
-                Next::Progress(progress) => *progress,
-            };
-            if self.cx.cancelled().is_cancelled() {
-                return Err(Error::new(Code::Cancelled, "cancelled").into());
-            }
-            (next, printed) = match progress {
-                RunProgress::Complete(value) => return Ok((Ok(value), printed)),
-                RunProgress::NameLookup(lookup) => {
-                    let found = match lookup.name.as_str() {
-                        name @ ("describe_tool" | "search_tools") => {
-                            NameLookupResult::Value(MontyObject::function(name, None))
-                        }
-                        MODULE => NameLookupResult::Value(self.module()),
-                        _ => NameLookupResult::Undefined,
-                    };
-                    step(printed, cap, move |print| lookup.resume(found, print)).await?
-                }
-                RunProgress::FunctionCall(call) => {
-                    let result = self
-                        .call(&call.function_name, &call.args)
-                        .await
-                        .map(|value| convert::to_python(&value));
-                    if call.allow_eager_await {
-                        step(printed, cap, move |print| call.resume_eager(result, print)).await?
-                    } else {
-                        let result = match result {
-                            Ok(value) => ExtFunctionResult::Return(value),
-                            Err(error) => ExtFunctionResult::Error(error),
-                        };
-                        step(printed, cap, move |print| call.resume(result, print)).await?
-                    }
-                }
-                RunProgress::OsCall(call) => {
-                    // `import tools` gives the same object the bare name does.
-                    if let OsFunctionCall::Import(import) = &call.function_call
-                        && import.module == MODULE
-                    {
-                        let module = self.module();
-                        (next, printed) = step(printed, cap, move |print| {
-                            call.resume(ExtFunctionResult::Return(module), print)
-                        })
-                        .await?;
-                        continue;
-                    }
-                    let error = raise(
-                        ExcType::RuntimeError,
-                        "the sandbox has no direct access to files, the network, the clock or the environment; use the provided functions",
-                    );
-                    step(printed, cap, move |print| {
-                        call.resume(ExtFunctionResult::Error(error), print)
-                    })
-                    .await?
-                }
-                RunProgress::ResolveFutures(waiting) => {
-                    // Functions answer at the call, so nothing here can be pending.
-                    let error = raise(
-                        ExcType::RuntimeError,
-                        "awaited something that never resolves",
-                    );
-                    step(printed, cap, move |print| waiting.abort(error, print)).await?
-                }
-            };
-        }
-    }
 }
 
 fn bounded(text: String) -> String {
@@ -315,7 +198,13 @@ fn bounded(text: String) -> String {
 }
 
 impl CodeTool {
-    async fn run(&self, code: String, cx: ToolContext) -> modular_agent::Result<ToolOutput> {
+    async fn run(
+        &self,
+        code: &str,
+        cx: ToolContext,
+        pool: &OnceCell<Pool>,
+    ) -> modular_agent::Result<ToolOutput> {
+        let pool = pool.get_or_try_init(|| sandbox::pool(self)).await?;
         let mut run = Run {
             tool: self,
             functions: functions(cx.tools().list().await?)?
@@ -325,8 +214,7 @@ impl CodeTool {
             cx,
             made: 0,
         };
-        let (outcome, printed) = run.drive(code).await?;
-        let mut text = printed;
+        let (outcome, mut text) = run.sandbox(code, pool).await;
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
@@ -381,7 +269,18 @@ impl CodeTool {
                 }
             }
             Err(error) => {
-                text.push_str(&error.to_string());
+                if text.len() + error.len() <= MAX_OUTPUT_BYTES
+                    && text.lines().count() + error.lines().count() <= MAX_OUTPUT_LINES
+                {
+                    text.push_str(&error);
+                } else {
+                    // Do not let printed output hide why the run stopped.
+                    // Monty puts the exception type and message on the last line.
+                    let reason = error.lines().next_back().unwrap_or(&error);
+                    let end = reason.floor_char_boundary(1024);
+                    text.insert(0, '\n');
+                    text.insert_str(0, &reason[..end]);
+                }
                 ToolOutput {
                     status: ToolStatus::Failed,
                     ..ToolOutput::from(bounded(text))
