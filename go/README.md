@@ -20,3 +20,5 @@ mise exec -- go test -race -count=1 ./...
 ```
 
 Commands need Linux with unprivileged user, PID and mount namespaces. The service sandbox also needs Bubblewrap.
+
+The Go conformance plugin passes 146/146 checks on stdio and 153/153 over WebSocket. Go `ma` passes 18/18 reference checks, and the ACP kit with crash, probe and job checks passes 188/188 on stdio and 193/193 over WebSocket. Run `scripts/websocket-kits.sh go` from the repository root after building `go/.bin/modular` and `go/.bin/ma`.

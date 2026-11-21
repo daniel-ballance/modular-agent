@@ -30,32 +30,40 @@ Claude needs Node.js 22 or later and the [Claude sidecar](../../../typescript/si
 
 The four languages share `$XDG_CONFIG_HOME/modular-agent` (or `~/.config/modular-agent`). Go saves sessions, command state and spilled output under `$XDG_STATE_HOME/modular-agent/go` (or `~/.local/state/modular-agent/go`). `MODULAR_AGENT_DATA_DIR` puts configuration directly in that directory and puts state in its `state/` subdirectory. `ma --trust-project` records the canonical project path in `trusted-projects.json` outside the project. A project's own settings are read without granting it permission to start a server. One ACP connection can serve several canonical projects, each with its own settings, prompt and trusted MCP servers.
 
+## Code sandbox
+
+Each `codemode` call starts a fresh worker by re-executing `ma`. Only the worker compiles and runs the Python code. It sends requests over framed stdio; the agent makes each nested tool call and returns its result through the same connection.
+
+The worker sets Monty's heap limit to 256 MiB. This is an approximate count of the interpreter heap, not a cap on the process's resident memory. The other limits are 30 seconds of computation between nested calls, 500 nested calls per run, recursion depth 200, 1 MiB of printed output, and 2,000 lines or 50 KiB of result text. Each stdio frame is limited to 64 MiB. Time spent waiting for a nested result does not count against the compute limit. Print formatting can differ from Python's.
+
+A memory or time limit fails the call with Monty's error. The worker exits after each run, even on success. If it dies during a run, the call reports that the worker died; the next call starts a new worker. Cancelling the call kills and reaps the worker.
+
 ## What is checked
 
 From the repository root:
 
 ```sh
+export TMPDIR="$HOME/.cache/ma-std-tmp"
+mkdir -p "$TMPDIR"
 (cd conformance/acp && npm ci)
-(cd go && mkdir -p .bin && mise exec -- go build -o .bin/ma ./cmd/ma)
+(cd go && mkdir -p .bin && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular)
 node conformance/reference/run.mjs --agent go
-MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs -- "$PWD/go/.bin/ma" --acp
-MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks -- "$PWD/go/.bin/ma" --acp
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/go/.bin/ma" --acp
-(cd go && mise exec -- go build ./... && mise exec -- go vet ./... && mise exec -- gofmt -l .)
-(cd go && mise exec -- go test -json -count=1 ./... > /tmp/ma-go-full.log 2>&1)
-(cd go && mise exec -- go test -race -json -count=1 ./cmd/ma/... ./modular/... ./acpinterface ./harness ./mcptools ./turnrun ./pluginrpc ./contextview ./portable > /tmp/ma-go-race.log 2>&1)
+scripts/websocket-kits.sh go
+(cd go && mise exec -- go build ./... && mise exec -- go vet ./... && test -z "$(mise exec -- gofmt -l .)")
+(cd go && mise exec -- go test -count=1 ./... > "$TMPDIR/ma-go-full.log" 2>&1)
+(cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/... > "$TMPDIR/ma-go-race.log" 2>&1)
 ```
 
-- **Reference checks:** 15/15. No changes to the runner.
-- **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 against `ma` and 214/214 against the base build, including late answers and job reports after recovery.
-- **Shared SDK scenarios:** 55/55 with the Go, Python, Rust and TypeScript fixture programs built.
-- **Go regressions:** 19 focused tests and 19 subtests cover the Rust auth format, simultaneous refresh, loopback sign-in and Responses requests, Provider data isolation, in-process late answers, the standard 500-call Monty budget and exceptions, prompt order and wording, skills, project trust and multi-project ACP, file tools, MCP and the SDK import boundary. The reference runner separately exercises stdio MCP and real process loss with a scripted Provider.
-- **Go SDK and base:** the full run passed 36 packages (252 top-level tests and 499 subtests); 15 packages have no tests. `cmd/modular` took about 5½ minutes, so use the default package timeout. The race run passed 14 tested packages (156 top-level tests and 316 subtests). The later in-process late-answer regression passed separately under `-race`. Build and vet pass, and `gofmt -l .` is empty.
+- **Reference checks:** 18/18, including the sandbox memory limit and recovery.
+- **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio and 193/193 over WebSocket against `ma`.
+- **Sandbox regressions:** the Go tests cover memory and time limits, worker death, cancellation, the 500-call budget, nested calls and exceptions, and printed output and return values.
+- **Go checks:** build, vet and formatting pass. The full suite passed 37 packages. The race run for `modular/...` and `cmd/ma/...` passed 7 tested packages. `cmd/modular` takes several minutes; use the default package timeout.
 - **Claude:** the first pass tested the sidecar over stdio with its scripted SDK. No real sign-ins or model requests were made for any Provider.
 
 ## Known gaps
 
-- `gomonty` main is still at v0.0.14. It supports `tools.read(...)` and calls on another reference to `tools`. `import tools` fails with `ModuleNotFoundError`. A dataclass adapter with external functions in its attributes let `f = tools.read; f(...)` work but made direct calls fail with `TypeError: 'function' object is not callable`. Go keeps direct calls rather than rewriting Python source. Codemode uses Monty throughout. It resets the compute clock after each nested call and bounds `print` in the host, so edge-case object formatting can differ. The additional heap limit is 64 MiB.
+- `gomonty` v0.0.14 is the latest release, and its main branch resolves to that tag. It pins Monty 0.0.9 at [`c9802b5`](https://github.com/pydantic/monty/tree/c9802b5f30d11fecf9f153feb1dfdab3abda070e), not Monty 1.6.0. The binding exposes external functions and dataclasses but no module registration or import handler. Monty's [compiler](https://github.com/pydantic/monty/blob/c9802b5f30d11fecf9f153feb1dfdab3abda070e/crates/monty/src/bytecode/compiler.rs#L575-L591) emits an instruction that raises `ModuleNotFoundError` for unknown modules without calling the host. In [`Dataclass.py_call_attr`](https://github.com/pydantic/monty/blob/c9802b5f30d11fecf9f153feb1dfdab3abda070e/crates/monty/src/types/dataclass.rs#L260-L303), a public name missing from the dataclass yields a host method call, but a present field raises `TypeError` on direct call syntax, even when it holds an external function. Leaving the field absent supports `tools.read(...)` and `t = tools; t.read(...)`, but `f = tools.read` then raises `AttributeError`. The binding cannot support both forms on the same object. Go keeps direct calls and does not rewrite Python source.
 - `find` uses `git ls-files` where Git can read a worktree and falls back to `find` otherwise. It does not interpret `.gitignore` outside a Git worktree. The existing SDK command environment is required for this tool. Very long command output is held by that environment before being cut and spilled.
 - The SDK's question handler supports in-turn text and choice answers. `auth.json` preserves named answers written by Rust, but this configuration does not store new secret answers. The SDK's question tool keeps its existing definition, which is not word-for-word the Rust question tool.
 - The subscription Providers use the documented endpoints, not API-key Providers supplied by the SDK. Only loopback fixtures have checked the protocols. Model streams honor request cancellation and a response-header timeout; a quiet stream after headers has no independent idle timeout.
@@ -72,8 +80,10 @@ Proposed replacement text, without changing the shared documents from this workt
 1. **`docs/reference/standard-configuration.md`, Tools.** Replace the argument sentence with:
    > Pass arguments by keyword or position: required fields in schema order, then optional fields by name. A single dict supplies named arguments unless the first parameter takes an object. `None` omits an argument.
 2. **`docs/reference/standard-configuration.md`, Tools.** Add after the `tools` object description:
-   > The `tools` object is already available; call a function directly as `tools.name(...)`. Importing `tools` or storing a function from it is not portable across Monty bindings.
-3. **`docs/sdk/api.md`, The agent.** Add after `serveAcp`:
+   > The sandbox supplies `tools` without an import. Call a function directly as `tools.name(...)`. Importing `tools` or reading an individual function as a value is not required of every build.
+3. **`docs/reference/standard-configuration.md`, Tools.** Replace the memory limit clause with:
+   > 256 MiB of interpreter memory (Monty's `max_memory`; the binding decides what allocations to count, and this is not a limit on the worker's resident memory)
+4. **`docs/sdk/api.md`, The agent.** Add after `serveAcp`:
    > On reopen, the composition factory can read the saved session ID before building the agent, so it can start a Provider selected by the saved settings. Inspecting the ID does not start recovery. Project compositions on one connection share the history store and are closed when the connection ends.
-4. **`docs/sdk/api.md`, The agent.** Add after `sessionInfo`:
+5. **`docs/sdk/api.md`, The agent.** Add after `sessionInfo`:
    > A file or HTTP history handle exposes `sessions` and `sessionInfo` before an Agent is constructed, so an application can choose the project or Provider for a reopen without starting recovery.
