@@ -9,7 +9,7 @@ import pytest
 
 from ma_fake import Fake
 from ma_cli import build
-from test_swap import until
+from test_swap import DRIVER_STARTUP, until
 from test_vanilla import paired
 
 
@@ -33,7 +33,10 @@ async def crash_and_reopen(tmp_path, runtime, variant, action, reopen):
     q = None
     try:
         try:
-            await until(lambda: (tmp_path / "checkpoint").exists() or p.returncode is not None)
+            await until(
+                lambda: (tmp_path / "checkpoint").exists() or p.returncode is not None,
+                DRIVER_STARTUP,
+            )
         except TimeoutError:
             # It normally takes about 0.3 s (under 1.5 s with every core busy). Keep what the driver
             # said so an unexplained stall can be diagnosed rather than retried.

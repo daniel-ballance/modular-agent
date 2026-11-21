@@ -17,6 +17,13 @@ from ma_cli import build
 from test_vanilla import entries, paired, run
 
 
+# Waiting for a crash driver to reach its checkpoint. The wait ends at once if the driver
+# exits, so a broken driver still fails fast; this bound only stops a hang. A driver with
+# process plugins starts about five Python processes: 0.8 s idle, 3.8 s with three busy
+# loops per core, more beside other suites. That is not what these tests check.
+DRIVER_STARTUP = 120
+
+
 async def until(predicate, timeout=5):
     async with asyncio.timeout(timeout):
         while not predicate():
@@ -75,7 +82,8 @@ async def test_sigkill_at_committed_boundaries(tmp_path, runtime_kind, phase):
             lambda: (
                 (pid_ready(marker) if phase == "bash_effect" else marker.exists())
                 or p.returncode is not None
-            )
+            ),
+            DRIVER_STARTUP,
         )
         assert p.returncode is None, (await p.communicate())[1].decode()
         if phase == "bash_effect":

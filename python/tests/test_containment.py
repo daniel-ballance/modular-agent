@@ -14,7 +14,7 @@ from ma_fake import Fake
 from ma_local import Local
 from ma_local.containment import delegated_root, journal, owner_identity, recover
 from ma_cli import build
-from test_swap import dead, pid_ready, spawn_driver, until
+from test_swap import DRIVER_STARTUP, dead, pid_ready, spawn_driver, until
 
 
 @pytest.fixture
@@ -35,7 +35,10 @@ async def test_watcher_and_agent_die_next_start_cleans_up(
     p = await spawn_driver(home, tmp_path, runtime_kind, "bash_effect")
     watcher, pids, record, group = None, [], None, None
     try:
-        await until(lambda: pid_ready(tmp_path / "escaped.pid") or p.returncode is not None)
+        await until(
+            lambda: pid_ready(tmp_path / "escaped.pid") or p.returncode is not None,
+            DRIVER_STARTUP,
+        )
         assert p.returncode is None, (await p.communicate())[1].decode()
         pids = [int((tmp_path / name).read_text()) for name in ("running.pid", "escaped.pid")]
         record = next((home / "commands").glob("*.json"))
@@ -110,7 +113,8 @@ asyncio.run(main())
             lambda: (
                 ((tmp_path / "returned").exists() and pid_ready(tmp_path / "daemon.pid"))
                 or p.returncode is not None
-            )
+            ),
+            DRIVER_STARTUP,
         )
         assert p.returncode is None, (await p.communicate())[1].decode()
         pid = int((tmp_path / "daemon.pid").read_text())
