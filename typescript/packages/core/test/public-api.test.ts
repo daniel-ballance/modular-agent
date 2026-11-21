@@ -108,12 +108,20 @@ test("proposals, generic Content, typed tool events and history movement use the
   const content: Content = [{ type: "text", text: "Find the tide" }, { type: "application.example", label: "keep this" }];
   const drop = await visitor.send("Withdraw this", "propose");
   await visitor.withdraw(drop.inputId);
+  await assert.rejects(visitor.withdraw(drop.inputId), { code: "conflict" });
+  const decline = await visitor.send("Decline this", "propose");
+  assert.deepEqual(await s.release(decline.inputId, "after", { declined: true }), { inputId: decline.inputId, taken: "handedBack" });
+  await assert.rejects(s.release(decline.inputId, "now"), { code: "conflict" });
+  await assert.rejects(visitor.withdraw(decline.inputId), { code: "conflict" });
+  assert.equal(await s.lastTurn(), undefined);
   const next = await visitor.send(content, "propose");
   assert.deepEqual((await s.proposals()).map(p => [p.inputId, p.content]), [[next.inputId, content]]);
   await assert.rejects(visitor.release(next.inputId), { code: "forbidden" });
   const cursor = (await s.history()).at(-1)!.id;
   const read = s.events(cursor)[Symbol.asyncIterator]();
-  await s.release(next.inputId);
+  assert.deepEqual(await s.release(next.inputId, "now"), { inputId: next.inputId, taken: "now" });
+  await assert.rejects(visitor.withdraw(next.inputId), { code: "conflict" });
+  assert.deepEqual(await s.proposals(), []);
   const observed: string[] = [];
   try {
     for (;;) {

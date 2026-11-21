@@ -415,11 +415,11 @@ export class Session {
     if (!proposals) throw new AgentError("withheld", "Proposals were withheld");
     return structuredClone(proposals);
   }
-  async release(inputId: string, timing: Exclude<InputTiming, "propose"> = "now"): Promise<InputReceipt> {
+  async release(inputId: string, timing: Exclude<InputTiming, "propose"> = "now", options?: { declined?: boolean }): Promise<InputReceipt> {
     this.#require("input");
     if (!this.#owner.enabled.severalActors) throw new AgentError("not_supported", "Several actors are disabled");
     if (!inputId || !["now", "steer", "after"].includes(timing)) throw new AgentError("invalid_params", "Invalid proposal or timing");
-    return checked(() => this.#api.releaseInput(this.id, inputId, timing, this.actor));
+    return checked(() => this.#api.releaseInput(this.id, inputId, timing, this.actor, options?.declined === true));
   }
   async withdraw(inputId: string): Promise<void> {
     this.#check();
