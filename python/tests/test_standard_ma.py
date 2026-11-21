@@ -7,12 +7,15 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import signal
 import stat
 from urllib.parse import parse_qs, urlsplit
 
 from httpx2 import AsyncClient
+from pydantic_monty import AsyncMontySession
 import pytest
 
 from modular_agent import Answer, ModelRef, ProviderContext, Tool, create_agent, file_credentials
@@ -475,6 +478,60 @@ async def test_codemode_memory_limit_discards_session(tmp_path: Path) -> None:
     assert "finished" not in failed.text()
     assert completed.status == "completed"
     assert completed.text() == "still here\n3"
+
+
+@pytest.mark.parametrize("stop", ["kill", "cancel"])
+async def test_codemode_worker_stops_and_next_run_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    code = "print('started')\nwhile True:\n    pass"
+    entered: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    loop = asyncio.get_running_loop()
+    original = AsyncMontySession.feed_start
+
+    def observe(worker: AsyncMontySession, source: str, **kwargs):
+        if source == code:
+            pid = worker.worker_pid
+            assert pid is not None and pid != os.getpid()
+
+            def printed(_stream: str, text: str) -> None:
+                if text == "started\n":
+                    loop.call_soon_threadsafe(entered.set_result, pid)
+
+            kwargs["print_callback"] = printed
+        return original(worker, source, **kwargs)
+
+    # Synchronize on output from the real worker, before stopping its running turn.
+    monkeypatch.setattr(AsyncMontySession, "feed_start", observe)
+    script = [
+        {"toolCalls": [{"name": "codemode", "input": {"code": code}}]},
+        {"toolCalls": [{"name": "codemode", "input": {"code": "print('fresh'); 42"}}]},
+        {"text": "done"},
+    ]
+    async with offline_agent(project=tmp_path, tools=[code_tool()], script=script) as agent:
+        session = await agent.session()
+        async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
+            running = tasks.create_task(session.prompt("run code"))
+            pid = await entered
+            if stop == "kill":
+                os.kill(pid, signal.SIGKILL)
+            else:
+                await session.cancel()
+            result = await running
+            # Monty's native runtime reaps the child, independently of asyncio.
+            while Path(f"/proc/{pid}").exists():
+                await asyncio.sleep(0.01)
+        if stop == "kill":
+            failed, completed = result.tool_results()
+            assert failed.status == "failed"
+            assert "worker process died" in failed.text()
+        else:
+            assert result.outcome.kind == "cancelled"
+            [cancelled] = result.tool_results()
+            assert cancelled.status == "cancelled"
+            [completed] = (await session.prompt("try again")).tool_results()
+        assert completed.status == "completed"
+        assert completed.text() == "fresh\n42"
 
 
 async def test_codemode_prints_started_call_on_stderr(tmp_path: Path, capsys) -> None:
