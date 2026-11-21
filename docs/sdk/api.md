@@ -78,7 +78,8 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `inputDuringTurn` | true: both Runtimes take steering |
 | `forking` | true |
 | `rewinding` | true only if the working environment declares `points` |
-| `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | from the Providers; false for those the SDK ships |
+| `keepsStateAtProvider` | from the Providers' `keepsState`; false for those the SDK ships |
+| `runsToolsAtProvider`, `liveSessions` | false: the SDK 0.1 Provider port cannot declare them ([Providers](#providers)) |
 | `severalActors`, `sessionLimits`, `tenants` | from the options of the same names; false by default |
 | `holdsOutput` | true when the agent guarantees whole-stream holding in the declared scope; otherwise false. Streams covered by a remote output gate require holding and a true declaration, as the [plugin binding](../bindings/plugin.md#the-host-asks-a-hook-handler) specifies. |
 | `outputBypassesAgent` | false |
@@ -108,6 +109,9 @@ The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check th
 | `prompt(input, options?)` | a PromptResult, once the turn that takes this input ends or the input is settled without a turn |
 | `promptStream(input, options?)` | the events of that turn as a stream, ending with its `turnEnded` event, or at once if the input is settled without a turn |
 | `send(input, timing, options?)` | an InputReceipt, without waiting for any turn. `timing` is `now`, `steer`, `after` or `propose` ([Input](../contracts.md#input)). |
+| `proposals()` | with `severalActors`, the parked proposals this actor may see |
+| `release(inputId, timing, options?)` | takes a proposal with timing `now`, `steer` or `after`, or hands it back with `declined: true`; returns an InputReceipt. Requires `input`. |
+| `withdraw(inputId)` | hands a proposal back, for its proposer or an actor with `input`. A second settlement of the same proposal raises `conflict`. |
 | `cancel()` | cancels the running turn; returns the inputs handed back |
 | `settings()` / `setSetting(key, value)` | the current settings / records a change. During a turn the change applies from the next turn, or is refused with `busy`, as the agent declares `settingsDuringTurn`. |
 | `history(options?)` | the recorded entries, in order, as this actor may see them: the gated view, not the raw record |
@@ -337,7 +341,7 @@ A model failure after the request is admitted, including credentials the model s
 
 A Provider may return opaque `providerData` in a response. The SDK keeps it in the record, bound to that Provider's identity, and sends it only in a later request to the same Provider; it never appears in output or in a history projection for anyone else ([Content](../bindings/data.md#content)).
 
-The Provider gets its credential through `context.credential()`; it never receives one in configuration. In process, a Provider can also run tools itself, hold a live session or answer late. Those are in-process only ([Model request and response](../contracts.md#model-request-and-response)).
+The Provider gets its credential through `context.credential()`; it never receives one in configuration. `request` and `discardState` are the SDK 0.1 Provider port. A Provider may keep state per session, declared with `keepsState`; the agent may call `discardState` to invalidate it. The core also allows a Provider to run tools itself, hold a live session or answer late ([Model request and response](../contracts.md#model-request-and-response)), but this port does not expose those modes, and a Provider registered through it cannot declare them.
 
 The `openai()` and `anthropic()` constructors make API-key Providers for the Responses and Messages APIs, respectively. Their catalogs and reasoning settings follow the [shared API-key model table](api-key-models.md).
 
@@ -408,7 +412,7 @@ These are written rarely. Each is an interface a plugin implements. Its operatio
 | Part | Operations | Defined by |
 |---|---|---|
 | Working environment | `read`, `exists`, `write`, `exec`, `list` (optional), `savePoint`, `checkPoint`, `restorePoint`, `sessionEnded`, and its registration: `containment`, `platforms`, `points`, `confinesFiles` | [The host asks the working environment](../bindings/plugin.md#the-host-asks-the-working-environment). A missing file is `not_found`. An environment without `list` raises `not_supported` and the agent treats listing as absent. |
-| History store | `acquire`, `renew`, `release`, `append`, `read`, `list`, `erase` | [History service](../bindings/history-http.md). An `acquire` refused because another writer holds the session raises `held` with `retryAfterMs`. An `append` skips an entry JSON-equal to one already kept under its id; a different entry under a kept id raises `conflict`. A store that can lose writer access, for example when renewal fails, tells the agent as soon as it knows, even with no write in progress, so the agent can [interrupt the session](../contracts.md#recovery-and-repeating-work) at once rather than at its next write. |
+| History store | `create(sessionId, metadata)`, `acquire`, `renew`, `release`, `append`, `read`, `list`, `erase` | [History service](../bindings/history-http.md). `create` is the binding's `PUT` of session metadata, which omits `id`; `read` and `list` take the binding's cursor and limit. A store declares its lease TTL and whether it is persistent. An `acquire` refused because another writer holds the session raises `held` with `retryAfterMs`. An `append` skips an entry JSON-equal to one already kept under its id; a different entry under a kept id raises `conflict`. A store that can lose writer access, for example when renewal fails, tells the agent as soon as it knows, even with no write in progress, so the agent can [interrupt the session](../contracts.md#recovery-and-repeating-work) at once rather than at its next write. |
 | Credential store | `read`, `stage`, `lookupStaged`, `activate`, `discard` | [Asking the credential store](../contracts.md#asking-the-credential-store) and [Secrets](../contracts.md#secrets) |
 | Configuration | `settings(project)`, `trusted(project)` | [Configuration and trust](../contracts.md#configuration-and-trust) |
 | Runtime | `declaration`, `runTurn`, `resumeTurn`, `continueOpenCalls` | [The host asks the Runtime](../bindings/plugin.md#the-host-asks-the-runtime). `resumeTurn` receives the interrupted checkpoint, including the last answered step and any committed `step.after` decision, exactly as the binding defines it. The context offers the [Runtime callbacks](../bindings/plugin.md#runtime-callbacks). |
