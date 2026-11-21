@@ -10,5 +10,6 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-monty = "=1.6.0"
+libc.workspace = true
+monty-pool = "=1.6.0"
 monty-types = "=1.6.0"

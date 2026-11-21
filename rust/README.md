@@ -36,8 +36,9 @@ print(run["output"])
 
 - A function call leaves the sandbox as a **nested tool call**. The Harness checks it as it checks any call (rights, gates, registration), records it with `startedBy: "tool"` and its parent's id, and keeps it out of the model's view. The model sees its own call and that call's result.
 - The functions sit on `tools` because `exec` and `list` are also Python builtins.
-- The sandbox has no file, network, clock or process access of its own. It is bounded: 30 seconds of computation between calls, 500 calls a run, a recursion limit and a cap on printed output.
-- Each run starts fresh. No variables carry over.
+- `ma` uses [Monty’s Rust pool](https://github.com/pydantic/monty/blob/v1.6.0/crates/monty-pool/README.md) to start a fresh worker process for each run. The pool re-executes `ma` in worker mode and speaks Monty’s framed protocol over stdin and stdout. No separate executable is needed. The worker does not load agent settings or credentials, and the sandbox has no file, network, clock or process access of its own.
+- A run has 30 seconds of computation between calls, 256 MiB of memory counted by Monty’s worker allocator, 500 nested calls, a recursion limit of 200, and 1 MiB of printed output. `describe_tool` and `search_tools` do not count toward the nested-call limit. Result text is cut to 2,000 lines or 50 KiB.
+- No session is reused. A run that reaches a memory or time limit reports `MemoryError` or `TimeoutError`. If the worker dies, the call fails and the next run starts a new worker. Cancelling the call kills its worker.
 - `describe_tool(name)` and `search_tools(query)` let the model look up a function when there are too many to list in full.
 
 The session setting `model_tools` holds the names the model is offered, `["codemode"]` by default. Set it to `null` in `settings.json` to offer the six tools and MCP tools directly as well.
@@ -105,6 +106,7 @@ export TMPDIR="$HOME/.cache/ma-std-tmp"; mkdir -p "$TMPDIR"
 (cd ../conformance/acp && npm ci)
 (cd ../conformance/tools && npm ci)
 mise exec -- cargo build --locked -p standard --bin ma
+mise exec -- cargo build --locked -p agent-base
 node ../conformance/reference/run.mjs --agent rust
 MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs -- "$PWD/target/debug/ma" --acp
 MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs --crash-checks -- "$PWD/target/debug/ma" --acp
@@ -112,13 +114,14 @@ MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs --crash-checks --pro
 mise exec -- cargo test --workspace --no-fail-fast -- --test-threads=1 > "$TMPDIR/ma-workspace.log" 2>&1
 mise exec -- cargo fmt --all -- --check
 mise exec -- cargo clippy --workspace --all-targets -- -D warnings
+../scripts/websocket-kits.sh rust
 ```
 
-- **Standard reference checks:** 17/17, including both Runtime crash cases, the declaration, the prompt tail and the SDK-shaped JSON stream.
+- **Standard reference checks:** 18/18, including `sandbox-memory`, both Runtime crash cases, the declaration, the prompt tail and the SDK-shaped JSON stream.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
 - **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. Neither WebSocket run used a bridge.
-- **Standard and its plugins:** 35 Rust tests: 17 for `ma`, including the dependency boundary, prompt, skills, MCP, nested calls, crash recovery, state isolation and JSON event IDs; 4 for file tools; 2 for auth storage and locking; and 12 for subscription sign-in, refresh and requests.
-- **Workspace and SDK shared scenarios:** See the [SDK verification matrix](crates/sdk/README.md#what-is-checked). Formatting and Clippy with `-D warnings` pass.
+- **Standard and its plugins:** 38 Rust tests: 20 for `ma`, including the dependency boundary, prompt, skills, MCP, nested calls, sandbox limits, worker death and cancellation, crash recovery, state isolation and JSON event IDs; 4 for file tools; 2 for auth storage and locking; and 12 for subscription sign-in, refresh and requests.
+- **Workspace:** 337 Rust tests passed. Formatting and Clippy with `-D warnings` pass. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
 - **Offline only:** browser sign-in uses a simulated browser on loopback; both device flows and refresh use loopback HTTP fixtures. No credentials, real sign-ins or model requests were used.
 
 To try the terminal without a login:
@@ -133,7 +136,7 @@ MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
 ## Known gaps
 
 - **Claude:** The sidecar must be installed separately. `ma --acp` loads it when the launch settings or the reopened session choose a Claude model, not when a client later switches a session that was composed without Claude. Claude Code starts per request and adds some text of its own; see the [sidecar's gaps](../typescript/sidecars/claude/README.md#known-gaps-and-open-problems). This migration did not exercise the sidecar with a real model.
-- **Monty runs in the agent process.** There is no sandbox memory limit. An interpreter abort can still stop the agent. The durable Runtime keeps the recorded history. Images are attached as read, up to 4.5 MiB; they are not resized.
+- **Images:** They are attached as read, up to 4.5 MiB. They are not resized.
 - **MCP:** tools only, no OAuth negotiation. The official MCP plugin's changing catalog is local to this agent; the SDK does not yet serve that plugin over stdio. It can still connect to remote MCP servers.
 - **Terminal:** line-based, with no markdown rendering. Embedded reopening waits for recovery before reading another terminal line. ACP installs recovery before returning the session and does not wait for the recovered turn to finish.
 - **Credential staging:** the Rust base stores a named answer directly; it does not implement the full staged-secret transaction.
@@ -142,6 +145,7 @@ MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
 
 These are proposed edits; the shared documents are unchanged in this branch.
 
+- **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools):** Replace “256 MiB of memory (Monty's `max_memory`, which counts what the interpreter allocates)” with “256 MiB of memory (Monty's `max_memory`, which counts live allocations against the worker's baseline, not the worker's resident memory)”. Monty 1.6.0 also counts compiled code and interpreter internals in worker mode.
 - **ACP declarations:** `interface-acp` dispatched proposed input, actor joins, session limits and tenant queries without consulting the SDK factory's session declaration. It now refuses disabled operations with `not_supported`, without changing the declarations or gating `proposals`, `release` or `withdraw`, which also serve parked job reports. The base declares all three features true and still passes the positive checks.
 - **[`docs/reference`, Checks](../docs/reference/standard-configuration.md#checks):** Replace the ACP-kit bullet with: “the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;”
 - **[`docs/sdk`, Building an agent](../docs/sdk/api.md#building-an-agent):** Add: “A builder may accept file-backed configuration and an explicit project trust ledger, a local credential store, deployment tenant configuration, and an option to replace the default prompt. SDK adapters may use the base's direct credential-write contract where staged secrets are not implemented, and must document that limitation.”

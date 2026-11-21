@@ -9,6 +9,8 @@ use standard::{
     terminal::{Mode, Questions},
 };
 
+mod sandbox_worker;
+
 const HELP: &str = "ma, the standard Modular Agent
 
 Usage:
@@ -49,8 +51,24 @@ fn take(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
     args.next().ok_or_else(|| anyhow!("{flag} needs a value"))
 }
 
+fn main() -> std::process::ExitCode {
+    // monty-pool invokes its worker with this argument. Do not load agent
+    // settings, credentials, or start a Tokio runtime in the worker.
+    if std::env::args_os().skip(1).eq(["subprocess"]) {
+        return match sandbox_worker::run() {
+            Ok(status) => status,
+            Err(error) => {
+                eprintln!("Sandbox worker: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+    agent_main();
+    std::process::ExitCode::SUCCESS
+}
+
 #[tokio::main]
-async fn main() {
+async fn agent_main() {
     if let Err(error) = start().await {
         eprintln!("Error: {error:#}");
         std::process::exit(1)
