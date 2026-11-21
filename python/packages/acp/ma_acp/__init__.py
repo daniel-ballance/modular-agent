@@ -14,7 +14,7 @@ from ma_core import AgentError, Plugin, content, lower_reasoning
 from ma_harness.authority import PERMISSIONS
 
 from . import binding
-from .stdio import MAX_FRAME, Stdio, encode
+from .stdio import MAX_FRAME, REPLY_VIEW, UPDATE_VIEW, Stdio, encode
 
 
 NAMESPACE = "modular-agent"
@@ -95,6 +95,13 @@ def rpc(fn):
     async def gated(self, *args, **kwargs):
         method = "_" + args[0] if fn.__name__ == "ext_method" else methods[fn.__name__]
         try:
+            sid = OUTPUT_SESSION.get()
+            if (
+                (prepared := REPLY_VIEW.get()) is not None
+                and sid in self.sessions
+                and self.guards_frame(method)
+            ):
+                prepared[:] = [sid, await self.frame_revision(sid)]
             result = await fn(self, *args, **kwargs)
             if result is None:
                 return None
@@ -329,6 +336,7 @@ class ACP(Plugin):
     async def update(self, sid, update, *, stream=False):
         # Event-derived updates are already gated, but configuration and other
         # directly constructed protocol updates must pass the same gate too.
+        revision = await self.frame_revision(sid)
         value = await self.view(
             {
                 "sessionId": sid,
@@ -347,10 +355,14 @@ class ACP(Plugin):
                 return
             if not self.client:
                 return
-            await self.client.session_update(
-                session_id=value["sessionId"],
-                update=type(update).model_validate(value["update"]),
-            )
+            prepared = UPDATE_VIEW.set([sid, revision])
+            try:
+                await self.client.session_update(
+                    session_id=value["sessionId"],
+                    update=type(update).model_validate(value["update"]),
+                )
+            finally:
+                UPDATE_VIEW.reset(prepared)
 
     async def session_started(self, d):
         if self.creating and not d.get("child"):
@@ -927,7 +939,7 @@ class ACP(Plugin):
         return None
 
     async def answer_request(self, sid, q):
-        if q["kind"] not in {"approval", "text", "choice"}:
+        if q["kind"] not in {"approval", "text", "choice", "secret"}:
             return
         value = None
         try:
@@ -1471,7 +1483,24 @@ class ACP(Plugin):
         else:
             self.presence.get(sid, set()).discard(actor)
 
-    async def authorize_frame(self, sid, method, message):
+    @staticmethod
+    def guards_frame(method):
+        # The open/new replies carry control metadata. Replay goes through the
+        # separate update boundary. An erase reply reports plan progress.
+        return method not in {
+            "session/new",
+            "session/load",
+            "session/resume",
+            "session/close",
+            "_modular-agent/erase",
+            "_modular-agent/leave",
+            "_modular-agent/interrupted",
+        }
+
+    async def frame_revision(self, sid):
+        return await self.api.session("erasure_cutoff", session=sid, actor=self.actor)
+
+    async def authorize_frame(self, sid, method, message, prepared=None):
         # The handler may have waited behind another frame since its last check.
         details = message.get("error", {}).get("data")
         if isinstance(details, dict) and details.get("code") in {
@@ -1504,6 +1533,13 @@ class ACP(Plugin):
         token = OUTPUT_SESSION.set(sid)
         try:
             await self.check_delivery(sid, method)
+            if self.guards_frame(method):
+                try:
+                    revision = await self.frame_revision(sid)
+                except AgentError as exc:
+                    raise protocol_error("unavailable", str(exc)) from exc
+                if prepared and prepared != [sid, revision]:
+                    raise protocol_error("unavailable", "Session view changed during delivery")
         finally:
             OUTPUT_SESSION.reset(token)
             self.reset_project_scope(scope)

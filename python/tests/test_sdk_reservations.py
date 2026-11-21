@@ -67,7 +67,7 @@ async def test_oversized_tool_result_still_records_terminal_call():
     @tool
     async def large() -> str:
         """Return a result larger than the tool settlement budget."""
-        return "x" * 50_000
+        return "x" * (64 * 1024 + 1)
 
     async with create_agent(
         tools=[large], resource_reservations={"session": {"calls": 1}}

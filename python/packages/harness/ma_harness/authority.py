@@ -163,6 +163,7 @@ class Authority:
             "tenant",
             "children",
             "view",
+            "erasure_cutoff",
         }
         if target == "@harness" and (
             operation not in public
@@ -181,6 +182,7 @@ class Authority:
             raise AgentError("Session inaccessible", "forbidden")
         if operation not in {
             "erase",
+            "erasure_cutoff",
             "cancel",
             "leave",
             "close",
@@ -243,7 +245,14 @@ class Authority:
                 "fork": "input",
                 "close": "watch",
             }.get(operation, "watch")
-            if operation in {"authority", "config_view", "declaration", "close", "view"}:
+            if operation in {
+                "authority",
+                "config_view",
+                "declaration",
+                "close",
+                "view",
+                "erasure_cutoff",
+            }:
                 return  # Control replies and configuration do not read session history.
         elif target in {"tools", "environment", "history", "subagents"}:
             raise AgentError("Use the checked Runtime or session API", "forbidden")

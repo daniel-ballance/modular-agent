@@ -16,7 +16,8 @@ from urllib.parse import unquote
 
 from ma_core import AgentError
 
-from . import freshness, pending
+from . import freshness
+from .registry import Registry, Unavailable
 
 PAGE = 4 * 1024 * 1024
 BODY = 64 * 1024 * 1024
@@ -137,15 +138,16 @@ def page(envelope, field, rows, query, cursor_error):
         rows = rows[start:]
     limit = int(query.get("limit", "500"))
     used = len(encode({**envelope, field: []}))
-    result = []
+    count = 0
     for i, (key, row) in enumerate(rows[:limit]):
-        used += len(encode(row)) + bool(result)
+        used += len(encode(row)) + bool(i)
+        if used > PAGE:
+            break
         more = i + 1 < len(rows)
         size = used + (len(encode({"next": key})) - 1 if more else 0)
         if size <= PAGE:
-            result.append((key, row))
-        else:
-            break
+            count = i + 1
+    result = rows[:count]
     if rows and not result:
         raise Refusal(503, "unavailable")
     return {
@@ -156,7 +158,7 @@ def page(envelope, field, rows, query, cursor_error):
 
 
 class Store:
-    def __init__(self, db, ttl_ms, witness=None):
+    def __init__(self, db, ttl_ms, witness=None, *, previously_profiled=False):
         self.db, self.ttl_ms = db, ttl_ms
         self.witness = witness
         self.leases = {}
@@ -167,7 +169,14 @@ class Store:
             "CREATE TABLE IF NOT EXISTS entries (session TEXT, id TEXT, record BLOB NOT NULL,"
             " UNIQUE(session, id));"
         )
-        pending.schema(self.db)
+        self.registry = None
+        try:
+            with self.db:
+                self.db.execute("BEGIN IMMEDIATE")
+                version = self.db.execute("PRAGMA user_version").fetchone()[0]
+                self.registry = Registry(self.db, initialized=previously_profiled or version != 0)
+        except (Unavailable, sqlite3.Error):
+            pass
         if witness is not None:
             with self.db:
                 self.db.execute("BEGIN IMMEDIATE")
@@ -180,9 +189,35 @@ class Store:
                 "INSERT INTO bound VALUES (?)", (max(ttl_ms, prior[0]) if prior else ttl_ms,)
             )
 
-    def route(self, method, route, sid, generation, q, body):
+    def route(self, method, route, sid, generation, q, body, *, revision=None):
         if route == "version":
-            return {"binding": "modular-agent-history/1", "ttlMs": self.ttl_ms}
+            return {"binding": "modular-agent-history/1", "ttlMs": self.ttl_ms, "pendingErasure": 1}
+        changes = self.db.total_changes
+        try:
+            result = self.apply(method, route, sid, generation, q, body, revision)
+            if self.db.total_changes != changes:
+                self.registry.advance()
+                if self.witness is not None:
+                    freshness.advance(self.db, self.witness)
+            return result
+        except (Unavailable, sqlite3.Error, AgentError, OSError) as exc:
+            # No commit has been attempted. The request transaction rolls back.
+            raise Refusal(503, "unavailable") from exc
+
+    def current_revision(self):
+        if self.registry is None:
+            raise Unavailable
+        if self.witness is not None:
+            freshness.check(self.db, self.witness)
+        return self.registry.revision()
+
+    def entry(self, sid, key):
+        row = self.db.execute(
+            "SELECT record FROM entries WHERE session=? AND id=?", (sid, key)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def apply(self, method, route, sid, generation, q, body, revision):
         if route == "list":
             rows = [
                 (sid, json.loads(raw))
@@ -213,8 +248,15 @@ class Store:
             if existing is None:
                 if self.db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] >= 100_000:
                     raise Refusal(503, "unavailable")
+                self.current_revision()
                 self.db.execute("INSERT INTO sessions VALUES (?,?)", (sid, encode(meta)))
             return {}
+        if route == "registry" and method == "GET":
+            revision = self.current_revision()
+            if existing is None:
+                raise Refusal(404, "unknown_session")
+            rows = [(plan["intentId"], plan) for plan in self.registry.plans(sid)]
+            return page({"revision": revision}, "plans", rows, q, "unknown_intent")
         if existing is None:
             raise Refusal(404, "unknown_session")
         meta = json.loads(existing[0])
@@ -256,13 +298,14 @@ class Store:
         if route == "renew":
             self.leases[sid] = (current[0], current[1], clock + self.ttl_ms / 1000)
             return {"ttlMs": self.ttl_ms}
-        if route in {"erase", "append"}:
-            self.db.execute("BEGIN IMMEDIATE")
-            if self.witness is not None:
-                try:
-                    freshness.check(self.db, self.witness)
-                except (AgentError, OSError) as exc:
-                    raise Refusal(503, "unavailable") from exc
+        self.db.execute("BEGIN IMMEDIATE")
+        current_revision = self.current_revision()
+        if route == "registry":
+            return self.publish(sid, body, current_revision)
+        if route == "complete":
+            return self.complete(sid, generation, body["entryIds"])
+        if revision is not None and revision != current_revision:
+            raise Refusal(409, "stale_revision")
         if route == "erase":
             erased = []
             for key in dict.fromkeys(body["entryIds"]):
@@ -278,21 +321,6 @@ class Store:
                             (encode(tombstone(row)), sid, key),
                         )
             return {"erased": erased}
-        # The write transaction serializes publication with the coordinator's intent.
-        try:
-            pending.check_batch(
-                self.db,
-                [
-                    {
-                        "kind": row.get("kind"),
-                        "copies": row.get("sources") or [],
-                        "fork_source": row.get("fork_source"),
-                    }
-                    for row in body["entries"]
-                ],
-            )
-        except AgentError as exc:
-            raise Refusal(409, "unavailable") from exc
         kept = 0
         for row in body["entries"]:
             key = row["id"]
@@ -312,8 +340,78 @@ class Store:
             kept += 1
         return {"kept": kept}
 
+    def publish(self, sid, body, revision):
+        registry = self.registry
+        intent = body["intentId"]
+        targets = json.dumps(sorted(body["entryIds"]))
+        sets = {c["sessionId"]: (c["recordId"], set(c["entryIds"])) for c in body["copies"]}
+        if saved := registry.intent(intent):
+            if saved != (sid, targets) or registry.copy_sets(intent) != sets:
+                raise Refusal(409, "conflict")
+            return {"intentId": intent, "sessionIds": registry.destinations(intent, sid)}
+        if saved := registry.operation(sid, targets):
+            original = saved[0]
+            return {"intentId": original, "sessionIds": registry.destinations(original, sid)}
+        if body["revision"] != revision:
+            raise Refusal(409, "stale_revision")
+        for destination in sets:
+            if not self.db.execute("SELECT 1 FROM sessions WHERE id=?", (destination,)).fetchone():
+                raise Refusal(404, "unknown_session")
+        plans = {}
+        for copy_set in body["copies"]:
+            destination = copy_set["sessionId"]
+            record = copy_set["recordId"]
+            entries = copy_set["entryIds"]
+            if any(self.entry(destination, key) is None for key in entries):
+                raise Refusal(404, "unknown_entry")
+            if (
+                registry.reserved(destination, record)
+                or self.entry(destination, record) is not None
+            ):
+                raise Refusal(409, "conflict")
+            plan = {
+                "intentId": intent,
+                "sourceSessionId": sid,
+                "recordId": record,
+                "copies": [{"entryId": key, "complete": False} for key in entries],
+            }
+            if len(encode({"revision": "x" * 128, "plans": [plan], "next": intent})) > PAGE:
+                raise Refusal(413, "request_too_large")
+            plans[destination] = plan
+        registry.publish(sid, targets, intent, plans)
+        return {"intentId": intent, "sessionIds": [dest for dest in plans if dest != sid]}
 
-def shape(route, method, body):
+    def complete(self, sid, intent, entries):
+        plan = next((p for p in self.registry.plans(sid) if p["intentId"] == intent), None)
+        if plan is None:
+            raise Refusal(404, "unknown_intent")
+        if not set(entries) <= {c["entryId"] for c in plan["copies"]}:
+            invalid()
+        record = self.entry(sid, plan["recordId"]) or {}
+        data = record.get("data")
+        evidence = data.get("entryIds") if isinstance(data, dict) else None
+        if (
+            record.get("erased") is True
+            or record.get("kind") != "erasure"
+            or not isinstance(evidence, list)
+            or any(key not in evidence for key in entries)
+            or any((self.entry(sid, key) or {}).get("erased") is not True for key in entries)
+        ):
+            raise Refusal(409, "conflict")
+        self.registry.complete(sid, plan, set(entries))
+        return {}
+
+
+def distinct_ids(values):
+    return (
+        isinstance(values, list)
+        and bool(values)
+        and all(is_id(x) for x in values)
+        and len(set(values)) == len(values)
+    )
+
+
+def shape(route, method, body, sid):
     if method == "PUT":
         if (
             "id" in body
@@ -330,6 +428,49 @@ def shape(route, method, body):
                 is_id(f.get(k)) for k in ("sessionId", "entryId")
             ):
                 invalid()
+    elif route in {"registry", "complete"}:
+        lease = body.get("lease")
+        if (
+            not isinstance(lease, str)
+            or not LEASE.fullmatch(lease)
+            or not distinct_ids(body.get("entryIds"))
+        ):
+            invalid()
+        if route == "complete":
+            if set(body) != {"lease", "entryIds"}:
+                invalid()
+            return
+        if set(body) != {"lease", "revision", "intentId", "entryIds", "copies"}:
+            invalid()
+        if not isinstance(body["revision"], str) or not LEASE.fullmatch(body["revision"]):
+            invalid()
+        if not is_id(body["intentId"]) or body["intentId"] in {".", ".."}:
+            invalid()
+        copies = body["copies"]
+        if not isinstance(copies, list) or not copies:
+            invalid()
+        sessions = set()
+        for copy_set in copies:
+            if not isinstance(copy_set, dict) or set(copy_set) != {
+                "sessionId",
+                "recordId",
+                "entryIds",
+            }:
+                invalid()
+            destination = copy_set["sessionId"]
+            if (
+                not is_id(destination)
+                or destination in {".", ".."}
+                or destination in sessions
+                or not is_id(copy_set["recordId"])
+                or not distinct_ids(copy_set["entryIds"])
+            ):
+                invalid()
+            sessions.add(destination)
+            if destination == sid and not set(body["entryIds"]) <= set(copy_set["entryIds"]):
+                invalid()
+        if sid not in sessions:
+            invalid()
     elif route == "acquire":
         if not is_id(body.get("owner")):
             invalid()
@@ -361,14 +502,23 @@ def sqlite_store(directory, ttl_ms, *, check_same_thread=True, witness=None):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     # One service instance per store: monotonic lease state is local. No other
     # instance may serve the same records until the prior instance loses its lock.
-    with (root / "service.lock").open("a") as lock:
+    with (root / "service.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         from contextlib import closing
 
         with closing(
             sqlite3.connect(root / "records.db", check_same_thread=check_same_thread)
         ) as db:
-            yield Store(db, ttl_ms, witness)
+            lock.seek(0)
+            previously_profiled = bool(lock.read())
+            store = Store(db, ttl_ms, witness, previously_profiled=previously_profiled)
+            if not previously_profiled and db.execute("PRAGMA user_version").fetchone()[0] == 1:
+                import os
+
+                lock.write("pendingErasure: 1\n")
+                lock.flush()
+                os.fsync(lock.fileno())
+            yield store
 
 
 def serve(
@@ -405,7 +555,8 @@ def serve(
                 else:
                     with store.db:
                         result = self.route()
-                status, headers = 200, {}
+                status = 200
+                headers = {"Cache-Control": "no-store"} if "plans" in result else {}
             except Refusal as exc:
                 status, result, headers = exc.status, exc.body, exc.headers
             except (UnicodeError, ValueError, RecursionError):
@@ -448,6 +599,10 @@ def serve(
                         route, methods = "session", ("GET", "PUT")
                     case ["lease"]:
                         route, methods = "acquire", ("POST",)
+                    case ["pending-erasure"] if store is not None:
+                        route, methods = "registry", ("GET", "POST")
+                    case ["pending-erasure", generation, "complete"] if store is not None:
+                        route, methods = "complete", ("POST",)
                     case [generation]:
                         routes = {"entries": "append", "erase": "erase"}
                         if generation not in routes:
@@ -476,7 +631,8 @@ def serve(
                 size < 0
                 or "Transfer-Encoding" in self.headers
                 or (sid is not None and sid in {"", ".", ".."})
-                or (generation is not None and not LEASE.fullmatch(generation))
+                or (route == "complete" and generation in {"", ".", ".."})
+                or (route in {"renew", "release"} and not LEASE.fullmatch(generation))
             ):
                 invalid()
             q = {}
@@ -485,7 +641,7 @@ def serve(
                     {"project", "after", "limit"}
                     if route == "list"
                     else {"after", "limit"}
-                    if route == "session" and method == "GET"
+                    if route in {"session", "registry"} and method == "GET"
                     else set()
                 )
                 for item in query.split("&"):
@@ -500,17 +656,27 @@ def serve(
                     invalid()
                 if "after" in q and not q["after"]:
                     invalid()
+            revision = None
+            if route == "append" and store is not None:
+                revisions = self.headers.get_all("History-Revision", [])
+                if len(revisions) > 1 or (revisions and not LEASE.fullmatch(revisions[0])):
+                    invalid()
+                if revisions:
+                    revision = revisions[0]
             body = None
-            if method == "PUT" or route in {"acquire", "append", "erase"}:
+            if method == "PUT" or (
+                method == "POST" and route in {"acquire", "append", "erase", "registry", "complete"}
+            ):
                 body = json.loads(self.rfile.read(size).decode("utf-8"))
                 if not isinstance(body, dict):
                     invalid()
                 check_json(body)
-                shape(route, method, body)
+                shape(route, method, body, sid)
             elif size:
                 invalid()
-            route_handler = store.route if store is not None else custom_route
-            return route_handler(method, route, sid, generation, q, body)
+            if store is not None:
+                return store.route(method, route, sid, generation, q, body, revision=revision)
+            return custom_route(method, route, sid, generation, q, body)
 
     with (
         sqlite_store(directory, ttl_ms, witness=witness)

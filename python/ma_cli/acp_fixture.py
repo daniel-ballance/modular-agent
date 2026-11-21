@@ -24,8 +24,6 @@ async def serve(args):
         http_history(
             url,
             token,
-            coordination=os.environ.get("MODULAR_AGENT_HISTORY_COORDINATION"),
-            witness=os.environ.get("MODULAR_AGENT_HISTORY_WITNESS"),
         )
         if url and token
         else file_history(args.home / "sessions")
