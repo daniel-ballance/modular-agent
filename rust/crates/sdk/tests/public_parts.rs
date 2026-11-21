@@ -1,7 +1,8 @@
 use futures_util::StreamExt;
 use modular_agent::{
     Agent, Ask, Code, Command, Configuration, Durability, Event, Interface, OutputDecision, Plugin,
-    Result, Timing, Tool, ToolSource, ToolsChanged, file_history, testing::test_agent,
+    ReleaseOptions, Result, Timing, Tool, ToolSource, ToolsChanged, file_history,
+    testing::test_agent,
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,14 +22,88 @@ async fn content_survives_proposal_and_typed_streaming() -> Result<()> {
         json!({"type":"text", "text":"request"}),
         json!({"type":"example.opaque", "keep":42}),
     ];
-    let rejected = session.send(parts.clone(), Timing::Propose).await?;
-    assert_eq!(session.proposals().await?[0].content, parts);
-    session.withdraw(&rejected.input_id).await?;
-    assert!(session.proposals().await?.is_empty());
-    let admitted = session.send(parts.clone(), Timing::Propose).await?;
     session
-        .release(&admitted.input_id, Timing::Now, false)
+        .join(modular_agent::Actor {
+            id: "guest".into(),
+            kind: "user".into(),
+            rights: modular_agent::Rights::only(&["watch", "propose"]),
+        })
         .await?;
+    let guest = session.r#as("guest")?;
+    let rejected = guest.send(parts.clone(), Timing::Propose).await?;
+    let proposals = session.proposals().await?;
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0].input_id, rejected.input_id);
+    assert_eq!(proposals[0].actor_id, "guest");
+    assert_eq!(proposals[0].content, parts);
+    assert_eq!(
+        guest
+            .release(&rejected.input_id, Timing::Now, None)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Forbidden
+    );
+    guest.withdraw(&rejected.input_id).await?;
+    assert_eq!(
+        guest.withdraw(&rejected.input_id).await.unwrap_err().code(),
+        Code::Conflict
+    );
+    assert_eq!(
+        session
+            .release(&rejected.input_id, Timing::Now, None)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Conflict
+    );
+    assert_eq!(
+        session.withdraw("unknown").await.unwrap_err().code(),
+        Code::NotFound
+    );
+    assert!(session.proposals().await?.is_empty());
+
+    let declined = guest.send(parts.clone(), Timing::Propose).await?;
+    let receipt = session
+        .release(
+            &declined.input_id,
+            Timing::After,
+            ReleaseOptions { declined: true },
+        )
+        .await?;
+    assert_eq!(
+        (receipt.input_id, receipt.taken.as_str()),
+        (declined.input_id.clone(), "handedBack")
+    );
+    assert!(!receipt.duplicate && !receipt.erased);
+    assert_eq!(
+        session
+            .withdraw(&declined.input_id)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Conflict
+    );
+    assert!(session.last_turn().await?.is_none());
+
+    let admitted = session.send(parts.clone(), Timing::Propose).await?;
+    let receipt = session
+        .release(&admitted.input_id, Timing::Now, None)
+        .await?;
+    assert_eq!(
+        (receipt.input_id, receipt.taken.as_str()),
+        (admitted.input_id.clone(), "now")
+    );
+    assert!(!receipt.duplicate && !receipt.erased);
+    assert_eq!(
+        session
+            .release(&admitted.input_id, Timing::After, None)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Conflict
+    );
+    assert!(session.proposals().await?.is_empty());
     session.wait_idle().await?;
     let rows = session.history().await?;
     let input = rows.iter().find(|row| row["kind"] == "input").unwrap();

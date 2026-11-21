@@ -258,11 +258,7 @@ impl Plugin {
             Ok(())
         })
     }
-    pub fn provider(mut self, provider: impl crate::Provider) -> Self {
-        if !provider.provider_tools().is_empty() {
-            self.local_items
-                .push(format!("Provider tools:{}", provider.id()));
-        }
+    pub fn provider(self, provider: impl crate::Provider) -> Self {
         let provider: Arc<dyn crate::Provider> = Arc::new(provider);
         self.setup(move |r| {
             r.providers.push(provider.clone());
@@ -491,13 +487,6 @@ impl Registrar {
             if registered {
                 return Err(cannot_serve(name));
             }
-        }
-        if let Some(p) = self
-            .providers
-            .iter()
-            .find(|p| !p.provider_tools().is_empty())
-        {
-            return Err(cannot_serve(&format!("Provider tools:{}", p.id())));
         }
         if let Some(hook) = self.local_hooks.first() {
             return Err(cannot_serve(hook.point));
@@ -777,15 +766,6 @@ impl base::Plugin for InProcess {
                             plugin_stdio::hook_payload(point, &scope, &original, &api)?;
                         if point == "step.before" {
                             let data = api.snapshot(&scope.session)?;
-                            let request: base::ModelRequest =
-                                serde_json::from_value(original["request"].clone())?;
-                            payload["providerTools"] = json!(
-                                request
-                                    .provider_tools
-                                    .iter()
-                                    .map(base::wire::definition)
-                                    .collect::<Vec<_>>()
-                            );
                             payload["history"] = json!(
                                 data.entries
                                     .iter()

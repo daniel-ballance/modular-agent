@@ -38,11 +38,20 @@ async fn inspect(url: &str, token: &Path, project: &Path, allowed: bool) -> Valu
             assert_eq!(ping["result"], json!({}));
             conn.outgoing.send(json!({"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":1,"clientCapabilities":{}}}).to_string()).await.unwrap();
             let v: Value = serde_json::from_str(&conn.incoming.recv().await.unwrap()).unwrap();
-            *actor = v["result"]["_meta"]["modular-agent"]["actor"].clone();
+            let metadata = &v["result"]["_meta"]["modular-agent"];
+            *actor = metadata["actor"].clone();
+            assert_eq!(metadata["declaration"]["runsToolsAtProvider"], false);
+            assert_eq!(metadata["declaration"]["liveSessions"], false);
             conn.outgoing.send(json!({"jsonrpc":"2.0","method":"session/new","id":2,"params":{"cwd":project,"mcpServers":[]}}).to_string()).await.unwrap();
             let v: Value = serde_json::from_str(&conn.incoming.recv().await.unwrap()).unwrap();
-            if allowed { assert!(v["result"]["sessionId"].is_string(), "{v}"); }
-            else { assert_eq!(v["error"]["data"]["code"], "forbidden", "{v}"); }
+            if allowed {
+                assert!(v["result"]["sessionId"].is_string(), "{v}");
+                let declaration = &v["result"]["_meta"]["modular-agent"]["declaration"];
+                assert_eq!(declaration["runsToolsAtProvider"], false);
+                assert_eq!(declaration["liveSessions"], false);
+            } else {
+                assert_eq!(v["error"]["data"]["code"], "forbidden", "{v}");
+            }
         }
     }).await;
     actor

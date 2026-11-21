@@ -1,8 +1,7 @@
 use futures_util::StreamExt;
 use modular_agent::{
     Code, DirEntry, DirEntryKind, EnvironmentContext, EnvironmentDeclaration, EnvironmentPart,
-    Event, ExecResult, Plugin, Result, StepChange, Tool, ToolContext, async_trait,
-    testing::test_agent,
+    Event, ExecResult, Plugin, Result, Tool, ToolContext, async_trait, testing::test_agent,
 };
 use serde_json::{Value, json};
 use std::{
@@ -146,16 +145,16 @@ async fn binding_shaped_environment_and_content_progress() -> Result<()> {
     Ok(())
 }
 
-struct LocalToolsProvider(Arc<Mutex<Vec<String>>>);
+struct RequestProvider;
 #[async_trait]
-impl modular_agent::Provider for LocalToolsProvider {
+impl modular_agent::Provider for RequestProvider {
     fn id(&self) -> &str {
-        "local-tools"
+        "request"
     }
     fn models(&self) -> Vec<modular_agent::ModelInfo> {
         vec![modular_agent::ModelInfo {
             model: modular_agent::ModelRef {
-                provider: "local-tools".into(),
+                provider: self.id().into(),
                 id: "demo".into(),
             },
             context_window: 32_000,
@@ -164,28 +163,19 @@ impl modular_agent::Provider for LocalToolsProvider {
             extra: Default::default(),
         }]
     }
-    fn provider_tools(&self) -> Vec<modular_agent::ToolDefinition> {
-        ["one", "two"]
-            .into_iter()
-            .map(|name| {
-                serde_json::from_value(
-                    json!({"name":name,"description":"fixture","parameters":{"type":"object"}}),
-                )
-                .unwrap()
-            })
-            .collect()
+    fn supports(&self) -> modular_agent::ProviderSupport {
+        modular_agent::ProviderSupport {
+            keeps_state: true,
+            safe_to_repeat: true,
+        }
     }
     async fn request(
         &self,
         _: modular_agent::ModelRef,
         request: modular_agent::ModelRequest,
-        cx: modular_agent::ProviderContext,
+        _: modular_agent::ProviderContext,
     ) -> Result<modular_agent::AssistantMessage> {
         assert!(request.0.get("providerTools").is_none());
-        self.0
-            .lock()
-            .unwrap()
-            .extend(cx.provider_tools().iter().map(|d| d.name.clone()));
         Ok(modular_agent::AssistantMessage(
             json!({"role":"assistant","stop":"finished","content":[{"type":"text","text":"answer"}],"usage":{}}),
         ))
@@ -240,23 +230,15 @@ impl modular_agent::RuntimePart for OneStep {
 }
 
 #[tokio::test]
-async fn local_step_hook_narrows_provider_tool_allowance_without_putting_it_on_the_wire()
--> Result<()> {
+async fn sdk_provider_declaration_excludes_provider_tools_and_live_sessions() -> Result<()> {
     for bridge in [false, true] {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let builder = modular_agent::Agent::builder()
-            .provider(LocalToolsProvider(seen.clone()))
-            .plugin(
-                Plugin::new("step-allowance").on_step_before_change(|step| async move {
-                    let mut tools = step.provider_tools.unwrap();
-                    assert_eq!(tools.len(), 2);
-                    tools.remove(0);
-                    Ok(StepChange {
-                        provider_tools: Some(tools),
-                        ..StepChange::default()
-                    })
-                }),
-            );
+        let provider = Plugin::new("request-provider").provider(RequestProvider);
+        let builder = test_agent().model("request/demo");
+        let builder = if bridge {
+            builder.over_wire(provider)
+        } else {
+            builder.plugin(provider)
+        };
         let builder = if bridge {
             builder.plugin(
                 Plugin::new("runtime-test")
@@ -267,9 +249,11 @@ async fn local_step_hook_narrows_provider_tool_allowance_without_putting_it_on_t
             builder
         };
         let agent = builder.build().await?;
+        let declaration = agent.declaration()?;
+        assert_eq!(declaration["runsToolsAtProvider"], false);
+        assert_eq!(declaration["liveSessions"], false);
         let session = agent.session().await?;
-        assert_eq!(session.prompt("test allowance").await?.text, "answer");
-        assert_eq!(*seen.lock().unwrap(), ["two"]);
+        assert_eq!(session.prompt("request").await?.text, "answer");
         agent.close().await?;
     }
     Ok(())

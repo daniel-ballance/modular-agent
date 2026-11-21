@@ -84,7 +84,8 @@ pub use runtime::{
 pub use serve::{ServeOptions, serve, serve_websocket, serve_websocket_factory};
 pub use session::{
     Actor, Content, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome,
-    PromptInput, PromptOptions, PromptResult, Proposal, Rights, Session, Timing, ToolResult,
+    PromptInput, PromptOptions, PromptResult, Proposal, ReleaseOptions, Rights, Session, Timing,
+    ToolResult,
 };
 pub use tool::{
     Answer, Ask, AskWait, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext,

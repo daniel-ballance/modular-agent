@@ -224,16 +224,8 @@ payload!(StepBefore {
     model: crate::ModelInfo,
     request: crate::ModelRequest,
     history: Option<Vec<crate::HistoryEntry>>,
-    usage: Option<crate::Usage>,
-    provider_tools: Option<Vec<crate::ToolDefinition>>
+    usage: Option<crate::Usage>
 });
-
-/// A step transform may narrow the Provider-local tool allowance.
-#[derive(Clone, Debug, Default)]
-pub struct StepChange {
-    pub request: Option<crate::ModelRequest>,
-    pub provider_tools: Option<Vec<crate::ToolDefinition>>,
-}
 payload!(ModelFailed {
     session_id: String,
     request: crate::ModelRequest,
@@ -621,29 +613,6 @@ registration!(
     Option<crate::ModelRequest>,
     decode,
     request_change
-);
-registration!(
-    on_step_before_change,
-    on_step_before_change_with,
-    "step.before",
-    StepBefore,
-    StepChange,
-    decode,
-    |change: StepChange, mut p: Value| {
-        if change.request.is_none() && change.provider_tools.is_none() {
-            return Ok(Value::Null);
-        }
-        if let Some(request) = change.request {
-            p["request"] = request.0;
-        }
-        if let Some(tools) = change.provider_tools {
-            if p.get("providerTools").is_none() {
-                return Err(crate::plugin::cannot_serve("Provider-tool allowance"));
-            }
-            p["providerTools"] = json!(tools);
-        }
-        Ok(json!({"value":p}))
-    }
 );
 registration!(
     on_provider_request,

@@ -114,6 +114,23 @@ impl From<Timing> for base::Timing {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReleaseOptions {
+    pub declined: bool,
+}
+
+impl From<Option<ReleaseOptions>> for ReleaseOptions {
+    fn from(options: Option<ReleaseOptions>) -> Self {
+        options.unwrap_or_default()
+    }
+}
+
+impl From<bool> for ReleaseOptions {
+    fn from(declined: bool) -> Self {
+        Self { declined }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InputReceipt {
@@ -508,7 +525,7 @@ impl Session {
         Ok(proposals)
     }
 
-    /// Withdraw an input proposed by the acting actor.
+    /// Withdraw a proposal as its proposer or as an actor with `input`.
     pub async fn withdraw(&self, input_id: &str) -> Result<()> {
         let sponsor = if self.actor == LOCAL {
             &self.actor
@@ -522,15 +539,34 @@ impl Session {
             .await?)
     }
 
-    pub async fn release(&self, input_id: &str, timing: Timing, declined: bool) -> Result<()> {
-        self.check_actor_option()?;
+    /// Release a proposal and return its new disposition without waiting for a turn.
+    /// Pass `None` for the default options, or set `declined` to hand it back.
+    pub async fn release(
+        &self,
+        input_id: &str,
+        timing: Timing,
+        options: impl Into<ReleaseOptions>,
+    ) -> Result<InputReceipt> {
         self.require("input")?;
-        self.inner
+        let taken = self
+            .inner
             .harness
-            .release(&self.scope(), input_id, timing.into(), declined)
+            .release(
+                &self.scope(),
+                input_id,
+                timing.into(),
+                options.into().declined,
+            )
             .await?;
-        drop(self.drive());
-        Ok(())
+        if taken != "handedBack" {
+            drop(self.drive());
+        }
+        Ok(InputReceipt {
+            input_id: input_id.into(),
+            duplicate: false,
+            erased: false,
+            taken: taken.into(),
+        })
     }
 
     /// Admit input with timing `now` and wait for the turn that takes it.
@@ -1026,7 +1062,9 @@ impl Session {
                 let data = self.snapshot()?;
                 let queued = data.pending_inputs().iter().any(|(_, entry)| {
                     entry.content.as_ref().is_some_and(|v| {
-                        v["parked"] != true && v["taken"] != "proposed" && v["timing"] != "propose"
+                        (v["parked"] != true || !v["releasedBy"].is_null())
+                            && v["taken"] != "proposed"
+                            && v["timing"] != "propose"
                     })
                 });
                 if !self.is_running()

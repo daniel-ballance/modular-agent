@@ -99,11 +99,8 @@ impl SessionData {
             let input = v["inputId"].as_str().unwrap_or(&entry.id);
             match entry.kind.as_str() {
                 "input.accepted" => {
-                    if let Some((_, old)) = pending.iter_mut().find(|(id, _)| *id == input) {
-                        *old = entry;
-                    } else {
-                        pending.push((input, entry));
-                    }
+                    pending.retain(|(id, _)| *id != input);
+                    pending.push((input, entry));
                 }
                 "input" => pending
                     .retain(|(id, _)| *id != input && !entry.copies.iter().any(|copy| copy == *id)),

@@ -1508,6 +1508,31 @@ impl Harness {
             .unwrap_or(Value::Null))
     }
 }
+fn proposal_source<'a>(data: &'a SessionData, input: &str) -> Result<&'a Entry> {
+    data.entries
+        .iter()
+        .find(|e| {
+            e.kind == "input.accepted"
+                && e.content.as_ref().is_some_and(|v| {
+                    (v["timing"] == "propose" || v["parked"] == true)
+                        && (e.id == input || v["inputId"] == input)
+                })
+        })
+        .ok_or_else(|| OperationError::NotFound("unknown proposal".into()).into())
+}
+
+fn pending_proposal(open: &OpenSession, input: &str) -> Result<usize> {
+    ensure!(
+        !input.is_empty(),
+        OperationError::InvalidParams("missing proposal id".into())
+    );
+    proposal_source(&open.data, input)?;
+    open.queue
+        .iter()
+        .position(|i| i.id == input && i.timing == Timing::Propose)
+        .ok_or_else(|| OperationError::Conflict("proposal has already settled".into()).into())
+}
+
 fn admitted_authority(
     api: &dyn AgentApi,
     session: &str,
@@ -1672,26 +1697,16 @@ impl AgentApi for Harness {
         input: &str,
         timing: Timing,
         declined: bool,
-    ) -> Result<()> {
+    ) -> Result<&'static str> {
         require(self, scope, "input")?;
         ensure!(
-            timing != Timing::Propose,
-            "cannot release to proposed state"
+            timing != Timing::Propose && !input.is_empty(),
+            OperationError::InvalidParams("invalid proposal id or release timing".into())
         );
         let data = self.snapshot(&scope.session)?;
-        let source = data
-            .entries
-            .iter()
-            .find(|e| {
-                e.kind == "input.accepted"
-                    && (e.id == input || e.content.as_ref().is_some_and(|v| v["inputId"] == input))
-            })
-            .ok_or_else(|| anyhow!("unknown proposed input"))?;
+        let source = proposal_source(&data, input)?;
         let releaser = self.authority(&scope.session, &scope.actor)?;
-        let admitted = source
-            .content
-            .as_ref()
-            .ok_or_else(|| anyhow!("erased proposal"))?;
+        let admitted = source.content.as_ref().unwrap();
         let cap = admitted_authority(
             self,
             &scope.session,
@@ -1703,27 +1718,39 @@ impl AgentApi for Harness {
         let open = sessions
             .get_mut(&scope.session)
             .ok_or_else(|| anyhow!("session closed"))?;
-        let i = open
-            .queue
-            .iter()
-            .position(|i| i.id == input && i.timing == Timing::Propose)
-            .ok_or_else(|| anyhow!("input is not awaiting release"))?;
+        let i = pending_proposal(open, input)?;
         open.check_rewind()?;
-        let proposal = &open.queue[i];
-        let (record_scope, draft) = if declined {
+        let timing = if timing == Timing::Steer
+            && (admitted["parked"] == true || (open.active && open.steer_closed))
+        {
+            Timing::After
+        } else {
+            timing
+        };
+        let (record_scope, draft, taken) = if declined {
             (
                 scope.clone(),
                 Draft::new("input.returned", false, json!({"input":input})),
+                "handedBack",
             )
         } else {
+            let ready_work = open.queue.iter().any(|i| i.timing != Timing::Propose)
+                || !open.interrupted.is_empty();
+            let taken = if !open.active && ready_work {
+                "after"
+            } else {
+                input_taken(open.active, timing)
+            };
+            let mut value = admitted.clone();
+            value["inputId"] = json!(input);
+            value["timing"] = json!(timing);
+            value["authority"] = json!(cap);
+            value["releasedBy"] = json!(scope.actor);
+            value["taken"] = json!(taken);
             (
                 source.scope.clone(),
-                Draft::new(
-                    "input.accepted",
-                    false,
-                    json!({"inputId":input,"text":proposal.text,"content":portable::input_content(admitted),
-                   "key":proposal.key,"timing":timing,"authority":cap,"sponsor":admitted["sponsor"],"submittedBy":admitted["submittedBy"],"releasedBy":scope.actor}),
-                ),
+                Draft::new("input.accepted", false, value),
+                taken,
             )
         };
         let mut next = open.data.clone();
@@ -1732,12 +1759,12 @@ impl AgentApi for Harness {
         next.entries.push(entry);
         self.commit(open, &next)?;
         open.data = next;
-        if declined {
-            open.queue.remove(i);
-        } else {
-            open.queue[i].timing = timing;
+        let mut proposal = open.queue.remove(i).unwrap();
+        if !declined {
+            proposal.timing = timing;
+            open.queue.push_back(proposal);
         }
-        Ok(())
+        Ok(taken)
     }
     async fn withdraw_proposal(&self, scope: &Scope, sponsor: &str, input: &str) -> Result<()> {
         let shared = self
@@ -1747,19 +1774,16 @@ impl AgentApi for Harness {
         let open = sessions
             .get_mut(&scope.session)
             .ok_or_else(|| anyhow!("session closed"))?;
-        let i = open
-            .queue
-            .iter()
-            .position(|i| i.id == input && i.timing == Timing::Propose)
-            .ok_or_else(|| anyhow!("input is not awaiting release"))?;
+        let i = pending_proposal(open, input)?;
         ensure!(
             open.queue[i].actor == scope.actor || shared.has("input"),
-            "cannot withdraw another actor's proposal"
+            OperationError::Forbidden("cannot withdraw another actor's proposal".into())
         );
         ensure!(
             scope.actor == sponsor || shared.has("propose") || shared.has("input"),
-            "connection cannot act for proposer"
+            OperationError::Forbidden("connection cannot act for proposer".into())
         );
+        open.check_rewind()?;
         let mut next = open.data.clone();
         let entry = make_entry(
             &next,
@@ -1983,7 +2007,11 @@ impl AgentApi for Harness {
                 id: entry.id.clone(),
                 actor,
                 text,
-                timing: Timing::After,
+                timing: if entry.content.as_ref().is_some_and(|v| v["parked"] == true) {
+                    Timing::Propose
+                } else {
+                    Timing::After
+                },
                 key,
             };
             next.position = Some(entry.id.clone());
