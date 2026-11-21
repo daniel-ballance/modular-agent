@@ -70,7 +70,7 @@ One option, `durability`, sets what survives the agent's process ending:
 
 | `durability` | History | Runtime | After a crash or restart |
 |---|---|---|---|
-| `ephemeral` (default) | memory | transient | Nothing survives. Sessions end with the process. |
+| `ephemeral` (default) | memory | transient | With the default store, sessions end with the process. |
 | `kept` | files under `dataDir`, or a history service | transient | Sessions reopen with their history. An interrupted turn ends `failed`. |
 | `durable` | files under `dataDir`, or a history service | durable | An interrupted turn carries on when the session reopens. |
 

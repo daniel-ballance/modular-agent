@@ -90,7 +90,61 @@ The model sees `tide` exactly as it would in process. The call passes the same g
 
 ## Test it without a model
 
-A test loads a plugin program the same way, with the scripted Provider from the testing kit in place of a real one. Each SDK's own guide tests do this with its fixture program, which serves the same `tide` tool as above, so the test needs neither Python nor a key.
+A test loads a plugin program the same way, with the scripted Provider in place of a real one. Use the `tide` fixture from your SDK so the test needs no installation of another SDK and no key.
+
+In Rust, put the test in the [SDK scenario crate](../../../rust/crates/sdk-scenarios/tests/guide03.rs) so Cargo supplies the fixture executable path:
+
+```rust
+use modular_agent::{Agent, ProcessPlugin, Result, testing::scripted_provider};
+use serde_json::json;
+
+#[tokio::test]
+async fn loads_the_tide_plugin_as_a_program() -> Result<()> {
+    let agent = Agent::builder()
+        .provider(scripted_provider(json!([
+            {"toolCalls":[{"name":"tide","input":{"harbour":"Whitby"}}]},
+            {"text":"High tide is at 14:02."}
+        ])))
+        .model("scripted/script")
+        .process_plugin(ProcessPlugin::new([
+            env!("CARGO_BIN_EXE_modular-agent-fixtures"),
+            "tide",
+        ]))
+        .build()
+        .await?;
+    let turn = agent
+        .session()
+        .await?
+        .prompt("When is high tide at Whitby?")
+        .await?;
+    assert_eq!(
+        turn.tool_results()[0].text(),
+        "High tide at Whitby is 14:02."
+    );
+    agent.close().await
+}
+```
+
+In TypeScript, set `program` to the absolute path of the built [fixture program](../../../typescript/packages/fixtures/test/integrations.test.ts). Import `testAgent` from `@modular-agent/core/testing`, `assert` from `node:assert/strict`, and `test` from `node:test`.
+
+```ts
+test("guide 03 loads the tide from a fixture program", async () => {
+  const node = process.execPath;
+  const agent = await testAgent({
+    script: [
+      { toolCalls: [{ name: "tide", input: { harbour: "Whitby" } }] },
+      { text: "High tide is at 14:02." },
+    ],
+    processPlugins: [{ command: [node, program, "tide"] }],
+  });
+  try {
+    const turn = await (await agent.session()).prompt("When is high tide at Whitby?");
+    assert.equal(turn.toolResults()[0].text(), "High tide at Whitby is 14:02.");
+  } finally {
+    await agent.close();
+  }
+});
+```
 
 ## Or keep it in process
 

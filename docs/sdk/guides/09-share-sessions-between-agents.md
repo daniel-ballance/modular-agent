@@ -17,7 +17,7 @@ Use a numeric loopback address such as `127.0.0.1:39071`. Plain HTTP is only for
 
 Run the following helper in the service process. Rust's future runs until stopped; if the same process also uses the blocking HTTP client, run the service on a separate task on a multi-thread Tokio runtime. A separate service process avoids sharing that runtime.
 
-Go stops when its context is cancelled; Python's call blocks; TypeScript returns a handle with `url` and `close()`. The [Rust](../../../rust/crates/sdk/tests/guide09.rs), [TypeScript](../../../typescript/packages/core/test/guide09.test.ts), [Go](../../../go/modular/guide09_test.go) and [Python](../../../python/tests/test_sdk_guide09.py) tests call these same helpers on loopback with a temporary store and a test token. See those files for imports and service startup. TypeScript applications import from `@modular-agent/core` and `@modular-agent/core/testing`.
+Go's service stops when its context is cancelled. Python's call blocks. TypeScript returns a handle with `url` and `close()`. The [Rust](../../../rust/crates/sdk/tests/guide09.rs), [TypeScript](../../../typescript/packages/core/test/guide09.test.ts), [Go](../../../go/modular/guide09_test.go) and [Python](../../../python/tests/test_sdk_guide09.py) tests call these same helpers on loopback with a temporary store and a test token. See those files for imports and service startup. TypeScript applications import from `@modular-agent/core` and `@modular-agent/core/testing`.
 
 **Rust**
 
