@@ -8,8 +8,17 @@ from copy import copy
 from typing import TYPE_CHECKING, Any, Self, cast
 from uuid import uuid4
 
-from ma_core.wire import entry_out, result_out, settings_in, settings_out, turn_end_out, usage_out
+from ma_core.wire import (
+    entry_in,
+    entry_out,
+    result_out,
+    settings_in,
+    settings_out,
+    turn_end_out,
+    usage_out,
+)
 
+from ._event_types import EntryEvent, Event, InputHandedBackEvent, SessionInterruptedEvent, _event
 from ._types import (
     Actor,
     AgentError,
@@ -17,8 +26,6 @@ from ._types import (
     Disposition,
     ErrorCode,
     ErasureReport,
-    Event,
-    EventData,
     Input,
     InputReceipt,
     Json,
@@ -75,6 +82,7 @@ _RECORD_EVENTS = {
     "setting": "settingChanged",
     "authority": "actorJoined",
     "actor_left": "actorLeft",
+    "input_withdrawn": "inputWithdrawn",
 }
 
 
@@ -92,7 +100,16 @@ def _events(d: dict[str, Any]) -> list[Event]:
         return (
             []
             if d.get("final")
-            else [Event(d.get("stream_type", "text"), data=EventData({"delta": d["text"]}), **args)]
+            else [
+                _event(
+                    d.get("stream_type", "text"),
+                    {
+                        "delta": d.get("delta", d.get("text", "")),
+                        **({"toolCallId": d["call"]} if d.get("call") else {}),
+                    },
+                    **args,
+                )
+            ]
         )
     if kind == "tool_progress" and d.get("final"):
         return []
@@ -101,8 +118,8 @@ def _events(d: dict[str, Any]) -> list[Event]:
     elif kind == "history_entry":
         entry = entry_out(ids)
         evt = _RECORD_EVENTS.get(ids["kind"])
-        return [Event("entry", data=EventData({"entry": entry}), **args)] + (
-            [Event(evt, data=EventData(entry["data"]), **args)] if evt else []
+        return [_event("entry", {"entry": entry}, **args)] + (
+            [_event(evt, entry["data"], **args)] if evt else []
         )
     else:
         data = {
@@ -112,8 +129,10 @@ def _events(d: dict[str, Any]) -> list[Event]:
         }
     event_name = _EVENT_NAMES.get(kind)
     if "." in kind:
-        return [Event(kind, data=EventData(data), **args)]
-    return [Event(event_name, data=EventData(data), **args)] if event_name else []
+        return [
+            _event(kind, d.get("data", data) if isinstance(d.get("data"), dict) else data, **args)
+        ]
+    return [_event(event_name, data, **args)] if event_name else []
 
 
 class _Stream:
@@ -142,7 +161,8 @@ class _Stream:
         return event
 
     def delivered(self, event: Event) -> None:
-        if event.type == "entry" and isinstance(entry := event.data.fields.get("entry"), dict):
+        if isinstance(event, EntryEvent):
+            entry = event.data.fields["entry"]
             self.cursor = entry.get("id")
 
 
@@ -390,32 +410,34 @@ class Session:
             if receipt.duplicate:
                 settled = await self._result(receipt)
                 if settled.disposition is Disposition.TURN and settled.outcome is not None:
-                    yield Event(
+                    yield _event(
                         "turnEnded",
+                        {
+                            "outcome": {"kind": settled.outcome.kind},
+                            "result": {"text": settled.text},
+                        },
                         "",
                         self.id,
-                        EventData(
-                            {
-                                "outcome": {"kind": settled.outcome.kind},
-                                "result": {"text": settled.text},
-                            }
-                        ),
                         settled.turn_id,
                     )
                 return
             turn_id = None
             while True:
                 event = await stream.next()
-                if event.type == "sessionInterrupted":
-                    raise AgentError(ErrorCode.LOST, "Session interrupted", event.data.fields)
-                entry = event.data.fields.get("entry")
+                if isinstance(event, SessionInterruptedEvent):
+                    raise AgentError(
+                        ErrorCode.LOST,
+                        "Session interrupted",
+                        {"reason": event.data.fields["reason"]},
+                    )
+                entry = event.data.fields["entry"] if isinstance(event, EntryEvent) else None
                 if isinstance(entry, dict) and entry.get("kind") == "turnStart":
                     data = entry.get("data")
                     if isinstance(data, dict) and data.get("input") == receipt.input_id:
                         turn_id = event.turn_id
                 if (
-                    event.type == "inputHandedBack"
-                    and event.data.fields.get("input") == receipt.input_id
+                    isinstance(event, InputHandedBackEvent)
+                    and event.data.fields["input"] == receipt.input_id
                 ):
                     return
                 if turn_id is not None and event.turn_id == turn_id:
@@ -469,11 +491,11 @@ class Session:
                     value=entry_out(raw),
                 )
                 if entry is not None:
-                    event = Event(
+                    event = _event(
                         "entry",
+                        {"entry": entry},
                         raw["time"],
                         self.id,
-                        EventData({"entry": entry}),
                         raw.get("turn"),
                         raw.get("step"),
                         raw.get("call"),
@@ -483,7 +505,8 @@ class Session:
             while not self._root._closed:
                 event = await stream.next()
                 if (
-                    isinstance(entry := event.data.fields.get("entry"), dict)
+                    isinstance(event, EntryEvent)
+                    and (entry := event.data.fields["entry"])
                     and entry.get("id") in entry_ids
                 ):
                     continue
@@ -496,10 +519,27 @@ class Session:
 
     async def last_turn(self) -> PromptResult | None:
         records = await self._native("branch")
-        for entry in reversed(records):
-            if entry["kind"] == "turn_end":
-                return _turn(entry, records)
-        return None
+        end = next((entry for entry in reversed(records) if entry["kind"] == "turn_end"), None)
+        if end is None:
+            return None
+        visible = []
+        terminal = None
+        for raw in records:
+            if raw.get("turn") != end["turn"]:
+                continue
+            if raw["kind"] not in {"turn_start", "turn_end", "tool_call", "tool_result"}:
+                continue
+            entry = await self._agent._session(
+                "view", session=self.id, recipient=self._actor, type="entry", value=entry_out(raw)
+            )
+            if entry is not None:
+                record = entry_in(entry, self.id)
+                visible.append(record)
+                if raw["id"] == end["id"]:
+                    terminal = record
+        if terminal is None:
+            raise AgentError(ErrorCode.WITHHELD, "The turn result was withheld")
+        return _turn(terminal, visible)
 
     async def history(self) -> list[JsonObject]:
         state = await self._state()

@@ -233,7 +233,21 @@ async def test_move_erase_and_proposals_with_shared_content(tmp_path):
         assert {"sessionId": session.id, "id": second_input} in report["erased"]
 
 
-async def test_gate_pending_leaves_call_for_a_later_turn():
+@pytest.mark.parametrize("hosted", [False, True])
+async def test_gate_pending_leaves_call_for_a_later_turn(hosted):
+    import sys
+    from pathlib import Path
+
+    process_plugins = (
+        [
+            {
+                "command": [str(Path(sys.executable).with_name("modular-agent-plugin"))],
+                "env": {"MODULAR_AGENT_PLUGIN_PARTS": "runtime"},
+            }
+        ]
+        if hosted
+        else None
+    )
     executed = []
 
     @tool
@@ -256,6 +270,7 @@ async def test_gate_pending_leaves_call_for_a_later_turn():
             {"text": "continued"},
         ],
         tools=[action],
+        process_plugins=process_plugins,
         plugins=[Plugin("defer", setup=setup)],
         late_answers_start_turns=True,
     ) as agent:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import logging
 import math
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -16,6 +15,7 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, create_model
 from referencing import Registry
 
+from ._context import CallContext
 from ._jobs import Job, JobManager
 from ._types import (
     AgentError,
@@ -146,7 +146,7 @@ class LeftOpen(Exception):
         self.question_id = question_id
 
 
-class ToolContext:
+class ToolContext(CallContext):
     def __init__(
         self,
         session_id: str,
@@ -159,24 +159,38 @@ class ToolContext:
         history: Callable[[str | None], Awaitable[JsonObject]] | None = None,
         *,
         start_job: Callable[[str, Json, str | None], Awaitable[Job]] | None = None,
+        credential: Callable[[str], Awaitable[str | None]] | None = None,
+        emit: Callable[[str, Json], Awaitable[None]] | None = None,
+        call_hook: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
+        turn_id: str | None = None,
+        step_id: str | None = None,
     ) -> None:
-        self.session_id = session_id
-        self.actor_id = actor_id
+        super().__init__(
+            session_id,
+            actor_id,
+            step_id=step_id,
+            turn_id=turn_id,
+            history=history,
+            emit=emit,
+            call_hook=call_hook,
+        )
         self.call_id = call_id
-        self.cancelled = asyncio.Event()
+        self._credential = credential
         self._ask = ask
         self._progress = progress
         self._nested = nested
-        self._history = history
         self.environment = ToolEnvironment(self._check, environment)
         self.tools = _NestedTools(self)
         self.jobs = JobManager(self._check, start_job)
         self._question_index = 0
-        self._active = True
 
-    def _check(self) -> None:
-        if not self._active:
-            raise AgentError(ErrorCode.INVALID_REQUEST, "The call has settled")
+    async def credential(self, name: str) -> str | None:
+        self._check()
+        if self._credential is None:
+            raise AgentError(
+                ErrorCode.NOT_SUPPORTED, "Named credentials require an in-process tool"
+            )
+        return await self._credential(name)
 
     def refuse(self, reason: str) -> _Refusal:
         self._check()
@@ -202,20 +216,9 @@ class ToolContext:
         self._question_index += 1
         return await self._ask(question, self._question_index, wait, then == "leaveOpen")
 
-    async def history(self, cursor: str | None = None) -> JsonObject:
-        """Read a page of the plugin's raw session record, after cursor if supplied."""
-        self._check()
-        if self._history is None:
-            raise AgentError(ErrorCode.NOT_SUPPORTED, "History is not available in this context")
-        return await self._history(cursor)
-
     async def progress(self, content: Input) -> None:
         self._check()
         await self._progress(_content(content))
-
-    def log(self, message: str) -> None:
-        self._check()
-        logging.getLogger("modular_agent.plugin").warning("%s", message)
 
 
 @dataclass(frozen=True)

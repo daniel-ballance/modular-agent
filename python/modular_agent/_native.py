@@ -659,6 +659,15 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                 **({"next": records[499]["id"]} if len(records) > 500 else {}),
             }
 
+        async def credential(name: str) -> str | None:
+            try:
+                return cast(str | None, await self.api.call("credentials", "get", {"name": name}))
+            except Exception as exc:
+                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+
+        async def custom_event(type: str, data: Json) -> None:
+            await self._emit_custom(sid, type, data)
+
         context = ToolContext(
             sid,
             call["actor"],
@@ -668,6 +677,11 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
             nested,
             environment,
             history,
+            credential=credential,
+            emit=custom_event,
+            call_hook=self._call_hook,
+            turn_id=d.get("turn"),
+            step_id=d.get("step"),
             start_job=(
                 self._job_start({**d, **call, "call": call["id"]})
                 if self.registrar._job_owner is not None

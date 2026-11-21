@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from . import Agent, AgentError, JsonObject, ProcessPlugin, PromptResult, ServicePlugin, Session
+from ._event_types import EntryEvent
 from ._history import HistoryStore, file_history, http_history
 from .fixtures import count, fixture
 from .testing import answers, test_agent
@@ -169,10 +170,8 @@ async def _crash_child(
         session = await agent.session(actors=scenario["agent"].get("actors", []))
         print(session.id, flush=True)
         async for event in session.prompt_stream(scenario["steps"][index]["prompt"]):
-            if event.type == "entry":
-                entry = event.data.fields["entry"]
-                if isinstance(entry, dict):
-                    print(entry["kind"], flush=True)
+            if isinstance(event, EntryEvent):
+                print(event.data.fields["entry"]["kind"], flush=True)
 
 
 def _live_group(pgid: int) -> bool:

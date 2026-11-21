@@ -193,6 +193,7 @@ async def _serve(
             )
             if part is not None
         ]
+        items += [f"provider:{name}" for name in sorted(registrar._local_providers)]
         items += list(registrar._defined_hooks)
         if items:
             raise WireError("Cannot serve " + ", ".join(items), "not_supported")
@@ -394,6 +395,12 @@ async def _serve(
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
             return cast(JsonObject, page)
 
+        async def custom_event(type: str, data: Json) -> None:
+            await server.peer.notify(
+                "host/emit",
+                {"sessionId": p["sessionId"], "parentRequestId": key, "type": type, "data": data},
+            )
+
         context = ToolContext(
             p["sessionId"],
             call.get("actorId", "user"),
@@ -403,6 +410,9 @@ async def _serve(
             nested,
             environment,
             history,
+            emit=custom_event,
+            turn_id=p.get("turnId"),
+            step_id=call.get("stepId"),
             start_job=start_job(key, p["sessionId"], call.get("actorId", "user"))
             if reg._job_owner
             else None,

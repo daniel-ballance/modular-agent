@@ -563,6 +563,8 @@ class Harness(Authority):
             except (Exception, asyncio.CancelledError) as exc:
                 reason = "writerLost" if getattr(exc, "writer_lost", False) else "commitFailed"
                 self._interrupt(sid, reason)
+                if isinstance(exc, AgentError) and exc.code == "lost":
+                    raise
                 raise AgentError(
                     "Cannot confirm the session commit; reopen to recover", "lost"
                 ) from exc

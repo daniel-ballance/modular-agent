@@ -1173,7 +1173,7 @@ def create_agent(
             h.on("embedding", "session.start", agent._present, "first")
             h.follow("embedding", "user", agent._event)
             for provider in providers:
-                await h.load(_ProviderAdapter(provider, credentials))
+                await h.load(_ProviderAdapter(provider, agent._credentials))
             selection = Selection(
                 [p.id for p in providers] + (["conformance"] if conformance else [])
             )
