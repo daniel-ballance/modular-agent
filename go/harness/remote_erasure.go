@@ -133,7 +133,8 @@ func (c *client) eraseRemote(ctx context.Context, store api.Store, remote api.Re
 	for _, row := range rows {
 		live[row.ID] = row
 	}
-	for _, id := range published.SessionIDs {
+	// The source has a plan but is not listed among the destinations.
+	for _, id := range slices.Concat([]string{source.id}, published.SessionIDs) {
 		row, exists := live[id]
 		if exists {
 			if current, err := c.find(id); err == nil {

@@ -226,7 +226,8 @@ func (l *lease) CompleteErasure(intentID string, ids []string) error {
 	return err
 }
 
-func (l *lease) mutateRegistry(path string, body func(string) any, publish bool) (result api.ErasurePublication, err error) {
+func (l *lease) mutateRegistry(path string, body func(string) any, publish bool) (api.ErasurePublication, error) {
+	var result api.ErasurePublication
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.usable(); err != nil {
@@ -257,9 +258,9 @@ func (l *lease) mutateRegistry(path string, body func(string) any, publish bool)
 	}
 	if publish && len(out) == 2 {
 		id := idOf(out["intentId"])
-		sessions, ok := distinctIDs(out["sessionIds"])
-		if validSegment(id) && ok && slices.Contains(sessions, l.id) &&
-			!slices.ContainsFunc(sessions, func(id string) bool { return !validSegment(id) }) {
+		sessions, ok := distinctIDs(out["sessionIds"], true)
+		if validSegment(id) && ok &&
+			!slices.ContainsFunc(sessions, func(id string) bool { return !validSegment(id) || id == l.id }) {
 			return api.ErasurePublication{IntentID: id, SessionIDs: sessions}, nil
 		}
 	}

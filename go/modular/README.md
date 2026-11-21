@@ -86,7 +86,7 @@ The dedicated file history service declares `pendingErasure: 1`. It keeps both p
 
 The old `/go/pending-erasure` route and `goErasureGuard` append member are removed. No in-repository client still needs them. Do not replace a legacy registry with an empty one. Existing deployments must fence old writers, settle their pending work, and migrate offline before enabling the new profile. A native snapshot-store listener does not declare the profile because native writers do not share its HTTP transaction lock. An authenticated HTTP relay preserves the upstream declaration and revision header.
 
-A repeated publication returns the original intent ID and destinations in published order. The client uses that list to find plans even when a peer expires a destination. Expiry is not proof of erasure. The report marks copies in expired sessions as out of reach without exposing their IDs.
+A repeated publication returns the original intent ID and destinations in published order. The source has its own plan and is not in the destination list. The client uses that list to find plans even when a peer expires a destination. Expiry is not proof of erasure. The report marks copies in expired sessions as out of reach without exposing their IDs.
 
 ### WebSocket services
 

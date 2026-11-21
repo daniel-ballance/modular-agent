@@ -99,7 +99,7 @@ func (s *Server) loadRegistry() ([]intentRecord, error) {
 		return nil, api.ErrErasureUnavailable
 	}
 	for _, row := range records {
-		if len(row.SessionIDs) == 0 || len(row.SessionIDs) != len(row.Plans) {
+		if row.SessionIDs == nil || len(row.SessionIDs)+1 != len(row.Plans) {
 			return nil, api.ErrErasureUnavailable
 		}
 	}
@@ -116,8 +116,8 @@ func (s *Server) saveRegistry(w http.ResponseWriter, records []intentRecord) boo
 	return true
 }
 
-func distinctIDs(v json.RawMessage) ([]string, bool) {
-	ids, ok := idsOf(v, false)
+func distinctIDs(v json.RawMessage, allowEmptyArray bool) ([]string, bool) {
+	ids, ok := idsOf(v, allowEmptyArray)
 	if !ok {
 		return nil, false
 	}
@@ -141,7 +141,7 @@ func (q *request) parsePublication(f fields) bool {
 		return false
 	}
 	var ok bool
-	if p.EntryIDs, ok = distinctIDs(f["entryIds"]); !ok {
+	if p.EntryIDs, ok = distinctIDs(f["entryIds"], false); !ok {
 		return false
 	}
 	var sets []json.RawMessage
@@ -152,7 +152,7 @@ func (q *request) parsePublication(f fields) bool {
 	for _, item := range sets {
 		f := objectOf(item)
 		s := copySet{SessionID: idOf(f["sessionId"]), RecordID: idOf(f["recordId"])}
-		s.EntryIDs, ok = distinctIDs(f["entryIds"])
+		s.EntryIDs, ok = distinctIDs(f["entryIds"], false)
 		if len(f) != 3 || !validSegment(s.SessionID) || s.RecordID == "" || !ok || seen[s.SessionID] {
 			return false
 		}
@@ -223,7 +223,8 @@ func (s *Server) publishPlans(w http.ResponseWriter, source document, q request,
 		staleRevision(w)
 		return
 	}
-	row := intentRecord{ID: p.IntentID, Source: q.id, Targets: targets, Plans: make(map[string]plan)}
+	row := intentRecord{ID: p.IntentID, Source: q.id, Targets: targets,
+		SessionIDs: make([]string, 0, len(p.Copies)-1), Plans: make(map[string]plan)}
 	for _, set := range p.Copies {
 		d := source
 		if set.SessionID != q.id {
@@ -254,7 +255,9 @@ func (s *Server) publishPlans(w http.ResponseWriter, source document, q request,
 			failure(w, 413, "request_too_large", "plan cannot fit a page")
 			return
 		}
-		row.SessionIDs = append(row.SessionIDs, set.SessionID)
+		if set.SessionID != q.id {
+			row.SessionIDs = append(row.SessionIDs, set.SessionID)
+		}
 		row.Plans[set.SessionID] = result
 	}
 	if !current() {

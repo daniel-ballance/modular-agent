@@ -43,17 +43,20 @@ func TestPublicationReturnsOriginalDestinationsInOrder(t *testing.T) {
 	}
 	source := seed("source")
 	defer source.Close()
-	if err := seed("destination").Close(); err != nil {
-		t.Fatal(err)
+	for _, id := range []string{"alpha", "zeta"} {
+		if err := seed(id).Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	_, revision, err := c.ErasurePlans("source")
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := publication{Lease: source.token, Revision: revision, IntentID: "original", EntryIDs: []string{"entry"},
-		Copies: []copySet{{SessionID: "source", RecordID: "source-record", EntryIDs: []string{"entry"}},
-			{SessionID: "destination", RecordID: "destination-record", EntryIDs: []string{"entry"}}}}
-	want := fields{"intentId": raw("original"), "sessionIds": raw([]string{"source", "destination"})}
+		Copies: []copySet{{SessionID: "zeta", RecordID: "zeta-record", EntryIDs: []string{"entry"}},
+			{SessionID: "source", RecordID: "source-record", EntryIDs: []string{"entry"}},
+			{SessionID: "alpha", RecordID: "alpha-record", EntryIDs: []string{"entry"}}}}
+	want := fields{"intentId": raw("original"), "sessionIds": raw([]string{"zeta", "alpha"})}
 	publish := func() {
 		t.Helper()
 		var out fields
@@ -62,10 +65,10 @@ func TestPublicationReturnsOriginalDestinationsInOrder(t *testing.T) {
 		}
 	}
 	publish()
-	p.Copies[0], p.Copies[1] = p.Copies[1], p.Copies[0]
+	p.Copies[0], p.Copies[2] = p.Copies[2], p.Copies[0]
 	publish() // An identical operation may resend the sets in another order.
 	p.IntentID = "replacement"
-	p.Copies = p.Copies[1:] // Rediscovery no longer includes the destination.
+	p.Copies = p.Copies[1:2] // Rediscovery no longer includes the destinations.
 	publish()
 }
 
@@ -117,7 +120,7 @@ func TestRegistryOrdersIntentAndAppend(t *testing.T) {
 		t.Fatalf("stale publication changed plans: %v, %v", plans, err)
 	}
 	published, err := writer.PublishErasure(fresh, intent)
-	want := api.ErasurePublication{IntentID: intent.ID, SessionIDs: []string{next.ID}}
+	want := api.ErasurePublication{IntentID: intent.ID, SessionIDs: []string{}}
 	if err != nil || !reflect.DeepEqual(published, want) {
 		t.Fatalf("publish: %+v, %v", published, err)
 	}

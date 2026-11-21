@@ -509,7 +509,7 @@ func (q *request) body(body []byte) bool {
 	case "complete":
 		q.lease = idOf(f["lease"])
 		var ok bool
-		q.erase, ok = distinctIDs(f["entryIds"])
+		q.erase, ok = distinctIDs(f["entryIds"], false)
 		return len(f) == 2 && validLease(q.lease) && ok
 	case "erase":
 		q.lease = idOf(f["lease"])
