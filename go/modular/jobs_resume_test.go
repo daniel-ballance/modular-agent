@@ -59,7 +59,7 @@ func testJobResume(t *testing.T, remote bool) {
 		url = svc.URL
 		placement = modular.WithServicePlugin(modular.ServicePlugin{URL: url, TokenFile: file})
 	}
-	opts := []modular.Option{modular.WithDurability(modular.Kept), modular.WithDataDir(dataDir), modular.WithProject(project), placement}
+	opts := []modular.Option{modular.WithDurability(modular.Kept), modular.WithDataDir(dataDir), modular.WithProject(project), placement, modulartest.Script(`[{"text":"ready"}]`)}
 	var id string
 	var a *modular.Agent
 	if remote {
@@ -90,6 +90,12 @@ func testJobResume(t *testing.T, remote bool) {
 			t.Fatal(err)
 		}
 		id = s.ID()
+		if _, err := s.Prompt(ctx, "initialize the session"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.WaitIdle(ctx); err != nil {
+			t.Fatal(err)
+		}
 		if got, err := s.CallTool(ctx, "background", struct{}{}); err != nil || got.Text() != "started" {
 			t.Fatalf("call: %+v %v", got, err)
 		}
@@ -125,12 +131,18 @@ func TestRemoteJobCrashHost(t *testing.T) {
 		t.Skip("subprocess helper")
 	}
 	ctx := t.Context()
-	a, err := modular.New(ctx, modular.WithDurability(modular.Kept), modular.WithDataDir(os.Getenv("MA_TEST_JOB_DATA")), modular.WithProject(os.Getenv("MA_TEST_JOB_PROJECT")), modular.WithServicePlugin(modular.ServicePlugin{URL: os.Getenv("MA_TEST_JOB_URL"), TokenFile: os.Getenv("MA_TEST_JOB_TOKEN")}))
+	a, err := modular.New(ctx, modular.WithDurability(modular.Kept), modular.WithDataDir(os.Getenv("MA_TEST_JOB_DATA")), modular.WithProject(os.Getenv("MA_TEST_JOB_PROJECT")), modulartest.Script(`[{"text":"ready"}]`), modular.WithServicePlugin(modular.ServicePlugin{URL: os.Getenv("MA_TEST_JOB_URL"), TokenFile: os.Getenv("MA_TEST_JOB_TOKEN")}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s, err := a.Session(ctx)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(ctx, "initialize the session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WaitIdle(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := s.CallTool(ctx, "background", struct{}{}); err != nil || got.Text() != "started" {

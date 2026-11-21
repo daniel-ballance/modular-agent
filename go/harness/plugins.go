@@ -29,6 +29,7 @@ type handler struct {
 }
 type Harness struct {
 	localActor      string
+	deferHistory    bool
 	handBackOnOpen  bool
 	parkJobReports  bool
 	refuseSettings  bool
@@ -69,6 +70,10 @@ func NewWithLocalActor(actor string) *Harness {
 	}
 	return h
 }
+
+// DeferPersistentHistory keeps new public sessions provisional until admission.
+// Call before loading plugins.
+func (h *Harness) DeferPersistentHistory() { h.deferHistory = true }
 
 // HandBackQueuedOnOpen selects the embedded SDK's recovery policy before loading plugins.
 func (h *Harness) HandBackQueuedOnOpen() { h.handBackOnOpen = true }

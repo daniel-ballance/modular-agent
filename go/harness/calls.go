@@ -12,6 +12,10 @@ func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.To
 		return api.ToolResult{}, err
 	}
 	s.mu.Lock()
+	if s.pendingStore != nil {
+		s.mu.Unlock()
+		return api.ToolResult{}, errProvisionalSession
+	}
 	if s.rewindBlocked {
 		s.mu.Unlock()
 		return api.ToolResult{}, errRewindUnresolved

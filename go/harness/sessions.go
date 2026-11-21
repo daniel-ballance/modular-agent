@@ -24,6 +24,7 @@ type session struct {
 	mu               sync.Mutex
 	data             api.Session
 	lease            api.Lease
+	pendingStore     api.Store // no persistent writer until first admission or fork publication
 	h                *Harness
 	interrupted      chan struct{}
 	interruptEmitted chan struct{}
@@ -155,18 +156,17 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		return "", err
 	}
 	if v, err := c.Get("history"); err == nil {
-		if fresh, ok := v.(interface {
-			AcquireNew(string) (api.Lease, error)
-		}); ok {
-			s.lease, err = fresh.AcquireNew(id)
+		store := v.(api.Store)
+		if c.h.deferHistory {
+			s.pendingStore = store
 		} else {
-			s.lease, err = v.(api.Store).Acquire(id)
-		}
-		if err != nil {
-			return "", err
+			s.lease, err = acquireNew(store, id)
+			if err != nil {
+				return "", err
+			}
 		}
 	}
-	if err = c.registerNew(s, host != nil || tenant != "" && !forking); err != nil {
+	if err = c.registerNew(s, s.pendingStore == nil && (host != nil || tenant != "" && !forking)); err != nil {
 		if s.lease != nil {
 			_ = s.lease.Close()
 		}
@@ -184,6 +184,15 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	c.Emit(ctx, api.Event{Kind: "session.ready", Session: id, Data: api.JSON(map[string]any{"sessionId": id})})
 	return id, nil
 }
+func acquireNew(store api.Store, id string) (api.Lease, error) {
+	if fresh, ok := store.(interface {
+		AcquireNew(string) (api.Lease, error)
+	}); ok {
+		return fresh.AcquireNew(id)
+	}
+	return store.Acquire(id)
+}
+
 func (c *client) registerNew(s *session, commit bool) error {
 	c.h.projectGate.Lock()
 	defer c.h.projectGate.Unlock()
@@ -447,14 +456,58 @@ func (s *session) commitLocked(next api.Session) error {
 	return s.commitSnapshotLocked(next)
 }
 
+var errProvisionalSession = errors.New("session has not admitted its first input")
+
+func isSetup(e api.Entry) bool {
+	switch e.Kind {
+	case "setting", "actor.set", "actor.left", "plugins.set", "tenant", "limit", "subagent.bound":
+		return true
+	default:
+		return false
+	}
+}
+
+func startsLegacyHistory(e api.Entry) bool { return !isSetup(e) || e.Kind == "subagent.bound" }
+
+// Only admission and fork publication can start a persistent writer. Save the
+// already staged setup with the new entries before making the state visible.
+func (s *session) publishInitialLocked(next api.Session) error {
+	if s.pendingStore == nil {
+		return s.commitLocked(next)
+	}
+	if err := s.checkWriterLocked(); err != nil {
+		return err
+	}
+	l, err := acquireNew(s.pendingStore, s.id)
+	if err != nil {
+		return s.stopWriterLocked(err)
+	}
+	s.lease = l
+	s.watchWriter()
+	if err := s.checkWriterLocked(); err != nil {
+		return err
+	}
+	if err := l.Save(next); err != nil {
+		return s.stopWriterLocked(err)
+	}
+	s.pendingStore, s.data = nil, next
+	return nil
+}
+
 func (s *session) commitSnapshotLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
-	used := slices.ContainsFunc(next.Entries, func(e api.Entry) bool {
-		return e.Kind != "setting" && e.Kind != "actor.set" && e.Kind != "actor.left" && e.Kind != "plugins.set" && e.Kind != "tenant" && e.Kind != "limit"
-	}) || next.ForkedFrom != ""
-	if s.lease != nil && used {
+	if s.pendingStore != nil {
+		if len(next.Entries) < len(s.data.Entries) || slices.ContainsFunc(next.Entries[len(s.data.Entries):], func(e api.Entry) bool { return !isSetup(e) }) {
+			return errProvisionalSession
+		}
+		s.data = next
+		return nil
+	}
+	// Outside the public persistent lifecycle, keep the original lazy
+	// save rule. An attached public persistent lease saves all changes.
+	if s.lease != nil && (s.h.deferHistory || next.ForkedFrom != "" || slices.ContainsFunc(next.Entries, startsLegacyHistory)) {
 		if err := s.lease.Save(next); err != nil {
 			if s.rewindBlocked && !errors.Is(err, api.ErrWriterLost) && s.reconcileRewindCommit(next) {
 				return nil
@@ -540,6 +593,9 @@ func (c *client) move(ctx context.Context, id, target string, rewind bool, outsi
 	defer s.mu.Unlock()
 	if !c.authorizedBy(s.data, ctx, "settings") {
 		return errors.New("move refused")
+	}
+	if s.pendingStore != nil {
+		return errProvisionalSession
 	}
 	if s.rewindBlocked {
 		return errRewindUnresolved
@@ -672,15 +728,15 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	s.mu.Unlock()
 	transformed, hookErr := c.h.API().Invoke(ctx, "session.fork", api.Forked{Session: next, Mapping: mapping})
 	s.mu.Lock()
-	if hookErr != nil {
-		return "", hookErr
+	if hookErr == nil {
+		next = transformed.(api.Forked).Session
+		hookErr = s.publishInitialLocked(next)
 	}
-	next = transformed.(api.Forked).Session
-	if err = s.commitLocked(next); err != nil {
+	if hookErr != nil {
 		s.mu.Unlock()
 		_ = c.CloseSession(fork)
 		s.mu.Lock()
-		return "", err
+		return "", hookErr
 	}
 	return fork, nil
 }
@@ -771,6 +827,9 @@ func (c *client) eraseLocal(ctx context.Context, id string, ids []string) (map[s
 		}
 	}()
 	for _, s := range sessions {
+		if s.id == id && s.pendingStore != nil {
+			return nil, errProvisionalSession
+		}
 		if s.rewindBlocked {
 			return nil, errRewindUnresolved
 		}

@@ -178,7 +178,6 @@ func checkSessionInterruption(t *testing.T, reason modular.SessionInterruptionRe
 			t.Fatal(err)
 		}
 	}
-	lease := takeInterruptionCheck(t, ctx, store.acquired, "lease")
 	following := make(chan struct{})
 	followed := make(chan modular.TypedEvent[modular.SessionInterruptedData], 1)
 	go func() {
@@ -246,6 +245,7 @@ func checkSessionInterruption(t *testing.T, reason modular.SessionInterruptionRe
 	case <-ctx.Done():
 		t.Fatal("tool did not start")
 	}
+	lease := takeInterruptionCheck(t, ctx, store.acquired, "lease")
 	if reason == modular.CommitFailed {
 		lease.failAppend.Store(true)
 		_, err := s.Send(ctx, "trigger a failed append", modular.Now)

@@ -298,6 +298,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		specs = append(specs, more...)
 	}
 	h := harness.NewWithLocalActor(localActor)
+	if o.durability != Ephemeral {
+		h.DeferPersistentHistory()
+	}
 	h.ConfigureTenants(o.tenants)
 	h.HandBackQueuedOnOpen()
 	h.ConfigureSessions(o.jobReports, o.lateAnswers, o.refuseSettings)

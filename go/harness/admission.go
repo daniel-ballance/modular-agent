@@ -78,12 +78,13 @@ func (c *client) admitLocked(s *session, in api.Input) (api.Receipt, error) {
 	default:
 		return api.Receipt{}, errors.New("invalid input timing")
 	}
-	if !slices.ContainsFunc(s.data.Entries, func(e api.Entry) bool { return e.Kind == "setting" }) {
-		if _, err := s.recordLocked(api.Entry{Kind: "setting", Data: api.JSON(s.data.Settings)}, "harness", true); err != nil {
-			return api.Receipt{}, err
-		}
+	next := s.data
+	next.Entries = slices.Clip(next.Entries)
+	if !slices.ContainsFunc(next.Entries, func(e api.Entry) bool { return e.Kind == "setting" }) {
+		appendEntry(&next, api.Entry{Kind: "setting", Data: api.JSON(next.Settings)}, "harness", true)
 	}
-	if _, err := s.recordLocked(api.Entry{Kind: "input.accepted", Job: in.Job, Data: api.JSON(in), Content: in.Content, Actor: attribution, Copies: in.Copies}, "harness", true); err != nil {
+	appendEntry(&next, api.Entry{Kind: "input.accepted", Job: in.Job, Data: api.JSON(in), Content: in.Content, Actor: attribution, Copies: in.Copies}, "harness", true)
+	if err := s.publishInitialLocked(next); err != nil {
 		return api.Receipt{}, err
 	}
 	if !parked(in) && !s.opening {
