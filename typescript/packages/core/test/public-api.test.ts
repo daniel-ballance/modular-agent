@@ -151,7 +151,7 @@ test("proposals, generic Content, typed tool events and history movement use the
   assert.deepEqual(input.message?.content, content);
   await s.moveTo(cursor);
   assert.equal((await s.history({ all: false })).at(-1)?.id, cursor);
-  assert.ok((await s.erase([input.id])).erased.includes(input.id));
+  assert.ok((await s.erase([input.id])).erased.some(copy => copy.sessionId === s.id && copy.id === input.id));
   await s.leave("reader");
   assert.deepEqual(lifecycle, ["join reader", "leave reader"]);
 });

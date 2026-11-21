@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider } from "@modular-agent/harness";
+import { ALL_AUTHORITY, Harness, filePendingErasure, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
 import { contextCompaction } from "@modular-agent/context-compaction";
@@ -43,6 +43,7 @@ export interface AgentOptions {
   model?: string | ModelRef;
   settings?: Settings;
   approval?: Approval;
+  resourceReservations?: ReservationOptions;
   /** Enable the official context compaction plugin and /compact command. */
   compaction?: boolean;
   questionsOutlastTurns?: boolean;
@@ -60,6 +61,11 @@ export interface SessionOptions { settings?: Settings; tenant?: string; actors?:
 export interface ServeAcpOptions {
   /** Trusted operator identity; never taken from a client request. */
   actorId?: string;
+  actor?: Actor;
+  projects?: readonly string[];
+  tenants?: readonly (string | null)[];
+  rights?: readonly Right[];
+  represents?: readonly string[];
   compose?(project: string, saved?: SessionInfo): Promise<Agent>;
   projectSettings?(project: string): Settings | Promise<Settings>;
   projectMcp?(project: string): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
@@ -76,6 +82,7 @@ export interface AcpActorToken {
   actor: Actor;
   tenants?: readonly (string | null)[];
   projects?: readonly string[];
+  represents?: readonly string[];
 }
 export interface ServeAcpServiceOptions extends ServeAcpOptions, ListenOptions {
   actors: readonly AcpActorToken[];
@@ -96,13 +103,18 @@ export class FileHistory {
 export class HttpHistory {
   #url: string;
   #tokenFile: string;
-  constructor(url: string, tokenFile: string) { this.#url = url; this.#tokenFile = tokenFile; }
+  #pendingErasureDir?: string;
+  constructor(url: string, tokenFile: string, options?: { pendingErasureDir?: string }) {
+    this.#url = url;
+    this.#tokenFile = tokenFile;
+    this.#pendingErasureDir = options?.pendingErasureDir;
+  }
   static {
     httpUpstream = async store => historyClientOptions(store.#url, await tokenFrom(store.#tokenFile)) as { url: string; token: string };
     openHttpHistory = async store => {
       const client = new HttpHistoryStore(await httpUpstream(store));
       await client.initialize();
-      return client;
+      return Object.assign(client, store.#pendingErasureDir === undefined ? {} : { pendingErasure: filePendingErasure(store.#pendingErasureDir) });
     };
   }
 }
@@ -111,7 +123,7 @@ async function tokenFrom(file: string): Promise<string> {
   if (!info.isFile() || (info.mode & 0o077) !== 0) throw new AgentError("invalid_params", "The token file must be private");
   return (await readFile(file, "utf8")).trim();
 }
-export const httpHistory = (url: string, tokenFile: string): HttpHistory => new HttpHistory(url, tokenFile);
+export const httpHistory = (url: string, tokenFile: string, options?: { pendingErasureDir?: string }): HttpHistory => new HttpHistory(url, tokenFile, options);
 const historyMethods = ["create", "list", "read", "acquire", "renew", "release", "append", "erase"] as const;
 
 export async function serveHistory(store: FileHistory | MemoryHistory | HttpHistory | HistoryServiceStore,
@@ -220,7 +232,7 @@ export class Agent {
       await mkdir(home, { recursive: true });
       const h = new Harness({ project, home, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
         jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn",
-        rejectUnknownModel: true, tenants: options.tenants ?? (options.conformance ? undefined : null) });
+        rejectUnknownModel: true, resourceReservations: options.resourceReservations, tenants: options.tenants ?? (options.conformance ? undefined : null) });
       const settings = structuredClone(options.settings ?? {});
       agent = new Agent(h, scratch, project, settings, options.onQuestion);
       agent.#authority = { severalActors: options.severalActors ?? false, sessionLimits: options.sessionLimits ?? false, tenants: options.tenants !== undefined };
@@ -283,6 +295,7 @@ export class Agent {
         await effectiveStore?.list();
         agent.#portable = effectiveStore?.supports.portableSessions === true;
       }
+      await h.rebuildReservations();
       const env = h.use<WorkingEnvironment>("working-environment");
       if (!options.dataDir && (env?.requiresDataDir || effectiveRuntime?.supports.requiresDataDir === true ||
           (durability !== "ephemeral" && defaultEnvironment && env === defaultEnvironment))) {
@@ -493,6 +506,7 @@ export class Agent {
     this.#check();
     return structuredClone(this.#h.useAll<BaseProvider>("provider").flatMap(p => p.models()));
   }
+  resourceLimits(): ReservationLimits { this.#check(); return this.#h.resourceLimits(); }
   declaration(): Declaration {
     this.#check();
     const base = this.#api.declaration();
@@ -537,7 +551,30 @@ export class Agent {
         if (agent !== this) await agent.close();
       }));
     };
-    const prepareConnection = (scope?: { actor: Actor; allowTenant(tenant: string | null): boolean; allowProject(project: string): boolean }) => {
+    const isId = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+    const list = <T>(items: readonly T[] | undefined, valid: (item: T) => boolean, name: string) => {
+      if (items === undefined) return undefined;
+      if (!Array.isArray(items) || !Array.from(items).every(valid)) throw new AgentError("invalid_composition", `Invalid ACP ${name}`);
+      return [...items];
+    };
+    const makeScope = async (actor: Actor, config: Pick<ServeAcpOptions, "tenants" | "projects" | "represents">, ceiling: boolean) => {
+      if (!actor || !isId(actor.id) || !["host", "user", "agent", "program"].includes(actor.kind) || !actor.rights) {
+        throw new AgentError("invalid_composition", "Invalid ACP actor");
+      }
+      const rights = list(actor.rights, r => ALL_AUTHORITY.includes(r), "rights")!;
+      const tenants = new Set(list(config.tenants, t => t === null || isId(t), "tenants") ?? [null]);
+      const represents = new Set(list(config.represents, isId, "representation"));
+      const paths = list(config.projects, p => isId(p) && isAbsolute(p), "projects");
+      const projects = paths && new Set(await Promise.all(paths.map(async path => {
+        const canonical = await realpath(path);
+        if (!(await stat(canonical)).isDirectory()) throw new AgentError("invalid_composition", "ACP project must be a directory");
+        return canonical;
+      })));
+      return { actor: { id: actor.id, kind: actor.kind, authority: rights }, ceiling, represents,
+        allowTenant: (tenant: string | null) => tenants.has(tenant),
+        allowProject: (project: string) => (!!options.compose || project === this.#project) && (!projects || projects.has(project)) };
+    };
+    const prepareConnection = (scope: Awaited<ReturnType<typeof makeScope>>, network: boolean) => {
       const attached = new Map<PluginApi, { detach(): void; agent: Agent }>();
       let disconnected = false;
       const attach = (agent: Agent) => {
@@ -547,35 +584,41 @@ export class Agent {
         const off = binding.acp.attach(agent.#api, agent === this);
         attached.set(agent.#api, { agent, detach() { off(); remove(); } });
       };
-      const actor = scope && { id: scope.actor.id, kind: scope.actor.kind, authority: scope.actor.rights };
+      const { actor } = scope;
+      const inaccessible = () => new AgentError("forbidden", "Session is inaccessible");
+      const authorize = async (id: string) => {
+        const owner = sessions.get(id) ?? this;
+        const saved = owner.#h.liveSessionInfo(id) ?? await this.sessionInfo(id).catch(error => {
+          if (error instanceof AgentError && error.code === "not_found") throw inaccessible();
+          throw error;
+        });
+        if (!scope.allowProject(saved.project) || !scope.allowTenant(saved.tenant ?? null) ||
+            !await owner.#h.canDiscoverSession(id, actor, !network || owner.#authority.severalActors)) throw inaccessible();
+        return saved;
+      };
       const binding = acpInterface({
-        ...(scope && actor ? {
-          actor,
-          connectionScope: run => this.#h.withConnectionActor(actor, run),
-          allowTenant: scope.allowTenant,
-          allowSession: async (id, project) => scope.allowProject(project) && scope.allowTenant((await this.sessionInfo(id)).tenant ?? null) &&
-            await this.#h.canDiscoverSession(id, actor, this.#authority.severalActors),
-        } : { actorId: options.actorId ?? process.env.MODULAR_AGENT_ACTOR }),
+        actor,
+        represents: scope.represents,
+        connectionScope: run => scope.ceiling ? this.#h.withConnectionActor(actor, run) : run(),
+        allowTenant: scope.allowTenant,
+        allowAttached: (project, tenant) => !disconnected && scope.allowProject(project) && scope.allowTenant(tenant ?? null),
+        authorizeSession: authorize,
+        allowSession: async id => {
+          try { await authorize(id); return true; }
+          catch (e) { if (e instanceof AgentError && e.code === "forbidden") return false; throw e; }
+        },
+        listProject: cwd => realpath(cwd),
         showApproval: options.showApproval ?? this.#approval,
-        hostMcpServers: options.hostMcpServers ?? !scope,
+        hostMcpServers: options.hostMcpServers ?? !network,
         declaration: id => (id && sessions.get(id) || this).declaration(),
         projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,
         associate: (id, api) => { sessions.set(id, attached.get(api)?.agent ?? this); },
         project: async (cwd, id) => {
+          const saved = id ? await authorize(id) : undefined;
           const project = await checked(() => realpath(cwd), "invalid_params");
           if (!(await stat(project)).isDirectory()) throw new AgentError("invalid_params", "Project must be a directory");
-          if (scope && !scope.allowProject(project)) throw new AgentError("forbidden", "Project is outside the actor's scope");
-          const inaccessible = () => new AgentError("forbidden", "Session is inaccessible");
-          const owner = id && sessions.get(id) || this;
-          const saved = id ? owner.#h.liveSessionInfo(id) ?? await this.sessionInfo(id).catch(error => {
-            if (scope && error instanceof AgentError && error.code === "not_found") throw inaccessible();
-            throw error;
-          }) : undefined;
-          if (saved && scope && actor && (!scope.allowTenant(saved.tenant ?? null) || !scope.allowProject(saved.project) ||
-              !await owner.#h.canDiscoverSession(id!, actor, owner.#authority.severalActors))) throw inaccessible();
-          if (saved && saved.project !== project || !options.compose && project !== this.#project) {
-            throw new AgentError("invalid_params", "Session belongs to a different project");
-          }
+          if (!scope.allowProject(project)) throw inaccessible();
+          if (saved && saved.project !== project) throw new AgentError("wrong_project", "Session belongs to a different project");
           const key = JSON.stringify([project, saved?.id]);
           let selected = id ? sessions.get(id) : undefined;
           if (!selected && options.compose) {
@@ -586,6 +629,7 @@ export class Agent {
                 if (agent === this) return agent;
                 try {
                   if (agent.#project !== project || agent.#open.size || agent.#acp) throw new AgentError("invalid_composition", "Factory must return a fresh agent for this project");
+                  agent.#h.shareReservations(this.#h);
                   agent.#acp = true;
                   await installMcp(agent);
                   return agent;
@@ -617,26 +661,26 @@ export class Agent {
     };
     let serving = false;
     try {
-      await installMcp(this);
       if (options.listen === undefined) {
-        const { binding, detach } = prepareConnection();
+        if (options.actor !== undefined && (options.actorId !== undefined || options.rights !== undefined)) {
+          throw new AgentError("invalid_composition", "ACP actor cannot be combined with actorId or rights");
+        }
+        const localActor = options.actor ?? { ...defaultAcpActor(), id: options.actorId ?? process.env.MODULAR_AGENT_ACTOR ?? "acp-user",
+          rights: list(options.rights, r => ALL_AUTHORITY.includes(r), "rights") ?? [...ALL_AUTHORITY] };
+        const scope = await makeScope(localActor, options, options.actor !== undefined || options.rights !== undefined);
+        await installMcp(this);
+        const { binding, detach } = prepareConnection(scope, false);
         try { await binding.acp.serveStdio(); } finally { detach(); }
         return;
       }
       const controlTimeoutMs = options.controlTimeoutMs ?? 5000;
       if (!Number.isSafeInteger(controlTimeoutMs) || controlTimeoutMs <= 0) throw new AgentError("invalid_params", "Invalid control timeout");
-      const actors = await Promise.all(options.actors.map(async ({ tokenFile, actor, tenants, projects }) => {
-        if (!actor.id || !["host", "user", "agent", "program"].includes(actor.kind) || !actor.rights.every(r => ALL_AUTHORITY.includes(r))) {
-          throw new AgentError("invalid_params", "Invalid ACP actor");
-        }
-        const allowedTenants = tenants && new Set(tenants);
-        const allowedProjects = projects && new Set(await Promise.all(projects.map(project => realpath(project))));
-        return { tokenFile, value: { actor: structuredClone(actor),
-          allowTenant: (tenant: string | null) => allowedTenants ? allowedTenants.has(tenant) : tenant === null,
-          allowProject: (project: string) => (!!options.compose || project === this.#project) && (!allowedProjects || allowedProjects.has(project)) } };
-      }));
+      const actors = await Promise.all(options.actors.map(async entry => ({
+        tokenFile: entry.tokenFile, value: await makeScope(entry.actor, entry, true),
+      })));
+      await installMcp(this);
       const server = await listenWebSocket(options, ACP_PROTOCOL, actors, async (ws, scope) => {
-        const { binding, detach } = prepareConnection(scope);
+        const { binding, detach } = prepareConnection(scope, true);
         try {
           await binding.acp.serveMessages({
             receive: receive => receiveMessages(ws, receive),

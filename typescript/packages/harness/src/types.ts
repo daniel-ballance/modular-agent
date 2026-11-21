@@ -219,7 +219,7 @@ export interface ToolSource {
 // ---------- Declarations ----------
 
 /** What a part, or the session as set up, supports. */
-export type Declaration = Record<string, boolean | string>;
+export type Declaration = Record<string, boolean | string | import("./reservations.js").ReservationDeclaration>;
 
 // ---------- Providers and model access ----------
 
@@ -328,6 +328,8 @@ export interface StoredSession {
 }
 export interface HistoryStore {
 	supports: Declaration;
+	/** Authoritative registry shared by Harness readers and writers of this namespace. */
+	pendingErasure?: import("./erasure.js").PendingErasure;
 	create(meta: StoredSession): Promise<void>;
 	/** Refuses if the session is already open for writing elsewhere. */
 	openForWriting(sessionId: string, options?: { wait?: boolean }): Promise<void>;

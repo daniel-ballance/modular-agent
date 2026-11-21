@@ -190,6 +190,31 @@ test("ACP token rights are independent ceilings and never change recorded grants
   assert.match(JSON.stringify(grants[0].data), /settings/);
 });
 
+test("only configured representation can submit work for a joined actor", async t => {
+  const primary = await token(t), other = await token(t);
+  const agent = await testAgent({ project: primary.dir, severalActors: true, script: [{ text: "Ready" }] });
+  const actor = { id: "owner", kind: "host" as const, rights: ["watch", "input", "propose", "grant"] as ("watch" | "input" | "propose" | "grant")[] };
+  const service = await agent.serveAcp({ listen: "127.0.0.1:0", actors: [
+    { tokenFile: primary.tokenFile, actor, represents: ["visitor"] }, { tokenFile: other.tokenFile, actor },
+  ] });
+  t.after(() => service.close());
+  const wide = await connectWebSocket(service.url, primary.tokenFile, ACP_PROTOCOL, 5000);
+  const narrow = await connectWebSocket(service.url, other.tokenFile, ACP_PROTOCOL, 5000);
+  for (const client of [wide, narrow]) await request(client, "initialize", { protocolVersion: 1 });
+  const project = { cwd: primary.dir, mcpServers: [] };
+  const { sessionId } = await request(wide, "session/new", project);
+  await request(narrow, "session/load", { ...project, sessionId });
+  await request(wide, "_modular-agent/join", { sessionId, actor: { id: "visitor", kind: "program", rights: ["watch", "propose"] }, present: true });
+  const input = { sessionId, actorId: "visitor", when: "propose", key: "once", content: "Proposed" };
+  await assert.rejects(request(narrow, "_modular-agent/input", input), { code: "forbidden" });
+  assert.ok((await request(wide, "_modular-agent/actors", { sessionId })).present.includes("visitor"));
+  const receipt = await request(wide, "_modular-agent/input", input);
+  const { entries } = await request(wide, "_modular-agent/history", { sessionId });
+  const admission = entries.find((e: { inputId?: string }) => e.inputId === receipt.inputId);
+  assert.equal(admission.actorId, "visitor");
+  assert.equal(admission.data.submittedBy, "owner");
+});
+
 test("an ACP composition shares an open session between connections without replacing its saved settings", async t => {
   const { dir, tokenFile } = await token(t);
   const project = join(dir, "project");

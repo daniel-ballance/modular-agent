@@ -403,10 +403,11 @@ export class Session {
     if (typeof key !== "string" || !key) throw new AgentError("invalid_params", "A setting key is required");
     await checked(() => this.#api.setSetting(this.id, key, structuredClone(value), this.actor), "invalid_params");
   }
-  async erase(entryIds: string[]): Promise<import("@modular-agent/harness").ErasureReport> {
+  async erase(entryIds: string[]): Promise<{ erased: { sessionId: string; id: string }[]; pending: { sessionId: string; id: string }[]; outOfReach: string[] }> {
     this.#require("erase");
     if (this.#api.declaration(this.id).erasure !== true) throw new AgentError("not_supported", "This store does not support erasure");
-    return checked(() => this.#api.erase(this.id, entryIds, this.actor));
+    const report = await checked(() => this.#api.erase(this.id, entryIds, this.actor));
+    return { erased: report.erasedPairs, pending: report.pendingPairs, outOfReach: report.outOfReach };
   }
   async proposals(): Promise<Proposal[]> {
     this.#require("watch");

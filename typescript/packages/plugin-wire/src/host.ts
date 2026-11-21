@@ -422,7 +422,10 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 					await handle.ready;
 					if (handle.started) activeJobs.add(handle.id);
 					return { jobId: handle.id, started: handle.started };
-				} catch (error) { throw new WireError("invalid_request", String(error)); }
+				} catch (error) {
+					const code = (error as { code?: string }).code;
+					throw new WireError(code === "busy" || code === "lost" ? code : "invalid_request", String(error));
+				}
 			});
 			peer.onNotification("host/jobs/progress", (p) => {
 				const id = ownJob(p);
@@ -438,7 +441,10 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 					throw new WireError("invalid_request", "Job already ended");
 				}
 				try { await api.resumeJob(id, p.jobId).finish(p.outcome.kind, fromWire(p.result), { report: p.report, error: p.outcome.error }); }
-				catch (error) { throw new WireError("invalid_request", String(error)); }
+				catch (error) {
+					const code = (error as { code?: string }).code;
+					throw new WireError(code === "result_too_large" || code === "lost" ? code : "invalid_request", String(error));
+				}
 				return {};
 			});
 			peer.handle("host/jobs/unfinished", async (p) => ({

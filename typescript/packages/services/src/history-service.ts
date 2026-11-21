@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { filePendingErasure, memoryPendingErasure, type PendingErasure } from "@modular-agent/harness";
 import type { HistoryEntry, HistoryStore, StoredSession } from "@modular-agent/harness";
 import { count, encodeJson, equalJson, nonnegativeNumber, object, parseJson, type Json, type JsonObject } from "./history-json.js";
 import { HistoryServiceError, historyStorageStatuses, type HistoryServiceStore } from "./history-backend.js";
@@ -275,6 +276,7 @@ function bodyObject(raw: Buffer, expected: boolean): JsonObject {
  * Direct writers and the HTTP service exclude one another, even in memory. */
 export class HistoryArchive {
 	private records?: Records;
+	private registry?: PendingErasure;
 	private exclusion?: { epoch: number; until: number };
 	private local = new Map<string, symbol>();
 	private remote?: { leased(id: string): boolean; ttl: number };
@@ -321,6 +323,7 @@ export class HistoryArchive {
 		};
 		return {
 			supports: { portableSessions: this.dir !== undefined, persistent: this.dir !== undefined, erasure: true },
+			pendingErasure: this.registry ??= this.dir ? filePendingErasure(this.dir) : memoryPendingErasure(),
 			create: async ({ id, ...meta }) => read(db => {
 				const initial = parseJson(JSON.stringify(meta)) as JsonObject;
 				validateMetadata(id, initial);

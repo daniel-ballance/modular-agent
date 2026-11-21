@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
-import { createHash } from "node:crypto";
-import { lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type WebSocket from "ws";
 import { listenWebSocket, PLUGIN_PROTOCOL, receiveMessages, type ListenOptions } from "./websocket.js";
@@ -52,14 +52,24 @@ export interface PluginListenOptions extends ListenOptions {
 	tokenFile: string;
 	/** Private service state; defaults to a sibling directory beside the token file. */
 	stateDir?: string;
+	/** Exact projects granted to this listener's single host trust scope. */
+	projects?: readonly string[];
 }
 
-interface ServiceConnection { ws: WebSocket; stateDir: string }
+interface ServiceConnection { ws: WebSocket; stateDir: string; projects?: ReadonlySet<string> }
 
 /** Create fresh plugin registrations and handlers for each authenticated connection. */
-export function servePluginService(makePlugins: () => ServeOptions, options: PluginListenOptions) {
+export async function servePluginService(makePlugins: () => ServeOptions, options: PluginListenOptions) {
+	if (options.projects !== undefined && (!Array.isArray(options.projects) || !Array.from(options.projects).every(p => typeof p === "string" && isAbsolute(p)))) {
+		throw new Error("Invalid served plugin project scope");
+	}
+	const projects = options.projects && new Set(await Promise.all(options.projects.map(async path => {
+		const project = await realpath(path);
+		if (!(await stat(project)).isDirectory()) throw new Error("Served plugin project must be a directory");
+		return project;
+	})));
 	return listenWebSocket(options, PLUGIN_PROTOCOL, [{ tokenFile: options.tokenFile, value: undefined }],
-		(ws, _, key) => servePlugins(makePlugins(), { ws, stateDir: join(options.stateDir ?? `${options.tokenFile}.state`, key) }));
+		(ws, _, key) => servePlugins(makePlugins(), { ws, projects, stateDir: join(options.stateDir ?? `${options.tokenFile}.state`, key) }));
 }
 
 async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: InterruptedTurn, runtime: Runtime) {
@@ -99,6 +109,8 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		if (method === "plugin/shutdown") service?.ws.close(1000);
 	}, service ? method => registered || startup.has(method) : undefined);
 	let projectRoot: string | undefined;
+	let pointDir: string | undefined;
+	const environmentSessions = new Set<string>();
 	let hostProject: string;
 	let setup: Promise<void> | undefined;
 	let shuttingDown = false;
@@ -255,7 +267,12 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		setup = (async () => {
 			if (service) {
 				if (!isAbsolute(init.home) || !isAbsolute(init.project)) throw new WireError("invalid_request", "Expected absolute host paths");
+				if (service.projects) {
+					const project = await realpath(init.project).catch(() => undefined);
+					if (!project || !service.projects.has(project)) throw new WireError("invalid_request", "Project is not granted to this host");
+				}
 				init.home = join(service.stateDir, createHash("sha256").update(init.home).digest("hex"));
+				pointDir = join(init.home, ".points");
 				await mkdir(init.home, { recursive: true, mode: 0o700 });
 			}
 			for (const plugin of options.plugins) {
@@ -387,7 +404,12 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		}
 		const base = env();
 		const e = await base.forSession?.(sessionId) ?? base;
-		return cwd && e.cwd !== cwd && e.at ? (e.at(cwd) as WorkingEnvironment) : e;
+		const scoped = cwd && e.cwd !== cwd && e.at ? (e.at(cwd) as WorkingEnvironment) : e;
+		if (service) {
+			withinProject(await realpath(scoped.cwd));
+			environmentSessions.add(sessionId);
+		}
+		return scoped;
 	};
 	const missing = (error: unknown) => ((error as NodeJS.ErrnoException)?.code === "ENOENT" ? new WireError("not_found", `No file ${(error as NodeJS.ErrnoException).path ?? ""}`) : error);
 	const filesAt = async (p: { cwd: string; sessionId: string; path: string }) => {
@@ -405,21 +427,36 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	peer.handle("env/write", async (p) => (await (await filesAt(p)).writeFile(p.path, Buffer.from(p.data, "base64")), {}));
 	peer.handle("env/list", async p => listDirectory(await filesAt(p), p.path));
 	peer.handle("env/exists", async (p) => ({ exists: await (await filesAt(p)).exists(p.path) }));
+	const scopedPoint = async (p: { cwd: string; point: string }) => {
+		if (!pointDir) return p.point;
+		if (typeof p.point !== "string" || !p.point) throw new WireError("invalid_request", "Invalid point");
+		if (!/^[0-9a-f-]{36}$/.test(p.point)) throw new WireError("not_found", "Unknown point");
+		const saved = await readFile(join(pointDir, p.point), "utf8").catch(error => { throw missing(error); });
+		const { point, cwd, project } = JSON.parse(saved) as { point: string; cwd: string; project: string };
+		if (project !== projectRoot || cwd !== await realpath(p.cwd)) throw new WireError("invalid_request", "Point is outside the host project");
+		return point;
+	};
 	peer.handle("env/save", async (p) => {
 		const e = await envAt(p);
 		if (!e.points || !e.save) throw new WireError("not_supported", "This environment does not save points");
-		return { point: await e.save() };
+		const point = await e.save();
+		if (!pointDir) return { point };
+		await mkdir(pointDir, { recursive: true, mode: 0o700 });
+		const key = randomUUID();
+		await writeFile(join(pointDir, key), JSON.stringify({ point, cwd: await realpath(p.cwd), project: projectRoot }), { flag: "wx", mode: 0o600 });
+		return { point: key };
 	});
 	peer.handle("env/checkPoint", async (p) => {
 		if (typeof p?.cwd !== "string" || !p.cwd || typeof p.point !== "string" || !p.point) throw new WireError("invalid_request", "Invalid point scope");
 		const e = await envAt(p);
 		if (!e.points || !e.hasPoint) throw new WireError("not_supported", "This environment does not check points");
-		return { exists: await e.hasPoint(p.point) };
+		try { return { exists: await e.hasPoint(await scopedPoint(p)) }; }
+		catch (error) { if (error instanceof WireError && error.code === "not_found") return { exists: false }; throw error; }
 	});
 	peer.handle("env/restore", async (p) => {
 		const e = await envAt(p);
 		if (!e.points || !e.restore) throw new WireError("not_supported", "This environment does not restore points");
-		try { await e.restore(p.point); }
+		try { await e.restore(await scopedPoint(p)); }
 		catch (error) { throw missing(error); }
 		return {};
 	});
@@ -438,7 +475,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 
 	peer.handle("env/sessionEnded", async (p) => {
 		if (typeof p.sessionId !== "string" || !p.sessionId) throw new WireError("invalid_request", "A session is required");
-		await env().sessionEnded?.(p.sessionId);
+		if (!service || environmentSessions.delete(p.sessionId)) await env().sessionEnded?.(p.sessionId);
 		return {};
 	});
 
