@@ -101,6 +101,11 @@ func (c *Client) Open(ctx context.Context, path, key string, in any) (*http.Resp
 }
 
 func (c *Client) OpenMethod(ctx context.Context, method, path, key string, in any) (*http.Response, error) {
+	return c.OpenMethodHeaders(ctx, method, path, key, in, nil)
+}
+
+// OpenMethodHeaders adds binding-specific request headers.
+func (c *Client) OpenMethodHeaders(ctx context.Context, method, path, key string, in any, headers http.Header) (*http.Response, error) {
 	u, err := url.Parse(c.URL)
 	if err != nil {
 		return nil, err
@@ -122,6 +127,11 @@ func (c *Client) OpenMethod(ctx context.Context, method, path, key string, in an
 	r, err := http.NewRequestWithContext(ctx, method, c.URL+path, body)
 	if err != nil {
 		return nil, err
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			r.Header.Add(name, value)
+		}
 	}
 	r.Header.Set("Authorization", "Bearer "+c.Token)
 	r.Header.Set("Content-Type", "application/json")

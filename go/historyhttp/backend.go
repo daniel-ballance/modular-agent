@@ -63,8 +63,9 @@ type operations interface {
 type httpBackend struct{ wire *servicehttp.Client }
 
 func (b httpBackend) info(ctx context.Context) (info struct {
-	Binding string  `json:"binding"`
-	TTLMS   float64 `json:"ttlMs"`
+	Binding        string          `json:"binding"`
+	TTLMS          float64         `json:"ttlMs"`
+	PendingErasure json.RawMessage `json:"pendingErasure"`
 }, err error) {
 	err = b.call(ctx, "GET", "/v1", nil, &info)
 	return
