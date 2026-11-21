@@ -2,13 +2,25 @@ package codemode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/files"
 )
+
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == WorkerArg {
+		if err := ServeWorker(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	os.Exit(m.Run())
+}
 
 func TestPromptCatalogThreshold(t *testing.T) {
 	defs := make([]modular.ToolDefinition, 13)
@@ -27,10 +39,6 @@ func TestPromptCatalogThreshold(t *testing.T) {
 
 func TestStandardNestedCallBudget(t *testing.T) {
 	defs := []modular.ToolDefinition{files.Tools("")[0].Definition()}
-	fs, err := catalog(defs)
-	if err != nil {
-		t.Fatal(err)
-	}
 	calls := 0
 	result, err := run(t.Context(), `
 for i in range(500):
@@ -41,7 +49,7 @@ try:
     tools.read('fixture.txt')
 except RuntimeError as e:
     print(e)
-`, fs, func(context.Context, string, any) (modular.ToolResult, error) {
+`, defs, func(context.Context, string, any) (modular.ToolResult, error) {
 		calls++
 		return modular.ToolResult{Status: modular.Completed, Content: modular.Text("fixture")}, nil
 	}, StandardLimits())
@@ -55,10 +63,6 @@ func TestMontyCallsAndLimits(t *testing.T) {
 	for _, d := range files.Tools("") {
 		defs = append(defs, d.Definition())
 	}
-	fs, err := catalog(defs)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, c := range []struct {
 		name, code, want string
 		fail             bool
@@ -66,6 +70,8 @@ func TestMontyCallsAndLimits(t *testing.T) {
 	}{
 		{"invoke", "print(tools.read(path='in.txt').upper())", "WHITBY", false, 1},
 		{"alias", "t = tools\nt.read('in.txt')", "whitby", false, 1},
+		{"import", "import tools", "ModuleNotFoundError", true, 0},
+		{"function value", "f = tools.read\nf('in.txt')", "AttributeError", true, 0},
 		{"positional and None", "tools.read('in.txt', None, None)", "whitby", false, 1},
 		{"count", "tools.read('in.txt')\ntools.read('in.txt')", "more than 1 function calls", true, 1},
 		{"bad args", "tools.read(other='x')", "unexpected argument other", true, 0},
@@ -85,12 +91,16 @@ func TestMontyCallsAndLimits(t *testing.T) {
 			l.PrintBytes = 10
 			l.Compute = 50_000_000
 			called := 0
-			got, err := run(t.Context(), c.code, fs, func(_ context.Context, name string, input any) (modular.ToolResult, error) {
+			got, err := run(t.Context(), c.code, defs, func(_ context.Context, name string, input any) (modular.ToolResult, error) {
 				called++
 				if name != "read" {
 					t.Fatalf("called %s", name)
 				}
-				p := input.(map[string]any)["path"]
+				var args map[string]string
+				if err := json.Unmarshal(input.(json.RawMessage), &args); err != nil {
+					t.Fatal(err)
+				}
+				p := args["path"]
 				if p == "missing" {
 					return modular.ToolResult{Status: modular.Failed, Content: modular.Text("file missing")}, nil
 				}

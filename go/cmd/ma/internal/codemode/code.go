@@ -33,11 +33,7 @@ func Tool(limits Limits) modular.Tool {
 		if err != nil {
 			return modular.ToolOutput{}, err
 		}
-		fs, err := catalog(defs)
-		if err != nil {
-			return modular.ToolOutput{}, err
-		}
-		return run(ctx, in.Code, fs, tc.Tools.Call, limits)
+		return run(ctx, in.Code, defs, tc.Tools.Call, limits)
 	})
 }
 
@@ -52,7 +48,7 @@ type callback func(context.Context, monty.Call) (reply, error)
 func raised(kind, message string) (reply, error) {
 	return reply{exception: &monty.Exception{Type: kind, Arg: &message}}, nil
 }
-func run(ctx context.Context, code string, fs []function, nested nestedFunc, l Limits) (modular.ToolOutput, error) {
+func evaluate(ctx context.Context, code string, fs []function, nested nestedFunc, l Limits) (modular.ToolOutput, error) {
 	// A Python assignment shadows the native print builtin so the host can
 	// bound each write before accumulating it.
 	compiled, err := monty.New("print = __ma_print\n"+code, monty.CompileOptions{ScriptName: "main.py", Inputs: []string{"tools", "__ma_print"}})
@@ -149,8 +145,12 @@ func run(ctx context.Context, code string, fs []function, nested nestedFunc, l L
 		printed.WriteByte('\n')
 	}
 	if err != nil {
-		printed.WriteString(err.Error())
-		return modular.ToolOutput{Status: modular.Failed, Content: modular.Text(bounded(printed.String()))}, nil
+		text := printed.String() + err.Error()
+		if cut := bounded(text); cut != text {
+			// Do not let a full print buffer hide why the run failed.
+			text = bounded(err.Error() + "\n" + printed.String())
+		}
+		return modular.ToolOutput{Status: modular.Failed, Content: modular.Text(text)}, nil
 	}
 	var images modular.Content
 	takeImage := func(v any) bool {

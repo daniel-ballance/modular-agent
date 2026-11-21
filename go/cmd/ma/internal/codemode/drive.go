@@ -12,7 +12,7 @@ import (
 func drive(ctx context.Context, r *monty.Runner, functions map[string]callback, l Limits, out *strings.Builder) (monty.Value, error) {
 	tools := monty.DataclassValue(monty.Dataclass{Name: "tools", TypeID: 1, Frozen: true})
 	function := func(name string) monty.Value { return monty.FunctionValue(monty.Function{Name: name}) }
-	p, err := r.Start(ctx, monty.StartOptions{Inputs: map[string]monty.Value{"tools": tools, "__ma_print": function("print")}, Limits: &monty.ResourceLimits{MaxDuration: l.Compute, MaxRecursionDepth: l.Recursion, MaxMemory: 64 * 1024 * 1024}})
+	p, err := r.Start(ctx, monty.StartOptions{Inputs: map[string]monty.Value{"tools": tools, "__ma_print": function("print")}, Limits: &monty.ResourceLimits{MaxDuration: l.Compute, MaxRecursionDepth: l.Recursion, MaxMemory: 256 * 1024 * 1024}})
 	for err == nil {
 		if ctx.Err() != nil {
 			return monty.None(), ctx.Err()
@@ -30,11 +30,7 @@ func drive(ctx context.Context, r *monty.Runner, functions map[string]callback, 
 			var result reply
 			switch {
 			case s.IsOSFunction:
-				if s.FunctionName == "import" && len(s.Args) > 0 && s.Args[0].Raw() == "tools" {
-					result.value = tools
-				} else {
-					result, _ = raised("RuntimeError", "the sandbox has no direct access to files, the network, the clock or the environment; use the provided functions")
-				}
+				result, _ = raised("RuntimeError", "the sandbox has no direct access to files, the network, the clock or the environment; use the provided functions")
 			case s.IsMethodCall:
 				var receiver monty.Dataclass
 				var ok bool
