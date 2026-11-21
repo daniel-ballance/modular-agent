@@ -426,10 +426,15 @@ export class Session {
   }
   async moveTo(entryId: string, options?: { rewind?: boolean }): Promise<{ outOfReach?: string[] }> {
     this.#require("settings");
-    return checked(() => this.#api.moveTo(this.id, entryId, { ...options, actorId: this.actor }), "busy");
+    if (typeof entryId !== "string" || !entryId) throw new AgentError("invalid_params", "An entry id is required");
+    return checked(() => this.#api.moveTo(this.id, entryId, { ...options, actorId: this.actor }));
   }
   async callTool(name: string, input: Record<string, unknown>): Promise<ToolResult> {
     this.#require("tools");
+    if (typeof name !== "string" || !name || !input || typeof input !== "object" || Array.isArray(input)) {
+      throw new AgentError("invalid_params", "A tool name and input object are required");
+    }
+    if (!this.#api.tools(this.id).some(t => t.name === name)) throw new AgentError("not_found", `Unknown tool ${name}`);
     const result = await checked(() => this.#api.callTool(this.id, { name, input: structuredClone(input), startedBy: "ui", actorId: this.actor }));
     const view = await this.#api.gateOutput(this.id, this.actor, "tool.result", result);
     if (!view) throw new AgentError("withheld", "Tool result was withheld");

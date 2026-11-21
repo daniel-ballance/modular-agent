@@ -336,8 +336,8 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	peer.handle("tools/call", async (p, ctx) => {
 		const call = fromWire(p.call) as ToolCall;
 		const result = await currentParent.run(ctx.id, () => source(p.toolSource).run(call, {
+			...work(ctx, String(p.sessionId)),
 			sessionId: String(p.sessionId),
-			signal: ctx.signal,
 			call,
 			jobs: { start: startJob(ctx.id, ctx.signal, p.sessionId, call.actorId) },
 			progress: (content) => peer.notify("tools/progress", { parentRequestId: ctx.id, content: toWire(content) }),
@@ -442,11 +442,14 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		return {};
 	});
 
-	const work = (ctx: { id: number | string; signal: AbortSignal }, sessionId: string) => ({
-		signal: ctx.signal,
-		history: (after?: string) => peer.request("host/history", { parentRequestId: ctx.id, sessionId, after, limit: 100, all: true }, ctx.signal),
-		emit: (type: string, data: unknown) => peer.notify("host/emit", { parentRequestId: ctx.id, sessionId, type, data }),
-	});
+	function work(ctx: { id: number | string; signal: AbortSignal }, sessionId: string) {
+		return {
+			signal: ctx.signal,
+			history: (after?: string) => peer.request<{ entries: import("@modular-agent/harness").HistoryEntry[]; next?: string }>(
+				"host/history", { parentRequestId: ctx.id, sessionId, after, limit: 100, all: true }, ctx.signal),
+			emit: (type: string, data: unknown) => peer.notify("host/emit", { parentRequestId: ctx.id, sessionId, type, data }),
+		};
+	}
 	peer.handle("hook/handle", async (p, ctx) => {
 		const h = handlers.get(Number(p.handlerId));
 		if (!h || h.hook !== p.hook) throw new WireError("unknown_handler", `No handler ${p.handlerId}`);

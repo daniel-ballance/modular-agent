@@ -100,7 +100,7 @@ export class JsonlHistoryStore implements HistoryStore {
 
 	async append(id: string, batch: HistoryEntry[]): Promise<void> {
 		if (!batch.length) return;
-		if (!this.held.has(id)) throw new Error(`Session ${id} is not open for writing`);
+		if (!this.held.has(id)) throw Object.assign(new Error(`Session ${id} is not open for writing`), { code: "lost" });
 		const pending = this.unsaved.get(id);
 		if (pending) {
 			pending.batches.push(batch);
@@ -144,7 +144,7 @@ export class JsonlHistoryStore implements HistoryStore {
 				pendingBatch = undefined;
 			}
 		}
-		if (!meta) throw new Error(`${path} has no session header`);
+		if (!meta) throw Object.assign(new Error(`${path} has no session header`), { code: "lost" });
 		return { meta, entries };
 	}
 
@@ -183,7 +183,7 @@ export class JsonlHistoryStore implements HistoryStore {
 			return;
 		}
 		const path = this.find(id);
-		if (!this.held.has(id) && existsSync(`${path}.lock`) && alive(Number(readFileSync(`${path}.lock`, "utf8")))) throw new Error(`Session ${id} is already open for writing`);
+		if (!this.held.has(id) && existsSync(`${path}.lock`) && alive(Number(readFileSync(`${path}.lock`, "utf8")))) throw Object.assign(new Error(`Session ${id} is already open for writing`), { code: "held", data: { retryAfterMs: 100 } });
 		const targets = new Set(entryIds);
 		const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim());
 		const rewritten = lines.map((raw) => {

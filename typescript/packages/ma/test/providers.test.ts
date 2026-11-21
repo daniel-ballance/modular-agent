@@ -269,6 +269,6 @@ test("Grok sends the system item, caps output, and maps a stream error", async t
   });
   const provider = responses("xai", auth, { xai: [{ id: "test", name: "Test", contextWindow: 1000, maxTokens: 20, effort: { off: "none", high: "high" } }] }, { endpoint: base, oauth: oauth({ endpoints: {} }) });
   await assert.rejects(async () => provider.request({ provider: "xai", id: "test" }, { systemPrompt: "rules", messages: [{ role: "user", content: [{ type: "text", text: "hey" }] }], tools: [], settings: { reasoning: "xhigh", maxOutput: 99 } }, {
-    cancelled: new AbortController().signal, async credential() { return undefined; }, piece() {},
+    cancelled: new AbortController().signal, async credential() { return undefined; }, piece() {}, log() {}, emit() {},
   }), { modelError: { kind: "contextTooLarge", message: "too long (context_length_exceeded)" } });
 });

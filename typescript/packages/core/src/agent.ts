@@ -10,7 +10,7 @@ import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, ACP_PROTOCOL, listenWebSocket, receiveMessages, type ListenOptions, type ServiceServer, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
 import { acpInterface, localAcpActor } from "@modular-agent/interface-acp";
-import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore } from "@modular-agent/services";
+import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore, type HistoryServiceStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
 import { type Provider } from "./provider.js";
@@ -112,11 +112,19 @@ async function tokenFrom(file: string): Promise<string> {
   return (await readFile(file, "utf8")).trim();
 }
 export const httpHistory = (url: string, tokenFile: string): HttpHistory => new HttpHistory(url, tokenFile);
-export async function serveHistory(store: FileHistory | MemoryHistory | HttpHistory, options: { address: string; tokenFile: string; testOnly?: boolean }) {
+const historyMethods = ["create", "list", "read", "acquire", "renew", "release", "append", "erase"] as const;
+
+export async function serveHistory(store: FileHistory | MemoryHistory | HttpHistory | HistoryServiceStore,
+  options: { address: string; tokenFile: string; testOnly?: boolean }) {
   return checked(async () => {
-    if (!(store instanceof FileHistory || store instanceof MemoryHistory || store instanceof HttpHistory)) {
+    const builtIn = store instanceof FileHistory || store instanceof MemoryHistory || store instanceof HttpHistory;
+    if (!builtIn && (!store || !historyMethods.every(name => typeof store[name] === "function"))) {
       const name = (store as object | null)?.constructor?.name ?? typeof store;
-      throw new AgentError("not_supported", `History store ${name} does not expose a history binding archive`);
+      throw new AgentError("not_supported", `History store ${name} does not implement HistoryServiceStore`);
+    }
+    if (!builtIn && (!Number.isSafeInteger(store.ttlMs) || store.ttlMs < 1 ||
+        (store.retention != null && (!Number.isSafeInteger(store.retention) || store.retention < 1)))) {
+      throw new AgentError("invalid_params", "Invalid history service TTL or retention");
     }
     if (store instanceof MemoryHistory && options.testOnly !== true) {
       throw new AgentError("not_supported", "MemoryHistory cannot commit durably; serve it only with testOnly: true");
@@ -126,7 +134,8 @@ export async function serveHistory(store: FileHistory | MemoryHistory | HttpHist
     const binding = { port: Number(match[1]), token: await tokenFrom(options.tokenFile) };
     const service = store instanceof HttpHistory
       ? await historyRelay({ ...binding, upstream: await httpUpstream(store) })
-      : await historyService({ ...binding, archive: store instanceof FileHistory ? fileArchive(store) : memoryArchive(store) });
+      : await historyService({ ...binding, ...(store instanceof FileHistory ? { archive: fileArchive(store) }
+        : store instanceof MemoryHistory ? { archive: memoryArchive(store) } : { store }) });
     return { url: service.url, close: () => new Promise<void>((resolve, reject) =>
       service.server.close(error => error ? reject(error) : resolve())) };
   });
@@ -397,7 +406,7 @@ export class Agent {
         this.#check();
         const at = entry ?? this.#api.session(id).position;
         if (!at || !this.#api.history(id, { all: true }).some(e => e.id === at)) throw new AgentError("not_found", "No entry to fork");
-        const fork = await checked(() => this.#api.forkSession(id, at), "busy");
+        const fork = await checked(() => this.#api.forkSession(id, at));
         return this.openSession(fork);
       },
       close: async (actor, delegatedBy) => {

@@ -1,13 +1,16 @@
 import type { Provider as BaseProvider } from "@modular-agent/harness";
 import type { AssistantMessage, ModelError, ModelInfo, ModelRef, ModelRequest } from "./data.js";
-import { AgentError, messageOf } from "./errors.js";
+import { AgentError, checked, messageOf } from "./errors.js";
 
 export interface ProviderContext {
   sessionId?: string;
   stepId?: string;
   cancelled: AbortSignal;
   piece(type: "text" | "reasoning" | "toolInput", delta: string, toolCallId?: string): void;
-  credential(): Promise<string | undefined>;
+  log(message: string): void;
+  emit(type: string, data: unknown): void;
+  /** An explicit name is in-process only. Declare inProcessOnly when using it. */
+  credential(name?: string): Promise<string | undefined>;
 }
 export interface Provider {
   id: string;
@@ -33,18 +36,32 @@ export class ModelFailure extends Error {
   constructor(readonly modelError: ModelError) { super(modelError.message); }
 }
 
-export function adaptProvider(p: Provider, credential: () => Promise<string | undefined> = async () => undefined): BaseProvider {
+export function adaptProvider(p: Provider, read: (name?: string) => Promise<string | undefined>,
+  emit: (sessionId: string | undefined, type: string, data: unknown) => void): BaseProvider {
+  const credential = (check: () => void): ProviderContext["credential"] => async name => {
+    check();
+    const key = await checked(() => read(name));
+    check();
+    return key;
+  };
   return {
     id: p.id, models: () => structuredClone(p.models()),
     supports: { ...p.supports, runsTools: false, liveSessions: false },
-    available: p.available && (async () => p.available!({ credential })),
+    available: p.available && (async () => {
+      let active = true;
+      try {
+        return await p.available!({ credential: credential(() => {
+          if (!active) throw new AgentError("invalid_request", "Provider availability check has settled");
+        }) });
+      } finally { active = false; }
+    }),
     onChange: p.onChange?.bind(p),
     discardState: p.discardState && (async id => { await p.discardState!(id); }),
     async request(model, request, opts) {
       let active = true;
       const check = () => {
         if (!active) throw new AgentError("invalid_request", "Provider context has settled");
-        opts.signal.throwIfAborted();
+        if (opts.signal.aborted) throw new AgentError("cancelled", "Provider request was cancelled");
       };
       try {
         return await p.request(model, structuredClone(request), {
@@ -53,7 +70,9 @@ export function adaptProvider(p: Provider, credential: () => Promise<string | un
             check();
             opts.onEvent?.({ type, delta, ...(toolCallId ? { toolCallId } : {}) });
           },
-          async credential() { check(); const key = await credential(); check(); return key; },
+          credential: credential(check),
+          log(message) { check(); console.error(message); },
+          emit(type, data) { check(); emit(opts.sessionId, type, data); },
         });
       } catch (error) {
         opts.signal.throwIfAborted();

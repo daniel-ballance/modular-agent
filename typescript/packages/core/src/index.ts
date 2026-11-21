@@ -1,4 +1,7 @@
 export { Agent, createAgent, defaultAcpActor, fileHistory, memoryHistory, httpHistory, serveHistory, FileHistory, HttpHistory } from "./agent.js";
+export { HistoryServiceError, parseHistoryJson, encodeHistoryJson, equalHistoryJson, historyTombstone,
+  type HistoryServiceStore, type HistoryServiceErrorCode, type HistoryReadOptions, type HistoryPage,
+  type HistorySessionPage, type HistoryJson, type HistoryJsonObject } from "@modular-agent/services";
 export { MemoryHistory } from "./history.js";
 export type { AgentOptions, Approval, Durability, ProcessPlugin, ServicePlugin, SessionInfo, SessionSummary, SessionOptions, ServeAcpOptions, ServeAcpServiceOptions, AcpActorToken } from "./agent.js";
 export { durableRuntime, transientRuntime, localEnvironment, environmentCredentials, fileCredentials } from "./parts.js";

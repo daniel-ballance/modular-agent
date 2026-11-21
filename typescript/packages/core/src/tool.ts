@@ -3,6 +3,7 @@ import type { Content, Input, QuestionDraft, QuestionReply, ToolDefinition, Tool
 import { AgentError, checked, messageOf, sdkError } from "./errors.js";
 import { schema, type Infer, type Schema } from "./schema.js";
 import { sdkJob, type JobStarter } from "./jobs.js";
+import type { CallContext } from "./plugin.js";
 
 export interface ToolEnvironment {
   read(path: string): Promise<Buffer>;
@@ -11,11 +12,14 @@ export interface ToolEnvironment {
   write(path: string, data: string | Uint8Array): Promise<void>;
   exec(command: string, options?: { timeout?: number }): Promise<{ exitCode: number | null; output: string; timedOut: boolean }>;
 }
-export interface ToolContext {
+export interface ToolContext extends Pick<CallContext, "history" | "emit"> {
   sessionId: string;
   actorId?: string;
   callId: string;
+  stepId?: string;
   cancelled: AbortSignal;
+  /** In process only. Declare inProcessOnly when using this member. */
+  credential(name: string): Promise<string | undefined>;
   environment: ToolEnvironment;
   jobs: JobStarter;
   tools: {
@@ -118,7 +122,11 @@ export function asContent(input: Input): Content {
   return typeof input === "string" ? [text(input)] : input;
 }
 
-export function toolSource(name: string, tools: Tool[]): ToolSource {
+interface ToolCallbacks extends Pick<ToolContext, "history" | "emit" | "credential"> {
+  finish(): void;
+}
+
+export function toolSource(name: string, tools: Tool[], scope: (base: BaseContext) => ToolCallbacks): ToolSource {
   return {
     id: name,
     tools: () => tools.map(t => structuredClone(t.definition)),
@@ -135,7 +143,9 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
         if (!base.environment) throw new AgentError("not_supported", "No working environment");
         return base.environment;
       };
+      const { finish, ...callbacks } = scope(base);
       const context: ToolContext = {
+        ...callbacks,
         jobs: { start: (kind, detail, key) => checked(async () => {
           check();
           if (!base.jobs) throw new AgentError("not_supported", "The host cannot start jobs");
@@ -167,6 +177,7 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
           }),
         },
         sessionId: base.sessionId, actorId: call.actorId, callId: call.id, cancelled: base.signal,
+        stepId: call.stepId,
         refuse(reason) { check(); throw new Refusal(reason); },
         progress(input) { check(); base.progress(asContent(input)); },
         log(message) { check(); console.error(message); },
@@ -181,7 +192,7 @@ export function toolSource(name: string, tools: Tool[]): ToolSource {
         },
       };
       try { return await body.get(tool)!(call.input, context); }
-      finally { live = false; }
+      finally { live = false; finish(); }
     },
   };
 }

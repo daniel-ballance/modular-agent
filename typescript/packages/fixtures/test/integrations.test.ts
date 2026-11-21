@@ -13,7 +13,10 @@ import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { client, methods, ndJsonStream, PROTOCOL_VERSION, type SessionNotification } from "@agentclientprotocol/sdk";
-import { createAgent, fileHistory, httpHistory, memoryHistory, serveHistory, tool } from "@modular-agent/core";
+import {
+  createAgent, encodeHistoryJson, fileHistory, HistoryServiceError, httpHistory, memoryHistory, parseHistoryJson, serveHistory, tool,
+  type HistoryJsonObject, type HistoryReadOptions, type HistoryServiceErrorCode, type HistoryServiceStore,
+} from "@modular-agent/core";
 import { restart, testAgent } from "@modular-agent/core/testing";
 import { openai } from "@modular-agent/openai";
 import { anthropic } from "@modular-agent/anthropic";
@@ -211,17 +214,64 @@ test("a kept session reopens over the history HTTP binding", { timeout: 10_000 }
   assert.equal((await reopened.prompt("Second")).text, "Still here.");
 });
 
-for (const placement of ["file", "memory", "relay"] as const) {
+// A custom backend with its durable records and leases kept by a separate archive.
+// Use the SDK's lossless codec on both sides, not a byte-forwarding HTTP relay.
+async function customHistory(url: string, token: string): Promise<HistoryServiceStore> {
+  const call = async (path: string, method = "GET", body?: string): Promise<string> => {
+    const response = await fetch(`${url}/v1${path}`, { method, body, headers: {
+      authorization: `Bearer ${token}`, "content-type": "application/json",
+    } });
+    const raw = await response.text();
+    if (!response.ok) {
+      const data = JSON.parse(raw) as { code: HistoryServiceErrorCode; error: string; retryAfterMs?: number };
+      throw new HistoryServiceError(data.code, data.error, data.retryAfterMs);
+    }
+    return raw;
+  };
+  const at = (id: string) => `/sessions/${encodeURIComponent(id)}`;
+  const query = ({ limit, after, project }: HistoryReadOptions & { project?: string }) => `?limit=${limit}` +
+    (after === undefined ? "" : `&after=${encodeURIComponent(after)}`) +
+    (project === undefined ? "" : `&project=${encodeURIComponent(project)}`);
+  return {
+    ttlMs: JSON.parse(await call("")).ttlMs,
+    async create(id, metadata) {
+      await call(at(id), "PUT", encodeHistoryJson(metadata));
+      if (id === "committed-without-reply") throw new Error("Commit acknowledgement was lost");
+    },
+    async list(q) { return parseHistoryJson(await call(`/sessions${query(q)}`)) as unknown as Awaited<ReturnType<HistoryServiceStore["list"]>>; },
+    async read(id, q) { return parseHistoryJson(await call(at(id) + query(q))) as unknown as Awaited<ReturnType<HistoryServiceStore["read"]>>; },
+    async acquire(id, owner) { return JSON.parse(await call(`${at(id)}/lease`, "POST", JSON.stringify({ owner }))).lease; },
+    async renew(id, lease) { await call(`${at(id)}/lease/${encodeURIComponent(lease)}/renew`, "POST"); },
+    async release(id, lease) { await call(`${at(id)}/lease/${encodeURIComponent(lease)}`, "DELETE"); },
+    async append(id, lease, entries) {
+      const body: HistoryJsonObject = { lease, entries };
+      return JSON.parse(await call(`${at(id)}/entries`, "POST", encodeHistoryJson(body))).kept;
+    },
+    async erase(id, entryIds, lease) { return JSON.parse(await call(`${at(id)}/erase`, "POST", JSON.stringify({ entryIds, lease }))).erased; },
+  };
+}
+
+for (const placement of ["file", "memory", "relay", "custom"] as const) {
   test(`SDK ${placement} history passes the history binding kit`, { timeout: 60_000 }, async t => {
     const dir = await mkdtemp(join(tmpdir(), "ma-sdk-history-"));
     const tokenFile = join(dir, "token");
-    await writeFile(tokenFile, randomBytes(32).toString("hex") + "\n", { mode: 0o600 });
+    const token = randomBytes(32).toString("hex");
+    await writeFile(tokenFile, token + "\n", { mode: 0o600 });
     const options = { address: "127.0.0.1:0", tokenFile };
     const store = placement === "memory" ? memoryHistory() : fileHistory(join(dir, "archive"));
     const direct = await serveHistory(store, { ...options, testOnly: placement === "memory" });
     let relay: Awaited<ReturnType<typeof serveHistory>> | undefined;
     t.after(async () => { await relay?.close(); await direct.close(); await rm(dir, { recursive: true, force: true }); });
     if (placement === "relay") relay = await serveHistory(httpHistory(direct.url, tokenFile), options);
+    if (placement === "custom") {
+      relay = await serveHistory(await customHistory(direct.url, token), options);
+      const path = `${relay.url}/v1/sessions/committed-without-reply`;
+      const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+      await assert.rejects(fetch(path, { method: "PUT", headers, body: '{"project":"/precise","created":0,"extra":9007199254740993}' }));
+      const kept = await fetch(path, { headers });
+      assert.equal(kept.status, 200);
+      assert.match(await kept.text(), /"extra":9007199254740993/);
+    }
     const kit = fileURLToPath(new URL("../../../../../conformance/history/run.mjs", import.meta.url));
     const { stdout } = await promisify(execFile)(process.execPath, [kit, (relay ?? direct).url, tokenFile], { timeout: 52_000 });
     t.diagnostic(stdout.trim().split("\n").at(-1)!);
