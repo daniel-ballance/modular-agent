@@ -68,9 +68,11 @@ type envelope struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *RPCError       `json:"error,omitempty"`
+	after   <-chan struct{} // completion of this request's earlier stream notifications
 }
 type pending struct {
 	ctx    context.Context
+	method string
 	result chan envelope
 }
 type requestIDKey struct{}
@@ -79,8 +81,10 @@ type incomingParentKey struct{}
 // incomingParent is captured on receipt, before a later answer on the wire
 // can invalidate the parent. The callback's worker may start after that answer.
 type incomingParent struct {
-	ctx context.Context
-	ok  bool
+	ctx    context.Context
+	key    string
+	method string
+	ok     bool
 }
 
 func (p *Peer) requestParent(ctx context.Context, id json.RawMessage) (context.Context, bool) {
@@ -99,17 +103,19 @@ type Handler func(context.Context, string, json.RawMessage) (any, error)
 type Notification func(string, json.RawMessage)
 type notificationHandler func(context.Context, string, json.RawMessage)
 
-// inbox keeps notifications and answer delivery ordered without holding up
-// the scanner. Request handlers start in that order but run independently.
+// inbox runs notifications in arrival order. Only work that depends on a
+// particular notification waits for its barrier, never the connection reader.
 type inbox struct {
 	ready  *sync.Cond
 	queue  []func()
+	tail   map[string]chan struct{}
+	bytes  int
 	closed bool
 	done   chan struct{}
 }
 
 func newInbox() *inbox {
-	q := &inbox{ready: sync.NewCond(&sync.Mutex{}), done: make(chan struct{})}
+	q := &inbox{ready: sync.NewCond(&sync.Mutex{}), tail: make(map[string]chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(q.done)
 		q.ready.L.Lock()
@@ -131,11 +137,40 @@ func newInbox() *inbox {
 	}()
 	return q
 }
-func (q *inbox) push(f func()) {
+func (q *inbox) push(key string, size int, f func()) bool {
 	q.ready.L.Lock()
-	q.queue = append(q.queue, f)
+	defer q.ready.L.Unlock()
+	// Reserve capacity for replies and cancels: the reader must not wait for
+	// the notification worker, even if it is waiting on a nested RPC.
+	if len(q.queue) >= 1024 || q.bytes+size > 2*MaxFrame {
+		return false
+	}
+	q.bytes += size
+	done := make(chan struct{})
+	if key != "" {
+		q.tail[key] = done
+	}
+	q.queue = append(q.queue, func() {
+		f()
+		q.ready.L.Lock()
+		defer q.ready.L.Unlock()
+		q.bytes -= size
+		if q.tail[key] == done {
+			delete(q.tail, key)
+		}
+		close(done)
+	})
 	q.ready.Signal()
-	q.ready.L.Unlock()
+	return true
+}
+
+func (q *inbox) barrier(key string) <-chan struct{} {
+	if key == "" {
+		return nil
+	}
+	q.ready.L.Lock()
+	defer q.ready.L.Unlock()
+	return q.tail[key]
 }
 func (q *inbox) finish(drain bool) {
 	q.ready.L.Lock()
@@ -176,7 +211,11 @@ type Peer struct {
 	Handle        Handler
 	Notify        Notification
 	notify        notificationHandler
-	OnClose       func()
+	// Host-specific admission policies run on the reader. They must not
+	// invoke handlers or wait for RPCs.
+	admitNotification func(context.Context, envelope) (string, bool)
+	requestBarrier    func(context.Context, envelope) string
+	OnClose           func()
 }
 
 func NewPeer(in io.ReadCloser, out io.Writer) *Peer {
@@ -245,7 +284,7 @@ func (p *Peer) call(ctx context.Context, method string, params any, out any, acc
 	if p.activity != nil && len(p.pending) == 0 {
 		p.heardLocked()
 	}
-	p.pending[key] = pending{ctx, ch}
+	p.pending[key] = pending{ctx: ctx, method: method, result: ch}
 	p.mu.Unlock()
 	defer func() {
 		p.mu.Lock()
@@ -294,6 +333,21 @@ func (p *Peer) call(ctx context.Context, method string, params any, out any, acc
 			return fault("lost", "plugin ignored cancellation")
 		}
 	}
+	select {
+	case <-m.after:
+	default:
+		if m.after != nil {
+			select {
+			case <-m.after:
+			case <-ctx.Done():
+				if !acceptCancelledResult {
+					return ctx.Err()
+				}
+			case <-p.done:
+				return fault("lost", "plugin connection ended during "+method)
+			}
+		}
+	}
 	if m.Error != nil {
 		return m.Error
 	}
@@ -319,7 +373,6 @@ func (p *Peer) Run() error            { return p.run(true) }
 func (p *Peer) run(drain bool) error {
 	q := newInbox()
 	defer func() {
-		q.finish(drain)
 		p.cancel()
 		p.mu.Lock()
 		for _, cancel := range p.active {
@@ -330,6 +383,7 @@ func (p *Peer) run(drain bool) error {
 		if p.OnClose != nil {
 			go p.OnClose()
 		}
+		q.finish(drain)
 	}()
 	var read func() ([]byte, error)
 	if p.wire != nil {
@@ -390,7 +444,8 @@ func (p *Peer) run(drain bool) error {
 			if !ok {
 				return fault("lost", "unexpected JSON-RPC response")
 			}
-			q.push(func() { x.result <- m })
+			m.after = q.barrier(key)
+			x.result <- m
 			continue
 		}
 		if fieldsErr != nil || fields == nil || decodeErr != nil || m.Version != "2.0" || m.Method == "" || hasID && !idOK {
@@ -424,15 +479,25 @@ func (p *Peer) run(drain bool) error {
 				if cancel != nil {
 					cancel()
 				}
-			} else {
+			} else if p.notify != nil || p.Notify != nil {
 				ctx := p.captureParent(p.ctx, m.Params)
-				q.push(func() {
+				key := capturedParent(ctx).key
+				if p.admitNotification != nil {
+					var admit bool
+					key, admit = p.admitNotification(ctx, m)
+					if !admit {
+						continue
+					}
+				}
+				if !q.push(key, len(b), func() {
 					if p.notify != nil {
 						p.notify(ctx, m.Method, m.Params)
-					} else if p.Notify != nil {
+					} else {
 						p.Notify(m.Method, m.Params)
 					}
-				})
+				}) && m.Method == "tools/changed" {
+					return fault("lost", "notification queue full during catalog invalidation")
+				}
 			}
 			continue
 		}
@@ -441,20 +506,21 @@ func (p *Peer) run(drain bool) error {
 		if strings.HasPrefix(m.Method, "host/") {
 			ctx = p.captureParent(ctx, m.Params)
 		}
-		p.mu.Lock()
-		if _, exists := p.active[key]; exists {
-			p.mu.Unlock()
-			cancel()
-			return fault("invalid_request", "duplicate active request id")
+		var after <-chan struct{}
+		if p.requestBarrier != nil {
+			after = q.barrier(p.requestBarrier(ctx, m))
 		}
+		p.mu.Lock()
 		p.active[key] = cancel
 		p.mu.Unlock()
-		q.push(func() {
-			p.wait.Add(1)
-			go func() {
-				defer p.wait.Done()
-				p.answer(ctx, m, cancel)
-			}()
+		p.wait.Go(func() {
+			if after != nil {
+				select {
+				case <-after:
+				case <-ctx.Done():
+				}
+			}
+			p.answer(ctx, m, cancel)
 		})
 	}
 }
@@ -469,8 +535,20 @@ func (p *Peer) captureParent(ctx context.Context, raw json.RawMessage) context.C
 		Parent json.RawMessage `json:"parentRequestId"`
 	}
 	_ = json.Unmarshal(raw, &params)
-	parent, ok := p.Parent(params.Parent)
-	return context.WithValue(ctx, incomingParentKey{}, incomingParent{ctx: parent, ok: ok})
+	key, _ := rpcID(params.Parent)
+	p.mu.Lock()
+	parent, ok := p.pending[key]
+	p.mu.Unlock()
+	var captured incomingParent
+	if ok {
+		captured = incomingParent{ctx: parent.ctx, key: key, method: parent.method, ok: true}
+	}
+	return context.WithValue(ctx, incomingParentKey{}, captured)
+}
+
+func capturedParent(ctx context.Context) incomingParent {
+	x, _ := ctx.Value(incomingParentKey{}).(incomingParent)
+	return x
 }
 
 func (p *Peer) answer(ctx context.Context, m envelope, cancel context.CancelFunc) {

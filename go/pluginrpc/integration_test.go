@@ -81,6 +81,9 @@ func TestBindingChild(t *testing.T) {
 			if mode == "unsupported" {
 				reg["hooks"] = []any{map[string]any{"handlerId": 1, "hook": "fixture.unknown", "order": "normal"}}
 			}
+			if mode == "probe-output" {
+				reg["hooks"] = []any{map[string]any{"handlerId": 4, "hook": "output", "order": "normal"}}
+			}
 			if mode == "hooks" {
 				reg["hooks"] = []any{map[string]any{"handlerId": 1, "hook": "provider.request", "order": "normal"}, map[string]any{"handlerId": 2, "hook": "step.after", "order": "normal"}, map[string]any{"handlerId": 3, "hook": "turn.before", "order": "normal"}}
 			}
@@ -157,6 +160,22 @@ func TestBindingChild(t *testing.T) {
 				return map[string]any{"refuse": "step gate ended turn"}, nil
 			case float64(3):
 				return map[string]any{"system": "fixture collect", "context": []any{map[string]any{"type": "text", "text": "fixture context"}}}, nil
+			case float64(4):
+				events, _ := payload["events"].([]any)
+				for _, raw := range events {
+					event := raw.(map[string]any)
+					if event["type"] == "plugin.problem" {
+						// A hook reply has no tool stream. A mismatched notification
+						// must not make this reply wait behind the gate itself.
+						if err := peer.Send("tools/progress", map[string]any{
+							"parentRequestId": pluginrpc.RequestID(ctx), "content": []any{},
+						}); err != nil {
+							return nil, err
+						}
+						event["data"] = "gated problem"
+					}
+				}
+				return map[string]any{"events": events}, nil
 			}
 		case "tools/call":
 			call := p["call"].(map[string]any)
@@ -430,7 +449,16 @@ func TestToolsUseTheSelectedEnvironmentInAnotherProcess(t *testing.T) {
 	}
 }
 func TestHostCallbacksCommandsChangedListsAndLostTools(t *testing.T) {
-	t.Setenv("MODULAR_AGENT_PLUGINS", string(api.JSON([]any{childSpec("probe", "")})))
+	testHostCallbacks(t, "probe")
+}
+
+func TestHostProblemThroughOwnOutputGate(t *testing.T) {
+	testHostCallbacks(t, "probe-output")
+}
+
+func testHostCallbacks(t *testing.T, mode string) {
+	t.Helper()
+	t.Setenv("MODULAR_AGENT_PLUGINS", string(api.JSON([]any{childSpec(mode, "")})))
 	opt := options(t)
 	h, err := vanilla.New(opt)
 	if err != nil {
@@ -442,16 +470,16 @@ func TestHostCallbacksCommandsChangedListsAndLostTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var emitted, problem atomic.Bool
+	notifications := make(chan string, 2)
 	a.Subscribe(func(e api.Event) {
-		if e.Kind == "plugin.wire-fixture.probe.notice" {
-			emitted.Store(true)
-		}
-		if e.Kind == "plugin.problem" {
-			problem.Store(true)
+		if e.Kind == "plugin.wire-fixture.probe.notice" || e.Kind == "plugin.problem" &&
+			(mode != "probe-output" || string(e.Data) == `"gated problem"`) {
+			notifications <- e.Kind
 		}
 	})
-	result, err := a.CallTool(context.Background(), id, api.Call{Name: "probe", Input: api.JSON(map[string]any{})})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	result, err := a.CallTool(ctx, id, api.Call{Name: "probe", Input: api.JSON(map[string]any{})})
 	if err != nil || result.Status != "completed" {
 		t.Fatal(result, err)
 	}
@@ -469,8 +497,18 @@ func TestHostCallbacksCommandsChangedListsAndLostTools(t *testing.T) {
 	if !found {
 		t.Fatal("changed list was not refreshed before returning the result")
 	}
-	if !emitted.Load() || !problem.Load() {
-		t.Fatal("plugin notifications were not delivered")
+	for _, want := range []string{"plugin.wire-fixture.probe.notice", "plugin.problem"} {
+		select {
+		case got := <-notifications:
+			if got != want {
+				t.Fatalf("notification = %q, want %q", got, want)
+			}
+		case <-ctx.Done():
+			t.Fatalf("notification %q was not delivered", want)
+		}
+	}
+	if mode == "probe-output" {
+		return
 	}
 	text, err := a.Command(context.Background(), id, "fixture one two")
 	if err != nil || text != "external command: [one two]" {

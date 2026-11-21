@@ -15,9 +15,8 @@ type toolChanges struct {
 	ids []string
 }
 
-// The peer captures the live parent at notification receipt. Its inbox runs
-// notifications before delivering the answer, so changes belong to that call
-// even if other concurrent calls finish first.
+// The reader registers scoped catalog changes on the live parent before
+// delivering its answer. Refresh here, never on the reader.
 func (r *remote) callTrackingTools(ctx context.Context, method string, params any, out any, acceptCancelled bool) error {
 	changes := &toolChanges{}
 	ctx = context.WithValue(ctx, changedToolsKey{}, changes)
@@ -53,27 +52,25 @@ func (r *remote) refreshChanged(ctx context.Context, id, session string) error {
 	return source.refresh(ctx, session, false)
 }
 
-func (r *remote) toolsChanged(ctx context.Context, v object) {
-	id := str(v, "toolSource")
-	if has(v, "parentRequestId") {
-		ctx, ok := r.peer.requestParent(ctx, mustJSON(v["parentRequestId"]))
-		if !ok {
-			return
-		}
-		if changes, _ := ctx.Value(changedToolsKey{}).(*toolChanges); changes != nil {
-			changes.mu.Lock()
-			if !slices.Contains(changes.ids, id) {
-				changes.ids = append(changes.ids, id)
-			}
-			changes.mu.Unlock()
-		}
+func (r *remote) registerToolChange(ctx context.Context, v object) {
+	parent, ok := r.peer.requestParent(ctx, mustJSON(v["parentRequestId"]))
+	if !ok {
 		return
 	}
-	// A parentless change isn't tied to any response, and the inbox must
-	// remain free to receive the answer to this tools/list request.
-	go func() {
-		if err := r.refreshChanged(ctx, id, ""); err != nil {
-			r.host.a.Emit(ctx, api.Event{Kind: "plugin.problem", Data: mustJSON(err.Error())})
+	if changes, _ := parent.Value(changedToolsKey{}).(*toolChanges); changes != nil {
+		id := str(v, "toolSource")
+		changes.mu.Lock()
+		if !slices.Contains(changes.ids, id) {
+			changes.ids = append(changes.ids, id)
 		}
-	}()
+		changes.mu.Unlock()
+	}
+}
+
+func (r *remote) toolsChanged(ctx context.Context, v object) {
+	// Parentless changes run in the ordered notification worker. The reader
+	// can deliver the tools/list answer while this work is pending.
+	if err := r.refreshChanged(ctx, str(v, "toolSource"), ""); err != nil {
+		r.host.a.Emit(ctx, api.Event{Kind: "plugin.problem", Data: mustJSON(err.Error())})
+	}
 }
