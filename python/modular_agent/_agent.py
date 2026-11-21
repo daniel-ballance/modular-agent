@@ -63,10 +63,12 @@ from ._native import (
     _reply,
 )
 from ._plugin import Plugin, ProcessPlugin, ServicePlugin, _SUPPORTED_HOOKS
+from ._parts import Interface, _Configuration, _InterfacePart
 from ._provider import ModelInfo, Provider, _ProviderAdapter
 from ._serve import _MemoryExternal, _OverWire
 from ._session import Session, _events
 from ._tool import Tool
+from ._working import _WorkingPart
 from ._types import (
     Actor,
     AgentError,
@@ -790,6 +792,7 @@ class Agent:
                 value["waitingThroughRestart"] and self._late_answers and "questions" in parts
             ),
             mixedActorInput="refused",
+            holdsOutput=bool(self._h.holds_output()),
             severalActors=self._several_actors,
             sessionLimits=self._session_limits,
             tenants=self._tenants,
@@ -1066,10 +1069,6 @@ def create_agent(
                 raise AgentError(
                     ErrorCode.INVALID_COMPOSITION, "Kept history needs a persistent store"
                 )
-            if not isinstance(environment, MemoryEnvironment):
-                raise AgentError(
-                    ErrorCode.INVALID_COMPOSITION, "Local environment recovery needs data_dir"
-                )
         if runtime is not None and runtime.continues_after_restart != (durability == "durable"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Runtime does not match durability")
         if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
@@ -1183,6 +1182,8 @@ def create_agent(
             if approval is not None or conformance:
                 await h.load(_Approval())
             registered_tools: dict[str, _LocalPlugin] = {}
+            interfaces: list[tuple[str, Interface]] = []
+            credential_registered = credentials is not None
             for plugin in [
                 *(Plugin(t.name, tools=[t]) for t in tools),
                 *(
@@ -1197,19 +1198,27 @@ def create_agent(
                     )
                 try:
                     registrar = await plugin._register(plugin.config)
-                    for hook in registrar._hooks:
-                        if hook.point not in _SUPPORTED_HOOKS:
-                            raise AgentError(
-                                ErrorCode.NOT_SUPPORTED, f"Unsupported hook: {hook.point}"
-                            )
-                    replacements = set(plugin.replaces)
-                    items = {
-                        *(f"provider:{key}" for key in registrar._providers),
-                        *(f"tool:{key}" for key in registrar._tools),
-                        *(f"command:{key}" for key in registrar._commands),
-                    }
-                    if len(replacements) != len(plugin.replaces) or not replacements <= items:
-                        raise ValueError(f"Invalid replacements for plugin {plugin.name}")
+                    if registrar._credential_store is not None:
+                        if credential_registered:
+                            raise ValueError("Duplicate credential store")
+                        credential_registered = True
+                        agent._credentials = registrar._credential_store
+                        await h.unload("credentials")
+                        await h.load(_CredentialAdapter(agent._credentials))
+                        for owner in h.plugins.values():
+                            if isinstance(owner, _ProviderAdapter):
+                                owner.credentials = agent._credentials
+                    if registrar._configuration is not None:
+                        if "config" in h.capabilities:
+                            raise ValueError("Duplicate configuration source")
+                        await h.load(_Configuration(plugin.name, registrar._configuration))
+                    if registrar._interface is not None:
+                        interfaces.append((plugin.name, registrar._interface))
+                    if registrar._environment is not None:
+                        if "working-environment" not in plugin.replaces:
+                            raise ValueError("Unlisted working-environment replacement")
+                        await h.unload(h.capabilities["environment"][0])
+                        await h.load(_WorkingPart(plugin.name, registrar._environment))
                     for provider in registrar._providers.values():
                         prior_provider = h.capabilities.get(provider.id)
                         if prior_provider is not None:
@@ -1244,6 +1253,11 @@ def create_agent(
                 for p in plugins
                 if isinstance(p, _OverWire)
             ]
+
+            for adapter in (p for p in h.plugins.values() if isinstance(p, _LocalPlugin)):
+                for hook in adapter.registrar._hooks:
+                    if hook.point not in _SUPPORTED_HOOKS and hook.point not in h.hooks:
+                        raise AgentError(ErrorCode.NOT_SUPPORTED, f"Unsupported hook: {hook.point}")
 
             async def load_configured_plugins(initial: list[dict[str, Any]], *, host: bool) -> None:
                 configured = list(initial)
@@ -1286,6 +1300,13 @@ def create_agent(
 
             agent._enable_plugin_host = enable_plugin_host
             wrap_native_providers(h)
+            environment_owner = h.capabilities["environment"][0]
+            if (
+                data_dir is None
+                and durability != "ephemeral"
+                and h.plugins[environment_owner] is local
+            ):
+                raise ValueError("Local environment recovery needs data_dir")
             runtime_owner = h.capabilities["runtime"][0]
             continues = bool(h.plugins[runtime_owner].declarations.get("durable"))
             # Offline ACP fixtures exercise both Runtime kinds with persistent
@@ -1303,8 +1324,10 @@ def create_agent(
                 raise AgentError(ErrorCode.INVALID_PARAMS, f"Unknown model: {selected}")
             if selected is not None:
                 defaults["model"] = selected
-            if not specs and not agent._plugin_host:
+            if not specs and not agent._plugin_host and not interfaces:
                 agent._restart = lambda: build_with_store(agent._memory_store)
+            for owner_name, implementation in interfaces:
+                await h.load(_InterfacePart(owner_name, implementation, agent))
             return agent
         except BaseException as exc:
             try:

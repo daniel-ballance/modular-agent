@@ -835,13 +835,56 @@ class Turns:
                 )
             if "tools" not in authority:
                 gate = {**gate, "refused": True, "reason": "Actor lacks authority: tools"}
-            if gate.get("open") and not gate.get("refused"):
+            if gate.get("open") and not gate.get("refused") and not gate.get("pending"):
                 return unknown if replay else {"open": True, "request": gate["request"]}
             caller = "plugin" if call.get("parentCallId") else call.get("initiator", "model")
             if definition and caller not in definition.get("callers", []):
                 gate = {**gate, "refused": True, "reason": "Tool does not allow this initiator"}
             if "checked_input" in gate and gate["checked_input"] != gate["call"]["input"]:
                 gate = {**gate, "refused": True, "reason": "Tool input changed after approval"}
+            if gate.get("pending") and not gate.get("refused"):
+                if replay:
+                    return unknown
+                if call.get("parentCallId") or not self.declarations.get("open_calls"):
+                    gate = {**gate, "refused": True, "reason": "This tool call cannot be left open"}
+                else:
+                    question = gate["pending"]
+                    reply = await self.api.call(
+                        "questions",
+                        "ask",
+                        {
+                            **question,
+                            "session": sid,
+                            "actor": call["actor"],
+                            "authority": sorted(authority),
+                            "call": call["id"],
+                            "turn": turn,
+                            "step": step,
+                            "name": question.get("credential"),
+                            "timeout": 0,
+                            "park": True,
+                            "key": "call:" + call["id"] + ":gate",
+                            **(
+                                {"responders": question["answerers"]}
+                                if "answerers" in question
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "approval_call": {
+                                        "name": call["name"],
+                                        "input": gate["call"]["input"],
+                                    }
+                                }
+                                if question["kind"] == "approval"
+                                else {}
+                            ),
+                        },
+                    )
+                    if reply.get("open"):
+                        return {"open": True, "request": reply["request"]}
+                    if reply.get("declined"):
+                        gate = {**gate, "refused": True, "reason": reply.get("reason", "Declined")}
             if gate.get("refused"):
                 if replay:
                     return unknown

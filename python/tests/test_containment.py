@@ -5,18 +5,32 @@ import json
 import os
 import signal
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from ma_core import AgentError
 from ma_fake import Fake
 from ma_local import Local
-from ma_local.containment import journal, owner_identity, recover
+from ma_local.containment import delegated_root, journal, owner_identity, recover
 from ma_cli import build
 from test_swap import dead, pid_ready, spawn_driver, until
 
 
-async def test_watcher_and_agent_die_next_start_cleans_up(tmp_path, runtime_kind):
+@pytest.fixture
+def isolated_cgroup_root(monkeypatch):
+    # This observes a dead owner with live descendants. Unrelated agent
+    # startups intentionally sweep orphan groups in their own cgroup root.
+    root = delegated_root() / f"python-containment-test-{uuid4().hex}"
+    root.mkdir()
+    monkeypatch.setenv("MA_CGROUP_ROOT", str(root))
+    yield
+    root.rmdir()
+
+
+async def test_watcher_and_agent_die_next_start_cleans_up(
+    tmp_path, runtime_kind, isolated_cgroup_root
+):
     home = tmp_path / "store"
     p = await spawn_driver(home, tmp_path, runtime_kind, "bash_effect")
     watcher, pids, record, group = None, [], None, None

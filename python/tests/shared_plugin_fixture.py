@@ -11,6 +11,7 @@ from ma_plugin.server import BINDING, PluginServer
 
 class Fixture(PluginServer):
     def __init__(self):
+        self.changed_sessions = set()
         self.tools = [
             {
                 "name": "probe",
@@ -286,6 +287,10 @@ class Fixture(PluginServer):
             if self.config.get("perSession") and p.get("sessionId")
             else []
         )
+        if p.get("sessionId") and p["sessionId"] in self.changed_sessions:
+            extra.append(
+                {"name": "added", "description": "Added", "parameters": {"type": "object"}}
+            )
         return {"tools": self.tools + extra}
 
     async def handle(self, p, key):
@@ -397,9 +402,12 @@ class Fixture(PluginServer):
         if operation == "large":
             return {"output": "x" * (64 * 1024 * 1024)}
         if operation == "change":
-            self.tools.append(
-                {"name": "added", "description": "Added", "parameters": {"type": "object"}}
-            )
+            if self.config.get("perSession"):
+                self.changed_sessions.add(sid)
+            else:
+                self.tools.append(
+                    {"name": "added", "description": "Added", "parameters": {"type": "object"}}
+                )
             await self.peer.notify(
                 "tools/changed", {"toolSource": "probes", "parentRequestId": key}
             )

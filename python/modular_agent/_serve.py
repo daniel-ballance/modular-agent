@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
+from contextvars import ContextVar
 from copy import deepcopy
 from os import PathLike
 from typing import Any, cast, overload
@@ -20,6 +21,8 @@ from ma_plugin.websocket import (
     listen_websocket,
 )
 
+from ._context import HookContext
+from ._jobs import Job, JobContext, JobOutcome
 from ._native import _error, _read_answer
 from ._plugin import (
     CommandContext,
@@ -31,8 +34,9 @@ from ._plugin import (
     _handle_hook,
 )
 from ._provider import Provider, ProviderContext, _available, _models, _request
-from ._tool import LeftOpen, ToolContext
+from ._tool import LeftOpen, Tool, ToolContext, ToolSource
 from ._types import AgentError, Answer, Content, ErrorCode, Json, JsonObject, ModelRef, QuestionSpec
+from ._working import _METHODS, _dispatch_environment
 
 
 async def _serve(
@@ -47,6 +51,113 @@ async def _serve(
     active: set[asyncio.Task[Any]] = set()
     environment_output: dict[str, Callable[[Content], Awaitable[None]]] = {}
     provider_locks: dict[tuple[str, str], asyncio.Lock] = {}
+    changing: ContextVar[set[str] | None] = ContextVar("tool_source_changes", default=None)
+    subscriptions: list[tuple[ToolSource, Callable[[], None]]] = []
+    notifications: set[asyncio.Task[None]] = set()
+    jobs: dict[str, Job] = {}
+
+    def job_from(jid: str, sid: str, actor: str, kind: str, detail: Json) -> Job:
+        async def progress(content: Content) -> None:
+            await server.peer.notify("host/jobs/progress", {"jobId": jid, "content": content})
+
+        async def end(outcome: JobOutcome, result: Content | None, report: bool) -> None:
+            try:
+                await server.peer.request(
+                    "host/jobs/end",
+                    {
+                        "jobId": jid,
+                        "outcome": {"kind": outcome},
+                        "report": report,
+                        **({"result": result} if result is not None else {}),
+                    },
+                )
+            except WireError as exc:
+                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+            jobs.pop(jid, None)
+
+        return Job(jid, sid, actor, kind, detail, progress, end)
+
+    def start_job(
+        key: str | int, sid: str, actor: str
+    ) -> Callable[[str, Json, str | None], Awaitable[Job]]:
+        async def start(kind: str, detail: Json, dedupe: str | None) -> Job:
+            try:
+                reply = await server.peer.request(
+                    "host/jobs/start",
+                    {
+                        "parentRequestId": key,
+                        "kind": kind,
+                        "detail": detail,
+                        **({"key": dedupe} if dedupe is not None else {}),
+                    },
+                )
+            except WireError as exc:
+                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+            jid = reply["jobId"]
+            if jid not in jobs:
+                jobs[jid] = job_from(jid, sid, actor, kind, detail)
+            return jobs[jid]
+
+        return start
+
+    async def invoke_job(callback: Callable[[Job, JobContext], Awaitable[None]], job: Job) -> None:
+        async def history(cursor: str | None) -> JsonObject:
+            return cast(
+                JsonObject,
+                await server.peer.request(
+                    "host/history",
+                    {
+                        "sessionId": job.session_id,
+                        **({"after": cursor} if cursor else {}),
+                    },
+                ),
+            )
+
+        async def emit(type: str, data: Json) -> None:
+            await server.peer.notify(
+                "host/emit", {"sessionId": job.session_id, "type": type, "data": data}
+            )
+
+        context = JobContext(job, history=history, emit=emit)
+        try:
+            await callback(job, context)
+        except asyncio.CancelledError:
+            context.cancelled.set()
+            raise
+        finally:
+            context._active = False
+
+    async def notify_source(source: str, key: str | int | None = None) -> None:
+        try:
+            await server.peer.notify(
+                "tools/changed",
+                {
+                    "toolSource": source,
+                    **({"parentRequestId": key} if key is not None else {}),
+                },
+            )
+        except (ConnectionError, WireError):
+            pass
+
+    def subscribe(source: ToolSource) -> None:
+        def changed() -> None:
+            bucket = changing.get()
+            if bucket is not None:
+                bucket.add(source.id)
+            elif not stopped:
+                task = asyncio.create_task(notify_source(source.id))
+                notifications.add(task)
+                task.add_done_callback(notifications.discard)
+
+        source._subscribers.add(changed)
+        subscriptions.append((source, changed))
+
+    async def source_tools(source: ToolSource, session: str | None) -> list[Tool]:
+        result = list(await source.tools(session))
+        if hidden := [t.name for t in result if t.in_process_only]:
+            raise WireError("Cannot serve tools: " + ", ".join(hidden), "not_supported")
+        return result
+
     registration: dict[str, Any] = {
         "binding": BINDING,
         "name": plugin.name,
@@ -70,6 +181,16 @@ async def _serve(
             if h.in_process_only or h.point not in _SUPPORTED_HOOKS
         ]
         items += [f"command:{c.name}" for c in registrar._commands.values() if c.in_process_only]
+        items += [
+            label
+            for label, part in (
+                ("credential store", registrar._credential_store),
+                ("configuration", registrar._configuration),
+                ("interface", registrar._interface),
+            )
+            if part is not None
+        ]
+        items += list(registrar._defined_hooks)
         if items:
             raise WireError("Cannot serve " + ", ".join(items), "not_supported")
         registration["toolSources"] = (
@@ -83,10 +204,33 @@ async def _serve(
             if registrar._tools
             else []
         )
+        for source in registrar._sources.values():
+            if source.id == plugin.name and registrar._tools:
+                raise WireError("Duplicate tool source", "invalid_request")
+            registration["toolSources"].append(
+                {
+                    "id": source.id,
+                    "perSession": source.per_session,
+                    "tools": []
+                    if source.per_session
+                    else [t.definition for t in await source_tools(source, None)],
+                }
+            )
+            subscribe(source)
+        if registrar._environment is not None:
+            registration["workingEnvironment"] = registrar._environment.supports
         registration["hooks"] = [
             {"hook": h.point, "handlerId": n, "order": h.order}
             for n, h in enumerate(registrar._hooks, 1)
         ]
+        if registrar._job_owner is not None and getattr(registrar._job_owner, "resume", None):
+            registration["hooks"].append(
+                {
+                    "hook": "session.start",
+                    "handlerId": len(registrar._hooks) + 1,
+                    "order": "first",
+                }
+            )
         registration["providers"] = [
             {
                 "id": p.id,
@@ -108,7 +252,9 @@ async def _serve(
         if stopped:
             return
         stopped = True
-        tasks = active - {asyncio.current_task()}
+        for source, callback in subscriptions:
+            source._subscribers.discard(callback)
+        tasks = (active | notifications) - {asyncio.current_task()}
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -121,16 +267,27 @@ async def _serve(
         return registrar
 
     async def list_tools(p: dict[str, Any], key: str | int) -> JsonObject:
-        if p.get("toolSource") != plugin.name or p.get("sessionId") is not None:
-            raise WireError("Unknown or session-scoped tool source", "invalid_request")
-        return {"tools": [t.definition for t in registered()._tools.values()]}
+        reg, sid = registered(), p.get("sessionId")
+        source = reg._sources.get(p.get("toolSource", ""))
+        if source is not None and source.per_session == isinstance(sid, str):
+            listed = await source_tools(source, sid)
+        elif source is None and p.get("toolSource") == plugin.name and sid is None:
+            listed = list(reg._tools.values())
+        else:
+            raise WireError("Unknown tool source or invalid session scope", "invalid_request")
+        return {"tools": [t.definition for t in listed]}
 
     async def call_tool(p: dict[str, Any], key: str | int) -> JsonObject:
         call = p["call"]
-        t = registered()._tools.get(call["name"])
+        reg = registered()
+        source = reg._sources.get(p.get("toolSource", ""))
+        if source is not None and isinstance(p.get("sessionId"), str):
+            listed = await source_tools(source, p["sessionId"] if source.per_session else None)
+            t = next((t for t in listed if t.name == call["name"]), None)
+        else:
+            t = reg._tools.get(call["name"]) if p.get("toolSource") == plugin.name else None
         if (
             t is None
-            or p.get("toolSource") != plugin.name
             or not isinstance(p.get("sessionId"), str)
             or not p["sessionId"]
             or not isinstance(call.get("id"), str)
@@ -229,6 +386,9 @@ async def _serve(
             nested,
             environment,
             history,
+            start_job=start_job(key, p["sessionId"], call.get("actorId", "user"))
+            if reg._job_owner
+            else None,
         )
         try:
             return await t._run(call["input"], context)
@@ -314,8 +474,25 @@ async def _serve(
         return {}
 
     async def handle_hook(p: dict[str, Any], key: str | int) -> JsonObject | None:
-        registrations = registered()._hooks
+        reg = registered()
+        registrations = reg._hooks
         n = p.get("handlerId")
+        resume = getattr(reg._job_owner, "resume", None)
+        if n == len(registrations) + 1 and p.get("hook") == "session.start" and resume is not None:
+            payload = p["payload"]
+            if payload.get("resumed"):
+                sid = payload["sessionId"]
+                unfinished = await server.peer.request("host/jobs/unfinished", {"sessionId": sid})
+                for item in unfinished["jobs"]:
+                    jid = item["jobId"]
+                    if item.get("cleanup") == "unconfirmed" or jid in jobs:
+                        continue
+                    await server.peer.request("host/jobs/resume", {"jobId": jid})
+                    job = jobs[jid] = job_from(
+                        jid, sid, item["actorId"], item["kind"], item["detail"]
+                    )
+                    await invoke_job(resume, job)
+            return None
         if (
             type(n) is not int
             or not 1 <= n <= len(registrations)
@@ -323,8 +500,33 @@ async def _serve(
         ):
             raise WireError("Unknown hook handler", "unknown_handler")
         hook = registrations[n - 1]
+        payload = p["payload"]
+        sid = payload.get("sessionId")
+
+        async def history(cursor: str | None) -> JsonObject:
+            return cast(
+                JsonObject,
+                await server.peer.request(
+                    "host/history",
+                    {
+                        "sessionId": sid,
+                        "parentRequestId": key,
+                        **({"after": cursor} if cursor else {}),
+                    },
+                ),
+            )
+
+        async def emit(type: str, data: Json) -> None:
+            await server.peer.notify(
+                "host/emit", {"sessionId": sid, "parentRequestId": key, "type": type, "data": data}
+            )
+
         try:
-            return await _handle_hook(hook, p["payload"])
+            return await _handle_hook(
+                hook,
+                payload,
+                HookContext(payload, history=history if sid else None, emit=emit if sid else None),
+            )
         except Exception as exc:
             if hook.point not in _OBSERVERS:
                 raise
@@ -335,10 +537,58 @@ async def _serve(
         command = registered()._commands.get(p["name"])
         if command is None:
             raise WireError("Unknown command", "invalid_request")
+        sid, actor = p["sessionId"], p["actorId"]
+
+        async def history(cursor: str | None) -> JsonObject:
+            return cast(
+                JsonObject,
+                await server.peer.request(
+                    "host/history",
+                    {
+                        "sessionId": sid,
+                        "parentRequestId": key,
+                        **({"after": cursor} if cursor else {}),
+                    },
+                ),
+            )
+
+        async def emit(type: str, data: Json) -> None:
+            await server.peer.notify(
+                "host/emit", {"sessionId": sid, "parentRequestId": key, "type": type, "data": data}
+            )
+
         output = await _handle_command(
-            command, p["args"], CommandContext(p["sessionId"], p["actorId"])
+            command,
+            p["args"],
+            CommandContext(
+                sid,
+                actor,
+                history=history,
+                emit=emit,
+                start_job=start_job(key, sid, actor) if registered()._job_owner else None,
+            ),
         )
         return {"output": output} if output is not None else {}
+
+    async def cancel_job(p: dict[str, Any], key: str | int) -> JsonObject:
+        owner = registered()._job_owner
+        job = jobs.get(p.get("jobId", ""))
+        if owner is None or job is None:
+            raise WireError("Unknown job execution", "invalid_request")
+        await invoke_job(owner.cancel, job)
+        if not job._settled:
+            raise WireError("Job cleanup not confirmed", "lost")
+        return {}
+
+    async def call_environment(method: str, params: JsonObject, key: str | int) -> JsonObject:
+        environment = registered()._environment
+        if environment is None:
+            raise WireError("No registered working environment", "not_supported")
+
+        async def progress(chunk: str) -> None:
+            await server.peer.notify("env/output", {"parentRequestId": key, "chunk": chunk})
+
+        return await _dispatch_environment(environment, method, params, progress)
 
     class Server(PluginServer):  # type: ignore[misc]  # Untyped base adapter.
         async def notification(self, method: str, params: dict[str, Any]) -> None:
@@ -356,6 +606,8 @@ async def _serve(
                 attempted = True
             if method != "plugin/shutdown" and task is not None:
                 active.add(task)
+            changes: set[str] = set()
+            scope = changing.set(changes)
             try:
                 return await super().dispatch(method, params, key)
             except AgentError as exc:
@@ -363,19 +615,34 @@ async def _serve(
             except (KeyError, TypeError) as exc:
                 raise WireError("Malformed plugin request", "invalid_request", -32602) from exc
             finally:
-                if task is not None:
-                    active.discard(task)
+                changing.reset(scope)
+                try:
+                    if not stopped:
+                        for source in sorted(changes):
+                            await notify_source(source, key)
+                finally:
+                    if task is not None:
+                        active.discard(task)
 
     methods: dict[str, Callable[..., Awaitable[Any]]] = {
         "tools/list": list_tools,
         "tools/call": call_tool,
         "hook/handle": handle_hook,
         "command/run": run_command,
+        "jobs/cancel": cancel_job,
         "provider/models": models,
         "provider/available": available,
         "provider/request": request_model,
         "provider/discard": discard,
     }
+
+    def bind_environment(name: str) -> Callable[..., Awaitable[JsonObject]]:
+        async def invoke(params: JsonObject, key: str | int) -> JsonObject:
+            return await call_environment(name, params, key)
+
+        return invoke
+
+    methods.update({f"env/{name}": bind_environment(name) for name in _METHODS})
     server = Server(registration, methods, initialize, stop)
     if frames is not None:
         await server.serve_frames(frames)

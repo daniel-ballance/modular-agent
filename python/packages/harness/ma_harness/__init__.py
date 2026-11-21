@@ -43,6 +43,9 @@ class Harness(Authority):
         self.trace = []
         self.define_hook("@harness", "plugin.load", "gate")
         self.define_hook("@harness", "session.prepare", "observe")
+        self.define_hook("@harness", "session.join", "observe")
+        self.define_hook("@harness", "session.leave", "observe")
+        self.define_hook("@harness", "provider.piece", "observe")
         self.define_hook("@harness", "session.start", "observe")
         self.define_hook("@harness", "session.end", "observe")
         self.define_hook("@harness", "session.suspend", "observe")
@@ -1045,11 +1048,18 @@ class Harness(Authority):
                 emit,
             )
         if op == "grant":
-            return await self.grant(d)
+            entry = await self.grant(d)
+            await self.fire("@harness", "session.join", {**d, "entry": entry})
+            return entry
         if op == "leave":
-            return await self.leave(d)
+            entry = await self.leave(d)
+            await self.fire("@harness", "session.leave", {**d, "entry": entry})
+            return entry
         if op == "input":
-            return await self.fire("@harness", "input.arrives", d)
+            result = await self.fire("@harness", "input.arrives", d)
+            if result.get("handled") and (command := result.get("command")):
+                result["result"] = await self.handle("command", {**d, "text": command}, emit)
+            return result
         if op == "prepare":
             return await self.fire("@harness", "turn.prepare", d)
         if op == "invalidate":

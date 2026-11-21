@@ -141,6 +141,8 @@ def answer(hook, d, a):
         if a.get("stop"):
             result["handled"] = True
             result.setdefault("result", None)
+            if "command" in changed:
+                result["command"] = changed["command"]
     elif hook.startswith("provider."):
         result = changed
     else:
