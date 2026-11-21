@@ -14,6 +14,7 @@ from pydantic_monty import (
     CollectString,
     ExternalModule,
     MontyComplete,
+    MontyCrashedError,
     MontyError,
 )
 
@@ -222,12 +223,16 @@ def code_tool(
             )
 
         try:
-            async with AsyncMonty(max_processes=1) as pool:
+            # One pool and checkout per call. Never feed a session again after
+            # a memory or time limit, when Monty no longer trusts its heap.
+            async with AsyncMonty(max_processes=1, max_checkouts_per_worker=1) as pool:
                 module = ExternalModule(dict.fromkeys(catalog, lambda: None))
                 handlers = {f"tools.{name}": callback(f) for name, f in catalog.items()}
                 async with pool.checkout(
                     external_modules={"tools": module},
+                    os_policy={"datetime": "call_host", "sleep": "call_host"},
                     limits={
+                        "max_memory": 256 * 1024 * 1024,
                         "max_turn_duration_secs": compute,
                         "max_recursion_depth": recursion,
                         # The pool counts lookups too. Leave the product call budget to invoke().
@@ -263,9 +268,19 @@ def code_tool(
                             raise RuntimeError("awaited something that never resolves")
                     result: object = snapshot.output
         except (MontyError, MemoryError) as exc:
-            return ToolOutput(
-                [{"type": "text", "text": _bounded(collector.output + str(exc))}], "failed"
-            )
+            if isinstance(exc, MontyCrashedError):
+                kind = "TimeoutError: " if exc.timed_out else ""
+                error = f"{kind}Sandbox worker process died: {exc}"
+            elif isinstance(exc, MemoryError):
+                error = f"MemoryError: {exc}"
+            else:
+                error = str(exc)
+            combined = collector.output + error
+            text = _bounded(combined)
+            if text != combined:
+                # Keep the error even if the run filled the output budget first.
+                text = _bounded(error + "\n" + collector.output)
+            return ToolOutput([{"type": "text", "text": text}], "failed")
 
         notes = collector.output
         if notes and not notes.endswith("\n"):

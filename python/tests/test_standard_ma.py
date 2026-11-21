@@ -429,7 +429,13 @@ async def test_responses_refresh_retry_and_stream(
             "more than 1 function calls",
         ),
         ("print('x' * 1000)", {"printed": 30}, "failed", "1001 bytes > 30 bytes"),
-        ("while True:\n    pass", {"compute": 0.1}, "failed", "limit"),
+        ("while True:\n    pass", {"compute": 0.1}, "failed", "TimeoutError"),
+        (
+            "import time\ntime.time()",
+            {},
+            "failed",
+            "no direct access",
+        ),
         ("def f():\n    return 1 + f()\nf()", {"recursion": 15}, "failed", "recursion"),
         (
             "from pathlib import Path\nPath('/etc/passwd').read_text()",
@@ -452,6 +458,23 @@ async def test_monty(tmp_path: Path, code: str, limits: dict, status: str, conta
     [tool] = result.tool_results()
     assert tool.status == status, tool.text()
     assert contains.lower() in tool.text().lower()
+
+
+async def test_codemode_memory_limit_discards_session(tmp_path: Path) -> None:
+    # Grow past 256 MiB in small allocations, not just one pre-checked allocation.
+    grow = "print('x' * 60000)\nitems = []\nfor i in range(30000):\n    items.append('y' * 10000)\nprint('finished')"
+    script = [
+        {"toolCalls": [{"name": "codemode", "input": {"code": grow}}]},
+        {"toolCalls": [{"name": "codemode", "input": {"code": "print('still here'); 1 + 2"}}]},
+        {"text": "done"},
+    ]
+    async with offline_agent(project=tmp_path, tools=[code_tool()], script=script) as agent:
+        failed, completed = (await (await agent.session()).prompt("use code")).tool_results()
+    assert failed.status == "failed"
+    assert "MemoryError" in failed.text()
+    assert "finished" not in failed.text()
+    assert completed.status == "completed"
+    assert completed.text() == "still here\n3"
 
 
 async def test_codemode_prints_started_call_on_stderr(tmp_path: Path, capsys) -> None:
