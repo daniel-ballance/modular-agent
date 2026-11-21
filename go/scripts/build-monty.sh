@@ -12,7 +12,7 @@ if [[ ! -d $source ]]; then
   trap 'rm -rf -- "$clone"' EXIT
   git clone --depth 1 --branch v1.6.0 https://github.com/pydantic/monty.git "$clone"
   [[ $(git -C "$clone" rev-parse HEAD) == "$revision" ]]
-  mv -T -- "$clone" "$source"
+  mv -- "$clone" "$source"
 fi
 if [[ $(git -C "$source" rev-parse HEAD) != "$revision" || -n $(git -C "$source" status --porcelain) ]]; then
   echo "Monty source in $source does not match the clean v1.6.0 revision $revision" >&2

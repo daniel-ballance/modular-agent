@@ -787,11 +787,9 @@ func conformanceServer(serviceState string) *Server {
 			if serviceState != "" {
 				home = serviceState
 			}
-			s.Environment = local.NewAt(filepath.Join(home, "commands"))
-			containment := "none"
-			if s.Environment.StopsOnCrash() {
-				containment = "strong"
-			}
+			environment := local.NewAt(filepath.Join(home, "commands"))
+			s.Environment = environment
+			containment := environment.Containment()
 			_, points := api.Points(s.Environment)
 			s.Registration.Environment = &EnvironmentRegistration{Containment: containment, Platforms: []string{runtime.GOOS}, Points: points}
 			s.Registration.Replaces = append(s.Registration.Replaces, "working-environment")
