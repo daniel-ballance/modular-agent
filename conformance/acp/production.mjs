@@ -212,7 +212,7 @@ async function scopedAttachments(kit, { scopes, nested, alias, nestedAlias, unse
 }
 
 async function representation(kit) {
-	const { check, project, history, closeSession, reopenWatchdog, within } = kit;
+	const { check, project, history, closeSession, reopenWatchdog, within, prompt } = kit;
 	const principal = scoped([project], [null]);
 	const member = { id: "kit-represented", kind: "user", rights: ["watch", "input", "answer", "propose"] };
 	const h = await host(kit, [principal]);
@@ -224,6 +224,9 @@ async function representation(kit) {
 			return;
 		}
 		sessionId = await approvalOff(a, await open(a, project));
+		// A session is persisted only from its first admitted input, so admit one before the
+		// close and reopen below (docs/bindings/history-http.md, Sessions).
+		check("isolation: the principal's first input is admitted", (await within(15000, prompt(a, sessionId, "first input"), "first input")).stopReason === "end_turn");
 		await ext(a, "join", { sessionId, actor: member, present: true });
 		const grants = await ext(a, "actors", { sessionId });
 		const before = await history(a, sessionId, { all: true });
