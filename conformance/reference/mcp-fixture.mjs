@@ -2,6 +2,8 @@
 // A minimal MCP server on stdio with one tool, `echo`, for the reference checks.
 // Newline-delimited JSON-RPC 2.0; no dependencies.
 import { createInterface } from "node:readline";
+import { appendFileSync } from "node:fs";
+if (process.argv[2]) appendFileSync(process.argv[2], "started\n");
 const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
 createInterface({ input: process.stdin }).on("line", (line) => {
   let req;

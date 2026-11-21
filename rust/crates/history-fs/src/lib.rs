@@ -1,21 +1,22 @@
-//! Atomic JSON snapshots with OS-owned, diskless session writer leases (Linux).
+//! Atomic JSON snapshots with OS-owned session writer leases.
 mod erasure;
 use agent_api::*;
 use fs2::FileExt;
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
-    hash::{Hash, Hasher},
     io::Write,
-    os::{
-        linux::net::SocketAddrExt,
-        unix::{
-            fs::OpenOptionsExt,
-            net::{SocketAddr, UnixListener},
-        },
-    },
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::Arc,
+};
+#[cfg(target_os = "linux")]
+use std::{
+    hash::{Hash, Hasher},
+    os::{
+        linux::net::SocketAddrExt,
+        unix::net::{SocketAddr, UnixListener},
+    },
 };
 
 fn decode(bytes: &[u8]) -> Result<SessionData> {
@@ -66,7 +67,10 @@ impl Plugin for HistoryPlugin {
     }
 }
 struct SessionLease {
+    #[cfg(target_os = "linux")]
     _listener: UnixListener,
+    #[cfg(target_os = "macos")]
+    _file: File,
 }
 impl Lease for SessionLease {}
 struct StoreLock(File);
@@ -166,6 +170,7 @@ impl HistoryStore for FileHistory {
     fn supports_service_snapshots(&self) -> bool {
         true
     }
+    #[cfg(target_os = "linux")]
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
         self.path(session)?;
         let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -196,6 +201,26 @@ impl HistoryStore for FileHistory {
             }
         }
         unreachable!()
+    }
+    #[cfg(target_os = "macos")]
+    fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
+        self.path(session)?;
+        // Leave the inode in place: unlinking a lease file would allow two writers.
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(self.root.join(format!(".{session}.lease")))?;
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(Box::new(SessionLease { _file: file })),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(OperationError::Busy(
+                format!("session {session} is already held by another writer"),
+            )
+            .into()),
+            Err(e) => Err(e.into()),
+        }
     }
     fn load(&self, session: &str) -> Result<SessionData> {
         let _lock = self.lock()?;

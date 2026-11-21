@@ -1,4 +1,4 @@
-// Package local provides Linux local files and supervised commands, not a sandbox.
+// Package local provides local files and supervised commands, not a sandbox.
 package local
 
 import (
@@ -11,8 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
-	"syscall"
 )
 
 type Environment struct {
@@ -48,14 +48,21 @@ func NewGitAt(root string, stateDirs ...string) *Environment {
 	e.gitPoints = true
 	return e
 }
-func (e *Environment) StopsOnCrash() bool { return e.initErr == nil }
+
+// StopsOnCrash is the strong containment check used by recovery.
+func (e *Environment) StopsOnCrash() bool { return runtime.GOOS == "linux" && e.initErr == nil }
 
 func (e *Environment) Containment() string {
 	if e.StopsOnCrash() {
 		return "strong"
 	}
+	if runtime.GOOS == "darwin" && e.initErr == nil {
+		return "processGroup"
+	}
 	return "none"
 }
+func (e *Environment) Platforms() []string { return []string{runtime.GOOS} }
+
 func Plugin() api.Plugin { return PluginAt(defaultRoot()) }
 func PluginAt(root string, stateDirs ...string) api.Plugin {
 	return environmentPlugin(NewAt(root, stateDirs...))
@@ -223,43 +230,19 @@ func (e *Environment) Bash(ctx context.Context, project, command string, progres
 	}
 	cmd := exec.Command(exe, "--modular-command-supervisor")
 	cmd.ExtraFiles = []*os.File{controlR, resultW}
-	// Linux kills every remaining namespace member if its PID 1 dies.
-	// https://man7.org/linux/man-pages/man7/pid_namespaces.7.html
-	cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
-		UidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1}},
-		GidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getgid(), HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false,
-		AmbientCaps: []uintptr{21}} // CAP_SYS_ADMIN only inside the new user namespace, for mounting its /proc
-	// Serialize startup with stale-owner cleanup, including registry publication.
-	unlock, err := e.registryLock()
-	if err != nil {
-		controlR.Close()
-		controlW.Close()
-		resultW.Close()
-		return "", err
-	}
-	err = cmd.Start()
+	release, err := e.startSupervisor(cmd)
 	controlR.Close()
 	resultW.Close()
 	if err != nil {
-		unlock()
 		controlW.Close()
-		return "", fmt.Errorf("Linux user/PID namespace required: %w", err)
-	}
-	g := &guardian{session: api.Executing(ctx).Session, cmd: cmd, control: controlW, done: make(chan struct{})}
-	journal := filepath.Join(e.root, api.ID()+".json")
-	err = saveRegistry(journal, ownership{Owner: identity(os.Getpid()), Guardian: identity(cmd.Process.Pid)})
-	unlock()
-	if err != nil {
-		controlW.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
 		return "", err
 	}
+	g := &guardian{session: api.Executing(ctx).Session, cmd: cmd, control: controlW, done: make(chan struct{})}
 	e.guards = append(e.guards, g)
 	go func() {
 		_ = cmd.Wait()
 		_ = controlW.Close()
-		_ = os.Remove(journal)
+		release()
 		close(g.done)
 		e.mu.Lock()
 		for i, current := range e.guards {

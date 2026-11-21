@@ -52,6 +52,10 @@ fn take(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
 }
 
 fn main() -> std::process::ExitCode {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        eprintln!("ma supports only Linux and macOS");
+        return std::process::ExitCode::FAILURE;
+    }
     // monty-pool invokes its worker with this argument. Do not load agent
     // settings, credentials, or start a Tokio runtime in the worker.
     if std::env::args_os().skip(1).eq(["subprocess"]) {

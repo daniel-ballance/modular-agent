@@ -14,7 +14,7 @@ from ma_fake import Fake, call, reply
 from ma_harness import Harness
 from ma_process import ProcessPlugin
 from ma_cli import build
-from test_swap import dead, pid_ready, until
+from test_swap import DRIVER_STARTUP, dead, pid_ready, until
 from test_vanilla import entries, paired, run
 
 
@@ -25,6 +25,7 @@ class Streaming(Fake):
         return reply(f"provider-pid={os.getpid()} α SECRET")
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="checks plugin parentage in Linux /proc")
 async def test_only_harness_local_all_plugins_moved_stream_and_gate(tmp_path, runtime_type):
     h = await build(
         tmp_path / "store",
@@ -69,6 +70,9 @@ async def test_only_harness_local_all_plugins_moved_stream_and_gate(tmp_path, ru
     assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="checks containment of processes that use Linux setsid"
+)
 async def test_cancel_turn_joins_bash_two_processes_away(tmp_path, runtime_type):
     command = "echo $$ > shell.pid; setsid sleep 90 & echo $! > escaped.pid; printf live; wait"
     h = await build(
@@ -337,7 +341,9 @@ async def test_cli_all_plugins_including_terminal_moved(tmp_path):
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        out, err = await asyncio.wait_for(p.communicate(), 20)
+        # Every part runs as its own Python process: about 3 s idle, more beside other suites.
+        # The bound only stops a hang; the run itself is what is checked.
+        out, err = await asyncio.wait_for(p.communicate(), DRIVER_STARTUP)
         assert p.returncode == 0, err.decode()
         events = [json.loads(line) for line in out.decode().splitlines()]
         assert any(e.get("kind") == "model_output" and e.get("text") == "CLI " for e in events)

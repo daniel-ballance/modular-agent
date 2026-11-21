@@ -14,8 +14,9 @@ export { ProcessTracker, RUN_MARKER, COMMAND_MARKER, markedProcesses } from "./p
 /** The local machine as the working environment. */
 export class LocalEnvironment implements WorkingEnvironment {
 	readonly id: string;
-	readonly containment = process.platform === "linux" ? "strong" : "processGroup";
-	readonly safeToRepeat = this.containment === "strong";
+	get containment() { return this.processes.platform === "linux" ? "strong" : "processGroup"; }
+	get safeToRepeat() { return this.containment === "strong"; }
+	get platforms() { return [this.processes.platform]; }
 	get points(): boolean { return this.keepsPoints(this.cwd); }
 	keepsPoints(cwd: string): boolean {
 		return !(this.snapshots instanceof GitPoints) || this.snapshots.keepsPoints(cwd);
@@ -103,6 +104,7 @@ export class LocalEnvironment implements WorkingEnvironment {
 	async exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult> {
 		const cwd = await this.confined(".");
 		if (options.signal.aborted) return { exitCode: null, output: "", timedOut: false };
+		if (this.processes.groups) return this.processes.groups.exec(cwd, command, this.sessionId, options);
 		return new Promise((done) => {
 			const commandId = randomUUID();
 			const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...this.processes.env(), [COMMAND_MARKER]: commandId } });
@@ -164,7 +166,7 @@ export function localEnvironment(options: { cwd?: string; confineFiles?: boolean
 			const processes = new ProcessTracker(join(stateDir, "run"));
 			const snapshots = options.points === "copy" ? new SavedPoints(stateDir) : new GitPoints(stateDir);
 			api.provide("working-environment", new LocalEnvironment(options.cwd ?? api.project, processes, undefined, snapshots, options.confineFiles ? api.project : undefined));
-			stop = async () => { processes.stopAll(); await snapshots.stop(); };
+			stop = async () => { await processes.stopAll(); await snapshots.stop(); };
 		},
 		stop: () => stop(),
 	};
