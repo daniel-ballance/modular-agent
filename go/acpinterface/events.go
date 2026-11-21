@@ -127,7 +127,15 @@ func (s *server) event(e api.Event) {
 		Events bool `json:"events"`
 	}
 	_ = json.Unmarshal(events, &cap)
-	if cap.Events || e.Kind == api.SessionInterrupted {
+	if e.Kind == api.SessionInterrupted {
+		// The binding's projection of session interrupted (docs/bindings/acp.md, Updates).
+		var data struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(e.Data, &data)
+		_ = s.peer.NotifyExtension(st.ctx, "_modular-agent/interrupted", map[string]any{"sessionId": e.Session, "reason": data.Reason})
+	}
+	if cap.Events {
 		_ = s.peer.NotifyExtension(st.ctx, "_modular-agent/event", e)
 	}
 }

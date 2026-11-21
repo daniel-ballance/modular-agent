@@ -60,13 +60,15 @@ type interruptionACPClient struct {
 }
 
 type interruptionNotice struct {
-	Kind, Session string
-	Data          modular.SessionInterruptedData
+	Session string
+	Data    modular.SessionInterruptedData
 }
 
 func (c *interruptionACPClient) HandleExtensionMethod(_ context.Context, method string, b json.RawMessage) (any, error) {
-	var e interruptionNotice
-	if method == "_modular-agent/event" && json.Unmarshal(b, &e) == nil && e.Kind == "session.interrupted" {
+	var p struct{ SessionID, Reason string }
+	if method == "_modular-agent/interrupted" && json.Unmarshal(b, &p) == nil {
+		e := interruptionNotice{Session: p.SessionID}
+		e.Data.Reason = modular.SessionInterruptionReason(p.Reason)
 		c.interrupt <- e
 	}
 	return nil, nil

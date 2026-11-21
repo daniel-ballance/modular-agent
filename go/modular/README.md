@@ -92,7 +92,6 @@ The base suites use Linux with unprivileged user, PID and mount namespaces. The 
 
 - [API, The other parts](../../docs/sdk/api.md#the-other-parts) does not specify how a snapshot store advertises HTTP lease and tombstone support. Add: “A service adapter for a snapshot store may require an explicit exact-erasure capability and private persistent state for restart lease exclusion. Its native and served records may share a namespace if both paths preserve the same leases and tombstones.”
 
-- [ACP, Updates](../../docs/bindings/acp.md#updates) does not map session interruption to ACP. Add: “When session writing stops because a commit failed or writer access was lost or uncertain, send a live `_modular-agent/event` notification to every attached, authorized recipient after the output gate. Parameters are `{ kind: 'session.interrupted', session: Id, time: string, data: { reason: 'commitFailed' | 'writerLost' } }`. Send it without capability negotiation; clients that do not recognize the extension can ignore it. A waiting `session/prompt` fails with `lost` (`-32000`, `data.code: 'lost'`). Do not replay the notification.”
 - [API, The other parts](../../docs/sdk/api.md#the-other-parts) does not define how local adapters report revocation when no store call is in progress. Add: “A history adapter whose writer access can be revoked MUST notify the host when revocation is detected, including when there is no pending write. Go exposes `WatchedHistoryLease` with `WriterLost` and `CheckWriter` for this purpose.”
 
 ### Remaining Go gaps

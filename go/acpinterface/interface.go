@@ -215,7 +215,7 @@ func (s *server) Initialize(ctx context.Context, p acp.InitializeRequest) (acp.I
 		AgentCapabilities: acp.AgentCapabilities{LoadSession: true, McpCapabilities: acp.McpCapabilities{Http: true}, SessionCapabilities: acp.SessionCapabilities{List: &acp.SessionListCapabilities{}, Resume: &acp.SessionResumeCapabilities{}, Close: &acp.SessionCloseCapabilities{}}},
 		Meta: map[string]json.RawMessage{Namespace: api.JSON(map[string]any{
 			"binding": s.binding, "declaration": s.declaration(""),
-			"extensions": []string{"history", "input", "requests", "answer", "fork", "move", "erase", "jobs", "cancel-job", "support", "command", "withdraw", "call_tool", "actors", "join", "leave", "release", "proposals", "limit", "tenant"},
+			"extensions": []string{"history", "input", "requests", "answer", "fork", "move", "erase", "jobs", "cancel-job", "support", "command", "withdraw", "call_tool", "actors", "join", "leave", "release", "proposals", "limit", "tenant", "interrupted"},
 			"actor":      s.hostActor(),
 		})},
 	}, nil
