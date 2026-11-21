@@ -452,8 +452,10 @@ func (m *Manager) decline(q api.Question, reason string) error {
 		m.mu.Unlock()
 		return err
 	}
+	settled := false
 	if st := states(s)[q.ID]; st != nil && st.answer == nil && st.selected == "" {
 		_, err = m.a.Record(context.Background(), q.Session, api.Entry{Kind: "question.answer", Turn: q.Turn, Step: st.q.Question.Step, Call: q.Call, Actor: q.Actor, Copies: []string{q.ID}, Data: api.JSON(api.Answer{Request: q.ID, Declined: true, Reason: reason})})
+		settled = err == nil
 		if err == nil && q.Kind == "secret" {
 			if store := m.secretStore(); store != nil {
 				err = store.Discard(context.Background(), q.Session, q.ID)
@@ -466,8 +468,17 @@ func (m *Manager) decline(q api.Question, reason string) error {
 	if err != nil {
 		return err
 	}
-	m.a.Emit(context.Background(), api.Event{Kind: "question.closed", Session: q.Session, Data: api.JSON(q.ID)})
+	if settled {
+		m.emitClosure(context.Background(), q, reason)
+	}
 	return &api.QuestionDeclined{Request: q.ID, Reason: reason}
+}
+func (m *Manager) emitClosure(ctx context.Context, q api.Question, reason string) {
+	data := api.JSON(map[string]any{"questionId": q.ID, "reason": reason})
+	if reason == "noLongerAnswerable" {
+		m.a.Emit(ctx, api.Event{Kind: "question.unanswerable", Session: q.Session, Turn: q.Turn, Step: q.Step, Call: q.Call, Data: data})
+	}
+	m.a.Emit(ctx, api.Event{Kind: "question.closed", Session: q.Session, Turn: q.Turn, Step: q.Step, Call: q.Call, Data: data})
 }
 func (m *Manager) Answer(ctx context.Context, id string, a api.Answer) error {
 	a.Actor = api.Acting(ctx)
@@ -566,7 +577,8 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 	if err != nil {
 		return err
 	}
-	m.a.Emit(ctx, api.Event{Kind: "question.answered", Session: id, Call: q.Call, Actor: a.Actor, Data: api.JSON(a)})
+	m.a.Emit(ctx, api.Event{Kind: "question.answered", Session: id, Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: a.Actor, Data: api.JSON(a)})
+	m.emitClosure(ctx, q, a.Reason)
 	if forward.ForwardSession != "" {
 		child, e := m.a.Snapshot(forward.ForwardSession)
 		if e != nil {

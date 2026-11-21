@@ -162,8 +162,22 @@ func (h *Harness) Load(p api.Plugin) error {
 		}
 	}
 	h.mu.Unlock()
+	var replaced []string
+	if p.Replaces != "" {
+		replaced = []string{p.Replaces}
+	}
+	h.emitPluginChange(p.Name, replaced)
 	return nil
 }
+
+func (h *Harness) emitPluginChange(name string, replaces []string) {
+	kind := "plugin.loaded"
+	if len(replaces) != 0 {
+		kind = "plugin.replaced"
+	}
+	h.API().Emit(context.Background(), api.Event{Kind: kind, Data: api.JSON(map[string]any{"name": name, "replaces": replaces})})
+}
+
 func (h *Harness) removeLocked(name string) {
 	delete(h.plugins, name)
 	for i, n := range h.order {
@@ -455,6 +469,7 @@ func (h *Harness) Close() error {
 		if p.Close != nil {
 			errs = append(errs, p.Close())
 		}
+		h.API().Emit(context.Background(), api.Event{Kind: "plugin.unloaded", Data: api.JSON(map[string]any{"name": p.Name})})
 	}
 	return errors.Join(errs...)
 }

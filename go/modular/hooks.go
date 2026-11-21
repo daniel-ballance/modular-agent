@@ -82,21 +82,59 @@ func (r *Registrar) OnProviderRequest(fn func(context.Context, ProviderRequest) 
 		if err != nil || changed == nil {
 			return nil, err
 		}
-		// Keep top-level fields the typed request does not know.
-		var request map[string]json.RawMessage
-		if err := decodeInto(payload["request"], &request); err != nil {
+		request, err := changedRequest(payload["request"], *changed)
+		if err != nil {
 			return nil, err
-		}
-		var fields map[string]json.RawMessage
-		if err := decodeInto(changed, &fields); err != nil {
-			return nil, err
-		}
-		for k, v := range fields {
-			request[k] = v
 		}
 		payload["request"] = request
 		return HookAnswer{"value": payload}, nil
 	}, opts...)
+}
+
+// Keep opaque fields and the exact encodings of fields the handler did not change.
+func changedRequest(raw any, changed ModelRequest) (map[string]json.RawMessage, error) {
+	var original ModelRequest
+	var request, before, after map[string]json.RawMessage
+	if err := decodeInto(raw, &original); err != nil {
+		return nil, err
+	}
+	if err := decodeInto(raw, &request); err != nil {
+		return nil, err
+	}
+	if err := decodeInto(original, &before); err != nil {
+		return nil, err
+	}
+	if err := decodeInto(changed, &after); err != nil {
+		return nil, err
+	}
+	// Use original wire definitions for retained unedited tools, even on reorder.
+	if !bytes.Equal(before["tools"], after["tools"]) {
+		var originalTools []json.RawMessage
+		_ = json.Unmarshal(request["tools"], &originalTools)
+		tools := []json.RawMessage{}
+		for _, def := range changed.Tools {
+			encoded := api.JSON(def)
+			for i, old := range original.Tools {
+				if i < len(originalTools) && bytes.Equal(encoded, api.JSON(old)) {
+					encoded = originalTools[i]
+					break
+				}
+			}
+			tools = append(tools, encoded)
+		}
+		request["tools"] = api.JSON(tools)
+	}
+	for k, v := range after {
+		if k != "tools" && !bytes.Equal(v, before[k]) {
+			request[k] = v
+		}
+	}
+	for k := range before {
+		if _, ok := after[k]; !ok {
+			delete(request, k)
+		}
+	}
+	return request, nil
 }
 
 func (r *Registrar) OnProviderResponse(fn func(context.Context, ProviderResponse) error, opts ...HookOption) error {

@@ -41,7 +41,7 @@ func (s *server) event(e api.Event) {
 	case "question.open":
 		s.ask(st, api.Decode[api.Question](e.Data))
 	case "question.closed":
-		s.cancelQuestion(st, api.Decode[string](e.Data))
+		s.cancelQuestion(st, api.Decode[struct{ QuestionID string }](e.Data).QuestionID)
 	case "question.answered":
 		s.cancelQuestion(st, api.Decode[api.Answer](e.Data).Request)
 	case "model.delta":

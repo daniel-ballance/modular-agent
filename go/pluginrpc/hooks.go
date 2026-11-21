@@ -75,6 +75,9 @@ func (r *remote) handler(reg HookRegistration) api.Handler {
 		if err != nil {
 			return api.Decision{}, err
 		}
+		if err := ValidateHookAnswer(reg.Hook, payload, answer, false); err != nil {
+			return api.Decision{}, errors.New(r.reg.Name + ": " + err.Error())
+		}
 		return hookAnswer(reg.Hook, v, answer)
 	}
 }
@@ -104,9 +107,17 @@ func RegisterLocalHook(a api.API, point, order string, handle func(context.Conte
 				}
 				payload["history"], payload["usage"] = history, s.Usage
 			}
+			definitions := []Object{}
+			for _, tool := range s.Request.ProviderTools {
+				definitions = append(definitions, toolOut(tool))
+			}
+			payload["providerTools"] = definitions
 		}
 		answer, err := handle(ctx, payload)
 		if err != nil {
+			return api.Decision{}, err
+		}
+		if err := ValidateHookAnswer(point, payload, answer, true); err != nil {
 			return api.Decision{}, err
 		}
 		result := asObject(answer)
@@ -215,19 +226,21 @@ func hookAnswer(point string, v any, answer any) (api.Decision, error) {
 		case "input":
 			e := v.(api.InputEvent)
 			e.Input.Content = contentIn(changed["content"])
-			if when := str(changed, "when"); when != "" {
-				if when != "now" && when != "steer" && when != "after" {
-					return api.Decision{}, fault("invalid_request", "invalid transformed intake timing")
-				}
-				e.Input.When = when
-			}
 			if boolean(result, "stop") {
 				e.Handled = true
 			}
 			value = e
 		case "step.before":
 			e := v.(api.StepContext)
+			allowed := e.Request.ProviderTools
+			if has(changed, "providerTools") {
+				allowed = nil
+				for _, definition := range objects(changed["providerTools"]) {
+					allowed = append(allowed, toolIn(definition))
+				}
+			}
 			e.Request = requestIn(asObject(changed["request"]))
+			e.Request.ProviderTools = allowed
 			value = e
 		case "tool.after":
 			e := v.(api.AfterTool)
@@ -245,7 +258,7 @@ func hookPayload(ctx context.Context, project, hook string, v any) object {
 	payload := object{"sessionId": execution.Session, "turnId": execution.Turn}
 	switch hook {
 	case "plugin.load":
-		return object{"name": v, "origin": "configuration", "project": project}
+		return object{"name": v, "origin": "global", "project": project}
 	case "session.start":
 		s := v.(api.Session)
 		return object{"sessionId": s.ID, "resumed": api.IsReopenedSession(ctx)}
@@ -276,13 +289,18 @@ func hookPayload(ctx context.Context, project, hook string, v any) object {
 		f := v.(api.Failure)
 		return object{"sessionId": f.Context.Turn.Session, "request": requestOut(f.Context.Request), "error": errorOut(f.Err)}
 	case "turn.result":
-		payload["result"] = object{"text": v.(api.ResultCheck).Result.Text()}
+		check := v.(api.ResultCheck)
+		result := object{"text": check.Result.Text()}
+		if len(check.Value) != 0 {
+			result["value"] = check.Value
+		}
+		payload["result"] = result
+		if len(check.Shape) != 0 {
+			payload["shape"] = check.Shape
+		}
 	case "turn.end":
 		o := v.(api.Outcome)
-		payload["outcome"] = object{"kind": o.Status}
-		if o.Error != "" {
-			payload["outcome"].(object)["error"] = o.Error
-		}
+		payload["outcome"], payload["result"] = outcomeKindOut(o), turnResultOut(o)
 	}
 	return payload
 }

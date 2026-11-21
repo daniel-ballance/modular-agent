@@ -234,6 +234,7 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 		}
 		t.IO.Emit(ctx, api.Event{Kind: "step.start", Step: step})
 		var response api.Response
+		var attempted api.StepContext
 		model := api.Entry{}
 		if pendingModel != nil {
 			model = *pendingModel
@@ -302,6 +303,7 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 						return fail(err)
 					}
 				}
+				attempted = sc
 				response, err = t.Access.Generate(modelCtx, sc.Request, func(p api.Part) { t.IO.Emit(ctx, api.Event{Kind: "model.delta", Step: step, Data: api.JSON(p)}) })
 				// A wire Provider can return a typed error alongside an actual
 				// failed message. Record that answer just as for a local Provider.
@@ -436,11 +438,11 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 			if _, err := t.IO.Record(context.WithoutCancel(ctx), state.Record()); err != nil {
 				return fail(err)
 			}
+			t.IO.Emit(ctx, api.Event{Kind: "step.end", Step: step, Data: api.JSON(response.Usage)})
 			if state.Refused != "" {
 				out.Open = open
 				return fail(errors.New(state.Refused))
 			}
-			t.IO.Emit(ctx, api.Event{Kind: "step.end", Step: step, Data: api.JSON(response.Usage)})
 		}
 		if len(open) > 0 {
 			out.Status = "completed"
@@ -481,6 +483,16 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 			}
 			_ = json.Unmarshal(response.Wire, &wire)
 			if wire.Error != nil {
+				if !replayed && !isBound {
+					decision, err := t.IO.Hook(ctx, "runtime.request.failed", api.Failure{Context: attempted, Err: wire.Error})
+					if err != nil {
+						return fail(err)
+					}
+					if f, ok := decision.(api.Failure); ok && f.Retry {
+						more = true
+						break
+					}
+				}
 				return fail(errors.New(wire.Error.Message))
 			}
 			return fail(errors.New("model " + response.Stop))

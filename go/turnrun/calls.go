@@ -273,7 +273,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 				if err != nil {
 					return nil, err
 				}
-				t.IO.Emit(ctx, api.Event{Kind: "tool.started", Step: p.call.Step, Call: p.call.ID})
+				t.IO.Emit(ctx, api.Event{Kind: "tool.started", Step: p.call.Step, Call: p.call.ID, Data: api.JSON(check.Call)})
 			}
 			p.started = true
 			run := func() {
