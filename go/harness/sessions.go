@@ -26,6 +26,7 @@ type session struct {
 	commandBytes      int64
 	mu                sync.Mutex
 	data              api.Session
+	storageCharges    []int64 // encoded sizes for data.Entries, under mu
 	lease             api.Lease
 	pendingStore      api.Store // no persistent writer until first admission or fork publication
 	provisional       atomic.Bool

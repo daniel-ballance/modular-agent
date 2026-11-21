@@ -234,6 +234,7 @@ func (s *session) reconcileRemoteErasureLocked(remote api.RemoteErasureCoordinat
 		return errors.Join(api.ErrErasureUnavailable, err)
 	}
 	s.data, s.last = snap, recordedOutcome(snap)
+	s.storageCharges = nil
 	_, queue := recovery(snap)
 	s.queue = slices.DeleteFunc(queue, parked)
 	if s.h.capacity != nil {

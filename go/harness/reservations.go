@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"reflect"
 	"sync"
 
 	"github.com/daniel-ballance/modular-agent/go/portable"
@@ -112,10 +113,12 @@ func (p *Capacity) update(row api.Session, next CapacityBounds) {
 
 func (s *session) commitCapacity(next api.Session, save func() error) error {
 	if s.h == nil || !changesCapacity(s.data, next) {
+		s.storageCharges = nil
 		return save()
 	}
 	p := s.h.capacity
-	charge := s.capacityCharges(next)
+	sizes := s.recordSizes(next)
+	charge := s.capacityCharges(next, sizes)
 	transferred := ""
 	if !s.running && !s.opening && len(next.Entries) > len(s.data.Entries) {
 		e := next.Entries[len(next.Entries)-1]
@@ -133,6 +136,12 @@ func (s *session) commitCapacity(next api.Session, save func() error) error {
 	}
 	if err := save(); err != nil {
 		return err
+	}
+	// An uncertain rewind can reload a different snapshot instead of next.
+	if len(s.data.Entries) == len(next.Entries) && len(next.Entries) > 0 && &s.data.Entries[0] == &next.Entries[0] {
+		s.storageCharges = sizes
+	} else {
+		s.storageCharges = nil
 	}
 	// Admission must fit before taking. Once handed to an idle Runtime the
 	// slot is no longer queued. Its payload and write space stay charged.
@@ -204,20 +213,44 @@ func (p *Capacity) reserveOutput(id, tenant string, n int64) func() {
 	})
 }
 
-func (s *session) capacityCharges(next api.Session) CapacityBounds {
+// recordSizes reuses costs only for unchanged committed records in the same
+// encoding mode. Keep counts, not another copy of the records.
+func (s *session) recordSizes(next api.Session) []int64 {
+	sizes := make([]int64, len(next.Entries))
+	if (len(s.data.HistoryMeta) != 0) == (len(next.HistoryMeta) != 0) {
+		for i := 0; i < min(len(sizes), len(s.storageCharges)); i++ {
+			if reflect.DeepEqual(s.data.Entries[i], next.Entries[i]) {
+				sizes[i] = s.storageCharges[i]
+			}
+		}
+	}
+	for i, e := range next.Entries {
+		if sizes[i] == 0 {
+			sizes[i] = encodedRecordSize(next, e)
+		}
+	}
+	return sizes
+}
+
+func encodedRecordSize(row api.Session, e api.Entry) int64 {
+	return int64(len(portable.HistoryEntry(row, e)) + 1)
+}
+
+func (s *session) capacityCharges(next api.Session, sizes []int64) CapacityBounds {
 	if claim := s.responseClaim; claim != nil {
 		for _, e := range next.Entries {
 			if e.Kind == "model" && e.Step == claim.Step || e.Kind == "turn.end" && e.Turn == claim.Turn {
-				return s.liveCharges(next)
+				return s.liveCharges(next, sizes)
 			}
 		}
 		next.Entries = append(append([]api.Entry(nil), next.Entries...), *claim)
+		sizes = append(sizes, encodedRecordSize(next, *claim))
 	}
-	return s.liveCharges(next)
+	return s.liveCharges(next, sizes)
 }
 
-func (s *session) liveCharges(snap api.Session) CapacityBounds {
-	b := snapshotCharges(snap)
+func (s *session) liveCharges(snap api.Session, sizes []int64) CapacityBounds {
+	b := snapshotChargesWithSizes(snap, sizes)
 	b.BufferedBytes += s.commandBytes
 	if s.transferredInput != "" {
 		for _, e := range pendingAdmissions(snap) {
@@ -254,7 +287,7 @@ func (p *turnPorts) ReserveModelResponse(step string, content api.Content) error
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
 	s.responseClaim = &api.Entry{Kind: "model", Session: s.id, Turn: p.id, Step: step, Content: content}
-	charge := s.capacityCharges(s.data)
+	charge := s.capacityCharges(s.data, s.recordSizes(s.data))
 	if !ledger.permits(s.data, charge) {
 		s.responseClaim = nil
 		return api.ErrCapacity
@@ -267,15 +300,24 @@ func changesCapacity(before, after api.Session) bool {
 	return len(before.Entries) != len(after.Entries) || before.ForkedFrom != after.ForkedFrom
 }
 
-func snapshotCharges(row api.Session) (b CapacityBounds) {
+func snapshotCharges(row api.Session) CapacityBounds {
+	return snapshotChargesWithSizes(row, nil)
+}
+
+func snapshotChargesWithSizes(row api.Session, sizes []int64) (b CapacityBounds) {
 	for _, e := range pendingAdmissions(row) {
 		b.Inputs++
 		b.BufferedBytes += int64(len(e.Data))
 	}
 	// The encoded record size is the logical quota. Native snapshots need
 	// additional disk space for atomic replacement; the operator provisions it.
-	for _, e := range row.Entries {
-		size := int64(len(portable.HistoryEntry(row, e)) + 1)
+	for i, e := range row.Entries {
+		var size int64
+		if sizes == nil {
+			size = encodedRecordSize(row, e)
+		} else {
+			size = sizes[i]
+		}
 		switch e.Kind {
 		case "input.returned", "input.withdrawn", "actor.left", "limit", "job.cleanup", "erasure":
 			b.ControlBytes += size

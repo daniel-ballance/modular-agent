@@ -270,6 +270,7 @@ func (s *session) reconcileErasureLocked() error {
 			return api.ErrErasureUnavailable
 		}
 		s.data, s.last = snap, recordedOutcome(snap)
+		s.storageCharges = nil
 		_, queue := recovery(snap)
 		s.queue = slices.DeleteFunc(queue, parked)
 		if s.h != nil && s.h.capacity != nil {
