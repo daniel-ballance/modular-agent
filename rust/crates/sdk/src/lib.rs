@@ -46,8 +46,9 @@ pub use credentials::{
 pub use error::{Code, Error, Result};
 pub use events::{Event, Question, QuestionKind, QuestionReply};
 pub use history::{
-    ErasedEntry, ErasureReport, History, ServeHistoryOptions, SessionInfo, file_history,
-    http_history, http_history_from_env, memory_history, serve_history,
+    ErasedEntry, ErasureReport, History, HistoryServer, ServeHistoryOptions, SessionInfo,
+    file_history, http_history, http_history_from_env, listen_history, memory_history,
+    serve_history,
 };
 pub use hooks::*;
 pub use parts::{Environment, Runtime, durable_runtime, local_environment, transient_runtime};

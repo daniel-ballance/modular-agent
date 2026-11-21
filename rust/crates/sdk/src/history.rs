@@ -1,12 +1,23 @@
 //! History choices. The HTTP client uses the base's lease and portable-record implementation.
 use crate::{Code, Error, Result, core::MemoryHistory};
 use agent_api as base;
-pub use history_http::ServeHistoryOptions;
+pub use history_http::{HistoryServer, ServeHistoryOptions};
 use serde_json::Value;
 use std::{path::Path, sync::Arc};
 
 /// Serve a dedicated history store on loopback.
 pub async fn serve_history(store: History, options: ServeHistoryOptions) -> Result<()> {
+    check_service(&store)?;
+    Ok(history_http::serve_history(store.0, options).await?)
+}
+
+/// Bind a history service, returning its URL and a close handle when ready.
+pub async fn listen_history(store: History, options: ServeHistoryOptions) -> Result<HistoryServer> {
+    check_service(&store)?;
+    Ok(history_http::listen_history(store.0, options).await?)
+}
+
+fn check_service(store: &History) -> Result<()> {
     if !store.0.supports_service_snapshots() {
         return Err(Error::new(
             Code::NotSupported,
@@ -16,7 +27,7 @@ pub async fn serve_history(store: History, options: ServeHistoryOptions) -> Resu
             ),
         ));
     }
-    Ok(history_http::serve_history(store.0, options).await?)
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]

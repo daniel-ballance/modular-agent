@@ -53,6 +53,42 @@ pub async fn serve_history(
     store: Arc<dyn HistoryStore>,
     options: ServeHistoryOptions,
 ) -> agent_api::Result<()> {
+    let (listener, server) = prepare(store, options).await?;
+    drive(listener, server).await
+}
+
+/// A bound listener and its task. Dropping or closing the handle stops the service.
+pub struct HistoryServer {
+    pub url: String,
+    task: tokio::task::JoinHandle<agent_api::Result<()>>,
+}
+impl HistoryServer {
+    pub async fn close(mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+}
+impl Drop for HistoryServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub async fn listen_history(
+    store: Arc<dyn HistoryStore>,
+    options: ServeHistoryOptions,
+) -> agent_api::Result<HistoryServer> {
+    let (listener, server) = prepare(store, options).await?;
+    Ok(HistoryServer {
+        url: format!("http://{}", listener.local_addr()?),
+        task: tokio::spawn(drive(listener, server)),
+    })
+}
+
+async fn prepare(
+    store: Arc<dyn HistoryStore>,
+    options: ServeHistoryOptions,
+) -> agent_api::Result<(tokio::net::TcpListener, Arc<Server>)> {
     if !store.supports_service_snapshots() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -90,6 +126,10 @@ pub async fn serve_history(
             .await??;
     let server = Arc::new(server);
     let listener = tokio::net::TcpListener::bind(options.address).await?;
+    Ok((listener, server))
+}
+
+async fn drive(listener: tokio::net::TcpListener, server: Arc<Server>) -> agent_api::Result<()> {
     let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
