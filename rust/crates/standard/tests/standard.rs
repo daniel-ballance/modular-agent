@@ -244,6 +244,73 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
 }
 
 #[tokio::test]
+async fn lossy_arguments_raise_type_error_without_dispatching_a_tool() {
+    let echo = Plugin::new("echo").tool(
+        Tool::new("echo", "Return the input")
+            .input_schema(json!({"type":"object","properties":{"value":{}},"required":["value"]}))
+            .run(|input: Value, _| async move {
+                Ok(ToolOutput {
+                    value: Some(input["value"].clone()),
+                    ..ToolOutput::from("echo")
+                })
+            }),
+    );
+    let rig = Rig::with(
+        vec![
+            code("bad", "for value in [b'bytes', {1}, {'nested': [float('nan')]}, {1: 'key'}, 2**70 + 1, -(2**70 + 1)]:\n    try:\n        tools.echo(value=value)\n    except TypeError:\n        print('not JSON')"),
+            code("exact", "tools.echo(value=2**64 - 1)"),
+            text("done"),
+        ],
+        vec![echo],
+        json!({}),
+        |_| (),
+    ).await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    let bad = rig.result("bad").await;
+    assert_eq!(bad.status, "completed", "{}", bad.text);
+    assert_eq!(bad.text, "not JSON\n".repeat(6));
+    assert_eq!(rig.result("exact").await.text, "18446744073709551615");
+    // Two codemode calls and only the exact echo call.
+    assert_eq!(rig.entries("toolStarted").await.len(), 3);
+}
+
+#[tokio::test]
+async fn codemode_shows_a_message_less_exception_and_leads_with_the_reason_on_a_cut() {
+    let rig = Rig::new(vec![
+        code("empty", "print('before')\nraise ValueError"),
+        code("explicit", "raise ValueError('')"),
+        code(
+            "cut",
+            "print('before')\nprint('é' * 30000)\nraise ValueError('too far')",
+        ),
+        text("done"),
+    ])
+    .await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    let empty = rig.result("empty").await;
+    assert_eq!(empty.status, "failed");
+    assert!(
+        empty.text.starts_with("before\nTraceback"),
+        "{}",
+        empty.text
+    );
+    assert_eq!(empty.text.lines().last(), Some("ValueError"));
+    assert_eq!(
+        rig.result("explicit").await.text.lines().last(),
+        Some("ValueError")
+    );
+    let cut = rig.result("cut").await;
+    assert_eq!(cut.status, "failed");
+    assert!(
+        cut.text
+            .starts_with("ValueError: too far\nbefore\n[Output cut."),
+        "{}",
+        cut.text
+    );
+    assert_eq!(cut.text.lines().count(), 3);
+}
+
+#[tokio::test]
 async fn the_sandbox_reaches_nothing_itself_and_is_bounded() {
     let rig = Rig::new(vec![
         code(
@@ -296,6 +363,10 @@ async fn codemode_spends_its_wall_budget_running_python_not_waiting_for_a_tool()
         vec![
             code("resumed", "tools.pause()"),
             code("spin", "tools.pause()\nwhile True:\n    pass"),
+            code(
+                "lookup-spin",
+                "for i in range(6000):\n    for j in range(1000):\n        pass\n    describe_tool('pause')\n'done'",
+            ),
             text("done"),
         ],
         vec![delay],
@@ -308,6 +379,9 @@ async fn codemode_spends_its_wall_budget_running_python_not_waiting_for_a_tool()
     let spin = rig.result("spin").await;
     assert_eq!(spin.status, "failed");
     assert!(spin.text.contains("TimeoutError:"), "{}", spin.text);
+    let lookup = rig.result("lookup-spin").await;
+    assert_eq!(lookup.status, "failed", "{}", lookup.text);
+    assert_eq!(lookup.text, "TimeoutError: sandbox time limit exceeded");
 }
 
 #[tokio::test]
@@ -399,6 +473,7 @@ denied('random', lambda: random.random())
 denied('Random()', lambda: random.Random().random())
 denied('seed()', lambda: random.seed())
 print('seeded', random.Random(7).random() == random.Random(7).random())
+print(time.process_time(), time.thread_time(), time.process_time_ns(), time.thread_time_ns())
 "#,
         ),
         text("done"),
@@ -412,6 +487,7 @@ print('seeded', random.Random(7).random() == random.Random(7).random())
         concat!(
             "files denied\nnetwork denied\nprocess denied\nclock denied\nmonotonic denied\n",
             "sleep denied\nentropy denied\nrandom denied\nRandom() denied\nseed() denied\nseeded True\n",
+            "0.0 0.0 0 0\n",
         )
     );
     assert!(!rig.project.path().join("sandbox.txt").exists());

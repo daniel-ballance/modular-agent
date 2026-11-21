@@ -1,20 +1,26 @@
 //! Drive one Monty checkout over stdio. Only the agent handles tool calls.
 use super::{CodeTool, MODULE, Run, convert, raise};
-use monty_pool::{
-    Checkout, OnPrint, Pool, PoolConfig, PoolError, ReplConfig, ResumeValue, TurnEvent,
+use monty_pool::{Checkout, OnRawEvent, Pool, PoolConfig, PoolError, ReplConfig};
+use monty_proto::{
+    ext_result_to_proto, future_results_to_proto, named_values_to_proto, os_call_from_proto,
+    pb::{self, client_request::Kind as Request, worker_event::Kind as Event},
 };
 use monty_types::{
-    DateTimeSource, ExcType, IMPORT_CALL, ImportArgs, MontyObject, MontyUuid, NameLookupResult,
-    OsPolicy, PrintStream, ProcessTime, RandomStart, ResourceLimits, SleepMode,
+    DateTimeSource, ExcType, ExtFunctionResult, MontyException, MontyObject, MontyUuid,
+    NameLookupResult, OsFunctionCall, OsPolicy, ProcessTime, RandomStart, ResourceLimits,
+    SleepMode,
 };
 use std::{
     future::{pending, ready},
     io,
     os::fd::{FromRawFd, OwnedFd},
+    time::Duration,
 };
-use tokio::{io::unix::AsyncFd, sync::Notify};
+use tokio::{io::unix::AsyncFd, sync::Notify, time::timeout};
 
 const MAX_MEMORY: usize = 256 * 1024 * 1024;
+const PIPE_ALLOWANCE: Duration = Duration::from_millis(250);
+const TIME_LIMIT: &str = "TimeoutError: sandbox time limit exceeded";
 
 pub(super) enum RunError {
     Failed(String),
@@ -48,8 +54,8 @@ impl Run<'_> {
             limits: Some(
                 ResourceLimits::default()
                     .max_memory(MAX_MEMORY)
-                    // The pinned protocol resets this at every resume, not just
-                    // after nested tool calls. See the finding in rust/README.md.
+                    // Monty restarts this limit at each resume. The agent also
+                    // checks cumulative active time between nested tool calls.
                     .max_turn_duration(self.tool.compute)
                     .max_recursion_depth(self.tool.recursion)
                     // The agent counts nested calls, not name and catalog lookups.
@@ -75,15 +81,17 @@ impl Run<'_> {
         let full = Notify::new();
         let cap = self.tool.print_bytes;
         let outcome = {
-            let mut print = |_stream: PrintStream, text: &str| -> monty_pool::PrintFuture {
-                if keep_printed(&mut printed, text, cap) {
-                    Box::pin(ready(()))
-                } else {
-                    // Stop reading this turn before it can dispatch another
-                    // nested call. The sandbox has exceeded its print budget.
-                    full.notify_one();
-                    Box::pin(pending())
+            let mut print = |event: &pb::WorkerEvent| -> monty_pool::PrintFuture {
+                if let Some(Event::Print(batch)) = &event.kind {
+                    for segment in batch.segments.iter() {
+                        if !keep_printed(&mut printed, &segment.text, cap) {
+                            // Stop reading before dispatching a call or using the final value.
+                            full.notify_one();
+                            return Box::pin(pending());
+                        }
+                    }
                 }
+                Box::pin(ready(()))
             };
             tokio::select! {
                 biased;
@@ -104,7 +112,7 @@ impl Run<'_> {
                 (
                     MontyObject::string(function.name.as_str()),
                     MontyObject::function(
-                        function.name.as_str(),
+                        format!("{MODULE}.{}", function.name),
                         Some(function.tool.description.clone()),
                     ),
                 )
@@ -116,85 +124,172 @@ impl Run<'_> {
         &mut self,
         code: &str,
         worker: &mut Checkout,
-        print: OnPrint<'_>,
+        print: OnRawEvent<'_>,
     ) -> Result<MontyObject, String> {
         let pid = worker.pid().ok_or("sandbox worker exited before running")?;
         let exit =
             watch_exit(pid).map_err(|error| format!("could not watch sandbox worker: {error}"))?;
-        let mut next = worker.feed(code, vec![], vec![], false, print).await;
+        let (inputs, values) =
+            named_values_to_proto(vec![(MODULE.to_owned(), self.module())].into());
+        let mut request = Request::Feed(pb::Feed {
+            code: code.to_owned(),
+            inputs,
+            values: Some(values),
+            skip_type_check: true,
+            ..Default::default()
+        });
+        let mut last = Duration::ZERO;
+        let mut checkpoint = Duration::ZERO;
         loop {
-            next = match next.map_err(|error| match error {
-                // The pool's wall deadline caught a worker that didn't reach
-                // an interpreter checkpoint in time.
-                PoolError::Timeout { .. } => {
-                    format!("TimeoutError: sandbox time limit exceeded ({error})")
-                }
+            // The typed pool API drops the worker's feed clock. Use its raw
+            // API for the clock while keeping the pool's framing and lifecycle.
+            let remaining = self.tool.compute - (last - checkpoint);
+            let event = timeout(
+                remaining.saturating_add(PIPE_ALLOWANCE),
+                worker.turn_raw(
+                    &pb::ClientRequest {
+                        kind: Some(request),
+                        ..Default::default()
+                    },
+                    print,
+                ),
+            )
+            .await
+            .map_err(|_| TIME_LIMIT.to_owned())?
+            .map_err(|error| match error {
+                PoolError::Timeout { .. } => TIME_LIMIT.to_owned(),
                 _ => error.to_string(),
-            })? {
-                TurnEvent::Complete(value) => return Ok(value),
-                TurnEvent::NameLookup { name, .. } => {
-                    let found = match name.as_str() {
-                        name @ ("describe_tool" | "search_tools") => {
+            })?;
+
+            let event_kind = event.kind.ok_or("sandbox worker returned an empty event")?;
+            let exception = if let Event::Error(error) = &event_kind {
+                let exc = MontyException::try_from(
+                    error
+                        .exception
+                        .clone()
+                        .ok_or("sandbox worker omitted the exception")?,
+                )
+                .map_err(|err| err.to_string())?;
+                // Keep the interpreter's traceback for its own limit errors.
+                if matches!(exc.exc_type(), ExcType::TimeoutError | ExcType::MemoryError) {
+                    return Err(exception_text(&exc));
+                }
+                Some(exc)
+            } else {
+                None
+            };
+            let active = Duration::from_micros(event.feed_execution_micros);
+            if active < last {
+                return Err("sandbox worker execution clock went backwards".into());
+            }
+            last = active;
+            if last - checkpoint >= self.tool.compute {
+                return Err(TIME_LIMIT.into());
+            }
+            if let Some(exc) = exception {
+                return Err(exception_text(&exc));
+            }
+
+            request = match event_kind {
+                Event::Complete(value) => {
+                    return MontyObject::try_from(value).map_err(|err| err.to_string());
+                }
+                Event::NameLookup(lookup) => {
+                    let found = match (lookup.object_id, lookup.name.as_str()) {
+                        (None, name @ ("describe_tool" | "search_tools")) => {
                             NameLookupResult::Value(MontyObject::function(name, None))
                         }
-                        MODULE => NameLookupResult::Value(self.module()),
                         _ => NameLookupResult::Undefined,
                     };
-                    worker.resume_name_lookup(found, print).await
+                    Request::ResumeNameLookup(found.into())
                 }
-                TurnEvent::FunctionCall {
-                    function_name,
-                    args,
-                    call_id,
-                    allow_eager_await,
-                    ..
-                } => {
-                    // The pool watches the pipes while the VM runs. While it
-                    // waits on a nested call, also watch for process exit.
-                    let result = tokio::select! {
-                        biased;
-                        exited = exit.readable() => return Err(match exited {
-                            Ok(_) => "sandbox worker died while waiting for a nested tool call".into(),
-                            Err(error) => format!("could not watch sandbox worker: {error}"),
-                        }),
-                        result = self.call(&function_name, &args) => result,
-                    };
-                    let result = match result {
-                        Ok(value) => ResumeValue::Return(convert::to_python(&value)),
-                        Err(error) => ResumeValue::Error(error),
-                    };
-                    if allow_eager_await {
-                        worker.resume_futures(vec![(call_id, result)], print).await
+                Event::FunctionCall(call) => {
+                    let name = call.function_name.clone();
+                    let (id, eager, receiver) =
+                        (call.call_id, call.allow_eager_await, call.object_id);
+                    let args = call.into_call_args().map_err(|err| err.to_string())?;
+                    let prior = self.calls.made;
+                    let result = if receiver.is_some() {
+                        Err(raise(
+                            ExcType::NameError,
+                            format!("name '{name}' is not defined"),
+                        ))
                     } else {
-                        worker.resume(result, print).await
+                        // While the worker waits for a tool, watch for process exit
+                        // without running the pipe watchdog or the compute clock.
+                        tokio::select! {
+                            biased;
+                            exited = exit.readable() => return Err(match exited {
+                                Ok(_) => "sandbox worker died while waiting for a nested tool call".into(),
+                                Err(error) => format!("could not watch sandbox worker: {error}"),
+                            }),
+                            result = self.call(&name, &args) => result,
+                        }
+                    };
+                    if self.calls.made != prior {
+                        checkpoint = last;
                     }
+                    let result = match result {
+                        Ok(value) => ExtFunctionResult::Return(convert::to_python(&value)),
+                        Err(error) => ExtFunctionResult::Error(error),
+                    };
+                    resume(id, eager, result)
                 }
-                TurnEvent::OsCall {
-                    function_name,
-                    args,
-                    ..
-                } => {
-                    // `import tools` gives the same object the bare name does.
-                    let result = if function_name == IMPORT_CALL
-                        && ImportArgs::from_call_args(&args)
-                            .is_some_and(|import| import.module == MODULE)
-                    {
-                        ResumeValue::Return(self.module())
-                    } else {
-                        ResumeValue::Error(raise(
+                Event::OsCall(call) => {
+                    let eager = call.allow_eager_await;
+                    let (id, call) = os_call_from_proto(call).map_err(|err| err.to_string())?;
+                    let result = match &call {
+                        OsFunctionCall::Import(import) if import.module == MODULE => {
+                            ExtFunctionResult::Return(self.module())
+                        }
+                        _ => ExtFunctionResult::Error(raise(
                             ExcType::RuntimeError,
                             "the sandbox has no direct access to files, the network, the clock or the environment; use the provided functions",
-                        ))
+                        )),
                     };
-                    worker.resume(result, print).await
+                    resume(
+                        id,
+                        eager && OsFunctionCall::accepts_future(call.name()),
+                        result,
+                    )
                 }
-                TurnEvent::ResolveFutures { .. } => {
-                    // Host functions answer at the call; none can be pending.
+                Event::ResolveFutures(_) => {
                     return Err("RuntimeError: awaited something that never resolves".into());
                 }
+                Event::FatalError(error) => {
+                    return Err(format!("sandbox worker died: {}", error.message));
+                }
+                Event::SessionRefused(error) => {
+                    return Err(format!(
+                        "sandbox worker refused configuration: {}",
+                        error.message
+                    ));
+                }
+                _ => return Err("sandbox worker returned an unexpected event".into()),
             };
         }
     }
+}
+
+fn resume(call_id: u32, eager: bool, result: ExtFunctionResult) -> Request {
+    if eager {
+        Request::ResumeFutures(future_results_to_proto(vec![(call_id, result)]))
+    } else {
+        let (result, values) = ext_result_to_proto(result);
+        Request::ResumeCall(pb::ResumeCall {
+            call_id,
+            result: Some(result),
+            values,
+        })
+    }
+}
+
+fn exception_text(exc: &MontyException) -> String {
+    let mut text = exc.to_string();
+    if exc.message() == Some("") {
+        text.truncate(text.len() - ": ".len());
+    }
+    text
 }
 
 fn watch_exit(pid: u32) -> io::Result<AsyncFd<OwnedFd>> {

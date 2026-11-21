@@ -30,7 +30,7 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 pub struct CodeTool {
     /// A Monty worker executable. By default the pool re-executes `ma`.
     pub worker: Option<PathBuf>,
-    /// Active wall clock limit for one Monty turn.
+    /// Active interpreter wall time between nested tool calls.
     pub compute: Duration,
     /// Most nested tool calls one run may make.
     pub calls: usize,
@@ -121,15 +121,14 @@ impl Run<'_> {
     ) -> std::result::Result<Value, MontyException> {
         match name {
             "describe_tool" | "search_tools" => {
-                let text = args
-                    .arg(0)
-                    .or_else(|| {
-                        args.kwarg(if name == "describe_tool" {
-                            "name"
-                        } else {
-                            "query"
-                        })
-                    })
+                let keyword = if name == "describe_tool" {
+                    "name"
+                } else {
+                    "query"
+                };
+                let text = (args.args().len() + args.kwargs().count() == 1)
+                    .then(|| args.arg(0).or_else(|| args.kwarg(keyword)))
+                    .flatten()
                     .and_then(|v| v.as_str().map(str::to_owned))
                     .ok_or_else(|| {
                         raise(ExcType::TypeError, format!("{name}() takes one string"))
@@ -147,10 +146,11 @@ impl Run<'_> {
             }
             _ => (),
         }
-        let function = self
-            .functions
-            .get(name)
+        let function = name
+            .strip_prefix("tools.")
+            .and_then(|name| self.functions.get(name))
             .ok_or_else(|| raise(ExcType::NameError, format!("name '{name}' is not defined")))?;
+        let name = &function.name;
         let input = function
             .input(args)
             .map_err(|e| raise(ExcType::TypeError, format!("{name}(): {e}")))?;
@@ -169,6 +169,7 @@ impl Run<'_> {
         // A result with content beyond text: an image reaches the code as a
         // dict it can return, as in Pi's codemode.
         if result.status == ToolStatus::Completed
+            && result.value.is_none()
             && let Some(image) = result.content.iter().find(|part| part["type"] == "image")
         {
             return Ok(
@@ -193,27 +194,23 @@ impl Run<'_> {
     }
 }
 
-const CUT: &str = "\n[Output cut. Return or print less, or write the rest to a file.]";
+const CUT: &str = "[Output cut. Return or print less, or write the rest to a file.]";
 
-fn prefix_end(text: &str, bytes: usize, lines: usize) -> usize {
-    let stop = text.floor_char_boundary(bytes);
-    text[..stop]
-        .split_inclusive('\n')
-        .take(lines)
-        .map(str::len)
-        .sum()
+fn fits(text: &str) -> bool {
+    text.len() <= MAX_OUTPUT_BYTES && text.lines().count() <= MAX_OUTPUT_LINES
 }
 
 fn bounded(mut text: String) -> String {
-    if text.len() > MAX_OUTPUT_BYTES || text.lines().count() > MAX_OUTPUT_LINES {
-        text.truncate(prefix_end(
-            &text,
-            MAX_OUTPUT_BYTES - CUT.len(),
-            MAX_OUTPUT_LINES - 1,
-        ));
-        if text.ends_with('\n') {
-            text.pop();
+    if !fits(&text) {
+        let mut end = 0;
+        for line in text.split_inclusive('\n').take(MAX_OUTPUT_LINES - 1) {
+            if end + line.len() > MAX_OUTPUT_BYTES - CUT.len() {
+                break;
+            }
+            end += line.len();
         }
+        text.truncate(end);
+        end_printed_line(&mut text);
         text.push_str(CUT);
     }
     text
@@ -226,31 +223,31 @@ fn end_printed_line(printed: &mut String) {
 }
 
 fn append_error(printed: &mut String, error: &str) {
-    // Leave room for the traceback after the printed prefix. If the traceback
-    // itself is too large, keep its final line, which has the type and message.
-    let error = if error.len() >= MAX_OUTPUT_BYTES - CUT.len()
-        || error.lines().count() >= MAX_OUTPUT_LINES
-    {
-        error.lines().next_back().unwrap_or(error)
-    } else {
-        error
-    };
-    let end = prefix_end(
-        printed,
-        MAX_OUTPUT_BYTES.saturating_sub(error.len() + CUT.len() + 1),
-        MAX_OUTPUT_LINES.saturating_sub(error.lines().count() + 2),
-    );
-    if printed.len() + error.len() > MAX_OUTPUT_BYTES
-        || printed.lines().count() + error.lines().count() > MAX_OUTPUT_LINES
-    {
-        printed.truncate(end);
-        if printed.ends_with('\n') {
-            printed.pop();
-        }
-        printed.push_str(CUT);
-        printed.push('\n');
-    }
+    let start = printed.len();
     printed.push_str(error);
+    if fits(printed) {
+        return;
+    }
+    // If the traceback cannot follow the printed output, put its reason first.
+    let last = error.lines().next_back().unwrap_or(error);
+    let first = if last.len() < MAX_OUTPUT_BYTES - CUT.len() {
+        last
+    } else {
+        // Even the last line can be too long. Keep the type, without a partial
+        // message, before the cut notice.
+        last.split_once(": ").map_or("", |(kind, _)| kind)
+    };
+    if !first.is_empty() {
+        if let Some(prefix) = error.strip_suffix(last) {
+            // Move rather than duplicate the last line. Keep the original
+            // line when only its type can be shown, so it triggers the cut.
+            if first == last {
+                printed.truncate(start + prefix.len());
+            }
+        }
+        printed.insert(0, '\n');
+        printed.insert_str(0, first);
+    }
 }
 
 impl CodeTool {
@@ -358,15 +355,15 @@ mod tests {
     }
 
     #[test]
-    fn the_result_cut_keeps_a_utf8_prefix_of_a_long_line() {
-        let text = format!(
-            "RuntimeError: printed output exceeded 1048576 bytes\n{}",
-            "é".repeat(MAX_OUTPUT_BYTES)
+    fn the_result_cut_keeps_only_whole_lines() {
+        let head = "RuntimeError: printed output exceeded 1048576 bytes";
+        let cut = bounded(format!("{head}\n{}", "é".repeat(MAX_OUTPUT_BYTES)));
+        assert_eq!(cut, format!("{head}\n{}", super::CUT));
+
+        let cut = bounded("line\n".repeat(MAX_OUTPUT_LINES + 1));
+        assert_eq!(
+            cut,
+            format!("{}{}", "line\n".repeat(MAX_OUTPUT_LINES - 1), super::CUT)
         );
-        let cut = bounded(text);
-        assert!(cut.starts_with("RuntimeError: printed output exceeded 1048576 bytes\néé"));
-        assert!(cut.lines().nth(1).unwrap().chars().all(|ch| ch == 'é'));
-        assert!(cut.len() <= MAX_OUTPUT_BYTES);
-        assert!(cut.lines().count() <= MAX_OUTPUT_LINES);
     }
 }

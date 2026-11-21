@@ -1,15 +1,24 @@
 //! Values crossing the sandbox boundary, as JSON on the agent's side.
-use monty_types::{MontyObject, ObjectRef};
+use anyhow::{Result, anyhow, bail, ensure};
+use monty_types::{
+    MontyObject, ObjectRef,
+    unstable::{self, MontyNode},
+};
 use serde_json::{Value, json};
 
 pub fn to_python(value: &Value) -> MontyObject {
     match value {
         Value::Null => MontyObject::none(),
         Value::Bool(b) => MontyObject::bool(*b),
-        Value::Number(n) => match n.as_i64() {
-            Some(i) => MontyObject::int(i),
-            None => MontyObject::float(n.as_f64().unwrap_or(f64::NAN)),
-        },
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                MontyObject::int(i)
+            } else if let Ok(i) = n.as_str().parse() {
+                MontyObject::bigint(i)
+            } else {
+                MontyObject::float(n.as_f64().unwrap_or(f64::NAN))
+            }
+        }
         Value::String(s) => MontyObject::string(s.as_str()),
         Value::Array(items) => MontyObject::list(items.iter().map(to_python)),
         Value::Object(map) => MontyObject::dict(
@@ -19,46 +28,73 @@ pub fn to_python(value: &Value) -> MontyObject {
     }
 }
 
-/// JSON has fewer types than Python. Sequences become arrays, keys become
-/// strings, and anything without a JSON form becomes its `repr`.
-pub fn to_json(value: ObjectRef<'_>) -> Value {
-    if let Some(b) = value.as_bool() {
-        return json!(b);
+/// Convert the whole call before dispatch. JSON arrays accept tuples, but
+/// sets, non-string keys, non-finite numbers and other lossy forms are refused.
+/// Bound expansion of a worker value that shares the same subtree many times.
+pub(super) struct Arguments {
+    left: usize,
+}
+
+impl Default for Arguments {
+    fn default() -> Self {
+        Self { left: 250_000 }
     }
-    if let Some(i) = value.as_int() {
-        return json!(i);
+}
+
+impl Arguments {
+    pub(super) fn value(&mut self, value: ObjectRef<'_>) -> Result<Value> {
+        self.convert(value, 0)
     }
-    if value.type_name() == "int"
-        && let Ok(number) = value.py_repr().parse::<serde_json::Number>()
-    {
-        return Value::Number(number);
-    }
-    if let Some(f) = value.as_float() {
-        return serde_json::Number::from_f64(f)
-            .map_or_else(|| json!(value.py_repr()), Value::Number);
-    }
-    if let Some(s) = value.as_str() {
-        return json!(s);
-    }
-    match value.type_name() {
-        "NoneType" => Value::Null,
-        "dict" => match value.pairs() {
-            Some(pairs) => Value::Object(
-                pairs
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let key = k.as_str().map(str::to_owned).unwrap_or_else(|| k.py_repr());
-                        (key, to_json(v))
-                    })
-                    .collect(),
+
+    fn convert(&mut self, value: ObjectRef<'_>, depth: usize) -> Result<Value> {
+        ensure!(
+            self.left > 0 && depth <= 400,
+            "tool arguments are too large"
+        );
+        self.left -= 1;
+        let child = |id| unstable::child(value, id);
+        Ok(match unstable::node(value) {
+            MontyNode::None => Value::Null,
+            MontyNode::Bool(b) => json!(b),
+            MontyNode::Int(i) => Value::Number((*i).into()),
+            // The SDK reads tool inputs through serde's Value visitor. It
+            // accepts 64-bit integers but cannot carry all arbitrary-precision
+            // numbers, even though serde_json can print them without loss.
+            MontyNode::BigInt(i) => {
+                if let Ok(n) = i64::try_from(i) {
+                    Value::Number(n.into())
+                } else if let Ok(n) = u64::try_from(i) {
+                    Value::Number(n.into())
+                } else {
+                    bail!("tool argument integer is outside the JSON input range");
+                }
+            }
+            MontyNode::Float(f) => Value::Number(
+                serde_json::Number::from_f64(*f)
+                    .ok_or_else(|| anyhow!("tool arguments must be finite JSON numbers"))?,
             ),
-            None => json!(value.py_repr()),
-        },
-        "list" | "tuple" | "set" | "frozenset" => match value.items() {
-            Some(items) => Value::Array(items.into_iter().map(to_json).collect()),
-            None => json!(value.py_repr()),
-        },
-        _ => json!(value.py_repr()),
+            MontyNode::String(s) => json!(s),
+            MontyNode::List(ids) | MontyNode::Tuple(ids) => Value::Array(
+                ids.iter()
+                    .map(|&id| self.convert(child(id), depth + 1))
+                    .collect::<Result<_>>()?,
+            ),
+            MontyNode::Dict(pairs) => Value::Object(
+                pairs
+                    .iter()
+                    .map(|&(k, v)| {
+                        let key = child(k)
+                            .as_str()
+                            .ok_or_else(|| anyhow!("tool argument keys must be strings"))?;
+                        Ok((key.to_owned(), self.convert(child(v), depth + 1)?))
+                    })
+                    .collect::<Result<_>>()?,
+            ),
+            _ => bail!(
+                "tool arguments must be JSON values, not {}",
+                value.type_name()
+            ),
+        })
     }
 }
 
