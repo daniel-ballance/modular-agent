@@ -4,6 +4,8 @@ package scenarios
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +38,11 @@ type scenario struct {
 		Settings      modular.Settings
 		SeveralActors bool
 		Actors        []modular.Actor
+		History       string
+	}
+	ExpectCreateError *struct {
+		Code            modular.Code
+		MessageContains string
 	}
 	Model      json.RawMessage
 	Placements []string
@@ -113,6 +120,19 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 		durability = modular.Ephemeral
 	}
 	opts := []modular.Option{modulartest.Script(string(s.Model)), modular.WithProject(project), modular.WithDataDir(r.dataDir()), modular.WithDurability(durability), modular.WithSettings(s.Agent.Settings), modular.WithSeveralActors(s.Agent.SeveralActors)}
+	switch s.Agent.History {
+	case "":
+	case "file":
+		opts = append(opts, modular.WithHistory(modular.FileHistory(filepath.Join(r.dir, "explicit-history"))))
+	case "service":
+		url, err := os.ReadFile(filepath.Join(r.dir, "history-url"))
+		if err != nil {
+			return nil, fmt.Errorf("history fixture URL: %w", err)
+		}
+		opts = append(opts, modular.WithHistory(modular.HTTPHistory(string(url), filepath.Join(r.dir, "history-token"))))
+	default:
+		return nil, fmt.Errorf("unknown history fixture %q", s.Agent.History)
+	}
 	config := map[string]any{"path": r.countPath()}
 	for i, name := range s.Agent.Plugins {
 		if r.placement.Service {
@@ -224,8 +244,7 @@ func TestShared(t *testing.T) {
 	}
 	placements := []placement{{}}
 	var services []placement
-	// During the parallel transport rollout, use "go" to run only Go services
-	// while still requiring all four built process fixtures.
+	// An optional subset is for local development only; require=all always runs the matrix.
 	serviceFilter := strings.Split(os.Getenv("MODULAR_AGENT_SDK_SERVICE"), ",")
 	for _, path := range regs {
 		f, err := load[struct {
@@ -261,7 +280,7 @@ func TestShared(t *testing.T) {
 			continue
 		}
 		placements = append(placements, p)
-		if slices.Contains(serviceFilter, "") || slices.Contains(serviceFilter, "all") || slices.Contains(serviceFilter, p.SDK) {
+		if requireAll || slices.Contains(serviceFilter, "") || slices.Contains(serviceFilter, "all") || slices.Contains(serviceFilter, p.SDK) {
 			p.Service = true
 			services = append(services, p)
 		}
@@ -287,6 +306,29 @@ func TestShared(t *testing.T) {
 func (r run) check(t *testing.T, path string, sc scenario) {
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
+	if sc.Agent.History == "service" {
+		var token [32]byte
+		if _, err := rand.Read(token[:]); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(r.dir, "history-token")
+		if err := os.WriteFile(path, []byte(hex.EncodeToString(token[:])), 0600); err != nil {
+			t.Fatal(err)
+		}
+		store := modular.FileHistory(filepath.Join(r.dir, "explicit-history"))
+		service, err := modular.ListenHistory(ctx, store, modular.HistoryOptions{Address: "127.0.0.1:0", TokenFile: path})
+		if err != nil {
+			t.Fatalf("set up history fixture: %v", err)
+		}
+		defer func() {
+			if err := service.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		if err := os.WriteFile(filepath.Join(r.dir, "history-url"), []byte(service.URL), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var a *modular.Agent
 	var s *modular.Session
 	var id string
@@ -318,6 +360,22 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 			return nil, err
 		}
 		return r.agent(ctx, sc, remember)
+	}
+	if want := sc.ExpectCreateError; want != nil {
+		if len(sc.Steps) != 0 {
+			t.Fatal("expectCreateError requires no steps")
+		}
+		var err error
+		r.services, err = serviceGroups.start(ctx, r, sc)
+		if err != nil {
+			t.Fatalf("start fixture services: %v", err)
+		}
+		a, err = r.agent(ctx, sc, nil)
+		var got *modular.Error
+		if !errors.As(err, &got) || got.Code != want.Code || !strings.Contains(got.Message, want.MessageContains) {
+			t.Fatalf("create: want %s with message containing %q, got %v", want.Code, want.MessageContains, err)
+		}
+		return
 	}
 	for i, step := range sc.Steps {
 		var result *modular.PromptResult

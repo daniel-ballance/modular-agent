@@ -66,7 +66,49 @@ func ServeHistory(ctx context.Context, store HistoryStore, options HistoryOption
 	defer listener.Close()
 	return serveHistory(ctx, store, options, listener)
 }
+
+// HistoryService holds a running loopback history service.
+type HistoryService struct {
+	URL    string
+	cancel context.CancelFunc
+	done   chan struct{}
+	err    error
+}
+
+func (s *HistoryService) Close() error {
+	s.cancel()
+	<-s.done
+	return s.err
+}
+
+// ListenHistory starts serving history and returns the actual address (including for port 0).
+func ListenHistory(ctx context.Context, store HistoryStore, options HistoryOptions) (*HistoryService, error) {
+	listener, err := net.Listen("tcp", options.Address)
+	if err != nil {
+		return nil, appError(err, InvalidParams)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	service := &HistoryService{URL: "http://" + listener.Addr().String(), cancel: cancel, done: make(chan struct{})}
+	ready := make(chan struct{})
+	go func() {
+		defer close(service.done)
+		defer listener.Close()
+		service.err = runHistory(ctx, store, options, listener, ready)
+	}()
+	select {
+	case <-ready:
+		return service, nil
+	case <-service.done:
+		cancel()
+		return nil, service.err
+	}
+}
+
 func serveHistory(ctx context.Context, store HistoryStore, options HistoryOptions, listener net.Listener) error {
+	return runHistory(ctx, store, options, listener, nil)
+}
+
+func runHistory(ctx context.Context, store HistoryStore, options HistoryOptions, listener net.Listener, ready chan<- struct{}) error {
 	addr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok || !addr.IP.IsLoopback() {
 		return &Error{Code: InvalidParams, Message: "plaintext history requires a loopback listener"}
@@ -112,6 +154,9 @@ func serveHistory(ctx context.Context, store HistoryStore, options HistoryOption
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	stop := context.AfterFunc(ctx, func() { _ = server.Close() })
 	defer stop()
+	if ready != nil {
+		close(ready)
+	}
 	err = server.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
