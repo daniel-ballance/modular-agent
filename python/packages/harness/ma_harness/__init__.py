@@ -1054,6 +1054,7 @@ class Harness(Authority, Erasure):
             s = await self.call("@harness", "history", "open", d)
             if s is None:
                 raise AgentError("Unknown session", "unknown_session")
+            self.capacity.restore(s)
             s["plugins"] = list(self.plugins)
             s.setdefault("authority", sorted(self.admin & self.tenant))
             s.setdefault("actors", {s["actor"]: {"kind": "user", "authority": s["authority"]}})

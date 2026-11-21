@@ -816,19 +816,24 @@ class External(Plugin):
                     or (p["report"] and "result" not in p)
                 ):
                     raise WireError("Invalid job outcome", "invalid_request")
-                await self.api.call(
-                    "jobs",
-                    "report",
-                    {
-                        **args,
-                        "state": outcome["kind"],
-                        "error": outcome.get("error"),
-                        "result": p.get("result") or [],
-                        "report": p["report"],
-                        "usage": p.get("usage", {}),
-                        "strict": True,
-                    },
-                )
+                try:
+                    await self.api.call(
+                        "jobs",
+                        "report",
+                        {
+                            **args,
+                            "state": outcome["kind"],
+                            "error": outcome.get("error"),
+                            "result": p.get("result") or [],
+                            "report": p["report"],
+                            "usage": p.get("usage", {}),
+                            "strict": True,
+                        },
+                    )
+                except AgentError as exc:
+                    if exc.code != "result_too_large":
+                        raise
+                    raise WireError(str(exc), "result_too_large") from exc
             elif method == "host/jobs/progress":
                 await self.api.call("jobs", "progress", {**args, "content": p["content"]})
                 return None

@@ -2,7 +2,9 @@
 
 import asyncio
 
-from ma_core import AgentError, Plugin, identity
+import json
+
+from ma_core import AgentError, Plugin, content, identity
 
 
 class Jobs(Plugin):
@@ -149,6 +151,8 @@ class Jobs(Plugin):
         async with self.locks.setdefault(d["session"], asyncio.Lock()):
             job = await self._end(d)
         await self._deliver(job)
+        if job.get("result_too_large"):
+            raise AgentError("Job result exceeded reserved space", "result_too_large")
         return job
 
     async def _end(self, d):
@@ -165,6 +169,13 @@ class Jobs(Plugin):
             "usage": d.get("usage", {}),
             "report": d.get("report", job["report"]),
         }
+        if end["report"] and not job["report"] and job["state"] == "running":
+            raise AgentError("This job did not reserve an input report", "invalid_request")
+        if len(json.dumps([end["result"], end.get("error")], ensure_ascii=True)) > 8192:
+            # The end and its optional input both use this same bounded result.
+            end["result"] = content("Job result exceeded reserved space")
+            end["result_too_large"] = True
+            end.pop("error", None)
         if job["state"] != "running":
             if d.get("strict") and any(job.get(k) != v for k, v in end.items()):
                 raise AgentError("Job already ended with a different outcome", "invalid_request")

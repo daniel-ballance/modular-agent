@@ -141,7 +141,11 @@ class Reservations:
             self.fresh.add(id(history[1]))
 
     def restore(self, session):
-        self.current[session["id"]] = session.get("tenant"), fold(session["entries"])
+        sid = session["id"]
+        self.current[sid] = session.get("tenant"), fold(session["entries"])
+        self.inflight.pop(sid, None)
+        for key in [pair for pair in self.responses if pair[0] == sid]:
+            del self.responses[key]
 
     def _usage(self, sid, tenant, *, skip=None):
         buckets = {scope: Counter() for scope in self.limits}
