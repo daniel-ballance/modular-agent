@@ -1,6 +1,6 @@
 # ma — Python standard configuration
 
-`ma` is the Python implementation of the [standard configuration](../../../docs/reference/standard-configuration.md). Its package is `modular-agent-standard`. It uses the public `modular_agent` SDK and its official plugins. Monty runs each code call in a fresh worker; it reaches the working environment only through nested SDK tool calls.
+`ma` is the Python implementation of the [standard configuration](../../../docs/reference/standard-configuration.md). Its package is `modular-agent-standard`. It uses the public `modular_agent` SDK and its official plugins.
 
 ## Build, install and run
 
@@ -21,13 +21,20 @@ The configuration folder is shared across languages; sessions live under `$XDG_S
 
 Build the [Claude sidecar](../../../typescript/sidecars/claude/README.md) with Node 22 or newer. `ma` looks for it in a development checkout, at `~/.local/share/modular-agent/sidecars/claude/dist/main.js`, or at `MODULAR_AGENT_CLAUDE_SIDECAR`. `ma login claude` uses the installed `claude` program. ACP selects a composition for the client’s project; it does not start the Claude sidecar for sessions that select another Provider.
 
+## Code sandbox
+
+Each `codemode` call checks out a fresh worker process from [Monty 1.6.0's async pool](https://github.com/pydantic/monty/blob/v1.6.0/docs/api/python/pools.md). The interpreter never runs in the agent process. The worker has no file, network, clock or process access from sandbox code. Calls on `tools` go through the agent as nested SDK tool calls.
+
+Monty's [`max_memory`](https://github.com/pydantic/monty/blob/v1.6.0/docs/resource-limits.md) is 256 MiB of interpreter allocations, not a cap on the worker's total process memory. The other limits are 30 seconds of computation between host round trips, 200 levels of recursion, 500 nested tool calls and 1 MiB of printed output. Lookups do not spend the nested-call budget. The text result is cut to 2,000 lines or 50 KB.
+
+A memory or time limit returns `MemoryError` or `TimeoutError` and ends the session. A worker crash fails the call without replaying it, and cancellation stops the run. The next call always starts with a fresh worker and no variables from the previous call.
+
 ## What is checked
 
-- **Reference:** 15/15, including the declaration, crash recovery, the prompt tail and SDK-shaped JSON events.
-- **ACP:** 184/184 with `--crash-checks --probe-checks --job-checks`, with the same check names in the same order as Rust `ma`. This includes transient Runtime replacement, steering cutoff, both `step.after` crash boundaries and the served Provider response probe. The standard composition does not declare several actors, tenants or session limits.
-- **Python ma and SDK revisions:** 29 earlier focused tests plus three ACP regressions for transient Runtime replacement, crash recovery and served Provider response fidelity. The earlier tests cover loopback sign-in, concurrent token refresh, opaque reasoning, shared `auth.json`, Monty limits, project trust, multi-project ACP, SDK environment callbacks and late answers. No real sign-in, credentials or model calls were used.
-- **SDK scenarios:** 55/55: 11 in process and 11 each through the built Python, Rust, Go and TypeScript fixture programs.
-- **Python suites:** 368/368 for transient/local, durable/local and durable/process. Transient/process passed 367/368 on two full runs; its pre-existing `test_foreign_job_report_runs_as_a_turn` timed out and passed on an isolated retry.
+- **Reference:** 18/18, including sandbox memory exhaustion followed by a successful code call.
+- **ACP:** 188/188 with `--crash-checks --probe-checks --job-checks`. The standard composition does not declare several actors, tenants or session limits.
+- **WebSocket kits:** 153/153 for the plugin binding and 193/193 for ACP.
+- **Python suites:** 416 passed and 2 live tests skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and time limits, worker death, cancellation, nested calls, printed output and results.
 - **Python static checks:** Ruff lint and format checks passed; strict mypy passed (30 source files).
 
 ```sh
@@ -35,6 +42,7 @@ Build the [Claude sidecar](../../../typescript/sidecars/claude/README.md) with N
 npm ci --prefix conformance/acp
 node conformance/reference/run.mjs --agent python
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/python/.venv/bin/ma" --acp
+scripts/websocket-kits.sh python
 cd python
 uv run --offline pytest -q --runtime transient
 uv run --offline pytest -q --runtime durable
@@ -45,7 +53,7 @@ uv run --offline ruff format --check .
 uv run --offline mypy
 ```
 
-See the [SDK README](../../SDK.md) for fixture build commands. If running Python suites concurrently, give each a separate writable delegated `MA_CGROUP_ROOT` so containment recovery in one suite does not clean up another suite's deliberate crash. Process-binding tests include the base's intermittent `test_foreign_job_report_runs_as_a_turn`.
+See the [SDK README](../../SDK.md) for fixture build commands and SDK scenario results. If running Python suites concurrently, give each a separate writable delegated `MA_CGROUP_ROOT` so containment recovery in one suite does not clean up another suite's deliberate crash.
 
 ## Known gaps
 
