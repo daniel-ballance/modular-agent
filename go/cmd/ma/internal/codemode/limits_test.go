@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/files"
@@ -65,7 +66,7 @@ func TestStandardPrintAndResultLimits(t *testing.T) {
 		failed     bool
 	}{
 		{"print('x' * 1048575)", "1048576 bytes).", false},
-		{"print('x' * 1048576)\n'unreachable'", "RuntimeError: printed output exceeds the 1048576-byte limit", true},
+		{"print('x' * 1048576)\n'unreachable'", "RuntimeError: printed output exceeded 1048576 bytes", true},
 		{"'line\\n' * 2001", "first 2000 of 2001 lines", false},
 		{"('a' * 51199) + '\\nb'", "first 1 of 2 lines (51200 of 51201 bytes)", false},
 	} {
@@ -77,24 +78,39 @@ func TestStandardPrintAndResultLimits(t *testing.T) {
 	}
 }
 
+func TestPrintLimitKeepsUTF8Prefix(t *testing.T) {
+	l := StandardLimits()
+	l.PrintBytes = 8
+	out, err := testRun(t, "print('abc', end='')\nprint('éé😀')\nprint('unreachable')", nil, nil, l)
+	text := out.Content.Text()
+	if err != nil || out.Status != modular.Failed || !utf8.ValidString(text) || text != "RuntimeError: printed output exceeded 8 bytes\nabcéé" {
+		t.Fatalf("print limit: %q (%s), %v", text, out.Status, err)
+	}
+}
+
 func TestDeniedAmbientAccess(t *testing.T) {
 	for _, code := range []string{
 		"import time\ntime.time()",
-		"import time\ntime.sleep(30)",
+		"import time\ntime.sleep(0)",
 		"import datetime\ndatetime.date.today()",
 		"import os\nos.getenv('HOME', 'fallback')",
 		"import os\nos.urandom(1)",
 		"import random\nrandom.random()",
+		"open('fixture.txt')",
 		"from pathlib import Path\nPath('/inside').write_text('no')",
-		"import socket",
-		"import subprocess",
+		"import socket\nsocket.socket()",
+		"import subprocess\nsubprocess.run(['true'])",
 	} {
 		out, err := testRun(t, code, nil, nil, StandardLimits())
 		if err != nil || out.Status != modular.Failed || !strings.Contains(out.Content.Text(), osDenied) {
 			t.Errorf("%s: %+v, %v", code, out, err)
 		}
 	}
-	out, err := testRun(t, "import time\ntime.process_time() == time.thread_time() == 0", nil, nil, StandardLimits())
+	out, err := testRun(t, "import random\na = random.Random(7)\nb = random.Random(7)\n[a.random() for _ in range(3)] == [b.random() for _ in range(3)]", nil, nil, StandardLimits())
+	if err != nil || out.Status == modular.Failed || out.Content.Text() != "true" {
+		t.Fatalf("seeded generator: %+v, %v", out, err)
+	}
+	out, err = testRun(t, "import time\ntime.process_time() == time.thread_time() == 0", nil, nil, StandardLimits())
 	if err != nil || out.Status == modular.Failed || out.Content.Text() != "true" {
 		t.Fatalf("synthetic process clocks: %+v, %v", out, err)
 	}

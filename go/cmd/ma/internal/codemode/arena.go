@@ -332,8 +332,13 @@ func floatRepr(f float64) string {
 	case math.IsInf(f, -1):
 		return "-inf"
 	}
-	s := strconv.FormatFloat(f, 'g', -1, 64)
-	if !strings.ContainsAny(s, ".e") {
+	// Python uses fixed notation for exponents from -4 through 15.
+	m := math.Abs(f)
+	if m != 0 && (m < 1e-4 || m >= 1e16) {
+		return strconv.FormatFloat(f, 'e', -1, 64)
+	}
+	s := strconv.FormatFloat(f, 'f', -1, 64)
+	if !strings.Contains(s, ".") {
 		return s + ".0"
 	}
 	return s

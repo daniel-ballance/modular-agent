@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
@@ -36,21 +35,40 @@ func catalog(defs []modular.ToolDefinition) ([]function, error) {
 		}
 		seen[name] = true
 		var s struct {
-			Properties           map[string]parameter
+			Properties           json.RawMessage
 			Required             []string
 			AdditionalProperties json.RawMessage
 		}
 		if err := json.Unmarshal(d.Parameters, &s); err != nil {
 			return nil, err
 		}
-		opt := []string{}
-		for n := range s.Properties {
-			if !slices.Contains(s.Required, n) {
-				opt = append(opt, n)
+		params := slices.Clone(s.Required)
+		properties := map[string]parameter{}
+		if len(s.Properties) != 0 && string(s.Properties) != "null" {
+			// A map loses the order used to bind positional arguments.
+			dec := json.NewDecoder(bytes.NewReader(s.Properties))
+			if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+				return nil, fmt.Errorf("tool %s properties must be an object", d.Name)
+			}
+			for dec.More() {
+				key, err := dec.Token()
+				if err != nil {
+					return nil, err
+				}
+				keyName := key.(string)
+				var p parameter
+				if err := dec.Decode(&p); err != nil {
+					return nil, err
+				}
+				if !slices.Contains(s.Required, keyName) {
+					if _, seen := properties[keyName]; !seen {
+						params = append(params, keyName)
+					}
+				}
+				properties[keyName] = p
 			}
 		}
-		sort.Strings(opt)
-		out = append(out, function{name, d, append(slices.Clone(s.Required), opt...), s.Required, s.Properties, string(s.AdditionalProperties) == "false"})
+		out = append(out, function{name, d, params, s.Required, properties, string(s.AdditionalProperties) == "false"})
 	}
 	return out, nil
 }

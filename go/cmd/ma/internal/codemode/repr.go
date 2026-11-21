@@ -61,7 +61,11 @@ func (a arena) repr(id uint32) string {
 		case *pb.MontyNode_List:
 			sequence("[", "]")
 		case *pb.MontyNode_Tuple:
-			sequence("(", ")")
+			close := ")"
+			if len(v.Tuple.Items) == 1 {
+				close = ",)"
+			}
+			sequence("(", close)
 		case *pb.MontyNode_Set:
 			if len(v.Set.Items) == 0 {
 				out.WriteString("set()")
@@ -134,7 +138,9 @@ func (a arena) repr(id uint32) string {
 			}
 			out.WriteByte(')')
 		case *pb.MontyNode_Path:
-			fmt.Fprintf(&out, "PosixPath('%s')", v.Path)
+			out.WriteString("PosixPath(")
+			quote(&out, v.Path, false)
+			out.WriteByte(')')
 		case *pb.MontyNode_Type:
 			fmt.Fprintf(&out, "<class '%s'>", v.Type.Name)
 		case *pb.MontyNode_Function:
@@ -146,9 +152,7 @@ func (a arena) repr(id uint32) string {
 			quote(&out, v.Module.Name, false)
 			out.WriteByte('>')
 		case *pb.MontyNode_Repr:
-			out.WriteString("Repr(")
-			quote(&out, v.Repr, false)
-			out.WriteByte(')')
+			out.WriteString(v.Repr)
 		case *pb.MontyNode_Cycle:
 			out.WriteString(v.Cycle)
 		}

@@ -24,6 +24,12 @@ const openingTimeout = 5 * time.Second
 
 var errCompute = errors.New("TimeoutError: sandbox time limit exceeded")
 
+type printLimitError int
+
+func (e printLimitError) Error() string {
+	return fmt.Sprintf("RuntimeError: printed output exceeded %d bytes", int(e))
+}
+
 type versionOutput struct{ strings.Builder }
 
 func (v *versionOutput) Write(p []byte) (int, error) {
@@ -70,7 +76,7 @@ func runAt(ctx context.Context, path, code string, defs []modular.ToolDefinition
 		if ctx.Err() != nil {
 			return modular.ToolOutput{}, ctx.Err()
 		}
-		return failedOutput(err.Error()+"; build it with go/scripts/build-monty.sh and put it beside ma", ""), nil
+		return failedOutput(fmt.Errorf("%w; build it with go/scripts/build-monty.sh and put it beside ma", err), ""), nil
 	}
 	return runWorker(ctx, cmd, code, defs, nested, limits)
 }
@@ -108,7 +114,7 @@ func runWorker(ctx context.Context, cmd *exec.Cmd, code string, defs []modular.T
 		if ctx.Err() != nil {
 			return modular.ToolOutput{}, ctx.Err()
 		}
-		return failedOutput("start codemode worker process: "+err.Error(), ""), nil
+		return failedOutput(fmt.Errorf("start codemode worker process: %w", err), ""), nil
 	}
 	callCtx, cancel := context.WithCancel(ctx)
 	w := &worker{in: in, out: out, ctx: callCtx, exited: make(chan struct{})}
@@ -124,14 +130,14 @@ func runWorker(ctx context.Context, cmd *exec.Cmd, code string, defs []modular.T
 	}()
 
 	var printed strings.Builder
-	value, made, err := w.drive(code, fs, nested, limits, &printed)
+	value, made, err := w.drive(code, fs, nested, limits, &printed, w.exchange)
 	if ctx.Err() != nil {
 		return modular.ToolOutput{}, ctx.Err()
 	}
 	if err != nil {
-		return failedOutput(err.Error(), printed.String()), nil
+		return failedOutput(err, printed.String()), nil
 	}
-	return renderOutput(value, made, printed.String())
+	return renderOutput(value, made, printed.String()), nil
 }
 
 func (w *worker) exchange(req *pb.ClientRequest, timeout time.Duration, printed *strings.Builder, printCap int) (*pb.WorkerEvent, error) {
@@ -165,7 +171,7 @@ func (w *worker) exchange(req *pb.ClientRequest, timeout time.Duration, printed 
 				left := printCap - printed.Len()
 				if len(seg.Text) > left {
 					printed.WriteString(utf8Prefix(seg.Text, left))
-					return nil, fmt.Errorf("RuntimeError: printed output exceeds the %d-byte limit", printCap)
+					return nil, printLimitError(printCap)
 				}
 				printed.WriteString(seg.Text)
 			}

@@ -2,14 +2,16 @@
 package codemode
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	pb "github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/codemode/protocol"
 	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
@@ -39,7 +41,12 @@ func Tool(limits Limits) modular.Tool {
 
 type nestedFunc func(context.Context, string, any) (modular.ToolResult, error)
 
-func failedOutput(reason, printed string) modular.ToolOutput {
+func failedOutput(err error, printed string) modular.ToolOutput {
+	reason := err.Error()
+	var over printLimitError
+	if errors.As(err, &over) {
+		return modular.ToolOutput{Status: modular.Failed, Content: modular.Text(bounded(reason + "\n" + printed))}
+	}
 	prefix := withNewline(printed)
 	text := prefix + reason
 	if cut := bounded(text); cut != text {
@@ -64,62 +71,56 @@ func utf8Prefix(s string, n int) string {
 	return s[:n]
 }
 
-func renderOutput(output any, made int, stream string) (modular.ToolOutput, error) {
+func renderOutput(value finalValue, made int, stream string) modular.ToolOutput {
 	var printed strings.Builder
 	printed.WriteString(withNewline(stream))
 	var images modular.Content
-	takeImage := func(v any) bool {
-		m, ok := v.(map[string]any)
-		if !ok || m["type"] != "image" {
-			return false
-		}
-		mime, mok := m["mimeType"].(string)
-		data, dok := m["data"].(string)
-		if !mok || !dok {
-			return false
-		}
-		if note, ok := m["note"].(string); ok {
-			printed.WriteString(note)
-			printed.WriteByte('\n')
-		}
-		images = append(images, modular.Part{Type: "image", Fields: map[string]json.RawMessage{"mimeType": raw(mime), "data": raw(data)}})
-		return true
-	}
-	switch v := output.(type) {
-	case []any:
-		rest := make([]any, 0, len(v))
-		for _, item := range v {
-			if !takeImage(item) {
-				rest = append(rest, item)
+	takeImage := func(id uint32) bool {
+		var kind string
+		var mime, data, note *pb.MontyNode_Str
+		for _, pair := range value.nodes[id].GetDict().GetPairs() {
+			s, _ := value.nodes[pair.Value].Kind.(*pb.MontyNode_Str)
+			switch value.nodes[pair.Key].GetStr() {
+			case "type":
+				kind = value.nodes[pair.Value].GetStr()
+			case "mimeType":
+				mime = s
+			case "data":
+				data = s
+			case "note":
+				note = s
 			}
 		}
-		output = rest
-		if len(rest) == 0 && len(images) > 0 {
-			output = nil
+		if kind != "image" || mime == nil || data == nil {
+			return false
 		}
-	default:
-		if takeImage(v) {
-			output = nil
+		if note != nil {
+			printed.WriteString(note.Str)
+			printed.WriteByte('\n')
 		}
+		images = append(images, modular.Part{Type: "image", Fields: map[string]json.RawMessage{"mimeType": raw(mime.Str), "data": raw(data.Str)}})
+		return true
 	}
-	switch v := output.(type) {
-	case nil:
-	case string:
-		printed.WriteString(v)
-	default:
-		var b bytes.Buffer
-		enc := json.NewEncoder(&b)
-		enc.SetEscapeHTML(false)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(v); err != nil {
-			return modular.ToolOutput{}, err
+	showValue := true
+	switch value.nodes[value.id].Kind.(type) {
+	case *pb.MontyNode_List, *pb.MontyNode_Tuple:
+		original := items(value.nodes[value.id])
+		rest := slices.DeleteFunc(slices.Clone(original), takeImage)
+		if len(rest) != len(original) {
+			showValue = len(rest) != 0
+			node := &pb.MontyNode{Kind: &pb.MontyNode_List{List: &pb.Indexes{Items: rest}}}
+			value.id, value.nodes = uint32(len(value.nodes)), append(value.nodes, node)
 		}
-		printed.Write(b.Bytes()[:b.Len()-1])
+	default:
+		showValue = !takeImage(value.id)
+	}
+	if showValue {
+		printed.WriteString(value.text())
 	}
 	if printed.Len() == 0 {
 		printed.WriteString("(no output)")
 	}
-	return modular.ToolOutput{Content: append(modular.Text(bounded(printed.String())), images...), Value: map[string]int{"calls": made}}, nil
+	return modular.ToolOutput{Content: append(modular.Text(bounded(printed.String())), images...), Value: map[string]int{"calls": made}}
 }
 
 func raw(s string) json.RawMessage { b, _ := json.Marshal(s); return b }

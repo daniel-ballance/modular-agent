@@ -51,8 +51,17 @@ func TestStandardNestedCallBudget(t *testing.T) {
 	calls := 0
 	result, err := testRun(t, `
 for i in range(500):
+    import tools
     search_tools('read')
     describe_tool('read')
+    try:
+        unknown_name
+    except NameError:
+        pass
+    try:
+        tools.read()
+    except TypeError:
+        pass
     tools.read('fixture.txt', None)
 try:
     tools.read('fixture.txt')
@@ -64,6 +73,40 @@ except RuntimeError as e:
 	}, StandardLimits())
 	if err != nil || calls != 500 || !strings.Contains(result.Content.Text(), "more than 500 function calls") {
 		t.Fatalf("calls=%d, result=%+v, error=%v", calls, result, err)
+	}
+}
+
+func TestPositionalArgumentsFollowSchemaOrder(t *testing.T) {
+	read := files.Tools("")[0].Definition()
+	out, err := testRun(t, "tools.read('fixture', 7, 3)", []modular.ToolDefinition{read}, func(_ context.Context, _ string, input any) (modular.ToolResult, error) {
+		return modular.ToolResult{Status: modular.Completed, Content: modular.Text(string(input.(json.RawMessage)))}, nil
+	}, StandardLimits())
+	if err != nil || out.Status == modular.Failed || out.Content.Text() != `{"limit":3,"offset":7,"path":"fixture"}` {
+		t.Fatalf("positional read: %+v, %v", out, err)
+	}
+}
+
+func TestFinalValue(t *testing.T) {
+	for _, tc := range []struct{ code, want string }{
+		{"1.0", "1.0"},
+		{"-0.0", "-0.0"},
+		{"(1e-5, 1e-4, 1e15, 1e16)", "[\n  1e-05,\n  0.0001,\n  1000000000000000.0,\n  1e+16\n]"},
+		{"[2**70]", "[\n  1180591620717411303424\n]"},
+		{"{1}", "{1}"},
+		{"range(3)", "range(0, 3)"},
+		{"import pathlib\npathlib.Path(\"a'b\")", `PosixPath("a'b")`},
+		{"[None, (1,), {1}]", "[None, (1,), {1}]"},
+		{"[b'hi', float('nan')]", "[b'hi', nan]"},
+		{"{(1,): 'x'}", "{(1,): 'x'}"},
+		{"{'z': 1.0, 'a': 'é\\u2028<>&', None: (False,), 2.5: 'n'}", "{\n  \"z\": 1.0,\n  \"a\": \"é\u2028<>&\",\n  \"null\": [\n    false\n  ],\n  \"2.5\": \"n\"\n}"},
+		{"a = []; a.append(a); a", "[[...]]"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			out, err := testRun(t, tc.code, nil, nil, StandardLimits())
+			if err != nil || out.Status == modular.Failed || out.Content.Text() != tc.want {
+				t.Fatalf("got %q (%s), %v, want %q", out.Content.Text(), out.Status, err, tc.want)
+			}
+		})
 	}
 }
 
@@ -92,7 +135,7 @@ func TestMontyCallsAndLimits(t *testing.T) {
 		{"syntax", "for", "SyntaxError", true, 0},
 		{"recursion", "def f():\n    return f()\nf()", "RecursionError", true, 0},
 		{"compute", "while True:\n    pass", "Timeout", true, 0},
-		{"print cap", "print('éééééééé')", "ééééé\nRuntimeError: printed output exceeds the 10-byte limit", true, 0},
+		{"print cap", "print('aéééééééé')", "RuntimeError: printed output exceeded 10 bytes\naéééé", true, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l := StandardLimits()
