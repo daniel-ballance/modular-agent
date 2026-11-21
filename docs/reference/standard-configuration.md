@@ -189,7 +189,9 @@ With the durable Runtime on Linux, every implementation declares the same values
 | `movingWithUnfinishedWork` | `refused` | | `mixedActorInput` | `refused` |
 | `rewinding` | true when the session's project is in a git work tree ([rewind points](#rewind-points)); false otherwise |
 | `forking`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` on Linux; `processGroup` on macOS, where a process that leaves its command's process group is not stopped |
-| `confinesFiles`, `severalActors`, `sessionLimits`, `tenants`, `holdsOutput`, `outputBypassesAgent`, `cancellingTurnCancelsJobs`, `pluginsDuringSession`, `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | false | | `projectRoot` | omitted |
+| `confinesFiles`, `severalActors`, `sessionLimits`, `holdsOutput`, `outputBypassesAgent`, `cancellingTurnCancelsJobs`, `pluginsDuringSession`, `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | false | | `projectRoot` | omitted |
+
+`tenants` is false unless the operator's [policy](#connection-policy-and-limits) names tenants; then `ma` enables those tenants' buckets and applies each connection's tenant reach, and a connection with no tenant list still reaches only sessions without a tenant.
 
 These are what the Rust implementation declares. An implementation that cannot meet one declares what it does meet, and the difference is a gap to close, not a choice.
 
