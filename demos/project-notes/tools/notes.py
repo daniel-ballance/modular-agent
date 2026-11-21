@@ -25,7 +25,9 @@ async def add_note(note: str, ctx: ToolContext) -> str:
 async def search_notes(query: str, ctx: ToolContext) -> str:
     """Find lines containing the given text, ignoring case."""
     notes = (await ctx.environment.read(NOTES)).decode()
-    matches = [line for line in notes.splitlines() if query.casefold() in line.casefold()]
+    matches = [
+        line for line in notes.splitlines() if query.casefold() in line.casefold()
+    ]
     return "\n".join(matches) if matches else "No matching notes."
 
 

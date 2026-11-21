@@ -35,7 +35,7 @@ demos/project-notes/run.py
 
 Each case gets a fresh temporary project and two owner-only random tokens. The services bind to loopback on OS-assigned ports. Run this only on a machine where you trust the other local accounts: the listeners use plain HTTP and WebSocket, and moving a plugin to another process does not sandbox it.
 
-The first check compares the file, tool results and final answer with the transcript read from the history service. The second check (also available with `--crash`) kills the agent and its stdio plugin after the append reaches disk but before the tool returns. A fresh agent with an empty local state directory reopens the same session over HTTP, without another prompt. The durable Runtime reports the unfinished write as `outcomeUnknown`, does not repeat it, and completes the turn after searching the file. Both checks stop their processes and delete their temporary directories.
+The first check compares the file, tool results and final answer with the transcript read from the history service. The second check (also available with `--crash`) kills the agent and its stdio plugin after the line appears in the file but before the tool returns. A fresh agent with an empty local state directory reopens the same session over HTTP, without another prompt. The durable Runtime reports the unfinished write as `outcomeUnknown`, does not repeat it, and completes the turn after searching the file. Both checks stop their processes and delete their temporary directories.
 
 ## Run with a real model
 
