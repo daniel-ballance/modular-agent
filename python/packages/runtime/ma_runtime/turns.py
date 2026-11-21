@@ -927,6 +927,7 @@ class Turns:
                         call=call["id"],
                         text=piece.get("text", ""),
                         final=False,
+                        **({"content": piece["content"]} if "content" in piece else {}),
                     )
 
                 ran_again = True

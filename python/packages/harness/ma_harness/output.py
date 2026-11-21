@@ -79,7 +79,7 @@ def project(event):
         ]
     elif kind == "tool_progress":
         event_type = "toolOutput"
-        fields = {"toolCallId": "call", "chunk": "text"}
+        fields = {"toolCallId": "call", "chunk": "text", "content": "content"}
     elif kind in {"history_entry", "history_view"}:
         e = data["entry"]
         wire = entry_out(e)

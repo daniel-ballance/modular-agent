@@ -505,9 +505,12 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         value = agent.declaration()
         if sid:
             selected = await super().declaration(sid)
-            for key in ("keepsStateAtProvider", "runsToolsAtProvider", "liveSessions", "rewinding"):
-                value[key] = selected[key]
-            return {**value, "plugins": selected["plugins"]}
+            return {
+                **value,
+                "keepsStateAtProvider": selected["keepsStateAtProvider"],
+                "rewinding": selected["rewinding"],
+                "plugins": selected["plugins"],
+            }
         return {**value, "plugins": agent._h.declarations(str(agent._project))}
 
     async def close_projects(self) -> None:
@@ -806,6 +809,8 @@ class Agent:
                 value["waitingThroughRestart"] and self._late_answers and "questions" in parts
             ),
             mixedActorInput="refused",
+            runsToolsAtProvider=False,
+            liveSessions=False,
             holdsOutput=bool(self._h.holds_output()),
             severalActors=self._several_actors,
             sessionLimits=self._session_limits,

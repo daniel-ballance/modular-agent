@@ -233,6 +233,39 @@ async def test_move_erase_and_proposals_with_shared_content(tmp_path):
         assert {"sessionId": session.id, "id": second_input} in report["erased"]
 
 
+@pytest.mark.parametrize("settlement", ["release", "decline", "withdraw"])
+async def test_proposals_can_only_be_settled_once(settlement):
+    async with make_agent(script=[{"text": "accepted"}], several_actors=True) as agent:
+        session = await agent.session()
+        await session.join({"id": "guest", "kind": "user", "rights": ["watch", "propose"]})
+        guest = session.as_actor("guest")
+        proposal = await guest.send("proposal", "propose")
+        [parked] = await session.proposals()
+        assert parked["inputId"] == proposal.input_id
+        assert parked["actorId"] == "guest"
+        if settlement == "withdraw":
+            await guest.withdraw(proposal.input_id)
+        else:
+            receipt = await session.release(
+                proposal.input_id, "after", declined=settlement == "decline"
+            )
+            assert receipt.input_id == proposal.input_id
+            assert receipt.disposition == ("handedBack" if settlement == "decline" else None)
+
+        assert await session.proposals() == []
+        with pytest.raises(AgentError) as release:
+            await session.release(proposal.input_id, "now")
+        with pytest.raises(AgentError) as withdraw:
+            await guest.withdraw(proposal.input_id)
+        assert release.value.code == withdraw.value.code == "conflict"
+        await session.wait_idle()
+        turn = await session.last_turn()
+        if settlement == "release":
+            assert turn is not None and turn.text == "accepted"
+        else:
+            assert turn is None
+
+
 @pytest.mark.parametrize("hosted", [False, True])
 async def test_gate_pending_leaves_call_for_a_later_turn(hosted):
     import sys

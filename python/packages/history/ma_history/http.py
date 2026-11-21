@@ -251,7 +251,12 @@ class HTTPHistory(Plugin):
                 self._lose(sid, lease)
                 raise
             lease["task"] = asyncio.create_task(self.renew(sid, lease, sent, value["ttlMs"]))
+            lease["watcher"] = self._watch_writer(sid, lease)
             return lease["id"]
+
+    def _watch_writer(self, sid, lease):
+        # HTTP reports writer loss via renewals and the local deadline.
+        return None
 
     async def renew(self, sid, lease, sent, ttl):
         path = self.path(sid) + "/lease/" + self.segment(lease["id"]) + "/renew"
@@ -272,9 +277,10 @@ class HTTPHistory(Plugin):
         if lease := self.leases.pop(sid, None):
             if timer := lease.get("timer"):
                 timer.cancel()
-            if task := lease.get("task"):
+            tasks = [task for key in ("task", "watcher") if (task := lease.get(key))]
+            for task in tasks:
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
             if task := lease.get("interrupt"):
                 await asyncio.gather(task, return_exceptions=True)
             try:
