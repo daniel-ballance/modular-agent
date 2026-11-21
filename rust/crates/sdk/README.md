@@ -87,8 +87,4 @@ rm -rf "$scratch"
 
 ## Findings for the SDK specification
 
-- **[ACP token scope](../../../docs/research/sdk-findings.md#open-decisions).** Rust treats omitted `tenants` and `projects` as no additional restriction and includes descendants of canonical project roots. The SDKs differ on these defaults and on project matching.
-- **[ACP control message](../../../docs/research/sdk-findings.md#open-decisions).** Rust proposes documenting `$/ping` with `{}` in and out, including before `initialize`, and a five-second default control deadline. The WebSocket binding's liveness rule needs a decision about ACP clients.
-- **[API-key reasoning levels](../../../docs/research/sdk-api-key-reasoning.md).** The OpenAI adapter and Anthropic adapter do not offer the same range of settings as the other SDKs. Decide the shared per-model mapping before changing the adapters.
-
 **Remaining implementation gaps.** The Rust SDK still lacks several generic part and job interfaces, dynamic tool-source serving, custom hook subscription and invocation, the public `output` handler, and some context and in-process hook variants. These are not requests to relax the specification. The live suite has not been run against model services; the Anthropic adapter does not advertise a reasoning setting, so that check does not run for it until the adapter gains one.
