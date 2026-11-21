@@ -19,9 +19,11 @@ pub struct HookContext {
     pub turn_id: Option<String>,
     pub step_id: Option<String>,
     pub tool_call_id: Option<String>,
+    pub job_id: Option<String>,
     pub cancelled: CancellationToken,
     pub(crate) settled: CancellationToken,
     pub(crate) backend: Option<Backend>,
+    pub(crate) job_owner: Option<(String, crate::jobs::Owner)>,
 }
 
 impl std::fmt::Debug for HookContext {
@@ -45,6 +47,7 @@ impl HookContext {
             turn_id: scope.turn.clone(),
             step_id: scope.step.clone(),
             tool_call_id: scope.call.clone(),
+            job_id: scope.job.clone(),
             cancelled,
             backend: Some(Backend::Local { api, scope }),
             ..Default::default()
@@ -59,6 +62,7 @@ impl HookContext {
             step_id: id("stepId"),
             tool_call_id: id("toolCallId")
                 .or_else(|| payload["call"]["id"].as_str().map(str::to_owned)),
+            job_id: id("jobId"),
             cancelled,
             backend: Some(backend),
             ..Default::default()
@@ -67,11 +71,15 @@ impl HookContext {
     pub fn log(&self, message: impl std::fmt::Display) {
         eprintln!("hook in session {}: {message}", self.session_id);
     }
-    fn backend(&self) -> Result<&Backend> {
+    pub(crate) fn backend(&self) -> Result<&Backend> {
         self.backend
             .as_ref()
             .filter(|_| !self.settled.is_cancelled())
             .ok_or_else(|| Error::new(Code::InvalidRequest, "hook context is not active"))
+    }
+    /// Job-owner operations are available only during this plugin's session.start hook.
+    pub fn jobs(&self) -> crate::StartJobs<'_> {
+        crate::StartJobs(self)
     }
     pub async fn history(&self, after: Option<&str>) -> Result<HistoryPage> {
         history(self.backend()?, &self.session_id, after).await
@@ -86,6 +94,17 @@ impl HookContext {
     ) -> Result<crate::HookReply> {
         call_hook(self.backend()?, hook, value).await
     }
+}
+
+pub(crate) fn named_credential(api: &base::Api, name: &str) -> Result<String> {
+    if api.provider_credential(name) {
+        return Err(Error::new(
+            Code::InvalidRequest,
+            "a Provider owns this credential",
+        ));
+    }
+    let store = base::capability::<dyn base::CredentialStore>(api.as_ref(), "credentials")?;
+    Ok(store.get(name)?)
 }
 
 pub(crate) async fn history(

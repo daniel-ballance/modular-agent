@@ -13,7 +13,9 @@ use std::{
 
 struct OpenSession {
     data: SessionData,
-    _lease: Option<Box<dyn Lease>>,
+    lease: Option<Box<dyn Lease>>,
+    generation: CancellationToken,
+    interruption: CancellationToken,
     queue: VecDeque<Input>,
     interrupted: Vec<(Arc<dyn Runtime>, Scope)>,
     active: bool,
@@ -23,6 +25,12 @@ struct OpenSession {
     steer_closed: bool,
     cancel: CancellationToken,
 }
+impl Drop for OpenSession {
+    fn drop(&mut self) {
+        self.generation.cancel();
+    }
+}
+
 type HeldOutput = BTreeMap<(String, String, String), Vec<(Event, Value)>>;
 
 pub struct Harness {
@@ -210,7 +218,9 @@ impl Harness {
                 id.clone(),
                 OpenSession {
                     data,
-                    _lease: lease,
+                    lease,
+                    generation: CancellationToken::new(),
+                    interruption: CancellationToken::new(),
                     queue: VecDeque::new(),
                     interrupted: Vec::new(),
                     active: false,
@@ -222,6 +232,7 @@ impl Harness {
                 },
             );
         }
+        self.watch_writer(&id);
         if let Err(error) = self.prepare_session(&id).await {
             let _ = self.close(&id).await;
             self.sessions.lock().unwrap().remove(&id);
@@ -325,7 +336,9 @@ impl Harness {
                 id.into(),
                 OpenSession {
                     data,
-                    _lease: Some(lease),
+                    lease: Some(lease),
+                    generation: CancellationToken::new(),
+                    interruption: CancellationToken::new(),
                     queue: VecDeque::new(),
                     interrupted: Vec::new(),
                     active: false,
@@ -337,6 +350,7 @@ impl Harness {
                 },
             );
         }
+        self.watch_writer(id);
         if recovery {
             let result = self.recover_rewind(&Scope::session(id)).await;
             let mut sessions = self.sessions.lock().unwrap();
@@ -490,6 +504,19 @@ impl Harness {
         {
             let mut sessions = self.sessions.lock().unwrap();
             if let Some(open) = sessions.get(id)
+                && open.interruption.is_cancelled()
+                && !open.active
+            {
+                if open.journal_uncertain || open.data.unresolved_rewind().is_some() {
+                    self.blocked_projects
+                        .lock()
+                        .unwrap()
+                        .insert(open.data.project.clone(), id.into());
+                }
+                sessions.remove(id);
+                return Ok(());
+            }
+            if let Some(open) = sessions.get(id)
                 && !open.rewinding
                 && (open.journal_uncertain || open.data.unresolved_rewind().is_some())
             {
@@ -576,6 +603,77 @@ impl Harness {
     }
     fn holds_remote_output(&self) -> bool {
         self.registry.read().unwrap().declaration()["remote_output"] == true
+    }
+    fn watch_writer(&self, id: &str) {
+        let (lost, generation) = {
+            let sessions = self.sessions.lock().unwrap();
+            let Some(open) = sessions.get(id) else { return };
+            let Some(lost) = open.lease.as_ref().and_then(|lease| lease.lost()) else {
+                return;
+            };
+            (lost, open.generation.clone())
+        };
+        let weak = self.me.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = generation.cancelled() => {},
+                _ = lost.cancelled() => {
+                    if let Some(h) = weak.upgrade()
+                        && let Some(open) = h.sessions.lock().unwrap().get_mut(&id)
+                        && !generation.is_cancelled()
+                    {
+                        h.interrupt(open, "writerLost");
+                    }
+                }
+            }
+        });
+    }
+    fn interrupt(&self, open: &mut OpenSession, reason: &str) {
+        if open.interruption.is_cancelled() {
+            return;
+        }
+        open.cancel.cancel();
+        open.interruption.cancel();
+        let h = self.api();
+        let event = Event::new(
+            &Scope::session(&open.data.id),
+            "session.interrupted",
+            json!({"reason":reason}),
+        );
+        // The transition runs under the sessions lock; gates and delivery must not.
+        tokio::spawn(async move {
+            if let Err(error) = h.emit(event).await {
+                eprintln!("session interruption delivery failed: {error}");
+            }
+        });
+    }
+    fn check_open_writer(&self, open: &mut OpenSession) -> Result<()> {
+        ensure!(
+            !open.interruption.is_cancelled(),
+            LostPart("session writer interrupted; reopen to recover".into())
+        );
+        if let Some(lease) = &open.lease
+            && let Err(error) = lease.check()
+        {
+            self.interrupt(open, "writerLost");
+            return Err(LostPart(format!("session writer lost: {error}")).into());
+        }
+        Ok(())
+    }
+    fn commit(&self, open: &mut OpenSession, data: &SessionData) -> Result<()> {
+        self.check_open_writer(open)?;
+        if let Err(error) = self.save(data) {
+            let lost = error.is::<LostPart>()
+                || open
+                    .lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.check().is_err());
+            self.interrupt(open, if lost { "writerLost" } else { "commitFailed" });
+            return Err(LostPart(format!("session commit failed: {error}")).into());
+        }
+        Ok(())
     }
     fn save(&self, data: &SessionData) -> Result<()> {
         // An ACP connection joins even a new session, but that join alone
@@ -835,7 +933,7 @@ impl Harness {
         }
         next.position = Some(entry.id.clone());
         next.entries.push(entry.clone());
-        self.save(&next)?;
+        self.commit(open, &next)?;
         open.data = next;
         open.queue.push_back(Input {
             id: entry.id.clone(),
@@ -860,8 +958,9 @@ impl Harness {
         {
             let sessions = self.sessions.lock().unwrap();
             if sessions.get(session).is_some_and(|open| {
-                !open.rewinding
-                    && (open.journal_uncertain || open.data.unresolved_rewind().is_some())
+                open.interruption.is_cancelled()
+                    || (!open.rewinding
+                        && (open.journal_uncertain || open.data.unresolved_rewind().is_some()))
             }) {
                 // Rewind started with no live work. Closing an unresolved session
                 // should release the writer without writing cancellation records.
@@ -1108,6 +1207,7 @@ impl Harness {
             .get_mut(session)
             .unwrap()
             .active = false;
+        self.check_writer(session)?;
         let result = match result {
             Ok(r) => r,
             Err(e) => {
@@ -1625,7 +1725,7 @@ impl AgentApi for Harness {
         let entry = make_entry(&next, &record_scope, "harness", draft);
         next.position = Some(entry.id.clone());
         next.entries.push(entry);
-        self.save(&next)?;
+        self.commit(open, &next)?;
         open.data = next;
         if declined {
             open.queue.remove(i);
@@ -1664,7 +1764,7 @@ impl AgentApi for Harness {
         );
         next.position = Some(entry.id.clone());
         next.entries.push(entry);
-        self.save(&next)?;
+        self.commit(open, &next)?;
         open.data = next;
         open.queue.remove(i);
         Ok(())
@@ -1684,15 +1784,20 @@ impl AgentApi for Harness {
     fn declaration(&self) -> Result<Value> {
         Harness::declaration(self)
     }
-    fn check_writer(&self, session: &str) -> Result<()> {
-        let sessions = self.sessions.lock().unwrap();
-        let open = sessions
+    fn writer_interruption(&self, session: &str) -> Result<CancellationToken> {
+        self.sessions
+            .lock()
+            .unwrap()
             .get(session)
+            .map(|open| open.interruption.clone())
+            .ok_or_else(|| OperationError::NotFound("session not open".into()).into())
+    }
+    fn check_writer(&self, session: &str) -> Result<()> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get_mut(session)
             .ok_or_else(|| anyhow!("session not open"))?;
-        if let Some(lease) = &open._lease {
-            lease.check()?;
-        }
-        Ok(())
+        self.check_open_writer(open)
     }
     fn cancellation(&self, session: &str) -> Result<CancellationToken> {
         Ok(self
@@ -1881,7 +1986,7 @@ impl AgentApi for Harness {
             entries.push(entry);
             input
         });
-        self.save(&next)?;
+        self.commit(open, &next)?;
         open.data = next;
         if let Some(input) = queued {
             open.queue.push_back(input);
@@ -1915,7 +2020,7 @@ impl AgentApi for Harness {
         let mut next = open.data.clone();
         next.position = Some(entry.id.clone());
         next.entries.push(entry.clone());
-        self.save(&next)?;
+        self.commit(open, &next)?;
         open.data = next;
         self.pending_events
             .lock()
@@ -1986,7 +2091,7 @@ impl AgentApi for Harness {
         );
         next.position = Some(entry.id.clone());
         next.entries.push(entry.clone());
-        self.save(&next)?;
+        self.commit(open, &next)?;
         open.data = next.clone();
         self.pending_events.lock().unwrap().push(Event::new(
             scope,
@@ -2015,6 +2120,7 @@ impl AgentApi for Harness {
             .get_mut(session)
             .ok_or_else(|| anyhow!("session not open"))?;
         open.check_rewind()?;
+        self.check_open_writer(open)?;
         open.environment_work += 1;
         Ok(Box::new(rewind::EnvironmentWork {
             harness: self.me.clone(),
@@ -2110,7 +2216,7 @@ impl AgentApi for Harness {
         );
         next.position = position;
         next.entries.push(entry);
-        self.save(&next)?;
+        self.commit(open, &next)?;
         open.data = next;
         open.queue.clear();
         self.invalidate_providers(&scope.session)?;
@@ -2213,7 +2319,9 @@ impl AgentApi for Harness {
             new_id.clone(),
             OpenSession {
                 data: next,
-                _lease: lease,
+                lease,
+                generation: CancellationToken::new(),
+                interruption: CancellationToken::new(),
                 queue: VecDeque::new(),
                 interrupted: Vec::new(),
                 active: false,
@@ -2224,6 +2332,7 @@ impl AgentApi for Harness {
                 cancel: CancellationToken::new(),
             },
         );
+        self.watch_writer(&new_id);
         Ok(new_id)
     }
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
@@ -2351,11 +2460,12 @@ impl AgentApi for Harness {
             .map(|event| event["data"].clone()))
     }
     async fn emit(&self, event: Event) -> Result<()> {
-        let mut events = if event.stream.is_some() && !event.end {
-            vec![]
-        } else {
-            std::mem::take(&mut *self.pending_events.lock().unwrap())
-        };
+        let mut events =
+            if event.kind == "session.interrupted" || (event.stream.is_some() && !event.end) {
+                vec![]
+            } else {
+                std::mem::take(&mut *self.pending_events.lock().unwrap())
+            };
         events.push(event);
         for event in events {
             let observe = match event.kind.as_str() {

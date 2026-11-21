@@ -61,9 +61,18 @@ pub(crate) async fn pump(
                                 thoughts.insert(event.scope.turn.clone());
                                 text(&cx,&session.id,"agent_thought_chunk",c.as_str().unwrap_or(""))
                             },
+                            "session.interrupted" => {
+                                streamed.clear();
+                                thoughts.clear();
+                                questions.abort_all();
+                                notify(&cx, &session.id, json!({"sessionUpdate":"agent_message_chunk",
+                                    "content":{"type":"text","text":""},
+                                    "_meta":{"modular-agent":{"event":{"type":"sessionInterrupted","time":event.at,"sessionId":session.id,"data":c}}}}))
+                            },
                             "job.ended" => { session.wake.notify_one(); Ok(()) },
                             "request.answered" => {
                                 session.approval_views.lock().unwrap().retain(|(_, id)| c["request"] != *id);
+                                session.wake.notify_one();
                                 Ok(())
                             },
                             "turn.result" => {

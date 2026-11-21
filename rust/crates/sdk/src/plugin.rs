@@ -69,6 +69,7 @@ pub struct Registrar {
     prepare: Vec<LocalHook<SessionPrepare, ()>>,
     pub(crate) environment: Option<Arc<dyn base::WorkingEnvironment>>,
     runtime: Option<Arc<dyn base::Runtime>>,
+    pub(crate) portable_runtime: Option<crate::runtime::Adapter>,
     history: Option<crate::History>,
     credentials: Option<Arc<dyn crate::CredentialStore>>,
     configuration: Option<Arc<dyn crate::Configuration>>,
@@ -126,6 +127,13 @@ impl CommandContext {
             _ = model.done.cancelled() => Err(Error::new(Code::InvalidRequest, "command context has settled")),
             result = attempt => result,
         }
+    }
+
+    pub fn project(&self) -> &std::path::Path {
+        &self.work.project
+    }
+    pub fn step_id(&self) -> Option<&str> {
+        self.work.step_id()
     }
 
     /// Ask an actor from an in-process-only command.
@@ -307,6 +315,7 @@ impl Plugin {
             prepare: vec![],
             environment: None,
             runtime: None,
+            portable_runtime: None,
             history: None,
             jobs: None,
             credentials: None,
@@ -389,7 +398,21 @@ impl Registrar {
     pub fn environment(&mut self, part: impl base::WorkingEnvironment + 'static) -> Result<()> {
         set_part(&mut self.environment, Arc::new(part), "working-environment")
     }
-    pub fn runtime(&mut self, part: impl base::Runtime + 'static) -> Result<()> {
+    pub fn runtime(&mut self, part: impl crate::RuntimePart) -> Result<()> {
+        if self.runtime.is_some() {
+            return Err(Error::new(Code::InvalidComposition, "duplicate runtime"));
+        }
+        set_part(
+            &mut self.portable_runtime,
+            crate::runtime::Adapter::new(part)?,
+            "runtime",
+        )
+    }
+    /// Advanced native-only Runtime, with direct access to base ports.
+    pub fn native_runtime(&mut self, part: impl base::Runtime + 'static) -> Result<()> {
+        if self.portable_runtime.is_some() {
+            return Err(Error::new(Code::InvalidComposition, "duplicate runtime"));
+        }
         set_part(&mut self.runtime, Arc::new(part), "runtime")
     }
     pub fn history_store(&mut self, store: crate::History) -> Result<()> {
@@ -508,6 +531,14 @@ impl base::Plugin for InProcess {
         if let Some(part) = &self.registered.runtime {
             base::Plugin::install(&crate::parts::RuntimeAdapter(part.clone()), r)?;
         }
+        if let Some(part) = &self.registered.portable_runtime {
+            let runtime = plugin_stdio::local_runtime(
+                Arc::new(part.clone()),
+                part.registration.clone(),
+                r.runtime_points(),
+            );
+            r.provide::<dyn base::Runtime>("runtime", runtime)?;
+        }
         if let Some(part) = &self.registered.history {
             r.provide_over_default::<dyn base::HistoryStore>(
                 "history",
@@ -557,11 +588,20 @@ impl base::Plugin for InProcess {
                     let (name, owner) = (name.clone(), closer.clone());
                     Box::pin(async move {
                         let backend = Backend::Local {
-                            api,
+                            api: api.clone(),
                             scope: scope.clone(),
                         };
-                        for job in owner.unfinished(&backend, &name, &scope.session).await? {
-                            if let Err(error) = owner.cancel_id(&job.id).await {
+                        let closer = crate::jobs::LocalOwner(name.clone(), owner.clone());
+                        for job in owner
+                            .unfinished(&backend, &name, &scope.session)
+                            .await?
+                            .into_iter()
+                            .filter(|j| !j.cleanup_unconfirmed)
+                        {
+                            if let Err(error) = closer
+                                .cancel_record(api.clone(), &job.id, &scope.session)
+                                .await
+                            {
                                 eprintln!("could not cancel job {}: {error}", job.id);
                             }
                         }
@@ -569,7 +609,13 @@ impl base::Plugin for InProcess {
                     })
                 }),
             );
-            if owner.can_resume() {
+            if owner.can_resume()
+                && !self
+                    .registered
+                    .hooks
+                    .iter()
+                    .any(|hook| hook.point == "session.start")
+            {
                 let name = self.name.clone();
                 r.on(
                     "session.start",
@@ -581,7 +627,12 @@ impl base::Plugin for InProcess {
                                 api,
                                 scope: scope.clone(),
                             };
-                            for job in owner.unfinished(&backend, &name, &scope.session).await? {
+                            for job in owner
+                                .unfinished(&backend, &name, &scope.session)
+                                .await?
+                                .into_iter()
+                                .filter(|j| !j.cleanup_unconfirmed)
+                            {
                                 owner.resume(job).await?;
                             }
                             Ok(base::HookResult::default())
@@ -667,15 +718,30 @@ impl base::Plugin for InProcess {
             let handle = hook.handle.clone();
             let point = hook.point;
             let question_key = format!("gate:{}:{index}", self.name);
+            let job_owner = (point == "session.start").then(|| jobs.clone()).flatten();
             r.on(
                 plugin_stdio::hook_name(point).expect("known hook"),
                 hook.order.native(),
                 base::handler(move |api, scope, original| {
                     let handle = handle.clone();
                     let question_key = question_key.clone();
+                    let job_owner = job_owner.clone();
                     Box::pin(async move {
                         let mut payload =
                             plugin_stdio::hook_payload(point, &scope, &original, &api)?;
+                        if point == "step.before" {
+                            let data = api.snapshot(&scope.session)?;
+                            payload["history"] = json!(
+                                data.entries
+                                    .iter()
+                                    .filter(|e| e.writer != "rust.derived")
+                                    .map(|e| base::wire::entry(e, &data))
+                                    .collect::<base::Result<Vec<_>>>()?
+                            );
+                            let usage: base::Usage =
+                                serde_json::from_value(original["usage"].clone())?;
+                            payload["usage"] = json!(crate::Usage::from(usage));
+                        }
                         if point == "turn.before" {
                             let data = api.snapshot(&scope.session)?;
                             payload["project"] = json!(data.project);
@@ -686,7 +752,8 @@ impl base::Plugin for InProcess {
                                     .collect::<Vec<_>>()
                             );
                         }
-                        let context = crate::HookContext::local(api.clone(), scope.clone());
+                        let mut context = crate::HookContext::local(api.clone(), scope.clone());
+                        context.job_owner = job_owner;
                         let guard = context.settled.clone().drop_guard();
                         let reply = handle(payload, context)
                             .await
@@ -780,8 +847,11 @@ impl base::Plugin for InProcess {
                             actor_id: scope.actor.clone(),
                             project: api.snapshot(&scope.session)?.project,
                             call_id: String::new(),
+                            turn_id: None,
+                            step_id: scope.step.clone(),
                             cancelled: cancelled.clone(),
                             settled: done,
+                            asks: Default::default(),
                         };
                         let text = run(
                             args["args"].as_str().unwrap_or_default().into(),
@@ -971,11 +1041,16 @@ impl base::ToolSource for Source {
             session_id: scope.session.clone(),
             actor_id: scope.actor.clone(),
             call_id: call.id.clone(),
+            turn_id: scope.turn.clone(),
+            step_id: scope.step.clone(),
             backend: Backend::Local { api, scope },
             cancelled: cancel,
             settled: Default::default(),
+            asks: Default::default(),
         };
-        let settled = execute(&tool, call.input.clone(), cx).await;
+        let Some(settled) = execute(&tool, call.input.clone(), cx).await else {
+            return base::ToolResult::new(&call, base::ToolStatus::Waiting, "question left open");
+        };
         // ToolResult::new words a refusal itself.
         let mut result = base::ToolResult::new(&call, settled.status.to_base(), settled.text);
         // Preserve the distinction between an omitted value and JSON null, and

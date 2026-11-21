@@ -129,6 +129,7 @@ impl Session {
         if !receipt.duplicate && receipt.command.is_none() && !self.api.is_running(&self.id) {
             self.api.next_turn(&self.id).await?;
         }
+        let interruption = self.api.writer_interruption(&self.id)?;
         // A duplicate of extension input may still be queued. It must describe
         // the original turn, never invent a completed outcome or start it twice.
         if receipt.command.is_none()
@@ -151,7 +152,11 @@ impl Session {
                     "input was handed back before a turn took it"
                 );
                 self.wake.notify_one();
-                tokio::select! { _ = completed => (), _ = self.stop.cancelled() => bail!("session closed before input ran") }
+                tokio::select! {
+                    _ = interruption.cancelled() => bail!(LostPart("session writer interrupted; reopen to recover".into())),
+                    _ = completed => (),
+                    _ = self.stop.cancelled() => bail!("session closed before input ran"),
+                }
             }
         }
         // cancel may still be recording the queued inputs it handed back.

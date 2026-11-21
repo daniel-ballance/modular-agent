@@ -5,7 +5,10 @@ use crate::{
     tool::{Backend, ToolContext, ToolStatus, execute},
 };
 use agent_api as base;
-use plugin_stdio::rpc::{Endpoint, Fault, Peer, Reply};
+use plugin_stdio::{
+    RuntimeHandler,
+    rpc::{Endpoint, Fault, Peer, Reply},
+};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -100,6 +103,9 @@ impl Served {
 
 fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
     let mut v = json!({"binding": BINDING, "name": name, "replaces": replaces});
+    if let Some(runtime) = &r.portable_runtime {
+        v["runtime"] = runtime.registration.clone();
+    }
     if let Some(env) = &r.environment {
         let native = env.declaration();
         let containment = match native["containment"].as_str() {
@@ -150,7 +156,9 @@ fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
         .enumerate()
         .map(|(i, hook)| json!({"hook":hook.point,"handlerId":i + 1,"order":hook.order.name()}))
         .collect::<Vec<_>>();
-    if r.jobs.as_ref().is_some_and(crate::jobs::Owner::can_resume) {
+    if r.jobs.as_ref().is_some_and(crate::jobs::Owner::can_resume)
+        && !r.hooks.iter().any(|hook| hook.point == "session.start")
+    {
         hooks.push(json!({"hook":"session.start","handlerId":hooks.len()+1}));
     }
     if !hooks.is_empty() {
@@ -354,6 +362,15 @@ impl Endpoint for Served {
                     }
                 }
             }
+            "runtime/runTurn" | "runtime/resumeTurn" | "runtime/continueOpenCalls" => {
+                let r = self.registered()?;
+                let runtime = r
+                    .portable_runtime
+                    .as_ref()
+                    .ok_or_else(|| Fault::new("not_supported", "no Runtime registered"))?;
+                let (context, _scope) = plugin_stdio::RuntimeContext::remote(peer, id, cancel);
+                runtime.run(method, p, context).await
+            }
             "tools/list" => {
                 let r = self.registered()?;
                 Ok(json!({"tools": definitions(&tools(&r, &p)?)}))
@@ -374,16 +391,22 @@ impl Endpoint for Served {
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: call["actorId"].as_str().unwrap_or_default().into(),
                     call_id: call["id"].as_str().unwrap_or_default().into(),
+                    turn_id: call["turnId"].as_str().map(str::to_owned),
+                    step_id: call["stepId"].as_str().map(str::to_owned),
                     backend: Backend::Remote {
                         peer,
                         parent: id.clone(),
                     },
                     cancelled: cancel.clone(),
                     settled: Default::default(),
+                    asks: Default::default(),
                 };
-                let settled = CATALOG_PARENT
+                let Some(settled) = CATALOG_PARENT
                     .scope(id, execute(tool, call["input"].clone(), cx))
-                    .await;
+                    .await
+                else {
+                    return Ok(json!({"pending":"question left open"}));
+                };
                 if settled.status == ToolStatus::Cancelled && cancel.is_cancelled() {
                     return Err(Fault::new("cancelled", "tool cancelled"));
                 }
@@ -413,6 +436,8 @@ impl Endpoint for Served {
                         .unfinished(&backend, &self.plugin.name, session)
                         .await
                         .map_err(to_fault)?
+                        .into_iter()
+                        .filter(|j| !j.cleanup_unconfirmed)
                     {
                         owner.resume(job).await.map_err(to_fault)?;
                     }
@@ -423,11 +448,17 @@ impl Endpoint for Served {
                     .and_then(|i| r.hooks.get((i as usize).checked_sub(1)?))
                     .filter(|handler| p["hook"] == handler.point)
                     .ok_or_else(|| Fault::new("unknown_handler", "unknown handler"))?;
-                let context = crate::HookContext::remote(
+                let mut context = crate::HookContext::remote(
                     Backend::Remote { peer, parent: id },
                     &p["payload"],
                     cancel,
                 );
+                if handler.point == "session.start" {
+                    context.job_owner = r
+                        .jobs
+                        .clone()
+                        .map(|owner| (self.plugin.name.clone(), owner));
+                }
                 let _guard = context.settled.clone().drop_guard();
                 match (handler.handle)(p["payload"].clone(), context).await {
                     Err(e)
@@ -466,9 +497,12 @@ impl Endpoint for Served {
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: p["actorId"].as_str().unwrap_or_default().into(),
                     call_id: String::new(),
+                    turn_id: None,
+                    step_id: p["stepId"].as_str().map(str::to_owned),
                     backend: Backend::Remote { peer, parent: id },
                     cancelled: cancel.clone(),
                     settled,
+                    asks: Default::default(),
                 };
                 let cx = CommandContext {
                     session_id: work.session_id.clone(),
@@ -500,7 +534,7 @@ impl Endpoint for Served {
     }
 }
 
-fn to_fault(e: Error) -> Fault {
+pub(crate) fn to_fault(e: Error) -> Fault {
     Fault::new(e.code().as_str(), e.message())
 }
 

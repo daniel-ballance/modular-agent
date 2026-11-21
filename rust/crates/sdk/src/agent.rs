@@ -885,6 +885,7 @@ impl AgentBuilder {
                 kept: Default::default(),
             }),
         };
+        agent.inner.hub.inner.set(Arc::downgrade(&agent.inner)).ok();
         for interface in interfaces {
             if let Err(e) = interface.start(agent.clone()).await {
                 let _ = interface.stop().await;

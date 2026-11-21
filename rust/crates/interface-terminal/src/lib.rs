@@ -43,6 +43,10 @@ impl EventSink for TerminalSink {
             return;
         }
         match event.kind.as_str() {
+            "session.interrupted" => eprintln!(
+                "Session interrupted ({}); reopen to recover.",
+                event.content["reason"]
+            ),
             "session.open" => eprintln!("Session: {}", event.scope.session),
             "tool.progress" => {
                 eprint!("{}", event.content.as_str().unwrap_or(""));

@@ -196,8 +196,8 @@ impl Harness {
         let open = sessions
             .get_mut(&scope.session)
             .ok_or_else(|| anyhow!("session not open"))?;
-        let check_lease = || open._lease.as_ref().map_or(Ok(()), |lease| lease.check());
-        check_lease()?;
+        self.check_open_writer(open)?;
+        let check_lease = || open.lease.as_ref().map_or(Ok(()), |lease| lease.check());
         let mut content = json!({"to":to});
         if let Some((point, undo)) = restore {
             content["restore"] = json!({"point":point,"undo":undo});
@@ -233,11 +233,14 @@ impl Harness {
                     if data.position == open.data.position
                         && !data.entries.iter().any(|e| e.id == entry.id) =>
                 {
-                    return Err(error);
+                    self.interrupt(open, "commitFailed");
+                    return Err(LostPart(format!("rewind commit failed: {error}")).into());
                 }
                 _ => {
                     open.journal_uncertain = true;
-                    return Err(error.context("could not reconcile the rewind journal"));
+                    let lost = error.is::<LostPart>() || check_lease().is_err();
+                    self.interrupt(open, if lost { "writerLost" } else { "commitFailed" });
+                    return Err(LostPart("could not reconcile the rewind journal".into()).into());
                 }
             }
         }

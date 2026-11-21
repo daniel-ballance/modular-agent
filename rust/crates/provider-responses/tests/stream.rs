@@ -188,20 +188,16 @@ async fn service_errors_are_told_apart() {
         .lock()
         .unwrap()
         .iter()
-        .map(|e| {
-            (
-                e["kind"].as_str().unwrap().to_owned(),
-                e["message"].as_str().unwrap().to_owned(),
-            )
-        })
+        .map(|e| (e.kind, e.message.clone()))
         .collect();
-    assert_eq!(kinds[0].0, "other");
+    use modular_agent::ModelErrorKind::{ContextTooLarge, Other, Temporary};
+    assert_eq!(kinds[0].0, Other);
     assert!(kinds[0].1.contains("usage limit"));
-    assert_eq!(kinds[1].0, "contextTooLarge");
-    assert_eq!(kinds[2].0, "temporary");
+    assert_eq!(kinds[1].0, ContextTooLarge);
+    assert_eq!(kinds[2].0, Temporary);
     assert!(kinds[2].1.contains("503"));
-    assert_eq!(kinds[3].0, "temporary");
-    assert_eq!(kinds[4].0, "temporary");
+    assert_eq!(kinds[3].0, Temporary);
+    assert_eq!(kinds[4].0, Temporary);
     assert!(kinds[4].1.contains("ended before a complete response"));
     // xAI takes the system prompt as the first input item, with no extra headers.
     let requests = server.requests.lock().unwrap();

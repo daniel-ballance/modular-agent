@@ -123,6 +123,7 @@ pub fn encode(event: &Event, api: &dyn AgentApi) -> Result<Value> {
     let c = &event.content;
     let s = &event.scope;
     let (kind, data) = match event.kind.as_str() {
+        "session.interrupted" => ("sessionInterrupted", event.content.clone()),
         "model.delta" | "model.thought" => {
             let mut data = json!({"delta":c});
             if let Some(step) = &s.step {

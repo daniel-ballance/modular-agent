@@ -68,7 +68,7 @@ fn hooks() -> Plugin {
             })
         })
         .on_tool_after(|after| async move {
-            assert_eq!(after.call["name"], "echo");
+            assert_eq!(after.call.name, "echo");
             Ok(ToolChange {
                 content: Some(json!([{"type":"text","text":"after"}])),
                 value: None,
@@ -76,7 +76,7 @@ fn hooks() -> Plugin {
         })
         .on_step_after(|_| async { Ok(Gate::Allow) })
         .on_turn_end(|ended| async move {
-            assert_eq!(ended.outcome["kind"], "completed");
+            assert_eq!(ended.outcome.kind(), "completed");
             Ok(())
         })
         .command(Command::new(

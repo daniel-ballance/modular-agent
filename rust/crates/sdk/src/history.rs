@@ -2,7 +2,10 @@
 use crate::{Code, Error, Result, core::MemoryHistory};
 use agent_api as base;
 pub use agent_api::HistoryStore;
-pub use history_http::{HistoryServer, ServeHistoryOptions};
+pub use history_http::{
+    EntryPage, HistoryFault, HistoryResult, HistoryServer, LeaseGrant, PortableHistoryStore,
+    ServeHistoryOptions, SessionPage,
+};
 use serde_json::Value;
 use std::{path::Path, sync::Arc};
 
@@ -84,6 +87,16 @@ impl History {
     /// Adapt an advanced native snapshot store into an SDK history part.
     pub fn from_store(store: impl HistoryStore + 'static, persistent: bool) -> Self {
         Self(Arc::new(store), persistent, "custom")
+    }
+
+    /// Use a store that accepts opaque shared records and fences appends with the
+    /// active writer token. The agent owns reconstruction and lease renewal.
+    pub fn from_portable(store: impl PortableHistoryStore, persistent: bool) -> Result<Self> {
+        Ok(Self(
+            Arc::new(history_http::HttpHistory::from_store(store)?),
+            persistent,
+            "portable custom",
+        ))
     }
 
     pub fn sessions(&self, project: Option<&Path>) -> Result<Vec<SessionInfo>> {

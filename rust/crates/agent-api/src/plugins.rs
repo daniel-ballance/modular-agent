@@ -418,6 +418,9 @@ impl Registry {
     }
 }
 impl Registrar<'_> {
+    pub fn runtime_points(&self) -> BTreeMap<String, HookPoint> {
+        self.registry.runtime_points()
+    }
     pub fn declare(&mut self, value: Value) {
         self.registry.declarations.insert(self.owner.clone(), value);
     }

@@ -93,6 +93,10 @@ impl PromptPlugin {
                 if !listing.is_empty() {
                     sections.push(format!("<skills>\n{listing}\n</skills>"));
                 }
+                let tools = tools
+                    .into_iter()
+                    .map(serde_json::to_value)
+                    .collect::<serde_json::Result<Vec<_>>>()?;
                 sections.push(tools_code::catalog::prompt(&tools_code::functions(tools)?));
                 sections.push(format!(
                     "<cwd>\n{}\n</cwd>\n\n<date>\n{}\n</date>",

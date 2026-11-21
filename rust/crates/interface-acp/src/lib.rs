@@ -229,7 +229,10 @@ impl State {
                 .ok_or_else(|| withheld().into());
         }
         let result = self.request(request, cx).await;
-        if result.as_ref().err().is_some_and(|e| e.is::<acp::Error>())
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.is::<acp::Error>() || e.is::<LostPart>())
             || matches!(
                 method.as_str(),
                 "session/load" | "session/resume" | "session/new"
@@ -817,6 +820,9 @@ async fn run_connection(
                         let result = requests.dispatch(request, connection).await.map_err(|e| {
                             if let Some(error) = e.downcast_ref::<acp::Error>() {
                                 error.clone()
+                            } else if let Some(lost) = e.downcast_ref::<LostPart>() {
+                                acp::Error::new(-32000, lost.to_string())
+                                    .data(json!({"code":"lost"}))
                             } else if let Some(held) = e.downcast_ref::<HistoryHeld>() {
                                 acp::Error::new(-32000, held.to_string())
                                     .data(json!({"code":"held","retryAfterMs":held.retry_after_ms}))

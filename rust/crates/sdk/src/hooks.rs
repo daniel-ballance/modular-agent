@@ -123,7 +123,7 @@ pub struct ToolBefore {
     pub call_id: String,
     pub name: String,
     pub input: Value,
-    pub definition: Value,
+    pub definition: crate::ToolDefinition,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -133,11 +133,11 @@ pub struct TurnBefore {
     pub context: crate::HookContext,
     pub session_id: String,
     pub turn_id: String,
-    pub input: Value,
+    pub input: crate::Content,
     /// In-process snapshot of the session's project.
     pub project: Option<std::path::PathBuf>,
     /// Tool definitions callable by plugins; absent over the binding.
-    pub tools: Option<Vec<Value>>,
+    pub tools: Option<Vec<crate::ToolDefinition>>,
 }
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct TurnAddition {
@@ -156,8 +156,8 @@ pub struct ToolAfter {
     #[serde(skip)]
     pub context: crate::HookContext,
     pub session_id: String,
-    pub call: Value,
-    pub result: Value,
+    pub call: crate::ToolCall,
+    pub result: crate::ToolSettlement,
 }
 #[derive(Clone, Debug, Default)]
 pub struct ToolChange {
@@ -172,7 +172,7 @@ pub struct StepAfter {
     pub session_id: String,
     pub turn_id: String,
     pub step_id: String,
-    pub response: Value,
+    pub response: crate::AssistantMessage,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,8 +181,9 @@ pub struct TurnEnd {
     pub context: crate::HookContext,
     pub session_id: String,
     pub turn_id: String,
-    pub outcome: Value,
-    pub result: Value,
+    pub outcome: crate::Outcome,
+    pub result: crate::TurnOutput,
+    pub usage: Option<crate::Usage>,
 }
 
 macro_rules! payload {
@@ -210,7 +211,7 @@ payload!(InputHook {
     session_id: String,
     actor_id: String,
     content: Value,
-    when: String
+    when: crate::Timing
 });
 payload!(TurnStart {
     session_id: String,
@@ -220,22 +221,24 @@ payload!(StepBefore {
     session_id: String,
     turn_id: String,
     step_id: String,
-    model: Value,
-    request: Value
+    model: crate::ModelInfo,
+    request: crate::ModelRequest,
+    history: Option<Vec<crate::HistoryEntry>>,
+    usage: Option<crate::Usage>
 });
 payload!(ModelFailed {
     session_id: String,
-    request: Value,
-    error: Value
+    request: crate::ModelRequest,
+    error: crate::ModelError
 });
 payload!(TurnResultReady {
     session_id: String,
     turn_id: String,
-    result: Value,
+    result: crate::TurnOutput,
     shape: Value
 });
-payload!(ProviderRequest { session_id: Option<String>, provider: String, model: Value, request: Value });
-payload!(ProviderResponse { session_id: Option<String>, provider: String, model: Value, message: Value });
+payload!(ProviderRequest { session_id: Option<String>, provider: String, model: crate::ModelRef, request: crate::ModelRequest });
+payload!(ProviderResponse { session_id: Option<String>, provider: String, model: crate::ModelRef, message: crate::AssistantMessage });
 
 #[derive(Clone, Debug)]
 pub enum InputChange {
@@ -482,7 +485,7 @@ registration!(
             call_id: p["call"]["id"].as_str().unwrap_or_default().into(),
             name: p["call"]["name"].as_str().unwrap_or_default().into(),
             input: p["call"]["input"].clone(),
-            definition: p["definition"].clone(),
+            definition: serde_json::from_value(p["definition"].clone())?,
         })
     },
     gate
@@ -607,7 +610,7 @@ registration!(
     on_step_before_with,
     "step.before",
     StepBefore,
-    Option<Value>,
+    Option<crate::ModelRequest>,
     decode,
     request_change
 );
@@ -616,7 +619,7 @@ registration!(
     on_provider_request_with,
     "provider.request",
     ProviderRequest,
-    Option<Value>,
+    Option<crate::ModelRequest>,
     decode,
     request_change
 );
@@ -635,11 +638,11 @@ registration!(
     })
 );
 
-fn request_change(request: Option<Value>, mut payload: Value) -> Result<Value> {
+fn request_change(request: Option<crate::ModelRequest>, mut payload: Value) -> Result<Value> {
     Ok(match request {
         None => Value::Null,
         Some(request) => {
-            payload["request"] = request;
+            payload["request"] = request.0;
             json!({"value":payload})
         }
     })

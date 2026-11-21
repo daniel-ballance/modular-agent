@@ -280,9 +280,12 @@ pub struct ToolContext {
     pub(crate) session_id: String,
     pub(crate) actor_id: String,
     pub(crate) call_id: String,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) step_id: Option<String>,
     pub(crate) project: std::path::PathBuf,
     pub(crate) cancelled: CancellationToken,
     pub(crate) settled: CancellationToken,
+    pub(crate) asks: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Where the agent is: in this process, or across the plugin binding.
@@ -306,6 +309,14 @@ pub struct Ask {
     options: Vec<String>,
     credential: Option<String>,
     link: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wait_ms: Option<u64>,
+}
+
+/// An unanswered tool question remains open when this wait ends.
+#[derive(Clone, Copy, Debug)]
+pub struct AskWait {
+    pub wait: std::time::Duration,
 }
 
 impl Ask {
@@ -313,6 +324,10 @@ impl Ask {
         let mut question = base::Question::new(scope, self.kind, &self.text);
         question.options = self.options;
         question.credential = self.credential;
+        if let Some(ms) = self.wait_ms {
+            question.timeout_ms = Some(ms);
+            question.extra["whenTimeLimit"] = json!("leaveOpen");
+        }
         if self.link {
             question.extra["kind"] = json!("link");
         }
@@ -325,6 +340,7 @@ impl Ask {
             options: options.iter().map(|o| o.to_string()).collect(),
             credential: None,
             link: false,
+            wait_ms: None,
         }
     }
     pub fn approval(question: impl Into<String>) -> Self {
@@ -334,6 +350,7 @@ impl Ask {
             options: vec![],
             credential: None,
             link: false,
+            wait_ms: None,
         }
     }
     pub fn text(question: impl Into<String>) -> Self {
@@ -343,6 +360,7 @@ impl Ask {
             options: vec![],
             credential: None,
             link: false,
+            wait_ms: None,
         }
     }
     pub fn link(question: impl Into<String>) -> Self {
@@ -387,6 +405,15 @@ impl ToolContext {
     }
     pub fn actor_id(&self) -> &str {
         &self.actor_id
+    }
+    pub fn tool_call_id(&self) -> &str {
+        &self.call_id
+    }
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+    pub fn step_id(&self) -> Option<&str> {
+        self.step_id.as_deref()
     }
     pub fn call_id(&self) -> &str {
         &self.call_id
@@ -436,6 +463,15 @@ impl ToolContext {
         Ok(())
     }
 
+    /// Read a non-Provider named credential. This operation is in-process only.
+    pub async fn credential(&self, name: &str) -> Result<String> {
+        self.check()?;
+        let Backend::Local { api, .. } = &self.backend else {
+            return Err(crate::plugin::cannot_serve("named credentials"));
+        };
+        crate::context::named_credential(api, name)
+    }
+
     /// The session's working environment, scoped to this call and project.
     pub fn environment(&self) -> ToolEnvironment<'_> {
         ToolEnvironment(self)
@@ -482,18 +518,36 @@ impl ToolContext {
         crate::context::call_hook(&self.backend, hook, value).await
     }
 
+    /// Ask an actor, suspending the invocation if the wait ends before an answer.
+    /// `Error::is_left_open` identifies the signal; propagate it to let the SDK
+    /// run this tool again from the top after the question is answered.
+    pub async fn ask_with(&self, mut ask: Ask, options: AskWait) -> Result<Answer> {
+        let ms = options.wait.as_millis();
+        if ask.kind == base::RequestKind::Approval || ms > 9_007_199_254_740_991 {
+            return Err(Error::new(
+                Code::InvalidRequest,
+                "leaveOpen needs a representable wait and a non-approval question",
+            ));
+        }
+        ask.wait_ms = Some(ms as u64);
+        self.ask(ask).await
+    }
+
     /// Ask an actor and wait for the answer.
     pub async fn ask(&self, ask: Ask) -> Result<Answer> {
         self.check()?;
         let approval = ask.kind == base::RequestKind::Approval;
         match &self.backend {
             Backend::Local { api, scope } => {
-                let mut question = base::Question::new(scope.clone(), ask.kind, &ask.text);
-                question.options = ask.options;
-                question.credential = ask.credential;
-                if ask.link {
-                    question.extra["kind"] = json!("link");
+                if ask.wait_ms.is_some() && api.declaration()?["questions_outlast_turn"] != true {
+                    return Err(Error::new(
+                        Code::NotSupported,
+                        "this agent does not leave questions open",
+                    ));
                 }
+                let mut question = ask.into_question(scope.clone());
+                let n = self.asks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                question.key = scope.call.as_ref().map(|call| format!("call:{call}:{n}"));
                 if approval {
                     let data = api.snapshot(&scope.session)?;
                     if let Some(call) = data
@@ -524,7 +578,7 @@ impl ToolContext {
                         }
                     }),
                     base::RequestReply::Declined => Ok(Answer::Declined { reason: None }),
-                    base::RequestReply::Waiting => Err(not_open()),
+                    base::RequestReply::Waiting => Err(left_open()),
                 }
             }
             Backend::Remote { peer, parent } => {
@@ -542,6 +596,10 @@ impl ToolContext {
                 if !ask.options.is_empty() {
                     request["options"] = json!(ask.options);
                 }
+                if let Some(ms) = ask.wait_ms {
+                    request["timeLimitMs"] = json!(ms);
+                    request["whenTimeLimit"] = json!("leaveOpen");
+                }
                 let answer = peer
                     .call(
                         "host/ask",
@@ -552,7 +610,7 @@ impl ToolContext {
                     .await
                     .map_err(crate::serve::from_fault)?;
                 if answer["pending"] == true {
-                    return Err(not_open());
+                    return Err(left_open());
                 }
                 if answer["declined"] == true {
                     return Ok(Answer::Declined {
@@ -803,11 +861,10 @@ impl NestedTools<'_> {
     }
 }
 
-fn not_open() -> Error {
-    Error::new(
-        Code::NotSupported,
-        "leaving a call open past its turn is not supported yet",
-    )
+fn left_open() -> Error {
+    let mut error = Error::new(Code::Internal, "question left open");
+    error.left_open = true;
+    error
 }
 
 /// How a call ended, before the agent adds the call's id. A refusal's text is the bare
@@ -820,18 +877,19 @@ pub(crate) struct Settled {
 }
 
 /// Run a tool's function with a context, wherever the agent is.
-pub(crate) async fn execute(tool: &Tool, input: Value, cx: ToolContext) -> Settled {
+pub(crate) async fn execute(tool: &Tool, input: Value, cx: ToolContext) -> Option<Settled> {
     let cancel = cx.cancelled.clone();
     let _settled = cx.settled.clone().drop_guard();
     let run = (tool.run)(input, cx);
     let outcome = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
-            return Settled { status: ToolStatus::Cancelled, text: "The call was cancelled.".into(), value: None, content: None };
+            return Some(Settled { status: ToolStatus::Cancelled, text: "The call was cancelled.".into(), value: None, content: None });
         }
         outcome = run => outcome,
     };
-    match outcome {
+    Some(match outcome {
+        Err(ref e) if e.is_left_open() => return None,
         Ok(output) => Settled {
             status: match output.status {
                 ToolStatus::NotStarted | ToolStatus::Cancelled => ToolStatus::Failed,
@@ -857,5 +915,5 @@ pub(crate) async fn execute(tool: &Tool, input: Value, cx: ToolContext) -> Settl
             value: None,
             content: None,
         },
-    }
+    })
 }

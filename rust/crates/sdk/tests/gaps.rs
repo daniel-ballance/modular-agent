@@ -84,11 +84,13 @@ async fn validates_returns_after_the_tool_after_transform() -> Result<()> {
 async fn structured_prompt_retries_schema_and_hook_refusals() -> Result<()> {
     let agent = test_agent()
         .plugin(Plugin::new("result-check").on_turn_result(|p| async move {
-            Ok(if p.result["value"]["n"] == 1 {
-                Gate::Refuse("choose a larger number".into())
-            } else {
-                Gate::Allow
-            })
+            Ok(
+                if p.result.value.as_ref().is_some_and(|value| value["n"] == 1) {
+                    Gate::Refuse("choose a larger number".into())
+                } else {
+                    Gate::Allow
+                },
+            )
         }))
         .script(json!([{"text":"not JSON"},{"text":"{\"n\":1}"},{"text":"{\"n\":2}"}]))
         .build()

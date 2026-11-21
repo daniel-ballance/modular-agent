@@ -6,6 +6,7 @@ mod relay;
 pub mod rpc;
 mod runtime_host;
 mod runtime_server;
+pub use runtime_server::{RuntimeContext, RuntimeHandler, local_runtime};
 pub mod server;
 pub use agent_api::wire;
 pub use host::{
