@@ -1,7 +1,7 @@
 // Opt-in ADR 0030 checks. Each profile has its own operator policy and data directory.
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual as equal } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
@@ -19,16 +19,34 @@ const open = (a, cwd, tenant, mcpServers = []) => rpc(a, "session/new", { cwd, m
 const load = (a, sessionId, cwd, method = "load") => rpc(a, `session/${method}`, { sessionId, cwd, mcpServers: [] });
 const input = (a, sessionId, content, key, when = "after", extras = {}) => ext(a, "input", { sessionId, content, key, when, ...extras });
 const errorOf = (p) => p.then(() => undefined, (e) => e);
-const refusal = (e, code, number = -32602) => e?.code === number && e?.data?.code === code && !meta(e.data)?.inputId && !meta(e.data)?.outcome;
+const refusal = (e, code, number = -32602) => e?.code === number && e?.data?.code === code &&
+	!("inputId" in e.data) && !("outcome" in e.data) && !("inputId" in (meta(e.data) ?? {})) && !("outcome" in (meta(e.data) ?? {}));
 const rows = (k, entries) => entries.filter((e) => e.kind === k);
-const contains = (value, text) => JSON.stringify(value).includes(text);
+const contains = (value, text) => JSON.stringify(value)?.includes(text) === true;
+const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
 const scoped = (projects, tenants, more = {}) => ({ actor, projects, tenants, ...more });
 const approvalOff = async (a, s) => {
 	await rpc(a, "session/set_config_option", { sessionId: s.sessionId, configId: "model", value: "conformance/echo" });
 	if (s.configOptions?.some((o) => o.id === "approval")) await rpc(a, "session/set_config_option", { sessionId: s.sessionId, configId: "approval", value: "off" });
 	return s.sessionId;
 };
-const observed = (file) => existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+const observed = (file) => existsSync(file) ? readFileSync(file, "utf8").split("\n").slice(0, -1).filter(Boolean).map((line) => JSON.parse(line)) : [];
+async function waitTrace(kit, path, pred) {
+	let observer;
+	try {
+		return await kit.within(15000, new Promise((resolve, reject) => {
+			const check = () => {
+				try {
+					const event = observed(path).find(pred);
+					if (event) resolve(event);
+				} catch (error) { reject(error); }
+			};
+			observer = watch(dirname(path), check);
+			observer.on("error", reject);
+			check();
+		}), "observe committed fixture trace");
+	} finally { observer?.close(); }
+}
 const fixtureEnv = (kit, role, options) => ({ MODULAR_AGENT_PLUGINS: JSON.stringify([kit.probePlugin(role, options)]),
 	MODULAR_AGENT_TENANTS: JSON.stringify({ [tenantA]: { rights }, [tenantB]: { rights } }) });
 
@@ -64,9 +82,10 @@ async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limi
 }
 
 export async function isolation(kit) {
-	const { check, attempt, project, root, invalid, within, prompt, history, closeSession, reopenWatchdog } = kit;
+	const { check, attempt, project, root, invalid } = kit;
 	const nested = join(project, "nested-project"), alias = join(root, "alias"), nestedAlias = join(root, "nested-alias");
-	mkdirSync(nested);
+	const unseen = join(nested, "unseen-project");
+	mkdirSync(unseen, { recursive: true });
 	symlinkSync(project, alias, "dir");
 	symlinkSync(nested, nestedAlias, "dir");
 	const broad = scoped(undefined, [null, tenantA, tenantB]);
@@ -80,11 +99,20 @@ export async function isolation(kit) {
 	const mcp = [{ name: "isolation-counter", command: process.execPath,
 		args: [fileURLToPath(new URL("../reference/mcp-fixture.mjs", import.meta.url)), mcpTrace], env: [] }];
 	const extraEnv = fixtureEnv(kit, "project-observer", { traceOut: trace });
+	extraEnv.MODULAR_AGENT_PLUGINS = JSON.stringify([...JSON.parse(extraEnv.MODULAR_AGENT_PLUGINS), kit.probePlugin("probe")]);
 	await attempt("isolation: malformed policy", async () => {
 		const bad = await invalid({ stdio: { actor, projects: "not a list" }, actors: "not a list" });
 		check("isolation: malformed operator policy fails startup with a diagnostic", bad.code > 0 && /policy/i.test(bad.stderr) && /projects|actors/i.test(bad.stderr));
 	});
-	const h = await host(kit, [broad, narrow, exact, empty, omitted, tenantOnly], { extraEnv });
+	await attempt("isolation: scoped attachments", () => scopedAttachments(kit, {
+		scopes: [broad, narrow, exact, empty, omitted, tenantOnly], nested, alias, nestedAlias, unseen, trace, mcpTrace, mcp, extraEnv,
+	}));
+	await attempt("isolation: configured representation", () => representation(kit));
+}
+
+async function scopedAttachments(kit, { scopes, nested, alias, nestedAlias, unseen, trace, mcpTrace, mcp, extraEnv }) {
+	const { check, attempt, project, within, prompt, history, closeSession, reopenWatchdog } = kit;
+	const h = await host(kit, scopes, { extraEnv });
 	const create = (a, cwd, tenant, servers) => within(15000, open(a, cwd, tenant, servers), "policy session/new");
 	try {
 		const { a: writer, hello } = await h.peer();
@@ -97,8 +125,11 @@ export async function isolation(kit) {
 			await closeSession(writer, sid);
 			return { sid, entries };
 		};
-		const plain = await seed(project), foreign = await seed(nested), hiddenTenant = await seed(project, tenantB);
-		const visibleTenant = await seed(project, tenantA);
+		const plain = await seed(project);
+		let foreign, hiddenTenant, visibleTenant;
+		await attempt("isolation: seed second project", async () => { foreign = await seed(nested); });
+		await attempt("isolation: seed hidden tenant", async () => { hiddenTenant = await seed(project, tenantB); });
+		await attempt("isolation: seed visible tenant", async () => { visibleTenant = await seed(project, tenantA); });
 		const wideList = await rpc(writer, "session/list", {});
 		const wideCursor = wideList.nextCursor;
 		if (!kit.network) await kit.stop(writer);
@@ -107,19 +138,20 @@ export async function isolation(kit) {
 		check("isolation: canonical symlink to the listed project opens", !!(await create(restricted, alias)).sessionId);
 		const before = observed(trace).length;
 		const nestedRefusal = await errorOf(create(restricted, nestedAlias, undefined, mcp));
+		const unseenRefusal = await errorOf(create(restricted, unseen, undefined, mcp));
 		const tenantRefusal = await errorOf(create(restricted, project, tenantB, mcp));
 		const after = observed(trace).length;
-		check("isolation: forbidden project and tenant do not compose the project or start MCP", [nestedRefusal, tenantRefusal].every((e) => refusal(e, "forbidden")) && before === after && !existsSync(mcpTrace));
+		check("isolation: forbidden project and tenant do not compose the project or start MCP", [nestedRefusal, unseenRefusal, tenantRefusal].every((e) => refusal(e, "forbidden")) && before === after && !existsSync(mcpTrace));
 		const list = await rpc(restricted, "session/list", {});
 		const ids = new Set(list.sessions?.map((s) => s.sessionId));
-		check("isolation: list filters stored projects and tenants", ids.has(plain.sid) && ids.has(visibleTenant.sid) && !ids.has(foreign.sid) && !ids.has(hiddenTenant.sid));
+		check("isolation: list filters stored projects and tenants", ids.has(plain.sid) && (!visibleTenant || ids.has(visibleTenant.sid)) && !ids.has(foreign?.sid) && !ids.has(hiddenTenant?.sid));
 		if (wideCursor) {
 			const page = await rpc(restricted, "session/list", { cursor: wideCursor }).catch((e) => e);
 			check("isolation: broad list cursor is not authority on a narrower connection", refusal(page, "forbidden") ||
 				(Array.isArray(page.sessions) && page.sessions.every((s) => ids.has(s.sessionId))));
 		} else console.log("SKIP  borrowed ACP list cursor (the fixture list was not paged)");
 		for (const m of ["load", "resume"]) await attempt(`isolation: ${m}`, async () => {
-			const errors = await Promise.all([foreign.sid, hiddenTenant.sid, randomUUID()].map((id) => errorOf(load(restricted, id, project, m))));
+			const errors = await Promise.all([foreign?.sid, hiddenTenant?.sid, randomUUID()].filter(Boolean).map((id) => errorOf(load(restricted, id, project, m))));
 			check(`isolation: ${m} masks unknown, stored project and stored tenant alike`, errors.every((e) => refusal(e, "forbidden")) &&
 				errors.every((e) => e.message === errors[0].message && equal(e.data, errors[0].data)));
 			const mismatch = await errorOf(load(restricted, plain.sid, nested, m));
@@ -130,12 +162,23 @@ export async function isolation(kit) {
 		await within(await reopenWatchdog(), load(watcher, plain.sid, project), "attach with narrow rights");
 		const beforeNarrow = await history(watcher, plain.sid, { all: true });
 		const target = beforeNarrow.entries.findLast((e) => e.kind !== "position").id;
+		const authorizedKey = randomUUID();
 		const denied = await Promise.all([
 			errorOf(input(watcher, plain.sid, "denied input", randomUUID(), "now")),
 			errorOf(ext(watcher, "fork", { sessionId: plain.sid, entryId: target })),
 			errorOf(ext(watcher, "answer", { sessionId: plain.sid, requestId: randomUUID(), value: "denied" })),
 		]);
 		check("isolation: recorded actor cannot exceed connection ceiling for input, fork and answer", denied.every((e) => refusal(e, "forbidden")) && equal(await history(watcher, plain.sid, { all: true }), beforeNarrow));
+		if (kit.network) await attempt("isolation: cancellation uses the connection ceiling", async () => {
+			await within(await reopenWatchdog(), load(writer, plain.sid, project), "owner attaches during narrow view");
+			const turn = settled(prompt(writer, plain.sid, "tool:probe-question {}", authorizedKey));
+			const requestId = await question(kit, writer, plain.sid, turn);
+			await watcher.ctx.notify("session/cancel", { sessionId: plain.sid });
+			const deniedAnswer = await errorOf(ext(watcher, "answer", { sessionId: plain.sid, requestId, value: "denied" }));
+			const accepted = await ext(writer, "answer", { sessionId: plain.sid, requestId, value: "only owner may answer" });
+			check("isolation: cancellation and an answer without rights do not settle the owner's question", refusal(deniedAnswer, "forbidden") &&
+				accepted.accepted === true && (await within(15000, turn, "settle owner question")).result?.stopReason === "end_turn");
+		});
 		await closeSession(watcher, plain.sid);
 		check("isolation: detached history, requests and input return not_open", (await Promise.all([
 			errorOf(history(watcher, plain.sid)), errorOf(ext(watcher, "requests", { sessionId: plain.sid })),
@@ -158,14 +201,86 @@ export async function isolation(kit) {
 			const service = await h.listener;
 			const unauthorized = await upgradeStatus(service.url, kit.network.protocol, kit.network.token);
 			check("isolation: a bearer not listed in the policy is refused at upgrade", !unauthorized.upgraded && unauthorized.status === 401);
-		} else kit.profile({ stdio: broad }, extraEnv, h.directory);
+		} else kit.profile({ stdio: scopes[0] }, extraEnv, h.directory);
 		const { a: reopen } = await h.peer();
 		await within(await reopenWatchdog(), load(reopen, plain.sid, project), "reopen with original grants");
 		const afterNarrow = (await history(reopen, plain.sid, { all: true })).entries;
 		const grants = (entries) => entries.filter((e) => e.kind === "actorJoined" || e.kind === "actorLeft");
 		check("isolation: narrow open and refused calls do not rewrite grants or admit work", equal(grants(plain.entries), grants(afterNarrow)) &&
-			equal(rows("inputAccepted", plain.entries), rows("inputAccepted", afterNarrow)) && (await prompt(reopen, plain.sid, "wide again")).stopReason === "end_turn");
+			equal(rows("inputAccepted", plain.entries), rows("inputAccepted", afterNarrow).filter((e) => e.data?.key !== authorizedKey)) && (await prompt(reopen, plain.sid, "wide again")).stopReason === "end_turn");
 	} finally { await h.stop(); }
+}
+
+async function representation(kit) {
+	const { check, project, history, closeSession, reopenWatchdog, within } = kit;
+	const principal = scoped([project], [null]);
+	const member = { id: "kit-represented", kind: "user", rights: ["watch", "input", "answer", "propose"] };
+	const h = await host(kit, [principal]);
+	let sessionId, represented;
+	try {
+		const { a, hello } = await h.peer();
+		if (!meta(hello)?.declaration?.severalActors) {
+			console.log("SKIP  configured representation (severalActors not declared)");
+			return;
+		}
+		sessionId = await approvalOff(a, await open(a, project));
+		await ext(a, "join", { sessionId, actor: member, present: true });
+		const grants = await ext(a, "actors", { sessionId });
+		const before = await history(a, sessionId, { all: true });
+		const key = randomUUID(), requestId = randomUUID();
+		const [invalidInput, invalidAnswer] = await Promise.all([
+			errorOf(input(a, sessionId, "unrepresented input", key, "propose", { actorId: member.id })),
+			errorOf(ext(a, "answer", { sessionId, requestId, value: "unrepresented answer", actorId: member.id })),
+		]);
+		check("isolation: joining an unrepresented actor cannot grant presence, input or answer", grants.actors.some((a) => a.id === member.id) &&
+			!grants.present.includes(member.id) && refusal(invalidInput, "forbidden") && refusal(invalidAnswer, "forbidden") &&
+			equal(await history(a, sessionId, { all: true }), before));
+		await closeSession(a, sessionId);
+		await h.stop();
+		const scope = { ...principal, represents: [member.id], actor: { ...actor, rights: ["watch", "answer", "propose"] } };
+		represented = await host(kit, [scope], { dir: h.directory });
+		const { a: route } = await represented.peer();
+		await within(await reopenWatchdog(), load(route, sessionId, project), "attach authorized represented route");
+		const refused = await errorOf(input(route, sessionId, "intersection denies now", randomUUID(), "now", { actorId: member.id }));
+		const receipt = await input(route, sessionId, "represented proposal", key, "propose", { actorId: member.id });
+		const stale = await ext(route, "answer", { sessionId, requestId, value: "stale answer", actorId: member.id });
+		const entries = (await history(route, sessionId, { all: true })).entries;
+		const admitted = rows("inputAccepted", entries).find((e) => e.inputId === receipt.inputId);
+		check("isolation: represented work applies the rights intersection and records both actors", refusal(refused, "forbidden") &&
+			receipt.taken === "proposed" && admitted?.actorId === member.id && admitted.data?.submittedBy === actor.id &&
+			!admitted.data.rights?.includes("input") && equal(stale, { accepted: false, reason: "not_open" }));
+	} finally { await Promise.all([h.stop(), represented?.stop()]); }
+	if (kit.network) await kit.attempt("isolation: recheck authority after the delivery gate", () => revokedDelivery(kit));
+}
+
+async function revokedDelivery(kit) {
+	const { root, project, prompt, history, within, reopenWatchdog, check } = kit;
+	const viewer = { id: "kit-viewer", kind: "host", rights: ["watch"] };
+	const release = join(root, "allow-gated-delivery"), traceOut = join(root, "held-delivery.jsonl");
+	const h = await host(kit, [scoped([project], [null]), scoped([project], [null], { actor: viewer })], {
+		extraEnv: fixtureEnv(kit, "delivery-barrier", { recipient: viewer.id, release, traceOut }),
+	});
+	try {
+		const { a: owner } = await h.peer();
+		const sid = await approvalOff(owner, await open(owner, project));
+		const marker = `held-content-${randomUUID()}`;
+		await prompt(owner, sid, marker);
+		await ext(owner, "join", { sessionId: sid, actor: viewer });
+		const { a: reader } = await h.peer(1);
+		await within(await reopenWatchdog(), load(reader, sid, project, "resume"), "attach viewer without replay");
+		const reply = settled(history(reader, sid, { all: true }));
+		await waitTrace(kit, traceOut, (e) => e.beforeDelivery === sid);
+		await within(15000, ext(owner, "leave", { sessionId: sid, actorId: viewer.id }), "commit revocation while reply is held");
+		writeFileSync(release, "allow\n");
+		const resumed = await within(15000, reply, "release the held reply after revocation");
+		check("isolation: a reply withheld at the gate cannot disclose history after revocation",
+			!resumed.result && (refusal(resumed.error, "forbidden") || refusal(resumed.error, "withheld", -32000)) &&
+			!contains(resumed.error?.data, marker) && refusal(await errorOf(history(reader, sid)), "forbidden") &&
+			contains(await history(owner, sid, { all: true }), marker));
+	} finally {
+		writeFileSync(release, "cleanup\n");
+		await h.stop();
+	}
 }
 
 const settled = (p) => p.then((result) => ({ result }), (error) => ({ error }));
@@ -192,13 +307,15 @@ export async function capacity(kit) {
 		try {
 			const { a, hello } = await h.peer();
 			check(`capacity: ${scope} input ceiling is declared at initialize`, equal(meta(hello)?.declaration?.resourceReservations, limits));
-			const create = async (tenant) => {
-				const s = await open(a, project, tenant);
+			const create = async (tenant, cwd = project) => {
+				const s = await open(a, cwd, tenant);
 				check(`capacity: ${scope} ceiling is declared for the session`, equal(meta(s)?.declaration?.resourceReservations, limits));
 				return approvalOff(a, s);
 			};
 			const sid1 = await create(scope === "session" ? undefined : tenantA);
-			const sid2 = scope === "session" ? sid1 : await create(scope === "tenant" ? tenantA : tenantB);
+			const otherProject = join(project, "capacity-project");
+			if (scope === "agent") mkdirSync(otherProject, { recursive: true });
+			const sid2 = scope === "session" ? sid1 : scope === "tenant" ? await create(tenantA) : await create(undefined, otherProject);
 			const ids = [...new Set([sid1, sid2])];
 			const turns = ids.map((sid) => settled(prompt(a, sid, "tool:probe-question {}")));
 			const questions = await Promise.all(ids.map((sid, i) => question(kit, a, sid, turns[i])));
@@ -211,8 +328,9 @@ export async function capacity(kit) {
 			const entries = (await Promise.all(ids.map((sid) => history(a, sid, { all: true })))).flatMap((r) => r.entries);
 			if (raced) {
 				const dup = await admit(winner);
+				const afterDuplicate = (await Promise.all(ids.map((sid) => history(a, sid, { all: true })))).flatMap((r) => r.entries);
 				check(`capacity: ${scope} duplicate consumes no slot and refused key has no record`, dup.duplicate === true &&
-					dup.inputId === outcomes[winner].result.inputId && !entries.some((e) => e.data?.key === keys[loser]));
+					dup.inputId === outcomes[winner].result.inputId && equal(afterDuplicate, entries) && !entries.some((e) => e.data?.key === keys[loser]));
 			}
 			// The other tenant and the unassigned bucket can still run at tenant saturation.
 			if (scope === "tenant") for (const tenant of [tenantB, undefined]) {
@@ -225,6 +343,15 @@ export async function capacity(kit) {
 			check(`capacity: ${scope} saturation leaves room for the question and call settlements`, answers.every((r) => r.accepted) && ends.every((r) => r.result?.stopReason === "end_turn") &&
 				rows("inputAnswer", closed).length === ids.length && rows("toolResult", closed).length === ids.length);
 			if (raced) {
+				const winnerId = outcomes[winner].result.inputId;
+				await within(15000, (async () => {
+					// Reuse the refused key only after the winner's slot is transferred to a turn.
+					for (;;) {
+						const r = await history(a, [sid1, sid2][winner], { all: true });
+						if (r.entries.some((e) => (e.kind === "input" || e.kind === "inputHandedBack") && e.inputId === winnerId)) return;
+						await delay(25);
+					}
+				})(), "observe disposition of the winning admission");
 				const reused = await admit(loser);
 				check(`capacity: ${scope} refused key can be used after capacity is released`, !!reused.inputId && !reused.duplicate);
 			}
@@ -249,19 +376,105 @@ export async function capacity(kit) {
 				equal(rows("turnEnd", entries)[0]?.data?.outcome, outcome));
 		} finally { await h.stop(); }
 	});
+	await attempt("capacity: reserve and transfer a job report", () => jobCapacity(kit, scopeAll));
+}
+
+async function jobCapacity(kit, scope) {
+	const { root, project, prompt, history, within, check } = kit;
+	const trace = join(root, "job-capacity.jsonl"), releaseFile = join(root, "release-job-report");
+	const limits = ceiling("session", "inputs");
+	limits.session.inputs = 2;
+	limits.session.jobs = 1;
+	const extraEnv = fixtureEnv(kit, "probe", {});
+	extraEnv.MODULAR_AGENT_PLUGINS = JSON.stringify([...JSON.parse(extraEnv.MODULAR_AGENT_PLUGINS), {
+		command: [process.execPath, fileURLToPath(new URL("../plugin/jobs.mjs", import.meta.url))], config: { out: trace, releaseFile },
+	}]);
+	const h = await host(kit, [scope], { limits, extraEnv });
+	try {
+		const { a } = await h.peer();
+		const s = await open(a, project);
+		const sid = await approvalOff(a, s);
+		const runJob = (text) => within(15000, prompt(a, sid, `tool:background ${JSON.stringify({ text, ms: 0 })}`), "start fixture job");
+		await runJob("reserved report");
+		const start = await waitTrace(kit, trace, (e) => e.started && e.commit && e.duplicate);
+		await runJob("must not start another job");
+		const starts = rows("jobStarted", (await history(a, sid, { all: true })).entries);
+		check("capacity: saturated job pool refuses a new start with busy before recording it", starts.length === 1 &&
+			observed(trace).some((e) => e.startFailed && e.code === "busy" && e.number === -32000));
+		const turn = settled(prompt(a, sid, "tool:probe-question {}"));
+		const requestId = await question(kit, a, sid, turn);
+		const ordinary = await input(a, sid, "ordinary queue slot", randomUUID());
+		const rejectedKey = randomUUID();
+		const full = await errorOf(input(a, sid, "reserved slot is not free", rejectedKey, meta(s)?.declaration?.inputDuringTurn ? "steer" : "after"));
+		writeFileSync(releaseFile, "end\n");
+		const end = await waitTrace(kit, trace, (e) => e.repeatedEnd === start.started || e.endFailed === start.started);
+		const entries = (await history(a, sid, { all: true })).entries;
+		const reports = rows("inputAccepted", entries).filter((e) => e.data?.key === `job:${start.started}`);
+		const ends = rows("jobEnded", entries).filter((e) => e.jobId === start.started);
+		check("capacity: the reserved job report transfers at saturation into exactly one matching admission", !!ordinary.inputId &&
+			refusal(full, "busy") && !entries.some((e) => e.data?.key === rejectedKey) && end.once === true &&
+			reports.length === 1 && ends.length === 1 && ends[0].data.report === true && equal(ends[0].data.result, reports[0].data.content));
+		await a.ctx.notify("session/cancel", { sessionId: sid });
+		const afterCancel = await within(15000, turn, "cancel while admission slots are full");
+		const stale = await ext(a, "answer", { sessionId: sid, requestId, value: "too late" });
+		const terminal = (await history(a, sid, { all: true })).entries;
+		check("capacity: cancellation at saturation still closes the question and hands back accepted input", afterCancel.result?.stopReason === "cancelled" &&
+			equal(stale, { accepted: false, reason: "not_open" }) && rows("inputHandedBack", terminal).some((e) =>
+				e.inputId === ordinary.inputId || e.inputIds?.includes(ordinary.inputId)));
+	} finally { await h.stop(); }
+}
+
+async function holdLease(store, path) {
+	const { ttlMs } = await store.json("/v1");
+	if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) throw Error("history service did not declare a positive lease TTL");
+	const { lease } = await store.json(`${path}/lease`, "POST", { owner: "kit-erasure-blocker" });
+	const route = `${path}/lease/${encodeURIComponent(lease)}`;
+	const controller = new AbortController();
+	const renewed = settled((async () => {
+		while (!controller.signal.aborted) {
+			await delay(Math.max(1, Math.floor(ttlMs / 3)), undefined, { signal: controller.signal });
+			await store.json(`${route}/renew`, "POST");
+		}
+	})());
+	return async () => {
+		controller.abort();
+		const { error } = await renewed;
+		await store.json(route, "DELETE");
+		if (error && error.name !== "AbortError") throw error;
+	};
 }
 
 export async function erasure(kit) {
-	const { check, project, store, prompt, history, closeSession, reopenWatchdog, within } = kit;
+	for (const cutoff of ["reported pending", "bookkeeping commit", "tombstone commit"]) {
+		await kit.attempt(`erasure: ${cutoff}`, () => eraseAcrossWriters(kit, cutoff));
+	}
+}
+
+async function eraseAcrossWriters(kit, cutoff) {
+	const { project, store, prompt, history, closeSession, reopenWatchdog, within } = kit;
+	const check = (label, ok, detail) => kit.check(`erasure (${cutoff}): ${label}`, ok, detail);
 	const dir = mkdtempSync(join(kit.root, "pending-state-"));
 	const scope = scoped([project], [null]);
 	const env = { MODULAR_AGENT_CONFORMANCE_ERASURE_DIR: dir };
-	const h = await host(kit, [scope], { extraEnv: env });
-	let reader, reopener, lease, dst, heldPath;
+	const reached = deferred(), releaseReply = deferred();
+	let eraseSource;
+	const proxy = cutoff === "reported pending" ? undefined : await store.observe({
+		async beforeReply({ method, path, ok, entries }) {
+			if (!eraseSource || !ok || method !== "POST") return;
+			const bookkeeping = path === `${eraseSource}/entries` && entries?.some((e) => e.kind === "erasure");
+			const tombstones = path === `${eraseSource}/erase`;
+			if (cutoff === "bookkeeping commit" ? bookkeeping : tombstones) {
+				reached.resolve(true);
+				await releaseReply.promise;
+			}
+		},
+	});
+	const h = await host(kit, [scope], { extraEnv: proxy ? { ...env, MODULAR_AGENT_HISTORY_URL: proxy.url } : env });
+	let reader, reopener, releaseLease, dst;
 	try {
 		const { a, hello } = await h.peer();
 		const source = await open(a, project);
-		check("erasure: agent and session declare coordination when the shared mechanism is configured",
+		check("agent and session declare coordination when the shared mechanism is configured",
 			meta(hello)?.declaration?.erasure === true && meta(source)?.declaration?.erasure === true);
 		const sid = await approvalOff(a, source);
 		const key = randomUUID(), secret = `erase-${randomUUID()}`;
@@ -278,43 +491,56 @@ export async function erasure(kit) {
 		const secondFork = (await fork(a, first, rows("turnEnd", firstRows).at(-1)?.id)).sessionId;
 		dst = secondFork;
 		await closeSession(a, first);
+		// Release any lease obtained at fork publication before another writer takes it.
+		await within(loadMs, load(a, dst, project), "attach second fork");
+		await closeSession(a, dst);
 		const before = await store.pages(dst);
 		const copy = before.find((e) => e.kind === "inputAccepted" && contains(e, secret));
 		if (!copy) throw Error("fork-of-fork did not retain the fixture admission");
-		heldPath = store.path(dst);
-		lease = (await store.json(heldPath + "/lease", "POST", { owner: "kit-erasure-blocker" })).lease;
+		releaseLease = await holdLease(store, store.path(dst));
 		reader = await host(kit, [scope], { dir: h.directory, extraEnv: env });
 		const { a: r } = await reader.peer();
 		await within(loadMs, load(r, first, project), "independent writer attaches first fork");
 		const erase = (p) => ext(p, "erase", { sessionId: sid, entryIds: [target.id] });
-		const report = await erase(a);
 		const pair = (entries, sessionId, id) => entries?.some((e) => e.sessionId === sessionId && e.id === id);
-		check("erasure: shared pending state is declared and held copy is reported pending, not changed",
-			pair(report.pending, dst, copy.id) && !pair(report.erased, dst, copy.id) && equal(await store.pages(dst), before));
+		if (proxy) {
+			eraseSource = store.path(sid);
+			const received = await within(15000, Promise.race([reached.promise, settled(erase(a))]), `observe ${cutoff} before its HTTP reply`);
+			if (received !== true) throw Error(`erase settled before the fault cutoff: ${JSON.stringify(received)}`);
+			check("erase cannot mutate a held destination", equal(await store.pages(dst), before));
+		} else {
+			const report = await within(15000, erase(a), "keep held copies pending");
+			check("held copy is reported pending, not changed", pair(report.pending, dst, copy.id) &&
+				!pair(report.erased, dst, copy.id) && equal(await store.pages(dst), before));
+		}
 		await kit.crash(a);
+		releaseReply.resolve();
 		const visible = await history(r, first, { all: true }).catch((e) => e);
-		check("erasure: an attached independent reader does not disclose pending content after initiator loss",
+		check("an attached independent reader does not disclose pending content after initiator loss",
 			(Array.isArray(visible.entries) && !contains(visible, secret)) || refusal(visible, "unavailable"));
 		await reader.stop();
 		reader = undefined;
 		// Release the raw test lease only after the reader has checked the cutoff.
-		await store.json(`${heldPath}/lease/${encodeURIComponent(lease)}`, "DELETE");
-		lease = undefined;
+		const release = releaseLease;
+		releaseLease = undefined;
+		await release();
 		reopener = await host(kit, [scope], { dir: h.directory, extraEnv: env, which: kit.second });
 		const { a: next } = await reopener.peer();
 		await within(loadMs, load(next, dst, project), "new writer reconciles fork-of-fork");
 		const kept = await store.pages(dst);
 		const tombstone = kept.find((e) => e.id === copy.id);
-		check("erasure: next writer reconciles durable pending intent once, before replay", tombstone?.erased === true &&
+		check("next writer reconciles durable pending intent once, before replay", tombstone?.erased === true &&
 			!contains(kept, secret) && !contains(next.updates, secret) && rows("erasure", kept).length === 1);
 		const duplicate = await input(next, dst, secret, key, "now");
-		check("erasure: pending copy key survives only as an erased receipt", equal(duplicate, { duplicate: true, erased: true }) && equal(await store.pages(dst), kept));
+		check("pending copy key survives only as an erased receipt", equal(duplicate, { duplicate: true, erased: true }) && equal(await store.pages(dst), kept));
 		await within(loadMs, load(next, sid, project), "reopen initiating source for progress");
 		const done = await erase(next);
-		check("erasure: repeated authorized erase reports convergence without duplicate bookkeeping", pair(done.erased, dst, copy.id) && !pair(done.pending, dst, copy.id) &&
+		check("repeated authorized erase reports convergence without duplicate bookkeeping", pair(done.erased, dst, copy.id) && !pair(done.pending, dst, copy.id) &&
 			rows("erasure", await store.pages(dst)).length === 1 && rows("erasure", await store.pages(sid)).length === 1);
 	} finally {
-		if (lease) await store.json(`${heldPath}/lease/${encodeURIComponent(lease)}`, "DELETE").catch(() => {});
+		releaseReply.resolve();
+		if (releaseLease) await releaseLease().catch(() => {});
 		await Promise.all([reader?.stop(), reopener?.stop(), h.stop()]);
+		proxy?.stop();
 	}
 }

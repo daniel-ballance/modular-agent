@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Host-side fixtures for docs/bindings/plugin.md. The ACP kit loads these with --probe-checks.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, outcome, rpcError, serve } from "./peer.mjs";
@@ -21,6 +21,21 @@ const QUESTION = fixtureTool("probe-question", "Ask one fixture question.", { la
 const REFRESH = fixtureTool("probe-refresh", "Change the fixture tool list.", { fail: { type: "boolean" } });
 const currentTools = () => [PROBE, QUESTION, REFRESH, fixtureTool(refreshed ? "probe-added" : "probe-retired", "A tool from the current view.")];
 let failRefresh = false;
+async function untilFile(path, signal) {
+	if (signal.aborted) throw rpcError("cancelled");
+	let observer;
+	let onAbort;
+	try {
+		await new Promise((resolve, reject) => {
+			const check = () => { if (existsSync(path)) resolve(); };
+			onAbort = () => reject(rpcError("cancelled"));
+			signal.addEventListener("abort", onAbort, { once: true });
+			observer = watch(dirname(path), check);
+			observer.on("error", reject);
+			check();
+		});
+	} finally { observer?.close(); signal.removeEventListener("abort", onAbort); }
+}
 const points = new Map();
 let pointProject, pointDir;
 function registration() {
@@ -35,6 +50,7 @@ function registration() {
 		case "project-observer": return base;
 		case "capacity-provider": return { ...base, toolSources: [{ id: "probe-tools", tools: [EFFECT] }],
 			providers: [{ id: model.provider, models, supports: { keepsState: false, runsTools: false } }] };
+		case "delivery-barrier":
 		case "output-observer": return { ...base, hooks: [{ hook: "output", handlerId: 1, order: "last" }] };
 		case "runtime": return { ...base, replaces: ["runtime"], runtime: { id: "probe-runtime", supports: {} }, toolSources: [{ id: "probe-tools", tools: [EFFECT] }],
 			providers: [{ id: model.provider, models, supports: { keepsState: false, runsTools: false } }],
@@ -292,6 +308,14 @@ serve("probe", async (m, ctx) => {
 			if (config.role === "runtime" && p.handlerId === 3 && p.hook === "tool.before") {
 				trace({ gate: p.payload.call.id });
 				return p.payload.call.input?.value === "refusal" ? { refuse: "fixture gate refused" } : null;
+			}
+			if (config.role === "delivery-barrier" && p.handlerId === 1 && p.hook === "output") {
+				if (p.payload.recipient === config.recipient && p.payload.events.some((e) => e.type === "reply" &&
+					e.data.method === "_modular-agent/history" && e.data.result)) {
+					trace({ beforeDelivery: p.payload.sessionId });
+					await untilFile(config.release, ctx.signal);
+				}
+				return null;
 			}
 			if (config.role !== "output-observer" || p.handlerId !== 1 || p.hook !== "output") throw rpcError("unknown_handler");
 			trace(p.payload);
