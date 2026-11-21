@@ -20,18 +20,38 @@ from modular_agent.testing import memory_environment, scripted_provider
 
 
 class FaultStore:
+    """A store that, once active, refuses appends (commitFailed) or reports its writer lost.
+
+    Writer loss is reported through wait_writer_lost, as soon as the fault is switched on,
+    so the test does not depend on a renewal tick: a lease short enough to renew quickly
+    is also short enough to lapse for a healthy writer on a busy machine.
+    """
+
     def __init__(self, backend, reason):
         self.backend = backend
         self.reason = reason
-        self.active = False
+        self._lost = asyncio.Event()
+        self._active = False
 
     def __getattr__(self, name):
         return getattr(self.backend, name)
 
-    async def renew(self, session_id, lease):
-        if self.active and self.reason == "writerLost":
-            await self.backend.release(session_id, lease)
-        return await self.backend.renew(session_id, lease)
+    @property
+    def active(self):
+        return self._active
+
+    @active.setter
+    def active(self, value):
+        self._active = value
+        if value and self.reason == "writerLost":
+            self._lost.set()
+        elif not value:
+            self._lost = asyncio.Event()
+
+    async def wait_writer_lost(self, session_id, lease):
+        lost = self._lost
+        await lost.wait()
+        await self.backend.release(session_id, lease)
 
     async def append(self, session_id, lease, entries):
         if self.active and self.reason == "commitFailed":
@@ -96,7 +116,7 @@ async def test_waiter_loses_writer_and_follower_can_reopen(tmp_path, reason, pla
                     cancelled.set()
             return await provider.request(model, request, context)
 
-    with sqlite_history_port(tmp_path, ttl_ms=900) as backend:
+    with sqlite_history_port(tmp_path, ttl_ms=60_000) as backend:
         await _exercise(tmp_path, reason, placement, backend, Provider(), entered, cancelled)
 
 
