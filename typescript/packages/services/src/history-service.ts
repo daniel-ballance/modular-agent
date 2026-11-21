@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { HistoryEntry, HistoryStore, StoredSession } from "@modular-agent/harness";
 import { count, encodeJson, equalJson, nonnegativeNumber, object, parseJson, type Json, type JsonObject } from "./history-json.js";
+import { HistoryServiceError, historyStorageStatuses, type HistoryServiceStore } from "./history-backend.js";
 
 export const HISTORY_BINDING = "modular-agent-history/1";
 const maxBody = 64 * 1024 * 1024;
@@ -27,7 +28,7 @@ const unknownSession = () => new BindingError(404, "unknown_session", "Unknown s
 const conflict = () => new BindingError(409, "conflict", "The ID is reserved with different content or has expired");
 const held = (until: number) => new BindingError(409, "held", "Session is held by another owner or temporarily excluded", Math.max(1, Math.ceil(until - performance.now())));
 
-function tombstone(e: JsonObject): JsonObject {
+export function historyTombstone(e: JsonObject): JsonObject {
 	const kind = typeof e.kind === "string" ? e.kind : null;
 	const t: JsonObject = { id: e.id, parentId: e.parentId, kind, erased: true };
 	for (const k of ["turnId", "stepId", "toolCallId", "jobId", "inputId", "requestId", "continuesTurnId"]) {
@@ -150,12 +151,8 @@ class Records {
 		});
 	}
 	put(sid: string, initial: JsonObject, expires: (s: Session) => boolean) {
-		if (Object.hasOwn(initial, "id") || typeof initial.project !== "string" || count(initial.created) === undefined ||
-			(Object.hasOwn(initial, "parentSessionId") && !id(initial.parentSessionId)) ||
-			(Object.hasOwn(initial, "forkedFrom") && (!object(initial.forkedFrom) || !id(initial.forkedFrom.sessionId) || !id(initial.forkedFrom.entryId)))) invalid("Invalid session metadata");
 		const meta = { ...initial, id: sid };
 		const json = encodeJson(meta);
-		if (!fits(frame(), json, sid) || bytes(frame(json)) + 2 > maxPage) throw new BindingError(413, "request_too_large", "Metadata cannot fit a read page");
 		const row = this.session(sid, expires);
 		if (row) { if (!equalJson(row.json, meta)) throw conflict(); return; }
 		if (this.db.prepare("SELECT 1 FROM sessions WHERE id=?").get(sid)) throw conflict();
@@ -190,7 +187,7 @@ class Records {
 				const known = find.get(s.id, eid)?.json as string | undefined;
 				if (known !== undefined) { if (!equalJson(known, e)) throw conflict(); continue; }
 				const json = encodeJson(e);
-				if (!fits(prefix, json, eid) || !fits(prefix, encodeJson(tombstone(e)), eid)) throw new BindingError(413, "entry_too_large", "Entry cannot fit a read page");
+				if (!fits(prefix, json, eid) || !fits(prefix, encodeJson(historyTombstone(e)), eid)) throw new BindingError(413, "entry_too_large", "Entry cannot fit a read page");
 				insert.run(s.id, eid, json);
 				kept++;
 			}
@@ -211,7 +208,7 @@ class Records {
 				erased.push(eid);
 				const entry = parseJson(known) as JsonObject;
 				if (entry.erased === true) continue;
-				replace.run(encodeJson(tombstone(entry)), s.id, eid);
+				replace.run(encodeJson(historyTombstone(entry)), s.id, eid);
 				changed = true;
 			}
 			authorize();
@@ -324,7 +321,11 @@ export class HistoryArchive {
 		};
 		return {
 			supports: { portableSessions: this.dir !== undefined, erasure: true },
-			create: async ({ id, ...meta }) => read(db => db.put(id, parseJson(JSON.stringify(meta)) as JsonObject, expires)),
+			create: async ({ id, ...meta }) => read(db => {
+				const initial = parseJson(JSON.stringify(meta)) as JsonObject;
+				validateMetadata(id, initial);
+				db.put(id, initial, expires);
+			}),
 			openForWriting: async id => read(db => {
 				known(db, id);
 				if (db.holdUntil > performance.now()) throw held(db.holdUntil);
@@ -376,8 +377,16 @@ export class HistoryArchive {
 	}
 }
 
+function validateMetadata(sid: string, initial: JsonObject) {
+	if (Object.hasOwn(initial, "id") || typeof initial.project !== "string" || count(initial.created) === undefined ||
+		(Object.hasOwn(initial, "parentSessionId") && !id(initial.parentSessionId)) ||
+		(Object.hasOwn(initial, "forkedFrom") && (!object(initial.forkedFrom) || !id(initial.forkedFrom.sessionId) || !id(initial.forkedFrom.entryId)))) invalid("Invalid session metadata");
+	const json = encodeJson({ ...initial, id: sid });
+	if (!fits(frame(), json, sid) || bytes(frame(json)) + 2 > maxPage) throw new BindingError(413, "request_too_large", "Metadata cannot fit a read page");
+}
+
 export interface HistoryServiceOptions {
-	dir?: string; archive?: HistoryArchive; token: string; port?: number; leaseMs?: number; retention?: number | null;
+	dir?: string; archive?: HistoryArchive; store?: HistoryServiceStore; token: string; port?: number; leaseMs?: number; retention?: number | null;
 	/** Permanent ID reservations count toward this operator-supplied limit. */
 	maxSessions?: number;
 	/** Fault injection for the history client tests. */
@@ -387,7 +396,9 @@ export interface HistoryServiceOptions {
 /** A single loopback HTTP listener. The operator must trust every local account,
  * provision a random bearer token, and keep this directory on durable local storage. */
 export async function historyService(options: HistoryServiceOptions) {
-	const ttlMs = options.leaseMs ?? 15_000, retention = options.retention ?? null, quota = options.maxSessions ?? 100_000;
+	const ttlMs = options.store?.ttlMs ?? options.leaseMs ?? 15_000;
+	const retention = (options.store ? options.store.retention : options.retention) ?? null;
+	const quota = options.maxSessions ?? 100_000;
 	for (const n of [ttlMs, quota, ...(retention === null ? [] : [retention])]) if (!Number.isSafeInteger(n) || n < 1) throw new Error("Invalid history service limit");
 	if (!/^[A-Za-z0-9._~+/\-]+=*$/.test(options.token)) throw new Error("Invalid history bearer token configuration");
 	const token = digest(`Bearer ${options.token}`);
@@ -406,10 +417,64 @@ export async function historyService(options: HistoryServiceOptions) {
 	}
 	if (options.archive && retention !== null) throw new Error("An attached SDK archive does not support service retention");
 	const attached = options.archive?.attach(sid => current(sid) !== undefined, ttlMs);
-	const records = attached?.records ?? new Records(options.dir, ttlMs, retention, quota);
-	const closeRecords = () => attached ? attached.detach() : records.close();
+	const records = options.store ? undefined : attached?.records ?? new Records(options.dir, ttlMs, retention, quota);
+	const closeRecords = () => attached ? attached.detach() : records?.close();
 	const expired = (s: Session) => retention !== null && !current(s.id) && Date.now() - s.changed >= retention;
-	const known = (sid: string) => records.session(sid, expired) ?? (() => { throw unknownSession(); })();
+	function builtInStore(records: Records): Omit<HistoryServiceStore, "ttlMs" | "retention" | "read" | "list"> & {
+		read(sid: string, q: { after?: string; limit: number }): string;
+		list(q: { after?: string; limit: number; project?: string }): string;
+	} {
+		const known = (sid: string) => records.session(sid, expired) ?? (() => { throw unknownSession(); })();
+		const checkHold = () => { if (records.holdUntil > performance.now()) throw held(records.holdUntil); };
+		return {
+			create: (sid, metadata) => records.put(sid, metadata, expired),
+			list: ({ project, after, limit }) => records.list(project, after, limit, expired),
+			read: (sid, { after, limit }) => records.read(known(sid), after, limit),
+			acquire(sid, owner) {
+				known(sid);
+				checkHold();
+				const l = current(sid);
+				if (attached?.localHeld(sid)) throw held(performance.now() + ttlMs);
+				if (l) { if (l.owner !== owner) throw held(l.expires); return l.lease; }
+				const lease = randomBytes(16).toString("hex");
+				leases.set(sid, { lease, owner, expires: performance.now() + ttlMs });
+				return lease;
+			},
+			renew(sid, lease) { known(sid); requireLease(sid, lease).expires = performance.now() + ttlMs; },
+			release(sid, lease) { known(sid); if (current(sid)?.lease === lease) leases.delete(sid); },
+			append(sid, lease, entries) {
+				const s = known(sid), authorize = () => { requireLease(sid, lease); };
+				authorize();
+				return records.keep(s, entries, authorize);
+			},
+			erase(sid, entryIds, lease) {
+				const s = known(sid);
+				const authorize = () => {
+					if (lease !== undefined) { requireLease(sid, lease); return; }
+					checkHold();
+					if (attached?.localHeld(sid)) throw held(performance.now() + ttlMs);
+					const l = current(sid);
+					if (l) throw held(l.expires);
+				};
+				authorize();
+				return records.erase(s, entryIds, authorize).erased;
+			},
+		};
+	}
+	const store = options.store ?? builtInStore(records!);
+	const mutate = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+		try { return await operation(); }
+		catch (error) {
+			if (options.store && !(error instanceof HistoryServiceError && Object.hasOwn(historyStorageStatuses, error.code))) throw new UncertainCommit();
+			throw error;
+		}
+	};
+	const encodePage = (value: string | JsonObject) => {
+		if (typeof value === "string") return value;
+		const json = encodeJson(value);
+		if (bytes(json) > maxPage) throw unavailable();
+		return json;
+	};
 	function send(res: ServerResponse, status: number, json: string) {
 		res.writeHead(status, { "content-type": "application/json", "content-length": bytes(json) });
 		res.end(json);
@@ -444,56 +509,57 @@ export async function historyService(options: HistoryServiceOptions) {
 			if (leaseParam !== undefined && !validLease(leaseParam)) return invalid("Invalid lease");
 			const { after, limit, project } = query(rawQuery, op === "list" ? ["after", "limit", "project"] : op === "session" && reading ? ["after", "limit"] : []);
 			const b = bodyObject(raw, req.method === "PUT" || op === "acquire" || op === "append" || op === "erase");
-			records.check();
+			records?.check();
 			let result: unknown = {};
 			switch (op) {
 				case "version": result = { binding: HISTORY_BINDING, ttlMs, retention }; break;
-				case "list": return send(res, 200, records.list(project, after, limit, expired));
-				case "session":
-					if (reading) return send(res, 200, records.read(known(sid), after, limit));
-					records.put(sid, b, expired);
+				case "list": {
+					const page = await store.list({ project, after, limit });
+					return send(res, 200, encodePage(typeof page === "string" ? page : {
+						sessions: page.sessions, ...(page.next === undefined ? {} : { next: page.next }),
+					}));
+				}
+				case "session": {
+					if (reading) {
+						const page = await store.read(sid, { after, limit });
+						return send(res, 200, encodePage(typeof page === "string" ? page : {
+							session: page.session, entries: page.entries, ...(page.next === undefined ? {} : { next: page.next }),
+						}));
+					}
+					validateMetadata(sid, b);
+					await mutate(() => store.create(sid, b));
 					break;
+				}
 				case "acquire": {
-					if (!id(b.owner)) return invalid("owner is required");
-					known(sid);
-					if (records.holdUntil > performance.now()) throw held(records.holdUntil);
-					const l = current(sid);
-					if (attached?.localHeld(sid)) throw held(performance.now() + ttlMs);
-					if (l && l.owner !== b.owner) throw held(l.expires);
-					const lease = l?.lease ?? randomBytes(16).toString("hex");
-					if (!l) leases.set(sid, { lease, owner: b.owner, expires: performance.now() + ttlMs });
+					const owner = b.owner;
+					if (!id(owner)) return invalid("owner is required");
+					const lease = await mutate(() => store.acquire(sid, owner));
+					if (!validLease(lease)) throw new UncertainCommit();
 					result = { lease, ttlMs };
 					break;
 				}
 				case "renew":
-					known(sid);
-					requireLease(sid, leaseParam).expires = performance.now() + ttlMs;
+					await mutate(() => store.renew(sid, leaseParam));
 					result = { ttlMs };
 					break;
 				case "release":
-					known(sid);
-					if (current(sid)?.lease === leaseParam) leases.delete(sid);
+					await mutate(() => store.release(sid, leaseParam));
 					break;
 				case "append": {
-					if (!validLease(b.lease) || !Array.isArray(b.entries) || !b.entries.every((e) => object(e) && id(e.id) && (e.parentId === null || id(e.parentId)) && e.erased !== true)) return invalid("Invalid lease or entries");
-					const s = known(sid), authorize = () => { requireLease(sid, b.lease); };
-					authorize();
-					result = { kept: records.keep(s, b.entries as JsonObject[], authorize) };
+					const { lease, entries } = b;
+					if (!validLease(lease) || !Array.isArray(entries) || !entries.every((e) => object(e) && id(e.id) && (e.parentId === null || id(e.parentId)) && e.erased !== true)) return invalid("Invalid lease or entries");
+					const kept = await mutate(() => store.append(sid, lease, entries as JsonObject[]));
+					if (!Number.isSafeInteger(kept) || kept < 0 || kept > entries.length) throw new UncertainCommit();
+					result = { kept };
 					if (drop > 0) { drop--; res.destroy(); return; }
 					break;
 				}
 				case "erase": {
-					if (!ids(b.entryIds) || (Object.hasOwn(b, "lease") && !validLease(b.lease))) return invalid("Invalid entry IDs or lease");
-					const s = known(sid);
-					const authorize = () => {
-						if (b.lease !== undefined) { requireLease(sid, b.lease); return; }
-						if (records.holdUntil > performance.now()) throw held(records.holdUntil);
-						if (attached?.localHeld(sid)) throw held(performance.now() + ttlMs);
-						const l = current(sid);
-						if (l) throw held(l.expires);
-					};
-					authorize();
-					result = records.erase(s, b.entryIds, authorize);
+					const { entryIds, lease } = b;
+					if (!ids(entryIds) || (Object.hasOwn(b, "lease") && !validLease(lease))) return invalid("Invalid entry IDs or lease");
+					const erased = await mutate(() => store.erase(sid, entryIds, lease as string | undefined));
+					if (!Array.isArray(erased) || !erased.every(id)) throw new UncertainCommit();
+					result = { erased };
 					break;
 				}
 			}
@@ -501,7 +567,10 @@ export async function historyService(options: HistoryServiceOptions) {
 		} catch (e) {
 			if (e instanceof UncertainCommit || res.headersSent) { res.destroy(); return; }
 			if (!req.complete) { res.setHeader("Connection", "close"); req.resume(); }
-			const failure = e instanceof BindingError ? e : unavailable();
+			const failure = e instanceof BindingError ? e : e instanceof HistoryServiceError && Object.hasOwn(historyStorageStatuses, e.code)
+				? new BindingError(historyStorageStatuses[e.code], e.code, e.message,
+					e.code === "held" ? Math.max(1, Math.ceil(e.retryAfterMs ?? ttlMs) || ttlMs) : undefined)
+				: unavailable();
 			send(res, failure.status, JSON.stringify({ error: failure.message, code: failure.code, ...(failure.retryAfterMs === undefined ? {} : { retryAfterMs: failure.retryAfterMs }) }));
 		}
 	});
