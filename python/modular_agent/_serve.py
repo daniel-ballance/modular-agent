@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from contextvars import ContextVar
 from copy import deepcopy
 from os import PathLike
+from pathlib import Path
 from typing import Any, cast, overload
 
 from ma_plugin.host import External
@@ -36,6 +37,7 @@ from ._plugin import (
 from ._provider import Provider, ProviderContext, _available, _models, _request
 from ._tool import LeftOpen, Tool, ToolContext, ToolSource
 from ._types import AgentError, Answer, Content, ErrorCode, Json, JsonObject, ModelRef, QuestionSpec
+from ._runtime_port import RuntimeContext, _dispatch_runtime
 from ._working import _METHODS, _dispatch_environment
 
 
@@ -184,12 +186,14 @@ async def _serve(
         items += [
             label
             for label, part in (
+                ("history store", registrar._history_store),
                 ("credential store", registrar._credential_store),
                 ("configuration", registrar._configuration),
                 ("interface", registrar._interface),
             )
             if part is not None
         ]
+        items += [f"provider:{name}" for name in sorted(registrar._local_providers)]
         items += list(registrar._defined_hooks)
         if items:
             raise WireError("Cannot serve " + ", ".join(items), "not_supported")
@@ -217,6 +221,8 @@ async def _serve(
                 }
             )
             subscribe(source)
+        if registrar._runtime is not None:
+            registration["runtime"] = registrar._runtime[0].declaration()
         if registrar._environment is not None:
             registration["workingEnvironment"] = registrar._environment.supports
         registration["hooks"] = [
@@ -277,6 +283,52 @@ async def _serve(
             raise WireError("Unknown tool source or invalid session scope", "invalid_request")
         return {"tools": [t.definition for t in listed]}
 
+    async def scoped_environment(
+        sid: str,
+        project: str,
+        key: str | int,
+        progress: Callable[[Content], Awaitable[None]] | None,
+        operation: str,
+        params: JsonObject,
+    ) -> Json:
+        methods = {
+            "read_bytes": "read",
+            "write_bytes": "write",
+            "list_directory": "list",
+            "bash": "exec",
+        }
+        arguments = dict(params)
+        timeout = arguments.pop("timeout", None)
+        if isinstance(timeout, (int, float)):
+            arguments["timeoutMs"] = round(timeout * 1000)
+        from uuid import uuid4
+
+        callback_id = uuid4().hex
+        if operation == "bash" and progress is not None:
+            environment_output[callback_id] = progress
+        try:
+            reply = await server.peer.request(
+                "host/env/" + methods[operation],
+                {
+                    **arguments,
+                    "parentRequestId": key,
+                    "sessionId": sid,
+                    "cwd": project,
+                },
+                key=callback_id,
+            )
+        except WireError as exc:
+            raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+        finally:
+            environment_output.pop(callback_id, None)
+        if operation == "bash":
+            return {
+                "exit_code": reply["exitCode"],
+                "text": reply["output"],
+                "timed_out": reply["timedOut"],
+            }
+        return cast(Json, reply)
+
     async def call_tool(p: dict[str, Any], key: str | int) -> JsonObject:
         call = p["call"]
         reg = registered()
@@ -329,43 +381,9 @@ async def _serve(
             return reply["tools"] if operation == "list" and isinstance(reply, dict) else reply
 
         async def environment(operation: str, params: JsonObject) -> Json:
-            methods = {
-                "read_bytes": "read",
-                "write_bytes": "write",
-                "list_directory": "list",
-                "bash": "exec",
-            }
-            arguments = dict(params)
-            timeout = arguments.pop("timeout", None)
-            if isinstance(timeout, (int, float)):
-                arguments["timeoutMs"] = round(timeout * 1000)
-            from uuid import uuid4
-
-            callback_id = uuid4().hex
-            if operation == "bash":
-                environment_output[callback_id] = progress
-            try:
-                reply = await server.peer.request(
-                    "host/env/" + methods[operation],
-                    {
-                        **arguments,
-                        "parentRequestId": key,
-                        "sessionId": p["sessionId"],
-                        "cwd": p["project"],
-                    },
-                    key=callback_id,
-                )
-            except WireError as exc:
-                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
-            finally:
-                environment_output.pop(callback_id, None)
-            if operation == "bash":
-                return {
-                    "exit_code": reply["exitCode"],
-                    "text": reply["output"],
-                    "timed_out": reply["timedOut"],
-                }
-            return cast(Json, reply)
+            return await scoped_environment(
+                p["sessionId"], p["project"], key, progress, operation, params
+            )
 
         async def history(cursor: str | None) -> JsonObject:
             try:
@@ -377,6 +395,12 @@ async def _serve(
                 raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
             return cast(JsonObject, page)
 
+        async def custom_event(type: str, data: Json) -> None:
+            await server.peer.notify(
+                "host/emit",
+                {"sessionId": p["sessionId"], "parentRequestId": key, "type": type, "data": data},
+            )
+
         context = ToolContext(
             p["sessionId"],
             call.get("actorId", "user"),
@@ -386,6 +410,9 @@ async def _serve(
             nested,
             environment,
             history,
+            emit=custom_event,
+            turn_id=p.get("turnId"),
+            step_id=call.get("stepId"),
             start_job=start_job(key, p["sessionId"], call.get("actorId", "user"))
             if reg._job_owner
             else None,
@@ -538,6 +565,12 @@ async def _serve(
         if command is None:
             raise WireError("Unknown command", "invalid_request")
         sid, actor = p["sessionId"], p["actorId"]
+        session = await server.peer.request(
+            "host/session", {"sessionId": sid, "parentRequestId": key}
+        )
+
+        async def environment(operation: str, params: JsonObject) -> Json:
+            return await scoped_environment(sid, session["project"], key, None, operation, params)
 
         async def history(cursor: str | None) -> JsonObject:
             return cast(
@@ -563,6 +596,8 @@ async def _serve(
             CommandContext(
                 sid,
                 actor,
+                environment,
+                project=Path(session["project"]),
                 history=history,
                 emit=emit,
                 start_job=start_job(key, sid, actor) if registered()._job_owner else None,
@@ -590,8 +625,38 @@ async def _serve(
 
         return await _dispatch_environment(environment, method, params, progress)
 
+    model_contexts: dict[str, RuntimeContext] = {}
+
+    def bind_runtime(method: str) -> Callable[..., Awaitable[JsonObject]]:
+        async def invoke(params: dict[str, Any], parent: str | int) -> JsonObject:
+            installed = registered()._runtime
+            if installed is None:
+                raise WireError("No registered Runtime", "not_supported")
+
+            async def callback(name: str, value: JsonObject, key: str) -> Json:
+                rpc = "host/history" if name == "history" else "host/runtime/" + name
+                args = {**value, "parentRequestId": parent}
+                if name == "report":
+                    await server.peer.notify(rpc, args)
+                    return None
+                if name == "model":
+                    model_contexts[key] = cx
+                try:
+                    return cast(Json, await server.peer.request(rpc, args, key=key))
+                finally:
+                    model_contexts.pop(key, None)
+
+            cx = RuntimeContext(params["turn"], callback)
+            return await _dispatch_runtime(installed[0], method, params, cx)
+
+        return invoke
+
     class Server(PluginServer):  # type: ignore[misc]  # Untyped base adapter.
         async def notification(self, method: str, params: dict[str, Any]) -> None:
+            if method == "host/runtime/modelEvent" and (
+                cx := model_contexts.get(params.get("parentRequestId", ""))
+            ):
+                await cx._piece(params)
             if method == "host/env/output" and isinstance(chunk := params.get("chunk"), str):
                 callback = environment_output.get(params.get("parentRequestId", ""))
                 if callback is not None:
@@ -642,6 +707,12 @@ async def _serve(
 
         return invoke
 
+    methods.update(
+        {
+            f"runtime/{name}": bind_runtime(name)
+            for name in ("runTurn", "resumeTurn", "continueOpenCalls")
+        }
+    )
     methods.update({f"env/{name}": bind_environment(name) for name in _METHODS})
     server = Server(registration, methods, initialize, stop)
     if frames is not None:

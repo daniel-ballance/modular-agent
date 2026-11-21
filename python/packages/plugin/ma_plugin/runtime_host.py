@@ -929,8 +929,26 @@ class TurnHost:
             value["call"] = call_out(call)
             if "checked_input" in a and a["checked_input"] != call["input"]:
                 a = {**a, "refused": True, "reason": "Tool input changed after approval"}
+            if a.get("open") and isinstance(a.get("pending"), dict) and not a.get("refused"):
+                if not self.runtime.declarations.get("open_calls"):
+                    return await self.refuse_tool(
+                        value, call, d["step"], "This call cannot be left open"
+                    )
+                question = await self.runtime._gate_question(
+                    self.sid, self.turn, d["step"], call, authority, a["pending"]
+                )
+                if question.get("open"):
+                    a = {**a, "request": question["request"], "pending": "Waiting for an answer"}
+                elif question.get("declined"):
+                    a = {**a, "refused": True, "reason": question.get("reason", "Declined")}
+                else:
+                    a = {**a, "open": False}
             if a.get("refused"):
                 return await self.refuse_tool(value, call, d["step"], a.get("reason", "Refused"))
+            if a.get("open") and a.get("request"):
+                await self.append(
+                    "tool_deferred", step=d["step"], call=cid, data={"requestIds": [a["request"]]}
+                )
             self.gating.discard(cid)
             if not a.get("open") and definition:
                 self.gates[call["id"]] = (call, definition, d["step"])

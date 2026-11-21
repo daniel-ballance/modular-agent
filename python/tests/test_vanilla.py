@@ -138,6 +138,21 @@ async def test_turn_outcomes(agent, script, settings, outcome, error):
     paired(await entries(a, sid))
 
 
+async def wait_for_model(api, sid, fake):
+    # Cancellation tests need the dispatch boundary, not a performance target
+    # for point creation, durable commits and the Runtime's process round trips.
+    entered = asyncio.create_task(fake.entered.wait())
+    ended = asyncio.create_task(api.call("runtime", "wait", {"session": sid}))
+    try:
+        await asyncio.wait((entered, ended), return_when=asyncio.FIRST_COMPLETED)
+        if not fake.entered.is_set():
+            pytest.fail(f"Turn settled before dispatching to the fake Provider: {ended.result()}")
+    finally:
+        for task in (entered, ended):
+            task.cancel()
+        await asyncio.gather(entered, ended, return_exceptions=True)
+
+
 async def test_cancelling_model_and_queued_input_returned(agent):
     h, a, sid, fake = await agent([{**reply("never"), "wait": True}])
     events = []
@@ -147,7 +162,7 @@ async def test_cancelling_model_and_queued_input_returned(agent):
 
     a.follow("user", follow)
     await a.call("runtime", "submit", {"session": sid, "content": content("start")})
-    await asyncio.wait_for(fake.entered.wait(), 1)
+    await wait_for_model(a, sid, fake)
     for mode in ["steer", "after"]:
         await a.call("runtime", "submit", {"session": sid, "content": content(mode), "when": mode})
     await a.call("runtime", "cancel", {"session": sid})
@@ -163,7 +178,7 @@ async def test_steering_joins_turn_followup_waits_and_key_is_taken_once(agent):
     first = await a.call(
         "runtime", "submit", {"session": sid, "content": content("start"), "key": "k"}
     )
-    await asyncio.wait_for(fake.entered.wait(), 1)
+    await wait_for_model(a, sid, fake)
     again = await a.call(
         "runtime", "submit", {"session": sid, "content": content("different"), "key": "k"}
     )

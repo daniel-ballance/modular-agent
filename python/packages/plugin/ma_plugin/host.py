@@ -430,11 +430,6 @@ class External(Plugin):
 
     async def cancel_job(self, d, emit):
         await self.request("jobs/cancel", {"jobId": d["job"]}, d)
-        # The plugin is expected to end it before answering. The native Jobs
-        # ledger makes this fallback harmless if the plugin already did.
-        jobs = await self.api.call("jobs", "list", d)
-        if any(j["id"] == d["job"] and j["state"] == "running" for j in jobs):
-            await self.api.call("jobs", "report", {**d, "state": "cancelled", "report": False})
         return {}
 
     async def owned_job(self, job_id):
@@ -896,6 +891,9 @@ class External(Plugin):
                         "detail": j["detail"],
                         "actorId": j["actor"],
                         **({"key": j["key"]} if j.get("key") else {}),
+                        **(
+                            {"cleanup": "unconfirmed"} if j["state"] == "cleanupUnconfirmed" else {}
+                        ),
                     }
                     for j in jobs
                 ]
@@ -940,8 +938,15 @@ class External(Plugin):
                 raise WireError("Nested tools need a name and object input", "invalid_request")
             return result_out(await self.api.nested_tools(d["dispatch"], p["name"], p["input"]))
         if method.startswith("host/env/"):
-            if parent is None or p.get("sessionId") != sid or "tools" not in authority:
-                raise WireError("No parent work with tool authority", "invalid_request")
+            required = {"tools/call": "tools", "command/run": "input"}
+            if (
+                parent is None
+                or p.get("sessionId") != sid
+                or required.get(parent["method"]) not in authority
+            ):
+                raise WireError(
+                    "No authorized parent work for this environment call", "invalid_request"
+                )
             cwd = Path(p["cwd"]).resolve()
             if not cwd.is_relative_to(Path(s["project"]).resolve()):
                 raise WireError("cwd is outside the session project", "invalid_request")

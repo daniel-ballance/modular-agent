@@ -11,6 +11,7 @@ from typing import Unpack, TypedDict
 from ._agent import Agent, AgentStart, create_agent
 from ._environment import MemoryEnvironment, memory_environment as memory_environment
 from ._history import HistoryStore
+from ._history_port import HistoryPort
 from ._plugin import Plugin, ProcessPlugin, ServicePlugin
 from ._serve import _OverWire
 from ._provider import ModelInfo, ProviderContext, ProviderSupports
@@ -131,7 +132,7 @@ class _Options(TypedDict, total=False):
     data_dir: str | PathLike[str] | None
     durability: Durability
     environment: MemoryEnvironment
-    history: HistoryStore | None
+    history: HistoryStore | HistoryPort | None
     tools: Sequence[Tool]
     plugins: Sequence[Plugin]
     process_plugins: Sequence[ProcessPlugin | JsonObject] | None

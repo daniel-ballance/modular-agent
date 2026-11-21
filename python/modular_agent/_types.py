@@ -134,30 +134,6 @@ class Proposal(TypedDict):
     time: int
 
 
-@dataclass(frozen=True)
-class EventData:
-    fields: JsonObject
-
-    @property
-    def delta(self) -> str:
-        return str(self.fields.get("delta", ""))
-
-    @property
-    def outcome(self) -> Json:
-        return self.fields.get("outcome")
-
-
-@dataclass(frozen=True)
-class Event:
-    type: str
-    time: str
-    session_id: str
-    data: EventData
-    turn_id: str | None = None
-    step_id: str | None = None
-    call_id: str | None = None
-
-
 class QuestionSpec(TypedDict):
     kind: Literal["approval", "choice", "text", "link", "secret"]
     question: str

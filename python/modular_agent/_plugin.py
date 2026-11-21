@@ -8,8 +8,46 @@ import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from os import PathLike
+from pathlib import Path
 from typing import Literal, NotRequired, TypedDict, cast, overload
 
+from ._history_port import HistoryPort
+from ._hook_types import (
+    PluginLoad,
+    SessionHook,
+    ActorHook,
+    InputHook,
+    TurnBefore,
+    TurnStart,
+    TurnEnd,
+    StepBefore,
+    StepAfter,
+    ToolBefore,
+    ToolAfter,
+    ModelFailed,
+    TurnResult,
+    ProviderRequest,
+    ProviderResponse,
+    ProviderPiece,
+    OutputHook,
+    Allow,
+    Refuse,
+    ChangeInput,
+    ChangeContent,
+    ChangeToolResult,
+    Pending,
+    Handle,
+    Add,
+    End,
+    Retry,
+    StopRetrying,
+    Accept,
+    Redact,
+    Block,
+    Change,
+    Continue,
+)
+from ._runtime_port import QueuePolicy, RuntimePort
 from ._context import CallContext, HookContext
 from ._credentials import CredentialStore
 from ._jobs import Job, JobManager, JobOwner
@@ -22,32 +60,12 @@ from ._working import WorkingEnvironment
 type Order = Literal["first", "normal", "last"]
 type HookAnswer = JsonObject | None
 type HookRule = Literal["observe", "gate", "transform", "collect", "firstAnswer"]
-type Handler[P] = Callable[[P, HookContext], HookAnswer | Awaitable[HookAnswer]]
-type HookHandler = Callable[[JsonObject], HookAnswer | Awaitable[HookAnswer]] | Handler[JsonObject]
-type _AnyHandler = HookHandler | Handler[ToolBefore] | Handler[ToolAfter] | Handler[ProviderPiece]
-
-
-class ToolBefore(TypedDict):
-    sessionId: str
-    turnId: NotRequired[str | None]
-    stepId: NotRequired[str | None]
-    call: JsonObject
-    definition: JsonObject | None
-
-
-class ToolAfter(TypedDict):
-    sessionId: str
-    turnId: NotRequired[str | None]
-    call: JsonObject
-    result: JsonObject
-
-
-class ProviderPiece(TypedDict):
-    sessionId: str | None
-    stepId: NotRequired[str]
-    provider: str
-    model: JsonObject
-    event: JsonObject
+type Handler[P, A] = (
+    Callable[[P], A | None | Awaitable[A | None]]
+    | Callable[[P, HookContext], A | None | Awaitable[A | None]]
+)
+type HookHandler = Handler[JsonObject, JsonObject]
+type _AnyHandler = Callable[..., object]
 
 
 type CommandHandler = Callable[[str, CommandContext], str | None | Awaitable[str | None]]
@@ -68,6 +86,7 @@ class CommandContext(CallContext):
         actor_id: str,
         environment: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
         *,
+        project: Path,
         step_id: str | None = None,
         request_model: Callable[[JsonObject], Awaitable[JsonObject]] | None = None,
         ask: Callable[[QuestionSpec, float | None], Awaitable[Answer]] | None = None,
@@ -79,6 +98,7 @@ class CommandContext(CallContext):
         super().__init__(
             session_id, actor_id, step_id=step_id, history=history, emit=emit, call_hook=call_hook
         )
+        self.project = project
         self._model = request_model
         self._ask = ask
         self.environment = ToolEnvironment(self._check, environment)
@@ -131,12 +151,15 @@ class Registrar:
         self._config = config
         self._tools: dict[str, Tool] = {}
         self._sources: dict[str, ToolSource] = {}
+        self._local_providers: set[str] = set()
         self._providers: dict[str, Provider] = {}
         self._hooks: list[_Hook] = []
         self._commands: dict[str, _Command] = {}
         self._credential_store: CredentialStore | None = None
         self._configuration: Configuration | None = None
         self._interface: Interface | None = None
+        self._runtime: tuple[RuntimePort, QueuePolicy, QueuePolicy | None] | None = None
+        self._history_store: HistoryPort | None = None
         self._environment: WorkingEnvironment | None = None
         self._job_owner: JobOwner | None = None
         self._defined_hooks: dict[str, HookRule] = {}
@@ -152,6 +175,22 @@ class Registrar:
         if self._job_owner is not None:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate job owner")
         self._job_owner = owner
+
+    def runtime(
+        self,
+        runtime: RuntimePort,
+        *,
+        queued_input_after_restart: QueuePolicy = "handedBack",
+        queued_job_reports_after_restart: QueuePolicy | None = None,
+    ) -> None:
+        if self._runtime is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate Runtime")
+        self._runtime = runtime, queued_input_after_restart, queued_job_reports_after_restart
+
+    def history_store(self, store: HistoryPort) -> None:
+        if self._history_store is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate history store")
+        self._history_store = store
 
     def environment(self, environment: WorkingEnvironment) -> None:
         if self._environment is not None:
@@ -188,18 +227,110 @@ class Registrar:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid tool source: {source.id}")
         self._sources[source.id] = source
 
-    def provider(self, provider: Provider) -> None:
+    def provider(self, provider: Provider, *, in_process_only: bool = False) -> None:
         if not provider.id or provider.id in self._providers:
             raise AgentError(
                 ErrorCode.INVALID_COMPOSITION, f"Invalid Provider registration: {provider.id}"
             )
         self._providers[provider.id] = provider
+        if in_process_only:
+            self._local_providers.add(provider.id)
+
+    @overload
+    def on(
+        self,
+        point: Literal["plugin.load"],
+        handler: Handler[PluginLoad, Allow | Refuse],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["session.prepare", "session.start", "session.end"],
+        handler: Handler[SessionHook, None],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["session.join", "session.leave"],
+        handler: Handler[ActorHook, None],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["input"],
+        handler: Handler[InputHook, Change[ChangeContent] | Handle],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["turn.before"],
+        handler: Handler[TurnBefore, Add],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["turn.start"],
+        handler: Handler[TurnStart, None],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["turn.end"],
+        handler: Handler[TurnEnd, None],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["step.before"],
+        handler: Handler[StepBefore, Change[JsonObject]],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["step.after"],
+        handler: Handler[StepAfter, Continue | End],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
 
     @overload
     def on(
         self,
         point: Literal["tool.before"],
-        handler: Handler[ToolBefore],
+        handler: Handler[ToolBefore, Allow | Refuse | Change[ChangeInput] | Pending],
         order: Order = "normal",
         *,
         in_process_only: bool = False,
@@ -209,7 +340,47 @@ class Registrar:
     def on(
         self,
         point: Literal["tool.after"],
-        handler: Handler[ToolAfter],
+        handler: Handler[ToolAfter, Change[ChangeToolResult]],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["model.failed"],
+        handler: Handler[ModelFailed, Retry | StopRetrying],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["turn.result"],
+        handler: Handler[TurnResult, Accept | Refuse],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["provider.request"],
+        handler: Handler[ProviderRequest, Change[JsonObject]],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["provider.response"],
+        handler: Handler[ProviderResponse, None],
         order: Order = "normal",
         *,
         in_process_only: bool = False,
@@ -219,7 +390,17 @@ class Registrar:
     def on(
         self,
         point: Literal["provider.piece"],
-        handler: Handler[ProviderPiece],
+        handler: Handler[ProviderPiece, None],
+        order: Order = "normal",
+        *,
+        in_process_only: bool = False,
+    ) -> None: ...
+
+    @overload
+    def on(
+        self,
+        point: Literal["output"],
+        handler: Handler[OutputHook, Redact | Block],
         order: Order = "normal",
         *,
         in_process_only: bool = False,
@@ -309,6 +490,7 @@ class Plugin:
             *(f"tool:{n}" for n in registrar._tools),
             *(f"command:{n}" for n in registrar._commands),
             *(f"provider:{n}" for n in registrar._providers),
+            *(["runtime"] if registrar._runtime is not None else []),
             *(["working-environment"] if registrar._environment is not None else []),
         }
         if len(set(self.replaces)) != len(self.replaces) or set(self.replaces) - items:
@@ -370,7 +552,10 @@ async def _invoke_hook(hook: _Hook, payload: JsonObject, context: HookContext) -
                 payload
             )
         else:
-            reply = cast(Handler[JsonObject], hook.handler)(payload, context)
+            reply = cast(
+                Callable[[JsonObject, HookContext], HookAnswer | Awaitable[HookAnswer]],
+                hook.handler,
+            )(payload, context)
         return await reply if inspect.isawaitable(reply) else reply
     except asyncio.CancelledError:
         context.cancelled.set()

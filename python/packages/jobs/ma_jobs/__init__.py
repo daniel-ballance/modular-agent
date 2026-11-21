@@ -120,7 +120,7 @@ class Jobs(Plugin):
         return [
             j
             for j in await self.list(d, emit)
-            if j["state"] == "running" and j["owner"] == d["_caller"]
+            if j["state"] in {"running", "cleanupUnconfirmed"} and j["owner"] == d["_caller"]
         ]
 
     async def take_up(self, d, emit):
@@ -270,15 +270,32 @@ class Jobs(Plugin):
 
     async def cancel(self, d, emit):
         job = await self._get(d)
-        if job["state"] == "running":
-            args = {"session": job["session"], "job": job["id"]}
-            try:
-                await self.api.call("job-owner:" + job["owner"], "cancel_job", args)
-            except AgentError as exc:
-                if exc.code != "unavailable":
-                    raise
-                await self.api.call(job["owner"], "cancel_job", args)
-        return await self._get(d)
+        if job["state"] == "cleanupUnconfirmed":
+            raise AgentError("Job cleanup not confirmed", "lost")
+        if job["state"] != "running":
+            return job
+        args = {"session": job["session"], "job": job["id"]}
+        try:
+            async with asyncio.timeout(5):
+                try:
+                    await self.api.call("job-owner:" + job["owner"], "cancel_job", args)
+                except AgentError as exc:
+                    if exc.code != "unavailable":
+                        raise
+                    await self.api.call(job["owner"], "cancel_job", args)
+        except Exception:
+            # The end may have committed before the cancellation reply was lost.
+            # Check the record under the same lock as a terminal owner callback.
+            pass
+        async with self.locks.setdefault(job["session"], asyncio.Lock()):
+            job = await self._get(d)
+            if job["state"] == "running":
+                await self.api.session(
+                    "append", **args, kind="job_cleanup_unconfirmed", writer="@harness", data={}
+                )
+            elif job["state"] != "cleanupUnconfirmed":
+                return job
+        raise AgentError("Job cleanup not confirmed", "lost")
 
     async def usage(self, d, emit):
         total = {}

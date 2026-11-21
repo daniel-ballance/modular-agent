@@ -54,6 +54,8 @@ from .mcp import _McpPlugin
 from ._credentials import CredentialStore, _CredentialAdapter, environment_credentials
 from ._environment import LocalEnvironment, MemoryEnvironment
 from ._history import HistoryStore
+from ._history_port import HistoryPort, _PortHistory
+from ._runtime_port import _LocalRuntime
 from ._native import (
     _LocalPlugin,
     _MemoryHistory,
@@ -649,11 +651,20 @@ class Agent:
             reason=answer.reason,
         )
 
+    async def _interrupted(self, d: dict[str, Any]) -> None:
+        if (reason := d.get("interrupted")) and (session := self._sessions.get(d["session"])):
+            session._interruption = reason
+            session._changed.set()
+            for stream in session._prompt_streams:
+                stream.push(AgentError(ErrorCode.LOST, "Session interrupted", {"reason": reason}))
+
     async def _event(self, d: dict[str, Any]) -> None:
         sid = d.get("session")
         if sid is None:
             return
         if (session := self._sessions.get(sid)) is not None:
+            if d["kind"] == "session_interrupted":
+                session._interruption = d["reason"]
             session._changed.set()
             if session._streams:
                 for event in _events(d):
@@ -725,6 +736,9 @@ class Agent:
                 and await self._call("history", "read", session=id) is None
             ):
                 raise AgentError(ErrorCode.NOT_FOUND, "Unknown session")
+            if (old := self._sessions.get(id)) is not None and old._interruption:
+                old._closed = True
+                self._detached(id)
             await self._session("open", session=id, actor="user")
             await self._call("runtime", "wait", session=id)
             return self._attach(id)
@@ -1027,7 +1041,7 @@ def create_agent(
     project: str | os.PathLike[str] | None = None,
     data_dir: str | os.PathLike[str] | None = None,
     durability: Durability = "ephemeral",
-    history: HistoryStore | None = None,
+    history: HistoryStore | HistoryPort | None = None,
     runtime: RuntimeChoice | None = None,
     environment: MemoryEnvironment | LocalEnvironment | None = None,
     credentials: CredentialStore | None = None,
@@ -1064,14 +1078,17 @@ def create_agent(
             "never",
         }:
             raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid durability or approval policy")
-        if data_dir is None and durability != "ephemeral":
-            if history is None:
-                raise AgentError(
-                    ErrorCode.INVALID_COMPOSITION, "Kept history needs a persistent store"
-                )
+
         if runtime is not None and runtime.continues_after_restart != (durability == "durable"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Runtime does not match durability")
-        if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
+        persistent = (
+            history._kind != "memory"
+            if isinstance(history, HistoryStore)
+            else history.persistent
+            if history is not None
+            else None
+        )
+        if persistent is not None and persistent == (durability == "ephemeral"):
             raise AgentError(
                 ErrorCode.INVALID_COMPOSITION,
                 "Persistent history requires kept or durable"
@@ -1110,9 +1127,11 @@ def create_agent(
                 defaults.update(settings_in({"approval": approval}))
             agent = Agent(h, folder, defaults, on_question, scratch)
             agent._plugin_host = plugin_host is True or external_placement
-            if history is not None and history._kind == "http":
+            if history is not None and not isinstance(history, HistoryStore):
+                store = _PortHistory(history)
+            elif isinstance(history, HistoryStore) and history._kind == "http":
                 store = HTTPHistory(history._url, history._path)
-            elif durability == "ephemeral":
+            elif durability == "ephemeral" or (history is None and data_dir is None):
                 store = agent._memory_store = memory_store or _MemoryHistory()
             else:
                 store_root = history._path if history is not None else root
@@ -1159,9 +1178,10 @@ def create_agent(
             agent._credentials = credentials or environment_credentials()
             await h.load(_CredentialAdapter(agent._credentials))
             h.on("embedding", "session.start", agent._present, "first")
+            h.on("embedding", "session.suspend", agent._interrupted, "first")
             h.follow("embedding", "user", agent._event)
             for provider in providers:
-                await h.load(_ProviderAdapter(provider, credentials))
+                await h.load(_ProviderAdapter(provider, agent._credentials))
             selection = Selection(
                 [p.id for p in providers] + (["conformance"] if conformance else [])
             )
@@ -1184,6 +1204,7 @@ def create_agent(
             registered_tools: dict[str, _LocalPlugin] = {}
             interfaces: list[tuple[str, Interface]] = []
             credential_registered = credentials is not None
+            history_registered = history is not None
             for plugin in [
                 *(Plugin(t.name, tools=[t]) for t in tools),
                 *(
@@ -1198,6 +1219,20 @@ def create_agent(
                     )
                 try:
                     registrar = await plugin._register(plugin.config)
+                    if registrar._history_store is not None:
+                        if history_registered:
+                            raise ValueError("Duplicate history store")
+                        port = registrar._history_store
+                        if port.persistent == (durability == "ephemeral"):
+                            raise ValueError(
+                                "Persistent history requires kept or durable"
+                                if port.persistent
+                                else "Kept history needs a persistent store"
+                            )
+                        history_registered = True
+                        await h.unload(h.capabilities["history"][0])
+                        await h.load(_PortHistory(port))
+                        agent._memory_store = None
                     if registrar._credential_store is not None:
                         if credential_registered:
                             raise ValueError("Duplicate credential store")
@@ -1246,6 +1281,22 @@ def create_agent(
                 adapter = _LocalPlugin(
                     plugin, registrar, folder, late_answers=late_answers_start_turns
                 )
+                if registrar._runtime is not None:
+                    if "runtime" not in plugin.replaces:
+                        await plugin._close()
+                        raise ValueError("Unlisted Runtime replacement")
+                    runtime_port, queued_input, queued_jobs = registrar._runtime
+                    await h.unload(h.capabilities["runtime"][0])
+                    await h.load(
+                        _LocalRuntime(
+                            h,
+                            plugin.name,
+                            runtime_port,
+                            adapter._history_page,
+                            queued_input=queued_input,
+                            queued_jobs=queued_jobs,
+                        )
+                    )
                 await h.load(adapter)
                 registered_tools.update((name, adapter) for name in registrar._tools)
             specs: list[dict[str, Any]] = [
@@ -1300,6 +1351,8 @@ def create_agent(
 
             agent._enable_plugin_host = enable_plugin_host
             wrap_native_providers(h)
+            if durability != "ephemeral" and agent._memory_store is not None:
+                raise ValueError("Kept history needs a persistent store")
             environment_owner = h.capabilities["environment"][0]
             if (
                 data_dir is None

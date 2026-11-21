@@ -804,6 +804,36 @@ class Turns:
         await ordered_tools(pending, parallel, execute, record)
         return opened
 
+    async def _gate_question(self, sid, turn, step, call, authority, question):
+        return await self.api.call(
+            "questions",
+            "ask",
+            {
+                **question,
+                "session": sid,
+                "actor": call["actor"],
+                "authority": sorted(authority),
+                "call": call["id"],
+                "turn": turn,
+                "step": step,
+                "name": question.get("credential"),
+                "timeout": 0,
+                "park": True,
+                "key": "call:" + call["id"] + ":gate",
+                **({"responders": question["answerers"]} if "answerers" in question else {}),
+                **(
+                    {
+                        "approval_call": {
+                            "name": call["name"],
+                            "input": call["input"],
+                        }
+                    }
+                    if question["kind"] == "approval"
+                    else {}
+                ),
+            },
+        )
+
     async def _tool(self, sid, turn, step, call, definition, *, replay=False):
         ran_again = False
         unknown = {"status": "outcome_unknown", "content": content(UNKNOWN)}
@@ -848,38 +878,8 @@ class Turns:
                 if call.get("parentCallId") or not self.declarations.get("open_calls"):
                     gate = {**gate, "refused": True, "reason": "This tool call cannot be left open"}
                 else:
-                    question = gate["pending"]
-                    reply = await self.api.call(
-                        "questions",
-                        "ask",
-                        {
-                            **question,
-                            "session": sid,
-                            "actor": call["actor"],
-                            "authority": sorted(authority),
-                            "call": call["id"],
-                            "turn": turn,
-                            "step": step,
-                            "name": question.get("credential"),
-                            "timeout": 0,
-                            "park": True,
-                            "key": "call:" + call["id"] + ":gate",
-                            **(
-                                {"responders": question["answerers"]}
-                                if "answerers" in question
-                                else {}
-                            ),
-                            **(
-                                {
-                                    "approval_call": {
-                                        "name": call["name"],
-                                        "input": gate["call"]["input"],
-                                    }
-                                }
-                                if question["kind"] == "approval"
-                                else {}
-                            ),
-                        },
+                    reply = await self._gate_question(
+                        sid, turn, step, gate["call"], authority, gate["pending"]
                     )
                     if reply.get("open"):
                         return {"open": True, "request": reply["request"]}

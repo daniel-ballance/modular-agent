@@ -24,8 +24,11 @@ async def test_turn_start_and_first_input_are_one_commit(agent, monkeypatch, rej
     _, api, sid, provider = await agent([reply("answer")])
     await api.call("runtime", "submit", {"session": sid, "content": content("input")})
     if reject_take:
-        with pytest.raises(AgentError, match="Cannot commit taken input"):
+        with pytest.raises(AgentError) as failure:
             await api.call("runtime", "wait", {"session": sid})
+        # A waiter can see either the commit failure or the suspension that
+        # it caused. The diagnostic is not part of the settlement contract.
+        assert failure.value.code == "lost"
         assert not provider.requests
         assert [batch for batch in batches if "turn_start" in batch] == []
     else:

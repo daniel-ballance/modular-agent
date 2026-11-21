@@ -52,14 +52,21 @@ class ProviderContext:
     _credential: Callable[[], str | None]
     cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     _active: bool = True
+    _named_credential: Callable[[str], str | None] | None = None
 
     def _check(self) -> None:
         if not self._active:
             raise AgentError(ErrorCode.INVALID_REQUEST, "Model request has settled")
 
-    def credential(self) -> str | None:
+    def credential(self, name: str | None = None) -> str | None:
         self._check()
-        return self._credential()
+        if name is None:
+            return self._credential()
+        if self._named_credential is None:
+            raise AgentError(
+                ErrorCode.NOT_SUPPORTED, "Named credentials require an in-process Provider"
+            )
+        return self._named_credential(name)
 
     async def piece(self, type: str, delta: Json, tool_call_id: str | None = None) -> None:
         self._check()
@@ -204,6 +211,7 @@ class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapt
                 if self.credentials is not None
                 else os.getenv(self.name.upper().replace("-", "_") + "_API_KEY")
             ),
+            _named_credential=self.credentials.read if self.credentials is not None else None,
         )
         request = request_for_provider(d.get("_shared_request") or request_out(d), self.name)
         reply = await _request(self.provider, model, info, request, cx)

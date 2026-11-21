@@ -1,8 +1,11 @@
+import asyncio
 import json
+from pathlib import Path
+import sys
 
 import pytest
-from modular_agent import Plugin
-from modular_agent.testing import over_wire, restart, test_agent as make_agent
+from modular_agent import AgentError, ErrorCode, Plugin, create_agent, file_history, run
+from modular_agent.testing import memory_environment, over_wire, restart, test_agent as make_agent
 
 
 @pytest.mark.parametrize("served", [False, True])
@@ -71,3 +74,85 @@ async def test_owner_resumes_unfinished_job_on_reopen(tmp_path):
             assert resumed == [jid]
             rows = [e for e in await reopened.history() if e["kind"] == "jobEnded"]
             assert len(rows) == 1 and rows[0]["jobId"] == jid
+
+
+def wire_owner(resumed):
+    class Owner:
+        async def cancel(self, job, cx):
+            return None  # Not a confirmation: work could still be running.
+
+        async def resume(self, job, cx):
+            resumed.append(job.id)
+            await job.end("completed", "wire resumed")
+
+    async def start(_, cx):
+        return (await cx.jobs.start("offline", {})).id
+
+    def setup(r):
+        r.jobs(Owner())
+        r.command("offline", "Start a job", start)
+
+    return Plugin("wire-owner", setup=setup)
+
+
+@pytest.mark.parametrize("served", [False, True])
+async def test_unconfirmed_owner_cleanup_is_recorded_and_not_resumed(tmp_path, served):
+    async with create_agent(
+        project=tmp_path,
+        plugins=[over_wire(wire_owner([])) if served else wire_owner([])],
+    ) as agent:
+        session = await agent.session()
+        jid = await session.run_command("/offline")
+        with pytest.raises(AgentError) as failure:
+            await session.run_command(f"/job_cancel {jid}")
+        assert failure.value.code is ErrorCode.LOST
+        [job] = json.loads(await session.run_command("/jobs"))
+        assert job["state"] == "cleanupUnconfirmed"
+        markers = [e for e in await session.history() if e["kind"] == "jobCleanupUnconfirmed"]
+        assert len(markers) == 1 and markers[0]["jobId"] == jid
+
+
+def wire_agent(path, resumed):
+    return create_agent(
+        project=path,
+        history=file_history(path / "history"),
+        durability="kept",
+        environment=memory_environment(),
+        plugins=[over_wire(wire_owner(resumed))],
+    )
+
+
+async def test_wire_owner_resumes_after_host_crash(tmp_path):
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(Path(__file__).resolve()),
+        str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    try:
+        async with asyncio.timeout(10):
+            sid, jid = (await process.stdout.readline()).decode().split()
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+    assert process.returncode < 0
+    resumed = []
+    async with wire_agent(tmp_path, resumed) as agent:
+        session = await agent.open_session(sid)
+        assert resumed == [jid]
+        [end] = [e for e in await session.history() if e["kind"] == "jobEnded"]
+        assert end["jobId"] == jid
+        assert end["data"]["outcome"]["kind"] == "completed"
+
+
+async def crash_fixture(path):
+    async with wire_agent(path, []) as agent:
+        session = await agent.session()
+        job = await session.run_command("/offline")
+        print(session.id, job, flush=True)
+        await asyncio.Future()
+
+
+if __name__ == "__main__":
+    run(crash_fixture(Path(sys.argv[1])))

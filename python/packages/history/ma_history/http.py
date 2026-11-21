@@ -160,13 +160,13 @@ class HTTPHistory(Plugin):
             cursors.add(cursor)
             query["after"] = cursor
 
-    def _lose(self, sid, lease):
+    def _lose(self, sid, lease, *, notify=True):
         if self.leases.get(sid) is not lease or lease["lost"]:
             return
         lease["lost"] = True
         if timer := lease.get("timer"):
             timer.cancel()
-        if hasattr(self, "api"):
+        if notify and hasattr(self, "api"):
             lease["interrupt"] = asyncio.create_task(self.api.session("writer_lost", session=sid))
 
     def _check(self, sid, lease):
@@ -356,9 +356,10 @@ class HTTPHistory(Plugin):
         except ServiceError as exc:
             if exc.code == "lost":
                 self._lose(sid, self.leases[sid])
+                exc.writer_lost = True
             raise
         except (AgentError, asyncio.CancelledError):
-            self._lose(sid, self.leases[sid])
+            self._lose(sid, self.leases[sid], notify=False)
             raise
 
     async def erase(self, d, emit):

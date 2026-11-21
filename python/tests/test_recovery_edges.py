@@ -1,13 +1,11 @@
 """Persisted recovery states that are difficult to time with a real SIGKILL."""
 
-import asyncio
-
 import pytest
 
 from ma_core import content, plain
 from ma_core.wire import tool_out
 from ma_fake import call, reply
-from test_vanilla import entries, paired
+from test_vanilla import entries, paired, wait_for_model
 
 
 async def seed(a, sid, calls, definitions, started=(), receipts=()):
@@ -242,7 +240,7 @@ async def test_recover_call_while_resuming_does_not_spawn_duplicate_turn(agent, 
     await a.session("close", session=sid)
     await a.session("open", session=sid)
     if runtime_kind == "durable":
-        await asyncio.wait_for(fake.entered.wait(), 1)
+        await wait_for_model(a, sid, fake)
         await a.call("runtime", "recover", {"session": sid})
         fake.release.set()
     await a.call("runtime", "wait", {"session": sid})

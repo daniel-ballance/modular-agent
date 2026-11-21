@@ -92,6 +92,7 @@ class Runtime(Turns, Plugin):
 
     async def _submit(self, d, emit):
         sid = d["session"]
+        await self.api.session("assert_writable", session=sid)
         s = await self.api.session(
             "get", session=sid, **({"actor": d["actor"]} if "actor" in d else {})
         )
@@ -344,8 +345,20 @@ class Runtime(Turns, Plugin):
         return await self._record(sid, turn, "input", **self._taken_input(e))
 
     async def wait(self, d, emit):
-        task = self.tasks.get(d["session"])
-        result = await asyncio.shield(task) if task else []
+        sid = d["session"]
+        task = self.tasks.get(sid)
+        if task is None and sid in self.suspending:
+            raise AgentError("Session suspended", "lost")
+        try:
+            result = await asyncio.shield(task) if task else []
+        except asyncio.CancelledError:
+            if not asyncio.current_task().cancelling() and task.cancelled():
+                # A normal close can remove the session before the waiter wakes.
+                if sid in self.suspending:
+                    raise AgentError("Session suspended", "lost") from None
+            raise
+        if sid in self.suspending:
+            raise AgentError("Session suspended", "lost")
         return result if isinstance(result, list) else []
 
     async def cancel(self, d, emit):
@@ -527,9 +540,10 @@ class Runtime(Turns, Plugin):
     async def _suspend(self, d):
         sid = d["session"]
         self.suspending.add(sid)
-        task = self.tasks.get(sid)
-        if task and not task.done():
+        task = self.tasks.pop(sid, None)
+        if task and not task.done() and not task.cancelling():
             task.cancel()
+        if task:
             await asyncio.gather(task, return_exceptions=True)
 
     async def _close(self, d):
