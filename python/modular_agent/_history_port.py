@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from os import PathLike
@@ -20,6 +21,9 @@ class HistoryPort(Protocol):
 
     Parameters and returned dictionaries keep the history HTTP binding's
     shapes; implementations own locking, expiry, and durable settlement.
+    A refusal from renew reports lost writer access. A store with independent
+    revocation notices also implements async `wait_writer_lost(session_id, lease)`:
+    return once the named lease is lost. The agent cancels the wait on close.
     """
 
     persistent: bool
@@ -205,6 +209,21 @@ class _PortHistory(HTTPHistory):  # type: ignore[misc]  # Native history adapter
         if type(self.ttl) is not int or not 0 < self.ttl <= 2**53 - 1:
             raise ValueError("History TTL must be positive milliseconds")
         api.provide("history", self)
+
+    def _watch_writer(self, sid: str, lease: dict[str, Any]) -> asyncio.Task[None] | None:
+        wait = getattr(self.port, "wait_writer_lost", None)
+        if wait is None:
+            return None
+
+        async def watch() -> None:
+            try:
+                await wait(sid, lease["id"])
+            except Exception:
+                # A broken revocation signal cannot vouch for this writer.
+                pass
+            self._lose(sid, lease)
+
+        return asyncio.create_task(watch())
 
     async def request(
         self, method: str, path: str, body: dict[str, Any] | None = None

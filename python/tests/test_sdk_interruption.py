@@ -3,6 +3,7 @@
 import asyncio
 import json
 import secrets
+from contextlib import aclosing
 
 import pytest
 from websockets.asyncio.client import connect
@@ -36,6 +37,44 @@ class FaultStore:
         if self.active and self.reason == "commitFailed":
             raise HistoryError("unavailable", "Storage write refused")
         return await self.backend.append(session_id, lease, entries)
+
+
+async def test_idle_session_is_interrupted_when_custom_store_reports_revocation(tmp_path):
+    watching, revoked = asyncio.Event(), asyncio.Event()
+    lease = None
+    renewed = []
+
+    class RevocableStore:
+        def __getattr__(self, name):
+            return getattr(backend, name)
+
+        async def wait_writer_lost(self, session_id, writer_lease):
+            nonlocal lease
+            lease = session_id, writer_lease
+            watching.set()
+            await revoked.wait()
+
+        async def renew(self, session_id, writer_lease):
+            renewed.append(session_id)
+            return await backend.renew(session_id, writer_lease)
+
+    # A long TTL separates an explicit notice from periodic renewal.
+    with sqlite_history_port(tmp_path, ttl_ms=60_000) as backend:
+        plugin = Plugin("revocable-store", setup=lambda r: r.history_store(RevocableStore()))
+        async with create_agent(
+            project=tmp_path, durability="kept", plugins=[plugin], environment=memory_environment()
+        ) as agent:
+            session = await agent.session()
+            async with aclosing(session.events()) as events, asyncio.timeout(5):
+                assert (await anext(events)).type == "entry"
+                await watching.wait()
+                assert lease is not None and lease[0] == session.id
+                await backend.release(*lease)
+                revoked.set()
+                interruptions = [event async for event in events if event.type != "entry"]
+                assert [event.type for event in interruptions] == ["sessionInterrupted"]
+                assert interruptions[0].data.fields == {"reason": "writerLost"}
+                assert not renewed
 
 
 @pytest.mark.parametrize("reason", ["commitFailed", "writerLost"])
