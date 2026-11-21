@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createAgent, definePlugin, defineToolSource, environmentCredentials, tool, transientRuntime,
-  type CommandContext, type Content, type CustomHook, type HistoryStore } from "@modular-agent/core";
+  type CommandContext, type Content, type CustomHook, type WriterHistoryStore } from "@modular-agent/core";
 import { answers, memoryEnvironment, overWire, scriptedProvider, testAgent } from "@modular-agent/core/testing";
 
 const empty = { type: "object" } as const;
 
 test("a custom Runtime, history, configuration, credential store and Interface work through registration", async t => {
-  const kept = new Map<string, Awaited<ReturnType<HistoryStore["load"]>>>();
-  const store: HistoryStore = {
+  const kept = new Map<string, Awaited<ReturnType<WriterHistoryStore["load"]>>>();
+  const store: WriterHistoryStore = {
     supports: { erasure: false },
     async create(meta) { kept.set(meta.id, { meta, entries: [] }); },
     async openForWriting() {}, async close() {},

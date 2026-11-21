@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { HistoryStore } from "@modular-agent/core";
+import type { WriterHistoryStore as HistoryStore } from "@modular-agent/core";
 
 /** A Registrar store with deterministic append failure and lease revocation. */
 export function interruptedHistory() {

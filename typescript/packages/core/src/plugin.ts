@@ -1,5 +1,6 @@
 import { mapOutput } from "@modular-agent/plugin-wire";
-import type { Configuration, CredentialStore, ModelStreamEvent, OutputPayload, HistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
+import { customHistoryWriter, type LeasedHistoryStore } from "@modular-agent/services";
+import type { Configuration, CredentialStore, ModelStreamEvent, OutputPayload, HistoryStore as WriterHistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
 import type { Agent } from "./agent.js";
 import { AgentError, checked } from "./errors.js";
 import { questionReply, toolSource, type Tool, type ToolEnvironment } from "./tool.js";
@@ -73,7 +74,7 @@ export interface Registrar {
   tools(source: ToolCatalog): void;
   environment(environment: WorkingEnvironment): void;
   runtime(runtime: Runtime): void;
-  historyStore(store: HistoryStore): void;
+  historyStore(store: LeasedHistoryStore | WriterHistoryStore): void;
   credentialStore(store: CredentialStore): void;
   configuration(source: ProjectConfiguration | Configuration): void;
   interface(part: AgentInterface): void;
@@ -284,7 +285,13 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
   const r: Registrar = {
     environment: env => part("working-environment", env, true),
     runtime: runtime => part("runtime", runtime, true),
-    historyStore: store => part("history-store", store, false),
+    historyStore(store) {
+      add("history-store");
+      if (served) unavailable("history-store");
+      registrations.push(async api => {
+        api.provide("history-store", "ttlMs" in store ? await customHistoryWriter(store) : store);
+      });
+    },
     credentialStore: store => part("credential-store", store, false),
     configuration(source) {
       add("configuration");

@@ -1,5 +1,5 @@
 export { call, stream, serve, ndjson, send, HttpError, ServiceError, type ClientOptions, type Route } from "./http.js";
-export { historyService, historyHttp, HttpHistoryStore, historyClientOptions } from "./history.js";
+export { historyService, historyHttp, HttpHistoryStore, historyClientOptions, customHistoryWriter, type LeasedHistoryStore, type HistoryMetadata } from "./history.js";
 export { HistoryArchive, historyTombstone } from "./history-service.js";
 export { HistoryServiceError, type HistoryServiceErrorCode, type HistoryServiceStore,
 	type HistoryReadOptions, type HistoryPage, type HistorySessionPage } from "./history-backend.js";

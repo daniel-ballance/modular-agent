@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { addAbortListener } from "node:events";
 import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
-import { erasedEntry, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
+import { erasedEntry, untilAborted, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
+import { HistoryServiceError, historyStorageStatuses, type HistoryReadOptions } from "./history-backend.js";
 import { call, type ClientOptions, ServiceError } from "./http.js";
 import { HISTORY_BINDING, MAX_LEASE_BYTES, validLease } from "./history-service.js";
 export { HISTORY_BINDING, historyService } from "./history-service.js";
@@ -44,30 +46,66 @@ export function historyClientOptions(url: string, token: string): ClientOptions 
 	return { url: address.href.replace(/\/+$/, ""), token };
 }
 
-type Lease = { value: string; ttl: number; cutoff: number; timer?: NodeJS.Timeout; abort: AbortController };
+type Lease = { value: string; ttl: number; cutoff: number; timer?: NodeJS.Timeout; abort: AbortController; watch?: Disposable };
 type Pending = { meta: StoredSession; entries: HistoryEntry[]; abort: AbortController };
 
-export class HttpHistoryStore implements HistoryStore {
-	readonly supports = { erasure: true, retention: false };
+type Awaitable<T> = T | Promise<T>;
+export type HistoryMetadata = Omit<StoredSession, "id">;
+type ReadPage = { session: StoredSession; entries: HistoryEntry[]; next?: string };
+type ListPage = { sessions: StoredSession[]; next?: string };
+type ListOptions = HistoryReadOptions & { project?: string };
+
+/** In-process Registrar history port. The store owns atomicity and lease fencing. */
+export interface LeasedHistoryStore {
+	readonly ttlMs: number;
+	readonly persistent: boolean;
+	create(id: string, metadata: HistoryMetadata): Awaitable<void>;
+	read(id: string, options: HistoryReadOptions): Awaitable<ReadPage>;
+	list(options: ListOptions): Awaitable<ListPage>;
+	acquire(id: string, owner: string): Awaitable<string>;
+	renew(id: string, lease: string): Awaitable<void>;
+	release(id: string, lease: string): Awaitable<void>;
+	append(id: string, lease: string, entries: HistoryEntry[]): Awaitable<number>;
+	erase?(id: string, entryIds: string[], lease?: string): Awaitable<string[]>;
+	/** Abort as soon as this lease is known to be lost, including while idle. */
+	writerSignal?(id: string, lease: string): AbortSignal | undefined;
+}
+
+type Grant = { lease: string; ttlMs: number };
+type Caps = { ttlMs: number; retention?: number | null };
+interface HistoryPort {
+	readonly remote?: boolean;
+	initialize(signal: AbortSignal): Promise<Caps>;
+	create(id: string, meta: HistoryMetadata, signal: AbortSignal): Promise<unknown>;
+	acquire(id: string, owner: string, signal: AbortSignal): Promise<Grant>;
+	renew(id: string, lease: string, signal: AbortSignal): Promise<{ ttlMs: number }>;
+	release(id: string, lease: string, signal: AbortSignal): Promise<unknown>;
+	append(id: string, lease: string, entries: HistoryEntry[], signal: AbortSignal): Promise<unknown>;
+	erase?(id: string, entryIds: string[], lease: string | undefined, signal: AbortSignal): Promise<unknown>;
+	writerSignal?: LeasedHistoryStore["writerSignal"];
+	read(id: string, options: HistoryReadOptions, signal: AbortSignal): Promise<ReadPage>;
+	list(options: ListOptions, signal: AbortSignal): Promise<ListPage>;
+}
+
+class HistoryWriter implements HistoryStore {
+	readonly supports: { erasure: boolean; retention: boolean; persistent: boolean };
 	private owner = randomUUID();
 	private leases = new Map<string, Lease>();
 	private unsent = new Map<string, Pending>();
-	private client: ClientOptions;
 	private ttl?: number;
 	private clock: ReturnType<typeof writerClock>;
 
-	constructor(client: HistoryClientOptions) {
-		this.client = historyClientOptions(client.url, client.token);
+	constructor(private port: HistoryPort, persistent: boolean, margin?: number) {
+		this.supports = { erasure: !!port.erase, retention: false, persistent };
 		const configured = process.env.MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS;
-		this.clock = writerClock(client.leaseMarginMs ?? (configured === undefined ? undefined : Number(configured)));
+		this.clock = writerClock(margin ?? (configured === undefined ? undefined : Number(configured)));
 	}
 	async initialize() {
-		const caps = await call<{ binding: string; ttlMs: number; retention?: number | null }>(this.client, "GET", "/v1", { signal: timeout(10_000) });
-		if (caps.binding !== HISTORY_BINDING || !positive(caps.ttlMs) || (caps.retention != null && !positive(caps.retention))) throw new Error("Unsupported history service declaration");
+		const caps = await this.port.initialize(timeout(10_000));
+		if (!positive(caps.ttlMs) || (caps.retention != null && !positive(caps.retention))) throw new Error("Unsupported history store declaration");
 		this.ttl = caps.ttlMs;
 		this.supports.retention = caps.retention != null;
 	}
-	private path(id: string, rest = ""): string { return `/v1/sessions/${pathId(id)}${rest}`; }
 	async create(meta: StoredSession): Promise<void> {
 		this.unsent.set(meta.id, { meta, entries: [], abort: new AbortController() });
 	}
@@ -86,6 +124,7 @@ export class HttpHistoryStore implements HistoryStore {
 	}
 	private lose(lease: Lease) {
 		clearTimeout(lease.timer);
+		lease.watch?.[Symbol.dispose]();
 		lease.abort.abort(new ServiceError(409, "Session is not open for writing: its lease is lost", "lost"));
 	}
 	private async takeLease(id: string, wait = false, abort = new AbortController()): Promise<void> {
@@ -98,9 +137,9 @@ export class HttpHistoryStore implements HistoryStore {
 			const remaining = budget - sent;
 			if (lastHeld && remaining <= 0) throw lastHeld;
 			const signal = timeout(Math.min(remaining, 10_000));
-			let grant: { lease: string; ttlMs: number };
+			let grant: Grant;
 			try {
-				grant = await call(this.client, "POST", this.path(id, "/lease"), { body: { owner: this.owner }, signal });
+				grant = await this.port.acquire(id, this.owner, signal);
 			} catch (error) {
 				if (wait && error instanceof ServiceError && error.code === "held" && positive(error.retryAfterMs)) {
 					const now = this.clock.now();
@@ -111,13 +150,16 @@ export class HttpHistoryStore implements HistoryStore {
 					continue;
 				}
 				if (lastHeld && (this.clock.now() >= budget || (signal.aborted && remaining <= 10_000))) throw lastHeld;
-				if (!(error instanceof ServiceError) && !lostReply) { lostReply = true; continue; }
+				if (this.port.remote && !(error instanceof ServiceError) && !lostReply) { lostReply = true; continue; }
 				throw error;
 			}
 			if (lastHeld && this.clock.now() >= budget) throw lastHeld;
 			if (!validLease(grant.lease) || !positive(grant.ttlMs)) throw new ServiceError(409, "Invalid history lease grant", "lost");
 			const lease: Lease = { value: grant.lease, ttl: grant.ttlMs, cutoff: sent + grant.ttlMs / 2 - this.clock.margin, abort };
 			this.leases.set(id, lease);
+			const writer = this.port.writerSignal?.(id, grant.lease);
+			if (writer?.aborted) this.lose(lease);
+			else if (writer) lease.watch = addAbortListener(writer, () => this.lose(lease));
 			this.checkWriter(id);
 			if (lostReply) await this.renew(id, lease);
 			else this.schedule(id, lease, sent);
@@ -131,7 +173,7 @@ export class HttpHistoryStore implements HistoryStore {
 	private async renew(id: string, lease: Lease) {
 		this.checkWriter(id);
 		const sent = this.clock.now();
-		const reply = await call<{ ttlMs: number }>(this.client, "POST", this.path(id, `/lease/${pathId(lease.value)}/renew`), { signal: AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - sent)]) });
+		const reply = await this.port.renew(id, lease.value, AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - sent)]));
 		const cutoff = sent + reply.ttlMs / 2 - this.clock.margin;
 		if (!positive(reply.ttlMs) || this.clock.now() >= Math.min(lease.cutoff, cutoff) || lease.abort.signal.aborted) {
 			this.lose(lease);
@@ -147,7 +189,7 @@ export class HttpHistoryStore implements HistoryStore {
 		if (!lease) return;
 		this.lose(lease);
 		this.leases.delete(id);
-		await call(this.client, "DELETE", this.path(id, `/lease/${pathId(lease.value)}`), { signal: timeout(1000) }).catch(() => undefined);
+		await this.port.release(id, lease.value, timeout(1000)).catch(() => undefined);
 	}
 	async append(id: string, batch: HistoryEntry[]): Promise<void> {
 		if (!batch.length) return;
@@ -162,7 +204,7 @@ export class HttpHistoryStore implements HistoryStore {
 				throw new ServiceError(413, "Initial history batch is too large", "result_too_large");
 			}
 			try {
-				await call(this.client, "PUT", this.path(id), { body, retry: true, signal: timeout(10_000) });
+				await this.port.create(id, body, timeout(10_000));
 				await this.takeLease(id, false, pending.abort);
 			} catch (e) { pending.abort.abort(e); throw e; }
 			this.unsent.delete(id);
@@ -170,19 +212,19 @@ export class HttpHistoryStore implements HistoryStore {
 		}
 		const lease = this.leases.get(id);
 		this.checkWriter(id);
-		await this.mutate(id, "/entries", { lease: lease!.value, entries: batch }, lease);
+		await this.mutate(id, signal => this.port.append(id, lease!.value, batch, signal), lease);
 	}
-	private async mutate(id: string, path: string, body: unknown, lease?: Lease) {
+	private async mutate(id: string, work: (signal: AbortSignal) => Promise<unknown>, lease?: Lease) {
 		for (let attempt = 0; ; attempt++) {
 			if (lease) this.checkWriter(id);
 			try {
-				await call(this.client, "POST", this.path(id, path), { body, signal: lease ? AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - this.clock.now())]) : timeout(10_000) });
+				await work(lease ? AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - this.clock.now())]) : timeout(10_000));
 				if (lease) this.checkWriter(id);
 				return;
 			} catch (error) {
 				if (error instanceof ServiceError && error.code !== "lost" && attempt === 0) throw error;
 				// Retry an identical mutation only if this generation is still proven current.
-				if (!(error instanceof ServiceError) && lease && attempt < 4 && !lease.abort.signal.aborted && this.clock.now() < lease.cutoff) continue;
+				if (this.port.remote && !(error instanceof ServiceError) && lease && attempt < 4 && !lease.abort.signal.aborted && this.clock.now() < lease.cutoff) continue;
 				if (lease) this.lose(lease);
 				throw error;
 			}
@@ -194,7 +236,7 @@ export class HttpHistoryStore implements HistoryStore {
 		const entries: HistoryEntry[] = [];
 		let meta!: StoredSession, after: string | undefined;
 		do {
-			const r: { session: StoredSession; entries: HistoryEntry[]; next?: string } = await call(this.client, "GET", this.path(id) + (after === undefined ? "" : `?after=${segment(after)}`), { retry: true, signal: timeout(10_000) });
+			const r = await this.port.read(id, { after, limit: 500 }, timeout(10_000));
 			meta ??= r.session;
 			entries.push(...r.entries);
 			after = this.next(r.entries, r.next, after);
@@ -207,10 +249,7 @@ export class HttpHistoryStore implements HistoryStore {
 		const sessions: StoredSession[] = [];
 		let after: string | undefined;
 		do {
-			const q: string[] = [];
-			if (filter?.project !== undefined) q.push(`project=${segment(filter.project)}`);
-			if (after !== undefined) q.push(`after=${segment(after)}`);
-			const r: { sessions: StoredSession[]; next?: string } = await call(this.client, "GET", "/v1/sessions" + (q.length ? `?${q.join("&")}` : ""), { retry: true, signal: timeout(10_000) });
+			const r = await this.port.list({ ...filter, after, limit: 500 }, timeout(10_000));
 			sessions.push(...r.sessions);
 			after = this.next(r.sessions, r.next, after);
 		} while (after !== undefined);
@@ -228,7 +267,61 @@ export class HttpHistoryStore implements HistoryStore {
 			return;
 		}
 		const lease = this.leases.get(id);
-		await this.mutate(id, "/erase", { entryIds, ...(lease ? { lease: lease.value } : {}) }, lease);
+		const erase = this.port.erase;
+		if (!erase) throw new ServiceError(405, "The history store does not support erasure", "not_supported");
+		await this.mutate(id, signal => erase(id, entryIds, lease?.value, signal), lease);
+	}
+}
+
+export async function customHistoryWriter(store: LeasedHistoryStore): Promise<HistoryStore> {
+	const { ttlMs, persistent } = store;
+	if (typeof persistent !== "boolean") throw new Error("The history store must declare persistence");
+	const run = async <T>(signal: AbortSignal, work: () => Awaitable<T>): Promise<T> => {
+		try { return await untilAborted(signal, async () => work()); }
+		catch (error) {
+			if (error instanceof HistoryServiceError) throw new ServiceError(historyStorageStatuses[error.code], error.message, error.code, error.retryAfterMs);
+			throw error;
+		}
+	};
+	const writer = new HistoryWriter({
+		initialize: async () => ({ ttlMs }),
+		create: (id, meta, signal) => run(signal, () => store.create(id, structuredClone(meta))),
+		acquire: async (id, owner, signal) => ({ lease: await run(signal, () => store.acquire(id, owner)), ttlMs }),
+		renew: async (id, lease, signal) => { await run(signal, () => store.renew(id, lease)); return { ttlMs }; },
+		release: (id, lease, signal) => run(signal, () => store.release(id, lease)),
+		append: (id, lease, entries, signal) => run(signal, () => store.append(id, lease, structuredClone(entries))),
+		erase: store.erase && ((id, ids, lease, signal) => run(signal, () => store.erase!(id, [...ids], lease))),
+		writerSignal: store.writerSignal?.bind(store),
+		read: (id, options, signal) => run(signal, async () => structuredClone(await store.read(id, options))),
+		list: (options, signal) => run(signal, async () => structuredClone(await store.list(options))),
+	}, persistent);
+	await writer.initialize();
+	return writer;
+}
+
+export class HttpHistoryStore extends HistoryWriter {
+	constructor(options: HistoryClientOptions) {
+		const client = historyClientOptions(options.url, options.token);
+		const path = (id: string, rest = "") => `/v1/sessions/${pathId(id)}${rest}`;
+		const query = ({ project, after, limit }: ListOptions) => `?${new URLSearchParams({
+			...(project === undefined ? {} : { project }), ...(after === undefined ? {} : { after }), limit: String(limit),
+		})}`;
+		super({
+			remote: true,
+			async initialize(signal) {
+				const caps = await call<Caps & { binding: string }>(client, "GET", "/v1", { signal });
+				if (caps.binding !== HISTORY_BINDING) throw new Error("Unsupported history service binding");
+				return caps;
+			},
+			create: (id, body, signal) => call(client, "PUT", path(id), { body, retry: true, signal }),
+			acquire: (id, owner, signal) => call(client, "POST", path(id, "/lease"), { body: { owner }, signal }),
+			renew: (id, lease, signal) => call(client, "POST", path(id, `/lease/${pathId(lease)}/renew`), { signal }),
+			release: (id, lease, signal) => call(client, "DELETE", path(id, `/lease/${pathId(lease)}`), { signal }),
+			append: (id, lease, entries, signal) => call(client, "POST", path(id, "/entries"), { body: { lease, entries }, signal }),
+			erase: (id, entryIds, lease, signal) => call(client, "POST", path(id, "/erase"), { body: { entryIds, ...(lease ? { lease } : {}) }, signal }),
+			read: (id, opts, signal) => call(client, "GET", path(id) + query(opts), { retry: true, signal }),
+			list: (opts, signal) => call(client, "GET", "/v1/sessions" + query(opts), { retry: true, signal }),
+		}, true, options.leaseMarginMs);
 	}
 }
 
