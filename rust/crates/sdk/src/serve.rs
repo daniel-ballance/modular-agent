@@ -160,6 +160,9 @@ fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
         .enumerate()
         .map(|(i, hook)| json!({"hook":hook.point,"handlerId":i + 1,"order":hook.order.name()}))
         .collect::<Vec<_>>();
+    for (id, hook) in output_handlers(r) {
+        hooks.push(json!({"hook":"output","handlerId":id,"order":hook.order.name()}));
+    }
     if r.jobs.as_ref().is_some_and(crate::jobs::Owner::can_resume)
         && !r.hooks.iter().any(|hook| hook.point == "session.start")
     {
@@ -177,6 +180,18 @@ fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
         );
     }
     v
+}
+
+// Keep the same handler ids in registration and dispatch; a synthetic job
+// resume hook, when present, follows these handlers.
+fn output_handlers(
+    r: &Registrar,
+) -> impl Iterator<Item = (usize, &crate::hooks::LocalRegistration)> {
+    r.local_hooks
+        .iter()
+        .filter(|hook| hook.point == "output")
+        .enumerate()
+        .map(|(index, hook)| (r.hooks.len() + index + 1, hook))
 }
 
 fn definitions(tools: &[crate::Tool]) -> Vec<Value> {
@@ -455,8 +470,47 @@ impl Endpoint for Served {
             }
             "hook/handle" => {
                 let r = self.registered()?;
+                if p["hook"] == "output" {
+                    let (_, handler) = output_handlers(&r)
+                        .find(|(handler_id, _)| p["handlerId"] == *handler_id)
+                        .ok_or_else(|| Fault::new("unknown_handler", "unknown handler"))?;
+                    let payload = &p["payload"];
+                    let context = crate::HookContext::remote(
+                        Backend::Remote { peer, parent: id },
+                        payload,
+                        cancel,
+                    );
+                    let _guard = context.settled.clone().drop_guard();
+                    let mut events = payload["events"].as_array().cloned().ok_or_else(|| {
+                        Fault::new("invalid_request", "output requires an array of events")
+                    })?;
+                    let mut changed = false;
+                    for event in &mut events {
+                        let view = json!({
+                            "sessionId":payload["sessionId"],
+                            "recipient":payload["recipient"],
+                            "value":event,
+                            "end":payload["final"],
+                        });
+                        let answer = (handler.handle)(view, context.clone())
+                            .await
+                            .map_err(to_fault)?;
+                        if answer.stopped {
+                            return Ok(json!({"block":true}));
+                        }
+                        if answer.answered {
+                            *event = answer.value["value"].clone();
+                            changed = true;
+                        }
+                    }
+                    return Ok(if changed {
+                        json!({"events":events})
+                    } else {
+                        Value::Null
+                    });
+                }
                 if p["hook"] == "session.start"
-                    && p["handlerId"] == r.hooks.len() + 1
+                    && p["handlerId"] == r.hooks.len() + output_handlers(&r).count() + 1
                     && let Some(owner) = r.jobs.as_ref().filter(|owner| owner.can_resume())
                 {
                     let session = base::wire::string(&p["payload"], "sessionId")?;

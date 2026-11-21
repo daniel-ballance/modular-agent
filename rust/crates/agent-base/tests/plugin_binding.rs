@@ -1160,14 +1160,8 @@ async fn every_host_callback_is_authorized_and_binary_environment_operations_rou
         std::fs::read(rig.project.path().join("callback.bin")).unwrap(),
         [0, 255, 42]
     );
-    assert!(
-        rig.events
-            .values
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| e.kind == "fixture.event")
-    );
+    // A custom event is attributed to the sender and has no reply barrier.
+    rig.events.wait("plugin.fixture.fixture.event").await;
     rig.end(&id).await;
 }
 #[tokio::test]

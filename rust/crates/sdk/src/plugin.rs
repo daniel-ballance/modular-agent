@@ -488,7 +488,7 @@ impl Registrar {
                 return Err(cannot_serve(name));
             }
         }
-        if let Some(hook) = self.local_hooks.first() {
+        if let Some(hook) = self.local_hooks.iter().find(|hook| hook.point != "output") {
             return Err(cannot_serve(hook.point));
         }
         if !self.prepare.is_empty() {

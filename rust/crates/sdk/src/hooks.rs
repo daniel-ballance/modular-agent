@@ -301,7 +301,9 @@ macro_rules! local_hook {
                 F: Fn($payload) -> Fut + Send + Sync + 'static,
                 Fut: Future<Output = Result<$reply>> + Send + 'static,
             {
-                self.local_items.push(format!("hook:{}", $point));
+                if $point != "output" {
+                    self.local_items.push(format!("hook:{}", $point));
+                }
                 let f = Arc::new(f);
                 self.setup(move |r| {
                     let f = f.clone();
