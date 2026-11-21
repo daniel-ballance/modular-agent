@@ -1139,7 +1139,10 @@ class Harness(Authority, Erasure):
                 await self._emit({"time": now(), **d})
             return {}
         if op == "erasure_cutoff":
-            return await self.erasure_revision(d["session"])
+            history = self.capabilities.get("history")
+            if history and self.plugins[history[0]].declarations.get("remote_lease"):
+                return await self.erasure_revision(d["session"])
+            return 0
         if op == "view":
             delivery_sid = d.get("session")
             guarded = delivery_sid in self.sessions and d.get("method") != "_modular-agent/erase"

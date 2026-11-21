@@ -1498,11 +1498,7 @@ class ACP(Plugin):
         }
 
     async def frame_revision(self, sid):
-        harness = self.api._harness
-        capability = harness.capabilities.get("history")
-        if capability and harness.plugins[capability[0]].declarations.get("remote_lease"):
-            return await self.api.session("erasure_cutoff", session=sid, actor=self.actor)
-        return 0
+        return await self.api.session("erasure_cutoff", session=sid, actor=self.actor)
 
     async def authorize_frame(self, sid, method, message, prepared=None):
         # The handler may have waited behind another frame since its last check.
