@@ -55,6 +55,7 @@ from ._credentials import CredentialStore, _CredentialAdapter, environment_crede
 from ._environment import LocalEnvironment, MemoryEnvironment
 from ._history import HistoryStore
 from ._history_port import HistoryPort, _PortHistory
+from ._runtime_port import _LocalRuntime
 from ._native import (
     _LocalPlugin,
     _MemoryHistory,
@@ -1272,6 +1273,22 @@ def create_agent(
                 adapter = _LocalPlugin(
                     plugin, registrar, folder, late_answers=late_answers_start_turns
                 )
+                if registrar._runtime is not None:
+                    if "runtime" not in plugin.replaces:
+                        await plugin._close()
+                        raise ValueError("Unlisted Runtime replacement")
+                    runtime_port, queued_input, queued_jobs = registrar._runtime
+                    await h.unload(h.capabilities["runtime"][0])
+                    await h.load(
+                        _LocalRuntime(
+                            h,
+                            plugin.name,
+                            runtime_port,
+                            adapter._history_page,
+                            queued_input=queued_input,
+                            queued_jobs=queued_jobs,
+                        )
+                    )
                 await h.load(adapter)
                 registered_tools.update((name, adapter) for name in registrar._tools)
             specs: list[dict[str, Any]] = [

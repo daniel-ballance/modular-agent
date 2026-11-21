@@ -62,6 +62,12 @@ from ._provider import (
 )
 from ._serve import serve as serve
 from ma_plugin.websocket import WebSocketServer as WebSocketServer, WebSocketTLS as WebSocketTLS
+from ._runtime_port import (
+    RuntimeContext as RuntimeContext,
+    RuntimeDeclaration as RuntimeDeclaration,
+    RuntimePort as RuntimePort,
+    RuntimeSupports as RuntimeSupports,
+)
 from ._session import Session as Session
 from ._tool import (
     LeftOpen as LeftOpen,

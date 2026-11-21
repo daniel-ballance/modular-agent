@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal, NotRequired, TypedDict, cast, overload
 
 from ._history_port import HistoryPort
+from ._runtime_port import QueuePolicy, RuntimePort
 from ._context import CallContext, HookContext
 from ._credentials import CredentialStore
 from ._jobs import Job, JobManager, JobOwner
@@ -141,6 +142,7 @@ class Registrar:
         self._credential_store: CredentialStore | None = None
         self._configuration: Configuration | None = None
         self._interface: Interface | None = None
+        self._runtime: tuple[RuntimePort, QueuePolicy, QueuePolicy | None] | None = None
         self._history_store: HistoryPort | None = None
         self._environment: WorkingEnvironment | None = None
         self._job_owner: JobOwner | None = None
@@ -157,6 +159,17 @@ class Registrar:
         if self._job_owner is not None:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate job owner")
         self._job_owner = owner
+
+    def runtime(
+        self,
+        runtime: RuntimePort,
+        *,
+        queued_input_after_restart: QueuePolicy = "handedBack",
+        queued_job_reports_after_restart: QueuePolicy | None = None,
+    ) -> None:
+        if self._runtime is not None:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate Runtime")
+        self._runtime = runtime, queued_input_after_restart, queued_job_reports_after_restart
 
     def history_store(self, store: HistoryPort) -> None:
         if self._history_store is not None:
@@ -319,6 +332,7 @@ class Plugin:
             *(f"tool:{n}" for n in registrar._tools),
             *(f"command:{n}" for n in registrar._commands),
             *(f"provider:{n}" for n in registrar._providers),
+            *(["runtime"] if registrar._runtime is not None else []),
             *(["working-environment"] if registrar._environment is not None else []),
         }
         if len(set(self.replaces)) != len(self.replaces) or set(self.replaces) - items:

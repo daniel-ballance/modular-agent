@@ -37,6 +37,7 @@ from ._plugin import (
 from ._provider import Provider, ProviderContext, _available, _models, _request
 from ._tool import LeftOpen, Tool, ToolContext, ToolSource
 from ._types import AgentError, Answer, Content, ErrorCode, Json, JsonObject, ModelRef, QuestionSpec
+from ._runtime_port import RuntimeContext, _dispatch_runtime
 from ._working import _METHODS, _dispatch_environment
 
 
@@ -219,6 +220,8 @@ async def _serve(
                 }
             )
             subscribe(source)
+        if registrar._runtime is not None:
+            registration["runtime"] = registrar._runtime[0].declaration()
         if registrar._environment is not None:
             registration["workingEnvironment"] = registrar._environment.supports
         registration["hooks"] = [
@@ -612,8 +615,38 @@ async def _serve(
 
         return await _dispatch_environment(environment, method, params, progress)
 
+    model_contexts: dict[str, RuntimeContext] = {}
+
+    def bind_runtime(method: str) -> Callable[..., Awaitable[JsonObject]]:
+        async def invoke(params: dict[str, Any], parent: str | int) -> JsonObject:
+            installed = registered()._runtime
+            if installed is None:
+                raise WireError("No registered Runtime", "not_supported")
+
+            async def callback(name: str, value: JsonObject, key: str) -> Json:
+                rpc = "host/history" if name == "history" else "host/runtime/" + name
+                args = {**value, "parentRequestId": parent}
+                if name == "report":
+                    await server.peer.notify(rpc, args)
+                    return None
+                if name == "model":
+                    model_contexts[key] = cx
+                try:
+                    return cast(Json, await server.peer.request(rpc, args, key=key))
+                finally:
+                    model_contexts.pop(key, None)
+
+            cx = RuntimeContext(params["turn"], callback)
+            return await _dispatch_runtime(installed[0], method, params, cx)
+
+        return invoke
+
     class Server(PluginServer):  # type: ignore[misc]  # Untyped base adapter.
         async def notification(self, method: str, params: dict[str, Any]) -> None:
+            if method == "host/runtime/modelEvent" and (
+                cx := model_contexts.get(params.get("parentRequestId", ""))
+            ):
+                await cx._piece(params)
             if method == "host/env/output" and isinstance(chunk := params.get("chunk"), str):
                 callback = environment_output.get(params.get("parentRequestId", ""))
                 if callback is not None:
@@ -664,6 +697,12 @@ async def _serve(
 
         return invoke
 
+    methods.update(
+        {
+            f"runtime/{name}": bind_runtime(name)
+            for name in ("runTurn", "resumeTurn", "continueOpenCalls")
+        }
+    )
     methods.update({f"env/{name}": bind_environment(name) for name in _METHODS})
     server = Server(registration, methods, initialize, stop)
     if frames is not None:
