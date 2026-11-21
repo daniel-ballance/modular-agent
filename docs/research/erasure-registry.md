@@ -10,3 +10,14 @@
 | Python: [SDK](../../python/SDK.md), [service](../../python/packages/history/ma_history/service.py), [HTTP client](../../python/packages/history/ma_history/http.py), [registry](../../python/packages/history/ma_history/pending.py), [witness](../../python/packages/history/ma_history/freshness.py) | No registry HTTP route or `/v1` declaration. The coordinated client opens the service's SQLite database directly and declares `pending_erasure` only with the coordination option. Intent rows hold source and targets; copy rows hold intent, session, entry and confirmation. | The client checks writer access before publishing in SQLite; the HTTP lease is not the registry transaction fence. A SQLite write transaction orders marks against copy appends. Readers check pending state and the session revision. A later writer uses ordinary leased bookkeeping and erase, then confirms returned IDs in SQLite with the local lease still usable. | An external witness advances before registry commit. A mismatched or missing witness blocks use instead of allowing an older database to serve content. |
 
 All four separate pending publication from leased deletion. Rust and Go check the publication/copy-write race at the service, but disagree on who finds copies: Rust scans under its append lock, while Go compares a revision after client discovery. TypeScript and Python depend on shared filesystem access. None of the four private mechanisms gives the others a common way to read the marks or take over the work. Raw history access is not a pending-aware view.
+
+## History kit baseline
+
+Ran `--erasure-registry-checks --restart` on 2026-11-21 with unmodified services from `9a1ac174`, fresh stores and a fixed 2,500 ms lease TTL. None declared `pendingErasure: 1`. The kit stopped at that check for the optional profile, so these runs do not assess the new endpoints or cutoff on the existing services.
+
+| Service tested | Base and restart | Profile |
+|---|---:|---|
+| Rust SDK `history_service` example | 42/42 | Missing declaration |
+| TypeScript `services` CLI | 42/42 | Missing declaration |
+| Go `modular-service -role history` | 42/42 | Missing declaration |
+| Python `serve_history` with a restore witness | 42/42 | Missing declaration |
