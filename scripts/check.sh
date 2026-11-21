@@ -89,18 +89,22 @@ if $all; then
   step "scenarios: Python runner, every placement" bash -c "cd python && uv run --offline python -m modular_agent._scenarios"
   step "reference checks: all four ma" node conformance/reference/run.mjs --all
   step "demo: project notes, including crash recovery" bash -c 'demos/project-notes/build.sh --sdk-built && demos/project-notes/run.py'
-  if ! $quick; then
-    for language in rust typescript go python; do
-      command=$(node -e "const a=require('./conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")
-      step "ACP kit: $language ma (crash, probe, job checks)" bash -c "cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- $command --acp"
-      # Enable only once all four builds pass with the disposable policy and shared history setup:
-      # ACP options: --isolation-checks --capacity-checks --erasure-checks
-      step "kits over WebSocket: $language plugin and ma" scripts/websocket-kits.sh "$language"
-    done
-  fi
   unset MODULAR_AGENT_SDK_REQUIRE MODULAR_AGENT_REF_REQUIRE
 else
   echo "(cross-language steps skipped: they need all four languages)"
+fi
+
+# ---------- binding kits against each selected language ----------
+if ! $quick; then
+  want rust && step "rust: build history service example" bash -c "cd rust && mise exec -- cargo build -q -p modular-agent --example history_service"
+  want go && step "go: build history service" bash -c "cd go && mise exec -- go build -o .bin/modular-service ./cmd/modular-service"
+  for language in rust typescript go python; do
+    want "$language" || continue
+    command=$(node -e "const a=require('./conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")
+    step "ACP kit: $language ma (crash, probe, job checks)" bash -c "cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- $command --acp"
+    step "kits over WebSocket: $language plugin and ma" scripts/websocket-kits.sh "$language"
+    step "ADR 0030 kits: $language ACP and history" scripts/production-kits.sh "$language"
+  done
 fi
 
 echo
