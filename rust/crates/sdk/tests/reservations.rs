@@ -51,9 +51,16 @@ async fn last_agent_input_slot_has_one_winner_and_can_be_handed_back() -> modula
 
 #[tokio::test]
 async fn uncovered_call_list_records_usage_and_a_capacity_limit() -> modular_agent::Result<()> {
+    for served in [false, true] {
+        check_uncovered_call_list(served).await?;
+    }
+    Ok(())
+}
+
+async fn check_uncovered_call_list(served: bool) -> modular_agent::Result<()> {
     use modular_agent::{Outcome, Tool};
     use serde_json::json;
-    let agent = test_agent()
+    let mut builder = test_agent()
         .tool(Tool::new("never", "must not run").run::<serde_json::Value, String, _, _>(|_, _| async {
             panic!("a call from an uncovered response was dispatched");
         }))
@@ -61,8 +68,15 @@ async fn uncovered_call_list_records_usage_and_a_capacity_limit() -> modular_age
             session: Capacity { calls: 1, ..Capacity::default() },
             ..ResourceLimits::default()
         })
-        .script(json!([{"toolCalls":[{"name":"never","input":{}},{"name":"never","input":{}}],"usage":{"input":4,"output":2}}]))
-        .build().await?;
+        .script(json!([{"toolCalls":[{"name":"never","input":{}},{"name":"never","input":{}}],"usage":{"input":4,"output":2}}]));
+    if served {
+        builder = builder.over_wire(
+            modular_agent::Plugin::new("reservation-runtime")
+                .replaces("runtime")
+                .setup(|r| r.runtime(SingleStep)),
+        );
+    }
+    let agent = builder.build().await?;
     assert_eq!(
         agent.declaration()?["resourceReservations"]["session"]["calls"],
         1
@@ -84,6 +98,59 @@ async fn uncovered_call_list_records_usage_and_a_capacity_limit() -> modular_age
     assert_eq!(response["message"]["content"], json!([]));
     assert_eq!(response["message"]["usage"]["input"], 4);
     agent.close().await
+}
+
+struct SingleStep;
+
+#[modular_agent::async_trait]
+impl modular_agent::RuntimePart for SingleStep {
+    async fn resume_turn(
+        &self,
+        _: modular_agent::RuntimeTurn,
+        _: modular_agent::InterruptedTurn,
+        _: modular_agent::RuntimeContext,
+    ) -> modular_agent::Result<modular_agent::RuntimeOutcome> {
+        unreachable!()
+    }
+    async fn continue_open_calls(
+        &self,
+        _: modular_agent::RuntimeTurn,
+        _: Vec<modular_agent::RuntimeCall>,
+        _: modular_agent::RuntimeContext,
+    ) -> modular_agent::Result<modular_agent::RuntimeOutcome> {
+        unreachable!()
+    }
+    fn declaration(&self) -> modular_agent::RuntimeDeclaration {
+        modular_agent::RuntimeDeclaration {
+            id: "single-step".into(),
+            supports: Default::default(),
+        }
+    }
+
+    async fn run_turn(
+        &self,
+        _: modular_agent::RuntimeTurn,
+        cx: modular_agent::RuntimeContext,
+    ) -> modular_agent::Result<modular_agent::RuntimeOutcome> {
+        use modular_agent::{Outcome, Usage};
+        use serde_json::json;
+        let id = cx.new_id().await?;
+        let request = cx.prepare_step(&id, Usage::default()).await?;
+        let response = cx.model(&id, request).await?;
+        assert_eq!(response.0["stop"], "failed");
+        assert_eq!(response.0["content"], json!([]));
+        let entry = cx
+            .record(json!({"kind":"response","stepId":id,"visible":true,"message":response}))
+            .await?;
+        cx.hook("step.after", json!({"stepId":id,"response":response}))
+            .await?;
+        Ok(modular_agent::RuntimeOutcome {
+            outcome: Outcome::Completed,
+            result: json!({"text":"","openToolCalls":[]}),
+            entries: vec![entry["id"].as_str().unwrap().into()],
+            usage: serde_json::from_value(response.0["usage"].clone())?,
+        })
+    }
 }
 
 #[tokio::test]
