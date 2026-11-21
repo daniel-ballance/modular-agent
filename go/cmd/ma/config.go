@@ -206,11 +206,8 @@ func decodeServer(name string, raw json.RawMessage) (*modular.MCPServer, error) 
 	}
 	return &s.MCPServer, nil
 }
-func (d layout) history(conformance bool) (modular.HistoryStore, error) {
+func (d layout) history() (modular.HistoryStore, error) {
 	if endpoint := os.Getenv("MODULAR_AGENT_HISTORY_URL"); endpoint != "" {
-		if conformance {
-			return modular.HistoryStore{}, errors.New("conformance mode requires isolated local history")
-		}
 		return modular.HTTPHistory(endpoint, os.Getenv("MODULAR_AGENT_HISTORY_TOKEN_FILE")), nil
 	}
 	return modular.FileHistory(filepath.Join(d.state, "sessions")), nil

@@ -27,7 +27,7 @@ func TestServeHistoryEligibility(t *testing.T) {
 		{"plaintext wildcard", "0.0.0.0:0", FileHistory(t.TempDir()), InvalidParams},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ServeHistory(t.Context(), tc.store, HistoryOptions{Address: tc.address, TokenFile: token})
+			_, err := ServeHistory(t.Context(), tc.store, HistoryOptions{Address: tc.address, TokenFile: token})
 			var e *Error
 			if !errors.As(err, &e) || e.Code != tc.code {
 				t.Fatalf("want %s, got %v", tc.code, err)

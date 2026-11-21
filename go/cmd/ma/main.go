@@ -259,7 +259,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 	}
 	o.project = project
 	config := o.acp && os.Getenv("MODULAR_AGENT_CONFORMANCE") == "1"
-	store, err := d.history(config)
+	store, err := d.history()
 	if err != nil {
 		return err
 	}
