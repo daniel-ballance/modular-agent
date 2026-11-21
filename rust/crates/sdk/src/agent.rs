@@ -284,6 +284,9 @@ impl Agent {
         _acp: bool,
     ) -> Result<Value> {
         let mut declaration = interface_acp::declaration(api, session)?;
+        // These core modes have no SDK 0.1 Provider operations.
+        declaration["runsToolsAtProvider"] = json!(false);
+        declaration["liveSessions"] = json!(false);
         declaration["portableSessions"] = json!(self.inner.persistent);
         declaration["severalActors"] = json!(self.inner.several_actors);
         declaration["sessionLimits"] = json!(self.inner.session_limits);

@@ -141,10 +141,6 @@ pub trait Provider: Send + Sync + 'static {
     fn supports(&self) -> ProviderSupport {
         ProviderSupport::default()
     }
-    /// Tools executed by this Provider, not by the agent. This is in-process only.
-    fn provider_tools(&self) -> Vec<crate::ToolDefinition> {
-        vec![]
-    }
     fn available(&self) -> bool {
         true
     }
@@ -170,7 +166,6 @@ pub struct ProviderContext {
     cancelled: CancellationToken,
     done: CancellationToken,
     stream: String,
-    provider_tools: Vec<crate::ToolDefinition>,
 }
 #[derive(Clone)]
 enum ProviderBackend {
@@ -200,7 +195,6 @@ impl ProviderContext {
             cancelled,
             done,
             stream: String::new(),
-            provider_tools: vec![],
         }
     }
     pub fn session_id(&self) -> &str {
@@ -247,11 +241,6 @@ impl ProviderContext {
             return Err(crate::plugin::cannot_serve("named credentials"));
         };
         crate::context::named_credential(api, name)
-    }
-    /// The narrowed allowance for this request. A served or auxiliary
-    /// request never authorizes execution at the Provider.
-    pub fn provider_tools(&self) -> &[crate::ToolDefinition] {
-        &self.provider_tools
     }
     pub fn cancelled(&self) -> &CancellationToken {
         &self.cancelled
@@ -391,7 +380,7 @@ impl Adapter {
             output_limit: model.max_output,
             thinking: model.thinking.clone(),
             keeps_state: self.provider.supports().keeps_state,
-            runs_tools: !self.provider.provider_tools().is_empty(),
+            runs_tools: false,
             extra: Value::Object(model.extra.clone()),
         }
     }
@@ -427,14 +416,6 @@ struct Bound {
 }
 #[async_trait::async_trait]
 impl base::ModelAccess for Bound {
-    fn provider_tools(&self) -> Vec<base::ToolDefinition> {
-        self.adapter
-            .provider
-            .provider_tools()
-            .iter()
-            .filter_map(|tool| base::wire::parse_definition(&serde_json::to_value(tool).ok()?).ok())
-            .collect()
-    }
     fn info(&self) -> base::ModelInfo {
         self.adapter.info(&self.model)
     }
@@ -492,11 +473,6 @@ impl base::ModelAccess for Bound {
             cancelled,
             done: done.clone(),
             stream: stream.clone(),
-            provider_tools: request
-                .provider_tools
-                .iter()
-                .filter_map(|d| serde_json::from_value(base::wire::definition(d)).ok())
-                .collect(),
         };
         let reply = self
             .adapter
