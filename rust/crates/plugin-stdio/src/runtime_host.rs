@@ -248,7 +248,16 @@ impl RemoteRuntime {
                         .registration(&api, &call_scope, &original.name)?
                         .is_some()
                     && !cancel.is_cancelled();
+                let expired = expired_leave_open(&branch, &call_scope);
+                if expired {
+                    requests(api.as_ref())?.close_turn_with_reason(
+                        api.as_ref(),
+                        &call_scope,
+                        "noLongerAnswerable",
+                    )?;
+                }
                 if !durable
+                    || expired
                     || !eligible
                     || (call["started"] == true && call["safeToRepeat"] != true)
                 {

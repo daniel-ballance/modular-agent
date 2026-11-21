@@ -385,6 +385,42 @@ impl Engine {
                     .ok_or_else(|| anyhow!("erased tool result"))?,
             )?);
         }
+        if scope.turn.is_some()
+            && entries.iter().any(|e| {
+                e.kind == "tool.pending"
+                    && e.scope.turn == scope.turn
+                    && e.scope.call == scope.call
+                    && e.content.is_some()
+            })
+        {
+            return Ok(ToolResult::new(
+                call,
+                ToolStatus::Waiting,
+                "waiting for answer",
+            ));
+        }
+        if scope.turn.is_some() && expired_leave_open(&entries, scope) {
+            requests(api.as_ref())?.close_turn_with_reason(
+                api.as_ref(),
+                scope,
+                "noLongerAnswerable",
+            )?;
+            return Ok(
+                if entries.iter().any(|e| {
+                    e.kind == "tool.started"
+                        && e.scope.call == scope.call
+                        && e.scope.turn == scope.turn
+                }) {
+                    ToolResult::new(call, ToolStatus::Unknown, INTERRUPTED_TOOL)
+                } else {
+                    ToolResult::new(
+                        call,
+                        ToolStatus::NotStarted,
+                        "Interrupted before the call started",
+                    )
+                },
+            );
+        }
         let registration = current_registration(api, &session, &call.name)?;
         let definition = registration.as_ref().map(|(_, def)| def);
         let model_offer = scope.turn.is_none()
@@ -1134,15 +1170,39 @@ impl Engine {
         if matches!(result.outcome, Outcome::Cancelled | Outcome::Failed)
             && let Ok(requests) = requests(api.as_ref())
         {
-            requests.close_turn_with_reason(
-                api.as_ref(),
-                scope,
-                if result.outcome == Outcome::Cancelled {
-                    "cancelled"
-                } else {
-                    "noLongerAnswerable"
-                },
-            )?;
+            let reason = if result.outcome == Outcome::Cancelled {
+                "cancelled"
+            } else {
+                "noLongerAnswerable"
+            };
+            if result.open_calls.is_empty() {
+                requests.close_turn_with_reason(api.as_ref(), scope, reason)?;
+            } else {
+                let data = api.snapshot(&scope.session)?;
+                let calls: BTreeSet<_> = questions(&data)?
+                    .into_iter()
+                    .filter(|q| q.answerable && q.scope.turn == scope.turn)
+                    .map(|q| q.scope.call)
+                    .collect();
+                for call in calls {
+                    if call
+                        .as_ref()
+                        .is_none_or(|id| !result.open_calls.iter().any(|c| &c.id == id))
+                    {
+                        // A call-less request has no pending disposition.
+                        if call.is_some() {
+                            requests.close_turn_with_reason(
+                                api.as_ref(),
+                                &Scope {
+                                    call,
+                                    ..scope.clone()
+                                },
+                                reason,
+                            )?;
+                        }
+                    }
+                }
+            }
         }
         let entries = self.turn_entries(api, scope)?;
         result.usage = self.usage(&entries)?;
@@ -1329,12 +1389,31 @@ impl Runtime for Engine {
     }
     async fn interrupted(&self, api: Api, scope: Scope) -> Result<()> {
         if !self.durable {
+            let branch = api.snapshot(&scope.session)?.branch();
+            let open_calls = branch
+                .iter()
+                .filter(|e| e.kind == "tool.call")
+                .filter(|call| {
+                    branch.iter().any(|e| {
+                        e.kind == "tool.pending"
+                            && e.scope.turn == scope.turn
+                            && e.scope.call == call.scope.call
+                            && e.content.is_some()
+                    }) && !branch
+                        .iter()
+                        .any(|e| e.kind == "tool.result" && e.scope.call == call.scope.call)
+                })
+                .map(|e| {
+                    serde_json::from_value::<ToolCall>(e.content.clone().unwrap_or(Value::Null))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
             self.finish(
                 &api,
                 &scope,
                 Ok(TurnResult {
                     outcome: Outcome::Failed,
                     error: Some("transient turn interrupted by process exit".into()),
+                    open_calls,
                     ..TurnResult::default()
                 }),
                 true,

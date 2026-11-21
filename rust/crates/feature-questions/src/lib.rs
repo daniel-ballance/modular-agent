@@ -320,10 +320,11 @@ impl InputRequests for Questions {
     ) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
         let data = api.snapshot(&scope.session)?;
-        for q in questions(&data)?
-            .into_iter()
-            .filter(|q| q.answerable && q.scope.turn == scope.turn)
-        {
+        for q in questions(&data)?.into_iter().filter(|q| {
+            q.answerable
+                && q.scope.turn == scope.turn
+                && (scope.call.is_none() || q.scope.call == scope.call)
+        }) {
             if selected(&data, &q).is_none() {
                 self.close_question(api, &q, reason)?;
             }
