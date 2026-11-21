@@ -339,6 +339,8 @@ A Provider may return opaque `providerData` in a response. The SDK keeps it in t
 
 The Provider gets its credential through `context.credential()`; it never receives one in configuration. In process, a Provider can also run tools itself, hold a live session or answer late. Those are in-process only ([Model request and response](../contracts.md#model-request-and-response)).
 
+The `openai()` and `anthropic()` constructors make API-key Providers for the Responses and Messages APIs, respectively. Their catalogs and reasoning settings follow the [shared API-key model table](api-key-models.md).
+
 ## Hooks
 
 `on(point, handler, order?)` registers a handler at a hook point. `order` is `first`, `normal` or `last`. Handlers combine by the [core rules](../contracts.md#hook-execution). Each point has a typed payload and a typed answer; returning nothing passes.
