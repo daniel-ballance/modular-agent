@@ -119,8 +119,9 @@ The inputs, limits and wording are Pi's, as the Rust `tools-files` crate has the
 - A function returns the result's structured value if it has one, otherwise its text. A call that fails, is refused or is cancelled raises `RuntimeError` with the result's text; `exec` with a non-zero exit returns its dict rather than raising.
 - `describe_tool(name)` and `search_tools(query)` look functions up. With at most twelve functions the prompt describes each in full. With more, it lists every function by its signature and the first line of its description, cut to 160 characters, and `describe_tool` gives the rest.
 - The value of the last expression and everything printed come back as the result. Each run starts fresh.
-- Limits: 30 seconds of computation between calls, 500 nested tool calls a run (`describe_tool` and `search_tools` do not count), a recursion limit of 200, 1 MiB of printed output, and a result cut to 2,000 lines or 50 KB.
+- Limits: 30 seconds of computation between calls, 256 MiB of memory (Monty's `max_memory`, which counts what the interpreter allocates), 500 nested tool calls a run (`describe_tool` and `search_tools` do not count), a recursion limit of 200, 1 MiB of printed output, and a result cut to 2,000 lines or 50 KB.
 - The sandbox has no file, network, clock or process access of its own.
+- The sandbox runs in a worker process, never in the agent's process, so neither a limit that fires nor a fault in the interpreter can stop the agent. A run that hits a memory or time limit fails with the limit's error, such as `MemoryError`, and the worker's session is discarded, never reused. If the worker process dies during a run, the call fails with an error that says so, and the next run gets a new worker. Cancelling a call ends its run.
 
 The session setting `model_tools` holds the names offered to the model, `["codemode"]` by default. `null` offers every tool that allows the model as a caller: `codemode`, the six tools and the MCP tools.
 
