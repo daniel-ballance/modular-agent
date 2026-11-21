@@ -260,6 +260,8 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
 
             def bind_command(item: Any) -> Callable[[dict[str, Any]], Awaitable[JsonObject]]:
                 async def run(d: dict[str, Any]) -> JsonObject:
+                    session = await self.api.session("get", session=d["session"])
+
                     async def environment(operation: str, params: JsonObject) -> Json:
                         try:
                             return cast(
@@ -319,6 +321,7 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                             d["session"],
                             d["actor"],
                             environment,
+                            project=Path(session["project"]),
                             step_id=step,
                             request_model=request_model if item.uses_model else None,
                             ask=ask if item.in_process_only else None,

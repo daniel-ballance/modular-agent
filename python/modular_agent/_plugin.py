@@ -8,6 +8,7 @@ import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from os import PathLike
+from pathlib import Path
 from typing import Literal, NotRequired, TypedDict, cast, overload
 
 from ._context import CallContext, HookContext
@@ -68,6 +69,7 @@ class CommandContext(CallContext):
         actor_id: str,
         environment: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
         *,
+        project: Path,
         step_id: str | None = None,
         request_model: Callable[[JsonObject], Awaitable[JsonObject]] | None = None,
         ask: Callable[[QuestionSpec, float | None], Awaitable[Answer]] | None = None,
@@ -79,6 +81,7 @@ class CommandContext(CallContext):
         super().__init__(
             session_id, actor_id, step_id=step_id, history=history, emit=emit, call_hook=call_hook
         )
+        self.project = project
         self._model = request_model
         self._ask = ask
         self.environment = ToolEnvironment(self._check, environment)

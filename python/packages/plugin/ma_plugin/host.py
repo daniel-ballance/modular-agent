@@ -940,8 +940,15 @@ class External(Plugin):
                 raise WireError("Nested tools need a name and object input", "invalid_request")
             return result_out(await self.api.nested_tools(d["dispatch"], p["name"], p["input"]))
         if method.startswith("host/env/"):
-            if parent is None or p.get("sessionId") != sid or "tools" not in authority:
-                raise WireError("No parent work with tool authority", "invalid_request")
+            required = {"tools/call": "tools", "command/run": "input"}
+            if (
+                parent is None
+                or p.get("sessionId") != sid
+                or required.get(parent["method"]) not in authority
+            ):
+                raise WireError(
+                    "No authorized parent work for this environment call", "invalid_request"
+                )
             cwd = Path(p["cwd"]).resolve()
             if not cwd.is_relative_to(Path(s["project"]).resolve()):
                 raise WireError("cwd is outside the session project", "invalid_request")

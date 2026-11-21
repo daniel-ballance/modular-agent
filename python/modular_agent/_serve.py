@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from contextvars import ContextVar
 from copy import deepcopy
 from os import PathLike
+from pathlib import Path
 from typing import Any, cast, overload
 
 from ma_plugin.host import External
@@ -277,6 +278,52 @@ async def _serve(
             raise WireError("Unknown tool source or invalid session scope", "invalid_request")
         return {"tools": [t.definition for t in listed]}
 
+    async def scoped_environment(
+        sid: str,
+        project: str,
+        key: str | int,
+        progress: Callable[[Content], Awaitable[None]] | None,
+        operation: str,
+        params: JsonObject,
+    ) -> Json:
+        methods = {
+            "read_bytes": "read",
+            "write_bytes": "write",
+            "list_directory": "list",
+            "bash": "exec",
+        }
+        arguments = dict(params)
+        timeout = arguments.pop("timeout", None)
+        if isinstance(timeout, (int, float)):
+            arguments["timeoutMs"] = round(timeout * 1000)
+        from uuid import uuid4
+
+        callback_id = uuid4().hex
+        if operation == "bash" and progress is not None:
+            environment_output[callback_id] = progress
+        try:
+            reply = await server.peer.request(
+                "host/env/" + methods[operation],
+                {
+                    **arguments,
+                    "parentRequestId": key,
+                    "sessionId": sid,
+                    "cwd": project,
+                },
+                key=callback_id,
+            )
+        except WireError as exc:
+            raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+        finally:
+            environment_output.pop(callback_id, None)
+        if operation == "bash":
+            return {
+                "exit_code": reply["exitCode"],
+                "text": reply["output"],
+                "timed_out": reply["timedOut"],
+            }
+        return cast(Json, reply)
+
     async def call_tool(p: dict[str, Any], key: str | int) -> JsonObject:
         call = p["call"]
         reg = registered()
@@ -329,43 +376,9 @@ async def _serve(
             return reply["tools"] if operation == "list" and isinstance(reply, dict) else reply
 
         async def environment(operation: str, params: JsonObject) -> Json:
-            methods = {
-                "read_bytes": "read",
-                "write_bytes": "write",
-                "list_directory": "list",
-                "bash": "exec",
-            }
-            arguments = dict(params)
-            timeout = arguments.pop("timeout", None)
-            if isinstance(timeout, (int, float)):
-                arguments["timeoutMs"] = round(timeout * 1000)
-            from uuid import uuid4
-
-            callback_id = uuid4().hex
-            if operation == "bash":
-                environment_output[callback_id] = progress
-            try:
-                reply = await server.peer.request(
-                    "host/env/" + methods[operation],
-                    {
-                        **arguments,
-                        "parentRequestId": key,
-                        "sessionId": p["sessionId"],
-                        "cwd": p["project"],
-                    },
-                    key=callback_id,
-                )
-            except WireError as exc:
-                raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
-            finally:
-                environment_output.pop(callback_id, None)
-            if operation == "bash":
-                return {
-                    "exit_code": reply["exitCode"],
-                    "text": reply["output"],
-                    "timed_out": reply["timedOut"],
-                }
-            return cast(Json, reply)
+            return await scoped_environment(
+                p["sessionId"], p["project"], key, progress, operation, params
+            )
 
         async def history(cursor: str | None) -> JsonObject:
             try:
@@ -538,6 +551,12 @@ async def _serve(
         if command is None:
             raise WireError("Unknown command", "invalid_request")
         sid, actor = p["sessionId"], p["actorId"]
+        session = await server.peer.request(
+            "host/session", {"sessionId": sid, "parentRequestId": key}
+        )
+
+        async def environment(operation: str, params: JsonObject) -> Json:
+            return await scoped_environment(sid, session["project"], key, None, operation, params)
 
         async def history(cursor: str | None) -> JsonObject:
             return cast(
@@ -563,6 +582,8 @@ async def _serve(
             CommandContext(
                 sid,
                 actor,
+                environment,
+                project=Path(session["project"]),
                 history=history,
                 emit=emit,
                 start_job=start_job(key, sid, actor) if registered()._job_owner else None,
