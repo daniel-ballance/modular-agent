@@ -186,6 +186,9 @@ export interface ToolContext {
 	sessionId: string;
 	signal: AbortSignal;
 	call: ToolCall;
+	/** Host callbacks supplied by a served tool's binding. */
+	history?(after?: string): Promise<{ entries: HistoryEntry[]; next?: string }>;
+	emit?(type: string, data: unknown): void;
 	tools?: {
 		list(): Promise<ToolDefinition[]>;
 		call(name: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult>;

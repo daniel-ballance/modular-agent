@@ -180,6 +180,13 @@ export interface Work {
   startJob?(kind: string, detail: unknown, key?: string): Promise<import("@modular-agent/harness").JobHandle>;
 }
 
+function emitCustom(sessionId: string | undefined, type: string, data: unknown, send: (sessionId: string, type: string, data: unknown) => void) {
+  if (!sessionId || typeof type !== "string" || !type.includes(".") || /^(session|actor|input|turn|step|model|tool|provider|job|history|position|entries|setting|plugin|capability)\./.test(type)) {
+    throw new AgentError("invalid_request", "Custom events need a non-standard dotted name and a session");
+  }
+  send(sessionId, type, structuredClone(data));
+}
+
 function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" | "turnId" | "stepId" | "callId">, work?: Work, inProcessOnly = false) {
   let live = true;
   const assert = () => {
@@ -197,23 +204,30 @@ function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" 
     async history(cursor) {
       assert();
       if (!ids.sessionId) throw new AgentError("invalid_request", "Call has no session");
-      if (work?.history) return work.history(cursor);
+      if (work?.history) {
+        const page = await checked(() => work.history!(cursor));
+        assert();
+        return page;
+      }
       const all = api.history(ids.sessionId, { all: true });
-      const at = cursor ? all.findIndex(e => e.id === cursor) : -1;
-      if (cursor && at < 0) throw new AgentError("invalid_request", "Unknown history cursor");
+      const at = cursor === undefined ? -1 : all.findIndex(e => e.id === cursor);
+      if (cursor !== undefined && at < 0) throw new AgentError("invalid_request", "Unknown history cursor");
       const entries = all.slice(at + 1, at + 101);
       return { entries: structuredClone(entries), next: all.length > at + 101 ? entries.at(-1)?.id : undefined };
     },
     emit(type, data) {
       assert();
-      if (!ids.sessionId || !type.includes(".") || /^(session|actor|input|turn|step|model|tool|provider|job|history|setting|plugin|capability)\./.test(type)) {
-        throw new AgentError("invalid_request", "Custom events need a non-standard dotted name and a session");
-      }
-      if (work?.emit) work.emit(type, data);
-      else api.emit(ids.sessionId, type, structuredClone(data));
+      emitCustom(ids.sessionId, type, data, work?.emit ? (_, type, data) => work.emit!(type, data) : api.emit);
     },
   };
   return { cx, assert, finish: () => { live = false; } };
+}
+
+async function readCredential(api: PluginApi, name: string, signal?: AbortSignal): Promise<string | undefined> {
+  if (typeof name !== "string" || !name) throw new AgentError("invalid_request", "A credential name is required");
+  const value = await api.use<CredentialStore>("credential-store")?.read(name, { signal });
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && "key" in value && typeof value.key === "string") return value.key;
 }
 
 const inProcessPoints = new Set<HookPoint>(["session.prepare", "session.join", "session.leave", "provider.piece"]);
@@ -257,6 +271,16 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
     if (served && !servable) unavailable(name);
     registrations.push(api => api.provide(name, value));
   };
+  const toolsAt = (api: PluginApi, id: string, tools: Tool[]) => toolSource(id, tools, base => {
+    const { cx, assert, finish } = context(api, { sessionId: base.sessionId }, base);
+    return { history: cx.history, emit: cx.emit, finish, async credential(name) {
+      assert();
+      if (served) throw new AgentError("not_supported", "Named credentials are in-process only");
+      const key = await checked(() => readCredential(api, name, base.signal));
+      assert();
+      return key;
+    } };
+  });
   const r: Registrar = {
     environment: env => part("working-environment", env, true),
     runtime: runtime => part("runtime", runtime, true),
@@ -288,27 +312,26 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
         add(`tool:${t.definition.name}`);
         if (served && t.inProcessOnly) unavailable(`tool ${t.definition.name}`);
       }
-      const at = (id?: string) => {
+      const at = (api: PluginApi, id?: string) => {
         const current = [...catalog.tools(id)];
         const blocked = served && current.find(t => t.inProcessOnly);
         if (blocked) unavailable(`tool ${blocked.definition.name}`);
-        return toolSource(catalog.id, current);
+        return toolsAt(api, catalog.id, current);
       };
       registrations.push(api => api.provide("tool-source", {
-        id: catalog.id, tools: (id?: string) => at(id).tools(),
+        id: catalog.id, tools: (id?: string) => at(api, id).tools(),
         run: (call: Parameters<ReturnType<typeof toolSource>["run"]>[0], cx: Parameters<ReturnType<typeof toolSource>["run"]>[1]) =>
-          at(cx.sessionId).run(call, cx),
+          at(api, cx.sessionId).run(call, cx),
         onChange: catalog.onChange?.bind(catalog),
       }));
     },
     provider(p) {
       add(`provider:${p.id}`);
       if (served && p.inProcessOnly) unavailable(`provider ${p.id}`);
-      registrations.push(api => api.provide("provider", adaptProvider(p, async () => {
-        const value = await api.use<CredentialStore>("credential-store")?.read(p.id);
-        if (typeof value === "string") return value;
-        if (value && typeof value === "object" && "key" in value && typeof value.key === "string") return value.key;
-      })));
+      registrations.push(api => api.provide("provider", adaptProvider(p, async name => {
+        if (served && name !== undefined) throw new AgentError("not_supported", "Named credentials are in-process only");
+        return readCredential(api, name === undefined ? p.id : name);
+      }, (sessionId, type, data) => emitCustom(sessionId, type, data, api.emit))));
     },
     jobs(owner) {
       check();
@@ -444,7 +467,7 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
     throw new AgentError("invalid_composition", `Invalid replacements in ${plugin.name}`);
   }
   const base: BasePlugin = { name: plugin.name, stop: plugin.stop?.bind(plugin), async setup(api) {
-    if (tools.length) api.provide("tool-source", toolSource(plugin.name, tools));
+    if (tools.length) api.provide("tool-source", toolsAt(api, plugin.name, tools));
     for (const register of registrations) await register(api);
     if (jobOwner) {
       const owner = jobOwner;
