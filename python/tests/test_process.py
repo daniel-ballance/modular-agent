@@ -25,6 +25,7 @@ class Streaming(Fake):
         return reply(f"provider-pid={os.getpid()} α SECRET")
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="checks plugin parentage in Linux /proc")
 async def test_only_harness_local_all_plugins_moved_stream_and_gate(tmp_path, runtime_type):
     h = await build(
         tmp_path / "store",
@@ -69,6 +70,9 @@ async def test_only_harness_local_all_plugins_moved_stream_and_gate(tmp_path, ru
     assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="checks containment of processes that use Linux setsid"
+)
 async def test_cancel_turn_joins_bash_two_processes_away(tmp_path, runtime_type):
     command = "echo $$ > shell.pid; setsid sleep 90 & echo $! > escaped.pid; printf live; wait"
     h = await build(

@@ -85,7 +85,7 @@ func path(id string) string   { return "/v1/sessions/" + escape(id) }
 // CLOCK_BOOTTIME is monotonic and advances while the system is suspended.
 func leaseClock() int64 {
 	var t unix.Timespec
-	if unix.ClockGettime(unix.CLOCK_BOOTTIME, &t) != nil {
+	if unix.ClockGettime(leaseClockID, &t) != nil {
 		panic("history writer requires a suspend-aware clock")
 	}
 	return t.Nano()

@@ -1,10 +1,12 @@
-// Package proctest contains Linux-only subprocess acceptance helpers.
+// Package proctest contains subprocess acceptance helpers.
 package proctest
 
 import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -13,6 +15,18 @@ import (
 )
 
 func Find(marker string) []int {
+	if runtime.GOOS == "darwin" {
+		out, _ := exec.Command("ps", "-axww", "-o", "pid=,command=").Output()
+		var pids []int
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[1] == marker {
+				pid, _ := strconv.Atoi(fields[0])
+				pids = append(pids, pid)
+			}
+		}
+		return pids
+	}
 	entries, _ := os.ReadDir("/proc")
 	var pids []int
 	for _, e := range entries {
@@ -38,6 +52,11 @@ func Await(t *testing.T, condition func() bool) {
 	}
 }
 func Gone(pid int) bool {
+	if runtime.GOOS == "darwin" {
+		out, _ := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "state=").Output()
+		state := strings.TrimSpace(string(out))
+		return state == "" || strings.HasPrefix(state, "Z")
+	}
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if os.IsNotExist(err) {
 		return true
@@ -47,14 +66,6 @@ func Gone(pid int) bool {
 	}
 	f := strings.Fields(string(b)[strings.LastIndex(string(b), ")")+1:])
 	return len(f) > 0 && f[0] == "Z"
-}
-func Subreaper(t *testing.T) {
-	t.Helper()
-	// https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
-	_, _, err := syscall.Syscall6(syscall.SYS_PRCTL, 36, 1, 0, 0, 0, 0)
-	if err != 0 {
-		t.Fatal(err)
-	}
 }
 func Reap(t *testing.T, pid int) {
 	t.Helper()

@@ -26,6 +26,7 @@ class Local(Plugin):
         "containment": "strong",
         "confines_files": False,
         "platform": "Linux cgroup v2 with delegated subtree",
+        "platforms": ["linux"],
     }
 
     def __init__(self, root=None, *, point_store="copy"):
@@ -256,6 +257,27 @@ class Local(Plugin):
             sessions.update(item[0] for item in self.points.saved.values())
         for sid in sessions:
             await self._close({"session": sid})
+
+
+def local_for_platform(root=None, *, point_store="copy", linux_process_groups=False, platform=None):
+    part = local_type(platform)
+    if part is Local and linux_process_groups:
+        try:
+            delegated_root()
+        except Exception:
+            part = ProcessGroupLocal
+    return part(root, point_store=point_store)
+
+
+def local_type(platform=None):
+    platform = platform or sys.platform
+    if platform == "darwin":
+        from .darwin import DarwinLocal
+
+        return DarwinLocal
+    if platform == "linux":
+        return Local
+    raise AgentError("The local environment supports only Linux and macOS", "not_supported")
 
 
 class ProcessGroupLocal(Local):

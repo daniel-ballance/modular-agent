@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import sys
 
 import pytest
 
@@ -148,6 +149,11 @@ async def test_shell_background_stopped_and_reaped_at_session_close(agent, tmp_p
     pid = int((tmp_path / "pid").read_text())
     os.kill(pid, 0)
     await a.session("close", session=sid)
+    if sys.platform == "darwin":
+        from test_swap import dead, until
+
+        await until(lambda: dead(pid))
+        return
     # PID 1 reaps an orphan on this local machine. A zombie is already dead, but
     # do not leave a live command behind and do not treat it as a surviving job.
     for _ in range(100):

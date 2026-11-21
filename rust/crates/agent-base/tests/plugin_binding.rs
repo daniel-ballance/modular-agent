@@ -110,6 +110,10 @@ impl Rig {
     }
 }
 #[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "requires Linux process inspection or strong containment"
+)]
 async fn closing_plugin_stdin_joins_a_running_command_and_its_setsid_descendant() {
     use std::io::{BufRead, Write};
     struct Child(std::process::Child);

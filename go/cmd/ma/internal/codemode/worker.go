@@ -58,7 +58,7 @@ func workerCommand(ctx context.Context, path string) (*exec.Cmd, error) {
 func command(ctx context.Context, path string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = []string{} // No provider keys, user settings or PATH.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	workerLifetime(cmd)
 	return cmd
 }
 
