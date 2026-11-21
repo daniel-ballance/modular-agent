@@ -106,13 +106,9 @@ func runRuntimeHost(ctx context.Context, t api.Turn, host api.API, declaration a
 		"modelSupports": object{"keepsState": model.Stateful, "runsTools": model.RunsTools, "safeToRepeat": model.SafeToRepeatRequests},
 		"settings":      object{"maxSteps": t.Settings.MaxSteps, "maxOutput": t.Settings.MaxOutput, "reasoning": t.Settings.Thinking},
 	}}
-	for _, entry := range snap.Branch() {
-		if entry.Turn == t.ID && entry.Kind == "input" {
-			if shape := api.Decode[api.Input](entry.Data).ResultSchema; len(shape) != 0 {
-				asObjectTurn := params["turn"].(object)
-				asObjectTurn["resultShape"] = shape
-			}
-			break
+	if port, ok := t.IO.(interface{ ResultShape() json.RawMessage }); ok {
+		if shape := port.ResultShape(); len(shape) != 0 {
+			params["turn"].(object)["resultShape"] = shape
 		}
 	}
 	method := "runtime/runTurn"

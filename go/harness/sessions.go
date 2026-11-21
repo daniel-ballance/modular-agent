@@ -1626,6 +1626,8 @@ func (p *turnPorts) CheckTenantBudget() error {
 	return p.c.checkBudget(name)
 }
 
+func (p *turnPorts) ResultShape() json.RawMessage { return p.input.ResultSchema }
+
 func (p *turnPorts) Snapshot() (api.Session, error) {
 	p.s.mu.Lock()
 	defer p.s.mu.Unlock()

@@ -263,5 +263,6 @@ func serveFault(err error) error {
 	e := appError(err, Internal).(*Error)
 	fault := &pluginrpc.RPCError{Message: e.Message}
 	fault.Data.Code = string(e.Code)
+	fault.Data.Limit, _ = e.Data["limit"].(string)
 	return fault
 }

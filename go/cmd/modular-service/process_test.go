@@ -243,7 +243,7 @@ func TestSeparateServicesOwnershipSIGKILLAndRecovery(t *testing.T) {
 		toolDone := make(chan agenthttp.Response, 1)
 		toolErr := make(chan error, 1)
 		go func() {
-			q := agenthttp.Request{Op: "tool", Session: id, Call: api.Call{ID: "service-death", Name: "bash", Input: api.JSON(map[string]string{"command": "echo service-ready; while :; do echo tick >> service-ticks; sleep .03; done"})}}
+			q := agenthttp.Request{Op: "tool", Session: id, Call: api.Call{ID: "service-death", Name: "bash", Input: api.JSON(map[string]string{"command": "echo tick >> service-ticks; echo service-ready; while :; do echo tick >> service-ticks; sleep .03; done"})}}
 			o, err := bc(q)
 			if err != nil {
 				toolErr <- err

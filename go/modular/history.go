@@ -14,11 +14,12 @@ import (
 )
 
 type HistoryStore struct {
-	make       func() (api.Store, error)
-	persistent bool
-	erasure    bool
-	serviceDir string
-	fileDir    string
+	make           func() (api.Store, error)
+	persistent     bool
+	erasure        bool
+	serviceDir     string
+	fileDir        string
+	serviceBackend api.Store
 }
 
 func MemoryHistory() HistoryStore {
@@ -142,10 +143,10 @@ func runHistory(ctx context.Context, store HistoryStore, options HistoryOptions,
 					return &Error{Code: NotSupported, Message: "MemoryHistory is not durable and can only be served for tests"}
 				}
 				disk = historyhttp.NewStoreServer(backing, 3*time.Second)
-			} else if store.persistent && store.erasure && options.StateDir != "" {
-				disk, err = historyhttp.NewFileStoreServer(backing, options.StateDir, 3*time.Second)
+			} else if store.persistent && store.erasure && store.serviceBackend != nil && options.StateDir != "" {
+				disk, err = historyhttp.NewFileStoreServer(store.serviceBackend, options.StateDir, 3*time.Second)
 			} else {
-				return &Error{Code: NotSupported, Message: "custom history backend requires persistence, exact erasure and a persistent HistoryOptions.StateDir"}
+				return &Error{Code: NotSupported, Message: "custom history backend requires ServiceHistoryBackend, persistence, erasure and a persistent HistoryOptions.StateDir"}
 			}
 		}
 	}

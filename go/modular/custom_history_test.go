@@ -26,6 +26,10 @@ type snapshotLease struct {
 }
 
 func (b *snapshotBackend) Acquire(id string) (modular.HistoryLease, error) {
+	return b.AcquireService(id)
+}
+
+func (b *snapshotBackend) AcquireService(id string) (modular.ServiceHistoryLease, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.held[id] {
