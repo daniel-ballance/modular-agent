@@ -10,11 +10,10 @@ use tokio::sync::broadcast;
 /// The local actor. The base builds name the local person `user`.
 pub(crate) const LOCAL: &str = "user";
 
-/// A session event in the SDK's shared, tagged JSON shape. The payload is JSON
-/// so plugin-defined event types and future payload fields survive unchanged.
-#[derive(Clone, Debug, serde::Serialize)]
+/// Shared metadata and the lossless payload, including future fields.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Event {
+pub struct EventData {
     #[serde(rename = "type")]
     pub event_type: String,
     pub time: u64,
@@ -30,9 +29,68 @@ pub struct Event {
     pub data: Value,
 }
 
+macro_rules! event_types {
+    ($($variant:ident: $name:literal),* $(,)?) => {
+        /// A standard event, or an extension retained in its original shape.
+        #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+        #[serde(from = "EventData", into = "EventData")]
+        #[non_exhaustive]
+        pub enum Event {
+            Text { delta: String, info: EventData },
+            Reasoning { delta: String, info: EventData },
+            $($variant(EventData),)*
+            Custom(EventData),
+        }
+
+        impl From<EventData> for Event {
+            fn from(info: EventData) -> Self {
+                match info.event_type.as_str() {
+                    "text" => Self::Text { delta: info.data["delta"].as_str().unwrap_or_default().into(), info },
+                    "reasoning" => Self::Reasoning { delta: info.data["delta"].as_str().unwrap_or_default().into(), info },
+                    $($name => Self::$variant(info),)*
+                    _ => Self::Custom(info),
+                }
+            }
+        }
+        impl From<Event> for EventData {
+            fn from(event: Event) -> Self {
+                match event {
+                    Event::Text { info, .. } | Event::Reasoning { info, .. } => info,
+                    $(Event::$variant(info) => info,)*
+                    Event::Custom(info) => info,
+                }
+            }
+        }
+        impl std::ops::Deref for Event {
+            type Target = EventData;
+            fn deref(&self) -> &Self::Target {
+                match self {
+                    Event::Text { info, .. } | Event::Reasoning { info, .. } => info,
+                    $(Event::$variant(info) => info,)*
+                    Event::Custom(info) => info,
+                }
+            }
+        }
+    };
+}
+
+event_types!(
+    SessionStarted: "sessionStarted", SessionEnded: "sessionEnded",
+    ActorJoined: "actorJoined", ActorLeft: "actorLeft",
+    InputAccepted: "inputAccepted", InputWithdrawn: "inputWithdrawn", InputHandedBack: "inputHandedBack",
+    TurnStarted: "turnStarted", TurnEnded: "turnEnded", StepStarted: "stepStarted", StepEnded: "stepEnded",
+    ToolInput: "toolInput", Audio: "audio", ToolCall: "toolCall", ToolStarted: "toolStarted",
+    ToolOutput: "toolOutput", ToolResult: "toolResult", QuestionOpened: "questionOpened",
+    QuestionAnswered: "questionAnswered", QuestionClosed: "questionClosed",
+    QuestionNoLongerAnswerable: "questionNoLongerAnswerable", JobStarted: "jobStarted",
+    JobProgress: "jobProgress", JobEnded: "jobEnded", Entry: "entry", PositionMoved: "positionMoved",
+    EntriesErased: "entriesErased", SettingChanged: "settingChanged", PluginLoaded: "pluginLoaded",
+    PluginReplaced: "pluginReplaced", PluginUnloaded: "pluginUnloaded",
+);
+
 impl Event {
     pub(crate) fn new(scope: &base::Scope, time: u64, event_type: &str, data: Value) -> Self {
-        Self {
+        EventData {
             event_type: event_type.into(),
             time,
             session_id: scope.session.clone(),
@@ -42,6 +100,7 @@ impl Event {
             job_id: scope.job.clone(),
             data,
         }
+        .into()
     }
 
     pub(crate) fn entry(entry: &base::Entry, view: Value) -> Self {
@@ -77,6 +136,8 @@ impl Event {
             "setting.changed" => ("settingChanged", e.content.clone()),
             "session.start" => ("sessionStarted", e.content.clone()),
             "session.end" => ("sessionEnded", e.content.clone()),
+            "actor.joined" => ("actorJoined", e.content.clone()),
+            "actor.left" => ("actorLeft", e.content.clone()),
             "step.start" => ("stepStarted", e.content.clone()),
             "step.end" => ("stepEnded", e.content.clone()),
             "job.started" => ("jobStarted", e.content.clone()),
@@ -218,7 +279,6 @@ impl base::EventSink for Hub {
             let kind = match entry.kind.as_str() {
                 "turn.start" => Some("turnStarted"),
                 "actor.identity" => Some("actorJoined"),
-                "actor.left" => Some("actorLeft"),
                 "position" => Some("positionMoved"),
                 "erasure" => Some("entriesErased"),
                 "request.closed" => Some("questionClosed"),

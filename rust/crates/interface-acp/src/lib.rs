@@ -51,16 +51,32 @@ impl Identity {
     fn allows_project(&self, path: &Path) -> bool {
         self.projects
             .as_ref()
-            .is_none_or(|roots| roots.iter().any(|root| path.starts_with(root)))
+            .is_none_or(|projects| projects.iter().any(|project| path == project))
     }
     fn allows_tenant(&self, tenant: Option<&str>) -> bool {
         self.tenants
             .as_ref()
-            .is_none_or(|list| list.iter().any(|name| name.as_deref() == tenant))
+            .map_or(!self.network || tenant.is_none(), |list| {
+                list.iter().any(|name| name.as_deref() == tenant)
+            })
     }
 }
 
 tokio::task_local! { static PRINCIPAL: Arc<Identity>; }
+
+async fn with_principal<T>(
+    identity: Arc<Identity>,
+    ceiling: Option<Arc<ConnectionCeiling>>,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    if let Some(ceiling) = ceiling {
+        CONNECTION_CEILING
+            .scope(ceiling, PRINCIPAL.scope(identity, work))
+            .await
+    } else {
+        PRINCIPAL.scope(identity, work).await
+    }
+}
 
 fn connection_actor() -> String {
     PRINCIPAL.try_with(|id| id.id.clone()).unwrap_or_else(|_| {
@@ -100,6 +116,9 @@ pub trait Factory: Send + Sync {
     }
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>>;
     fn trust(&self, project: &Path) -> Result<()>;
+    fn serves_project(&self, _project: &Path) -> bool {
+        true
+    }
     /// The usual Factory builds one agent per session; an embedded agent shares one.
     fn owns_session_agent(&self) -> bool {
         true
@@ -139,6 +158,7 @@ impl Plugin for AcpPlugin {
 }
 struct State {
     principal: Arc<Identity>,
+    ceiling: Option<Arc<ConnectionCeiling>>,
     factory: Arc<dyn Factory>,
     launch_declaration: Option<Value>,
     client: Mutex<Option<Value>>,
@@ -327,6 +347,10 @@ impl State {
             );
         }
         if method == "$/ping" && self.principal.network {
+            ensure!(
+                p.as_object().is_some_and(|object| object.is_empty()),
+                "ping expects empty params"
+            );
             return Ok(json!({}));
         }
         if self.client.lock().unwrap().is_none() {
@@ -400,7 +424,10 @@ impl State {
                 }
                 if self.principal.network
                     && let Some(path) = &project
-                    && !self.principal.allows_project(&path.canonicalize()?)
+                    && {
+                        let path = path.canonicalize()?;
+                        !self.principal.allows_project(&path) || !self.factory.serves_project(&path)
+                    }
                 {
                     return Ok(json!({"sessions":[]}));
                 }
@@ -426,7 +453,7 @@ impl State {
                     }
                 }
                 Ok(
-                    json!({"sessions":sessions.values().filter(|s| !self.principal.network || sessions::discoverable(&self.principal, s)).map(|s|json!({"sessionId":s.id,"cwd":s.project})).collect::<Vec<_>>()}),
+                    json!({"sessions":sessions.values().filter(|s| !self.principal.network || (self.factory.serves_project(&s.project) && sessions::discoverable(&self.principal, s))).map(|s|json!({"sessionId":s.id,"cwd":s.project})).collect::<Vec<_>>()}),
                 )
             }
             "session/close" => {
@@ -545,7 +572,8 @@ impl State {
                 let project = Path::new(string(&p, "cwd")?);
                 ensure!(project.is_absolute(), "cwd must be absolute");
                 ensure!(
-                    self.principal.allows_project(&project.canonicalize()?)
+                    self.factory.serves_project(&project.canonicalize()?)
+                        && self.principal.allows_project(&project.canonicalize()?)
                         && self.principal.rights.has("settings"),
                     request_error("forbidden", "cannot change project trust")
                 );
@@ -744,8 +772,15 @@ async fn run_connection(
     } else {
         None
     };
+    let ceiling = identity.network.then(|| {
+        Arc::new(ConnectionCeiling::new(
+            identity.id.clone(),
+            identity.rights.clone(),
+        ))
+    });
     let state = Arc::new(State {
         principal: Arc::new(identity),
+        ceiling,
         factory,
         launch_declaration,
         client: Mutex::new(None),
@@ -767,43 +802,49 @@ async fn run_connection(
                 // https://docs.rs/agent-client-protocol/5.3.0/agent_client_protocol/struct.ConnectionTo.html#method.spawn
                 let requests = requests.clone();
                 let connection = cx.clone();
-                cx.spawn(PRINCIPAL.scope(requests.principal.clone(), async move {
-                    let result = requests.dispatch(request, connection).await.map_err(|e| {
-                        if let Some(error) = e.downcast_ref::<acp::Error>() {
-                            error.clone()
-                        } else if let Some(held) = e.downcast_ref::<HistoryHeld>() {
-                            acp::Error::new(-32000, held.to_string())
-                                .data(json!({"code":"held","retryAfterMs":held.retry_after_ms}))
-                        } else if e.to_string() == "method not found" {
-                            acp::Error::method_not_found()
-                        } else {
-                            let message = e.to_string();
-                            let code = if message.starts_with("actor lacks ")
-                                || message.starts_with("unknown tenant ")
-                            {
-                                "forbidden"
-                            } else if message == "initial history append is too large" {
-                                "result_too_large"
-                            } else if matches!(
-                                message.as_str(),
-                                "session busy" | "settle pending work before moving or forking"
-                            ) {
-                                "busy"
+                cx.spawn(with_principal(
+                    requests.principal.clone(),
+                    requests.ceiling.clone(),
+                    async move {
+                        let result = requests.dispatch(request, connection).await.map_err(|e| {
+                            if let Some(error) = e.downcast_ref::<acp::Error>() {
+                                error.clone()
+                            } else if let Some(held) = e.downcast_ref::<HistoryHeld>() {
+                                acp::Error::new(-32000, held.to_string())
+                                    .data(json!({"code":"held","retryAfterMs":held.retry_after_ms}))
+                            } else if e.to_string() == "method not found" {
+                                acp::Error::method_not_found()
                             } else {
-                                "invalid_params"
-                            };
-                            acp::Error::new(-32602, message).data(json!({"code":code}))
-                        }
-                    });
-                    responder.respond_with_result(result)
-                }))
+                                let message = e.to_string();
+                                let code = if message.starts_with("actor lacks ")
+                                    || message.starts_with("unknown tenant ")
+                                {
+                                    "forbidden"
+                                } else if message == "initial history append is too large" {
+                                    "result_too_large"
+                                } else if matches!(
+                                    message.as_str(),
+                                    "session busy" | "settle pending work before moving or forking"
+                                ) {
+                                    "busy"
+                                } else {
+                                    "invalid_params"
+                                };
+                                acp::Error::new(-32602, message).data(json!({"code":code}))
+                            }
+                        });
+                        responder.respond_with_result(result)
+                    },
+                ))
             },
             acp::on_receive_request!(),
         )
         .on_receive_notification(
             async move |notification: UntypedMessage, _cx| {
-                PRINCIPAL
-                    .scope(notifications.principal.clone(), async {
+                with_principal(
+                    notifications.principal.clone(),
+                    notifications.ceiling.clone(),
+                    async {
                         if notification.method == "session/cancel"
                             && let Ok(session) = notifications.session(&notification.params)
                             && require(session.api.as_ref(), &actor_scope(&session.id), "cancel")
@@ -812,8 +853,9 @@ async fn run_connection(
                             let _ = session.cancel().await;
                         }
                         Ok(())
-                    })
-                    .await
+                    },
+                )
+                .await
             },
             acp::on_receive_notification!(),
         )

@@ -108,7 +108,9 @@ pub(crate) struct Inner {
     pub drivers: std::sync::Mutex<
         std::collections::HashMap<String, std::sync::Weak<crate::session::Driver>>,
     >,
-    pub _scratch: Option<tempfile::TempDir>,
+    pub(crate) scratch: std::sync::Mutex<Option<tempfile::TempDir>>,
+    closed: tokio::sync::Mutex<bool>,
+    interfaces: tokio::sync::Mutex<Vec<Arc<dyn crate::Interface>>>,
     pub kept: std::sync::Mutex<Vec<tempfile::TempDir>>,
 }
 
@@ -202,7 +204,7 @@ impl Agent {
         self.attach(&id)?;
         let session = Session::new(self.inner.clone(), id);
         for actor in options.actors {
-            if let Err(error) = session.join(actor) {
+            if let Err(error) = session.join(actor).await {
                 let _ = self.inner.harness.close(session.id()).await;
                 return Err(error);
             }
@@ -324,7 +326,35 @@ impl Agent {
     /// Close every session and stop the plugins.
     pub async fn close(&self) -> Result<()> {
         use base::AgentApi;
-        Ok(self.inner.harness.shutdown().await?)
+        let mut closed = self.inner.closed.lock().await;
+        if *closed {
+            return Ok(());
+        }
+        let mut result = Ok(());
+        let interfaces = std::mem::take(&mut *self.inner.interfaces.lock().await);
+        for interface in interfaces.into_iter().rev() {
+            if let Err(e) = interface.stop().await
+                && result.is_ok()
+            {
+                result = Err(e);
+            }
+        }
+        for id in self.inner.harness.open_session_ids() {
+            if let Err(e) = Session::new(self.inner.clone(), id).close_owned().await
+                && result.is_ok()
+            {
+                result = Err(e);
+            }
+        }
+        if let Err(e) = self.inner.harness.shutdown().await
+            && result.is_ok()
+        {
+            result = Err(e.into());
+        }
+        self.inner.scratch.lock().unwrap().take();
+        self.inner.kept.lock().unwrap().clear();
+        *closed = true;
+        result
     }
 }
 
@@ -448,6 +478,18 @@ impl AgentBuilder {
     }
     /// Whether the agent hosts plugin programs. A plugin host also starts the programs
     /// named in `MODULAR_AGENT_PLUGINS`. Default: when process or service plugins are given.
+    /// Append a list of process plugins, in load order.
+    pub fn process_plugins(mut self, plugins: impl IntoIterator<Item = ProcessPlugin>) -> Self {
+        self.process_plugins.extend(plugins);
+        self
+    }
+
+    /// Append a list of service plugins, in load order.
+    pub fn service_plugins(mut self, plugins: impl IntoIterator<Item = ServicePlugin>) -> Self {
+        self.service_plugins.extend(plugins);
+        self
+    }
+
     pub fn plugin_host(mut self, host: bool) -> Self {
         self.plugin_host = Some(host);
         self
@@ -521,23 +563,18 @@ impl AgentBuilder {
         {
             return Err(Error::new(
                 Code::InvalidComposition,
-                "history persistence must match durability",
+                if self.durability == Durability::Ephemeral {
+                    "persistent history requires kept or durable, not ephemeral"
+                } else {
+                    "kept and durable require persistent history"
+                },
             ));
         }
-        if self.durability != Durability::Ephemeral && self.data_dir.is_none() {
-            if self.history.is_none() {
-                return Err(Error::new(
-                    Code::InvalidComposition,
-                    "kept and durable agents need a persistent history store",
-                ));
-            }
-            if matches!(environment, EnvironmentKind::Local(_)) {
-                return Err(Error::new(
-                    Code::InvalidComposition,
-                    "the local working environment needs a data_dir for recovery bookkeeping",
-                ));
-            }
-        }
+        let has_data_dir = self.data_dir.is_some();
+        let local = matches!(environment, EnvironmentKind::Local(_));
+        let explicit_history = self.history.is_some();
+        let explicit_credentials = self.credentials.is_some();
+        let explicit_configuration = self.configuration.is_some();
         // The local environment keeps command state on disk; an ephemeral agent puts it
         // in a scratch folder that goes with the agent.
         let (state, scratch) = match &self.data_dir {
@@ -552,10 +589,10 @@ impl AgentBuilder {
         std::fs::create_dir_all(&state)?;
         let History(history, persistent, store_name) = match self.history {
             Some(history) => history,
-            None if self.durability == Durability::Ephemeral => memory_history(),
+            None if self.durability == Durability::Ephemeral || !has_data_dir => memory_history(),
             None => file_history(state.join("sessions"))?,
         };
-        let saved_history = History(history.clone(), persistent, store_name);
+        let mut saved_history = History(history.clone(), persistent, store_name);
         if let Some(recipe) = &mut restart {
             recipe.project = Some(project.clone());
             recipe.history = Some(History(history.clone(), persistent, store_name));
@@ -621,11 +658,6 @@ impl AgentBuilder {
             let plugin = Plugin::new(tool.name().to_string()).tool(tool);
             own.push((Arc::new(InProcess::new(&plugin)?), vec![]));
         }
-        for plugin in &self.plugins {
-            own.push((Arc::new(InProcess::new(plugin)?), plugin.replaces.clone()));
-        }
-
-        own.push((Arc::new(feature_commands::CommandsPlugin), vec![]));
         let harness = Harness::for_project(project.clone());
         let tenants = self.tenants.as_ref().map(Value::to_string);
         harness
@@ -638,12 +670,68 @@ impl AgentBuilder {
             } else {
                 harness.load_replacing(plugin, &replaces).await
             };
-            loaded.map_err(|e| {
-                Error::new(
+            if let Err(e) = loaded {
+                let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                return Err(Error::new(
                     Code::InvalidComposition,
                     format!("plugin {name} could not load: {e:#}"),
-                )
-            })?;
+                ));
+            }
+        }
+        let mut interfaces = Vec::new();
+        let mut replaces_default_env = false;
+        for plugin in &self.plugins {
+            let loaded = match InProcess::new(plugin) {
+                Ok(registered) => {
+                    let registrar = &registered.registered;
+                    if let Some(part) = registrar.history_part()
+                        && part.1
+                        && self.durability == Durability::Ephemeral
+                    {
+                        let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                        return Err(Error::new(
+                            Code::InvalidComposition,
+                            "persistent history requires kept or durable, not ephemeral",
+                        ));
+                    }
+                    let collision = (explicit_history && registrar.history_part().is_some())
+                        || (explicit_credentials && registrar.has_credentials())
+                        || (explicit_configuration && registrar.has_configuration());
+                    if collision {
+                        Err(Error::new(
+                            Code::InvalidComposition,
+                            "plugin collides with an explicit part option",
+                        ))
+                    } else {
+                        interfaces.extend(registrar.interfaces.iter().cloned());
+                        replaces_default_env |= registrar.has_environment()
+                            && plugin.replaces.iter().any(|i| i == "working-environment");
+                        harness
+                            .load_replacing(Arc::new(registered), &plugin.replaces)
+                            .await
+                            .map_err(Error::from)
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = loaded {
+                let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                return Err(Error::new(
+                    Code::InvalidComposition,
+                    format!("plugin {} could not load: {e}", plugin.name()),
+                ));
+            }
+        }
+        // The slash-command fallback must run after explicit input handlers.
+        if let Err(e) = harness
+            .load(Arc::new(feature_commands::CommandsPlugin))
+            .await
+        {
+            let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+            return Err(Error::new(
+                Code::InvalidComposition,
+                format!("cannot load commands: {e}"),
+            ));
         }
         use plugin_stdio::ExternalLaunch;
         let mut launches: Vec<_> = self
@@ -664,13 +752,17 @@ impl AgentBuilder {
             .collect();
         let plugin_host = self.plugin_host.unwrap_or(!launches.is_empty());
         if plugin_host && let Some(value) = std::env::var_os("MODULAR_AGENT_PLUGINS") {
-            let named: Vec<ExternalLaunch> = serde_json::from_slice(value.as_encoded_bytes())
-                .map_err(|e| {
-                    Error::new(
+            let named: Vec<ExternalLaunch> = match serde_json::from_slice(value.as_encoded_bytes())
+            {
+                Ok(named) => named,
+                Err(e) => {
+                    let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                    return Err(Error::new(
                         Code::InvalidComposition,
                         format!("MODULAR_AGENT_PLUGINS is malformed: {e}"),
-                    )
-                })?;
+                    ));
+                }
+            };
             launches.extend(named);
         }
         let wire_count = self.wire_plugins.len();
@@ -713,6 +805,31 @@ impl AgentBuilder {
                 ));
             }
         }
+        if let Ok(custom) = base::capability::<History>(harness.as_ref(), "sdk.history.part") {
+            saved_history = (*custom).clone();
+            if let Some(recipe) = &mut restart {
+                // The plugin installs its store again on restart.
+                recipe.history = None;
+            }
+        }
+        if saved_history.1 != (self.durability != Durability::Ephemeral) {
+            let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "kept and durable require a persistent history store",
+            ));
+        }
+        if self.durability != Durability::Ephemeral
+            && !has_data_dir
+            && local
+            && !replaces_default_env
+        {
+            let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "the local working environment needs a data_dir for recovery bookkeeping",
+            ));
+        }
         hub.harness.set(Arc::downgrade(&harness)).ok();
 
         let model = match self.model {
@@ -745,7 +862,7 @@ impl AgentBuilder {
                 "runtime recovery does not match the chosen durability",
             ));
         }
-        Ok(Agent {
+        let agent = Agent {
             inner: Arc::new(Inner {
                 crash,
                 workers,
@@ -753,7 +870,7 @@ impl AgentBuilder {
                 harness,
                 hub,
                 project,
-                persistent,
+                persistent: saved_history.1,
                 history: saved_history,
                 plugin_host,
                 acp: Default::default(),
@@ -762,9 +879,23 @@ impl AgentBuilder {
                 session_limits: self.session_limits,
                 tenants: tenants.is_some(),
                 drivers: Default::default(),
-                _scratch: scratch,
+                scratch: std::sync::Mutex::new(scratch),
+                closed: tokio::sync::Mutex::default(),
+                interfaces: Default::default(),
                 kept: Default::default(),
             }),
-        })
+        };
+        for interface in interfaces {
+            if let Err(e) = interface.start(agent.clone()).await {
+                let _ = interface.stop().await;
+                let _ = agent.close().await;
+                return Err(Error::new(
+                    Code::InvalidComposition,
+                    format!("Interface failed to start: {e}"),
+                ));
+            }
+            agent.inner.interfaces.lock().await.push(interface);
+        }
+        Ok(agent)
     }
 }

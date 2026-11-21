@@ -435,6 +435,28 @@ impl ToolContext {
         NestedTools(self)
     }
 
+    /// Invoke a plugin-defined point using the token returned at setup.
+    pub async fn call_hook(
+        &self,
+        hook: &crate::DefinedHook,
+        value: Value,
+    ) -> Result<crate::HookReply> {
+        self.check()?;
+        let Backend::Local { api, scope } = &self.backend else {
+            return Err(crate::plugin::cannot_serve("custom hooks"));
+        };
+        let point = hook
+            .0
+            .get()
+            .ok_or_else(|| Error::new(Code::InvalidRequest, "hook is not installed"))?;
+        let reply = api.invoke(point, scope, value).await?;
+        Ok(crate::HookReply {
+            value: reply.value,
+            answered: reply.answered,
+            refused: reply.refused,
+        })
+    }
+
     /// Ask an actor and wait for the answer.
     pub async fn ask(&self, ask: Ask) -> Result<Answer> {
         self.check()?;

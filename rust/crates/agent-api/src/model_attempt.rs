@@ -129,6 +129,9 @@ impl ModelAttempt {
             request.session == scope.session,
             "request changed the session"
         );
+        if self.auxiliary && scope.turn.is_none() {
+            require(api, scope, "input")?;
+        }
         self.validate_tools(request)?;
         if !request.tools.is_empty() {
             ensure!(

@@ -201,6 +201,10 @@ impl TestAgentBuilder {
         self.builder = self.builder.data_dir(dir);
         self
     }
+    pub fn history(mut self, history: crate::History) -> Self {
+        self.builder = self.builder.history(history);
+        self
+    }
     pub fn durability(mut self, durability: Durability) -> Self {
         self.builder = self.builder.durability(durability);
         self

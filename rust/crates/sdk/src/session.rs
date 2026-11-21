@@ -14,6 +14,52 @@ use std::sync::Arc;
 /// A stream of events. Use it with `StreamExt::next`.
 pub type EventStream = std::pin::Pin<Box<dyn Stream<Item = Result<Event>> + Send>>;
 
+/// Shared Content. Unknown parts are retained when stored or relayed.
+pub type Content = Vec<Value>;
+
+#[derive(Clone, Debug)]
+pub enum PromptInput {
+    Text(String),
+    Content(Content),
+}
+impl From<String> for PromptInput {
+    fn from(input: String) -> Self {
+        Self::Text(input)
+    }
+}
+impl From<&str> for PromptInput {
+    fn from(input: &str) -> Self {
+        Self::Text(input.into())
+    }
+}
+impl From<&String> for PromptInput {
+    fn from(input: &String) -> Self {
+        Self::Text(input.clone())
+    }
+}
+impl From<Content> for PromptInput {
+    fn from(input: Content) -> Self {
+        Self::Content(input)
+    }
+}
+impl PromptInput {
+    fn content(self) -> Value {
+        match self {
+            Self::Text(text) => base::wire::text_content(&text),
+            Self::Content(parts) => Value::Array(parts),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Proposal {
+    pub input_id: String,
+    pub actor_id: String,
+    pub content: Content,
+    pub time: u64,
+}
+
 /// A conversation with its history, settings and actors.
 #[derive(Clone)]
 pub struct Session {
@@ -243,11 +289,11 @@ impl Session {
         })
     }
 
-    pub fn join(&self, actor: Actor) -> Result<()> {
-        self.join_with(actor, None)
+    pub async fn join(&self, actor: Actor) -> Result<()> {
+        self.join_with(actor, None).await
     }
 
-    pub fn join_with(&self, actor: Actor, granted_by: Option<&str>) -> Result<()> {
+    pub async fn join_with(&self, actor: Actor, granted_by: Option<&str>) -> Result<()> {
         self.check_actor_option()?;
         let who = match granted_by {
             Some(id) => self.r#as(id)?,
@@ -280,10 +326,16 @@ impl Session {
         h.append(&who.scope(), "interface.sdk", base::Draft::new("actor.grant", false,
             json!({"actor":actor.id,"kind":actor.kind,"authority":actor.rights,"sponsor":LOCAL})))?;
         base::requests(h)?.presence(&self.id, &actor.id, true);
+        h.emit(base::Event::new(
+            &who.scope(),
+            "actor.joined",
+            json!({"actorId":actor.id}),
+        ))
+        .await?;
         Ok(())
     }
 
-    pub fn leave(&self, actor_id: &str) -> Result<()> {
+    pub async fn leave(&self, actor_id: &str) -> Result<()> {
         self.check_actor_option()?;
         let data = self.snapshot()?;
         if actor_id != self.actor {
@@ -303,6 +355,12 @@ impl Session {
             ),
         )?;
         base::requests(h)?.presence(&self.id, actor_id, false);
+        h.emit(base::Event::new(
+            &self.scope(),
+            "actor.left",
+            json!({"actorId":actor_id}),
+        ))
+        .await?;
         Ok(())
     }
 
@@ -394,6 +452,57 @@ impl Session {
         Ok(())
     }
 
+    /// Proposals and parked reports the actor can see.
+    pub async fn proposals(&self) -> Result<Vec<Proposal>> {
+        self.require("watch")?;
+        let data = self.snapshot()?;
+        let mut proposals = Vec::new();
+        for (id, entry) in data.pending_inputs() {
+            let Some(value) = &entry.content else {
+                continue;
+            };
+            if value["timing"] != "propose"
+                && !(value["parked"] == true && value["releasedBy"].is_null())
+            {
+                continue;
+            }
+            let entry_view = base::portable::public_entry(entry, &data)?;
+            let proposal = json!({"inputId":id,"actorId":entry.scope.actor,
+                "content":entry_view["data"]["content"],"time":entry.at});
+            if let Some(value) = self
+                .inner
+                .harness
+                .output(
+                    &self.scope(),
+                    base::Output {
+                        recipient: self.actor.clone(),
+                        value: proposal,
+                        stream: None,
+                        end: true,
+                    },
+                )
+                .await?
+            {
+                proposals.push(serde_json::from_value(value)?);
+            }
+        }
+        Ok(proposals)
+    }
+
+    /// Withdraw an input proposed by the acting actor.
+    pub async fn withdraw(&self, input_id: &str) -> Result<()> {
+        let sponsor = if self.actor == LOCAL {
+            &self.actor
+        } else {
+            LOCAL
+        };
+        Ok(self
+            .inner
+            .harness
+            .withdraw_proposal(&self.scope(), sponsor, input_id)
+            .await?)
+    }
+
     pub async fn release(&self, input_id: &str, timing: Timing, declined: bool) -> Result<()> {
         self.check_actor_option()?;
         self.require("input")?;
@@ -406,14 +515,14 @@ impl Session {
     }
 
     /// Admit input with timing `now` and wait for the turn that takes it.
-    pub async fn prompt(&self, input: impl Into<String>) -> Result<PromptResult> {
+    pub async fn prompt(&self, input: impl Into<PromptInput>) -> Result<PromptResult> {
         self.prompt_with(input, None).await
     }
 
     /// Prompt with options. Retrying a key waits for its original turn.
     pub async fn prompt_with(
         &self,
-        input: impl Into<String>,
+        input: impl Into<PromptInput>,
         options: impl Into<PromptOptions>,
     ) -> Result<PromptResult> {
         let mut events = self.inner.hub.events.subscribe();
@@ -491,6 +600,7 @@ impl Session {
                 match events.recv().await {
                     Ok(event) if event.session_id == me.id => {
                         me.require("watch")?;
+                        let Some(event) = me.gate_event(event).await? else { continue; };
                         if event.event_type == "entry" {
                             let entry = &event.data["entry"];
                             let Some(id) = entry["id"].as_str() else { continue };
@@ -513,14 +623,14 @@ impl Session {
     }
 
     /// The events of the turn this input starts, ending with its `TurnEnded`.
-    pub async fn prompt_stream(&self, input: impl Into<String>) -> Result<EventStream> {
+    pub async fn prompt_stream(&self, input: impl Into<PromptInput>) -> Result<EventStream> {
         self.prompt_stream_with(input, PromptOptions::default())
             .await
     }
 
     pub async fn prompt_stream_with(
         &self,
-        input: impl Into<String>,
+        input: impl Into<PromptInput>,
         options: PromptOptions,
     ) -> Result<EventStream> {
         let events = self.inner.hub.events.subscribe();
@@ -546,9 +656,13 @@ impl Session {
                                     Err(e) => return Some((Err(e), None)),
                                 };
                                 if e.turn_id == input_turn(&data, &input) {
-                                    let next = (e.event_type != "turnEnded")
-                                        .then_some((events, run, input, me));
-                                    return Some((Ok(e), next));
+                                    let ended = e.event_type == "turnEnded";
+                                    match me.gate_event(e).await {
+                                        Ok(Some(event)) => return Some((Ok(event), (!ended).then_some((events, run, input, me)))),
+                                        Ok(None) if ended => return None,
+                                        Ok(None) => continue,
+                                        Err(e) => return Some((Err(e), None)),
+                                    }
                                 }
                             }
                             Ok(_) => (),
@@ -594,7 +708,7 @@ impl Session {
 
     async fn admit(
         &self,
-        text: String,
+        input: PromptInput,
         timing: Timing,
         key: Option<String>,
         shape: Option<Value>,
@@ -609,18 +723,15 @@ impl Session {
         })?;
         let sponsor = (self.actor != LOCAL).then_some(LOCAL);
         let h = &self.inner.harness;
-        let receipt = if let Some(shape) = shape {
-            base::schema::compile(&shape)
+        if let Some(shape) = &shape {
+            base::schema::compile(shape)
                 .map_err(|e| Error::new(Code::InvalidParams, e.to_string()))?;
-            h.submit_shaped_as(&self.scope(), sponsor, &text, key, shape)
-                .await?
-        } else if let Some(sponsor) = sponsor {
-            h.submit_as(&self.scope(), sponsor, &text, timing.into(), key)
-                .await?
-        } else {
-            h.submit(&self.id, &self.actor, &text, timing.into(), key)
-                .await?
-        };
+        }
+        let content = input.content();
+        base::wire::parts(&content).map_err(|e| Error::new(Code::InvalidParams, e.to_string()))?;
+        let receipt = h
+            .submit_content_as(&self.scope(), sponsor, content, timing.into(), key, shape)
+            .await?;
         let taken = if receipt.erased {
             "handedBack".into()
         } else {
@@ -670,13 +781,17 @@ impl Session {
     }
 
     /// Admit input without waiting for its turn.
-    pub async fn send(&self, input: impl Into<String>, timing: Timing) -> Result<InputReceipt> {
+    pub async fn send(
+        &self,
+        input: impl Into<PromptInput>,
+        timing: Timing,
+    ) -> Result<InputReceipt> {
         self.send_with(input, timing, None).await
     }
 
     pub async fn send_with(
         &self,
-        input: impl Into<String>,
+        input: impl Into<PromptInput>,
         timing: Timing,
         key: Option<String>,
     ) -> Result<InputReceipt> {
@@ -924,6 +1039,26 @@ impl Session {
         Ok(rows)
     }
 
+    async fn gate_event(&self, event: Event) -> Result<Option<Event>> {
+        self.require("watch")?;
+        let scope = self.scope();
+        self.inner
+            .harness
+            .output(
+                &scope,
+                base::Output {
+                    recipient: self.actor.clone(),
+                    value: json!(event),
+                    stream: None,
+                    end: true,
+                },
+            )
+            .await?
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(Into::into)
+    }
+
     async fn gate_entry(&self, scope: &base::Scope, row: Value) -> Result<Option<Value>> {
         self.require("watch")?;
         let scope = base::Scope {
@@ -936,7 +1071,7 @@ impl Session {
             .output(
                 &scope,
                 base::Output {
-                    recipient: "interface.sdk".into(),
+                    recipient: self.actor.clone(),
                     value: json!({"entry":row}),
                     stream: None,
                     end: true,
@@ -979,7 +1114,12 @@ impl Session {
 
     /// Close the session after cancelling and settling any queued or running work.
     pub async fn close(&self) -> Result<()> {
-        self.cancel().await?;
+        self.require("cancel")?;
+        self.close_owned().await
+    }
+
+    pub(crate) async fn close_owned(&self) -> Result<()> {
+        self.inner.harness.cancel(&self.id).await?;
         let _run = self.driver.run.lock().await;
         self.inner.harness.close(&self.id).await?;
         self.inner

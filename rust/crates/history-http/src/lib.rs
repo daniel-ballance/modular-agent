@@ -2,7 +2,7 @@
 use agent_api::*;
 mod server;
 use reqwest::{Client, Method, StatusCode, Url};
-pub use server::{ServeHistoryOptions, serve_history};
+pub use server::{HistoryServer, ServeHistoryOptions, listen_history, serve_history};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,

@@ -25,7 +25,7 @@ pub struct ModelInfo {
     pub model: ModelRef,
     pub context_window: u64,
     pub max_output: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub thinking: Vec<String>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,

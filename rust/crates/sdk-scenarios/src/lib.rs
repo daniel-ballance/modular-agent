@@ -1,7 +1,8 @@
 //! A runner for the shared SDK scenarios (docs/sdk/testing.md#the-shared-scenarios).
 use modular_agent::{
-    Agent, Answer, Approval, Code, Durability, Error, ProcessPlugin, ServicePlugin, Session,
-    SessionOptions, Timing,
+    Agent, Answer, Approval, Code, Durability, Error, HistoryServer, ProcessPlugin,
+    ServeHistoryOptions, ServicePlugin, Session, SessionOptions, Timing, file_history,
+    http_history, listen_history,
     testing::{Answers, answers, fixtures, test_agent},
 };
 use serde_json::Value;
@@ -75,6 +76,15 @@ impl Run {
     }
     pub fn project(&self) -> PathBuf {
         self.dir.join("project")
+    }
+    fn history_dir(&self) -> PathBuf {
+        self.dir.join("history")
+    }
+    fn history_token(&self) -> PathBuf {
+        self.dir.join("history-token")
+    }
+    fn history_url(&self) -> PathBuf {
+        self.dir.join("history-url")
     }
     fn service_config(&self) -> PathBuf {
         self.dir.join("services.json")
@@ -157,6 +167,50 @@ pub fn load(path: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// Start the history fixture independently of plugin placement.
+async fn start_history(
+    scenario: &Value,
+    run: &Run,
+) -> modular_agent::Result<Option<HistoryServer>> {
+    match scenario["agent"]["history"].as_str() {
+        None => Ok(None),
+        Some("file") => {
+            file_history(run.history_dir())?;
+            Ok(None)
+        }
+        Some("service") => {
+            let token = run.history_token();
+            let output = Command::new("openssl")
+                .args(["rand", "-hex", "32"])
+                .output()?;
+            if !output.status.success() {
+                return Err(Error::new(
+                    Code::Internal,
+                    "could not generate fixture token",
+                ));
+            }
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&token)?
+                .write_all(&output.stdout)?;
+            let server = listen_history(
+                file_history(run.history_dir())?,
+                ServeHistoryOptions::new("127.0.0.1:0".parse().unwrap(), token),
+            )
+            .await?;
+            std::fs::write(run.history_url(), &server.url)?;
+            http_history(&server.url, run.history_token())?;
+            Ok(Some(server))
+        }
+        Some(kind) => Err(Error::new(
+            Code::InvalidParams,
+            format!("unknown history fixture {kind}"),
+        )),
+    }
+}
+
 /// Build the scenario's agent over this run's files.
 pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent, Option<Answers>)> {
     let spec = &scenario["agent"];
@@ -171,6 +225,14 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent,
             Some("durable") => Durability::Durable,
             _ => Durability::Ephemeral,
         });
+    match spec["history"].as_str() {
+        Some("file") => builder = builder.history(file_history(run.history_dir())?),
+        Some("service") => {
+            let url = std::fs::read_to_string(run.history_url())?;
+            builder = builder.history(http_history(&url, run.history_token())?);
+        }
+        _ => (),
+    }
     if let Some(settings) = spec["settings"].as_object() {
         for (key, value) in settings {
             builder = builder.setting(key, value.clone());
@@ -331,6 +393,46 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
     let mut fail =
         |step: usize, what: String| failures.push(format!("{name} ({label}) step {step}: {what}"));
 
+    let _history = match start_history(&scenario, &run).await {
+        Ok(history) => history,
+        Err(e) => {
+            fail(0, format!("start history fixture: {e}"));
+            return failures;
+        }
+    };
+    if let Some(want) = scenario.get("expectCreateError") {
+        let mut services = match start_services(&scenario, &run) {
+            Ok(children) => children,
+            Err(e) => {
+                fail(0, format!("start fixture services: {e}"));
+                return failures;
+            }
+        };
+        match agent(&scenario, &run).await {
+            Ok((a, _)) => {
+                let _ = a.close().await;
+                fail(0, format!("createAgent: expected {want}, got success"));
+            }
+            Err(e)
+                if want["code"] == e.code().as_str()
+                    && want["messageContains"]
+                        .as_str()
+                        .is_some_and(|s| e.message().contains(s)) => {}
+            Err(e) => fail(
+                0,
+                format!(
+                    "createAgent: expected {want}, got {}: {}",
+                    e.code().as_str(),
+                    e.message()
+                ),
+            ),
+        }
+        if let Err(e) = stop_groups(&mut services) {
+            fail(0, e);
+        }
+        return failures;
+    }
+
     let mut current: Option<(Agent, modular_agent::Session, Option<Answers>)> = None;
     let mut session_id = None;
     let mut services = Vec::new();
@@ -400,18 +502,28 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
                     break;
                 }
             }
-            let opened = match agent(&scenario, &run).await {
-                Ok((a, queue)) => a.open_session(&id).await.map(|s| (a, s, queue)),
-                Err(e) => Err(e),
+            let (a, queue) = match agent(&scenario, &run).await {
+                Ok(composition) => composition,
+                Err(e) => {
+                    fail(index, format!("compose for reopen: {e}"));
+                    break;
+                }
             };
-            match opened {
-                Ok((a, s, queue)) => {
-                    result = s.last_turn().ok().flatten();
+            match a.open_session(&id).await {
+                Ok(s) => {
+                    result = match s.wait_idle().await.and_then(|_| s.last_turn()) {
+                        Ok(last) => last,
+                        Err(e) => {
+                            fail(index, format!("read the last turn after reopen: {e}"));
+                            None
+                        }
+                    };
                     current = Some((a, s, queue));
                 }
                 Err(e) => {
-                    fail(index, format!("reopen: {e}"));
-                    break;
+                    check_error(expect, &e, &mut |w| fail(index, w));
+                    let _ = a.close().await;
+                    continue;
                 }
             }
         }

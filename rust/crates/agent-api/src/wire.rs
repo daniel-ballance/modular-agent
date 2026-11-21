@@ -69,6 +69,10 @@ pub fn content(parts: &[Part]) -> Vec<Value> {
         })
         .collect()
 }
+pub fn text_content(text: &str) -> Value {
+    json!([{"type":"text","text":text}])
+}
+
 pub fn parts(content: &Value) -> Result<Vec<Part>> {
     content
         .as_array()
@@ -277,7 +281,7 @@ pub fn model(v: &Value, supports: &Value) -> Result<ModelInfo> {
                     .map(str::to_string)
                     .collect()
             })
-            .unwrap_or_else(|| vec!["off".into()]),
+            .unwrap_or_default(),
         keeps_state: supports["keepsState"] == true,
         runs_tools: supports["runsTools"] == true,
         extra: v.clone(),
@@ -297,6 +301,9 @@ pub fn model_value(m: &ModelInfo) -> Value {
         &mut v,
         json!({"provider":provider,"id":id,"contextWindow":m.context_window,"maxOutput":m.output_limit,"reasoning":reasoning,"thinking":m.thinking}),
     );
+    if m.thinking.is_empty() {
+        v.as_object_mut().unwrap().remove("thinking");
+    }
     v
 }
 pub fn response(r: &ModelResponse) -> Value {
@@ -452,7 +459,11 @@ fn project_request(
     if !v["settings"].is_object() {
         v["settings"] = json!({});
     }
-    v["settings"]["reasoning"] = json!(r.thinking);
+    if r.thinking.is_empty() {
+        v["settings"].as_object_mut().unwrap().remove("reasoning");
+    } else {
+        v["settings"]["reasoning"] = json!(r.thinking);
+    }
     v["settings"]["maxOutput"] = json!(r.output_limit);
     v
 }
@@ -484,7 +495,7 @@ pub fn parse_request(v: &Value, session: &str) -> Result<ModelRequest> {
             .flatten()
             .map(parse_definition)
             .collect::<Result<_>>()?,
-        thinking: v["settings"]["reasoning"].as_str().unwrap_or("off").into(),
+        thinking: v["settings"]["reasoning"].as_str().unwrap_or("").into(),
         output_limit: v["settings"]["maxOutput"].as_u64().unwrap_or(8192),
         extra: v.clone(),
     })
@@ -508,7 +519,7 @@ pub fn lower_reasoning<'a>(chosen: &str, accepted: &'a [String]) -> &'a str {
         .iter()
         .rev()
         .find_map(|l| accepted.iter().find(|s| s == l).map(String::as_str))
-        .unwrap_or("off")
+        .unwrap_or("")
 }
 
 pub fn turn_outcome(r: &TurnResult) -> Value {

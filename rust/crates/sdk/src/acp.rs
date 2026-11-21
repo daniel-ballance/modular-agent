@@ -98,7 +98,13 @@ impl interface_acp::Factory for ProjectFactory {
             agent.close().await?;
             return Err(base::anyhow!("serve_acp requires a plugin host"));
         }
-        if agent.inner._scratch.is_some() {
+        if agent.inner.project != project {
+            agent.close().await?;
+            return Err(base::anyhow!(
+                "ACP composition returned a different project"
+            ));
+        }
+        if agent.inner.scratch.lock().unwrap().is_some() {
             agent.close().await?;
             return Err(base::anyhow!(
                 "a project-aware ACP host must supply data_dir"
@@ -309,6 +315,9 @@ impl interface_acp::Factory for Factory {
     }
     fn owns_session_agent(&self) -> bool {
         false
+    }
+    fn serves_project(&self, project: &Path) -> bool {
+        project == self.0.inner.project
     }
     async fn build(&self, project: &Path, sink: Sink) -> base::Result<base::Api> {
         base::ensure!(

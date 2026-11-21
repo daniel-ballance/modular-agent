@@ -48,7 +48,7 @@ async fn compact(api: Api, scope: &Scope, system: &str, force: bool) -> Result<b
             "{system}\nSummarize the supplied history faithfully and concisely. Preserve important facts and outstanding tool outcomes. Do not call tools."
         ),
         messages: messages_with_origins(old, &data.branch())?,
-        thinking: data.settings["thinking"].as_str().unwrap_or("low").into(),
+        thinking: data.settings["thinking"].as_str().unwrap_or("").into(),
         output_limit: 1024,
         ..ModelRequest::default()
     };

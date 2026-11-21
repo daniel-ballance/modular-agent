@@ -1,7 +1,7 @@
 //! Hosts plugins and owns sessions. Inference, turns, I/O and presentation are delegated.
 use agent_api::*;
 mod output;
-pub use output::encode as output_event;
+pub use output::{apply_redactions, encode as output_event};
 mod rewind;
 mod tenants;
 use std::{
@@ -482,6 +482,10 @@ impl Harness {
             .validate_tools(&self.snapshot(id)?)?;
         Ok(())
     }
+    pub fn open_session_ids(&self) -> Vec<String> {
+        self.sessions.lock().unwrap().keys().cloned().collect()
+    }
+
     pub async fn close(&self, id: &str) -> Result<()> {
         {
             let mut sessions = self.sessions.lock().unwrap();
@@ -522,9 +526,16 @@ impl Harness {
         Ok(())
     }
     async fn local_output(&self, scope: &Scope, output: Output) -> Result<Option<Value>> {
-        let result = self
+        let result = match self
             .invoke(&self.points["output"], scope, json!(output))
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("output gate refused delivery: {e}");
+                return Ok(None);
+            }
+        };
         if result.stopped && result.value.is_null() {
             return Ok(None);
         }
@@ -592,7 +603,8 @@ impl Harness {
             actor: actor.into(),
             ..Scope::session(session)
         };
-        self.admit(&scope, text, timing, key, None, None).await
+        self.submit_content_as(&scope, None, wire::text_content(text), timing, key, None)
+            .await
     }
     /// Admit a prompt with a schema attached to this admission, not to the session.
     pub async fn submit_shaped(
@@ -617,19 +629,31 @@ impl Harness {
         key: Option<String>,
         shape: Value,
     ) -> Result<Receipt> {
-        schema::compile(&shape)?;
-        self.admit(scope, text, Timing::Now, key, sponsor, Some(shape))
-            .await
+        self.submit_content_as(
+            scope,
+            sponsor,
+            wire::text_content(text),
+            Timing::Now,
+            key,
+            Some(shape),
+        )
+        .await
     }
-    async fn admit(
+
+    pub async fn submit_content_as(
         &self,
         scope: &Scope,
-        text: &str,
+        sponsor: Option<&str>,
+        content: Value,
         timing: Timing,
         key: Option<String>,
-        sponsor: Option<&str>,
         result_shape: Option<Value>,
     ) -> Result<Receipt> {
+        if let Some(shape) = &result_shape {
+            schema::compile(shape)?;
+        }
+        wire::parts(&content)?;
+        let text = wire::text(&content);
         let session = scope.session.as_str();
         let actor = scope.actor.as_str();
         let own = self.authority(session, actor)?;
@@ -712,7 +736,7 @@ impl Harness {
         }
         // A proposal is data, not a command. Do not run input hooks with
         // broader authority than the connection and actor share.
-        let input_payload = json!({"text":text,"actor":actor,"timing":timing});
+        let input_payload = json!({"text":text,"content":content,"actor":actor,"timing":timing});
         let reply = if timing == Timing::Propose || authority != own {
             HookResult {
                 value: input_payload,
@@ -758,7 +782,18 @@ impl Harness {
                     .await?,
             });
         }
-        let text = reply.value["text"].as_str().unwrap_or(text).to_string();
+        let content = if reply.value["content"] != content && reply.value["content"].is_array() {
+            reply.value["content"].clone()
+        } else if let Some(changed) = reply.value["text"]
+            .as_str()
+            .filter(|changed| *changed != text)
+        {
+            wire::text_content(changed)
+        } else {
+            content
+        };
+        wire::parts(&content)?;
+        let text = wire::text(&content);
         // The per-session admission lock already serialized the key lookup.
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
@@ -789,7 +824,7 @@ impl Harness {
             Draft::new(
                 "input.accepted",
                 false,
-                json!({"text":text,"content":[{"type":"text","text":text}],"key":key,"timing":timing,
+                json!({"text":text,"content":content,"key":key,"timing":timing,
                        "authority":authority,"sponsor":sponsor,"submittedBy":submitter,"taken":input_taken(open.active, timing)}),
             ),
         );
@@ -1159,7 +1194,9 @@ impl Harness {
             .invoke(
                 &self.points["before.turn"],
                 scope,
-                json!({"input":input.text}),
+                json!({"input":input.text,"content":source.and_then(|entry|entry.content.as_ref())
+                    .and_then(|value|value.get("content")).cloned()
+                    .unwrap_or_else(|| wire::text_content(&input.text))}),
             )
             .await?
             .value;
@@ -1229,10 +1266,8 @@ impl Harness {
         };
         let env: Arc<dyn WorkingEnvironment> = capability(self, "environment")?;
         let mut settings = data.settings.clone();
-        settings["thinking"] = json!(wire::lower_reasoning(
-            settings["thinking"].as_str().unwrap_or("low"),
-            &info.thinking
-        ));
+        // Keep the requested level until the Runtime prepares a step against
+        // the refreshed Provider catalog. An absent setting stays absent.
         if let Some(shape) = source
             .and_then(|e| e.content.as_ref())
             .and_then(|v| v.get("resultShape"))
@@ -1444,10 +1479,15 @@ impl AgentApi for Harness {
     }
     async fn shutdown(&self) -> Result<()> {
         let plugins = self.plugins.lock().unwrap().clone();
+        let mut result = Ok(());
         for plugin in plugins.iter().rev() {
-            plugin.shutdown().await?;
+            if let Err(e) = plugin.shutdown().await
+                && result.is_ok()
+            {
+                result = Err(e);
+            }
         }
-        Ok(())
+        result
     }
     async fn create(&self, project: &Path, settings: Value) -> Result<String> {
         Harness::create(self, project, settings).await
@@ -1511,8 +1551,15 @@ impl AgentApi for Harness {
         timing: Timing,
         key: Option<String>,
     ) -> Result<Receipt> {
-        self.admit(scope, text, timing, key, Some(sponsor), None)
-            .await
+        self.submit_content_as(
+            scope,
+            Some(sponsor),
+            wire::text_content(text),
+            timing,
+            key,
+            None,
+        )
+        .await
     }
     async fn release(
         &self,
@@ -1718,6 +1765,7 @@ impl AgentApi for Harness {
                 }
             }
         }
+        authority = ConnectionCeiling::narrow(session, actor, authority);
         if let Some(cap) = data
             .entries
             .iter()
@@ -2310,6 +2358,18 @@ impl AgentApi for Harness {
         };
         events.push(event);
         for event in events {
+            let observe = match event.kind.as_str() {
+                "actor.joined" => Some("session.join"),
+                "actor.left" => Some("session.leave"),
+                "model.delta" | "model.thought" | "model.tool_input" | "model.audio" => {
+                    Some("provider.piece")
+                }
+                _ => None,
+            };
+            if let Some(point) = observe {
+                self.invoke(&self.points[point], &event.scope, json!(event))
+                    .await?;
+            }
             for name in self.capability_names("interface.") {
                 let sink: Arc<dyn EventSink> = capability(self, &name)?;
                 let view = self
@@ -2446,6 +2506,12 @@ impl Harness {
             }
             let mut taken =
                 json!({"text":input.text,"inputId":input.id,"key":input.key,"authority":cap});
+            if let Some(content) = accepted
+                .and_then(|v| v.get("content"))
+                .filter(|v| v.is_array())
+            {
+                taken["message"] = json!({"role":"user","content":content});
+            }
             for key in ["sponsor", "releasedBy"] {
                 if let Some(value) = accepted.and_then(|v| wire::optional(v, key)) {
                     taken[key] = value.clone();

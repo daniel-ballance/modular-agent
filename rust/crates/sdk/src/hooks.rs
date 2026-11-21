@@ -50,6 +50,36 @@ impl HookRule {
     }
 }
 
+/// Invocation authority for a point defined in this plugin instance.
+#[derive(Clone)]
+pub struct DefinedHook(pub(crate) Arc<std::sync::OnceLock<agent_api::HookPoint>>);
+
+#[derive(Clone, Debug)]
+pub enum HookAnswer {
+    Pass,
+    Value(Value),
+    Refuse(String),
+}
+impl HookAnswer {
+    pub(crate) fn native(self) -> agent_api::HookResult {
+        match self {
+            Self::Pass => agent_api::HookResult::default(),
+            Self::Value(value) => agent_api::answer(value),
+            Self::Refuse(reason) => agent_api::HookResult {
+                refused: Some(reason),
+                ..Default::default()
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HookReply {
+    pub value: Value,
+    pub answered: bool,
+    pub refused: Option<String>,
+}
+
 pub(crate) type Handle = Arc<dyn Fn(Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
 pub(crate) struct Hook {
     pub point: &'static str,
@@ -202,6 +232,157 @@ pub enum ModelDecision {
     Retry(Option<Value>),
     Stop,
 }
+
+// An actor joining or leaving a session.
+payload!(SessionMembership {
+    session_id: String,
+    actor_id: String,
+    changed_by: String
+});
+
+// One live Provider piece.
+payload!(ProviderPiece { session_id: String, step_id: Option<String>, tool_call_id: Option<String>, kind: String, delta: Value });
+
+#[derive(Clone, Debug)]
+pub struct OutputView {
+    pub session_id: String,
+    pub recipient: String,
+    pub value: Value,
+    pub stream: Option<String>,
+    pub end: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum OutputDecision {
+    Allow,
+    Block,
+    Redact(Value),
+}
+
+pub(crate) type LocalHandle =
+    Arc<dyn Fn(Value) -> BoxFuture<'static, Result<agent_api::HookResult>> + Send + Sync>;
+pub(crate) struct LocalRegistration {
+    pub point: &'static str,
+    pub order: Order,
+    pub handle: LocalHandle,
+}
+
+macro_rules! local_hook {
+    ($name:ident, $point:literal, $payload:ty, $reply:ty, $decode:expr, $encode:expr) => {
+        impl Plugin {
+            pub fn $name<F, Fut>(mut self, f: F) -> Self
+            where
+                F: Fn($payload) -> Fut + Send + Sync + 'static,
+                Fut: Future<Output = Result<$reply>> + Send + 'static,
+            {
+                self.local_items.push(format!("hook:{}", $point));
+                let f = Arc::new(f);
+                self.setup(move |r| {
+                    let f = f.clone();
+                    r.$name(Order::Normal, move |p| f(p));
+                    Ok(())
+                })
+            }
+        }
+        impl Registrar {
+            pub fn $name<F, Fut>(&mut self, order: Order, f: F)
+            where
+                F: Fn($payload) -> Fut + Send + Sync + 'static,
+                Fut: Future<Output = Result<$reply>> + Send + 'static,
+            {
+                let f = Arc::new(f);
+                self.local_hooks.push(LocalRegistration {
+                    point: $point,
+                    order,
+                    handle: Arc::new(move |raw| {
+                        let f = f.clone();
+                        Box::pin(async move {
+                            let payload = ($decode)(&raw)?;
+                            ($encode)(f(payload).await?, raw)
+                        })
+                    }),
+                });
+            }
+        }
+    };
+}
+
+fn membership(event: &Value) -> Result<SessionMembership> {
+    Ok(SessionMembership {
+        session_id: event["scope"]["session"].as_str().unwrap_or("").into(),
+        actor_id: event["content"]["actorId"].as_str().unwrap_or("").into(),
+        changed_by: event["scope"]["actor"].as_str().unwrap_or("").into(),
+    })
+}
+local_hook!(
+    on_session_join,
+    "session.join",
+    SessionMembership,
+    (),
+    membership,
+    |(), _| Ok(agent_api::HookResult::default())
+);
+local_hook!(
+    on_session_leave,
+    "session.leave",
+    SessionMembership,
+    (),
+    membership,
+    |(), _| Ok(agent_api::HookResult::default())
+);
+local_hook!(
+    on_provider_piece,
+    "provider.piece",
+    ProviderPiece,
+    (),
+    |event: &Value| {
+        Ok::<_, crate::Error>(ProviderPiece {
+            session_id: event["scope"]["session"].as_str().unwrap_or("").into(),
+            step_id: event["scope"]["step"].as_str().map(str::to_owned),
+            tool_call_id: event["scope"]["call"].as_str().map(str::to_owned),
+            kind: match event["kind"].as_str() {
+                Some("model.delta") => "text",
+                Some("model.thought") => "reasoning",
+                Some("model.tool_input") => "toolInput",
+                _ => "audio",
+            }
+            .into(),
+            delta: event["content"].clone(),
+        })
+    },
+    |(), _| Ok(agent_api::HookResult::default())
+);
+local_hook!(
+    on_output,
+    "output",
+    OutputView,
+    OutputDecision,
+    |raw: &Value| {
+        Ok::<_, crate::Error>(OutputView {
+            session_id: raw["sessionId"].as_str().unwrap_or("").into(),
+            recipient: raw["recipient"].as_str().unwrap_or("").into(),
+            value: raw["value"].clone(),
+            stream: raw["stream"].as_str().map(str::to_owned),
+            end: raw["end"] == true,
+        })
+    },
+    |decision, mut original: Value| {
+        // A gate may redact strings but cannot change protocol fields or add output.
+        if let OutputDecision::Redact(ref value) = decision
+            && agent_harness::apply_redactions(&mut original["value"], value)
+        {
+            return Ok(agent_api::answer(original));
+        }
+        if matches!(decision, OutputDecision::Allow) {
+            Ok(agent_api::HookResult::default())
+        } else {
+            Ok(agent_api::HookResult {
+                stopped: true,
+                ..agent_api::answer(Value::Null)
+            })
+        }
+    }
+);
 
 fn decode<T: serde::de::DeserializeOwned>(payload: &Value) -> Result<T> {
     serde_json::from_value(payload.clone()).map_err(Into::into)
