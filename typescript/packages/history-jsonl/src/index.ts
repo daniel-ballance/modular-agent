@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { erasedEntry, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
+import { erasedEntry, filePendingErasure, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
 
 type Line =
 	| { type: "session"; meta: StoredSession }
@@ -37,6 +37,8 @@ export class JsonlHistoryStore implements HistoryStore {
 	private held = new Set<string>();
 	/** New sessions not yet worth a file: their header and batches so far. */
 	private unsaved = new Map<string, { meta: StoredSession; batches: HistoryEntry[][] }>();
+	private registry?: ReturnType<typeof filePendingErasure>;
+	get pendingErasure() { return this.registry ??= filePendingErasure(this.dir); }
 	constructor(private dir: string) {}
 
 	private fileFor(meta: { id: string; project: string }): string {
@@ -49,7 +51,7 @@ export class JsonlHistoryStore implements HistoryStore {
 		const known = this.paths.get(id);
 		if (known) return known;
 		if (existsSync(this.dir)) {
-			for (const folder of readdirSync(this.dir)) {
+			for (const { name: folder } of readdirSync(this.dir, { withFileTypes: true }).filter(d => d.isDirectory())) {
 				const candidate = join(this.dir, folder, `${id}.jsonl`);
 				if (existsSync(candidate)) {
 					this.paths.set(id, candidate);
@@ -156,7 +158,7 @@ export class JsonlHistoryStore implements HistoryStore {
 
 	async list(filter?: { project?: string }): Promise<StoredSession[]> {
 		if (!existsSync(this.dir)) return [];
-		const folders = filter?.project ? [slug(filter.project)] : readdirSync(this.dir);
+		const folders = filter?.project ? [slug(filter.project)] : readdirSync(this.dir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name);
 		const out: StoredSession[] = [];
 		for (const folder of folders) {
 			const path = join(this.dir, folder);
