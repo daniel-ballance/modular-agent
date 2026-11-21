@@ -35,9 +35,10 @@ print(run["output"])
 ```
 
 - A function call leaves the sandbox as a **nested tool call**. The Harness checks it as it checks any call (rights, gates, registration), records it with `startedBy: "tool"` and its parent's id, and keeps it out of the model's view. The model sees its own call and that call's result.
-- The functions sit on `tools` because `exec` and `list` are also Python builtins.
-- `ma` uses [Monty’s Rust pool](https://github.com/pydantic/monty/blob/v1.6.0/crates/monty-pool/README.md) to start a fresh worker process for each run. The pool re-executes `ma` in worker mode and speaks Monty’s framed protocol over stdin and stdout. No separate executable is needed. The worker does not load agent settings or credentials, and the sandbox has no file, network, clock or process access of its own.
-- A run has 30 seconds of computation between calls, 256 MiB of memory counted by Monty’s worker allocator, 500 nested calls, a recursion limit of 200, and 1 MiB of printed output. `describe_tool` and `search_tools` do not count toward the nested-call limit. Result text is cut to 2,000 lines or 50 KiB.
+- Use the `tools` object or `import tools`. Tool functions can be assigned to variables. A failed call raises `RuntimeError` with the tool result's text. A timed-out `exec` raises; a command that exits non-zero returns its dict.
+- `ma` uses [Monty's Rust pool](https://github.com/pydantic/monty/blob/v1.6.0/crates/monty-pool/README.md) to start a fresh Monty 1.6.0 worker process for each run. The pool re-executes `ma` in worker mode and speaks Monty's framed protocol over stdin and stdout. The worker does not load agent settings or credentials. Code has no direct access to files, network, processes, wall clocks, sleep or system entropy. `random.Random(7)` works because it has an explicit seed.
+- A run has 30 seconds on Monty's active wall clock per worker turn. Host waits do not count. Monty 1.6.0 resets this budget at every resume; see the timing finding below. The worker allocator limits memory to 256 MiB. A run can make 500 nested tool calls and use 200 levels of Python recursion. Imports and lookups, including `describe_tool` and `search_tools`, do not count as calls.
+- Results show printed text followed by the last value, as plain text for strings, JSON where possible and Monty's value representation otherwise. Printing past 1 MiB stops the run. The error comes first, then the printed prefix, cut at a UTF-8 boundary. Result text is limited to 2,000 lines or 50 KiB.
 - No session is reused. A run that reaches a memory or time limit reports `MemoryError` or `TimeoutError`. If the worker dies, the call fails and the next run starts a new worker. Cancelling the call kills its worker.
 - `describe_tool(name)` and `search_tools(query)` let the model look up a function when there are too many to list in full.
 
@@ -117,11 +118,11 @@ mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 ../scripts/websocket-kits.sh rust
 ```
 
-- **Standard reference checks:** 18/18, including `sandbox-memory`, both Runtime crash cases, the declaration, the prompt tail and the SDK-shaped JSON stream.
+- **Standard reference checks:** 22/22, including tool values, denial of ambient access, result formatting, timeout and print-limit errors, memory limits, and both Runtime crash cases.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
 - **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. Neither WebSocket run used a bridge.
-- **Standard and its plugins:** 38 Rust tests: 20 for `ma`, including the dependency boundary, prompt, skills, MCP, nested calls, sandbox limits, worker death and cancellation, crash recovery, state isolation and JSON event IDs; 4 for file tools; 2 for auth storage and locking; and 12 for subscription sign-in, refresh and requests.
-- **Workspace:** 337 Rust tests passed. Formatting and Clippy with `-D warnings` pass. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
+- **Standard and codemode:** 26 tests for `ma` and 5 for `tools-code`. These cover tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.
+- **Workspace:** 394 Rust tests passed. Formatting and Clippy with `-D warnings` pass. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
 - **Offline only:** browser sign-in uses a simulated browser on loopback; both device flows and refresh use loopback HTTP fixtures. No credentials, real sign-ins or model requests were used.
 
 To try the terminal without a login:
@@ -145,6 +146,9 @@ MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
 
 These are proposed edits; the shared documents are unchanged in this branch.
 
+- **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools), time budget:** Replace the first limit with: “30 seconds on the interpreter's active wall clock per Monty turn. A turn starts when the script starts and after each resume, including after a nested tool call, an import, a name lookup, `describe_tool` or `search_tools`. Time waiting for the host does not count.” The 1.6.0 worker starts a new turn for each protocol resume. It cannot take the in-process `resume_in_turn` path for a catalog lookup, and its OS and name lookup resumes have no such option.
+- **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools), fallback representation:** Replace “and as `repr(value)` otherwise” with “and as Monty's value formatter renders the worker result otherwise”. The 1.6.0 value formatter omits the trailing comma of a singleton tuple inside a non-JSON result: `{(1,): True}` renders as `{(1): True}`, although `repr` inside the interpreter keeps the comma.
+- **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools), images:** Add after the result formatting rule: “A returned image dict, or an image dict among the top-level items of a returned list or tuple, is attached as an image instead of rendered as JSON. Its note is included in the text result.” This preserves the existing image result and its reopen check.
 - **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools):** Replace “256 MiB of memory (Monty's `max_memory`, which counts what the interpreter allocates)” with “256 MiB of memory (Monty's `max_memory`, which counts live allocations against the worker's baseline, not the worker's resident memory)”. Monty 1.6.0 also counts compiled code and interpreter internals in worker mode.
 - **ACP declarations:** `interface-acp` dispatched proposed input, actor joins, session limits and tenant queries without consulting the SDK factory's session declaration. It now refuses disabled operations with `not_supported`, without changing the declarations or gating `proposals`, `release` or `withdraw`, which also serve parked job reports. The base declares all three features true and still passes the positive checks.
 - **[`docs/reference`, Checks](../docs/reference/standard-configuration.md#checks):** Replace the ACP-kit bullet with: “the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;”

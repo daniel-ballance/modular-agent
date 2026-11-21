@@ -225,11 +225,7 @@ async fn failures_come_back_as_python_errors_and_a_failed_run_says_why() {
     assert_eq!(rig.run("go").await, Outcome::Completed);
     let first = rig.result("c1").await;
     assert_eq!(first.status, "completed");
-    assert!(
-        first
-            .text
-            .starts_with("caught read() failed: File not found: nope.txt\n")
-    );
+    assert!(first.text.starts_with("caught File not found: nope.txt\n"));
     assert!(first.text.contains("\"hi\\n\""));
     let second = rig.result("c2").await;
     assert_eq!(second.status, "failed");
@@ -285,6 +281,140 @@ async fn the_sandbox_reaches_nothing_itself_and_is_bounded() {
     let deep = rig.result("deep").await;
     assert_eq!(deep.status, "failed");
     assert!(deep.text.contains("RecursionError"), "{}", deep.text);
+}
+
+#[tokio::test]
+async fn codemode_spends_its_wall_budget_running_python_not_waiting_for_a_tool() {
+    let delay = Plugin::new("delay").tool(Tool::new("pause", "Wait outside the interpreter").run(
+        |_: Value, _| async {
+            // Longer than the rig's entire interpreter budget, after the worker has suspended.
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            Ok(ToolOutput::from("back"))
+        },
+    ));
+    let rig = Rig::with(
+        vec![
+            code("resumed", "tools.pause()"),
+            code("spin", "tools.pause()\nwhile True:\n    pass"),
+            text("done"),
+        ],
+        vec![delay],
+        json!({}),
+        |_| (),
+    )
+    .await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    assert_eq!(rig.result("resumed").await.text, "back");
+    let spin = rig.result("spin").await;
+    assert_eq!(spin.status, "failed");
+    assert!(spin.text.contains("TimeoutError:"), "{}", spin.text);
+}
+
+#[tokio::test]
+async fn only_nested_tool_calls_spend_the_call_allowance() {
+    let probe = Plugin::new("probe-tool").tool(
+        Tool::new("ping", "Say pong").run(|_: Value, _| async { Ok(ToolOutput::from("pong")) }),
+    );
+    let prelude = "import tools\ndescribe_tool('ping')\nsearch_tools('ping')\ntry:\n    missing_name\nexcept NameError:\n    pass\n";
+    let rig = Rig::with(
+        vec![
+            code(
+                "limit",
+                &format!(
+                    "{prelude}for i in range(5):\n    tools.ping()\nsearch_tools('ping')\n'done'"
+                ),
+            ),
+            code(
+                "over",
+                &format!("{prelude}for i in range(6):\n    tools.ping()"),
+            ),
+            text("done"),
+        ],
+        vec![probe],
+        json!({}),
+        |_| (),
+    )
+    .await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    let limit = rig.result("limit").await;
+    assert_eq!(limit.status, "completed", "{}", limit.text);
+    assert_eq!(limit.text, "done");
+    let over = rig.result("over").await;
+    assert_eq!(over.status, "failed");
+    assert!(
+        over.text
+            .contains("RuntimeError: this run made more than 5 function calls"),
+        "{}",
+        over.text
+    );
+}
+
+#[tokio::test]
+async fn recursion_allows_200_python_frames_but_not_201() {
+    let def = "def f(n):\n    return f(n - 1) if n > 1 else 'bottom'\n";
+    let rig = Rig::new(vec![
+        code("limit", &format!("{def}f(200)")),
+        code("over", &format!("{def}f(201)")),
+        text("done"),
+    ])
+    .await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    assert_eq!(rig.result("limit").await.text, "bottom");
+    let over = rig.result("over").await;
+    assert_eq!(over.status, "failed");
+    assert!(over.text.contains("RecursionError:"), "{}", over.text);
+}
+
+#[tokio::test]
+async fn codemode_denies_ambient_os_access_but_allows_explicit_random_seeds() {
+    let rig = Rig::new(vec![
+        code(
+            "probe",
+            r#"import os
+import time
+import random
+
+def denied(name, f):
+    try:
+        f()
+    except Exception:
+        print(name, 'denied')
+
+def network():
+    import socket
+    socket.socket()
+
+def process():
+    import subprocess
+    subprocess.run(['true'])
+
+denied('files', lambda: open('sandbox.txt', 'w'))
+denied('network', network)
+denied('process', process)
+denied('clock', lambda: time.time())
+denied('monotonic', lambda: time.monotonic())
+denied('sleep', lambda: time.sleep(0))
+denied('entropy', lambda: os.urandom(8))
+denied('random', lambda: random.random())
+denied('Random()', lambda: random.Random().random())
+denied('seed()', lambda: random.seed())
+print('seeded', random.Random(7).random() == random.Random(7).random())
+"#,
+        ),
+        text("done"),
+    ])
+    .await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    let probe = rig.result("probe").await;
+    assert_eq!(probe.status, "completed", "{}", probe.text);
+    assert_eq!(
+        probe.text,
+        concat!(
+            "files denied\nnetwork denied\nprocess denied\nclock denied\nmonotonic denied\n",
+            "sleep denied\nentropy denied\nrandom denied\nRandom() denied\nseed() denied\nseeded True\n",
+        )
+    );
+    assert!(!rig.project.path().join("sandbox.txt").exists());
 }
 
 #[tokio::test]
@@ -435,8 +565,13 @@ async fn a_nested_call_passes_its_own_gate() {
     assert!(!rig.project.path().join("a.txt").exists());
     let outer = rig.result("c1").await;
     assert_eq!(outer.status, "completed");
-    assert!(outer.text.contains("write() was refused"), "{}", outer.text);
-    assert!(outer.text.contains("writes are not allowed here"));
+    assert!(
+        outer
+            .text
+            .starts_with("The call was refused and did not run: writes are not allowed here\n"),
+        "{}",
+        outer.text
+    );
     assert!(outer.text.ends_with("kept.txt"));
     let refused = rig
         .entries("toolResult")
@@ -641,7 +776,7 @@ async fn nesting_is_bounded_and_a_deadline_ends_a_command() {
             ),
             code(
                 "slow",
-                "r = tools.exec(command='echo begun; sleep 20', timeout=0.3)\n[r.get('timed_out'), r['output'], r['wall_time_seconds'] < 10]",
+                "tools.exec(command='echo begun; sleep 20', timeout=0.3)",
             ),
             text("done"),
         ],
@@ -663,9 +798,15 @@ async fn nesting_is_bounded_and_a_deadline_ends_a_command() {
     assert_eq!(shallow.status, "completed", "{}", shallow.text);
     assert_eq!(shallow.text, "here.txt");
     let slow = rig.result("slow").await;
-    assert_eq!(slow.status, "completed", "{}", slow.text);
-    let value: Value = serde_json::from_str(&slow.text).unwrap();
-    assert_eq!(value, json!([true, "begun\n", true]));
+    assert_eq!(slow.status, "failed", "{}", slow.text);
+    assert!(slow.text.contains("RuntimeError: begun"), "{}", slow.text);
+    assert!(
+        slow.text
+            .trim_end()
+            .ends_with("Command timed out after 0.3 seconds"),
+        "{}",
+        slow.text
+    );
 }
 
 #[tokio::test]
