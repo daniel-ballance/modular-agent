@@ -52,9 +52,9 @@ The two [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_liv
 
 ## What is checked
 
-- **Shared scenarios:** 153/153 with `MODULAR_AGENT_SDK_REQUIRE=all`: all 17 in process, all 17 with each SDK's fixture programs on stdio, and all 17 with each SDK's fixtures over WebSocket.
+- **Shared scenarios:** 153/153 with `MODULAR_AGENT_SDK_REQUIRE=all` on the ADR 0030 branch: all 17 in process, all 17 with each SDK's fixture programs on stdio, and all 17 with each SDK's fixtures over WebSocket.
 - **Reference `ma`:** 23/23 on the policy implementation. The stderr regression checks a dispatched `codemode` call, not `tool(null)`.
-- **ACP kit against `ma`:** 188/188 on stdio and 193/193 over WebSocket with crash, probe and job checks, before the policy landed. The opt-in ADR 0030 run against history HTTP passed 15/27 at the first policy checkpoint. It does not establish shared erasure support.
+- **ACP kit against `ma`:** 188/188 on stdio and 193/193 over WebSocket with crash, probe and job checks. The opt-in ADR 0030 run against history HTTP passed 15/27 at the first policy checkpoint. A later stdio isolation-only run passed 13/15. Those runs do not establish shared erasure support.
 - **Plugin kit:** 146/146 on stdio and 153/153 over WebSocket, with both Runtime tiers.
 - **History kit:** 42/42 against `serve_history(file_history(...))` with restart. An earlier run also passed 42/42 through a custom `HistoryPort` with a shorter TTL after restart.
 - **Session publication:** six SDK cases cover file, HTTP and Registrar history with in-process and served Runtimes. Unused sessions leave no records on close or process loss. The first admission flushes setup in order, and forks publish the copied prefix and fresh setup together. A separate ACP case checks that `session/new` and close do not create an HTTP history record.
@@ -63,7 +63,7 @@ The two [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_liv
 - **SDK API regressions:** four follower cases preserve image progress through local and served tools and Runtimes. Three proposal cases check conflicts after release, decline and withdrawal. A history port case checks metadata and both page cursors; two Provider cases check the declaration in both placements.
 - **Command lifetime:** the WebSocket plugin kit checks disconnect cleanup. A regression also kills the agent's entire process group while a background descendant is still running; the separate lifetime watcher must survive the group kill and stop it on pipe EOF.
 - **Secret crash recovery:** three actual SIGKILL cutoffs: after staging, after committing the selection, and after activation. A separate test checks idempotence and generations.
-- **ADR 0030 SDK tests:** seven cases cover held-fork erasure handoff, concurrent refusal at each input scope, duplicate and hand-back at saturation, reservation rebuild, and capacity outcomes for a refused model attempt and a refused call list. Policy and SDK smoke checks passed 61 cases. The full matrix and required shared placements are not yet re-established here. The earlier four-placement matrix passed 518 in each placement, with two live checks skipped.
+- **ADR 0030 SDK tests:** seven cases cover held-fork erasure handoff, concurrent refusal at each input scope, duplicate and hand-back at saturation, reservation rebuild, and capacity outcomes for a refused model attempt and a refused call list. Policy and SDK smoke checks passed 61 cases. Two more public cases cover malformed stdio options and configured network representation. Ruff lint and format and strict mypy passed. The four-configuration pytest matrix was not clean during development; the targeted regressions passed after fixes. The earlier, pre-ADR four-configuration matrix passed 518 in each placement, with two live checks skipped.
 
 ## Built so far
 
