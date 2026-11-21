@@ -3,8 +3,12 @@ package modular
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"net/http"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/historyhttp"
+	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 )
 
 // HistoryBackend is the local lease-backed history adapter. Each Save is a
@@ -59,6 +63,57 @@ func NewHistoryStore(backend HistoryBackend, persistent, erasure bool) HistorySt
 		store.serviceBackend = serviceHistoryBackend{capable}
 	}
 	return store
+}
+
+// PagedHistoryBackend implements the history binding directly in process.
+// Use HistoryGrant.WriterLost if the store can discover revocation outside
+// renewal. Return *Error with code Held and data.retryAfterMs for writer
+// contention, and NotFound (or fs.ErrNotExist) for a missing session.
+type PagedHistoryBackend = historyhttp.Backend
+type HistoryMetadata = historyhttp.Metadata
+type HistorySession = historyhttp.Session
+type HistoryForkOrigin = historyhttp.ForkOrigin
+type HistoryReadPage = historyhttp.ReadPage
+type HistoryListPage = historyhttp.ListPage
+type HistoryGrant = historyhttp.Grant
+
+type pagedHistoryStore struct{ *historyhttp.Client }
+
+// NewPagedHistoryStore wraps a custom local store that exposes the history
+// binding operations. Persistent stores must survive a process restart. Set
+// erasure only if Erase is supported.
+func NewPagedHistoryStore(backend PagedHistoryBackend, persistent, erasure bool) HistoryStore {
+	if backend == nil {
+		return HistoryStore{}
+	}
+	return HistoryStore{persistent: persistent, erasure: erasure, make: func() (api.Store, error) {
+		client, err := historyhttp.NewLocalClient(localHistoryBackend{backend})
+		if err != nil {
+			return nil, err
+		}
+		return pagedHistoryStore{client}, nil
+	}}
+}
+
+type localHistoryBackend struct{ PagedHistoryBackend }
+
+func (b localHistoryBackend) Acquire(ctx context.Context, id, owner string) (HistoryGrant, error) {
+	grant, err := b.PagedHistoryBackend.Acquire(ctx, id, owner)
+	var e *Error
+	if !errors.As(err, &e) {
+		return grant, err
+	}
+	switch e.Code {
+	case NotFound, Code("unknown_session"):
+		return grant, errors.Join(fs.ErrNotExist, err)
+	case Held:
+		return grant, &servicehttp.ResponseError{Status: http.StatusConflict, Failure: servicehttp.Failure{
+			Code: string(Held), Error: e.Message, RetryAfterMS: api.Decode[float64](api.JSON(e.Data["retryAfterMs"])),
+		}}
+	default:
+		// A typed store refusal is definitive, just as a service refusal is.
+		return grant, errors.Join(err, &servicehttp.ResponseError{Status: http.StatusConflict, Failure: servicehttp.Failure{Code: string(e.Code), Error: e.Message}})
+	}
 }
 
 // Configuration provides operator-controlled settings and project trust.

@@ -249,15 +249,11 @@ func (p *turnPorts) executeTool(ctx context.Context, source api.ToolSource, snap
 	}()
 	live = api.WithExecution(live, api.Execution{Session: p.s.id, Turn: p.id, Call: call, ToolSource: &binding})
 	live = api.WithNestedTools(live, i)
-	progress := func(content api.Content) {
+	emitProgress := func(data []byte) {
 		if live.Err() == nil {
-			data := api.JSON(content)
-			if len(content) == 1 && content[0].Type == "text" {
-				data = api.JSON(content[0].Text)
-			}
 			p.Emit(live, api.Event{Kind: "tool.progress", Call: call.ID, Step: call.Step, Data: data})
 		}
 	}
-	live = api.WithToolProgress(live, progress)
-	return source.Run(live, snap, call, func(text string) { progress(api.Text(text)) }), nil
+	live = api.WithToolProgress(live, func(content api.Content) { emitProgress(api.JSON(content)) })
+	return source.Run(live, snap, call, func(text string) { emitProgress(api.JSON(text)) }), nil
 }

@@ -56,11 +56,7 @@ func (s *Session) UnmarshalJSON(b []byte) error {
 	return json.Unmarshal(b, &s.wire)
 }
 
-type document struct {
-	Session Session           `json:"session"`
-	Entries []json.RawMessage `json:"entries"`
-	Next    string            `json:"next,omitempty"`
-}
+type document = ReadPage
 
 type held struct {
 	owner, token string

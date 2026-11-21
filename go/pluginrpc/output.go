@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
+
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
-	"strings"
 )
 
 type outputEvent struct {
@@ -31,7 +32,7 @@ func outputOut(e api.Event) outputEvent {
 	case "tool.requested":
 		kind, data = "toolCall", object{"call": portable.Call(api.Decode[api.Call](e.Data))}
 	case "tool.progress":
-		kind, data = "toolOutput", object{"toolCallId": e.Call, "chunk": api.Decode[string](e.Data)}
+		kind, data = "toolOutput", portable.ToolOutput(e.Call, e.Data)
 	case "tool.end":
 		r := api.Decode[api.ToolResult](e.Data)
 		kind, data = "toolResult", object{"toolCallId": e.Call, "status": portable.StatusOut(r.Status), "content": portable.Content(r.Content)}
@@ -98,6 +99,18 @@ func outputIn(e api.Event, v outputEvent) (api.Event, error) {
 			return e, invalid
 		}
 		e.Data = mustJSON(chunk)
+		if raw, exists := d["content"]; exists {
+			parts, ok := raw.([]any)
+			if !ok {
+				return e, invalid
+			}
+			content := portable.ReadContent(parts)
+			// A gate that knows only chunk may redact it and echo the
+			// optional content unchanged. Never expose the old text.
+			if content.Text() == chunk {
+				e.Data = mustJSON(content)
+			}
+		}
 	case "toolResult":
 		r := api.Decode[api.ToolResult](e.Data)
 		content, ok := d["content"].([]any)

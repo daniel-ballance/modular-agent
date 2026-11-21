@@ -93,6 +93,44 @@ func requireLost(t *testing.T, err error) {
 	}
 }
 
+func TestIdleSessionInterruptsOnWriterRevocation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	store := interruptibleBackend{&snapshotBackend{dir: t.TempDir(), held: map[string]bool{}}, make(chan *interruptibleLease, 1)}
+	a := modulartest.Agent(t, modular.WithHistory(modular.NewHistoryStore(store, true, false)),
+		modular.WithDurability(modular.Kept), modulartest.Script(`[{"text":"committed"}]`))
+	s, err := a.Session(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(ctx, "create history"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lease := takeInterruptionCheck(t, ctx, store.acquired, "lease")
+	follower := false
+	for ev, err := range s.Events(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !follower {
+			follower = true
+			// Events has subscribed. Revoke the idle writer and do not call
+			// another session method to trigger a store access.
+			close(lease.lost)
+		}
+		if e, ok := ev.(modular.TypedEvent[modular.SessionInterruptedData]); ok {
+			if e.Data.Reason != modular.WriterLost || e.SessionID != s.ID() {
+				t.Fatalf("wrong interruption: %+v", e)
+			}
+			return
+		}
+	}
+	t.Fatal("idle writer loss did not interrupt the session")
+}
+
 func TestSessionInterruptionReachesFollowersAndWaitingPrompts(t *testing.T) {
 	for _, reason := range []modular.SessionInterruptionReason{modular.CommitFailed, modular.WriterLost} {
 		for _, surface := range []string{"prompt", "promptStream", "ACP"} {

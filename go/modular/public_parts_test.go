@@ -92,6 +92,17 @@ func TestEmbeddedProposalsMoveAndErase(t *testing.T) {
 	if err = s.Withdraw(ctx, one.InputID); err != nil {
 		t.Fatal(err)
 	}
+	requireCode(t, s.Withdraw(ctx, one.InputID), modular.Conflict)
+	_, err = s.Release(ctx, one.InputID, modular.Now)
+	requireCode(t, err, modular.Conflict)
+	decline, err := s.Send(ctx, "decline", modular.Propose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt, err := s.Release(ctx, decline.InputID, modular.Now, true); err != nil || receipt.InputID != decline.InputID || receipt.Disposition != "handedBack" {
+		t.Fatalf("decline: %+v %v", receipt, err)
+	}
+	requireCode(t, s.Withdraw(ctx, decline.InputID), modular.Conflict)
 	two, err := s.Send(ctx, "deliver", modular.Propose)
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +113,11 @@ func TestEmbeddedProposalsMoveAndErase(t *testing.T) {
 	}
 	if _, err = s.Release(ctx, two.InputID, modular.Now); err != nil {
 		t.Fatal(err)
+	}
+	_, err = s.Release(ctx, two.InputID, modular.Now)
+	requireCode(t, err, modular.Conflict)
+	if parked, err = s.Proposals(ctx); err != nil || len(parked) != 0 {
+		t.Fatalf("settled proposals still listed: %+v %v", parked, err)
 	}
 	if err = s.WaitIdle(ctx); err != nil {
 		t.Fatal(err)
