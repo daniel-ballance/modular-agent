@@ -50,7 +50,8 @@ test("composition checks the effective history, environment and plugin-host choi
   const dir = await mkdtemp(join(tmpdir(), "ma-parts-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const history = fileHistory(join(dir, "history"));
-  await assert.rejects(createAgent({ pluginHost: false, processPlugins: [] }), { code: "invalid_composition" });
+  await (await createAgent({ pluginHost: false, processPlugins: [], servicePlugins: [] })).close();
+  await assert.rejects(createAgent({ pluginHost: false, processPlugins: [{ command: ["unused"] }] }), { code: "invalid_composition" });
   await assert.rejects(createAgent({ durability: "kept", history }), { code: "invalid_composition", message: /bookkeeping/ });
   await assert.rejects(testAgent({ script: [], durability: "kept", dataDir: dir, history: memoryHistory() }), { code: "invalid_composition" });
   const kept = await createAgent({ durability: "kept", history, environment: memoryEnvironment() });

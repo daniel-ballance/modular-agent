@@ -183,7 +183,7 @@ export class Agent {
 
   static async #create(options: AgentOptions): Promise<Agent> {
     const durability = options.durability ?? "ephemeral";
-    const configuredHost = options.processPlugins !== undefined || options.servicePlugins !== undefined;
+    const configuredHost = !!(options.processPlugins?.length || options.servicePlugins?.length);
     if (options.pluginHost === false && configuredHost) {
       throw new AgentError("invalid_composition", "Loading processPlugins or servicePlugins requires a plugin host");
     }
@@ -228,7 +228,7 @@ export class Agent {
         // The public memory environment is rooted at its virtual root, not the host project.
         await agent.#load({ name: "sdk.environment", setup: api => api.provide("working-environment", env) });
       } else {
-        await agent.#load(localEnvironment({ cwd: project }));
+        await agent.#load(localEnvironment({ cwd: project, stateDir: durability === "ephemeral" ? scratch : undefined }));
         defaultEnvironment = h.use<WorkingEnvironment>("working-environment");
       }
       const explicitRuntime = options.runtime;

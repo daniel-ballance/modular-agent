@@ -40,7 +40,7 @@ test("SDK loads in-process, stdio, explicit service and environment services in 
     process.env.MODULAR_AGENT_PLUGINS = JSON.stringify([{ ...configured, command: ["also-stdio"] }]);
     await assert.rejects(testAgent({ script: [], pluginHost: true }), { code: "invalid_composition" });
     delete process.env.MODULAR_AGENT_PLUGINS;
-    await assert.rejects(testAgent({ script: [], pluginHost: false, servicePlugins: [] }), { code: "invalid_composition" });
+    await assert.rejects(testAgent({ script: [], pluginHost: false, servicePlugins: [configured] }), { code: "invalid_composition" });
     await assert.rejects(testAgent({ script: [], servicePlugins: [{ ...configured, config: {} }] }), { code: "invalid_composition" });
     await second.close();
     await assert.rejects(testAgent({ script: [], servicePlugins: [configured] }), { code: "invalid_composition" });

@@ -153,15 +153,16 @@ export class LocalEnvironment implements WorkingEnvironment {
 	}
 }
 
-export function localEnvironment(options: { cwd?: string; confineFiles?: boolean; points?: "copy" | "git" } = {}): Plugin {
+export function localEnvironment(options: { cwd?: string; confineFiles?: boolean; points?: "copy" | "git"; stateDir?: string } = {}): Plugin {
 	let stop: () => void | Promise<void> = () => {};
 	return {
 		name: "env-local",
 		spawn: { module: "@modular-agent/env-local", export: "localEnvironment", options },
 		setup(api) {
 			// No command this agent starts outlives it: see ProcessTracker.
-			const processes = new ProcessTracker(join(api.home, "run"));
-			const snapshots = options.points === "copy" ? new SavedPoints(api.home) : new GitPoints(api.home);
+			const stateDir = options.stateDir ?? api.home;
+			const processes = new ProcessTracker(join(stateDir, "run"));
+			const snapshots = options.points === "copy" ? new SavedPoints(stateDir) : new GitPoints(stateDir);
 			api.provide("working-environment", new LocalEnvironment(options.cwd ?? api.project, processes, undefined, snapshots, options.confineFiles ? api.project : undefined));
 			stop = async () => { processes.stopAll(); await snapshots.stop(); };
 		},
