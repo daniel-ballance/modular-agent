@@ -14,6 +14,7 @@ from modular_agent import (
     create_agent,
     serve,
 )
+from modular_agent.testing import over_wire
 
 
 class Beacon(ProviderCatalog):
@@ -83,6 +84,18 @@ async def test_provider_records_its_response_and_streams(served, key, monkeypatc
                 next(e["message"] for e in records if e["kind"] == "response")["error"]["kind"]
                 == "credentials"
             )
+
+
+@pytest.mark.parametrize("served", [False, True])
+async def test_sdk_provider_declaration_only_advertises_kept_state(served):
+    beacon = Beacon()
+    beacon.supports = ProviderSupports(keeps_state=True, safe_to_repeat=True)
+    registered = plugin(beacon)
+    async with create_agent(plugins=[over_wire(registered) if served else registered]) as agent:
+        value = agent.declaration()
+        assert value["keepsStateAtProvider"] is True
+        assert value["runsToolsAtProvider"] is False
+        assert value["liveSessions"] is False
 
 
 async def test_provider_refreshes_catalog_and_consults_readiness():
