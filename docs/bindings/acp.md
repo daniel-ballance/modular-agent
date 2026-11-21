@@ -72,7 +72,7 @@ An agent MUST send every non-optional key and use only the values below. The ses
 | `outputBypassesAgent` | boolean | Some output outside this binding bypasses the gate. |
 | `cancellingTurnCancelsJobs` | boolean | Turn cancellation also cancels its jobs. |
 | `pluginsDuringSession` | `false` | Fixed in this edition. |
-| `erasure` | boolean | Implies `erase` is offered. |
+| `erasure` | boolean | Implies `erase` is offered and the Harness and deployment can enforce [pending erasure](../contracts.md#cross-session-coordination). |
 | `inputKeys` | `true` | Fixed in this edition. |
 | `questionsOutlastTurns` | boolean | An eligible non-approval question can stay open past its turn. Requires `lateAnswersStartTurns: true`. |
 | `startsTurnsUnasked` | `never`, `jobReports` | Whether job reports start turns. Late answers are separate. |
@@ -170,6 +170,7 @@ Unless another number is specified, the agent MUST return the following errors a
 | `not_open` | Accessible session not open on this connection. |
 | `not_found` | Unknown item in the authorized session/view, including an invalid history `after`. |
 | `wrong_project` | Authorized session opened with a mismatched canonical project. |
+| `unavailable` | A required pending-erasure check or coordination cannot be established. |
 | `busy` | Conflict with current work, close or recovery, or insufficient [reservation capacity](../contracts.md#resource-reservations) for new work. |
 | `held` | `-32000`, with `data: { code: "held", retryAfterMs }`; a retryable [history lease refusal on reopen](history-http.md#writing-one-writer-at-a-time). `retryAfterMs` is a positive integer in milliseconds. |
 | `conflict` | Known item with an invalid transition, such as an already released proposal or prompt input handed back without a turn; also a [rewind target or point refusal](#extension-methods). |
@@ -319,7 +320,7 @@ The following extensions are optional and MUST be listed if offered. Features na
 
 - **Fork:** The agent MUST refuse unsupported forking or unfinished work with `not_supported` or `busy`, respectively. A fork MUST target a kept non-`position` entry in the source session and copy its branch with source lineage. The agent MUST apply the [core inheritance rules](../contracts.md#moving-and-rewinding) and [tenant inheritance](../contracts.md#limits-and-tenants). An unknown target MUST fail with `not_found`. A `position` target MUST fail with `conflict`. If the [history HTTP preflight](history-http.md#sessions) cannot fit the initial batch, the agent MUST return `-32602` with `data.code: "result_too_large"`. A fork MUST be reopened explicitly before use on this connection.
 - **Move:** The agent MUST refuse a target outside the session with `not_found`. It MUST refuse a `position` target with `conflict`. For `rewind: true` it MUST refuse if rewinding is undeclared, and otherwise follow the target, environment, unfinished-work, restoration and rollback rules in [Rewinding](data.md#rewinding). The agent MUST map target or point refusal, including a point treated as `not_found` in preflight, to `conflict`. It MUST map unfinished work to `busy`. With rewind it MUST include `outOfReach` when there are open-world calls the restore could not undo. Without rewind it MUST follow the [core move rule](../contracts.md#moving-and-rewinding). Neither ACP operation takes a null target.
-- **Erase:** The agent MUST validate and deduplicate targets before deletion, returning `not_found` for unknown and `forbidden` for protected records. An invalid request changes nothing. The agent MUST follow [Erasure](../contracts.md#erasure), listing affected sessions' copies under `pending` when held by another writer. It MUST return `busy` if `erasureDuringTurn` disallows starting the operation. The agent MUST deduplicate `erased` and `pending` by `(sessionId, id)`. For copies in sessions the actor may not see, it MUST omit the pairs and report only `"copies in other sessions"` in `outOfReach`. It MUST return each category at most once. Repeated targets do not cause duplicate erasure.
+- **Erase:** The agent MUST validate and deduplicate targets before deletion, returning `not_found` for unknown and `forbidden` for protected records. An invalid request changes nothing. The agent MUST follow [Erasure](../contracts.md#erasure). It MUST list every reportable unresolved copy under `pending`, including when its session is held by another writer. The agent MUST return `not_supported` if erasure is not declared, and `unavailable` if required coordination is temporarily unavailable before a new intent can be committed. An intent already committed remains in force even if its reply fails. Repeating the same authorized targets MUST report progress without appending another bookkeeping entry for a committed change. It MUST return `busy` if `erasureDuringTurn` disallows starting the operation. The agent MUST deduplicate `erased` and `pending` by `(sessionId, id)`. For copies in sessions the actor may not see, it MUST omit the pairs and report only `"copies in other sessions"` in `outOfReach`. It MUST return each category at most once. Repeated targets do not cause duplicate erasure.
 - **Jobs:** The agent MUST list unfinished jobs oldest first. It MUST use `state: "cleanupUnconfirmed"` when the [shared job fold](data.md#session-state) marks cleanup unconfirmed, `"running"` for other live jobs or `"unfinished"` otherwise. Cancellation MUST follow [Jobs](../contracts.md#jobs), returning `lost` for unconfirmed cleanup and `not_found` for unknown or foreign ids. Repeating cancellation of a terminal job MUST return `{}` without a second end.
 
 ### Entry
@@ -415,7 +416,7 @@ The [conformance kit](../../conformance/acp/README.md) exercises this mode. See 
 
 ## Changes
 
-- **Proposed production rules.** Stdio scope and an optional rights ceiling, connection-local configured representation, and scope checks on attached operations and delivery. Declare reservation ceilings and report capacity refusals without an admission receipt.
+- **Proposed production rules.** Stdio scope and an optional rights ceiling, connection-local configured representation, and scope checks on attached operations and delivery. Declare reservation ceilings and report capacity refusals without an admission receipt. Erasure reports distinguish pending from confirmed deletion.
 
 - **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). Both versions keep their numbers. The optional declaration key `nestedToolCalls`, the fixture tool `nest` for agents that declare it, and `parentToolCallId` on a nested call's first update.
 

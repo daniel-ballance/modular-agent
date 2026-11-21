@@ -119,7 +119,7 @@ The Harness MUST send the exact ids for each session after applying the [core er
 
 The service MUST return distinct known IDs from the request in first occurrence order, including IDs already erased. Unknown IDs are ignored. It MUST replace each erased record by applying the [shared tombstone field table](data.md#entry-fields-and-tombstones), including [legacy association fallbacks](data.md#legacy-associations). It MUST use `kind: null` when the old `kind` is missing or not a string and omit non-string associations. It MUST preserve a valid `sources` array without deciding whether the entry belongs to a fork prefix. It MUST omit malformed optional additions and strip any fields other than the standard numeric fields from preserved usage. The service MUST remove the other fields from its live copies. It MUST NOT serve pre-erasure data after a restart or restore.
 
-The Harness MUST keep a durable erasure intent before sending the deletion, and reconcile pending targets by reading if a commit or reply is uncertain. The agent, not the service, records the `erasure` entries. See [Deliberate limits](../security.md#deliberate-limits) for cross-session erasure. An offline backup is outside per-session atomicity; the deployment's erasure policy governs backup deletion.
+The Harness MUST follow [Cross-session coordination](../contracts.md#cross-session-coordination) before requesting deletion, including holding the current lease for each affected session and recording the `erasure` entry. The service's optional lease form does not relax the Harness's rule. After uncertain writes, the Harness MUST reconcile under the [lease rules](#writing-one-writer-at-a-time). The service does not compute lineage, enforce pending marks or write `erasure` entries. An offline backup is outside per-session atomicity; the deployment's erasure policy governs backup deletion.
 
 ## What the service declares
 
@@ -127,7 +127,7 @@ The client MUST check `GET /v1` before use and refuse a binding it does not spea
 
 ## Changes
 
-- **Proposed production rules.** Clarify what a deployment separates when history writers must not share raw access.
+- **Proposed production rules.** Clarify raw history isolation, storage provisioning for reservations and the Harness's role in pending erasure. No new endpoints.
 
 - **Production edition 2.** Bounded leases and fork preflight (all five builds: Elixir PE-2, Go P1, Python G88 and G99, Rust PE-01, TypeScript). Actual body and page bytes (Go P5), JSON depth and unencoded HTTP bodies (TypeScript), lease clocks (Rust PE-03, TypeScript), and retryable reopen after a restart hold (Go P4, TypeScript). See the limits on [initial create and legacy migration](../security.md#deliberate-limits) (Elixir PE-7, TypeScript).
 

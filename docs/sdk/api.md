@@ -85,7 +85,7 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `outputBypassesAgent` | false |
 | `cancellingTurnCancelsJobs` | false |
 | `pluginsDuringSession` | false |
-| `erasure` | true only if the history store and the agent both implement erasure; false for the memory store until it does |
+| `erasure` | true only if the history store and the agent implement erasure and can enforce [pending erasure](../contracts.md#cross-session-coordination) across the declared scope |
 | `inputKeys` | true |
 | `questionsOutlastTurns`, `lateAnswersStartTurns` | false unless the app enables both |
 | `startsTurnsUnasked` | `jobReports` if `jobReportsStartTurns`; otherwise `never` |
@@ -118,7 +118,7 @@ The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check th
 | `history(options?)` | the recorded entries, in order, as this actor may see them: the gated view, not the raw record |
 | `fork(entryId?)` | a new Session branching from that entry, or from the current position |
 | `moveTo(entryId, options?)` | moves the current position; `rewind: true` also restores files where the environment can |
-| `erase(entryIds)` | an ErasureReport |
+| `erase(entryIds)` | an ErasureReport: `{ erased, pending, outOfReach }` as in [ACP](../bindings/acp.md#extension-methods). Repeating authorized targets reports progress; it does not erase again. |
 | `commands()` / `runCommand(line)` | the commands available / runs one |
 | `callTool(name, input)` | a ToolResult; a direct call by this actor, through every gate |
 | `events(fromEntry?)` | every event in the session this actor may see, from the start or a cursor, then live |
@@ -437,6 +437,7 @@ The SDK has two surfaces, and each uses the codes of the binding it mirrors:
 | `not_found` | both | a named session, entry, file, point, tool or question does not exist |
 | `not_open` | app | the session is not open |
 | `busy` | both | conflicts with current work, close or recovery (app), or no capacity for new work |
+| `unavailable` | app | a required pending-erasure check or coordination could not be established |
 | `held` | app | another writer holds the session's history; `data.retryAfterMs` says when to retry |
 | `conflict` | app | an invalid transition, such as a proposal already released, or an entry that conflicts with a kept one |
 | `cancelled` | both | the operation was cancelled |

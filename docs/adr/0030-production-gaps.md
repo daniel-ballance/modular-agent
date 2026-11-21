@@ -40,3 +40,22 @@ status: proposed
 
 - **Provisioning shared history:** fixed writer shares or shared reservation accounting. Recommend fixed shares where all writers and storage allocations are known; use shared accounting when independent writers must borrow spare capacity. Do not add a reservation endpoint to `/1` without a separate binding decision.
 - **Limits for `ma`:** fixed defaults alone or finite defaults with trusted operator overrides. Recommend the latter; choose sizes with measurements of worst-case settlement and control work. The contract sets no universal byte or count values.
+
+## Cross-session erasure coordination
+
+[Erasure](../contracts.md#erasure) already follows lineage, requires pending marks, and uses leases and tombstones. It did not say who reads the marks, how a held copy stays hidden, how a different writer takes over, or what survives a crash between intent, tombstone and acknowledgement. A journal in the source session alone does not protect a fork another process has open. Taking all affected leases first either blocks progress on any held copy or tempts the agent to bypass fencing. A distributed delete transaction is not needed: publication of the pending marks prevents disclosure, and deletion is fenced separately per session.
+
+[Cross-session coordination](../contracts.md#cross-session-coordination) specifies the shared, content-free intent, read and write cutoff, writer handoff, completion evidence and report. Existing history and ACP records and result shapes are sufficient for per-session bookkeeping and authorized progress. [History HTTP](../bindings/history-http.md#erasure) still knows only exact targets and leases. [Security](../security.md#deliberate-limits) leaves backup erasure and raw-service isolation to the operator.
+
+### Erasure checks
+
+- **ACP and plugin host kits, two writers and a reader:** seed an input with a key, a fork, a fork of that fork, a derived summary, and a child report. Hold a destination lease while erasing the source. The request must leave those copies pending and must not mutate them under the other writer's lease. While held, probe history, replay, keyed receipts, callback history, buffered streams and the next model request; none may disclose pending content. Hold a fork publication and an output gate across the cutoff to test both sides of the race. After release or on an already-current writer's next authorized use, require reconciliation before effects, tombstones, preserved accounting and the erased duplicate receipt. Check that a principal who cannot see the destination sees only the generic description, not its IDs. Capture the Provider discard and test that a failure is not reported as erased.
+- **Portable ACP matrix with history faults:** interrupt the initiator immediately after intent, after the destination bookkeeping append, and after tombstone commit with its reply withheld. Reopen with a different SDK over the same pending state. Require no exposure during handoff, one bookkeeping record per change, the same tombstones and no replayed effect. Repeat the authorized erase and check convergence of `pending` to `erased` without duplicate records. Return an absent target after a lost reply or retention; it must not become confirmed. Break the freshness source and restore a stale backup; require fail-closed access, and verify that the declaration does not claim erasure on a composition lacking coordination from the start.
+
+### Open erasure decision
+
+- **Shared pending state:** a durable registry colocated with the shared history backend, or a separately provisioned coordinator used by all readers and writers. Recommend colocation to simplify freshness and backup fencing. Neither layout works with a reader that bypasses it. Choose an interoperable API only after two independent implementations can check the cutoff; until then deployments provide the shared mechanism or do not claim that scope.
+
+## Why these are kit checks
+
+The [shared scenario format](../sdk/testing.md#the-format) has one embedded agent and session. Plugin placements do not create multiple host connections or authenticated ACP identities. The format has no reservation setup, erasure, second writer, or assertions for scopes, declarations and the required races. The checks above are proposed kit and fixture checks, not new shared scenarios. Use fixture barriers and commit observations rather than sleeps or retries.

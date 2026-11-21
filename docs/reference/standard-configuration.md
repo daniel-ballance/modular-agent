@@ -164,10 +164,12 @@ With the durable Runtime on Linux, every implementation declares the same values
 | `settingsDuringTurn` | `refused` | | `erasureDuringTurn` | `refused` |
 | `movingWithUnfinishedWork` | `refused` | | `mixedActorInput` | `refused` |
 | `rewinding` | true when the session's project is in a git work tree ([rewind points](#rewind-points)); false otherwise |
-| `forking`, `erasure`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` |
+| `forking`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` |
 | `confinesFiles`, `severalActors`, `sessionLimits`, `tenants`, `holdsOutput`, `outputBypassesAgent`, `cancellingTurnCancelsJobs`, `pluginsDuringSession`, `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | false | | `projectRoot` | omitted |
 
 These are what the Rust implementation declares. An implementation that cannot meet one declares what it does meet, and the difference is a gap to close, not a choice.
+
+`ma` MUST declare `erasure` only when its history configuration supports [pending erasure](../contracts.md#cross-session-coordination) across its readers and writers. It MUST NOT infer that support from a configured history HTTP endpoint.
 
 The declaration MUST include the [reservation ceilings](../bindings/acp.md#the-declaration) enforced by the SDK. Operator limits are outside project settings; the project MUST NOT raise them.
 

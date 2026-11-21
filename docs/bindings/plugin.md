@@ -359,7 +359,7 @@ A job belongs to its plugin by registered name. The host records jobs in the [sh
 
 ### Paging history
 
-`all` defaults to false. The host MUST return the current branch in root-to-head order, or all entries in kept order with `all: true`, as defined in [Shared data](data.md#history-entries). `limit` MUST be from 1 to 500 inclusive, default 500. The host MUST page from immediately after `after`, or from the start when it is absent. A cursor not in the selected view is `invalid_request`. Each request reads the current view; the cursor is an entry id, not a snapshot. Appends, moves and erasure can change the view between pages.
+`all` defaults to false. The host MUST return the current branch in root-to-head order, or all entries in kept order with `all: true`, as defined in [Shared data](data.md#history-entries). `limit` MUST be from 1 to 500 inclusive, default 500. The host MUST page from immediately after `after`, or from the start when it is absent. A cursor not in the selected view is `invalid_request`. Each request reads the current view; the cursor is an entry id, not a snapshot. The host MUST NOT return [pending erasure](../contracts.md#cross-session-coordination) content even on this raw read. If the host cannot establish pending-state freshness, it MUST refuse with `internal`, without returning history. Appends, moves and erasure can change the view between pages.
 
 The host MUST fit the whole `result` it sends, including any `next`, in 4 MiB. It MUST return `next` as the last returned id only when more entries remain. The host MUST include at least one entry when entries remain; if that entry and any required cursor do not fit, the host MUST return `result_too_large` rather than split or skip it. A host MUST NOT commit an entry that would make its own Runtime unable to page it. An external record already too large is a recovery failure, not an empty page.
 
@@ -419,7 +419,7 @@ A build serving the conformance plugin MUST document its command and support the
 
 ## Changes
 
-- **Proposed production rules.** Hosted callbacks resolve parent IDs and ownership within their connection. Reservation refusal uses `busy` before a new operation or `turn_limit` with `capacity` at the model boundary.
+- **Proposed production rules.** Hosted callbacks resolve parent IDs and ownership within their connection. Reservation refusal uses `busy` before a new operation or `turn_limit` with `capacity` at the model boundary. Raw plugin reads enforce pending erasure.
 
 - **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). Still `/1`: every addition is an optional method that an edition 3 peer answers with the method-not-found or `not_supported` error. `host/tools/list` and `host/tools/call` let a tool source in another process make nested calls (the standard configuration's code tool could not be served over the wire). `env/list` and `host/env/list` list a directory (its `find` and `list` tools had to shell out). A cancelled Provider request sends no `provider.response`, and `outOfReach` items are for people (both guessed by the Claude sidecar). The fixture gains the optional tool `nest`.
 
