@@ -57,16 +57,52 @@ pub struct Command {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) local: bool,
+    uses_model: bool,
     pub(crate) run: CommandHandler,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CommandContext {
     pub session_id: String,
     pub actor_id: String,
     pub cancelled: CancellationToken,
+    pub(crate) model: Option<Arc<CommandModel>>,
 }
+
+pub(crate) struct CommandModel {
+    api: base::Api,
+    scope: base::Scope,
+    done: CancellationToken,
+    sequence: tokio::sync::Mutex<()>,
+}
+
 impl CommandContext {
+    /// Make an auxiliary request with the session's model. This never dispatches tools.
+    pub async fn request_model(
+        &self,
+        request: crate::ModelRequest,
+    ) -> Result<crate::AssistantMessage> {
+        let model = self.model.as_ref().ok_or_else(|| {
+            Error::new(
+                Code::NotSupported,
+                "command must register uses_model in process",
+            )
+        })?;
+        let _sequential = model.sequence.lock().await;
+        if model.done.is_cancelled() {
+            return Err(Error::new(
+                Code::InvalidRequest,
+                "command context has settled",
+            ));
+        }
+        let attempt = request_from_command(model, request, self.cancelled.child_token());
+        tokio::select! {
+            biased;
+            _ = model.done.cancelled() => Err(Error::new(Code::InvalidRequest, "command context has settled")),
+            result = attempt => result,
+        }
+    }
+
     pub fn log(&self, message: impl std::fmt::Display) {
         eprintln!("command in session {}: {message}", self.session_id);
     }
@@ -81,9 +117,17 @@ impl Command {
             name: name.into(),
             description: description.into(),
             local: false,
+            uses_model: false,
             run: Arc::new(move |args, cx| Box::pin(handler(args, cx))),
         }
     }
+    /// Enable scoped auxiliary inference. Such commands cannot be served.
+    pub fn uses_model(mut self) -> Self {
+        self.uses_model = true;
+        self.local = true;
+        self
+    }
+
     pub fn in_process_only(mut self) -> Self {
         self.local = true;
         self
@@ -352,18 +396,34 @@ impl base::Plugin for InProcess {
         }
         for command in &self.registered.commands {
             let run = command.run.clone();
+            let uses_model = command.uses_model;
             r.command(
                 &command.name,
                 base::handler(move |api, scope, args| {
                     let run = run.clone();
                     Box::pin(async move {
                         let cancelled = api.cancellation(&scope.session)?;
+                        let done = cancelled.child_token();
+                        let _guard = done.clone().drop_guard();
+                        let model = uses_model.then(|| {
+                            Arc::new(CommandModel {
+                                api,
+                                scope: base::Scope {
+                                    step: Some(base::id()),
+                                    turn: None,
+                                    ..scope.clone()
+                                },
+                                done,
+                                sequence: tokio::sync::Mutex::new(()),
+                            })
+                        });
                         let text = run(
                             args["args"].as_str().unwrap_or_default().into(),
                             CommandContext {
                                 session_id: scope.session,
                                 actor_id: scope.actor,
                                 cancelled,
+                                model,
                             },
                         )
                         .await?;
@@ -374,6 +434,105 @@ impl base::Plugin for InProcess {
         }
         Ok(())
     }
+}
+
+async fn request_from_command(
+    context: &CommandModel,
+    input: crate::ModelRequest,
+    cancelled: CancellationToken,
+) -> Result<crate::AssistantMessage> {
+    let (api, scope) = (&context.api, &context.scope);
+    base::require(api.as_ref(), scope, "input")?;
+    let select: Arc<dyn base::ModelSelection> = base::capability(api.as_ref(), "model.selection")?;
+    let model = select.select(api.clone(), scope).await?;
+    model.refresh(api, scope, cancelled.clone()).await?;
+    let info = model.info();
+    if info.runs_tools {
+        return Err(Error::new(
+            Code::NotSupported,
+            "auxiliary requests cannot authorize Provider tools",
+        ));
+    }
+    let data = api.snapshot(&scope.session)?;
+    let mut request = base::wire::parse_request(&input.0, &scope.session)
+        .map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))?;
+    request.output_limit = input.0["settings"]["maxOutput"]
+        .as_u64()
+        .or_else(|| data.settings["output_limit"].as_u64())
+        .unwrap_or(info.output_limit)
+        .min(info.output_limit);
+    request.thinking = base::wire::lower_reasoning(
+        input.0["settings"]["reasoning"]
+            .as_str()
+            .or_else(|| data.settings["thinking"].as_str())
+            .unwrap_or(""),
+        &info.thinking,
+    )
+    .into();
+    base::refresh_tool_sources(api, scope).await?;
+    let tools = base::current_model_tools(api, scope, &request.tools)?;
+    request = serde_json::from_value(
+        api.output(
+            scope,
+            base::Output {
+                recipient: "model".into(),
+                value: json!(request),
+                stream: None,
+                end: true,
+            },
+        )
+        .await?
+        .ok_or_else(|| Error::new(Code::Withheld, "auxiliary request blocked"))?,
+    )
+    .map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))?;
+    let known: std::collections::BTreeSet<_> = data.entries.iter().map(|entry| &entry.id).collect();
+    let generated = model
+        .generate_attempt(
+            api.clone(),
+            scope.clone(),
+            request,
+            cancelled,
+            base::ModelAttempt {
+                writer: "sdk.command",
+                tools,
+                sources: known.iter().map(|id| (*id).clone()).collect(),
+                auxiliary: true,
+                safe_to_repeat: false,
+                replay: None,
+                close_attempt: None,
+                authorized_wire: None,
+            },
+        )
+        .await;
+    let intent = api
+        .snapshot(&scope.session)?
+        .entries
+        .into_iter()
+        .rev()
+        .find(|e| {
+            e.kind == "model.request" && e.scope.step == scope.step && !known.contains(&e.id)
+        });
+    let response = match generated {
+        Ok(response) => response,
+        Err(e) if intent.is_some() && e.downcast_ref::<base::ModelAttemptLimit>().is_none() => {
+            let failure = e
+                .downcast_ref::<base::ModelFailure>()
+                .map(base::wire::failure)
+                .unwrap_or_else(|| json!({"kind":"other","message":e.to_string()}));
+            base::wire::parse_response(
+                json!({"role":"assistant","content":[],"stop":"failed","error":failure}),
+            )?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let intent =
+        intent.ok_or_else(|| Error::new(Code::Internal, "missing auxiliary model request"))?;
+    api.append(
+        scope,
+        "sdk.command",
+        base::Draft::new("model.response", false, json!(response)).copying(vec![intent.id]),
+    )?;
+    Ok(crate::AssistantMessage(base::wire::response(&response)))
 }
 
 pub(crate) fn command_reply(text: Option<String>) -> Value {

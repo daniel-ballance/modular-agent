@@ -33,6 +33,9 @@ async fn inspect(url: &str, token: &Path, project: &Path, allowed: bool) -> Valu
     transport_websocket::run(socket, CancellationToken::new(), |mut conn| {
         let actor = &mut actor;
         async move {
+            conn.outgoing.send(json!({"jsonrpc":"2.0","method":"$/ping","id":0,"params":{}}).to_string()).await.unwrap();
+            let ping: Value = serde_json::from_str(&conn.incoming.recv().await.unwrap()).unwrap();
+            assert_eq!(ping["result"], json!({}));
             conn.outgoing.send(json!({"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":1,"clientCapabilities":{}}}).to_string()).await.unwrap();
             let v: Value = serde_json::from_str(&conn.incoming.recv().await.unwrap()).unwrap();
             *actor = v["result"]["_meta"]["modular-agent"]["actor"].clone();
@@ -101,6 +104,88 @@ async fn acp_tokens_bind_independent_principals_and_scopes() {
     assert_eq!(b["kind"], "program");
     server.close().await;
     agent.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modular_agent::Result<()>
+{
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?;
+    let bearer = token(&root, "scope", "408ea717c85a5a164598ec62edaad510");
+    let subproject = root.join("nested");
+    std::fs::create_dir_all(&subproject)?;
+    let agent = Agent::builder()
+        .project(&root)
+        .plugin_host(true)
+        .several_actors(true)
+        .build()
+        .await?;
+    let grant = Actor {
+        id: "observer".into(),
+        kind: "user".into(),
+        rights: Rights::full(),
+    };
+    let saved = agent
+        .session_with(modular_agent::SessionOptions {
+            actors: vec![grant],
+            ..Default::default()
+        })
+        .await?;
+    let id = saved.id().to_owned();
+    saved.close().await?;
+    let service = agent
+        .serve_acp_websocket(
+            Default::default(),
+            AcpServiceOptions {
+                actors: vec![AcpActor {
+                    token_file: bearer.clone(),
+                    actor: Actor {
+                        id: "observer".into(),
+                        kind: "user".into(),
+                        rights: Rights::only(&["watch"]),
+                    },
+                    tenants: None,
+                    projects: Some(vec![root.clone()]),
+                }],
+                listen: "127.0.0.1:0".into(),
+                tls: None,
+            },
+        )
+        .await?;
+    let socket = transport_websocket::connect(&service.url, &bearer, transport_websocket::ACP)
+        .await
+        .unwrap();
+    transport_websocket::run(socket, CancellationToken::new(), |mut conn| {
+        let (id, root) = (&id, &root);
+        async move {
+            macro_rules! rpc {
+                ($id:expr, $method:expr, $params:expr) => {{
+                    conn.outgoing.send(json!({"jsonrpc":"2.0","method":$method,"id":$id,"params":$params}).to_string()).await.unwrap();
+                    loop {
+                        let v: Value = serde_json::from_str(&conn.incoming.recv().await.unwrap()).unwrap();
+                        if v["id"] == $id { break v; }
+                    }
+                }};
+            }
+            assert!(rpc!(1, "initialize", json!({"protocolVersion":1})).get("result").is_some());
+            let v = rpc!(2, "session/resume", json!({"sessionId":id,"cwd":root,"mcpServers":[]}));
+            assert!(v.get("result").is_some(), "{v}");
+            let v = rpc!(3, "session/prompt", json!({"sessionId":id,"prompt":[{"type":"text","text":"not allowed"}]}));
+            assert_eq!(v["error"]["data"]["code"], "forbidden", "{v}");
+            assert_eq!(rpc!(4, "$/ping", json!({}))["result"], json!({}));
+            let v = rpc!(5, "session/close", json!({"sessionId":id}));
+            assert!(v.get("result").is_some(), "{v}");
+        }
+    }).await;
+    service.close().await;
+    let reopened = agent.open_session(&id).await?;
+    let observer = reopened.r#as("observer")?;
+    // A connection limit does not modify the actor's grants for other callers.
+    observer
+        .send("allowed here", modular_agent::Timing::Propose)
+        .await?;
+    agent.close().await?;
+    Ok(())
 }
 
 #[tokio::test]

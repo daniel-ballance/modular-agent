@@ -554,7 +554,11 @@ impl AgentBuilder {
         {
             return Err(Error::new(
                 Code::InvalidComposition,
-                "history persistence must match durability",
+                if self.durability == Durability::Ephemeral {
+                    "persistent history requires kept or durable, not ephemeral"
+                } else {
+                    "kept and durable require persistent history"
+                },
             ));
         }
         if self.durability != Durability::Ephemeral && self.data_dir.is_none() {

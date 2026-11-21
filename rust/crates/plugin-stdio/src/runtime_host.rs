@@ -133,11 +133,7 @@ impl Runtime for RemoteRuntime {
 }
 
 impl RemoteRuntime {
-    async fn run_remote(&self, api: Api, mut input: TurnInput, method: &str) -> Result<TurnResult> {
-        input.settings["thinking"] = json!(wire::lower_reasoning(
-            input.settings["thinking"].as_str().unwrap_or("low"),
-            &input.model.info().thinking
-        ));
+    async fn run_remote(&self, api: Api, input: TurnInput, method: &str) -> Result<TurnResult> {
         let scope = input.scope.clone();
         let cancel = input.cancel.clone();
         let data = api.snapshot(&scope.session)?;
@@ -161,7 +157,10 @@ impl RemoteRuntime {
                 }
             });
         let model = input.model.info();
-        let settings = json!({"maxSteps":input.settings["step_limit"].as_u64().unwrap_or(12),"reasoning":input.settings["thinking"].as_str().unwrap_or("low"),"maxOutput":input.settings["output_limit"].as_u64().unwrap_or(model.output_limit)});
+        let mut settings = json!({"maxSteps":input.settings["step_limit"].as_u64().unwrap_or(12),"maxOutput":input.settings["output_limit"].as_u64().unwrap_or(model.output_limit)});
+        if let Some(level) = input.settings["thinking"].as_str() {
+            settings["reasoning"] = json!(level);
+        }
         let mut params = json!({"turn":{"sessionId":scope.session,"turnId":scope.turn,"startedBy":started_by,"model":wire::model_request_record(&model)["model"],"modelSupports":{"keepsState":model.keeps_state,"runsTools":model.runs_tools},"settings":settings}});
         if let Some(shape) = input.settings.get("result_shape") {
             params["turn"]["resultShape"] = shape.clone();
@@ -549,10 +548,11 @@ impl TurnWork {
             system: self.input.system.clone(),
             messages: model_messages(&data.branch(), scope.turn.as_deref())?,
             tools: current_model_tools(api, scope, &self.input.tools)?,
-            thinking: self.input.settings["thinking"]
-                .as_str()
-                .unwrap_or("low")
-                .into(),
+            thinking: wire::lower_reasoning(
+                self.input.settings["thinking"].as_str().unwrap_or(""),
+                &info.thinking,
+            )
+            .into(),
             extra: Value::Null,
             output_limit: self.input.settings["output_limit"]
                 .as_u64()

@@ -310,6 +310,9 @@ impl interface_acp::Factory for Factory {
     fn owns_session_agent(&self) -> bool {
         false
     }
+    fn serves_project(&self, project: &Path) -> bool {
+        project == self.0.inner.project
+    }
     async fn build(&self, project: &Path, sink: Sink) -> base::Result<base::Api> {
         base::ensure!(
             project == self.0.inner.project,

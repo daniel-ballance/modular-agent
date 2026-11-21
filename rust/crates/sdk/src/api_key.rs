@@ -16,23 +16,11 @@ enum Vendor {
 
 /// OpenAI Responses using `OPENAI_API_KEY`.
 pub fn openai() -> ApiKeyProvider {
-    ApiKeyProvider::new(
-        Vendor::OpenAi,
-        "https://api.openai.com/v1/responses",
-        "gpt-6-luna",
-        128_000,
-        8192,
-    )
+    ApiKeyProvider::new(Vendor::OpenAi, "https://api.openai.com/v1/responses")
 }
 /// Anthropic Messages using `ANTHROPIC_API_KEY`.
 pub fn anthropic() -> ApiKeyProvider {
-    ApiKeyProvider::new(
-        Vendor::Anthropic,
-        "https://api.anthropic.com/v1/messages",
-        "claude-sonnet-4-6",
-        200_000,
-        8192,
-    )
+    ApiKeyProvider::new(Vendor::Anthropic, "https://api.anthropic.com/v1/messages")
 }
 
 pub struct ApiKeyProvider {
@@ -42,18 +30,59 @@ pub struct ApiKeyProvider {
     test: bool,
 }
 impl ApiKeyProvider {
-    fn new(vendor: Vendor, endpoint: &str, id: &str, context_window: u64, max_output: u64) -> Self {
-        let mut p = Self {
+    fn new(vendor: Vendor, endpoint: &str) -> Self {
+        let mut provider = Self {
             vendor,
             endpoint: endpoint.into(),
             models: vec![],
             test: false,
         };
-        p = p.model(id, context_window, max_output);
-        p
+        provider.models = table()
+            .iter()
+            .filter(|m| m["provider"] == provider.id())
+            .map(|m| {
+                let mut catalog = m.clone();
+                catalog.as_object_mut().unwrap().remove("levels");
+                catalog["thinking"] = json!(levels(m));
+                serde_json::from_value(catalog).expect("valid API-key model table")
+            })
+            .collect();
+        provider
     }
-    /// Add a model to the offline catalog, or replace its limits.
-    pub fn model(mut self, id: &str, context_window: u64, max_output: u64) -> Self {
+
+    /// Enroll a text model, or override a listed model's limits without changing its capabilities.
+    pub fn model(self, id: &str, context_window: u64, max_output: u64) -> Self {
+        let input = self
+            .models
+            .iter()
+            .find(|m| m.model.id == id)
+            .and_then(|m| m.extra.get("input"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec!["text".into()]);
+        self.model_with_input(id, context_window, max_output, input)
+    }
+
+    /// Enroll an exact model id with the input types it accepts. Unlisted ids offer no reasoning levels.
+    pub fn model_with_input(
+        mut self,
+        id: &str,
+        context_window: u64,
+        max_output: u64,
+        input: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        if let Some(model) = self.models.iter_mut().find(|m| m.model.id == id) {
+            model.context_window = context_window;
+            model.max_output = max_output;
+            return self;
+        }
+        let input = input.into_iter().map(Into::into).collect::<Vec<String>>();
         let model = ModelInfo {
             model: ModelRef {
                 provider: self.id().into(),
@@ -61,13 +90,9 @@ impl ApiKeyProvider {
             },
             context_window,
             max_output,
-            thinking: match self.vendor {
-                Vendor::OpenAi => ["off", "low", "medium", "high"].map(str::to_owned).to_vec(),
-                Vendor::Anthropic => vec![],
-            },
-            extra: Default::default(),
+            thinking: vec![],
+            extra: serde_json::Map::from_iter([("input".into(), json!(input))]),
         };
-        self.models.retain(|m| m.model != model.model);
         self.models.push(model);
         self
     }
@@ -127,6 +152,16 @@ impl Provider for ApiKeyProvider {
                 Vendor::Anthropic => anthropic_body(&native),
             };
             body["model"] = json!(model.id);
+            let fields = body.as_object_mut().expect("vendor request object");
+            fields.remove("reasoning"); // Replace legacy Responses defaults with the shared table.
+            if let Some(mapping) = reasoning_fields(
+                self.id(),
+                &model.id,
+                request.0["settings"]["reasoning"].as_str(),
+                native.output_limit,
+            ) {
+                fields.extend(mapping);
+            }
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(15))
@@ -184,6 +219,57 @@ impl Provider for ApiKeyProvider {
         }
     }
 }
+const LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh"];
+
+fn table() -> &'static [Value] {
+    static TABLE: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table: Value = serde_json::from_str(include_str!("../api-key-models.json"))
+            .expect("valid API-key model table");
+        table["models"]
+            .as_array()
+            .expect("API-key model list")
+            .clone()
+    })
+}
+
+fn levels(model: &Value) -> Vec<String> {
+    LEVELS
+        .iter()
+        .filter(|level| model["levels"].get(**level).is_some())
+        .map(|level| (*level).into())
+        .collect()
+}
+
+fn reasoning_fields(
+    provider: &str,
+    id: &str,
+    chosen: Option<&str>,
+    max_output: u64,
+) -> Option<serde_json::Map<String, Value>> {
+    let chosen = chosen?;
+    let rank = LEVELS.iter().position(|level| *level == chosen)?;
+    let mappings = table()
+        .iter()
+        .find(|model| model["provider"] == provider && model["id"] == id)?["levels"]
+        .as_object()?;
+    let mut fields = LEVELS[..=rank]
+        .iter()
+        .rev()
+        .find_map(|level| mappings.get(*level))?
+        .clone();
+    if fields["thinking"]["type"] == "enabled" {
+        let budget = fields["thinking"]["budget_tokens"]
+            .as_u64()?
+            .min(max_output.saturating_sub(1));
+        if budget < 1024 {
+            return mappings.get("off")?.as_object().cloned();
+        }
+        fields["thinking"]["budget_tokens"] = json!(budget);
+    }
+    fields.as_object().cloned()
+}
+
 fn other(error: impl std::fmt::Display) -> ModelError {
     ModelError::new(Kind::Other, error.to_string())
 }

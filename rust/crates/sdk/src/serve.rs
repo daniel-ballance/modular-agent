@@ -328,6 +328,7 @@ impl Endpoint for Served {
                     session_id: p["sessionId"].as_str().unwrap_or_default().into(),
                     actor_id: p["actorId"].as_str().unwrap_or_default().into(),
                     cancelled: cancel,
+                    model: None,
                 };
                 let text = (command.run)(p["args"].as_str().unwrap_or_default().into(), cx)
                     .await

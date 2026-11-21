@@ -42,6 +42,43 @@ impl Authority {
         other.0.is_subset(&self.0)
     }
 }
+/// Local transport ceiling. Each connection pins the first recorded grant it
+/// encounters for a session, then intersects it with current authority on use.
+pub struct ConnectionCeiling {
+    actor: String,
+    token: Authority,
+    grants: std::sync::Mutex<std::collections::BTreeMap<String, Authority>>,
+}
+
+tokio::task_local! {
+    pub static CONNECTION_CEILING: std::sync::Arc<ConnectionCeiling>;
+}
+
+impl ConnectionCeiling {
+    pub fn new(actor: String, token: Authority) -> Self {
+        Self {
+            actor,
+            token,
+            grants: Default::default(),
+        }
+    }
+
+    pub fn narrow(session: &str, actor: &str, recorded: Authority) -> Authority {
+        CONNECTION_CEILING
+            .try_with(|ceiling| {
+                if actor != ceiling.actor {
+                    return recorded.clone();
+                }
+                let mut grants = ceiling.grants.lock().unwrap();
+                let first = grants
+                    .entry(session.into())
+                    .or_insert_with(|| recorded.intersect(&ceiling.token));
+                recorded.intersect(first)
+            })
+            .unwrap_or(recorded)
+    }
+}
+
 pub fn actors(data: &SessionData) -> std::collections::BTreeMap<String, Value> {
     let mut actors = std::collections::BTreeMap::new();
     for e in &data.entries {

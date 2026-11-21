@@ -301,9 +301,10 @@ pub(crate) fn discoverable(identity: &Identity, data: &SessionData) -> bool {
         && match recorded_rights(data, &identity.id) {
             Some(rights) => rights.is_some_and(|rights| {
                 rights.has("watch")
-                    && identity
-                        .rights
-                        .contains(&rights.intersect(&Authority::full()))
+                    && (identity.network
+                        || identity
+                            .rights
+                            .contains(&rights.intersect(&Authority::full())))
             }),
             None => identity.join_on_open,
         }
@@ -321,9 +322,12 @@ pub(crate) fn join_host(api: &dyn AgentApi, session: &str) -> Result<()> {
     let latest = recorded_rights(&data, &identity.id);
     if let Some(rights) = latest {
         ensure!(
-            rights
-                .is_some_and(|r| r.has("watch")
-                    && identity.rights.contains(&r.intersect(&Authority::full()))),
+            rights.is_some_and(|r| r.has("watch")
+                && (if identity.network {
+                    identity.rights.has("watch")
+                } else {
+                    identity.rights.contains(&r.intersect(&Authority::full()))
+                })),
             request_error("forbidden", "session inaccessible")
         );
     } else {
@@ -467,6 +471,7 @@ impl State {
                 .is_some_and(|servers| !servers.is_empty());
             ensure!(
                 self.principal.allows_project(&project)
+                    && self.factory.serves_project(&project)
                     && (!has_servers || self.principal.rights.has("tools"))
                     && (reopening
                         || (self.principal.allows_tenant(tenant)
@@ -574,8 +579,9 @@ impl State {
             approval_views: Mutex::default(),
         });
         requests(api.as_ref())?.presence(&id, connection_actor().as_str(), true);
-        let worker = tokio::spawn(PRINCIPAL.scope(
+        let worker = tokio::spawn(with_principal(
             self.principal.clone(),
+            self.ceiling.clone(),
             events::pump(
                 session.clone(),
                 rx,

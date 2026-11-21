@@ -1233,10 +1233,8 @@ impl Harness {
         };
         let env: Arc<dyn WorkingEnvironment> = capability(self, "environment")?;
         let mut settings = data.settings.clone();
-        settings["thinking"] = json!(wire::lower_reasoning(
-            settings["thinking"].as_str().unwrap_or("low"),
-            &info.thinking
-        ));
+        // Keep the requested level until the Runtime prepares a step against
+        // the refreshed Provider catalog. An absent setting stays absent.
         if let Some(shape) = source
             .and_then(|e| e.content.as_ref())
             .and_then(|v| v.get("resultShape"))
@@ -1727,6 +1725,7 @@ impl AgentApi for Harness {
                 }
             }
         }
+        authority = ConnectionCeiling::narrow(session, actor, authority);
         if let Some(cap) = data
             .entries
             .iter()

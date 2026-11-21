@@ -174,7 +174,7 @@ pub fn request_body(request: &ModelRequest) -> Result<Value> {
     let tools:Vec<_>=request.tools.iter().map(|t|json!({"type":"function","name":t.name,"description":t.description,"parameters":strict_schema(&t.input),"strict":true})).collect();
     // Keep shared levels in the catalog and history. Only the Responses API calls off "none".
     let effort = match request.thinking.as_str() {
-        "off" => "none",
+        "" | "off" => "none",
         level => level,
     };
     Ok(

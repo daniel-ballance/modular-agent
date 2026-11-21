@@ -203,7 +203,11 @@ impl Engine {
                 system: input.system.clone(),
                 messages: model_messages(&data.branch(), scope.turn.as_deref())?,
                 tools: offer.clone(),
-                thinking: input.settings["thinking"].as_str().unwrap_or("low").into(),
+                thinking: wire::lower_reasoning(
+                    input.settings["thinking"].as_str().unwrap_or(""),
+                    &info.thinking,
+                )
+                .into(),
                 extra: Value::Null,
                 output_limit: input.settings["output_limit"]
                     .as_u64()
@@ -1327,7 +1331,7 @@ impl Runtime for Engine {
                 .bind(name)?;
             let mut settings = saved["settings"].clone();
             settings["thinking"] = json!(wire::lower_reasoning(
-                settings["thinking"].as_str().unwrap_or("low"),
+                settings["thinking"].as_str().unwrap_or(""),
                 &model.info().thinking
             ));
             let input = TurnInput {
