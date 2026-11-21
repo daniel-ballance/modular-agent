@@ -72,6 +72,7 @@ impl Function {
         let mut parameters = required.clone();
         if let Some(properties) = tool.input["properties"].as_object() {
             parameters.extend(properties.keys().filter(|k| !required.contains(k)).cloned());
+            parameters[required.len()..].sort_unstable();
         }
         Ok(Self {
             name: identifier(&tool.name),
@@ -214,4 +215,66 @@ pub fn search<'a>(functions: impl Iterator<Item = &'a Function>, query: &str) ->
             .map(|f| json!({"name":f.name,"signature":f.signature(),"description":first_line(&f.tool.description)}))
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monty_types::MontyObject;
+
+    #[test]
+    fn positional_arguments_bind_in_the_order_shown_in_the_prompt() {
+        let functions = crate::functions(vec![
+            json!({"name": "read", "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["path"],
+            }}),
+            json!({"name": "mcp_inventory__lookup", "parameters": {
+                "type": "object",
+                "properties": {
+                    "zone": {"type": "string"},
+                    "sku": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "depot": {"type": "string"},
+                    "aisle": {"type": "string"},
+                },
+                "required": ["sku", "depot"],
+            }}),
+        ])
+        .unwrap();
+        let prompt = prompt(&functions);
+
+        let read = CallArgs::from(vec![
+            MontyObject::string("in.txt"),
+            MontyObject::int(1),
+            MontyObject::int(2),
+        ]);
+        assert_eq!(
+            functions[0].input(&read).unwrap(),
+            json!({"path": "in.txt", "limit": 1, "offset": 2})
+        );
+        assert!(
+            prompt.contains("## tools.read(path: str, limit: int = None, offset: int = None)\n")
+        );
+
+        let lookup = CallArgs::from(vec![
+            MontyObject::string("A123"),
+            MontyObject::string("north"),
+            MontyObject::string("B"),
+            MontyObject::int(10),
+            MontyObject::string("Z1"),
+        ]);
+        assert_eq!(
+            functions[1].input(&lookup).unwrap(),
+            json!({"sku": "A123", "depot": "north", "aisle": "B", "limit": 10, "zone": "Z1"})
+        );
+        assert!(prompt.contains(
+            "## tools.mcp_inventory__lookup(sku: str, depot: str, aisle: str = None, limit: int = None, zone: str = None)\n"
+        ));
+    }
 }
