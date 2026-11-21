@@ -109,10 +109,13 @@ Every SDK implements these identically and serves them from a fixture program, `
 | `scenario` | a unique name, the file's name without `.json` |
 | `about` | one sentence for people |
 | `rules` | the rules it checks, as links relative to `docs/` |
-| `agent` | `durability`, `plugins` (fixture names, in load order), `approval`, `answers` (for the [`answers` handler](#the-testing-kit), or absent for no handler), `settings`, `severalActors`, and `actors`: actors to join to the session after it is created, each `{ id, kind, rights }` |
+| `agent` | `durability`, `plugins` (fixture names, in load order), `approval`, `answers` (for the [`answers` handler](#the-testing-kit), or absent for no handler), `settings`, `severalActors`, and `actors`: actors to join to the session after it is created, each `{ id, kind, rights }`. Optional `history` selects an explicit fixture store: `file` or `service`, as described below. |
 | `model` | the [model script](#the-model-script) |
 | `placements` | optional; the placements it applies to, all by default |
 | `steps` | in order |
+| `expectCreateError` | optional `{ code, messageContains }`. With this expectation, `steps` is empty and the runner checks `createAgent` instead of opening a session. |
+
+For `agent.history: "file"`, the runner passes `fileHistory(dir)` explicitly. For `agent.history: "service"`, it starts a [history service](placement.md#services) over a file store and passes `httpHistory(url, tokenFile)` explicitly. Use a fresh store directory separate from `dataDir` in either case. The service fixture is independent of the placement of plugin fixtures. Set up the fixture before calling `createAgent`; a fixture setup error does not satisfy `expectCreateError`. The runner MUST check the error code and the required substring in the message. Success fails the expectation.
 
 A step is one of:
 

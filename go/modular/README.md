@@ -86,8 +86,3 @@ The base suites use Linux with unprivileged user, PID and mount namespaces. The 
 
 - The SDK does not yet expose all base roles: a developer tool source with change notification, a job owner and resumable job handles, and registrar History, Credential Store, Configuration and Interface roles. The bundled parts and the binding endpoints are not substitutes for those developer APIs.
 - Standard binding hooks are registerable, but not every point has a typed helper and a scoped SDK hook context. In-process-only hook points and answers such as plugin-defined hooks, join/leave observers, and pending from a tool gate still need SDK adapters. The Go SDK also does not yet expose all command-context callbacks or the embedded move, erase and direct-call operations.
-
-## Findings for the SDK specification
-
-- **[ACP service liveness](../../docs/research/sdk-findings.md#open-decisions).** Go proposes requiring JSON-RPC `$/ping` only for plugin service clients and using WebSocket ping/pong frames for ACP. The WebSocket binding currently does not make that distinction.
-- **[Persistent history under `ephemeral`](../../docs/research/sdk-findings.md#open-decisions).** Go accepts an explicit persistent store in this mode but does not declare `portableSessions`. Decide whether to allow the override and what the declaration promises.

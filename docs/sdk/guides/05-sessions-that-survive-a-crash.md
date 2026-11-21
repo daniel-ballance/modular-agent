@@ -6,9 +6,11 @@ Keep a session when the agent exits. Decide separately whether to resume a turn 
 
 | Durability | After the agent process ends |
 |---|---|
-| `ephemeral` (default) | With the default in-memory history, a new process cannot reopen the session. |
+| `ephemeral` (default) | Nothing survives the process. A new process cannot reopen the session. |
 | `kept` | Committed history survives. On reopen, an interrupted turn ends `failed`; you can send a fresh prompt. |
 | `durable` | Committed history survives. On reopen, the Runtime tries to continue the interrupted turn from its last committed checkpoint. |
+
+To use a persistent store or a history service, choose `kept` or `durable`. `createAgent` refuses either with `ephemeral`.
 
 Set `dataDir` to a persistent directory for `kept` or `durable`. The SDK puts default file history there. With an explicit persistent store, such as the [history service](09-share-sessions-between-agents.md), a part may still need the directory: the default local environment, for example, keeps command recovery bookkeeping there. `project` is the working directory, not the storage directory. See [Durability](../placement.md#durability).
 
@@ -287,4 +289,4 @@ async def test_reopens_an_interrupted_session(
 
 ## Kill a real process
 
-The restart helper interrupts tracked work without a graceful close. It does not test what happens to a real process or its children. The shared [kept crash](../../../conformance/sdk/scenarios/kept-crash.json) and [durable crash](../../../conformance/sdk/scenarios/durable-crash.json) scenarios use a non-repeatable counter tool. Each runner waits for the count file to reach one, kills the agent's process group with `SIGKILL`, and waits for the group to stop before reopening. Both scenarios check that the count is still one and the call is `outcomeUnknown`; only the durable turn continues. Run them with your SDK's [shared scenario runner](../testing.md#the-shared-scenarios).
+The restart helper interrupts tracked work without a graceful close. It does not test what happens to a real process or its children. The shared [kept crash](../../../conformance/sdk/scenarios/kept-crash.json) and [durable crash](../../../conformance/sdk/scenarios/durable-crash.json) scenarios use a non-repeatable counter tool. Each runner waits for the count file to reach one, kills the agent's process group with `SIGKILL`, and waits for the group to stop before reopening. Both scenarios check that the count is still one and the call is `outcomeUnknown`; only the durable turn continues. The [ephemeral crash](../../../conformance/sdk/scenarios/ephemeral-crash.json) scenario uses the same crash point and checks that the new process cannot reopen the session. Run them with your SDK's [shared scenario runner](../testing.md#the-shared-scenarios).

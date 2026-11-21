@@ -41,7 +41,9 @@ Each SDK provides constructors for the parts it ships: `transientRuntime()`, `du
 
 Each option that names a part is shorthand for a plugin that provides it. `providers`, `tools`, `environment` and the rest are added before `plugins`, in the order of this table, so an explicit plugin can [replace](#replacing-a-part) one of them.
 
-`createAgent` raises `invalid_composition` for a combination the [durability](placement.md#durability) rules forbid, `kept` or `durable` with no persistent history store, a part that needs local recovery bookkeeping to survive a restart (such as the local working environment under `kept` or `durable`) with no `dataDir`, `pluginHost: false` with a nonempty `processPlugins` or `servicePlugins` list, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. Failure to load, start, connect to, initialize or register a configured plugin fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
+`createAgent` raises `invalid_composition` for combinations the [durability rules](placement.md#durability) forbid. With `ephemeral`, an explicit persistent history store or a history service raises `invalid_composition` whose message names `kept`. The rule applies whether the store comes from `history` or a plugin registration.
+
+`createAgent` also raises `invalid_composition` for `pluginHost: false` with a nonempty `processPlugins` or `servicePlugins` list, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. Failure to load, start, connect to, initialize or register a configured plugin fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
 
 ## The agent
 
@@ -55,6 +57,8 @@ Each option that names a part is shorthand for a plugin that provides it. `provi
 | `models()` | the models its Providers offer, as ModelInfo |
 | `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md). On stdio it returns when the client disconnects. With `listen`, `actors` and optional `tls`, it returns a listener with `url` and `close()` once ready ([Placement](placement.md#the-whole-agent)). See composition options below. |
 | `close()` | closes open sessions, stops plugins in reverse load order and releases what it holds |
+
+For a WebSocket listener, each `actors` entry binds a token file to an actor and optional `tenants` and `projects` lists. Omitted `tenants` allows only sessions without a tenant; include `null` in a list to allow them. A project list matches exact canonical paths, not subdirectories. Omitted `projects` uses the serving composition's scope. An empty list permits nothing in its scope. The service computes the connection's rights by intersecting the token's rights with the actor's recorded grants at connection time, without rewriting those grants. See [The whole agent](placement.md#the-whole-agent) and the [WebSocket binding](../bindings/websocket.md#an-agent-service).
 
 Without a composition factory, ACP serves only the Agent's configured project. A factory builds an Agent for a canonical project and can use the saved session's identity or metadata when reopening. The serving agent needs access to the saved session's history before choosing a composition. Project settings supply defaults for new sessions, not replacements on reopen. Keep trusted project MCP configuration separate from attaching client-supplied servers under the [host MCP policy](../contracts.md#mcp-servers). See [Languages](languages.md) for the factory and callback signatures.
 
@@ -196,7 +200,7 @@ An embedded agent has the local actor, `user`. An app that serves several people
 
 Rights are the specification's named rights (`watch`, `propose`, `input`, `answer`, `approve`, `tools`, `cancel`, `settings`, `erase`, `grant`, `jobs`, `delegate`, `administer`). An operation without a required right raises `forbidden`, as ACP does.
 
-Authority comes from the app, which is the operator here. An Interface such as ACP authenticates its own actors; the SDK MUST NOT take an actor id from a client's request as proof of identity ([Security](../security.md#trust-boundaries)).
+Authority comes from the app, which is the operator here. An Interface such as ACP authenticates its own actors; the SDK MUST NOT take an actor id from a client's request as proof of identity ([Security](../security.md#trust-boundaries)). A token on a WebSocket connection also [limits scope and rights](#the-agent).
 
 ## Plugins
 
@@ -255,6 +259,7 @@ A plugin reaches the agent only through the context passed to the call it is ser
 | `refuse(reason)`: ends the call as `refused` | tool | yes |
 | `ask(question, wait?)` | tool | yes |
 | `ask(question, wait?)` | command | in process only |
+| `requestModel(request: ModelRequest) -> AssistantMessage`: one [auxiliary model request](#commands) using the session's current model | command with `usesModel` | in process only |
 | `environment`: the session's working environment, scoped to this call: `read` and `write` of bytes, `list`, and `exec(command, { timeout })` returning exit code, output and whether it timed out, with output as progress. Relative paths resolve against the session's project; an operation the environment lacks raises `not_supported`. | tool, command | yes; an ignore-aware file walk, where offered, is in process only |
 | `tools.list()`, `tools.call(name, input)`: [nested calls](../contracts.md#nested-calls) | tool | yes |
 | `jobs.start(kind, detail, key?)` | tool, command | yes |
@@ -334,6 +339,8 @@ A Provider may return opaque `providerData` in a response. The SDK keeps it in t
 
 The Provider gets its credential through `context.credential()`; it never receives one in configuration. In process, a Provider can also run tools itself, hold a live session or answer late. Those are in-process only ([Model request and response](../contracts.md#model-request-and-response)).
 
+The `openai()` and `anthropic()` constructors make API-key Providers for the Responses and Messages APIs, respectively. Their catalogs and reasoning settings follow the [shared API-key model table](api-key-models.md).
+
 ## Hooks
 
 `on(point, handler, order?)` registers a handler at a hook point. `order` is `first`, `normal` or `last`. Handlers combine by the [core rules](../contracts.md#hook-execution). Each point has a typed payload and a typed answer; returning nothing passes.
@@ -373,7 +380,11 @@ For `output`, a refused redaction withholds the output from that recipient ([The
 
 ## Commands
 
-`command(name, description, handler)` registers a command. The handler receives the argument text and a command context, and returns text for the actor or nothing. A command never starts a turn. A command that uses a model sets `usesModel` when registered and is in-process only ([Commands](../contracts.md#commands)).
+`command(name, description, handler)` registers a command. The handler receives the argument text and a command context, and returns text for the actor or nothing. A command never starts a turn. A command that uses a model MUST set `usesModel` and `inProcessOnly` at registration. A command that asks questions also remains in-process only. The [plugin binding](../bindings/plugin.md#the-host-asks-a-command) cannot carry model-using commands; `serve` refuses them with `not_supported` under the [registration rules](#plugins).
+
+A handler registered with `usesModel` may call `context.requestModel(request)` one or more times before the command settles. It supplies a [ModelRequest](../bindings/data.md#models), not a model id or a Provider. The agent uses the session's current model and its Provider. There is no unscoped access to a Provider.
+
+The agent requires the invoking actor's current `input` right and applies the same dispatch, persistence and metering rules as for a turn. It checks limits and charges usage to the session and its tenant. Each request passes through `provider.request`, `provider.response` and, where available, `provider.piece`, at the same points as an ordinary Provider request. The agent records each auxiliary `modelRequest` and `response`, including reported usage, under the command's `stepId` without a `turnId`. Each response names its request entry in `sources`. The request starts no turn and does not count toward `maxSteps`. The agent does not dispatch tool calls from the reply or authorize the Provider to run them. It returns the calls in the AssistantMessage to the handler. The agent does not automatically restart the command ([Commands](../contracts.md#commands)).
 
 ## Jobs
 

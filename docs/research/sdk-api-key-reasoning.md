@@ -1,6 +1,6 @@
-# Decision draft: reasoning in the API-key Providers
+# Research: reasoning in the API-key Providers
 
-Open. This proposal covers the SDK's `openai()` and `anthropic()` Providers, not subscription adapters. Vendor pages were fetched and checked on 2026-11-21.
+**Decided by [ADR 0029](../adr/0029-sdk-decisions-after-four-builds.md).** Option 2 was adopted; the [shared model table](../sdk/api-key-models.md) gives the rules now. This research covers the SDK's `openai()` and `anthropic()` Providers, not subscription adapters. Vendor pages were fetched and checked on 2026-11-21.
 
 ## What the APIs accept
 

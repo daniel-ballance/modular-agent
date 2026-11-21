@@ -96,7 +96,7 @@ What happened:
 
 - The agent started with its [defaults](../concepts.md#defaults): history in memory, the transient Runtime, a local working environment rooted at the current directory and no approval plugin.
 - `session` created a session. `prompt` admitted the input as the local actor, `user`, ran one turn and returned its outcome. `turn.outcome` says how it ended; `turn.text` is the answer.
-- Nothing was written to disk. When the process ends, the session is gone. [Sessions that survive a crash](README.md) changes that with one option.
+- No session history was written to disk. When the process ends, the session is gone. [Sessions that survive a crash](05-sessions-that-survive-a-crash.md) shows how to keep it.
 
 ## Stream the answer
 

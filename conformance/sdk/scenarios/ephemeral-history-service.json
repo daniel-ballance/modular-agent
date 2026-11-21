@@ -1,0 +1,9 @@
+{
+  "scenario": "ephemeral-history-service",
+  "about": "An ephemeral agent refuses a history service and names kept.",
+  "rules": ["sdk/placement.md#durability", "sdk/api.md#building-an-agent"],
+  "agent": {"durability": "ephemeral", "plugins": [], "history": "service"},
+  "model": [],
+  "expectCreateError": { "code": "invalid_composition", "messageContains": "kept" },
+  "steps": []
+}

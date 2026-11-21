@@ -4,6 +4,7 @@ The four SDKs share one version, the revision of the [SDK specification](docs/sd
 
 ## Unreleased
 
+- **Specified [ADR 0029](docs/adr/0029-sdk-decisions-after-four-builds.md):** ACP service liveness and token scope, rejection of persistent history under `ephemeral`, scoped model requests from commands, and a shared API-key model table.
 - **SDK options for several actors, session limits and tenants,** off unless chosen, and app-side questions: list the waiting ones, answer later, decline as distinct from text. In all four SDKs.
 - **Crash-safe secrets.** A secret answer is staged, then selected, then activated, so a crash at any point leaves the old value or the new one. In the SDKs' file credential stores and `ma`'s `auth.json`.
 - **Developer Providers** report catalog changes and readiness, in process and served over the plugin binding.
