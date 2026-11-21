@@ -149,7 +149,7 @@ A structured result is requested with `options.result`, a JSON Schema 2020-12 sc
 
 | Group | Event types |
 |---|---|
-| Session | `sessionStarted`, `sessionEnded`, `actorJoined`, `actorLeft` |
+| Session | `sessionStarted`, `sessionEnded`, `sessionInterrupted`, `actorJoined`, `actorLeft` |
 | Input | `inputAccepted`, `inputWithdrawn`, `inputHandedBack` |
 | Turns and steps | `turnStarted`, `turnEnded`, `stepStarted`, `stepEnded` |
 | Model output | `text`, `reasoning`, `toolInput`, `audio` |
@@ -160,7 +160,7 @@ A structured result is requested with `options.result`, a JSON Schema 2020-12 sc
 | Changes | `settingChanged`, `pluginLoaded`, `pluginReplaced`, `pluginUnloaded` |
 | Plugins | the plugin's own type, which contains a dot |
 
-The agent emits every standard event for the actions and states it supports ([Following a session](../contracts.md#following-a-session)). `questionNoLongerAnswerable` is distinct from `questionClosed`: the first says no eligible actor can answer any more, the second that the question has a recorded closure.
+The agent emits every standard event for the actions and states it supports ([Following a session](../contracts.md#following-a-session)). `questionNoLongerAnswerable` is distinct from `questionClosed`: the first says no eligible actor can answer any more, the second that the question has a recorded closure. `sessionInterrupted` says this agent stopped writing the session, with `data.reason` `commitFailed` or `writerLost`; it is live only, never recorded, and a `prompt` or `promptStream` waiting on the session fails with `lost`. Reopen the session to recover its work ([Recovery](../contracts.md#recovery-and-repeating-work)).
 
 Every event passes the [output gate](../contracts.md#the-output-gate) for the receiving actor first. Live model output is never history; `entry` reports what was kept.
 
