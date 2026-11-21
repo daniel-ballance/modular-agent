@@ -16,6 +16,15 @@ func discoverErasure(store api.Store, source string, ids []string) (api.ErasureI
 		return api.ErasureIntent{}, errors.Join(api.ErrErasureUnavailable, err)
 	}
 	selected := map[api.EntryPair]bool{}
+	locations := map[string]map[string]bool{}
+	for _, row := range all {
+		for _, e := range row.Entries {
+			if locations[e.ID] == nil {
+				locations[e.ID] = map[string]bool{}
+			}
+			locations[e.ID][row.ID] = true
+		}
+	}
 	for _, row := range all {
 		if row.ID != source {
 			continue
@@ -49,7 +58,19 @@ func discoverErasure(store api.Store, source string, ids []string) (api.ErasureI
 				if prefix {
 					from = origin
 				}
-				copied := slices.ContainsFunc(e.Copies, func(id string) bool { return selected[api.EntryPair{SessionID: from, ID: id}] })
+				copied := slices.ContainsFunc(e.Copies, func(id string) bool {
+					if prefix || locations[id][from] {
+						return selected[api.EntryPair{SessionID: from, ID: id}]
+					}
+					// Go job results also carry the child's source IDs.
+					// Follow those references when no local source exists.
+					for sid := range locations[id] {
+						if selected[api.EntryPair{SessionID: sid, ID: id}] {
+							return true
+						}
+					}
+					return false
+				})
 				if !selected[pair] && erasable(e) && (inputs[recordedInputID(e)] || copied) {
 					selected[pair], changed = true, true
 				}
