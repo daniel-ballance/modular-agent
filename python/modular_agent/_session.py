@@ -62,7 +62,6 @@ _EVENT_NAMES = {
     "plugin_loaded": "pluginLoaded",
     "plugin_replaced": "pluginReplaced",
     "plugin_unloaded": "pluginUnloaded",
-    "tool_progress": "toolOutput",
     "input_request_opened": "questionOpened",
     "input_request_answered": "questionAnswered",
     "input_request_closed": "questionClosed",
@@ -111,8 +110,20 @@ def _events(d: dict[str, Any]) -> list[Event]:
                 )
             ]
         )
-    if kind == "tool_progress" and d.get("final"):
-        return []
+    if kind == "tool_progress":
+        if d.get("final"):
+            return []
+        return [
+            _event(
+                "toolOutput",
+                {
+                    "toolCallId": d["call"],
+                    "chunk": d["text"],
+                    **({"content": d["content"]} if "content" in d else {}),
+                },
+                **args,
+            )
+        ]
     if kind == "turn_ended":
         data = turn_end_out(d)
     elif kind == "history_entry":

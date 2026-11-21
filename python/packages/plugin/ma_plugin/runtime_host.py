@@ -1129,6 +1129,7 @@ class TurnHost:
                     call=cid,
                     text=piece.get("text", ""),
                     final=False,
+                    **({"content": piece["content"]} if "content" in piece else {}),
                 )
 
             result = await self.api.call(
