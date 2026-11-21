@@ -91,6 +91,25 @@ test("HTTP erasure refuses a history delivery waiting at its output gate", async
   await refused;
 });
 
+test("a previously declared HTTP registry does not recreate missing storage", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-http-missing-registry-"));
+  const token = randomBytes(32).toString("hex"), tokenFile = join(dir, "token");
+  await writeFile(tokenFile, token, { mode: 0o600 });
+  const store = join(dir, "store"), options = { address: "127.0.0.1:0", tokenFile };
+  const first = await serveHistory(fileHistory(store), options);
+  await first.close();
+  await rename(join(store, "history.sqlite"), join(dir, "detached.sqlite"));
+  const restarted = await serveHistory(fileHistory(store), options);
+  t.after(async () => { await restarted.close(); await rm(dir, { recursive: true, force: true }); });
+  const headers = { authorization: `Bearer ${token}` };
+  const declaration = await fetch(`${restarted.url}/v1`, { headers });
+  assert.equal(declaration.status, 200);
+  assert.equal((await declaration.json() as { pendingErasure?: number }).pendingErasure, 1);
+  const registry = await fetch(`${restarted.url}/v1/sessions/previous/pending-erasure`, { headers });
+  assert.equal(registry.status, 503);
+  assert.equal((await registry.json() as { code: string }).code, "unavailable");
+});
+
 test("an independent erasure registry fences a restored history backup", async t => {
   const root = await mkdtemp(join(tmpdir(), "sdk-stale-restore-"));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -96,6 +96,7 @@ class Records {
 	private db: DatabaseSync;
 	private failed = false;
 	private registryFailed = false;
+	private disk?: { path: string; dev: bigint; ino: bigint };
 	holdUntil = 0;
 	ttlEpoch = 0;
 
@@ -104,8 +105,21 @@ class Records {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 			if (readdirSync(dir).some((name) => name.endsWith(".jsonl"))) throw new Error("Legacy history directory has no verifiable lease bound; use a fresh directory");
 		}
-		this.db = new DatabaseSync(dir === undefined ? ":memory:" : join(dir, "history.sqlite"));
+		const path = dir === undefined ? undefined : join(dir, "history.sqlite");
+		const marker = dir === undefined ? undefined : join(dir, "pending-erasure.profile");
+		const declared = marker !== undefined && existsSync(marker);
+		if (declared && !existsSync(path!)) {
+			// Do not create an empty archive in the place of an existing store.
+			this.db = new DatabaseSync(":memory:");
+			this.failed = true;
+			return;
+		}
+		this.db = new DatabaseSync(path ?? ":memory:");
 		try {
+			if (path !== undefined) {
+				const { dev, ino } = statSync(path, { bigint: true });
+				this.disk = { path, dev, ino };
+			}
 			// The retained exclusive lock prevents two service processes from
 			// managing independent lease maps over the same store. FULL sync
 			// and a rollback journal make a whole batch the durable unit.
@@ -116,7 +130,9 @@ class Records {
 				CREATE INDEX IF NOT EXISTS session_order ON sessions (created DESC, id);
 				CREATE TABLE IF NOT EXISTS entries (seq INTEGER PRIMARY KEY, session TEXT NOT NULL, id TEXT NOT NULL, json TEXT NOT NULL, UNIQUE (session,id));
 				CREATE INDEX IF NOT EXISTS entry_order ON entries (session,seq);`);
-			if (!this.db.prepare("SELECT 1 FROM settings WHERE key='pending-erasure-profile'").get()) {
+			const profile = this.db.prepare("SELECT value FROM settings WHERE key='pending-erasure-profile'").get();
+			if ((declared || profile) && profile?.value !== 1) this.registryFailed = true;
+			if (!declared && !profile) {
 				this.db.exec(`CREATE TABLE registry_revision (revision TEXT NOT NULL);
 					CREATE TABLE registry_intents (seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, operation TEXT UNIQUE NOT NULL, copies TEXT NOT NULL);
 					CREATE TABLE registry_plans (session TEXT NOT NULL, intent INTEGER NOT NULL, record TEXT NOT NULL, json TEXT NOT NULL,
@@ -137,6 +153,12 @@ class Records {
 			if (ttl > 0) this.bumpTtlEpoch();
 			else this.ttlEpoch = Number(this.db.prepare("SELECT value FROM settings WHERE key='ttl-epoch'").get()?.value ?? 0);
 			this.db.exec("COMMIT");
+			if (marker !== undefined && !declared && !this.registryFailed) {
+				// The marker detects an absent database, not two matching, stale backups.
+				writeFileSync(marker, "1\n", { mode: 0o600, flag: "wx", flush: true });
+				const directory = openSync(dir!, "r");
+				try { fsyncSync(directory); } finally { closeSync(directory); }
+			}
 			this.holdUntil = prior === undefined ? 0 : performance.now() + bound;
 		} catch (error) { this.db.close(); throw error; }
 	}
@@ -146,6 +168,7 @@ class Records {
 		this.ttlEpoch = Number(this.db.prepare("SELECT value FROM settings WHERE key='ttl-epoch'").get()!.value);
 	}
 	bindTtl(ttl: number) {
+		if (this.failed) return;
 		this.commit(() => {
 			this.db.prepare("UPDATE settings SET value=MAX(value,?) WHERE key='ttl-bound'").run(ttl);
 			this.bumpTtlEpoch();
@@ -253,6 +276,10 @@ class Records {
 	}
 	private revision() {
 		if (this.registryFailed) throw unavailable();
+		if (this.disk) {
+			const where = statSync(this.disk.path, { bigint: true, throwIfNoEntry: false });
+			if (where?.dev !== this.disk.dev || where.ino !== this.disk.ino) throw unavailable();
+		}
 		const rows = this.db.prepare("SELECT revision FROM registry_revision LIMIT 2").all();
 		if (rows.length !== 1 || !validLease(rows[0].revision)) throw unavailable();
 		return rows[0].revision;
@@ -631,7 +658,7 @@ export async function historyService(options: HistoryServiceOptions) {
 			if ((op === "renew" || op === "release") && !validLease(param)) return invalid("Invalid lease");
 			const { after, limit, project } = query(rawQuery, op === "list" ? ["after", "limit", "project"] : (op === "session" || op === "plans") && reading ? ["after", "limit"] : []);
 			const b = bodyObject(raw, req.method === "PUT" || op === "acquire" || op === "append" || op === "erase" || op === "complete" || (op === "plans" && !reading));
-			records?.check();
+			if (op !== "version") records?.check();
 			let result: unknown = {};
 			switch (op) {
 				case "version": result = { binding: HISTORY_BINDING, ttlMs, retention, ...(records && { pendingErasure: 1 }) }; break;
