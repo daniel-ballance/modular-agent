@@ -5,6 +5,7 @@ cgroup.kill is recursive and handles concurrent forks. Children inherit cgroups.
 """
 
 import asyncio
+import errno
 import json
 import os
 import time
@@ -70,8 +71,10 @@ def journal(path, value):
 def kill(group):
     try:
         (group / "cgroup.kill").write_text("1")
-    except FileNotFoundError:
-        pass
+    except OSError as exc:
+        # A second cleanup can remove the cgroup after we open cgroup.kill.
+        if exc.errno not in {errno.ENOENT, errno.ENODEV}:
+            raise
 
 
 def remove(group):
