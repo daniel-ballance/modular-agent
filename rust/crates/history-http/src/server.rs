@@ -215,27 +215,33 @@ impl SnapshotStore {
         );
         ensure!(max_sessions > 0, "history session quota must be positive");
         let exclusive = store.acquire(CONTROL)?;
-        let prior = match store.load(CONTROL) {
-            Ok(data) => Some(
-                data.settings["historyTtlBound"]
-                    .as_u64()
-                    .filter(|ms| (1..=MAX_COUNT).contains(ms))
-                    .ok_or_else(|| anyhow!("unknown previous history lease bound"))?,
+        let (prior, registry) = match store.load(CONTROL) {
+            Ok(mut data) => (
+                Some(
+                    data.settings["historyTtlBound"]
+                        .as_u64()
+                        .filter(|ms| (1..=MAX_COUNT).contains(ms))
+                        .ok_or_else(|| anyhow!("unknown previous history lease bound"))?,
+                ),
+                data.settings["pendingErasure"].take(),
             ),
             Err(e) if missing(&e) => {
                 ensure!(
                     store.list(None)?.is_empty(),
                     "history service needs a dedicated store with a verifiable lease bound"
                 );
-                None
+                (None, Value::Null)
             }
             Err(e) => return Err(e),
         };
         let bound = ttl_ms.max(prior.unwrap_or(0));
-        if prior != Some(bound) {
+        if !registry.is_null() {
+            serde_json::from_value::<super::pending::Registry>(registry.clone())?;
+        }
+        if prior != Some(bound) || registry.is_null() {
             store.save(&snapshot_data(
                 CONTROL.into(),
-                json!({"historyTtlBound": bound}),
+                json!({"historyTtlBound": bound, "pendingErasure": if registry.is_null() { json!(super::pending::Registry::default()) } else { registry }}),
                 vec![],
             ))?;
         }
@@ -271,13 +277,58 @@ impl SnapshotStore {
         self.store.save(&data).map_err(|_| Failure::Uncertain)
     }
 
+    fn registry(&self) -> std::result::Result<(SessionData, super::pending::Registry), Failure> {
+        let control = self
+            .store
+            .load(CONTROL)
+            .map_err(|_| Failure::unavailable())?;
+        let registry = serde_json::from_value(control.settings["pendingErasure"].clone())
+            .map_err(|_| Failure::unavailable())?;
+        Ok((control, registry))
+    }
+
+    // Runs under the same lock as append. Publication cannot miss a committed copy.
+    fn pending(&self, session: &str, targets: Option<Vec<String>>) -> Answer {
+        let (mut control, mut registry) = self.registry()?;
+        let Some(targets) = targets else {
+            return Ok(json!({"plans":registry.plans(session)}));
+        };
+        let mut sessions = Vec::new();
+        for snapshot in self.store.list(None).map_err(|_| Failure::unavailable())? {
+            if !snapshot.id.starts_with(PREFIX) {
+                continue;
+            }
+            let snapshot = unpack(snapshot)?;
+            // The raw API can store non-Harness records. Preserve its opaque
+            // behavior; do not infer authority or lineage from malformed rows.
+            if snapshot.entries.is_empty() && snapshot.metadata["id"] != session {
+                continue;
+            }
+            let data = agent_api::portable::session(&snapshot.metadata, &snapshot.entries)
+                .map_err(|_| Failure::unavailable())?;
+            sessions.push(data);
+        }
+        let copies = registry
+            .mark(session, targets, &sessions)
+            .map_err(|error| match error.downcast_ref::<OperationError>() {
+                Some(OperationError::NotFound(_)) => Failure::http(404, "unknown_entry"),
+                Some(OperationError::Forbidden(_)) => Failure::http(403, "forbidden"),
+                _ => Failure::unavailable(),
+            })?;
+        control.settings["pendingErasure"] = json!(registry);
+        self.store.save(&control).map_err(|_| Failure::Uncertain)?;
+        Ok(json!({"copies":copies}))
+    }
+
     fn apply(&self, route: Route, op: Op, query: Query, mut body: Value) -> Answer {
         let mut leases = self.leases.lock().map_err(|_| Failure::unavailable())?;
         let now = Instant::now();
         leases.retain(|_, lease| lease.until > now);
         let id = match route {
             Route::Root => {
-                return Ok(json!({"binding":"modular-agent-history/1","ttlMs":self.ttl_ms}));
+                return Ok(
+                    json!({"binding":"modular-agent-history/1","ttlMs":self.ttl_ms,"rustPendingErasure":1}),
+                );
             }
             Route::Sessions => {
                 let mut rows = self
@@ -295,6 +346,15 @@ impl SnapshotStore {
                         .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
                 });
                 return page(json!({}), "sessions", &rows, query, "unknown_session");
+            }
+            Route::Pending(ref id) => {
+                return self.pending(
+                    id,
+                    matches!(op, Op::Mark).then(|| {
+                        serde_json::from_value(body["entryIds"].take())
+                            .expect("validated erasure IDs")
+                    }),
+                );
             }
             Route::Session(ref id)
             | Route::Acquire(ref id)
@@ -402,6 +462,10 @@ impl SnapshotStore {
                 let added = stage(&record, more.as_array().unwrap())?;
                 let kept = added.len();
                 if kept != 0 {
+                    let (_, registry) = self.registry()?;
+                    if added.iter().any(|e| registry.affected(e)) {
+                        return Err(Failure::unavailable());
+                    }
                     record.entries.extend(added);
                     self.save(id, record)?;
                 }
@@ -431,12 +495,22 @@ impl SnapshotStore {
                         }
                     }
                 }
-                if changed {
+                if body.get("lease").is_some() {
+                    let (mut control, mut registry) = self.registry()?;
+                    let progress = registry.confirm(id, &record.entries, &erased);
+                    if changed {
+                        self.save(id, record)?;
+                    }
+                    if progress {
+                        control.settings["pendingErasure"] = json!(registry);
+                        self.store.save(&control).map_err(|_| Failure::Uncertain)?;
+                    }
+                } else if changed {
                     self.save(id, record)?;
                 }
                 Ok(json!({"erased":erased}))
             }
-            Op::Put => unreachable!(),
+            Op::Put | Op::Mark => unreachable!(),
         }
     }
 }
@@ -492,6 +566,22 @@ impl PortableHistoryStore for Arc<SnapshotStore> {
     }
     fn supports_history_service(&self) -> bool {
         true
+    }
+
+    fn coordinates_erasure(&self) -> bool {
+        true
+    }
+    async fn pending_erasure(
+        &self,
+        session: &str,
+        targets: Option<Vec<String>>,
+    ) -> HistoryResult<Value> {
+        let (op, body) = targets.map_or((Op::Get, Value::Null), |ids| {
+            (Op::Mark, json!({"entryIds":ids}))
+        });
+        self.clone()
+            .portable(Route::Pending(session.into()), op, Query::default(), body)
+            .await
     }
 
     async fn create(&self, session: &str, metadata: Value) -> HistoryResult<()> {
@@ -991,6 +1081,7 @@ enum Route {
     Renew(String, String),
     Entries(String),
     Erase(String),
+    Pending(String),
 }
 impl Route {
     fn segments(&self) -> Vec<&str> {
@@ -1003,6 +1094,7 @@ impl Route {
             Self::Renew(id, token) => vec!["v1", "sessions", id, "lease", token, "renew"],
             Self::Entries(id) => vec!["v1", "sessions", id, "entries"],
             Self::Erase(id) => vec!["v1", "sessions", id, "erase"],
+            Self::Pending(id) => vec!["rust", "erasure", "v1", id],
         }
     }
 
@@ -1025,6 +1117,7 @@ impl Route {
             }
             ["", "v1", "sessions", id, "entries"] => Self::Entries((*id).into()),
             ["", "v1", "sessions", id, "erase"] => Self::Erase((*id).into()),
+            ["", "rust", "erasure", "v1", id] => Self::Pending((*id).into()),
             _ => return Err(Failure::http(404, "not_found")),
         })
     }
@@ -1044,6 +1137,14 @@ impl Route {
             Self::Renew(..) => ("POST", (*method == Method::POST).then_some(Op::Renew)),
             Self::Entries(_) => ("POST", (*method == Method::POST).then_some(Op::Append)),
             Self::Erase(_) => ("POST", (*method == Method::POST).then_some(Op::Erase)),
+            Self::Pending(_) => (
+                "GET, POST",
+                match *method {
+                    Method::GET => Some(Op::Get),
+                    Method::POST => Some(Op::Mark),
+                    _ => None,
+                },
+            ),
         };
         op.ok_or(Failure::Http(
             405,
@@ -1054,9 +1155,11 @@ impl Route {
     fn validate(&mut self) -> std::result::Result<(), Failure> {
         let (id, lease) = match self {
             Self::Root | Self::Sessions => return Ok(()),
-            Self::Session(id) | Self::Acquire(id) | Self::Entries(id) | Self::Erase(id) => {
-                (id, None)
-            }
+            Self::Session(id)
+            | Self::Acquire(id)
+            | Self::Entries(id)
+            | Self::Erase(id)
+            | Self::Pending(id) => (id, None),
             Self::Lease(id, key) | Self::Renew(id, key) => (id, Some(key)),
         };
         *id = decode(id)?;
@@ -1081,6 +1184,7 @@ enum Op {
     Release,
     Append,
     Erase,
+    Mark,
 }
 impl Op {
     fn validate_body(&self, body: &Value, empty: bool) -> std::result::Result<(), Failure> {
@@ -1116,7 +1220,7 @@ impl Op {
                         })
                     })
             }
-            Self::Erase => {
+            Self::Erase | Self::Mark => {
                 body.get("lease").is_none_or(lease_field)
                     && body["entryIds"]
                         .as_array()

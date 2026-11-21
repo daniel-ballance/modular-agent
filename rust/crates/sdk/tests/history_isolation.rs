@@ -44,7 +44,7 @@ async fn raw_history_isolated_by_instance_credential_and_namespace() -> modular_
     let session = agent.session().await?;
     session.prompt("seed").await?;
     let id = session.id().to_owned();
-    assert_eq!(agent.declaration()?["erasure"], false);
+    assert_eq!(agent.declaration()?["erasure"], true);
     let client = reqwest::Client::new();
     let unauthorized = client
         .get(format!("{}/v1", b.url))

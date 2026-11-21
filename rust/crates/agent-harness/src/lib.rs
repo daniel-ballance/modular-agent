@@ -331,9 +331,10 @@ impl Harness {
         let session_id = id.to_owned();
         let (lease, mut data, erased) = tokio::task::spawn_blocking(move || -> Result<_> {
             let lease = store.acquire(&session_id)?;
+            let loaded = store.load(&session_id)?;
             let (data, erased) = match store.reconcile_erasure(&session_id)? {
                 Some((data, _)) => (data, true),
-                None => (store.load(&session_id)?, false),
+                None => (loaded, false),
             };
             store.check_erasure(&data)?;
             Ok((lease, data, erased))
@@ -2628,7 +2629,10 @@ impl AgentApi for Harness {
                             .map(|result| result.map(|(_, ids)| ids))
                     })
                 };
-                let done = result.ok().flatten().unwrap_or_default();
+                let done = result
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| store.confirmed_erasure(session).unwrap_or_default());
                 for id in targets {
                     if done.contains(id) {
                         erased.push(id.clone());

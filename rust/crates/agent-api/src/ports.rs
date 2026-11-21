@@ -284,6 +284,10 @@ pub trait HistoryStore: Send + Sync {
     }
     /// Reconcile under an already acquired writer lease. The return value contains
     /// the latest record and the IDs whose tombstones and bookkeeping are confirmed.
+    /// Previously verified tombstones, without attempting another writer acquisition.
+    fn confirmed_erasure(&self, _session: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
     fn reconcile_erasure(&self, _session: &str) -> Result<Option<(SessionData, Vec<String>)>> {
         Ok(None)
     }

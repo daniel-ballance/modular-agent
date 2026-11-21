@@ -822,6 +822,19 @@ pub(crate) async fn extension(
                 }
             }
             let mut report = api.erase(&scope, ids.into_iter().collect()).await?;
+            let visible_sessions: std::collections::BTreeSet<_> =
+                if report.qualified.iter().any(|(id, _)| id != &session.id) {
+                    let principal = PRINCIPAL.with(Clone::clone);
+                    factory
+                        .list(None)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|data| super::sessions::discoverable(&principal, data))
+                        .map(|data| data.id)
+                        .collect()
+                } else {
+                    Default::default()
+                };
             let mut hidden = false;
             let mut erased = Vec::new();
             let mut pending = Vec::new();
@@ -830,15 +843,16 @@ pub(crate) async fn extension(
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>()
             {
-                if sid != session.id {
+                if sid != session.id && !visible_sessions.contains(&sid) {
                     hidden = true;
                     continue;
                 }
                 let pair = json!({"sessionId":sid,"id":id});
                 if report.pending.contains(&id) {
-                    pending.push(pair.clone());
+                    pending.push(pair);
+                } else if report.erased.contains(&id) {
+                    erased.push(pair);
                 }
-                erased.push(pair);
             }
             if hidden {
                 report.out_of_reach.push("copies in other sessions".into());

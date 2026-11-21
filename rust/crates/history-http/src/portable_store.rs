@@ -60,6 +60,17 @@ pub trait PortableHistoryStore: Send + Sync + 'static {
     fn supports_erasure(&self) -> bool {
         false
     }
+    /// A service-specific extension, separate from the raw history binding.
+    fn coordinates_erasure(&self) -> bool {
+        false
+    }
+    async fn pending_erasure(
+        &self,
+        _session: &str,
+        _targets: Option<Vec<String>>,
+    ) -> HistoryResult<Value> {
+        Err(HistoryFault::Unavailable)
+    }
     async fn create(&self, session: &str, metadata: Value) -> HistoryResult<()>;
     async fn acquire(&self, session: &str, owner: &str) -> HistoryResult<LeaseGrant>;
     async fn renew(&self, session: &str, lease: &str) -> HistoryResult<u64>;
@@ -104,7 +115,18 @@ pub(super) async fn request(
     let body = body.unwrap_or_default();
     let reply: HistoryResult<Value> = match (method, path) {
         (Method::GET, ["v1"]) => {
-            Ok(json!({"binding":"modular-agent-history/1", "ttlMs":store.ttl_ms()}))
+            let mut declaration =
+                json!({"binding":"modular-agent-history/1", "ttlMs":store.ttl_ms()});
+            if store.coordinates_erasure() {
+                declaration["rustPendingErasure"] = json!(1);
+            }
+            Ok(declaration)
+        }
+        (Method::GET, ["rust", "erasure", "v1", id]) => store.pending_erasure(id, None).await,
+        (Method::POST, ["rust", "erasure", "v1", id]) => {
+            store
+                .pending_erasure(id, Some(serde_json::from_value(body["entryIds"].clone())?))
+                .await
         }
         (Method::PUT, ["v1", "sessions", id]) => store.create(id, body).await.map(|()| json!({})),
         (Method::GET, ["v1", "sessions"]) => {
