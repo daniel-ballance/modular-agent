@@ -38,6 +38,8 @@ async def test_history_port_create_and_paging(tmp_path):
             await second.prompt("two")
             assert creates.keys() == {first.id, second.id}
 
+            assert lists == [(None, None, 500)]  # Rebuild before accepting new work.
+            lists.clear()
             saved = await agent.sessions(project=tmp_path)
             assert {row["id"] for row in saved} == {first.id, second.id}
             assert lists == [(str(tmp_path), None, 500), (str(tmp_path), saved[0]["id"], 500)]

@@ -1462,8 +1462,48 @@ class ACP(Plugin):
         else:
             self.presence.get(sid, set()).discard(actor)
 
+    async def authorize_frame(self, sid, method, message):
+        # The handler may have waited behind another frame since its last check.
+        details = message.get("error", {}).get("data")
+        if isinstance(details, dict) and details.get("code") in {
+            "forbidden",
+            "not_open",
+            "wrong_project",
+            "unavailable",
+        }:
+            return
+        if (
+            "method" not in message
+            and method
+            not in {"session/load", "session/resume", "session/close", "_modular-agent/leave"}
+            and sid not in self.sessions
+        ):
+            # A close can settle an outstanding prompt before it gets the
+            # write lock. Do not include any content in this reply.
+            if (
+                method == "session/prompt"
+                and (message.get("result") or {}).get("stopReason") == "cancelled"
+            ):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {"stopReason": "cancelled"},
+                }
+            raise protocol_error("not_open", "Session is not open on this connection")
+        scope = self.project_scope()
+        token = OUTPUT_SESSION.set(sid)
+        try:
+            await self.check_delivery(sid, method)
+        finally:
+            OUTPUT_SESSION.reset(token)
+            self.reset_project_scope(scope)
+
     async def serve_frames(self, frames):
-        await acp.run_agent(self, Stdio(None, None, frames=frames), use_unstable_protocol=True)
+        await acp.run_agent(
+            self,
+            Stdio(None, None, frames=frames, authorize=self.authorize_frame),
+            use_unstable_protocol=True,
+        )
 
     async def serve(self):
         try:
@@ -1472,7 +1512,11 @@ class ACP(Plugin):
             from acp.stdio import stdio_streams
 
             reader, writer = await stdio_streams(limit=MAX_FRAME + 2)
-            await acp.run_agent(self, Stdio(reader, writer), use_unstable_protocol=True)
+            await acp.run_agent(
+                self,
+                Stdio(reader, writer, authorize=self.authorize_frame),
+                use_unstable_protocol=True,
+            )
         finally:
             # EOF interrupts the process, not an answer to a pending question.
             # Composition shutdown suspends the Runtime before tearing down plugins.

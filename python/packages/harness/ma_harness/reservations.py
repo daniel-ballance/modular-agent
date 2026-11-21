@@ -36,7 +36,7 @@ DEFAULTS = {
         controlBytes=64 * MIB,
     ),
 }
-MAX_ENTRY = 3 * MIB
+MAX_ENTRY = 4 * MIB
 CONTROL = {"limit", "authority", "actor_left", "erase", "position_move", "job_cleanup_unconfirmed"}
 
 
