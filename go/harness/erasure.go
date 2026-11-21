@@ -190,9 +190,6 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 				if err != nil {
 					return err
 				}
-				if running, _ := recovery(row); running != nil || unfinished(row) {
-					return api.ErrErasureBusy
-				}
 				_, err = reconcileCopies(lease, row, intents)
 				return err
 			})
@@ -255,16 +252,16 @@ func (s *session) reconcileErasureLocked() error {
 		if !needsErasure(s.data, *intents) {
 			return nil
 		}
-		if s.running || unfinished(s.data) || len(s.commandCancels) != 0 {
+		if s.running || (!s.opening && hasUnfinishedJobs(s.data)) || len(s.commandCancels) != 0 {
 			if s.cancel != nil {
 				s.cancel(api.ErrProcessStopped)
+			}
+			for pending := range s.commandCancels {
+				pending.cancel(api.ErrProcessStopped)
 			}
 			return api.ErrErasureUnavailable
 		}
 		if s.lease == nil {
-			return api.ErrErasureUnavailable
-		}
-		if interrupted, _ := recovery(s.data); interrupted != nil {
 			return api.ErrErasureUnavailable
 		}
 		old := s.data
@@ -309,6 +306,15 @@ func reconcileCopies(lease api.Lease, snap api.Session, intents *[]api.ErasureIn
 	exact, ok := lease.(api.ExactErasureLease)
 	if !ok {
 		return snap, api.ErrErasureUnsupported
+	}
+	if needsErasure(snap, *intents) {
+		settled := settleForErasure(snap)
+		if len(settled.Entries) > len(snap.Entries) {
+			if err := lease.Save(settled); err != nil {
+				return snap, err
+			}
+			snap = settled
+		}
 	}
 	for _, intent := range *intents {
 		var ids []string
