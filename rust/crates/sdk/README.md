@@ -98,7 +98,6 @@ rm -rf "$scratch"
 - **[API, fixed-project ACP](../../../docs/sdk/api.md#the-agent):** After the first sentence of the composition paragraph add “Connections may write different sessions concurrently. A second writer for an already open session is subject to the history writer rule; a refusal must not change the first connection's state.”
 - **[API, configuration and ACP](../../../docs/sdk/api.md#the-agent):** Replace “Project settings supply defaults for new sessions, not replacements on reopen.” with “Before invoking a factory that loads project-selected parts, consult the operator's configuration source for project trust. `trusted(project)` reads that decision; ACP's trust operation, where offered, changes it under operator authority. Project settings supply defaults for new sessions, not replacements on reopen.”
 
-- **[API, command environment progress](../../../docs/sdk/api.md#contexts):** Replace “with output as progress” with “with output as progress for tool calls. An out-of-turn command has no `toolCallId`; its exec output is returned in the result.” `toolOutput` requires a `toolCallId`, which a command does not have.
 
 ## Remaining
 

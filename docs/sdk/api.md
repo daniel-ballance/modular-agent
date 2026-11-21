@@ -264,7 +264,7 @@ A plugin reaches the agent only through the context passed to the call it is ser
 | `ask(question, wait?)` | tool | yes |
 | `ask(question, wait?)` | command | in process only |
 | `requestModel(request: ModelRequest) -> AssistantMessage`: one [auxiliary model request](#commands) using the session's current model | command with `usesModel` | in process only |
-| `environment`: the session's working environment, scoped to this call: `read` and `write` of bytes, `list`, and `exec(command, { timeout })` returning exit code, output and whether it timed out, with output as progress. Relative paths resolve against the session's project; an operation the environment lacks raises `not_supported`. | tool, command | yes; an ignore-aware file walk, where offered, is in process only |
+| `environment`: the session's working environment, scoped to this call: `read` and `write` of bytes, `list`, and `exec(command, { timeout })` returning exit code, output and whether it timed out, with output as progress for a tool call. A command has no `toolCallId`, so its exec output comes back only in the result. Relative paths resolve against the session's project; an operation the environment lacks raises `not_supported`. | tool, command | yes; an ignore-aware file walk, where offered, is in process only |
 | `tools.list()`, `tools.call(name, input)`: [nested calls](../contracts.md#nested-calls) | tool | yes |
 | `jobs.start(kind, detail, key?)` | tool, command | yes |
 | `jobs.unfinished()`, `jobs.resume(job)` | `session.start` hook of a job owner | yes |
