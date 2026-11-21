@@ -423,7 +423,8 @@ export class AcpInterface implements InterfaceCapability {
 					name === "answer" && represented ? "severalActors" : undefined;
 				if (represented && (name === "input" || name === "answer") && !this.represents(actorId)) throw bindingError("forbidden");
 				if (feature && this.bindingDeclaration(sessionId)[feature] !== true) throw bindingError("not_supported");
-				return (name === "requests" || name === "history") ? run(ctx) : this.gateReply(sessionId, method, await run(ctx));
+				const result = await this.checked(async () => run(ctx));
+				return (name === "requests" || name === "history") ? result : this.gateReply(sessionId, method, result);
 			});
 		};
 		extension("history", async ({ params }) => {
@@ -1070,7 +1071,7 @@ export class AcpInterface implements InterfaceCapability {
 		stream.readable = stream.readable.pipeThrough(new TransformStream({
 			transform(message, controller) {
 				if ("method" in message && "id" in message && message.id !== null && message.params && typeof message.params === "object") {
-					const { sessionId, when, actorId } = message.params as { sessionId?: unknown; when?: unknown; actorId?: unknown };
+					const { sessionId, when } = message.params as { sessionId?: unknown; when?: unknown };
 					if (typeof sessionId === "string" && replies.size < 1024) {
 						const method = message.method;
 						const watch = ["session/load", "session/resume", "_modular-agent/history", "_modular-agent/requests", "_modular-agent/jobs",

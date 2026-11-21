@@ -588,11 +588,16 @@ export class Harness {
 			}
 			return listener(event);
 		}, (e) => this.problem("harness", "follow", e),
-			options.onLag && (() => { s.followers.delete(follower); options.onLag!(); }));
+			() => { s.followers.delete(follower); options.onLag?.(); },
+			bytes => {
+				const key = `output:${this.newId()}`;
+				if (!this.reservations.reserve(s, key, { bufferedBytes: bytes })) return undefined;
+				return () => this.reservations.release(s, key);
+			});
 		// History first, from the requested point, then live events.
 		const from = options.fromEntry ?? s.order.length;
 		for (const id of s.order.slice(from)) follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: s.entries.get(id) });
-		s.followers.add(follower);
+		if (!follower.closed) s.followers.add(follower);
 		return Object.assign(() => { s.followers.delete(follower); follower.disconnect(); }, { idle: () => follower.idle() });
 	}
 
@@ -3176,6 +3181,8 @@ export class Harness {
 /** One recipient following a session, through the output gate. */
 class Follower {
 	private pending = 0;
+	private bytes = 0;
+	private charges = new Map<AgentEvent, () => void>();
 	private disconnected = false;
 	private held: AgentEvent[] = [];
 	private streams = new Map<string, AgentEvent[]>();
@@ -3187,24 +3194,42 @@ class Follower {
 		private listener: (event: AgentEvent) => unknown,
 		private onError: (e: unknown) => void,
 		private onLag?: () => void,
+		private reserve?: (bytes: number) => (() => void) | undefined,
 	) {}
+
+	get closed() { return this.disconnected; }
+
+	private drop(events: Iterable<AgentEvent>) {
+		for (const event of events) {
+			this.charges.get(event)?.();
+			this.charges.delete(event);
+		}
+	}
 
 	disconnect(): void {
 		this.disconnected = true;
+		this.drop(this.charges.keys());
 		this.held = [];
 		this.streams.clear();
 	}
 
 	push(event: AgentEvent): void {
 		if (this.disconnected) return;
-		if (this.onLag && this.pending >= 1024) {
-			if (event.type === "model.output" || event.type === "tool.progress") return;
+		const size = resourceBytes(event);
+		const lease = this.reserve?.(size);
+		if (this.pending >= 1024 || this.bytes + size > 64 * 1024 * 1024 || this.reserve && !lease) {
+			lease?.();
 			this.disconnect();
-			this.onLag();
+			this.onLag?.();
 			return;
 		}
+		this.bytes += size;
+		this.charges.set(event, () => { lease?.(); this.bytes -= size; });
 		this.pending++;
-		this.chain = this.chain.then(() => this.disconnected ? undefined : this.deliver(event)).catch(this.onError).finally(() => { this.pending--; });
+		this.chain = this.chain.then(() => this.disconnected ? undefined : this.deliver(event)).catch(this.onError).finally(() => {
+			this.pending--;
+			if (!this.held.includes(event) && ![...this.streams.values()].some(items => items.includes(event))) this.drop([event]);
+		});
 	}
 
 	/** Resolves once everything pushed so far has been delivered or blocked. */
@@ -3226,6 +3251,8 @@ class Follower {
 		const handlers = this.raw ? [] : this.hooks.raw("output");
 		if (event.type === "session.interrupted") {
 			// An incomplete stream must not be released because its writer stopped.
+			this.drop(this.held);
+			for (const pieces of this.streams.values()) this.drop(pieces);
 			this.held = [];
 			this.streams.clear();
 		}
@@ -3244,14 +3271,16 @@ class Follower {
 					return;
 				}
 				this.streams.delete(key);
-				if (pieces.length) await this.gate(pieces, true, handlers);
+				try { if (pieces.length) await this.gate(pieces, true, handlers); }
+				finally { this.drop(pieces); }
 			}
 			if (!modelEnd) await this.gate([event], true, handlers);
 			return;
 		}
 		const events = this.held.splice(0);
 		if (!modelEnd) events.push(event);
-		if (events.length) await this.gate(events, event.type !== "model.output", handlers);
+		try { if (events.length) await this.gate(events, event.type !== "model.output", handlers); }
+		finally { this.drop(events.filter(event => !this.held.includes(event))); }
 	}
 
 	private async gate(initial: AgentEvent[], final: boolean, handlers: ReturnType<HookRegistry["raw"]>): Promise<void> {
@@ -3269,7 +3298,9 @@ class Follower {
 					this.held = []; // what can't be decided at the end is blocked: fail closed
 					return;
 				}
-				this.held = events;
+				// Keep the original accounting when a gate held the whole chunk. Redacted
+				// replacements are not held if the gate changed their representation.
+				if (events.every(event => this.charges.has(event))) this.held = events;
 				return;
 			}
 			if (answer.events) events = answer.events;

@@ -78,7 +78,7 @@ test("declaration reflects the replacement Runtime and memory supports erasure",
   const s = await a.session();
   await s.prompt("Erase this");
   const { id } = (await s.history()).find(e => e.kind === "input")!;
-  assert.ok((await s.erase([id])).erased.includes(id));
+  assert.ok((await s.erase([id])).erased.some(copy => copy.sessionId === s.id && copy.id === id));
 });
 
 test("answers reports both unexpected questions and unused answers", async t => {

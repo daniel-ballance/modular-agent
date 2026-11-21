@@ -23,8 +23,8 @@ test("pending marks follow forks across held writers and survive restart", async
   const heldAgain = await b.openSession(secondId);
   const original = (await origin.history()).find(e => e.kind === "input")!;
   const report = await origin.erase([original.id, original.id]);
-  assert.ok(report.erasedPairs.some(copy => copy.sessionId === origin.id && copy.id === original.id));
-  for (const sid of [firstId, secondId]) assert.ok(report.pendingPairs.some(copy => copy.sessionId === sid));
+  assert.ok(report.erased.some(copy => copy.sessionId === origin.id && copy.id === original.id));
+  for (const sid of [firstId, secondId]) assert.ok(report.pending.some(copy => copy.sessionId === sid));
   await assert.rejects(held.fork(), { code: "unavailable" });
   const originId = origin.id;
   await a.close();
@@ -42,8 +42,8 @@ test("pending marks follow forks across held writers and survive restart", async
   const resumed = await c.openSession(originId);
   assert.deepEqual(await resumed.send("Never process this", "now", { key: "once" }), { duplicate: true, erased: true });
   const current = await resumed.erase([original.id]);
-  assert.equal(current.pendingPairs.length, 0);
-  assert.equal(current.erasedPairs.length, report.erasedPairs.length + report.pendingPairs.length);
+  assert.equal(current.pending.length, 0);
+  assert.equal(current.erased.length, report.erased.length + report.pending.length);
   assert.equal((await resumed.history()).filter(entry => entry.kind === "erasure").length, 1);
 });
 
