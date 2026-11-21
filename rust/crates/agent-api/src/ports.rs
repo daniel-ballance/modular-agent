@@ -149,6 +149,10 @@ pub trait AgentApi: Send + Sync {
     async fn withdraw(&self, session: &str, input: &str) -> Result<Input>;
     async fn history_view(&self, session: &str) -> Result<Value>;
     fn declaration(&self) -> Result<Value>;
+    /// Signals that the open session's writer can no longer commit.
+    fn writer_interruption(&self, _session: &str) -> Result<CancellationToken> {
+        Ok(CancellationToken::new())
+    }
     fn check_writer(&self, _session: &str) -> Result<()> {
         Ok(())
     }
@@ -220,6 +224,10 @@ impl std::fmt::Display for LostPart {
 }
 impl std::error::Error for LostPart {}
 pub trait Lease: Send + Sync {
+    /// An optional signal for losses detected without a call to `check`.
+    fn lost(&self) -> Option<CancellationToken> {
+        None
+    }
     fn check(&self) -> Result<()> {
         Ok(())
     }

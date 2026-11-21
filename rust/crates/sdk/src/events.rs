@@ -75,7 +75,7 @@ macro_rules! event_types {
 }
 
 event_types!(
-    SessionStarted: "sessionStarted", SessionEnded: "sessionEnded",
+    SessionStarted: "sessionStarted", SessionEnded: "sessionEnded", SessionInterrupted: "sessionInterrupted",
     ActorJoined: "actorJoined", ActorLeft: "actorLeft",
     InputAccepted: "inputAccepted", InputWithdrawn: "inputWithdrawn", InputHandedBack: "inputHandedBack",
     TurnStarted: "turnStarted", TurnEnded: "turnEnded", StepStarted: "stepStarted", StepEnded: "stepEnded",
@@ -136,6 +136,7 @@ impl Event {
             "setting.changed" => ("settingChanged", e.content.clone()),
             "session.start" => ("sessionStarted", e.content.clone()),
             "session.end" => ("sessionEnded", e.content.clone()),
+            "session.interrupted" => ("sessionInterrupted", e.content.clone()),
             "actor.joined" => ("actorJoined", e.content.clone()),
             "actor.left" => ("actorLeft", e.content.clone()),
             "step.start" => ("stepStarted", e.content.clone()),

@@ -97,6 +97,10 @@ rm -rf "$scratch"
 - **[API, fixed-project ACP](../../../docs/sdk/api.md#the-agent):** After the first sentence of the composition paragraph add “Connections may write different sessions concurrently. A second writer for an already open session is subject to the history writer rule; a refusal must not change the first connection's state.”
 - **[API, configuration and ACP](../../../docs/sdk/api.md#the-agent):** Replace “Project settings supply defaults for new sessions, not replacements on reopen.” with “Before invoking a factory that loads project-selected parts, consult the operator's configuration source for project trust. `trusted(project)` reads that decision; ACP's trust operation, where offered, changes it under operator authority. Project settings supply defaults for new sessions, not replacements on reopen.”
 
+### Proposed clarification: ACP session interruption
+
+The core now requires a live interruption event, but ACP does not specify its encoding. Add to `docs/bindings/acp.md` under Output: “On session interruption, the agent sends `session/update` with `sessionUpdate: agent_message_chunk`, empty text Content, and the shared `sessionInterrupted` event at `update._meta[\"modular-agent\"].event`. Do not replay this notification. A waiting prompt receives an error with `data.code: lost`.” Rust uses this representation; a client unaware of the extension sees no spurious text.
+
 ## Remaining
 
 - Custom Runtime and history still use native ports. The Runtime's native methods take a Harness API and an internal checkpoint; the remote Runtime bridge uses a different call-scoped callback port. A portable SDK Runtime needs a common adapter around those two paths. The native history port persists complete snapshots, including derived bookkeeping; a portable adapter needs to separate that bookkeeping from opaque append entries and fence each commit with the active lease token. The filesystem HTTP service continues to use its separate namespace. The public working-environment server adapts the native trait but does not yet expose the binding-shaped trait directly.

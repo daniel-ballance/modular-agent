@@ -292,15 +292,17 @@ impl std::error::Error for OpenBudgetExpired {}
 struct RemoteLease {
     id: String,
     stop: CancellationToken,
-    lost: CancellationToken,
     cutoff: Arc<Mutex<Duration>>,
 }
 impl RemoteLease {
-    fn check(&self) -> Result<()> {
+    fn check(&self, lost: &CancellationToken) -> Result<()> {
         if now() >= *self.cutoff.lock().unwrap() {
-            self.lost.cancel();
+            lost.cancel();
         }
-        ensure!(!self.lost.is_cancelled(), "history writer lease was lost");
+        ensure!(
+            !lost.is_cancelled(),
+            LostPart("history writer lease was lost".into())
+        );
         Ok(())
     }
 }
@@ -308,13 +310,14 @@ struct State {
     service: Service,
     session: String,
     lease: Mutex<Option<RemoteLease>>,
+    lost: CancellationToken,
     kept: Mutex<BTreeSet<String>>,
 }
 impl State {
     fn acquire(&self, ttl_ms: u64) -> Result<String> {
         let mut guard = self.lease.lock().unwrap();
         if let Some(lease) = &*guard {
-            lease.check()?;
+            lease.check(&self.lost)?;
             return Ok(lease.id.clone());
         }
         let owner = OWNER.get_or_init(id);
@@ -364,14 +367,13 @@ impl State {
         let remote = RemoteLease {
             id: lease.clone(),
             stop: CancellationToken::new(),
-            lost: CancellationToken::new(),
             cutoff: Arc::new(Mutex::new(cutoff)),
         };
         let service = self.service.clone();
         let session = self.session.clone();
         let lease_id = lease.clone();
         let stop = remote.stop.clone();
-        let lost = remote.lost.clone();
+        let lost = self.lost.clone();
         let cutoff = remote.cutoff.clone();
         io().spawn(async move {
             let mut ttl = Duration::from_millis(ttl);
@@ -430,9 +432,12 @@ impl Drop for State {
 }
 struct Held(#[allow(dead_code)] Arc<State>);
 impl Lease for Held {
+    fn lost(&self) -> Option<CancellationToken> {
+        Some(self.0.lost.clone())
+    }
     fn check(&self) -> Result<()> {
         if let Some(lease) = self.0.lease.lock().unwrap().as_ref() {
-            lease.check()?;
+            lease.check(&self.0.lost)?;
         }
         Ok(())
     }
@@ -525,6 +530,7 @@ impl HttpHistory {
             service: self.service.clone(),
             session: session.into(),
             lease: Mutex::default(),
+            lost: CancellationToken::new(),
             kept: Mutex::default(),
         })
     }
@@ -608,17 +614,21 @@ impl HistoryStore for HttpHistory {
             )?)?;
         }
         let lease = state.acquire(self.ttl)?;
-        let appended = self.service.post(
+        let appended = self.service.request(
+            Method::POST,
             &["v1", "sessions", &data.id, "entries"],
-            json!({"lease":lease,"entries":entries}),
+            None,
+            Some(json!({"lease":lease,"entries":entries})),
         );
         let guard = state.lease.lock().unwrap();
         let remote = guard.as_ref().expect("acquired lease");
-        if appended.is_err() {
-            remote.lost.cancel();
+        if appended.as_ref().map_or(true, |(status, body)| {
+            body["code"] == "lost" || (status.is_success() && !body["kept"].is_u64())
+        }) {
+            state.lost.cancel();
         }
-        appended?;
-        remote.check()?;
+        remote.check(&state.lost)?;
+        checked(appended?)?;
         kept.extend(
             entries
                 .drain(..)

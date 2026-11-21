@@ -545,6 +545,7 @@ impl Session {
         options: impl Into<PromptOptions>,
     ) -> Result<PromptResult> {
         let mut events = self.inner.hub.events.subscribe();
+        let interruption = self.inner.harness.writer_interruption(&self.id)?;
         let options = options.into();
         let receipt = self
             .admit(input.into(), Timing::Now, options.key, options.result)
@@ -558,6 +559,7 @@ impl Session {
                 return Ok(result);
             }
             tokio::select! {
+                _ = interruption.cancelled() => return Err(writer_interrupted()),
                 update = events.recv() => {
                     if matches!(update, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
                         return Err(Error::new(Code::Lost, "the event stream closed"));
@@ -653,6 +655,7 @@ impl Session {
         options: PromptOptions,
     ) -> Result<EventStream> {
         let events = self.inner.hub.events.subscribe();
+        let interruption = self.inner.harness.writer_interruption(&self.id)?;
         let receipt = self
             .admit(input.into(), Timing::Now, options.key, options.result)
             .await?;
@@ -663,34 +666,38 @@ impl Session {
         let run = self.drive();
         Ok(Box::pin(futures_util::stream::unfold(
             Some((events, run, receipt.input_id, me)),
-            |state| async move {
-                let (mut events, mut run, input, me) = state?;
-                loop {
-                    tokio::select! {
-                        biased;
-                        update = events.recv() => match update {
-                            Ok(e) if e.session_id == me.id && e.turn_id.is_some() => {
-                                let data = match me.snapshot() {
-                                    Ok(data) => data,
-                                    Err(e) => return Some((Err(e), None)),
-                                };
-                                if e.turn_id == input_turn(&data, &input) {
-                                    let ended = e.event_type == "turnEnded";
-                                    match me.gate_event(e).await {
-                                        Ok(Some(event)) => return Some((Ok(event), (!ended).then_some((events, run, input, me)))),
-                                        Ok(None) if ended => return None,
-                                        Ok(None) => continue,
+            move |state| {
+                let interruption = interruption.clone();
+                async move {
+                    let (mut events, mut run, input, me) = state?;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            update = events.recv() => match update {
+                                Ok(e) if e.session_id == me.id && e.turn_id.is_some() => {
+                                    let data = match me.snapshot() {
+                                        Ok(data) => data,
                                         Err(e) => return Some((Err(e), None)),
+                                    };
+                                    if e.turn_id == input_turn(&data, &input) {
+                                        let ended = e.event_type == "turnEnded";
+                                        match me.gate_event(e).await {
+                                            Ok(Some(event)) => return Some((Ok(event), (!ended).then_some((events, run, input, me)))),
+                                            Ok(None) if ended => return None,
+                                            Ok(None) => continue,
+                                            Err(e) => return Some((Err(e), None)),
+                                        }
                                     }
                                 }
+                                Ok(_) => (),
+                                Err(e) => return Some((Err(Error::new(Code::Lost, e.to_string())), None)),
+                            },
+                            _ = interruption.cancelled() => return Some((Err(writer_interrupted()), None)),
+                            done = &mut run => match done {
+                                Ok(Ok(())) => return None,
+                                Ok(Err(e)) => return Some((Err(e), None)),
+                                Err(e) => return Some((Err(Error::new(Code::Lost, e.to_string())), None)),
                             }
-                            Ok(_) => (),
-                            Err(e) => return Some((Err(Error::new(Code::Lost, e.to_string())), None)),
-                        },
-                        done = &mut run => match done {
-                            Ok(Ok(())) => return None,
-                            Ok(Err(e)) => return Some((Err(e), None)),
-                            Err(e) => return Some((Err(Error::new(Code::Lost, e.to_string())), None)),
                         }
                     }
                 }
@@ -1200,6 +1207,10 @@ fn input_turn(data: &base::SessionData, id: &str) -> Option<String> {
                 && e.content.as_ref().is_some_and(|c| c["inputId"] == id)
         })
         .and_then(|e| e.scope.turn.clone())
+}
+
+fn writer_interrupted() -> Error {
+    Error::new(Code::Lost, "session writer interrupted; reopen to recover")
 }
 
 fn no_turn(input_id: String, disposition: Disposition) -> PromptResult {
