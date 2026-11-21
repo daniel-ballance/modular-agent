@@ -38,6 +38,30 @@ pub struct LocalEnvironment {
     store: PointStore,
     points: Arc<points::Points>,
     background: std::sync::Mutex<std::collections::BTreeMap<String, Vec<containment::Command>>>,
+    #[cfg(target_os = "macos")]
+    active: ActiveCommands,
+}
+
+#[cfg(target_os = "macos")]
+type ActiveCommands = std::sync::Mutex<
+    std::collections::BTreeMap<
+        (String, String),
+        (CancellationToken, tokio::sync::oneshot::Receiver<()>),
+    >,
+>;
+
+#[cfg(target_os = "macos")]
+struct ActiveCommand<'a> {
+    commands: &'a ActiveCommands,
+    key: (String, String),
+    _settled: tokio::sync::oneshot::Sender<()>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ActiveCommand<'_> {
+    fn drop(&mut self) {
+        self.commands.lock().unwrap().remove(&self.key);
+    }
 }
 #[derive(Default)]
 struct TextDecoder(Vec<u8>);
@@ -108,6 +132,8 @@ fn install(
             store,
             points: Arc::default(),
             background: Default::default(),
+            #[cfg(target_os = "macos")]
+            active: Default::default(),
         }),
     )
 }
@@ -117,6 +143,27 @@ fn path(project: &Path, name: &str) -> PathBuf {
 #[async_trait]
 impl WorkingEnvironment for LocalEnvironment {
     async fn session_ended(&self, session: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let settling = {
+                let mut active = self.active.lock().unwrap();
+                let keys: Vec<_> = active
+                    .keys()
+                    .filter(|(sid, _)| sid == session)
+                    .cloned()
+                    .collect();
+                keys.into_iter()
+                    .filter_map(|key| active.remove(&key))
+                    .map(|(cancel, done)| {
+                        cancel.cancel();
+                        done
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for done in settling {
+                let _ = done.await;
+            }
+        }
         let mut jobs = self
             .background
             .lock()
@@ -265,6 +312,24 @@ impl WorkingEnvironment for LocalEnvironment {
         command: &str,
         cancel: CancellationToken,
     ) -> Result<ToolResult> {
+        #[cfg(target_os = "macos")]
+        let (cancel, _active) = {
+            let key = (scope.session.clone(), id());
+            let (settled, done) = tokio::sync::oneshot::channel();
+            let cancel = cancel.child_token();
+            self.active
+                .lock()
+                .unwrap()
+                .insert(key.clone(), (cancel.clone(), done));
+            (
+                cancel,
+                ActiveCommand {
+                    commands: &self.active,
+                    key,
+                    _settled: settled,
+                },
+            )
+        };
         let mut child = containment::spawn(&self.state, &project, command, self.keep_background)?;
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -325,7 +390,10 @@ impl WorkingEnvironment for LocalEnvironment {
             if !settled {
                 let _ = (&mut child.done).await;
             }
+            #[cfg(target_os = "linux")]
             child.join()?;
+            #[cfg(target_os = "macos")]
+            tokio::task::spawn_blocking(move || child.join()).await??;
         }
         let mut end = Event::new(&scope, "tool.stream.end", Value::Null);
         end.stream = Some(stream);
@@ -343,7 +411,9 @@ impl WorkingEnvironment for LocalEnvironment {
             call: scope.call.unwrap_or_default(),
             status,
             text: output,
-            value: Some(json!({"exit_code":exit.and_then(|s|s.code())})),
+            value: Some(
+                json!({"exit_code":if cfg!(target_os = "macos") && cancelled { None } else { exit.and_then(|s|s.code()) }}),
+            ),
         })
     }
 }

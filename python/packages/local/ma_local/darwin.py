@@ -11,6 +11,7 @@ import tempfile
 from ma_core import AgentError, Plugin
 
 from . import Local
+from .points import Points
 
 
 class DarwinLocal(Local):
@@ -28,6 +29,19 @@ class DarwinLocal(Local):
         api.provide("environment", self)
         api.on("session.end", self._close)
         api.on("session.suspend", self._close)
+
+    async def _close(self, d):
+        session = d["session"]
+        if isinstance(self.points, Points):
+            self.points.close(session)
+        # All groups begin their grace period together, not one per command.
+        results = await asyncio.gather(
+            *(self._stop_command(item) for item in self.commands.pop(session, [])),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def _stop_command(self, item):
         process, lifetime = item
