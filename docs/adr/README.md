@@ -33,3 +33,4 @@ The records keep the original decisions and evidence. [Contracts](../contracts.m
 | [0027](0027-sdk-0-1-and-edition-4.md) | SDK specification 0.1 accepted; edition 4 replaces edition 3 as the edition to pin | Accepted | [Conformance](../conformance.md#versioning), [SDK specification](../sdk/README.md) |
 | [0028](0028-websocket-transport.md) | Parts and agents as services: the plugin and ACP bindings over one WebSocket transport | Accepted | [WebSocket transport](../bindings/websocket.md) |
 | [0029](0029-sdk-decisions-after-four-builds.md) | Five SDK decisions the four builds could not settle: ACP liveness and token scope, no persistent history under `ephemeral`, model requests from commands, one reasoning table for the API-key Providers | Accepted | [SDK specification](../sdk/README.md) |
+| [0030](0030-production-gaps.md) | Per-connection isolation, resource reservations and cross-session erasure coordination | Proposed | [Security](../security.md) |

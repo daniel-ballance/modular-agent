@@ -56,15 +56,17 @@ The history store has its own service binding:
 - `serveHistory(store, { address, tokenFile })` serves a history store as the [history service](../bindings/history-http.md), if the store can keep the binding's promises. The adapter preserves opaque JSON, durable commits, equality on append, filtered session lists, writer leases and erasure by tombstone. It refuses any other store with `not_supported`, naming it, rather than substituting another backend. A volatile memory store cannot be served as a conforming history service, since the binding requires entries to survive a restart; a build may offer a test-only in-memory service that is labelled as not conforming. A file store may serve from a separate namespace of opaque records rather than its native sessions; the SDK documents which, and whether existing native sessions can be opened through the service. Plain HTTP is served only on loopback.
 - `httpHistory(url, tokenFile)` is a history store that uses one.
 
+A history service credential has raw access to the whole service. Use [separate services and storage](../bindings/history-http.md#the-basics) when writers must be isolated.
+
 Agents in any language that share a history service and the same actor ids can reopen and continue each other's [portable sessions](../bindings/data.md#portable-sessions).
 
 ## The whole agent
 
 - **Embedded.** The app holds the Agent and calls it.
 - **Over ACP.** `agent.serveAcp()` serves the agent on stdio. Any ACP client can drive it: an editor, T3 Code, or another agent. The ACP Interface authenticates the connection's actor ([ACP Authorization](../bindings/acp.md#authorization)).
-- **As a service.** `agent.serveAcp({ listen, actors, tls? })` serves ACP on a WebSocket. `actors` lists, for each token file, the actor its connections act as: `{ tokenFile, actor: { id, kind, rights }, tenants?, projects? }`. A connection presenting no listed token is refused. The token, not anything the client sends, decides the actor ([WebSocket transport](../bindings/websocket.md#an-agent-service)). Once ready, the listener returns `url` and `close()`. Closing it stops accepting connections and closes the existing ones.
+- **As a service.** `agent.serveAcp({ listen, actors, tls? })` serves ACP on a WebSocket. `actors` lists, for each token file, the actor its connections act as: `{ tokenFile, actor: { id, kind, rights }, tenants?, projects?, represents? }`. A connection presenting no listed token is refused. The token, not anything the client sends, decides the actor ([WebSocket transport](../bindings/websocket.md#an-agent-service)). Once ready, the listener returns `url` and `close()`. Closing it stops accepting connections and closes the existing ones.
 
-Omit `tenants` to allow only sessions without a tenant. Include `null` in an explicit `tenants` list to allow such sessions. `projects` matches exact canonical project paths, not subdirectories. Omit it to use the serving composition's project scope. An empty list permits nothing in its scope. At connection time the service intersects the token's rights with the actor's recorded grants; it does not rewrite the grants. Session and tenant authority checks still apply.
+Omit `tenants` to allow only sessions without a tenant. Include `null` in an explicit `tenants` list to allow such sessions. `projects` matches exact canonical project paths, not subdirectories. Omit it to use the serving composition's project scope. An empty list permits nothing in its scope. At connection time the service intersects the token's rights with the actor's recorded grants; it does not rewrite the grants. Session and tenant authority checks still apply. `represents` names additional actors the operator permits the connection to act for; it does not join them. Stdio takes its scope and optional rights ceiling and representation from [operator options](api.md#the-agent).
 
 ## Durability
 

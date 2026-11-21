@@ -362,6 +362,8 @@ The host MUST fit the whole `result` it sends, including any `next`, in 4 MiB. I
 
 ### Authority
 
+For a hosted connection, the host MUST resolve parent RPC IDs and plugin ownership in that connection's state, not across connections, even when the same service supplies multiple registrations or hosts. See [plugin services](websocket.md#a-plugin-service).
+
 The host MUST reject invalid authority, scope, role, ownership or parent with `invalid_request`, or drop an invalid notification. It MUST check parent liveness at frame acceptance and recheck at dispatch, using the tracked scope rather than callback parameters. A supplied session MUST match the parent. The [transport cutoff](#transport) and [core final check](../contracts.md#tool-dispatch) also apply.
 
 | Plugin method | Caller and required parent or scope |
@@ -413,6 +415,8 @@ A build serving the conformance plugin MUST document its command and support the
 - The `tool.before` fixture MUST refuse a call whose input JSON contains `conformance-forbidden`, with reason `refused by the conformance plugin`. The `turn.before` fixture MUST contribute `{ "system": "The conformance plugin is loaded." }`. The `output` fixture MUST replace `conformance-secret` with `[redacted]` in editable strings, including a match across text events within one segment, without making other changes.
 
 ## Changes
+
+- **Proposed production rules.** Hosted callbacks resolve parent IDs and ownership within their connection.
 
 - **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). Still `/1`: every addition is an optional method that an edition 3 peer answers with the method-not-found or `not_supported` error. `host/tools/list` and `host/tools/call` let a tool source in another process make nested calls (the standard configuration's code tool could not be served over the wire). `env/list` and `host/env/list` list a directory (its `find` and `list` tools had to shell out). A cancelled Provider request sends no `provider.response`, and `outOfReach` items are for people (both guessed by the Claude sidecar). The fixture gains the optional tool `nest`.
 

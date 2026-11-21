@@ -33,6 +33,10 @@ See [MCP servers](contracts.md#mcp-servers) for programs an Interface asks the a
 
 The connection rules also give the `joinOnOpen` default. See [Limits and tenants](contracts.md#limits-and-tenants) for tenant access, inheritance and session ceilings.
 
+### Connection scope
+
+An Interface connection's project and tenant limits restrict which sessions and mediated operations it can reach. They do not confine trusted code, a Provider or a shell. The operator MUST separate agents, stores, credentials and working environments wherever the deployment requires isolation those parts do not enforce. This includes tenant-isolated deployments with loaded plugins that can read raw records. See [ACP authorization](bindings/acp.md#authorization), [plugin services](bindings/websocket.md#a-plugin-service) and [history HTTP authentication](bindings/history-http.md#the-basics).
+
 ## Plugins
 
 [Configuration and trust](contracts.md#configuration-and-trust) covers approved code and project options. The operator SHOULD review the project's executable code, settings and dependencies before granting trust and when they change.
