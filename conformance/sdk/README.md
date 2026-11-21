@@ -18,10 +18,15 @@ A scenario that turns out to be wrong is fixed here first, then in the SDKs.
 | [`actor-rights`](scenarios/actor-rights.json) | An actor without `input` cannot prompt |
 | [`approval-without-handler`](scenarios/approval-without-handler.json) | With no handler, an approval is refused rather than left waiting |
 | [`read-only-approval`](scenarios/read-only-approval.json) | Under `ask`, a read-only tool runs without asking |
+| [`ephemeral-crash`](scenarios/ephemeral-crash.json) | An ephemeral session cannot be reopened after a crash |
+| [`ephemeral-file-history`](scenarios/ephemeral-file-history.json) | Composition refuses explicit file history under `ephemeral` and names `kept` |
+| [`ephemeral-history-service`](scenarios/ephemeral-history-service.json) | Composition refuses a history service under `ephemeral` and names `kept` |
 | [`kept-crash`](scenarios/kept-crash.json) | A crash under `kept`: the turn fails, the call is not repeated |
 | [`durable-crash`](scenarios/durable-crash.json) | A crash under `durable`: the turn carries on, the call is not repeated |
 
 ## Results
+
+These results are from before [ADR 0029](../../docs/adr/0029-sdk-decisions-after-four-builds.md) and do not include its three ephemeral scenarios.
 
 SDK specification 0.1 after the fourth build round. Each runner ran all fourteen scenarios in process, served by each SDK's fixture program on stdio, and served by each as a WebSocket service, with `MODULAR_AGENT_SDK_REQUIRE=all`:
 

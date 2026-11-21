@@ -1,0 +1,11 @@
+{
+  "scenario": "ephemeral-crash",
+  "about": "A session cannot be reopened after an ephemeral agent crashes.",
+  "rules": ["sdk/placement.md#durability", "sdk/api.md#building-an-agent"],
+  "agent": {"durability": "ephemeral", "plugins": ["counter"]},
+  "model": [{"toolCalls": [{"name": "bump", "input": {"hold": true}}]}],
+  "steps": [
+    { "prompt": "Increment the counter.", "crashWhen": { "count": 1 } },
+    { "reopen": true, "expect": { "error": "not_found" } }
+  ]
+}

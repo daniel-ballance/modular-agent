@@ -2,7 +2,7 @@
 
 This binding carries the [plugin binding](plugin.md) and the [ACP host binding](acp.md) over a network: the same messages, one per WebSocket text message instead of one per line. It is what lets a part, or a whole agent, run as a service. [ADR 0028](../adr/0028-websocket-transport.md) records why.
 
-Everything in the carried binding still applies, except the stdio rules this page replaces: how the peers connect and authenticate, how a message is framed, and what ends the connection.
+Everything in the carried binding still applies, except for the transport rules on this page: how peers connect and authenticate, how a message is framed, liveness and what ends a connection.
 
 ## Roles
 
@@ -23,14 +23,14 @@ A server MAY accept many connections. Each connection is independent, with its o
 
 - Each WebSocket text message carries exactly one JSON-RPC object, encoded as UTF-8 with no byte order mark and no batch. A peer MUST NOT send binary messages; a receiver MUST close on one with status 1003.
 - The 64 MiB cap of the carried binding counts the bytes of one message. Receivers MUST bound a message before buffering it whole, and close with status 1009 on an oversized message. The carried binding's rules for oversized results and errors apply unchanged.
-- All other message rules of the carried binding apply: ids, cancellation, notifications, ordering, errors and `$/ping`. WebSocket ping and pong frames MAY also be used; they are not `$/ping`.
+- All other message rules of the carried binding apply: ids, cancellation, notifications, ordering and errors. WebSocket ping and pong frames are not `$/ping`.
 
 ## Connection lifetime
 
 The connection takes the place of the child process's pipes, and closing it takes the place of the process ending:
 
-- **Loss.** A peer MUST treat a closed connection, a failed TLS session, a missed `$/ping` deadline or any protocol close as the carried binding's connection loss: unanswered work settles once as `lost`, and the host applies [Parts that are lost](../contracts.md#parts-that-are-lost). The server MUST stop the work it started for that connection as the carried binding requires when its peer is lost. There is no resumption: a new connection is a new plugin instance or ACP connection.
-- **Liveness.** Because a network can stall without closing, the client MUST send `$/ping` when a connection with pending work has been silent for an operator-configured interval, by default 30 seconds, and treat no answer within the carried binding's control deadline as loss.
+- **Loss.** A peer MUST treat a closed connection, a failed TLS session, a missed liveness deadline or any protocol close as the carried binding's connection loss: unanswered work settles once as `lost`, and the host applies [Parts that are lost](../contracts.md#parts-that-are-lost). The server MUST stop the work it started for that connection as the carried binding requires when its peer is lost. There is no resumption: a new connection is a new plugin instance or ACP connection.
+- **Plugin liveness.** A plugin service client MUST send `$/ping` when a connection with pending work has been silent for an operator-configured interval, by default 30 seconds. The [plugin binding's](plugin.md#transport) `$/ping` and control deadline apply. WebSocket ping frames MAY also be used; they do not replace the plugin client's `$/ping`.
 - **Plugin shutdown.** `plugin/shutdown` ends the plugin instance, not the service. After answering it, the plugin service MUST close the connection with status 1000. Where the stdio binding says a plugin exits on stdin EOF, a plugin service ends that instance when the connection closes.
 - **Command lifetime.** A working environment served over this transport MUST treat the end of a host connection as the agent's loss in [Command lifetime](plugin.md#command-lifetime): it stops the commands that connection started within its declared containment.
 
@@ -46,7 +46,10 @@ Each entry of `MODULAR_AGENT_PLUGINS` is either the stdio form `{ command, env?,
 
 ## An agent service
 
-- **Actors.** The token decides the connection's actor. The operator MUST configure, outside client control, the actor id, kind, rights, allowed tenants and project scope for each token, as the ACP binding's [Starting](acp.md#starting) section requires for a stdio connection. `MODULAR_AGENT_ACTOR` does not apply to a network connection.
+- **Liveness.** The agent service MUST accept `$/ping` with params `{}` and return `{}`. This rule applies before and after `initialize`; the request does not change session state. A client MAY use `$/ping` or WebSocket ping frames to check liveness; it need not use both. It MUST apply the five-second default control deadline, configurable by the operator, to the ping it sends and treat a missed deadline as loss. This does not change ACP on stdio.
+- **Actors.** The token decides the connection's actor. The operator MUST configure the actor id, kind, rights and scope for each token outside client and project control. `MODULAR_AGENT_ACTOR` does not apply to a network connection.
+- **Scope.** If `tenants` is omitted, the token permits only sessions without a tenant. An explicit `tenants` list permits only the named tenants and permits sessions without a tenant only if it includes `null`. An explicit `projects` list matches canonical project paths exactly, not their subdirectories. If `projects` is omitted, the token permits only projects the serving composition serves. Neither list can enlarge what the composition serves. An empty list permits nothing in its scope.
+- **Rights.** At connection time the service MUST use the token's rights as a ceiling: for a recorded actor its connection rights are the intersection of the token's rights and the actor's recorded grants. The service MUST NOT rewrite recorded grants to apply the ceiling. The [connection actor rules](../contracts.md#authority) still govern creation and join on open; prospective grants are also subject to the ceiling. The service MUST still apply ACP's [authorization checks](acp.md#authorization) at the point of action.
 - **State.** `MODULAR_AGENT_DATA_DIR` applies to the agent service as a whole.
 - **Client methods.** ACP's client file and terminal methods reach the client's machine, not the agent's. An agent service MUST NOT offer them to tools as the agent's working environment.
 

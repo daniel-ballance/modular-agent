@@ -1,0 +1,9 @@
+{
+  "scenario": "ephemeral-file-history",
+  "about": "An ephemeral agent refuses an explicit persistent file store and names kept.",
+  "rules": ["sdk/placement.md#durability", "sdk/api.md#building-an-agent"],
+  "agent": {"durability": "ephemeral", "plugins": [], "history": "file"},
+  "model": [],
+  "expectCreateError": { "code": "invalid_composition", "messageContains": "kept" },
+  "steps": []
+}

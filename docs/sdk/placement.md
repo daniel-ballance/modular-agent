@@ -9,7 +9,7 @@ Two choices are made when an agent is put together, never in a plugin's code: wh
 | Tools and tool sources | yes | yes | yes |
 | Providers | yes | yes, request and response only | yes, request and response only |
 | Hook handlers | yes | yes, for the [points the wire carries](api.md#hooks) | yes, the same points |
-| Commands | yes | yes | yes |
+| Commands | yes | yes, unless they use a model or ask questions | yes, with the same limits |
 | Working environment | yes | yes | yes, where the service sees the same project path |
 | Runtime | yes | yes | yes |
 | History store | yes | no | yes, the [history service](../bindings/history-http.md) |
@@ -64,13 +64,15 @@ Agents in any language that share a history service and the same actor ids can r
 - **Over ACP.** `agent.serveAcp()` serves the agent on stdio. Any ACP client can drive it: an editor, T3 Code, or another agent. The ACP Interface authenticates the connection's actor ([ACP Authorization](../bindings/acp.md#authorization)).
 - **As a service.** `agent.serveAcp({ listen, actors, tls? })` serves ACP on a WebSocket. `actors` lists, for each token file, the actor its connections act as: `{ tokenFile, actor: { id, kind, rights }, tenants?, projects? }`. A connection presenting no listed token is refused. The token, not anything the client sends, decides the actor ([WebSocket transport](../bindings/websocket.md#an-agent-service)). Once ready, the listener returns `url` and `close()`. Closing it stops accepting connections and closes the existing ones.
 
+Omit `tenants` to allow only sessions without a tenant. Include `null` in an explicit `tenants` list to allow such sessions. `projects` matches exact canonical project paths, not subdirectories. Omit it to use the serving composition's project scope. An empty list permits nothing in its scope. At connection time the service intersects the token's rights with the actor's recorded grants; it does not rewrite the grants. Session and tenant authority checks still apply.
+
 ## Durability
 
-One option, `durability`, sets what survives the agent's process ending:
+One option, `durability`, sets what session state survives the agent's process ending. It does not undo effects on files or services:
 
 | `durability` | History | Runtime | After a crash or restart |
 |---|---|---|---|
-| `ephemeral` (default) | memory | transient | With the default store, sessions end with the process. |
+| `ephemeral` (default) | memory | transient | Nothing survives the process. |
 | `kept` | files under `dataDir`, or a history service | transient | Sessions reopen with their history. An interrupted turn ends `failed`. |
 | `durable` | files under `dataDir`, or a history service | durable | An interrupted turn carries on when the session reopens. |
 
@@ -84,6 +86,7 @@ The scenarios check this with a real `kill -9`.
 
 `history` and `runtime` can still be given explicitly, for example a history service with `kept`. The agent checks the combination and raises `invalid_composition` for one that cannot keep its promise:
 
+- `ephemeral` with an explicit persistent history store or a history service. The error names `kept`; choose `kept` to retain sessions or `durable` to also continue interrupted turns;
 - a durable Runtime with history in memory;
 - `kept` or `durable` with no persistent history store: files under `dataDir` by default, or an explicit one such as `httpHistory`;
 - a part that needs a local directory to keep recovery bookkeeping across restarts, with no `dataDir`. This includes the default local environment under `kept` and `durable`; under `ephemeral` its disposable bookkeeping can go in agent-owned scratch;
