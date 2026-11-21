@@ -10,6 +10,10 @@ import (
 
 type modelEventKey struct{}
 
+func WithRuntimePieces(ctx context.Context, emit func(api.Part)) context.Context {
+	return context.WithValue(ctx, modelEventKey{}, emit)
+}
+
 // runtimeClient holds only a request-scoped view. Recovery reloads it from
 // the Harness, not the plugin's home or any state in the old process.
 type runtimeClient struct {
@@ -146,6 +150,18 @@ func (s *Server) runRuntime(ctx context.Context, method string, params object) (
 			}
 		}
 
+	}
+	if impl, ok := s.Runtime.(BindingRuntime); ok {
+		return impl.RunBinding(ctx, method, params, func(ctx context.Context, method string, params Object) (any, error) {
+			if method == "host/runtime/report" {
+				params["parentRequestId"] = port.parent
+				return nil, s.peer.Send(method, params)
+			}
+			var out any
+			params["parentRequestId"] = port.parent
+			err := s.peer.Call(ctx, method, params, &out)
+			return out, err
+		})
 	}
 	port.turn = t
 	out := s.Runtime.Run(ctx, t)

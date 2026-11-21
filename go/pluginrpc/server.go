@@ -48,9 +48,10 @@ type SourceRegistration struct {
 	PerSession bool     `json:"perSession"`
 }
 type EnvironmentRegistration struct {
-	Points      bool     `json:"points"`
-	Containment string   `json:"containment"`
-	Platforms   []string `json:"platforms"`
+	Points        bool     `json:"points"`
+	Containment   string   `json:"containment"`
+	Platforms     []string `json:"platforms,omitempty"`
+	ConfinesFiles bool     `json:"confinesFiles,omitempty"`
 }
 type HookRegistration struct {
 	Hook  string `json:"hook"`
@@ -600,14 +601,16 @@ func (s *Server) HostEnvironment() api.WorkingEnvironment {
 }
 
 type remoteEnvironment struct {
-	peer        *Peer
-	project     string
-	prefix      string
-	containment string
-	points      bool
+	peer          *Peer
+	project       string
+	prefix        string
+	containment   string
+	points        bool
+	confinesFiles bool
 }
 
 func (e *remoteEnvironment) Containment() string { return e.containment }
+func (e *remoteEnvironment) ConfinesFiles() bool { return e.confinesFiles }
 func (e *remoteEnvironment) StopsOnCrash() bool  { return e.containment == "strong" }
 func (e *remoteEnvironment) Close() error        { return nil }
 func (e *remoteEnvironment) SessionEnded(ctx context.Context, session string) error {

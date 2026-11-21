@@ -44,12 +44,12 @@ type hookRegistration struct {
 	handle func(context.Context, pluginrpc.Object) (any, error)
 }
 type CommandContext struct {
-	SessionID, ActorID, StepID string
-	requestModel               func(context.Context, ModelRequest) (AssistantMessage, error)
-	work                       *ToolContext
-	Environment                ToolEnvironment
-	Jobs                       JobCalls
-	active                     *atomic.Bool
+	SessionID, ActorID, StepID, Project string
+	requestModel                        func(context.Context, ModelRequest) (AssistantMessage, error)
+	work                                *ToolContext
+	Environment                         ToolEnvironment
+	Jobs                                JobCalls
+	active                              *atomic.Bool
 }
 type Command struct {
 	Name, Description        string
@@ -435,7 +435,7 @@ func loadPlugin(h *harness.Harness, p Plugin, defaults *api.Settings, durability
 			}
 		}
 		if r.environment != nil {
-			if err := a.Provide("working-environment", r.environment); err != nil {
+			if err := setupEnvironment(a, r.environment); err != nil {
 				return err
 			}
 		}

@@ -11,6 +11,14 @@ import (
 // commit of the complete ordered record and must keep its opaque entries.
 type HistoryBackend = api.Store
 type HistoryLease = api.Lease
+
+// ServiceHistoryLease is the lease required to serve a custom backend.
+// SaveErasure atomically installs the exact tombstoned snapshot the adapter
+// supplies. Load and List must return committed snapshots including Wire.
+type ServiceHistoryLease interface {
+	HistoryLease
+	SaveErasure(SessionRecord) error
+}
 type SessionRecord = api.Session
 type HistoryRecord = api.Entry
 

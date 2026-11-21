@@ -410,7 +410,7 @@ func (r *remote) plugin(index int) api.Plugin {
 			if slices.Contains(reg.Platforms, runtimePlatform()) {
 				containment = reg.Containment
 			}
-			env := &remoteEnvironment{peer: r.peer, project: r.host.project, containment: containment, points: reg.Points}
+			env := &remoteEnvironment{peer: r.peer, project: r.host.project, containment: containment, points: reg.Points, confinesFiles: reg.ConfinesFiles}
 			if err := a.Provide("working-environment", env); err != nil {
 				return err
 			}

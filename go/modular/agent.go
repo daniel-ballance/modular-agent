@@ -352,7 +352,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		}
 		environment = local.GitPluginAt(filepath.Join(environmentState, "commands"), environmentState)
 	} else {
-		environment = api.Plugin{Name: "environment", Setup: func(a api.API) error { return a.Provide("working-environment", o.environment) }, Close: o.environment.Close}
+		environment = api.Plugin{Name: "environment", Setup: func(a api.API) error { return setupEnvironment(a, o.environment) }, Close: o.environment.Close}
 	}
 	if o.credentials == nil {
 		o.credentials = EnvironmentCredentials()

@@ -54,6 +54,9 @@ func HistoryServiceFiles(dir string) HistoryStore { return HistoryStore{serviceD
 type HistoryOptions struct {
 	Address   string
 	TokenFile string
+	// StateDir holds the restart exclusion bound for a custom snapshot
+	// backend. Use a persistent, private directory dedicated to this service.
+	StateDir string
 	// AllowVolatileForTests explicitly permits serving MemoryHistory.
 	AllowVolatileForTests bool
 }
@@ -139,8 +142,10 @@ func runHistory(ctx context.Context, store HistoryStore, options HistoryOptions,
 					return &Error{Code: NotSupported, Message: "MemoryHistory is not durable and can only be served for tests"}
 				}
 				disk = historyhttp.NewStoreServer(backing, 3*time.Second)
+			} else if store.persistent && store.erasure && options.StateDir != "" {
+				disk, err = historyhttp.NewFileStoreServer(backing, options.StateDir, 3*time.Second)
 			} else {
-				return &Error{Code: NotSupported, Message: "selected history store cannot be served"}
+				return &Error{Code: NotSupported, Message: "custom history backend requires persistence, exact erasure and a persistent HistoryOptions.StateDir"}
 			}
 		}
 	}

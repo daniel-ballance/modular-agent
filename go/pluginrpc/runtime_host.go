@@ -48,6 +48,14 @@ type runtimeWork struct {
 }
 
 func (r *remoteRuntime) Run(ctx context.Context, t api.Turn) api.Outcome {
+	return runRuntimeHost(ctx, t, r.host.a, r.Declaration(), func(ctx context.Context, _ *runtimeWork, method string, params object) (object, error) {
+		var result object
+		err := r.callTrackingTools(ctx, method, params, &result, true)
+		return result, err
+	})
+}
+
+func runRuntimeHost(ctx context.Context, t api.Turn, host api.API, declaration api.RuntimeDeclaration, invoke func(context.Context, *runtimeWork, string, object) (object, error)) api.Outcome {
 	fail := func(err error) api.Outcome {
 		o := api.Outcome{Status: "failed", Error: err.Error()}
 		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
@@ -56,8 +64,8 @@ func (r *remoteRuntime) Run(ctx context.Context, t api.Turn) api.Outcome {
 		return o
 	}
 	w := newRuntimeWork(t)
-	w.turnContext, w.authorize = ctx, r.host.a.Authorize
-	w.steering = r.Declaration().Steering
+	w.turnContext, w.authorize = ctx, host.Authorize
+	w.steering = declaration.Steering
 	if port, ok := t.IO.(interface {
 		ToolRegistration(string) (string, string, api.Tool, bool)
 	}); ok {
@@ -72,7 +80,7 @@ func (r *remoteRuntime) Run(ctx context.Context, t api.Turn) api.Outcome {
 	model := t.Access.Model()
 	if model.Stateful {
 		w.discard = func(ctx context.Context) error {
-			return r.discardRuntimeProvider(ctx, t.Access, t.Session)
+			return discardRuntimeProvider(ctx, host, t.Access, t.Session)
 		}
 	}
 	snap, err := t.IO.Snapshot()
@@ -95,13 +103,22 @@ func (r *remoteRuntime) Run(ctx context.Context, t api.Turn) api.Outcome {
 	}
 	params := object{"turn": object{
 		"sessionId": t.Session, "turnId": t.ID, "startedBy": t.StartedBy, "model": modelOut(model),
-		"modelSupports": object{"keepsState": model.Stateful, "runsTools": model.RunsTools},
+		"modelSupports": object{"keepsState": model.Stateful, "runsTools": model.RunsTools, "safeToRepeat": model.SafeToRepeatRequests},
 		"settings":      object{"maxSteps": t.Settings.MaxSteps, "maxOutput": t.Settings.MaxOutput, "reasoning": t.Settings.Thinking},
 	}}
+	for _, entry := range snap.Branch() {
+		if entry.Turn == t.ID && entry.Kind == "input" {
+			if shape := api.Decode[api.Input](entry.Data).ResultSchema; len(shape) != 0 {
+				asObjectTurn := params["turn"].(object)
+				asObjectTurn["resultShape"] = shape
+			}
+			break
+		}
+	}
 	method := "runtime/runTurn"
 	if t.Resume {
 		method = "runtime/resumeTurn"
-		interrupted, err := w.restoreInterrupted(ctx, snap, r.Declaration().Durable)
+		interrupted, err := w.restoreInterrupted(ctx, snap, declaration.Durable)
 		if err != nil {
 			out := fail(err)
 			w.applyOutcome(&out)
@@ -132,8 +149,7 @@ func (r *remoteRuntime) Run(ctx context.Context, t api.Turn) api.Outcome {
 		params["calls"] = calls
 	}
 	ctx = withWork(ctx, work{session: t.Session, actor: t.Actor, runtime: w})
-	var result object
-	err = r.callTrackingTools(ctx, method, params, &result, true)
+	result, err := invoke(ctx, w, method, params)
 	out := outcomeIn(result)
 	if err != nil {
 		out = fail(err)
@@ -175,7 +191,7 @@ func (r *remoteRuntime) Run(ctx context.Context, t api.Turn) api.Outcome {
 	return out
 }
 
-func (r *remoteRuntime) discardRuntimeProvider(ctx context.Context, access api.ModelAccess, session string) error {
+func discardRuntimeProvider(ctx context.Context, host api.API, access api.ModelAccess, session string) error {
 	var provider any
 	switch a := access.(type) {
 	case *localAccess:
@@ -184,7 +200,7 @@ func (r *remoteRuntime) discardRuntimeProvider(ctx context.Context, access api.M
 		provider = a.p
 	default:
 		var err error
-		provider, err = r.host.a.Get("provider." + access.Model().Provider)
+		provider, err = host.Get("provider." + access.Model().Provider)
 		if err != nil {
 			return err
 		}
@@ -319,10 +335,14 @@ func (r *remote) runtimeCallback(ctx context.Context, method string, v object) (
 	if rt == nil {
 		return nil, fault("invalid_request", "callback parent is not a Runtime turn")
 	}
-	if (has(v, "sessionId") && str(v, "sessionId") != w.session) || (has(v, "turnId") && str(v, "turnId") != rt.turn.ID) {
+	return rt.callback(ctx, parent, RequestID(ctx), r.peer, method, v)
+}
+
+func (rt *runtimeWork) callback(ctx, parent context.Context, id any, peer *Peer, method string, v object) (any, error) {
+	if (has(v, "sessionId") && str(v, "sessionId") != rt.turn.Session) || (has(v, "turnId") && str(v, "turnId") != rt.turn.ID) {
 		return nil, fault("invalid_request", "callback session or turn differs from parent")
 	}
-	if !r.host.a.Authorize(w.session, w.actor, "watch") {
+	if !rt.authorize(rt.turn.Session, rt.turn.Actor, "watch") {
 		return nil, fault("invalid_request", "Runtime turn actor cannot watch the session")
 	}
 	rt.mu.Lock()
@@ -348,12 +368,22 @@ func (r *remote) runtimeCallback(ctx context.Context, method string, v object) (
 	if err := linked.Err(); err != nil {
 		return nil, err
 	}
-	return rt.handle(linked, RequestID(ctx), r.peer, method, v)
+	if method == "host/runtime/report" {
+		rt.report(linked, v)
+		return nil, nil
+	}
+	return rt.handle(linked, id, peer, method, v)
 }
 
 func (w *runtimeWork) handle(ctx context.Context, id any, p *Peer, method string, v object) (any, error) {
 	t := w.turn
 	switch method {
+	case "host/history":
+		snap, err := t.IO.Snapshot()
+		if err != nil {
+			return nil, err
+		}
+		return HistoryPage(snap, v)
 	case "host/runtime/newId":
 		w.mu.Lock()
 		defer w.mu.Unlock()
@@ -462,7 +492,7 @@ func (w *runtimeWork) report(ctx context.Context, v object) {
 	case "model.delta", "model.output", "model.stream.end", "step.start", "step.end", "tool.requested", "tool.started", "tool.progress", "tool.end", "turn.start", "turn.end", "turn.resumed", "history.added":
 		return
 	}
-	if kind != "" {
+	if strings.Contains(kind, ".") && !reservedRuntimeKind(kind) {
 		w.turn.IO.Emit(ctx, api.Event{Kind: kind, Step: str(v, "stepId"), Call: str(v, "toolCallId"), Data: mustJSON(v["data"])})
 	}
 }

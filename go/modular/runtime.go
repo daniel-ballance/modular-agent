@@ -3,6 +3,7 @@ package modular
 import (
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/durable"
+	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/transient"
 )
 
@@ -31,6 +32,9 @@ func runtimeSetup(a api.API, runtime Runtime) error {
 		if err := a.Define(point, rule); err != nil {
 			return err
 		}
+	}
+	if impl, ok := runtime.(pluginrpc.BindingRuntime); ok {
+		runtime = pluginrpc.LocalRuntime(a, impl)
 	}
 	return a.Provide("runtime", runtime)
 }
