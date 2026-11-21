@@ -32,9 +32,11 @@ A plugin moves into its own process without changing its code:
 1. **Serve it.** A plugin program's entry point calls `serve(plugin)`. That one call speaks the binding on stdio: it answers the handshake with the plugin's registration, routes requests to its tools, Provider, hooks and the rest, and passes each request's context through as host callbacks. `serve` refuses an [in-process-only plugin](api.md#plugins) with `not_supported`.
 2. **Load it.** The agent names the program in `processPlugins`: `{ command: ["python", "tides.py"], env?, config? }`. The command is an argument vector, never a shell line. The program can be written with any SDK, or without one.
 
-Giving `processPlugins` makes the agent a plugin host. The agent loads its own plugins first, then `processPlugins` in order, then the programs in `MODULAR_AGENT_PLUGINS`, and validates each registration before enabling it. If a program fails to start or its registration is refused, `createAgent` fails ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)). A child process starts with the minimal environment the binding requires, plus the `env` the developer approved; it does not inherit the agent's.
+A child process starts with the minimal environment the binding requires, plus the `env` the developer approved; it does not inherit the agent's.
 
-A plugin host MUST read `MODULAR_AGENT_PLUGINS` at startup, as the binding requires. An embedded agent is not a plugin host by default: a library should not start programs named in its environment unless the app asks. An agent becomes one when the app gives `processPlugins` or sets `pluginHost: true`, and then reads the variable too. An agent that loads plugin programs is a plugin host, so `pluginHost: false` together with `processPlugins` is contradictory and raises `invalid_composition`. A program that claims the plugin-host role, such as an agent served over ACP, sets `pluginHost: true`.
+A nonempty `processPlugins` or `servicePlugins` list enables plugin hosting. An embedded agent with neither can opt in with `pluginHost: true`. An explicit `pluginHost: false` with either nonempty list raises `invalid_composition`. A program that claims the plugin-host role, such as an agent served over ACP, enables plugin hosting even if it has no explicit lists.
+
+The host loads in-process plugins, then `processPlugins`, then `servicePlugins`, then the entries in `MODULAR_AGENT_PLUGINS`. It MUST read that variable at startup and load each list in order, validating each registration before enabling it. A configured plugin that cannot start, connect, initialize or register fails composition; see [Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start) and [Choosing plugin services at start](../bindings/websocket.md#choosing-plugin-services-at-start).
 
 If a plugin's process is lost while the agent runs, the agent treats the part as [lost](../contracts.md#parts-that-are-lost) and [settles](../contracts.md#settlement) its calls. A call that may have been dispatched is `outcomeUnknown`. A call abandoned before dispatch is `notStarted`. Neither is repeated except under the repeat rule below.
 
@@ -43,7 +45,9 @@ If a plugin's process is lost while the agent runs, the agent treats the part as
 A plugin moves to a service without changing its code, as it moves to its own process. The same plugin value is served three ways: in the agent's process, as a program on stdio, or as a service on a WebSocket ([WebSocket transport](../bindings/websocket.md)).
 
 1. **Serve it.** `serve(plugin, { listen, tokenFile, tls? })` listens on `listen`, an address such as `127.0.0.1:7401`, and serves each authenticated connection as a separate plugin instance. `tokenFile` holds the token clients must present. Without `tls: { certFile, keyFile }` it refuses any address that is not loopback. Port `0` picks a free port. Once it accepts connections, it returns a server with `url`, the `ws:` or `wss:` URL clients connect to, and `close()`, which stops accepting, closes each open connection and returns when their plugin instances have stopped. `serve(plugin)` with no options keeps serving on stdio.
-2. **Load it.** The agent names the service in `servicePlugins`: `{ url, tokenFile, config? }`, with a `ws:` or `wss:` URL. Giving one makes the agent a plugin host, as `processPlugins` does; it loads its own plugins, then `processPlugins`, then `servicePlugins`, then `MODULAR_AGENT_PLUGINS`, which may name services too. A service it cannot reach, or whose registration is refused, fails `createAgent` with `invalid_composition`.
+2. **Load it.** The agent names the service in `servicePlugins`: `{ url, tokenFile, config? }`, with a `ws:` or `wss:` URL. A service can also be named in `MODULAR_AGENT_PLUGINS`.
+
+Run registration once per connection, after receiving that connection's configuration. Allocate connection-local mutable state there. SDKs can also take a factory that supplies a fresh plugin for each connection; use one if the plugin captures mutable state outside setup. See [Languages](languages.md).
 
 When the connection drops, the agent treats the part as [lost](../contracts.md#parts-that-are-lost), as it does when a plugin process exits. A served working environment stops the commands that connection started.
 
@@ -58,7 +62,7 @@ Agents in any language that share a history service and the same actor ids can r
 
 - **Embedded.** The app holds the Agent and calls it.
 - **Over ACP.** `agent.serveAcp()` serves the agent on stdio. Any ACP client can drive it: an editor, T3 Code, or another agent. The ACP Interface authenticates the connection's actor ([ACP Authorization](../bindings/acp.md#authorization)).
-- **As a service.** `agent.serveAcp({ listen, actors, tls? })` serves ACP on a WebSocket. `actors` lists, for each token file, the actor its connections act as: `{ tokenFile, actor: { id, kind, rights }, tenants?, projects? }`. A connection presenting no listed token is refused. The token, not anything the client sends, decides the actor ([WebSocket transport](../bindings/websocket.md#an-agent-service)).
+- **As a service.** `agent.serveAcp({ listen, actors, tls? })` serves ACP on a WebSocket. `actors` lists, for each token file, the actor its connections act as: `{ tokenFile, actor: { id, kind, rights }, tenants?, projects? }`. A connection presenting no listed token is refused. The token, not anything the client sends, decides the actor ([WebSocket transport](../bindings/websocket.md#an-agent-service)). Once ready, the listener returns `url` and `close()`. Closing it stops accepting connections and closes the existing ones.
 
 ## Durability
 
@@ -82,7 +86,7 @@ The scenarios check this with a real `kill -9`.
 
 - a durable Runtime with history in memory;
 - `kept` or `durable` with no persistent history store: files under `dataDir` by default, or an explicit one such as `httpHistory`;
-- under `kept` or `durable`, a part whose local recovery bookkeeping must survive a restart, such as the local working environment's record of running commands, with no `dataDir` to keep it in;
+- a part that needs a local directory to keep recovery bookkeeping across restarts, with no `dataDir`. This includes the default local environment under `kept` and `durable`; under `ephemeral` its disposable bookkeeping can go in agent-owned scratch;
 - a Runtime that does not declare `continuesAfterRestart` under `durable`.
 
 The agent's [declaration](../contracts.md#declaration) states what it chose, so a client knows whether to expect a turn to continue after a restart.

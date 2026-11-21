@@ -37,7 +37,7 @@ The connection takes the place of the child process's pipes, and closing it take
 ## A plugin service
 
 - **Paths.** `project` and `home` in `plugin/initialize` are the host's paths. A plugin service that does not use the host's files treats them as names. A working environment served over the network MUST serve the same absolute project path in its own file system, for example through a shared mount, or answer `plugin/initialize` with `not_supported`. A remote environment never gives the host access to the service's other files.
-- **State.** `home` names state the host expects to keep. A plugin service MUST keep state for different hosts apart and SHOULD key it by the authenticated token.
+- **State.** `home` names state the host expects to keep; it does not authorize opening that path on the service. A stateful service MUST choose its own storage and keep each authenticated host's named state separate. It SHOULD use the authenticated token to distinguish hosts.
 - **Raw reads.** A loaded plugin can read every session open in its host ([Authority](plugin.md#authority)). A host operator MUST treat a plugin service as trusted code with that reach, the same as a child process.
 
 ## Choosing plugin services at start

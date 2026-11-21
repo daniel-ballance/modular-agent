@@ -63,6 +63,5 @@ Until 1.0, a minor version can break the API. From 1.0, a breaking change needs 
 
 Some of what the SDK promises needs the specification to change first:
 
-- **Parts as services.** The plugin binding runs a plugin as a child process over stdio. Only history has an HTTP binding. A plugin served over a network needs a binding before the SDK can offer that placement. See [Placement](placement.md#services).
 - **A machine-readable schema.** The SDK's data types follow [Shared data](../bindings/data.md). They are hand-written until shared data has a JSON Schema to generate them from.
 - **Edition 4.** The SDK targets [edition 4](../adr/0027-sdk-0-1-and-edition-4.md), which all four bases now implement.
