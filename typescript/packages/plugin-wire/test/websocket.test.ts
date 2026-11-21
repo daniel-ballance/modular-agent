@@ -69,6 +69,34 @@ test("client pings only while work is pending and a missed ping loses the connec
 	} finally { await service.close(); }
 });
 
+test("a remote diagnostic passes through the reporting plugin's output gate", { timeout: 5000 }, async t => {
+	const f = await fixture(t);
+	let report!: () => void;
+	const service = await servePluginService(() => ({ name: "reporter", plugins: [{ name: "reporter", setup(api) {
+		report = () => api.reportProblem("test", new Error("original"));
+		api.on("output", ({ events }: { events: { type: string; data: { error: string } }[] }) => ({
+			action: "pass", events: events.map(event => event.type === "plugin.problem"
+				? { ...event, data: { ...event.data, error: "gated" } } : event),
+		}));
+	} }] }), { listen: "127.0.0.1:0", tokenFile: f.tokenFile });
+	try {
+		const info = { project: f.dir, home: f.dir };
+		const external = await startPluginService({ url: service.url, tokenFile: f.tokenFile }, info);
+		const harness = new Harness(info);
+		try {
+			let deliver!: (data: unknown) => void;
+			const delivered = new Promise<unknown>(resolve => { deliver = resolve; });
+			await harness.load([external.plugin, { name: "diagnostics", setup(api) {
+				api.onEvent(event => {
+					if (event.type === "plugin.problem" && event.data.where === "test") deliver(event.data);
+				});
+			} }]);
+			report();
+			assert.deepEqual(await delivered, { plugin: "reporter", where: "test", error: "gated" });
+		} finally { await harness.stop(); }
+	} finally { await service.close(); }
+});
+
 const init = (dir: string) => ({ binding: PLUGIN_BINDING, data: "modular-agent-data/1", project: dir, home: dir });
 
 test("plugin service authenticates, isolates instances and closes only the instance on shutdown", async t => {

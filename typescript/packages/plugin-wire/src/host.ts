@@ -213,6 +213,7 @@ interface Parent {
 	actors?: string[];
 	jobs?: string[];
 	runtime?: boolean;
+	output?: boolean;
 	command?: boolean;
 	commandEnvironment?: () => Promise<WorkingEnvironment>;
 	provider?: ProviderAttempt;
@@ -395,7 +396,11 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				if (p.sessionId == null) { noSession(p); return api.declaration(); }
 				return api.declaration(sessionOf(p));
 			});
-			peer.onNotification("host/emit", (p) => api.emit(sessionOf(p), String(p.type), p.data));
+			peer.onNotification("host/emit", (p) => {
+				// An output hook is a live parent for reads, not for emitting more output.
+				if (p?.parentRequestId != null && parentOf(p).output) return;
+				api.emit(sessionOf(p), String(p.type), p.data);
+			});
 			peer.onNotification("host/problem", (p) => {
 				noSession(p);
 				api.reportProblem(String(p.where ?? reg.name), new Error(String(p.message)));
@@ -487,9 +492,9 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 					api.on(h.hook, async (p: import("@modular-agent/harness").OutputPayload) => {
 						const mapped = p.events.map(mapOutput);
 						const events = mapped.map((m) => m.wire);
-						const answer = await peer.request<{ events?: { type: string; data: unknown }[]; block?: boolean } | null>("hook/handle", {
+						const answer = await track(peer.request<{ events?: { type: string; data: unknown }[]; block?: boolean } | null>("hook/handle", {
 							handlerId: h.handlerId, hook: h.hook, payload: { sessionId: p.sessionId, recipient: p.recipient, events, final: true },
-						});
+						}), { sessionId: p.sessionId ?? undefined, output: true });
 						if (answer === null) return undefined;
 						if (answer?.block === true) return { action: "block" };
 						if (!Array.isArray(answer?.events) || answer.events.length !== events.length) throw new WireError("invalid_request", "Invalid output gate answer");

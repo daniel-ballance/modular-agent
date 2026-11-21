@@ -118,8 +118,10 @@ async function spinningSandbox(t: TestContext) {
   };
   try {
     await Promise.race([started, running.then(r => { throw new Error(r?.text() ?? "No tool result"); })]);
-    const { stdout } = await exec("ps", ["--ppid", String(process.pid), "-o", "pid=,comm="]);
-    const workers = stdout.trim().split("\n").map(line => line.trim().split(/\s+/)).filter(([, name]) => name === "monty");
+    const { stdout } = await exec("ps", ["--ppid", String(process.pid), "-o", "pid=,stat=,comm="]);
+    // Retired Monty children can still appear as zombies. They cannot be running this turn.
+    const workers = stdout.trim().split("\n").map(line => line.trim().split(/\s+/))
+      .filter(([, state, name]) => name === "monty" && !state.startsWith("Z"));
     assert.equal(workers.length, 1, stdout);
     pid = Number(workers[0][0]);
     const before = await ticks();
