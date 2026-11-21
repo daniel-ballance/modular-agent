@@ -632,6 +632,12 @@ class TurnHost:
     async def check_tenant(self):
         if self.sid in self.runtime.cancelled:
             raise WireError("Turn cancelled", "cancelled")
+        if self.capacity_limited:
+            raise WireError(
+                "Resource reservation capacity exhausted",
+                "turn_limit",
+                details={"limit": "capacity"},
+            )
         if self.tenant_limited or await self.api.session("tenant_exhausted", session=self.sid):
             self.tenant_limited = True
             raise WireError(

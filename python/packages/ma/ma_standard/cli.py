@@ -534,7 +534,7 @@ async def _run(args: argparse.Namespace) -> int:
         if args.acp:
 
             async def compose(folder: Path) -> Agent:
-                if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
+                if folder == project and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
                     return agent
                 return await _agent(paths, folder, args, acp_session=True)
 
@@ -542,7 +542,7 @@ async def _run(args: argparse.Namespace) -> int:
                 saved = await agent.session_info(id)
                 if saved["project"] != str(folder):
                     raise ValueError("Session is not in this project")
-                if os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
+                if folder == project and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1":
                     return agent
                 old = cast(JsonObject, saved["settings"]).get("model")
                 selected = f"{old['provider']}/{old['id']}" if isinstance(old, dict) else None

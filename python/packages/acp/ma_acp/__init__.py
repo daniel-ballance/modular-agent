@@ -1470,6 +1470,7 @@ class ACP(Plugin):
             "not_open",
             "wrong_project",
             "unavailable",
+            "lost",
         }:
             return
         if (
