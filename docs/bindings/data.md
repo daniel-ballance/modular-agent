@@ -176,7 +176,7 @@ An event is `{ type: Id, data: object }` with the following payload. The [plugin
 | `text` | `{ delta: string, stepId?: Id }` |
 | `reasoning` | `{ delta: string, stepId?: Id }` (readable only) |
 | `toolCall` | `{ call: ToolCall }` |
-| `toolOutput` | `{ toolCallId: Id, chunk: string }` |
+| `toolOutput` | `{ toolCallId: Id, chunk: string, content?: Content }`: `chunk` is the text of the progress; `content`, when present, is the progress as reported, which may include images |
 | `toolResult` | `{ toolCallId: Id, status: ToolStatus, content: Content }` |
 | `entry` | `{ entry: object }` (the recipient's history view) |
 | `turnEnded` | `{ turnId: Id, outcome: Outcome, result: TurnResult }` |
@@ -402,6 +402,8 @@ The Harness MUST use this journal when restoring a point:
 While an intent is unresolved, the Harness MUST block project work and keep other entries from interleaving with the journal. It MUST resume project work only once the target or undo restore has established the files at the head and the matching completion is committed. A missing point or a partial restore is not evidence of completion. A legacy `data.failed: true` record MUST NOT clear that block.
 
 ## Changes
+
+- **2026-11-21, after the SDK's fifth build round.** `toolOutput` may carry the progress as reported, `content`, beside its text `chunk`, so a tool's image progress is not reduced to text. Additive; a reader that knows only `chunk` is unaffected (Rust SDK).
 
 - **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). From the first working build on edition 3. Nested calls have a defined shape and stay out of model context. `modelTools` is a standard setting. A Provider handed a reasoning level its model does not list lowers it, as the host does. DirEntry is added for directory listing.
 

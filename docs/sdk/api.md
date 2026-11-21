@@ -250,7 +250,7 @@ A plugin reaches the agent only through the context passed to the call it is ser
 
 | Member | Available to | Over the wire |
 |---|---|---|
-| `sessionId`, `actorId` and work ids | all | yes |
+| `sessionId`, `actorId` and work ids, where the work has them | all | the ids in that method's envelope: a served Provider request carries `sessionId` but no actor or step id; `command/run` carries the session and actor ids but no step id |
 | `cancelled`: the language's cancellation signal | all | yes |
 | `log(message)`: operator diagnostics, never shown to the model | all | yes, on stderr |
 | `emit(type, data)`: a custom event, with a type containing a dot | all | yes |
