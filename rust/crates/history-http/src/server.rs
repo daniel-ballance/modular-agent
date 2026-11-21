@@ -28,6 +28,9 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 
+#[cfg(test)]
+mod tests;
+
 const CONTROL: &str = "history-service-control-v1";
 const PREFIX: &str = "history-service-v1-";
 const MAX_COUNT: u64 = 9_007_199_254_740_991;
@@ -350,7 +353,7 @@ impl SnapshotStore {
                 && intent.targets == targets
                 && intent.same_copies(&request.copies)
             {
-                Ok(json!({"intentId":intent.id}))
+                Ok(json!(intent.published()))
             } else {
                 Err(Failure::conflict())
             };
@@ -360,7 +363,7 @@ impl SnapshotStore {
             .iter()
             .find(|i| i.source == session && i.targets == targets)
         {
-            return Ok(json!({"intentId":intent.id}));
+            return Ok(json!(intent.published()));
         }
         if request.revision != *revision {
             return Err(Failure::http(409, "stale_revision"));
@@ -391,7 +394,7 @@ impl SnapshotStore {
                 return Err(Failure::http(413, "request_too_large"));
             }
         }
-        let reply = json!({"intentId":intent.id});
+        let reply = json!(intent.published());
         registry.intents.push(intent);
         self.save_registry(control, registry, revision)?;
         Ok(reply)

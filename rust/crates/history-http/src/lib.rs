@@ -942,31 +942,45 @@ impl HistoryStore for HttpHistory {
             &["v1", "sessions", session, "pending-erasure"],
             json!(intent),
         )?;
-        let intent_id = wire::string(&response, "intentId")?;
+        let published: pending::Published = serde_json::from_value(response)
+            .map_err(|_| registry_unavailable("invalid erasure publication response"))?;
         ensure!(
-            pending::path_id(intent_id),
-            registry_unavailable("invalid published intent ID")
+            pending::path_id(&published.intent_id)
+                && (published.session_ids.is_empty()
+                    || pending::distinct_ids(&published.session_ids))
+                && published
+                    .session_ids
+                    .iter()
+                    .all(|sid| pending::path_id(sid) && sid != session),
+            registry_unavailable("invalid erasure publication response")
         );
-        if intent_id == intent.intent_id {
+        if published.intent_id == intent.intent_id {
+            ensure!(
+                published
+                    .session_ids
+                    .iter()
+                    .eq(affected.keys().filter(|sid| sid.as_str() != session)),
+                registry_unavailable(
+                    "erasure publication did not return the submitted destinations"
+                )
+            );
             return Ok(affected);
         }
-        // A different writer already published this operation. The returned ID,
-        // not the newly computed copy sets, identifies its durable plans.
+        // Recover the source plan and every published destination, even if unlisted.
         let mut original = BTreeMap::new();
-        for s in sessions {
-            if let Some(plan) = self
-                .erasure_plans(&s.id)?
+        for sid in std::iter::once(session).chain(published.session_ids.iter().map(String::as_str))
+        {
+            let plan = self
+                .erasure_plans(sid)?
                 .1
                 .into_iter()
-                .find(|p| p.intent_id == intent_id)
-            {
-                original.insert(s.id, plan.copies.into_iter().map(|c| c.entry_id).collect());
-            }
+                .find(|p| p.intent_id == published.intent_id && p.source_session_id == session)
+                .ok_or_else(|| registry_unavailable("missing published erasure plan"))?;
+            original.insert(
+                sid.into(),
+                plan.copies.into_iter().map(|c| c.entry_id).collect(),
+            );
         }
-        ensure!(
-            original.contains_key(session),
-            registry_unavailable("missing source erasure plan")
-        );
         Ok(original)
     }
     fn check_erasure(&self, data: &SessionData) -> Result<()> {

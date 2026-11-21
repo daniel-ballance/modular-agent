@@ -51,6 +51,13 @@ pub(crate) struct Publication {
     pub copies: Vec<CopySet>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Published {
+    pub intent_id: String,
+    pub session_ids: Vec<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PlansPage {
@@ -97,6 +104,18 @@ impl Intent {
             source: source.into(),
             targets,
             plans,
+        }
+    }
+
+    pub fn published(&self) -> Published {
+        Published {
+            intent_id: self.id.clone(),
+            session_ids: self
+                .plans
+                .iter()
+                .filter(|(session, _)| session != &self.source)
+                .map(|(session, _)| session.clone())
+                .collect(),
         }
     }
 
