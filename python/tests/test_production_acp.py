@@ -4,6 +4,50 @@ import acp
 import pytest
 from acp_fixture import prompt, running
 from ma_fake import reply
+from modular_agent import HistoryError, serve_history, sqlite_history_port
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("code, details", [("held", {"retryAfterMs": 60_000}), ("lost", {})])
+async def test_reopen_reports_lease_refusal_without_attaching(
+    tmp_path, runtime_kind, monkeypatch, code, details
+):
+    class RefusingStore:
+        refuse = False
+
+        def __getattr__(self, name):
+            return getattr(backend, name)
+
+        async def acquire(self, session_id, owner):
+            if self.refuse:
+                raise HistoryError(code, "Fixture lease refusal", details)
+            return await backend.acquire(session_id, owner)
+
+    token = tmp_path / "history-token"
+    token.write_text("test-history-token-with-32-characters")
+    with sqlite_history_port(tmp_path / "history", ttl_ms=10_000) as backend:
+        history = RefusingStore()
+        server = serve_history(history, address=("127.0.0.1", 0), token_file=token)
+        assert server is not None
+        monkeypatch.setenv("MODULAR_AGENT_HISTORY_URL", server.url)
+        monkeypatch.setenv("MODULAR_AGENT_HISTORY_TOKEN_FILE", str(token))
+        try:
+            async with running(tmp_path, [reply("answer")], runtime_kind) as (conn, _, _):
+                sid = (await conn.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
+                assert (await prompt(conn, sid)).stop_reason == "end_turn"
+
+            history.refuse = True
+            async with running(tmp_path, [], runtime_kind) as (conn, client, _):
+                with pytest.raises(acp.RequestError) as caught:
+                    await conn.load_session(session_id=sid, cwd=str(tmp_path), mcp_servers=[])
+                assert caught.value.code == -32000
+                assert caught.value.data == {"code": code, **details}
+                assert not client.updates
+                with pytest.raises(acp.RequestError) as absent:
+                    await prompt(conn, sid)
+                assert absent.value.data == {"code": "not_open"}
+        finally:
+            server.close()
 
 
 async def test_join_does_not_bind_connection_to_guest(tmp_path, runtime_kind):

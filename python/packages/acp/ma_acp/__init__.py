@@ -63,6 +63,14 @@ def protocol_error(code, message, **details):
     )
 
 
+def lease_refused_open(method, details):
+    return (
+        method in {"session/load", "session/resume"}
+        and isinstance(details, dict)
+        and details.get("code") in {"held", "lost"}
+    )
+
+
 def rpc(fn):
     methods = {
         "new_session": "session/new",
@@ -167,9 +175,14 @@ def rpc(fn):
         }:
             raise error from None
         try:
-            await self.check_delivery(OUTPUT_SESSION.get(), method)
+            # A lease refusal follows visibility authorization but precedes
+            # attachment. It has no session content and still uses the output gate.
+            needs_attachment = not lease_refused_open(method, error.data)
+            if needs_attachment:
+                await self.check_delivery(OUTPUT_SESSION.get(), method)
             view = await self.view(error.to_error_obj(), method=method)
-            await self.check_delivery(OUTPUT_SESSION.get(), method)
+            if needs_attachment:
+                await self.check_delivery(OUTPUT_SESSION.get(), method)
             if view is None:
                 raise ValueError("Blocked error")
             outgoing = acp.RequestError(view["code"], view["message"], view.get("data"))
@@ -1503,13 +1516,11 @@ class ACP(Plugin):
     async def authorize_frame(self, sid, method, message, prepared=None):
         # The handler may have waited behind another frame since its last check.
         details = message.get("error", {}).get("data")
-        if isinstance(details, dict) and details.get("code") in {
-            "forbidden",
-            "not_open",
-            "wrong_project",
-            "unavailable",
-            "lost",
-        }:
+        if lease_refused_open(method, details) or (
+            isinstance(details, dict)
+            and details.get("code")
+            in {"forbidden", "not_open", "wrong_project", "unavailable", "lost"}
+        ):
             return
         if (
             "method" not in message
