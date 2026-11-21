@@ -195,6 +195,9 @@ pub trait AgentApi: Send + Sync {
         key: Option<String>,
     ) -> Result<Vec<Entry>>;
     fn append(&self, scope: &Scope, writer: &str, draft: Draft) -> Result<Entry>;
+    fn reserve_response_calls(&self, _scope: &Scope, _response: &ModelResponse) -> Result<()> {
+        Ok(())
+    }
     fn take_steering(&self, scope: &Scope) -> Result<Vec<Input>>;
     fn take_final_steering(&self, scope: &Scope) -> Result<Vec<Input>> {
         self.take_steering(scope)

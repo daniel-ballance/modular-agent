@@ -734,7 +734,7 @@ impl Harness {
         &self,
         open: &mut OpenSession,
         data: &SessionData,
-        admission: Option<capacity::InputReservation>,
+        admission: Option<capacity::Reservation>,
     ) -> Result<()> {
         self.check_open_writer(open)?;
         if open.provisional {
@@ -748,7 +748,15 @@ impl Harness {
             }
             open.lease = self.store().map(|s| s.acquire(&data.id)).transpose()?;
         }
-        if let Err(error) = self.save(data) {
+        let pool = self.reservations();
+        let mut write_failed = false;
+        let committed = pool.commit(&open.data, data, admission, || {
+            self.save(data).inspect_err(|_| write_failed = true)
+        });
+        if let Err(error) = committed {
+            if !write_failed {
+                return Err(error);
+            }
             let lost = error.is::<LostPart>()
                 || open
                     .lease
@@ -760,11 +768,6 @@ impl Harness {
         if open.provisional {
             open.provisional = false;
             self.watch_open_writer(open);
-        }
-        if let Some(admission) = admission {
-            admission.transfer(data);
-        } else {
-            self.reservations().rebuild(data);
         }
         Ok(())
     }
@@ -925,7 +928,7 @@ impl Harness {
                 });
             }
         }
-        let reservation = self.reservations().reserve(&self.snapshot(session)?)?;
+        let reservation = self.reservations().admit(&self.snapshot(session)?)?;
         // A proposal is data, not a command. Do not run input hooks with
         // broader authority than the connection and actor share.
         let input_payload = json!({"text":text,"content":content,"actor":actor,"timing":timing});
@@ -1582,6 +1585,7 @@ impl Harness {
             &mut declaration,
             self.registry.read().unwrap().declaration(),
         );
+        declaration["resource_reservations"] = json!(self.reservations().limits());
         Ok(declaration)
     }
     pub async fn history_view(&self, session: &str) -> Result<Value> {
@@ -2193,6 +2197,17 @@ impl AgentApi for Harness {
             .iter()
             .any(|i| i.timing == Timing::Steer))
     }
+    fn reserve_response_calls(&self, scope: &Scope, response: &ModelResponse) -> Result<()> {
+        let sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get(&scope.session)
+            .ok_or_else(|| anyhow!("session not open"))?;
+        self.reservations().stage_response(
+            &open.data,
+            (scope.turn.clone(), scope.step.clone()),
+            response,
+        )
+    }
     fn take_steering(&self, scope: &Scope) -> Result<Vec<Input>> {
         self.take_steering_inner(scope, false)
     }
@@ -2750,6 +2765,9 @@ impl AgentApi for Harness {
     async fn command(&self, scope: &Scope, name: &str, args: &str) -> Result<Value> {
         let _workspace = self.begin_environment_work(&scope.session)?;
         require(self, scope, "input")?;
+        let _reservation = self
+            .reservations()
+            .command(&self.snapshot(&scope.session)?)?;
         let h = self.registry.read().unwrap().command(name)?;
         Ok(h.handle(self.api(), scope.clone(), json!({"args":args}))
             .await?

@@ -743,6 +743,9 @@ impl TurnWork {
                         names.insert(call.id.clone());
                     }
                 }
+                if bound_model_response(api.as_ref(), scope, &mut response)? {
+                    self.signal_limit("capacity");
+                }
                 wire::response(&response)
             }
             Err(e) => {

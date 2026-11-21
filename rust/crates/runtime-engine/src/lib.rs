@@ -887,6 +887,7 @@ impl Engine {
                 api.emit(Event::new(&scope, "step.start", json!({"index":index})))
                     .await?;
             }
+            let mut capacity_limit = false;
             let (response_entry, response) = if let Some(entry) = entries
                 .iter()
                 .find(|e| e.kind == "model.response" && e.scope.step == scope.step)
@@ -910,7 +911,7 @@ impl Engine {
                     result.limit = Some(limit.0.into());
                     return Ok(result);
                 }
-                let response = match generated? {
+                let mut response = match generated? {
                     Ok((step, response)) => {
                         scope = step;
                         response
@@ -927,6 +928,7 @@ impl Engine {
                         return Ok(result);
                     }
                 };
+                capacity_limit = bound_model_response(api.as_ref(), &scope, &mut response)?;
                 let copies = self
                     .turn_entries(api, &scope)?
                     .into_iter()
@@ -954,6 +956,9 @@ impl Engine {
             let mut carry_on = false;
             if input.cancel.is_cancelled() {
                 result.outcome = Outcome::Cancelled;
+            } else if capacity_limit {
+                result.outcome = Outcome::Limit;
+                result.limit = Some("capacity".into());
             } else if api.tenant_budget_reached(&scope.session)? {
                 result.outcome = Outcome::Limit;
                 result.limit = Some("tenantTokens".into());
