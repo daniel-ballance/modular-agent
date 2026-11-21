@@ -85,7 +85,7 @@ An Agent is safe to use from several tasks at once. Sessions have separate work 
 | `outputBypassesAgent` | false |
 | `cancellingTurnCancelsJobs` | false |
 | `pluginsDuringSession` | false |
-| `erasure` | true only if the history store and the agent implement erasure and can enforce [pending erasure](../contracts.md#cross-session-coordination) across the declared scope. An HTTP history client with no pending-erasure registry declares false, even if the service can erase. |
+| `erasure` | true only if the history store and the agent implement erasure and can enforce [pending erasure](../contracts.md#cross-session-coordination) across the declared scope. An HTTP history client uses the [pending-erasure registry profile](../bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) when the service declares a supported version. Without one, the HTTP composition declares false, even if the service can erase. |
 | `inputKeys` | true |
 | `questionsOutlastTurns`, `lateAnswersStartTurns` | false unless the app enables both |
 | `startsTurnsUnasked` | `jobReports` if `jobReportsStartTurns`; otherwise `never` |

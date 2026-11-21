@@ -7,14 +7,17 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isDeepStrictEqual as equal } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
+import { runErasureRegistry } from "./erasure-registry.mjs";
 
-const [url, tokenFile, flag, ...extra] = process.argv.slice(2);
+const [url, tokenFile, ...options] = process.argv.slice(2);
+const registryChecks = options[0] === "--erasure-registry-checks";
+const [flag, ...extra] = registryChecks ? options.slice(1) : options;
 const isolation = flag === "--isolation-checks";
 const [otherUrl, otherTokenFile] = isolation ? extra : [];
 const restartFlag = isolation ? undefined : flag;
 const restartCommand = extra;
-if (!url || !tokenFile || (isolation && extra.length !== 2) || (restartFlag !== undefined && (!["--restart", "--restart-ttl"].includes(restartFlag) || restartCommand[0] !== "--" || !restartCommand[1]))) {
-	console.error("Usage: node run.mjs <service url> <token file> [--restart|--restart-ttl -- <service command> [args...] | --isolation-checks <second URL> <second token file>]");
+if (!url || !tokenFile || (registryChecks && flag !== "--restart") || (isolation && extra.length !== 2) || (restartFlag !== undefined && (!["--restart", "--restart-ttl"].includes(restartFlag) || restartCommand[0] !== "--" || !restartCommand[1]))) {
+	console.error("Usage: node run.mjs <service url> <token file> [--restart|--restart-ttl -- <service command> [args...] | --isolation-checks <second URL> <second token file> | --erasure-registry-checks --restart -- <service command> [args...]]");
 	process.exit(2);
 }
 const base = new URL(url);
@@ -30,10 +33,10 @@ const check = (name, ok) => { results.push(!!ok); console.log(`${ok ? "PASS" : "
 const run = async (name, fn) => {
 	try { await fn(); } catch (e) { check(`${name}: ${e.message}`, false); }
 };
-const req = async (method, path, body, { auth = token, raw = false, media = "application/json", endpoint = base } = {}) => {
+const req = async (method, path, body, { auth = token, raw = false, media = "application/json", endpoint = base, headers = {} } = {}) => {
 	const res = await fetch(endpoint.href.replace(/\/$/, "") + path, {
 		method, redirect: "error", signal: AbortSignal.timeout(15000),
-		headers: { ...(auth ? { authorization: `Bearer ${auth}` } : {}), ...(body !== undefined ? { "content-type": media } : {}) },
+		headers: { ...(auth ? { authorization: `Bearer ${auth}` } : {}), ...(body !== undefined ? { "content-type": media } : {}), ...headers },
 		body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
 	});
 	return { status: res.status, headers: res.headers, body: await res.json().catch(() => null) };
@@ -78,7 +81,7 @@ async function startService(phase = "initial") {
 	}) };
 	for (let i = 0; i < 300; i++) {
 		if (!child.pid || child.exitCode !== null || child.signalCode !== null) break;
-		const r = await req("GET", "/v1").catch(() => null);
+		const r = await req("GET", "/v1", undefined, { headers: { Connection: "close" } }).catch(() => null);
 		if (r?.status === 200) return r;
 		await sleep(50);
 	}
@@ -307,6 +310,18 @@ if (restartFlag) {
 		}
 		check("Writing: one writer at a time: acknowledged entries survive restart", ok(await read(sid), { session: { id: sid, ...meta }, entries: [current.entry] }));
 	});
+	if (registryChecks) {
+		await run("pending-erasure registry", () => runErasureRegistry({
+			url: base.href, tokenFile, project, check, ttl,
+			req: (method, path, body, opts) => req(method, path, body, {
+				...opts, headers: { ...opts?.headers, Connection: "close" },
+			}),
+			restart: async () => {
+				await stopService();
+				return await startService("restart");
+			},
+		}));
+	}
 	await stopService();
 } else console.log("SKIP  restart hold (use --restart with a disposable service command)");
 

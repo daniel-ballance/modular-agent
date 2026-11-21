@@ -54,7 +54,7 @@ When the connection drops, the agent treats the part as [lost](../contracts.md#p
 The history store has its own service binding:
 
 - `serveHistory(store, { address, tokenFile })` serves a history store as the [history service](../bindings/history-http.md), if the store can keep the binding's promises. As with `serve`, port `0` picks a free port, and once it accepts connections it returns a server with `url`, the base URL clients use, and `close()`, which stops accepting connections and returns when the open ones have ended. The adapter preserves opaque JSON, durable commits, equality on append, filtered session lists, writer leases and erasure by tombstone. It refuses any other store with `not_supported`, naming it, rather than substituting another backend. A volatile memory store cannot be served as a conforming history service, since the binding requires entries to survive a restart; a build may offer a test-only in-memory service that is labelled as not conforming. A file store may serve from a separate namespace of opaque records rather than its native sessions; the SDK documents which, and whether existing native sessions can be opened through the service. Plain HTTP is served only on loopback.
-- `httpHistory(url, tokenFile)` is a history store that uses one.
+- `httpHistory(url, tokenFile)` is a history store that uses one. It discovers the [pending-erasure registry profile](../bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) from `GET /v1`.
 
 A history service credential has raw access to the whole service. Use [separate services and storage](../bindings/history-http.md#the-basics) when writers must be isolated.
 
