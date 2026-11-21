@@ -61,6 +61,12 @@ func (p *projectPool) acquire(ctx context.Context, key projectKey, id string, co
 	if selected == nil {
 		selected, selectedKey = p.parts[key], key
 	}
+	if selected == nil && key.savedModel != "" {
+		local := projectKey{project: key.project}
+		if part := p.parts[local]; part != nil && offersModel(part.part.API, key.savedModel) {
+			selected, selectedKey = part, local
+		}
+	}
 	if selected == nil {
 		part, err := compose(context.WithoutCancel(ctx), key.project, id)
 		if err != nil {
@@ -190,8 +196,10 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 	return host, nil
 }
 
-func (s *server) offers(model string) bool {
-	for _, p := range s.a.All("provider.") {
+func (s *server) offers(model string) bool { return offersModel(s.a, model) }
+
+func offersModel(a api.API, model string) bool {
+	for _, p := range a.All("provider.") {
 		for _, m := range p.(api.Provider).Catalog() {
 			if modelMatches(m, model) {
 				return true
