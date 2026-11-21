@@ -497,8 +497,10 @@ export class Harness {
 				const entries = options.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
 				const out: HistoryEntry[] = [];
 				const follower = new Follower(this.hooks, options.recipient, false, (e) => { if (e.type === "entry") out.push(e.data as HistoryEntry); }, (e) => this.problem("harness", "gated history", e));
-				for (const entry of entries) follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: entry });
-				await follower.idle();
+				for (const entry of entries) {
+					follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: entry });
+					await follower.idle();
+				}
 				if (this.checkPending(s) !== freshness) throw failure("unavailable", "Erasure changed the history view");
 				return out;
 			},
