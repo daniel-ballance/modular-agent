@@ -527,6 +527,7 @@ class Harness(Authority, Erasure):
         await self._assert_writable(sid)
         await self.guard_erasure(sid, reconcile=True)
         revision = await self.erasure_revision(sid)
+        await self._assert_writable(sid)
         tasks = self.effects.setdefault(sid, {})
         task = asyncio.current_task()
         own = task not in tasks
@@ -944,12 +945,16 @@ class Harness(Authority, Erasure):
                     for reservation, _ in buffered:
                         self.capacity.release(reservation)
                     events = [piece for _, piece in buffered] + events
+                revision = await self.erasure_revision(sid) if sid is not None else 0
                 for item in await self.output(sid, recipient, events):
                     view = await self.fire(
                         "@harness", "output", {"recipient": recipient, "value": item["data"]}
                     )
                     if view is not None and view.get("value") is not None:
-                        await handler(clone(view["value"]))
+                        value = clone(view["value"])
+                        if sid is not None and revision != await self.erasure_revision(sid):
+                            break
+                        await handler(value)
             except Exception:
                 # A failed output gate or recipient can never expose ungated output.
                 continue
@@ -1133,12 +1138,19 @@ class Harness(Authority, Erasure):
             else:
                 await self._emit({"time": now(), **d})
             return {}
+        if op == "erasure_cutoff":
+            return await self.erasure_revision(d["session"])
         if op == "view":
+            delivery_sid = d.get("session")
+            guarded = delivery_sid in self.sessions and d.get("method") != "_modular-agent/erase"
+            revision = await self.erasure_revision(delivery_sid) if guarded else 0
             result = await self.fire(
                 "@harness",
                 "output",
                 {"recipient": d.get("recipient", "user"), "value": provider_projection(d["value"])},
             )
+            if guarded and revision != await self.erasure_revision(delivery_sid):
+                raise AgentError("Session view changed during delivery", "unavailable")
             if not result or result.get("value") is None or d.get("alreadyGated"):
                 return result.get("value") if result else None
             events = await self.output(
@@ -1391,6 +1403,8 @@ class Harness(Authority, Erasure):
                 },
                 emit,
             )
+            if self.supports_erasure():
+                branch = [e for e in branch if not e.get("data", {}).get("erased")]
             mapping = {e["id"]: identity() for e in branch}
             entries = list(child["entries"])
             for e in branch:

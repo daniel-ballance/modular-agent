@@ -15,23 +15,29 @@ class Erasure:
         declaration = self.plugins[history[0]].declarations
         return bool(declaration.get("erasure") and declaration.get("pending_erasure"))
 
+    def _erasure_view(self, sid):
+        state = self.sessions.get(sid, {})
+        return {
+            "session": sid,
+            "provisional": bool(state.get("provisional")),
+            "tombstones": state.get("_history_tombstones", []),
+        }
+
     async def _pending_erasure(self, sid):
         if not self.supports_erasure():
             return []
-        return await self.call("@harness", "history", "pending_erasure", {"session": sid})
+        return await self.call("@harness", "history", "pending_erasure", self._erasure_view(sid))
 
     async def erasure_revision(self, sid):
         if not self.supports_erasure():
             return 0
-        return await self.call("@harness", "history", "erasure_revision", {"session": sid})
+        return await self.call("@harness", "history", "erasure_revision", self._erasure_view(sid))
 
     async def guard_erasure(self, sid, *, reconcile=False):
-        if not await self._pending_erasure(sid):
-            return
-        if reconcile and sid in self.sessions:
-            if await self._reconcile_erasure(sid):
-                return
-        raise AgentError("Session content is pending erasure", "unavailable")
+        if reconcile and sid in self.sessions and await self._pending_erasure(sid):
+            if not await self._reconcile_erasure(sid):
+                raise AgentError("Session content is pending erasure", "unavailable")
+        await self.erasure_revision(sid)
 
     async def _reconcile_erasure(self, sid):
         async with self.erasure_locks.setdefault(sid, __import__("asyncio").Lock()):
@@ -61,14 +67,15 @@ class Erasure:
     async def _apply_erasure(self, sid, pending):
         groups = defaultdict(list)
         for p in pending:
-            groups[p["intent"]].append(p["id"])
+            groups[p["intent"], p.get("recordId")].append(p["id"])
         s = self.sessions[sid]
         for key in [k for k in self.output_streams if k[2] == sid]:
             for reservation, _ in self.output_streams.pop(key):
                 self.capacity.release(reservation)
-        for operation, targets in groups.items():
+        for (operation, record_id), targets in groups.items():
             if not any(
-                e["kind"] == "erase" and e["data"].get("operation") == operation
+                e["kind"] == "erase"
+                and (e["id"] == record_id if record_id else e["data"].get("operation") == operation)
                 for e in s["entries"]
             ):
                 reservations = [
@@ -89,6 +96,7 @@ class Erasure:
                         "session": sid,
                         "writer": "@harness",
                         "kind": "erase",
+                        **({"id": record_id} if record_id is not None else {}),
                         "data": {
                             "operation": operation,
                             "entryIds": targets,

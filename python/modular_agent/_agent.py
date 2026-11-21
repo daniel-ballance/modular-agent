@@ -834,7 +834,7 @@ class Agent:
         """Read saved local session settings without starting recovery or taking its lease."""
         if not id or not id.isalnum():
             raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid session id")
-        state = await self._call("history", "read", session=id)
+        state = await self._call("history", "read", session=id, view=True)
         if state is None:
             raise AgentError(ErrorCode.NOT_FOUND, "Unknown session")
         return {
@@ -1281,9 +1281,7 @@ def create_agent(
             if history is not None and not isinstance(history, HistoryStore):
                 store = _PortHistory(history)
             elif isinstance(history, HistoryStore) and history._kind == "http":
-                store = HTTPHistory(
-                    history._url, history._path, history._coordination, history._witness
-                )
+                store = HTTPHistory(history._url, history._path)
             elif durability == "ephemeral" or (history is None and data_dir is None):
                 store = agent._memory_store = memory_store or _MemoryHistory()
             else:

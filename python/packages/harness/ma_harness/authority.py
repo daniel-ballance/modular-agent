@@ -163,6 +163,7 @@ class Authority:
             "tenant",
             "children",
             "view",
+            "erasure_cutoff",
         }
         if target == "@harness" and (
             operation not in public
@@ -181,6 +182,7 @@ class Authority:
             raise AgentError("Session inaccessible", "forbidden")
         if operation not in {
             "erase",
+            "erasure_cutoff",
             "cancel",
             "leave",
             "close",

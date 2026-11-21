@@ -1504,6 +1504,11 @@ class ACP(Plugin):
         token = OUTPUT_SESSION.set(sid)
         try:
             await self.check_delivery(sid, method)
+            if method not in {"session/close", "_modular-agent/erase", "_modular-agent/leave"}:
+                try:
+                    await self.api.session("erasure_cutoff", session=sid, actor=self.actor)
+                except AgentError as exc:
+                    raise protocol_error("unavailable", str(exc)) from exc
         finally:
             OUTPUT_SESSION.reset(token)
             self.reset_project_scope(scope)
