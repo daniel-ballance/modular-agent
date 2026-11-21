@@ -8,8 +8,17 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
-from ma_core import AgentError as _NativeError, Plugin as _NativePlugin
-from ma_core.wire import result_in, tool_in
+from ma_core import AgentError as _NativeError, Plugin as _NativePlugin, identity
+from ma_core.wire import (
+    model_out,
+    model_request_fields,
+    request_in,
+    request_out,
+    response_out,
+    result_in,
+    tool_in,
+    usage_out,
+)
 from ma_plugin import hooks
 from ma_plugin.rpc import WireError
 from ma_tools import Tools
@@ -208,14 +217,145 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
                         except Exception as exc:
                             raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
 
+                    step = cast(str, identity())
+
+                    async def request_model(request: JsonObject) -> JsonObject:
+                        try:
+                            return await self._command_model(d, step, request)
+                        except AgentError:
+                            raise
+                        except Exception as exc:
+                            raise _error(exc, ErrorCode.INVALID_REQUEST) from exc
+
                     reply = await _handle_command(
-                        item, d["args"], CommandContext(d["session"], d["actor"], environment)
+                        item,
+                        d["args"],
+                        CommandContext(
+                            d["session"],
+                            d["actor"],
+                            environment,
+                            step_id=step,
+                            request_model=request_model if item.uses_model else None,
+                        ),
                     )
                     return {"output": reply} if reply is not None else {}
 
                 return run
 
             api.command(command.name, command.description, bind_command(command))
+
+    async def _command_model(
+        self, command: dict[str, Any], step: str, request: JsonObject
+    ) -> JsonObject:
+        sid, actor = command["session"], command["actor"]
+        api = self.api
+        state = await api.session("get", session=sid)
+        rights = set(await api.session("authority", session=sid, actor=actor))
+        if acting := command.get("acting_for"):
+            rights &= set(await api.session("authority", session=sid, actor=acting))
+        if "input" not in rights:
+            raise AgentError(ErrorCode.FORBIDDEN, "Actor lacks authority: input")
+        for key, type_ in (
+            ("systemPrompt", str),
+            ("messages", list),
+            ("tools", list),
+            ("settings", dict),
+        ):
+            if not isinstance(request.get(key), type_):
+                raise AgentError(ErrorCode.INVALID_REQUEST, f"Invalid model request {key}")
+
+        async def check_limit() -> None:
+            await api.session("assert_writable", session=sid)
+            if await api.session("tenant_exhausted", session=sid):
+                raise AgentError(
+                    ErrorCode.TURN_LIMIT, "Tenant token budget reached", {"limit": "tenantTokens"}
+                )
+            if (budget := state["settings"].get("max_tokens")) is not None:
+                usage = [
+                    usage_out(entry.get("data", {}).get("usage", {}))
+                    for entry in (await api.session("get", session=sid))["entries"]
+                    if entry["kind"] == "response" and not entry.get("fork_source")
+                ]
+                if sum(item["input"] + item["output"] for item in usage) >= budget:
+                    raise AgentError(ErrorCode.TURN_LIMIT, "Session token budget reached")
+
+        await check_limit()
+        access = await api.call("selection", "access", {"session": sid})
+        model = model_out(access, access["target"])
+        attempt = identity()
+        data = request_in(
+            request,
+            {
+                "session": sid,
+                "actor": actor,
+                "step": step,
+                "access": access,
+                "attempt_id": attempt,
+                "provider_tools": False,
+            },
+        )
+        wire = access["provider"].get("wire_provider")
+        if wire:
+            data["auxiliary_step"] = step
+        else:
+            data = await api.session("prepare_model_request", **data)
+            final = data.get("_shared_request") or request_out(data)
+            await api.session(
+                "append",
+                session=sid,
+                actor=actor,
+                step=step,
+                id=attempt,
+                kind="model_started",
+                writer=self.name,
+                **model_request_fields(
+                    {k: model[k] for k in ("provider", "id")}, final, False, auxiliary=True
+                ),
+            )
+        try:
+            await check_limit()
+            response = await api.call(access["target"], "generate", data)
+        except BaseException as exc:
+            entries = (await api.session("get", session=sid))["entries"]
+            if any(entry["id"] == attempt for entry in entries) and not any(
+                entry["kind"] == "response" and attempt in entry.get("copies", [])
+                for entry in entries
+            ):
+                response = (
+                    {"stop": "aborted", "recovery": True}
+                    if not isinstance(exc, Exception)
+                    or isinstance(exc, AgentError)
+                    and exc.code == ErrorCode.TURN_LIMIT
+                    else {"stop": "failed", "error": {"kind": "other", "message": str(exc)}}
+                )
+                await api.session(
+                    "append",
+                    session=sid,
+                    actor=actor,
+                    step=step,
+                    copies=[attempt],
+                    kind="response",
+                    writer=self.name,
+                    data=response,
+                )
+            if not isinstance(exc, Exception) or isinstance(exc, AgentError):
+                raise
+            if "response" not in locals():
+                raise
+        else:
+            if not wire:
+                await api.session(
+                    "append",
+                    session=sid,
+                    actor=actor,
+                    step=step,
+                    copies=[attempt],
+                    kind="response",
+                    writer=self.name,
+                    content=response.get("content", []),
+                    data={k: v for k, v in response.items() if k != "content"},
+                )
+        return cast(JsonObject, response_out(response))
 
     async def definitions(self, d: JsonObject) -> list[JsonObject]:
         return [

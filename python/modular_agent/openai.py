@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ._model_http import _HttpProvider, _argument, _failure, _max_tokens, _rows, _tools
-from ._provider import ProviderContext
+from ._provider import ModelInfo, ProviderContext
 from ._types import Json, JsonObject, ModelRef, _text
 
 
@@ -69,6 +69,7 @@ class OpenAI(_HttpProvider):
             "store": False,
             "max_output_tokens": _max_tokens(request),
         }
+        body.update(self._reasoning(model.id, request))
         final: dict[str, Any] | None = None
         async for event in self._events("/responses", {"Authorization": f"Bearer {key}"}, body):
             kind = event.get("type")
@@ -138,6 +139,6 @@ class OpenAI(_HttpProvider):
 
 
 def openai(
-    *, models: Sequence[str] = ("gpt-4.1-mini",), base_url: str = "https://api.openai.com/v1"
+    *, models: Sequence[str | ModelInfo] | None = None, base_url: str = "https://api.openai.com/v1"
 ) -> OpenAI:
-    return OpenAI("openai", tuple(models), base_url)
+    return OpenAI("openai", models, base_url)

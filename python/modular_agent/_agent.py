@@ -28,7 +28,7 @@ from ma_core import plain
 from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
-from ma_harness.authority import PERMISSIONS
+from ma_harness.authority import CONNECTION_AUTHORITY, PERMISSIONS
 from ma_history import History
 from ma_history.http import HTTPHistory
 from ma_jobs import Jobs
@@ -216,9 +216,12 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         self._allowed_projects: set[Path] | None = None
         self._allowed_tenants: set[str | None] = {None}
         self._connections = connections
+        self._token_rights: set[str] = set()
+        self._connection_grants: dict[str, set[str]] = {}
         if principal is not None:
             self.name = "acp:" + uuid4().hex
             self.principal = principal["actor"]
+            self._token_rights = set(self.principal["rights"])
             if "projects" in principal:
                 self._allowed_projects = {Path(p).resolve() for p in principal["projects"]}
             self._allowed_tenants = set(principal.get("tenants", [None]))
@@ -245,11 +248,17 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
     def _current(self) -> Agent:
         return self._scope.get() or self._agents.get(OUTPUT_SESSION.get() or "", self._agent)
 
-    def project_scope(self) -> Token[Agent | None]:
-        return self._scope.set(None)
+    def _authority_scope(self) -> Any:
+        return CONNECTION_AUTHORITY.set(
+            (self.actor, self._token_rights, self._connection_grants) if self.network else None
+        )
 
-    def reset_project_scope(self, token: Token[Agent | None]) -> None:
-        self._scope.reset(token)
+    def project_scope(self) -> tuple[Token[Agent | None], Any]:
+        return self._scope.set(None), self._authority_scope()
+
+    def reset_project_scope(self, token: tuple[Token[Agent | None], Any]) -> None:
+        self._scope.reset(token[0])
+        CONNECTION_AUTHORITY.reset(token[1])
 
     def register_project(self, agent: Agent, api: Any) -> None:
         self._apis[agent] = api
@@ -259,11 +268,11 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 sid = payload.get("session")
                 if self.network and self._scope.get() is not agent and sid not in self._agents:
                     return None
-                token = self._scope.set(agent)
+                token = self._scope.set(agent), self._authority_scope()
                 try:
                     return await handler(payload)
                 finally:
-                    self._scope.reset(token)
+                    self.reset_project_scope(token)
 
             return run
 
@@ -329,6 +338,16 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
     async def require_visible_session(self, project: str, sid: str) -> None:
         await super().require_visible_session(project, sid)
         self._claim(sid)
+        if self.network and sid not in self._connection_grants:
+            owner = self._connections.composition(sid) if self._connections else None
+            session = (owner or self._agent)._h.sessions.get(sid)
+            if session is None:
+                session = await self._agent._api.call("history", "read", {"session": sid})
+            if session is not None:
+                grant = session.get("actors", {}).get(self.actor)
+                self._connection_grants[sid] = self._token_rights & set(
+                    grant["authority"] if grant else ()
+                )
 
     async def _open(
         self,
@@ -372,8 +391,8 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 selected = await self._compose_reopen(folder, session_id)
             else:
                 selected = await self._compose(folder) if self._compose else self._agent
-        if selected is not self._agent and selected._project != folder:
-            if selected not in self._apis:
+        if selected._project != folder:
+            if selected is not self._agent and selected not in self._apis:
                 await selected.close()
             raise ValueError("Session is not in this project")
         if selected not in self._apis:
@@ -861,7 +880,6 @@ class Agent:
                     raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
                 self._plugin_host = True
             if listen is not None:
-                rights: dict[str, set[str]] = {}
                 kinds: dict[str, str] = {}
                 connections = _AcpConnections()
                 principals = deepcopy(actors)
@@ -874,11 +892,9 @@ class Agent:
                         or not allowed <= PERMISSIONS
                     ):
                         raise ValueError("Each WebSocket actor needs an id, kind and valid rights")
-                    if aid in rights and (allowed != rights[aid] or kind != kinds[aid]):
-                        raise ValueError(
-                            "Tokens for the same actor id must agree on kind and rights"
-                        )
-                    rights[aid], kinds[aid] = allowed, kind
+                    if aid in kinds and kind != kinds[aid]:
+                        raise ValueError("Tokens for the same actor id must agree on kind")
+                    kinds[aid] = kind
                 if not actors:
                     raise ValueError("WebSocket ACP requires at least one configured actor")
                 await self._install_acp_mcp(project_mcp)
@@ -1057,7 +1073,12 @@ def create_agent(
         if runtime is not None and runtime.continues_after_restart != (durability == "durable"):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Runtime does not match durability")
         if history is not None and (history._kind == "memory") != (durability == "ephemeral"):
-            raise AgentError(ErrorCode.INVALID_COMPOSITION, "History does not match durability")
+            raise AgentError(
+                ErrorCode.INVALID_COMPOSITION,
+                "Persistent history requires kept or durable"
+                if durability == "ephemeral"
+                else "History does not match durability",
+            )
         external_placement = bool(process_plugins or service_plugins)
         if plugin_host is False and external_placement:
             raise AgentError(
@@ -1085,7 +1106,7 @@ def create_agent(
                 )
             if not folder.is_dir():
                 raise ValueError("Project must be a directory")
-            defaults = {"thinking": "off", **settings_in(settings or {})}
+            defaults = settings_in(settings or {})
             if approval is not None:
                 defaults.update(settings_in({"approval": approval}))
             agent = Agent(h, folder, defaults, on_question, scratch)

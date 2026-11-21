@@ -1,5 +1,7 @@
 import asyncio
 import json
+from importlib.resources import files
+from pathlib import Path
 
 import pytest
 
@@ -28,10 +30,54 @@ ANTHROPIC = [
 ]
 
 
+TABLE = Path(__file__).resolve().parents[2] / "docs/sdk/api-key-models.json"
+MODELS = json.loads(TABLE.read_bytes())["models"]
+
+
+def test_shipped_catalog_is_byte_identical():
+    assert files("modular_agent").joinpath(TABLE.name).read_bytes() == TABLE.read_bytes()
+
+
 @pytest.mark.loopback
-@pytest.mark.parametrize("provider,events", [(openai, OPENAI), (anthropic, ANTHROPIC)])
-@pytest.mark.parametrize("status", [200, 401])
-async def test_loopback_provider(provider, events, status, monkeypatch):
+@pytest.mark.parametrize(
+    "vendor,model,status,settings,fields",
+    [
+        (vendor, model, status, {}, {})
+        for vendor, model in [("openai", "gpt-6-luna"), ("anthropic", "claude-haiku-5-5")]
+        for status in (200, 401)
+    ]
+    + [
+        (row["provider"], row["id"], 200, {"reasoning": level, "maxOutput": 16384}, fields)
+        for row in MODELS
+        for level, fields in row["levels"].items()
+    ]
+    + [
+        ("openai", "gpt-5", 200, {"reasoning": "off"}, {}),
+        ("openai", "gpt-6-luna", 200, {"reasoning": "minimal"}, {"reasoning": {"effort": "none"}}),
+        ("anthropic", "claude-opus-5-5", 200, {"reasoning": "off"}, {}),
+        (
+            "anthropic",
+            "claude-opus-4-5",
+            200,
+            {"reasoning": "high", "maxOutput": 2049},
+            {
+                "thinking": {"type": "enabled", "budget_tokens": 2048},
+                "output_config": {"effort": "high"},
+            },
+        ),
+        (
+            "anthropic",
+            "claude-opus-4-5",
+            200,
+            {"reasoning": "high", "maxOutput": 1024},
+            {"thinking": {"type": "disabled"}},
+        ),
+        ("openai", "unlisted", 200, {"reasoning": "high"}, {}),
+        ("anthropic", "unlisted", 200, {"reasoning": "high"}, {}),
+    ],
+)
+async def test_loopback_provider(vendor, model, status, settings, fields, monkeypatch):
+    provider, events = (openai, OPENAI) if vendor == "openai" else (anthropic, ANTHROPIC)
     received = []
     monkeypatch.setenv("OPENAI_API_KEY", "loopback-placeholder")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "loopback-placeholder")
@@ -56,8 +102,24 @@ async def test_loopback_provider(provider, events, status, monkeypatch):
     async with await asyncio.start_server(respond, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         async with create_agent(
-            providers=[provider(base_url=f"http://127.0.0.1:{port}/v1")]
+            providers=[
+                provider(
+                    models=[model] if model == "unlisted" else None,
+                    base_url=f"http://127.0.0.1:{port}/v1",
+                )
+            ],
+            model=f"{vendor}/{model}",
+            settings=settings,
         ) as agent:
+            info = next(m for m in await agent.models() if m["id"] == model)
+            row = next((m for m in MODELS if m["id"] == model), None)
+            if row is None:
+                assert "thinking" not in info
+            else:
+                assert info == {
+                    **{k: v for k, v in row.items() if k != "levels"},
+                    "thinking": list(row["levels"]),
+                }
             session = await agent.session()
             stream = [e async for e in session.prompt_stream("Say hello")]
             result = await session.last_turn()
@@ -76,6 +138,7 @@ async def test_loopback_provider(provider, events, status, monkeypatch):
     [(line, headers, body)] = received
     assert line.startswith("POST /v1/" + ("responses" if provider is openai else "messages"))
     assert body["stream"] is True
+    assert {k: body[k] for k in {"reasoning", "thinking", "output_config"} & body.keys()} == fields
     assert "Say hello" in json.dumps(body)
     if provider is openai:
         assert headers["authorization"] == "Bearer loopback-placeholder"

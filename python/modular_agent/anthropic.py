@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ._model_http import _HttpProvider, _argument, _failure, _max_tokens, _rows, _tools
-from ._provider import ProviderContext
+from ._provider import ModelInfo, ProviderContext
 from ._types import Json, JsonObject, ModelRef, _text
 
 
@@ -70,6 +70,7 @@ class Anthropic(_HttpProvider):
             "stream": True,
             "max_tokens": _max_tokens(request),
         }
+        body.update(self._reasoning(model.id, request, max_tokens=_max_tokens(request)))
         blocks: dict[int, dict[str, Any]] = {}
         usage: dict[str, Any] = {}
         stop: str | None = None
@@ -148,6 +149,8 @@ class Anthropic(_HttpProvider):
 
 
 def anthropic(
-    *, models: Sequence[str] = ("claude-haiku-4-5",), base_url: str = "https://api.anthropic.com/v1"
+    *,
+    models: Sequence[str | ModelInfo] | None = None,
+    base_url: str = "https://api.anthropic.com/v1",
 ) -> Anthropic:
-    return Anthropic("anthropic", tuple(models), base_url)
+    return Anthropic("anthropic", models, base_url)

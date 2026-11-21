@@ -938,7 +938,12 @@ class Harness(Authority):
             return {k: v[1] for k, v in self.commands.items()}
         if op == "command":
             command_session = self._session(d)
-            self.require(command_session, d.get("actor", command_session["actor"]), "input")
+            ceiling = (
+                self.permissions(command_session, d["acting_for"]) if d.get("acting_for") else None
+            )
+            self.require(
+                command_session, d.get("actor", command_session["actor"]), "input", ceiling
+            )
             name, _, args = d["text"].removeprefix("/").partition(" ")
             if name not in self.commands:
                 raise AgentError("Unknown command: /" + name)

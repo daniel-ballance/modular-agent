@@ -71,7 +71,11 @@ class Stdio:
                         return None
                     self.requests.add(key)
                     if self.frames is not None and message["method"] == "$/ping":
-                        await self.send({"jsonrpc": "2.0", "id": key, "result": {}})
+                        try:
+                            async with asyncio.timeout(5):
+                                await self.send({"jsonrpc": "2.0", "id": key, "result": {}})
+                        except TimeoutError:
+                            return None
                         continue
                 return message
 

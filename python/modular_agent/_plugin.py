@@ -31,11 +31,22 @@ class CommandContext:
         session_id: str,
         actor_id: str,
         environment: Callable[[str, JsonObject], Awaitable[Json]] | None = None,
+        *,
+        step_id: str | None = None,
+        request_model: Callable[[JsonObject], Awaitable[JsonObject]] | None = None,
     ) -> None:
         self.session_id = session_id
+        self.step_id = step_id
+        self._model = request_model
         self.actor_id = actor_id
         self._active = True
         self.environment = ToolEnvironment(self._check, environment)
+
+    async def request_model(self, request: JsonObject) -> JsonObject:
+        self._check()
+        if self._model is None:
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Command did not register uses_model")
+        return await self._model(request)
 
     def _check(self) -> None:
         if not self._active:
@@ -66,6 +77,7 @@ class _Command:
     description: str
     handler: CommandHandler
     in_process_only: bool
+    uses_model: bool
 
 
 class Registrar:
@@ -123,7 +135,9 @@ class Registrar:
             or any(c.isspace() for c in name)
         ):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid command registration: {name}")
-        self._commands[name] = _Command(name, description, handler, uses_model or in_process_only)
+        self._commands[name] = _Command(
+            name, description, handler, uses_model or in_process_only, uses_model
+        )
 
 
 class Plugin:

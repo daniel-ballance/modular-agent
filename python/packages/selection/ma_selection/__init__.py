@@ -57,9 +57,9 @@ class Selection(Plugin):
     async def thinking(self, d):
         s = await self.api.session("get", session=d["session"])
         if not d["args"]:
-            return {"thinking": s["settings"]["thinking"]}
+            return {"thinking": s["settings"].get("thinking")}
         access = await self.access(d)
-        if d["args"] not in access["thinking"]:
+        if d["args"] not in access.get("thinking", []):
             raise AgentError("Thinking level not supported")
         await self.api.session(
             "settings",
