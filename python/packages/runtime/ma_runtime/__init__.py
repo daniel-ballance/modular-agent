@@ -537,8 +537,9 @@ class Runtime(Turns, Plugin):
         sid = d["session"]
         self.suspending.add(sid)
         task = self.tasks.pop(sid, None)
-        if task and not task.done():
+        if task and not task.done() and not task.cancelling():
             task.cancel()
+        if task:
             await asyncio.gather(task, return_exceptions=True)
 
     async def _close(self, d):

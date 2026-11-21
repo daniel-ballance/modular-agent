@@ -651,6 +651,13 @@ class Agent:
             reason=answer.reason,
         )
 
+    async def _interrupted(self, d: dict[str, Any]) -> None:
+        if (reason := d.get("interrupted")) and (session := self._sessions.get(d["session"])):
+            session._interruption = reason
+            session._changed.set()
+            for stream in session._prompt_streams:
+                stream.push(AgentError(ErrorCode.LOST, "Session interrupted", {"reason": reason}))
+
     async def _event(self, d: dict[str, Any]) -> None:
         sid = d.get("session")
         if sid is None:
@@ -1171,6 +1178,7 @@ def create_agent(
             agent._credentials = credentials or environment_credentials()
             await h.load(_CredentialAdapter(agent._credentials))
             h.on("embedding", "session.start", agent._present, "first")
+            h.on("embedding", "session.suspend", agent._interrupted, "first")
             h.follow("embedding", "user", agent._event)
             for provider in providers:
                 await h.load(_ProviderAdapter(provider, agent._credentials))

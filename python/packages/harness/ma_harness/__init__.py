@@ -36,6 +36,7 @@ class Harness(Authority):
         self.commands = {}
         self.sessions = {}
         self.interruptions = {}
+        self.effects = {}
         self.reopening = set()
         self.append_locks = {}
         self.tool_dispatches = {}
@@ -315,7 +316,7 @@ class Harness(Authority):
         if method is None or operation.startswith("_"):
             raise AgentError("Unknown operation: " + operation)
         sid = data.get("session")
-        if (
+        effect = (
             isinstance(sid, str)
             and sid in self.sessions
             and (
@@ -323,9 +324,10 @@ class Harness(Authority):
                 or (target == "environment" and operation == "read")
             )
             and (target != "runtime" and target != "history")
-        ):
-            await self._assert_writable(sid)
+        )
         if target != "tools" or operation != "run" or "call" not in data:
+            if effect:
+                return clone(await self._effect(sid, method, data, emit))
             return clone(await method(data, emit))
         call = data["call"]
         if call.get("parentCallId") and (definition := data.get("definition")):
@@ -346,7 +348,7 @@ class Harness(Authority):
         scope = {"data": data, "children": set(), "closing": False}
         self.tool_dispatches[token] = scope
         try:
-            return clone(await method({**data, "dispatch": token}, emit))
+            return clone(await self._effect(sid, method, {**data, "dispatch": token}, emit))
         finally:
             scope["closing"] = True
             children = list(scope["children"])
@@ -495,6 +497,25 @@ class Harness(Authority):
                 silent,
             )
 
+    async def _effect(self, sid, callback, *args):
+        await self._assert_writable(sid)
+        tasks = self.effects.setdefault(sid, {})
+        task = asyncio.current_task()
+        own = task not in tasks
+        if own:
+            tasks[task] = asyncio.Event()
+        try:
+            return await callback(*args)
+        except asyncio.CancelledError as exc:
+            if self.sessions.get(sid, {}).get("writer_lost"):
+                raise AgentError("Session interrupted", "lost") from exc
+            raise
+        finally:
+            if own:
+                tasks.pop(task).set()
+            if not tasks:
+                self.effects.pop(sid, None)
+
     def _interrupt(self, sid, reason):
         state = self.sessions.get(sid)
         if state is None or state.get("writer_lost"):
@@ -504,12 +525,16 @@ class Harness(Authority):
         state["writer_lost"] = True
         state["interruption"] = reason
         self.interruptions[sid] = asyncio.create_task(self._finish_interruption(sid, reason))
+        for task in self.effects.get(sid, ()):
+            if task is not asyncio.current_task() and not task.cancelling():
+                task.cancel()
 
     async def _finish_interruption(self, sid, reason):
         await self._emit(
             {"kind": "session_interrupted", "session": sid, "reason": reason, "time": now()}
         )
-        await self.fire("@harness", "session.suspend", {"session": sid, "interrupted": True})
+        await self.fire("@harness", "session.suspend", {"session": sid, "interrupted": reason})
+        await asyncio.gather(*(settled.wait() for settled in self.effects.get(sid, {}).values()))
 
     async def _end_interrupted(self, sid):
         task = self.interruptions[sid]
@@ -577,6 +602,8 @@ class Harness(Authority):
         self.sessions[session["id"]] = session
         # A cancelled caller cannot dispatch from this append. The next
         # writer still needs the confirmed parent and call associations.
+        if session.get("writer_lost"):
+            raise AgentError("Session interrupted", "lost")
         if cancellation is not None:
             raise cancellation
 
@@ -990,8 +1017,10 @@ class Harness(Authority):
             name, _, args = d["text"].removeprefix("/").partition(" ")
             if name not in self.commands:
                 raise AgentError("Unknown command: /" + name)
-            return await self.commands[name][2](
-                {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()}
+            return await self._effect(
+                d["session"],
+                self.commands[name][2],
+                {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()},
             )
         if op == "event":
             if d.get("kind") == "plugin_failed" and "session" not in d and self.sessions:

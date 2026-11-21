@@ -64,6 +64,19 @@ def project(event):
     if kind == "model_output":
         event_type = data.get("stream_type", "text")
         fields = {"delta": "text", "stepId": "step"}
+    elif kind == "session_interrupted":
+        # Like an outcome kind, the reason is a protocol tag, not display text.
+        def restore_interruption(native, changed):
+            if changed != {"reason": native["reason"]}:
+                raise ValueError("The interruption reason cannot be redacted")
+            return native
+
+        return [
+            (
+                {"type": "sessionInterrupted", "data": {"reason": data["reason"]}},
+                restore_interruption,
+            )
+        ]
     elif kind == "tool_progress":
         event_type = "toolOutput"
         fields = {"toolCallId": "call", "chunk": "text"}

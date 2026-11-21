@@ -141,7 +141,7 @@ class _Stream:
         self.overflowed = False
         self.cursor: Json = None
 
-    def push(self, event: Event) -> None:
+    def push(self, event: Event | AgentError) -> None:
         if self.overflowed:
             return
         if self.queue.full():
@@ -157,7 +157,9 @@ class _Stream:
     async def next(self) -> Event:
         event = await self.queue.get()
         if isinstance(event, AgentError):
-            raise AgentError(ErrorCode.LOST, event.message, {"fromEntry": self.cursor})
+            if self.overflowed:
+                raise AgentError(ErrorCode.LOST, event.message, {"fromEntry": self.cursor})
+            raise event
         return event
 
     def delivered(self, event: Event) -> None:
@@ -229,6 +231,7 @@ class Session:
         self.id = session_id
         self._changed = asyncio.Event()
         self._interruption: str | None = None
+        self._prompt_streams: set[_Stream] = set()
         self._streams: set[_Stream] = set()
         self._closed = False
         self._root = self
@@ -403,6 +406,7 @@ class Session:
                 yield event
             return
         stream, unsubscribe = await self._subscribe()
+        self._root._prompt_streams.add(stream)
         try:
             receipt = await self._send(input, "now", key=key, result=result)
             if receipt.disposition is not None:
@@ -446,6 +450,7 @@ class Session:
                     if event.type == "turnEnded":
                         return
         finally:
+            self._root._prompt_streams.discard(stream)
             unsubscribe()
 
     async def _subscribe(self) -> tuple[_Stream, Callable[[], None]]:
