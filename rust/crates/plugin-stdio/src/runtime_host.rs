@@ -13,15 +13,20 @@ use std::{
     },
 };
 
+pub(crate) enum Execution {
+    Remote(Arc<Peer>),
+    Local(Arc<dyn crate::RuntimeHandler>),
+}
+
 pub(crate) struct RemoteRuntime {
-    pub peer: Arc<Peer>,
+    pub execution: Execution,
     pub points: BTreeMap<String, HookPoint>,
     pub registration: Value,
     pub ui_runtime: Option<Arc<dyn Runtime>>,
 }
 
 pub(crate) struct Callback<'a> {
-    pub peer: Arc<Peer>,
+    pub peer: Option<Arc<Peer>>,
     pub id: Value,
     pub method: &'a str,
     pub params: &'a Value,
@@ -124,11 +129,12 @@ impl Runtime for RemoteRuntime {
             .await
     }
     async fn tool(&self, api: Api, scope: Scope, call: ToolCall) -> Result<ToolResult> {
-        self.ui_runtime
-            .as_ref()
-            .ok_or_else(|| anyhow!("UI tool calls are not offered by the Runtime binding"))?
-            .tool(api, scope, call)
-            .await
+        let ui = self
+            .ui_runtime
+            .clone()
+            .or_else(|| capability::<dyn Runtime>(api.as_ref(), "runtime.transient").ok())
+            .ok_or_else(|| anyhow!("UI tool calls are not offered by the Runtime binding"))?;
+        ui.tool(api, scope, call).await
     }
 }
 
@@ -161,7 +167,7 @@ impl RemoteRuntime {
         if let Some(level) = input.settings["thinking"].as_str() {
             settings["reasoning"] = json!(level);
         }
-        let mut params = json!({"turn":{"sessionId":scope.session,"turnId":scope.turn,"startedBy":started_by,"model":wire::model_request_record(&model)["model"],"modelSupports":{"keepsState":model.keeps_state,"runsTools":model.runs_tools},"settings":settings}});
+        let mut params = json!({"turn":{"sessionId":scope.session,"turnId":scope.turn,"startedBy":started_by,"model":wire::model_value(&model),"modelSupports":{"keepsState":model.keeps_state,"runsTools":model.runs_tools},"settings":settings}});
         if let Some(shape) = input.settings.get("result_shape") {
             params["turn"]["resultShape"] = shape.clone();
         }
@@ -314,10 +320,14 @@ impl RemoteRuntime {
                     .collect::<Vec<_>>()
             );
         }
-        let reply = self
-            .peer
-            .call(method, params, Some(rpc), cancel.clone())
-            .await;
+        let reply = match &self.execution {
+            Execution::Remote(peer) => peer.call(method, params, Some(rpc), cancel.clone()).await,
+            Execution::Local(handler) => {
+                let cx = crate::RuntimeContext::local(work.clone(), rpc);
+                let _settled = cx.settled.clone().drop_guard();
+                handler.run(method, params, cx).await
+            }
+        };
         callback_cancel.cancel();
         work.ended.store(true, Ordering::Release);
         let _commits = work.commits.lock().await;
@@ -586,7 +596,7 @@ impl TurnWork {
         scope: &Scope,
         request_wire: &Value,
         token: CancellationToken,
-        peer: Arc<Peer>,
+        peer: Option<Arc<Peer>>,
         callback: Value,
     ) -> Result<Value> {
         let model = &self.input.model;
@@ -665,12 +675,16 @@ impl TurnWork {
         if !step_started {
             api.emit(Event::new(scope, "step.start", json!({}))).await?;
         }
-        let relay: Api = Arc::new(Relay {
-            inner: api.clone(),
-            peer,
-            id: callback,
-            route: Route::RuntimeModel,
-        });
+        let relay: Api = if let Some(peer) = peer {
+            Arc::new(Relay {
+                inner: api.clone(),
+                peer,
+                id: callback,
+                route: Route::RuntimeModel,
+            })
+        } else {
+            api.clone()
+        };
         let result = model
             .generate_attempt(
                 relay,

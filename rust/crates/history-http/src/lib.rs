@@ -1,6 +1,10 @@
 //! A synchronous HistoryStore port backed by a separately driven HTTP client.
 use agent_api::*;
+mod portable_store;
 mod server;
+pub use portable_store::{
+    EntryPage, HistoryFault, HistoryResult, LeaseGrant, PortableHistoryStore, SessionPage,
+};
 use reqwest::{Client, Method, StatusCode, Url};
 pub use server::{HistoryServer, ServeHistoryOptions, listen_history, serve_history};
 use std::{
@@ -62,10 +66,30 @@ fn io() -> &'static tokio::runtime::Runtime {
 
 #[derive(Clone)]
 struct Service {
-    client: Client,
-    base: Url,
-    token: Arc<str>,
+    transport: Transport,
     margin: Duration,
+}
+
+#[derive(Clone)]
+enum Transport {
+    Http {
+        client: Client,
+        base: Url,
+        token: Arc<str>,
+    },
+    Embedded(Arc<dyn PortableHistoryStore>),
+}
+
+fn clock_margin() -> Result<Duration> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Duration::ZERO)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(Duration::from_millis(std::env::var("MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS")
+        .map_err(|_| anyhow!("configure MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS without a suspension-aware clock"))?.parse()?))
+    }
 }
 impl Service {
     async fn send(
@@ -80,7 +104,18 @@ impl Service {
             path.iter().all(|s| !matches!(*s, "." | "..")),
             "invalid history path segment"
         );
-        let mut url = self.base.clone();
+        let (client, base, token) = match &self.transport {
+            Transport::Http {
+                client,
+                base,
+                token,
+            } => (client, base, token),
+            Transport::Embedded(store) => {
+                return portable_store::request(store.as_ref(), method, path, project, body, after)
+                    .await;
+            }
+        };
+        let mut url = base.clone();
         url.path_segments_mut()
             .map_err(|_| anyhow!("history service URL cannot be a base"))?
             .pop_if_empty()
@@ -95,10 +130,9 @@ impl Service {
         if !query.is_empty() {
             url.set_query(Some(&query.join("&")));
         }
-        let mut request = self
-            .client
+        let mut request = client
             .request(method.clone(), url)
-            .bearer_auth(&*self.token);
+            .bearer_auth(token.as_ref());
         if let Some(body) = body {
             let body = serde_json::to_vec(&body)?;
             ensure!(body.len() <= BODY_LIMIT, "history request is too large");
@@ -450,11 +484,7 @@ pub struct HttpHistory {
 }
 impl HttpHistory {
     pub fn new(url: &str, token: &str) -> Result<Self> {
-        #[cfg(target_os = "linux")]
-        let margin = Duration::ZERO;
-        #[cfg(not(target_os = "linux"))]
-        let margin = Duration::from_millis(std::env::var("MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS")
-            .map_err(|_| anyhow!("configure MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS without a suspension-aware clock"))?.parse()?);
+        let margin = clock_margin()?;
         ensure!(!token.is_empty(), "history token file is empty");
         let base = Url::parse(url)?;
         ensure!(
@@ -473,17 +503,27 @@ impl HttpHistory {
                     .is_some_and(|ip| ip.is_loopback()),
             "plaintext history requires a numeric loopback address"
         );
-        let service = Service {
-            client: Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(3))
-                .timeout(Duration::from_secs(8))
-                .build()?,
-            base,
-            token: token.into(),
+        Self::from_service(Service {
+            transport: Transport::Http {
+                client: Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .connect_timeout(Duration::from_secs(3))
+                    .timeout(Duration::from_secs(8))
+                    .build()?,
+                base,
+                token: token.into(),
+            },
             margin,
-        };
+        })
+    }
+    pub fn from_store(store: impl PortableHistoryStore) -> Result<Self> {
+        Self::from_service(Service {
+            transport: Transport::Embedded(Arc::new(store)),
+            margin: clock_margin()?,
+        })
+    }
+    fn from_service(service: Service) -> Result<Self> {
         let version = service.get(&["v1"], None)?;
         ensure!(
             version["binding"] == "modular-agent-history/1",
@@ -491,7 +531,7 @@ impl HttpHistory {
         );
         let ttl = positive_ms(&version, "ttlMs")?;
         ensure!(
-            margin < Duration::from_millis(ttl) / 3,
+            service.margin < Duration::from_millis(ttl) / 3,
             "history lease clock margin leaves no renewal time"
         );
         Ok(Self {
@@ -537,7 +577,10 @@ impl HttpHistory {
 }
 impl HistoryStore for HttpHistory {
     fn supports_erasure(&self) -> bool {
-        true
+        match &self.service.transport {
+            Transport::Http { .. } => true,
+            Transport::Embedded(store) => store.supports_erasure(),
+        }
     }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
         let mut held = self.held.lock().unwrap();

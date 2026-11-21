@@ -69,6 +69,7 @@ pub struct Registrar {
     prepare: Vec<LocalHook<SessionPrepare, ()>>,
     pub(crate) environment: Option<Arc<dyn base::WorkingEnvironment>>,
     runtime: Option<Arc<dyn base::Runtime>>,
+    pub(crate) portable_runtime: Option<crate::runtime::Adapter>,
     history: Option<crate::History>,
     credentials: Option<Arc<dyn crate::CredentialStore>>,
     configuration: Option<Arc<dyn crate::Configuration>>,
@@ -307,6 +308,7 @@ impl Plugin {
             prepare: vec![],
             environment: None,
             runtime: None,
+            portable_runtime: None,
             history: None,
             jobs: None,
             credentials: None,
@@ -389,7 +391,21 @@ impl Registrar {
     pub fn environment(&mut self, part: impl base::WorkingEnvironment + 'static) -> Result<()> {
         set_part(&mut self.environment, Arc::new(part), "working-environment")
     }
-    pub fn runtime(&mut self, part: impl base::Runtime + 'static) -> Result<()> {
+    pub fn runtime(&mut self, part: impl crate::RuntimePart) -> Result<()> {
+        if self.runtime.is_some() {
+            return Err(Error::new(Code::InvalidComposition, "duplicate runtime"));
+        }
+        set_part(
+            &mut self.portable_runtime,
+            crate::runtime::Adapter::new(part)?,
+            "runtime",
+        )
+    }
+    /// Advanced native-only Runtime, with direct access to base ports.
+    pub fn native_runtime(&mut self, part: impl base::Runtime + 'static) -> Result<()> {
+        if self.portable_runtime.is_some() {
+            return Err(Error::new(Code::InvalidComposition, "duplicate runtime"));
+        }
         set_part(&mut self.runtime, Arc::new(part), "runtime")
     }
     pub fn history_store(&mut self, store: crate::History) -> Result<()> {
@@ -507,6 +523,14 @@ impl base::Plugin for InProcess {
         }
         if let Some(part) = &self.registered.runtime {
             base::Plugin::install(&crate::parts::RuntimeAdapter(part.clone()), r)?;
+        }
+        if let Some(part) = &self.registered.portable_runtime {
+            let runtime = plugin_stdio::local_runtime(
+                Arc::new(part.clone()),
+                part.registration.clone(),
+                r.runtime_points(),
+            );
+            r.provide::<dyn base::Runtime>("runtime", runtime)?;
         }
         if let Some(part) = &self.registered.history {
             r.provide_over_default::<dyn base::HistoryStore>(

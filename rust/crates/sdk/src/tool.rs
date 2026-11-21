@@ -503,10 +503,10 @@ impl ToolContext {
     /// run this tool again from the top after the question is answered.
     pub async fn ask_with(&self, mut ask: Ask, options: AskWait) -> Result<Answer> {
         let ms = options.wait.as_millis();
-        if ask.kind == base::RequestKind::Approval || ms == 0 || ms > 9_007_199_254_740_991 {
+        if ask.kind == base::RequestKind::Approval || ms > 9_007_199_254_740_991 {
             return Err(Error::new(
                 Code::InvalidRequest,
-                "leaveOpen needs a positive wait and a non-approval question",
+                "leaveOpen needs a representable wait and a non-approval question",
             ));
         }
         ask.wait_ms = Some(ms as u64);

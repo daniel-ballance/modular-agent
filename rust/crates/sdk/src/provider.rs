@@ -31,6 +31,19 @@ pub struct ModelInfo {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// Usage reported by a model attempt or aggregated by a step or turn.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cost: f64,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ProviderSupport {
     pub keeps_state: bool,

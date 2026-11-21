@@ -5,7 +5,10 @@ use crate::{
     tool::{Backend, ToolContext, ToolStatus, execute},
 };
 use agent_api as base;
-use plugin_stdio::rpc::{Endpoint, Fault, Peer, Reply};
+use plugin_stdio::{
+    RuntimeHandler,
+    rpc::{Endpoint, Fault, Peer, Reply},
+};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -100,6 +103,9 @@ impl Served {
 
 fn registration(name: &str, replaces: &[String], r: &Registrar) -> Value {
     let mut v = json!({"binding": BINDING, "name": name, "replaces": replaces});
+    if let Some(runtime) = &r.portable_runtime {
+        v["runtime"] = runtime.registration.clone();
+    }
     if let Some(env) = &r.environment {
         let native = env.declaration();
         let containment = match native["containment"].as_str() {
@@ -356,6 +362,15 @@ impl Endpoint for Served {
                     }
                 }
             }
+            "runtime/runTurn" | "runtime/resumeTurn" | "runtime/continueOpenCalls" => {
+                let r = self.registered()?;
+                let runtime = r
+                    .portable_runtime
+                    .as_ref()
+                    .ok_or_else(|| Fault::new("not_supported", "no Runtime registered"))?;
+                let (context, _scope) = plugin_stdio::RuntimeContext::remote(peer, id, cancel);
+                runtime.run(method, p, context).await
+            }
             "tools/list" => {
                 let r = self.registered()?;
                 Ok(json!({"tools": definitions(&tools(&r, &p)?)}))
@@ -515,7 +530,7 @@ impl Endpoint for Served {
     }
 }
 
-fn to_fault(e: Error) -> Fault {
+pub(crate) fn to_fault(e: Error) -> Fault {
     Fault::new(e.code().as_str(), e.message())
 }
 

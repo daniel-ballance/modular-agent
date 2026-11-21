@@ -342,7 +342,7 @@ async fn load_transport(
                     "load the native Runtime hook points before external plugins"
                 );
                 Ok::<_, anyhow::Error>(Arc::new(crate::runtime_host::RemoteRuntime {
-                    peer: peer.clone(),
+                    execution: crate::runtime_host::Execution::Remote(peer.clone()),
                     points,
                     registration: runtime.clone(),
                     ui_runtime: capability(harness.as_ref(), "runtime.transient").ok(),
@@ -1715,7 +1715,7 @@ impl Callbacks {
             }
             let run=async {
                 match method {
-                    m if m.starts_with("host/runtime/")=> runtime.unwrap().callback(&api,work.as_ref().unwrap(),crate::runtime_host::Callback{peer:peer.clone(),id,method:m,params:&p},token.clone()).await,
+                    m if m.starts_with("host/runtime/")=> runtime.unwrap().callback(&api,work.as_ref().unwrap(),crate::runtime_host::Callback{peer:Some(peer.clone()),id,method:m,params:&p},token.clone()).await,
                     m if m.starts_with("host/env/")=>{
                         ensure!(work.is_some(),"environment calls require parentRequestId");
                         require(api.as_ref(),&scope,"tools")?;
@@ -1870,7 +1870,7 @@ impl Callbacks {
                             if api.declaration()?["questions_outlast_turn"] != true {
                                 return Err(Fault::new("not_supported", "this agent does not leave questions open").into());
                             }
-                            ensure!(q.kind != RequestKind::Approval && q.timeout_ms.is_some_and(|ms| ms > 0 && ms <= 9_007_199_254_740_991), "leaveOpen needs a positive wait and a non-approval question");
+                            ensure!(q.kind != RequestKind::Approval && q.timeout_ms.is_some_and(|ms| ms <= 9_007_199_254_740_991), "leaveOpen needs a representable wait and a non-approval question");
                         }
                         let n = work.asks.fetch_add(1,Ordering::Relaxed) + 1;
                         q.key = draft["key"].as_str().map(str::to_owned)

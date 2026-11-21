@@ -29,6 +29,7 @@ mod jobs;
 mod parts;
 mod plugin;
 mod provider;
+mod runtime;
 mod serve;
 mod session;
 pub mod testing;
@@ -49,8 +50,9 @@ pub use credentials::{
 pub use error::{Code, Error, Result};
 pub use events::{Event, EventData, Question, QuestionKind, QuestionReply};
 pub use history::{
-    ErasedEntry, ErasureReport, History, HistoryServer, HistoryStore, ServeHistoryOptions,
-    SessionInfo, file_history, http_history, http_history_from_env, listen_history, memory_history,
+    EntryPage, ErasedEntry, ErasureReport, History, HistoryFault, HistoryResult, HistoryServer,
+    HistoryStore, LeaseGrant, PortableHistoryStore, ServeHistoryOptions, SessionInfo, SessionPage,
+    file_history, http_history, http_history_from_env, listen_history, memory_history,
     serve_history,
 };
 pub use hooks::*;
@@ -63,6 +65,10 @@ pub use plugin::{
     Command, CommandContext, Plugin, Registrar, SessionPrepare, ToolSource, ToolsChanged,
 };
 pub use provider::*;
+pub use runtime::{
+    InterruptedTurn, ResumedStep, RuntimeCall, RuntimeContext, RuntimeDeclaration, RuntimeOutcome,
+    RuntimePart, RuntimeSupport, RuntimeTurn,
+};
 pub use serve::{ServeOptions, serve, serve_websocket, serve_websocket_factory};
 pub use session::{
     Actor, Content, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome,
