@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
         .await?;
     if args[1] == "crash" {
         let session = agent.session().await?;
+        session.prompt("Keep this session").await?;
         session.run_command("start").await?;
         println!("{}", session.id());
         std::future::pending::<()>().await;

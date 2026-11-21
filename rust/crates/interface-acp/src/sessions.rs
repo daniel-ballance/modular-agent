@@ -551,7 +551,7 @@ impl State {
             data.id
         } else {
             let created = async {
-                api.create_in_tenant(&project, self.factory.project_settings(&project)?, tenant)
+                api.create_provisional(&project, self.factory.project_settings(&project)?, tenant)
                     .await
             }
             .await;

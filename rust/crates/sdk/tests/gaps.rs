@@ -246,6 +246,11 @@ async fn distinguishes_unknown_sessions_and_another_writer() -> Result<()> {
     let error = |value: Result<modular_agent::Session>| value.err().unwrap().code();
     assert_eq!(error(second.open_session("unknown").await), Code::NotFound);
     let session = first.session().await?;
+    assert_eq!(
+        error(second.open_session(session.id()).await),
+        Code::NotFound
+    );
+    session.prompt("Keep this session").await?;
     assert_eq!(error(second.open_session(session.id()).await), Code::Busy);
     first.close().await?;
     second.close().await

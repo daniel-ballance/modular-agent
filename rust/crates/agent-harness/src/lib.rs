@@ -14,6 +14,7 @@ use std::{
 struct OpenSession {
     data: SessionData,
     lease: Option<Box<dyn Lease>>,
+    provisional: bool,
     generation: CancellationToken,
     interruption: CancellationToken,
     queue: VecDeque<Input>,
@@ -162,13 +163,14 @@ impl Harness {
         Ok(())
     }
     pub async fn create(&self, project: &Path, settings: Value) -> Result<String> {
-        self.create_tenanted(project, settings, None).await
+        self.create_tenanted(project, settings, None, false).await
     }
     async fn create_tenanted(
         &self,
         project: &Path,
         settings: Value,
         tenant: Option<&str>,
+        provisional: bool,
     ) -> Result<String> {
         let parent = settings["_parent"]["session"]
             .as_str()
@@ -191,7 +193,11 @@ impl Harness {
         };
         merge(&mut defaults, settings);
         let id = id();
-        let lease = self.store().map(|s| s.acquire(&id)).transpose()?;
+        let lease = if provisional {
+            None
+        } else {
+            self.store().map(|s| s.acquire(&id)).transpose()?
+        };
         let mut data = SessionData {
             id: id.clone(),
             project,
@@ -211,6 +217,9 @@ impl Harness {
             data.position = Some(entry.id.clone());
             data.entries.push(entry);
         }
+        if provisional && !data.settings.as_object().is_none_or(|o| o.is_empty()) {
+            push_setup(&mut data, "settings", |data| data.settings.clone());
+        }
         {
             let mut sessions = self.sessions.lock().unwrap();
             self.check_project_open(&sessions, &data)?;
@@ -219,6 +228,7 @@ impl Harness {
                 OpenSession {
                     data,
                     lease,
+                    provisional,
                     generation: CancellationToken::new(),
                     interruption: CancellationToken::new(),
                     queue: VecDeque::new(),
@@ -337,6 +347,7 @@ impl Harness {
                 OpenSession {
                     data,
                     lease: Some(lease),
+                    provisional: false,
                     generation: CancellationToken::new(),
                     interruption: CancellationToken::new(),
                     queue: VecDeque::new(),
@@ -608,16 +619,17 @@ impl Harness {
         self.registry.read().unwrap().declaration()["remote_output"] == true
     }
     fn watch_writer(&self, id: &str) {
-        let (lost, generation) = {
-            let sessions = self.sessions.lock().unwrap();
-            let Some(open) = sessions.get(id) else { return };
-            let Some(lost) = open.lease.as_ref().and_then(|lease| lease.lost()) else {
-                return;
-            };
-            (lost, open.generation.clone())
+        if let Some(open) = self.sessions.lock().unwrap().get(id) {
+            self.watch_open_writer(open);
+        }
+    }
+    fn watch_open_writer(&self, open: &OpenSession) {
+        let Some(lost) = open.lease.as_ref().and_then(|lease| lease.lost()) else {
+            return;
         };
+        let generation = open.generation.clone();
         let weak = self.me.clone();
-        let id = id.to_owned();
+        let id = open.data.id.clone();
         tokio::spawn(async move {
             tokio::select! {
                 biased;
@@ -667,6 +679,17 @@ impl Harness {
     }
     fn commit(&self, open: &mut OpenSession, data: &SessionData) -> Result<()> {
         self.check_open_writer(open)?;
+        if open.provisional {
+            let admitted = data
+                .entries
+                .iter()
+                .skip(open.data.entries.len())
+                .any(|entry| entry.kind == "input.accepted");
+            if !admitted {
+                return Ok(());
+            }
+            open.lease = self.store().map(|s| s.acquire(&data.id)).transpose()?;
+        }
         if let Err(error) = self.save(data) {
             let lost = error.is::<LostPart>()
                 || open
@@ -675,6 +698,10 @@ impl Harness {
                     .is_some_and(|lease| lease.check().is_err());
             self.interrupt(open, if lost { "writerLost" } else { "commitFailed" });
             return Err(LostPart(format!("session commit failed: {error}")).into());
+        }
+        if open.provisional {
+            open.provisional = false;
+            self.watch_open_writer(open);
         }
         Ok(())
     }
@@ -1550,6 +1577,18 @@ fn admitted_authority(
     Ok(cap)
 }
 
+fn push_setup(data: &mut SessionData, kind: &str, content: impl FnOnce(&SessionData) -> Value) {
+    let scope = Scope::session(&data.id);
+    let entry = make_entry(
+        data,
+        &scope,
+        "harness",
+        Draft::new(kind, false, content(data)),
+    );
+    data.position = Some(entry.id.clone());
+    data.entries.push(entry);
+}
+
 fn make_entry(data: &SessionData, scope: &Scope, writer: &str, draft: Draft) -> Entry {
     // Imported calls are a view over a real response or start, not entries
     // that can be named in a persisted sources list.
@@ -1628,7 +1667,15 @@ impl AgentApi for Harness {
         settings: Value,
         tenant: Option<&str>,
     ) -> Result<String> {
-        self.create_tenanted(project, settings, tenant).await
+        self.create_tenanted(project, settings, tenant, false).await
+    }
+    async fn create_provisional(
+        &self,
+        project: &Path,
+        settings: Value,
+        tenant: Option<&str>,
+    ) -> Result<String> {
+        self.create_tenanted(project, settings, tenant, true).await
     }
     fn tenant(&self, session: &str) -> Result<Value> {
         let data = self.snapshot(session)?;
@@ -2302,7 +2349,7 @@ impl AgentApi for Harness {
         let branch = source.branch();
         let branch: Vec<_> = branch
             .iter()
-            .filter(|e| e.writer != "rust.derived")
+            .filter(|e| e.writer != "rust.derived" && e.content.is_some())
             .collect();
         for original in &branch {
             let mut entry = (*original).clone();
@@ -2327,7 +2374,7 @@ impl AgentApi for Harness {
                     *v = json!(answer);
                 }
             }
-            entry.copies.push(original.id.clone());
+            entry.copies.insert(0, original.id.clone());
             next.position = Some(entry.id.clone());
             next.entries.push(entry);
         }
@@ -2338,6 +2385,12 @@ impl AgentApi for Harness {
             .map(|(a, b)| (a.id.clone(), b.id.clone()))
             .collect();
         for e in &mut next.entries {
+            if let Some(content) = &mut e.content
+                && matches!(e.kind.as_str(), "input" | "input.accepted")
+                && let Some(input) = content["inputId"].as_str().and_then(|id| map.get(id))
+            {
+                content["inputId"] = json!(input);
+            }
             let mut local: Vec<_> = e
                 .copies
                 .iter()
@@ -2345,14 +2398,58 @@ impl AgentApi for Harness {
                 .collect();
             e.copies.append(&mut local);
         }
-        if !next.entries.is_empty() {
-            self.save(&next)?;
+        // The copied branch is display/context, not the fork's setup. Capture
+        // the current session settings and membership even at an older fork point.
+        if let Some(tenant) = tenants::name(&source) {
+            push_setup(&mut next, "tenant", |_| json!({"tenant":tenant}));
+        }
+        let mut membership = BTreeMap::new();
+        let mut limit = None;
+        for entry in &source.entries {
+            let Some(value) = &entry.content else {
+                continue;
+            };
+            match entry.kind.as_str() {
+                "actor.grant" => {
+                    if let Some(actor) = value["actor"].as_str() {
+                        membership.insert(actor, entry);
+                    }
+                }
+                "actor.identity" => {
+                    if let Some(actor) = value["id"].as_str() {
+                        membership.insert(actor, entry);
+                    }
+                }
+                "actor.left" => {
+                    if let Some(actor) = value["actorId"].as_str() {
+                        membership.insert(actor, entry);
+                    }
+                }
+                "limit" => limit = Some(value),
+                _ => {}
+            }
+        }
+        for entry in membership.values() {
+            push_setup(&mut next, &entry.kind, |_| entry.content.clone().unwrap());
+        }
+        push_setup(&mut next, "settings", |data| data.settings.clone());
+        if let Some(limit) = limit {
+            push_setup(&mut next, "limit", |_| limit.clone());
+        }
+        push_setup(
+            &mut next,
+            "plugins.changed",
+            |data| json!({"active":data.plugins}),
+        );
+        if let Some(store) = self.store() {
+            store.save(&next)?;
         }
         self.sessions.lock().unwrap().insert(
             new_id.clone(),
             OpenSession {
                 data: next,
                 lease,
+                provisional: false,
                 generation: CancellationToken::new(),
                 interruption: CancellationToken::new(),
                 queue: VecDeque::new(),
@@ -2376,7 +2473,8 @@ impl AgentApi for Harness {
             .transpose()?
             .unwrap_or_default();
         for open in self.sessions.lock().unwrap().values() {
-            if open.data.entries.iter().any(|e| e.kind != "command")
+            if !open.provisional
+                && open.data.entries.iter().any(|e| e.kind != "command")
                 && canonical.as_ref().is_none_or(|p| p == &open.data.project)
             {
                 result.retain(|s| s.id != open.data.id);

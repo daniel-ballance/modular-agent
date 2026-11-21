@@ -649,6 +649,7 @@ impl HistoryStore for HttpHistory {
         // A session used only for setup should not leave a row or take a lease.
         if entries.is_empty()
             || (kept.is_empty()
+                && data.origin.is_none()
                 && data.entries.iter().all(|e| {
                     matches!(
                         e.kind.as_str(),

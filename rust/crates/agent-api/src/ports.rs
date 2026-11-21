@@ -100,6 +100,15 @@ pub trait AgentApi: Send + Sync {
         ensure!(tenant.is_none(), "tenants are not supported");
         self.create(project, settings).await
     }
+    /// Create a session whose setup is not kept until input is admitted.
+    async fn create_provisional(
+        &self,
+        project: &Path,
+        settings: Value,
+        tenant: Option<&str>,
+    ) -> Result<String> {
+        self.create_in_tenant(project, settings, tenant).await
+    }
     fn tenant(&self, _session: &str) -> Result<Value> {
         Ok(json!({"tenant":null,"rights":null,"tokens":null}))
     }

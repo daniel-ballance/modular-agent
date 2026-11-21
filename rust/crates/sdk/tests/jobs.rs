@@ -194,6 +194,7 @@ async fn unconfirmed_job_cleanup_fences_late_callbacks_and_resume() -> Result<()
         .await?;
         let session = agent.session().await?;
         let id = session.id().to_owned();
+        session.prompt("Keep this session").await?;
         session.run_command("start").await?;
         let job = handles.try_recv().unwrap();
         session.close().await?;

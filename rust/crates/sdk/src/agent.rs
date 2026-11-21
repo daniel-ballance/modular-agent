@@ -196,11 +196,17 @@ impl Agent {
             )?;
         }
         base::merge(&mut settings, patch);
-        let id = self
-            .inner
-            .harness
-            .create_in_tenant(&self.inner.project, settings, options.tenant.as_deref())
-            .await?;
+        let harness = &self.inner.harness;
+        let tenant = options.tenant.as_deref();
+        let id = if self.inner.persistent {
+            harness
+                .create_provisional(&self.inner.project, settings, tenant)
+                .await?
+        } else {
+            harness
+                .create_in_tenant(&self.inner.project, settings, tenant)
+                .await?
+        };
         self.attach(&id)?;
         let session = Session::new(self.inner.clone(), id);
         for actor in options.actors {

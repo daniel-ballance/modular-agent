@@ -70,6 +70,10 @@ impl Harness {
             .get(session)
             .ok_or_else(|| anyhow!("session not open"))?;
         open.check_rewind()?;
+        ensure!(
+            !open.provisional,
+            conflict("cannot rewind before the first input is admitted")
+        );
         let data = &open.data;
         ensure!(
             !open.active && open.environment_work == 0 && open.queue.is_empty(),

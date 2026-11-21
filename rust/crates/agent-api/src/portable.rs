@@ -190,6 +190,18 @@ pub fn public_entry(e: &Entry, session: &SessionData) -> Result<Value> {
 
 pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
     let k = kind(&e.kind);
+    let copied = session.origin.is_some()
+        && !e.copies.is_empty()
+        && session
+            .entries
+            .iter()
+            .take_while(|entry| !entry.copies.is_empty())
+            .any(|entry| entry.id == e.id);
+    let sources = if copied {
+        &e.copies[..1]
+    } else {
+        &e.copies[..]
+    };
     let Some(c) = &e.content else {
         let mut erased = json!({"id":e.id,"parentId":e.parent,"kind":k,"erased":true});
         for (key, value) in [
@@ -205,6 +217,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
         if e.kind == "input.returned" && e.writer == "rust.tombstone.inputHandedBack" {
             erased["inputIds"] = json!(e.copies);
         }
+        if copied {
+            erased["sources"] = json!(sources);
+        }
         return Ok(erased);
     };
     let mut v = json!({"id":e.id,"parentId":e.parent,"sessionId":e.scope.session,"kind":k,"time":e.at,"writer":e.writer,"modelVisible":e.visible,"actorId":e.scope.actor});
@@ -218,8 +233,8 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             v[key] = json!(value);
         }
     }
-    if !e.copies.is_empty() {
-        v["sources"] = json!(e.copies);
+    if !sources.is_empty() {
+        v["sources"] = json!(sources);
     }
     // Native job actors enforce the job's ceiling in-process. On the wire a
     // job report is attributed to its starting actor, with the job authorizer.
@@ -446,6 +461,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             end["usage"] = usage(&r.usage);
             end
         }
+        "summary" if copied => {
+            json!({"summary":c["text"],"summarizes":e.copies.iter().skip(1).filter(|id| session.entries.iter().any(|entry| &entry.id == *id)).collect::<Vec<_>>()})
+        }
         "summary" => json!({"summary":c["text"]}),
         "settings" => json!({"key":"settings","value":settings_to_wire(c)}),
         "actor.grant" => {
@@ -582,7 +600,11 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
             .filter(|v| v["erased"] == true)
             .filter_map(|v| v["id"].as_str()),
     );
+    let mut copied = data.origin.is_some();
     for v in entries {
+        copied &= v["sources"]
+            .as_array()
+            .is_some_and(|sources| !sources.is_empty());
         let k = string(v, "kind")?;
         let mut payload = v["data"].clone();
         if matches!(k, "inputAccepted" | "input") && v["inputId"].is_string() && v["erased"] != true
@@ -741,7 +763,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
             }
             "input" => {
                 let input = string(d, "inputId")?;
-                if !e.copies.iter().any(|id| id == input) {
+                if !copied && !e.copies.iter().any(|id| id == input) {
                     e.copies.insert(0, input.into());
                 }
                 (
@@ -813,7 +835,13 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     .count();
                 ("turn.end", json!(r))
             }
-            "summary" => ("summary", json!({"text":d["summary"]})),
+            "summary" => {
+                if copied && let Some(summarizes) = d.get("summarizes") {
+                    e.copies
+                        .extend(serde_json::from_value::<Vec<String>>(summarizes.clone())?);
+                }
+                ("summary", json!({"text":d["summary"]}))
+            }
             "setting" => {
                 let key = string(d, "key")?;
                 let patch = if key == "settings" {
