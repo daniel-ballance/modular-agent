@@ -344,17 +344,20 @@ class _LocalPlugin(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter
             await self.api.call("jobs", "progress", {**args, "content": content})
 
         async def end(outcome: JobOutcome, result: Content | None, report: bool) -> None:
-            await self.api.call(
-                "jobs",
-                "report",
-                {
-                    **args,
-                    "state": "outcome_unknown" if outcome == "outcomeUnknown" else outcome,
-                    "result": result or [],
-                    "report": report,
-                    "strict": True,
-                },
-            )
+            try:
+                await self.api.call(
+                    "jobs",
+                    "report",
+                    {
+                        **args,
+                        "state": "outcome_unknown" if outcome == "outcomeUnknown" else outcome,
+                        "result": result or [],
+                        "report": report,
+                        "strict": True,
+                    },
+                )
+            except Exception as exc:
+                raise _error(exc) from exc
 
         return Job(
             data["id"], data["session"], data["actor"], data["kind"], data["detail"], progress, end
