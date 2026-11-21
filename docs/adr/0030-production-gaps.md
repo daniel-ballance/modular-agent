@@ -23,3 +23,20 @@ status: proposed
 
 - **CLI policy:** a shared operator-owned policy file or separate flags and environment variables. Recommend one file for stdio and WebSocket; keep the existing local shorthand and fail startup on invalid policy. The SDK options do not depend on that format.
 - **Stateful plugin provisioning:** separate listeners or a shared listener with distinct host credentials and operator-assigned state and project scopes. Recommend separate listeners until there is a common hosting API that proves the same isolation. `/1` history stays on separate service instances; a multi-tenant raw service would need a separate binding decision.
+
+## Resource reservations
+
+[Security](../security.md#resource-limits-and-denial-of-service) required capacity for settlement but left the admission and dispatch cutoffs, concurrent accounting, refusal mapping and declaration unspecified. Checking current depth or free disk alone would let several operations commit against the same capacity. Documented token budgets are soft metering, not a reservation for work or writes. Reserving an entire turn's future calls at admission would tie up capacity before the calls are known.
+
+[Resource reservations](../contracts.md#resource-reservations) charges known obligations at each cutoff and keeps control capacity separate. It reuses `busy`, existing tool settlements, the `turn_limit` callback error and the `limit` outcome. [ACP](../bindings/acp.md#the-declaration) adds an optional declaration projection for count ceilings, not current usage. History HTTP still has no reservation RPC.
+
+### Reservation checks
+
+- **ACP kit with a bounded store and held fixture work:** oversubscribe each of the session, tenant and agent limits separately. Race two admissions for the last slot; exactly one can win. Use a second session in the same tenant, another tenant, and a no-tenant session. Probe steering, proposals, release, direct commands and jobs; check counts at the limits and compare declarations with configured ceilings. Check that a refused key is reusable, a duplicate succeeds without consuming a slot, and that admitted input can be handed back at saturation. Exercise multiple project compositions behind one listener.
+- **Plugin host and ACP kits:** fill the ordinary pool with model or tool work. Leave a call pending, then answer and continue it; its closing question and result must still commit once. Refuse a nested start and cancel the parent; verify that a recorded unstarted call is `notStarted`, while an ambiguous dispatched attempt stays `outcomeUnknown`. Saturate capacity for a model response's call count; require one bounded response that preserves usage, no dispatch and a `capacity` limit in both ACP versions. Check the wire Runtime's response/record and limit sequence. End a reporting job while input slots are otherwise full; verify one end and one admission with the same bounded result, including oversized and unconfirmed-cleanup cases.
+- **Fault-injected store and transport:** keep ordinary writes and output buffers full while cancelling, revoking, or erasing. Check control progress, replay records and the existing cancellation cutoff; a slow recipient must not be needed for settlement. Kill the agent after a durable admission, call intent or job start, then bring it back with tightened bounds. Check recovery honors old obligations before fresh admission and never starts a call merely because a reservation existed. Fail a reserved write and require `lost`, interruption and no new effects, not a false terminal commit.
+
+### Open reservation decisions
+
+- **Provisioning shared history:** fixed writer shares or shared reservation accounting. Recommend fixed shares where all writers and storage allocations are known; use shared accounting when independent writers must borrow spare capacity. Do not add a reservation endpoint to `/1` without a separate binding decision.
+- **Limits for `ma`:** fixed defaults alone or finite defaults with trusted operator overrides. Recommend the latter; choose sizes with measurements of worst-case settlement and control work. The contract sets no universal byte or count values.

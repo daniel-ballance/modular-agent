@@ -46,7 +46,7 @@ Peers MUST use the following fields under `_meta["modular-agent"]` on the indica
 | `inputId` | Admitted prompt result or post-admission error | Admission id; absent for an erased duplicate |
 | `duplicate`, `erased` | Prompt result or post-admission error (optional) | `true` for a duplicate or erased receipt, respectively; omission means false |
 | `disposition` | Prompt result or post-admission error (optional) | `handled` or `handedBack` for an admission settled without a turn |
-| `outcome` | Prompt result with a turn, cancelled hand-back, or `/2` failed-turn error | [Outcome](#prompts): kind `completed`, `cancelled`, `limit` or `failed`; limit `steps`, `output`, `sessionTokens`, `tenantTokens` or a build-specific name |
+| `outcome` | Prompt result with a turn, cancelled hand-back, or `/2` failed-turn error | [Outcome](#prompts): kind `completed`, `cancelled`, `limit` or `failed`; limit `steps`, `output`, `capacity`, `sessionTokens`, `tenantTokens` or a build-specific name |
 | `openToolCalls` | Prompt result in `/1` or `/2`, or `/2` failed-turn error (optional) | Nonempty array of call ids left open; omission means none |
 | `handedBack` | Cancelled prompt result; recovery result for `session/load` or `session/resume` when nonempty | Array of `{ inputId, content }`, with content in [shared Content](data.md#content) projected as in [Entry](#entry); `[]` if a cancelled prompt has nothing to report |
 | `requestId`, `actorId` | `session/request_permission` and `elicitation/create` requests | Shared question id and the addressed actor id, both strings |
@@ -89,6 +89,7 @@ An agent MUST send every non-optional key and use only the values below. The ses
 | `tenants` (optional) | boolean | Implies `tenant` is offered. Default `false`. |
 | `projectRoot` (optional) | string | Canonical absolute path of the sole served project. Omitted for no binding-level single-root restriction. |
 | `confinesFiles` (optional) | boolean | File operations refuse paths resolving outside the project after symlinks. Default `false`. |
+| `resourceReservations` (optional) | `{ session, tenant, agent }`; each is `{ inputs, calls, jobs }` of nonnegative [Count](data.md#general-rules). These are the configured ceilings in [Resource reservations](../contracts.md#resource-reservations), not free slots. Omission does not declare reservation enforcement. |
 | `nestedToolCalls` (optional) | boolean | A running tool call can start [nested calls](../contracts.md#nested-calls). Default `false`. |
 
 The table is the ACP projection of the core declaration; binding claims and extra hook names are published separately. In both versions a host MUST reject missing required keys, invalid values and the following inconsistent combinations:
@@ -169,7 +170,7 @@ Unless another number is specified, the agent MUST return the following errors a
 | `not_open` | Accessible session not open on this connection. |
 | `not_found` | Unknown item in the authorized session/view, including an invalid history `after`. |
 | `wrong_project` | Authorized session opened with a mismatched canonical project. |
-| `busy` | Conflict with current work, close or recovery. |
+| `busy` | Conflict with current work, close or recovery, or insufficient [reservation capacity](../contracts.md#resource-reservations) for new work. |
 | `held` | `-32000`, with `data: { code: "held", retryAfterMs }`; a retryable [history lease refusal on reopen](history-http.md#writing-one-writer-at-a-time). `retryAfterMs` is a positive integer in milliseconds. |
 | `conflict` | Known item with an invalid transition, such as an already released proposal or prompt input handed back without a turn; also a [rewind target or point refusal](#extension-methods). |
 | `lost` | `-32000`; cleanup of an affected part could not be confirmed. |
@@ -206,7 +207,7 @@ The agent MUST use the shared [`turnEnd`](data.md#history-entries) outcome and t
 |---|---|
 | `completed` | `stopReason: "end_turn"` |
 | `cancelled` | `stopReason: "cancelled"`; `handedBack` as in [Cancelling](#cancelling) |
-| `limit` with `steps` or a build-specific name | `stopReason: "max_turn_requests"` |
+| `limit` with `steps`, `capacity` or a build-specific name | `stopReason: "max_turn_requests"` |
 | `limit` with `output`, `sessionTokens` or `tenantTokens` | `stopReason: "max_tokens"` |
 | `failed` in `/1` | `stopReason: "refusal"`, with `outcome.kind: "failed"` |
 | `failed` in `/2` | JSON-RPC `-32000`, message equal to `outcome.error`, and `data: { _meta: { "modular-agent": { ... } } }` with the prompt metadata; no `stopReason` |
@@ -414,7 +415,7 @@ The [conformance kit](../../conformance/acp/README.md) exercises this mode. See 
 
 ## Changes
 
-- **Proposed production rules.** Stdio scope and an optional rights ceiling, connection-local configured representation, and scope checks on attached operations and delivery.
+- **Proposed production rules.** Stdio scope and an optional rights ceiling, connection-local configured representation, and scope checks on attached operations and delivery. Declare reservation ceilings and report capacity refusals without an admission receipt.
 
 - **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). Both versions keep their numbers. The optional declaration key `nestedToolCalls`, the fixture tool `nest` for agents that declare it, and `parentToolCallId` on a nested call's first update.
 

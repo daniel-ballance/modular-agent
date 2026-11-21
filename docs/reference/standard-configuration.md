@@ -169,7 +169,9 @@ With the durable Runtime on Linux, every implementation declares the same values
 
 These are what the Rust implementation declares. An implementation that cannot meet one declares what it does meet, and the difference is a gap to close, not a choice.
 
-The same values go out on every path, subject to the binding's single-project declaration for a restricted serving composition: `ma --declaration`, the ACP `initialize` result, every session reply and every configuration update. Conformance mode changes none of them: the ACP kit checks the agent as shipped, so a test-only declaration would have it check a different agent.
+The declaration MUST include the [reservation ceilings](../bindings/acp.md#the-declaration) enforced by the SDK. Operator limits are outside project settings; the project MUST NOT raise them.
+
+The same values go out on every path, subject to the binding's projection for the declared scope: `ma --declaration`, the ACP `initialize` result, every session reply and every configuration update. Conformance mode changes none of them: the ACP kit checks the agent as shipped, so a test-only declaration would have it check a different agent.
 
 ## Hooks for testing
 

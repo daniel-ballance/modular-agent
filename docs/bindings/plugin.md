@@ -26,7 +26,8 @@ Both peers MUST use the [shared data](data.md) shapes. The tables define method 
 | -32000 | `cancelled` | Request cancelled |
 | -32000 | `not_supported` | Unsupported version or capability |
 | -32000 | `result_too_large` | The result does not fit its limit |
-| -32000 | `turn_limit` | The host stopped preparation or dispatch for a limit, including one reached after the previous step; `data.limit` is `steps`, `tenantTokens`, `sessionTokens` or a deployment limit name |
+| -32000 | `busy` | A new operation cannot reserve capacity; no start or admission was recorded |
+| -32000 | `turn_limit` | The host stopped preparation or dispatch for a limit, including one reached after the previous step; `data.limit` is `steps`, `capacity`, `tenantTokens`, `sessionTokens` or a deployment limit name |
 | -32000 | `lost` | The connection or a required part was lost |
 | -32000 | `internal` | Other operation failure |
 
@@ -275,6 +276,8 @@ The host is the sole writer. The [shared ownership table](data.md#standard-kinds
 
 With an in-process Provider, the host MUST commit the effective `modelRequest` before dispatch to inference, following [Recording order and ownership](data.md#recording-order-and-ownership). A remote Provider uses the [Provider request callback](#the-host-asks-a-provider), even when the Runtime is local. If the final dispatch check finds a limit after that commit, the host MUST commit a bookkeeping `response` before returning `turn_limit`: `message` is `{ role: "assistant", stop: "aborted", content: [] }`, with `data.recovery: true` and `modelVisible: false`. It has no usage or calls and is not eligible for replay. Without a committed intent there is nothing to settle. The Runtime MUST NOT submit a `response` when `host/runtime/model` returns an RPC error. See [The host asks a Provider](#the-host-asks-a-provider) for the error when a Provider skips its request callback.
 
+If a returned model response would exceed the [call settlement reservation](../contracts.md#resource-reservations), the host MUST substitute the bounded failed response before returning the assistant message to the Runtime and latch `capacity`. The Runtime MUST record that response through `record` and run `step.after` as usual. If the Runtime ends without asking for another step, the host applies the latched limit in the outcome. A limit before a model attempt returns the existing `turn_limit` error instead of an assistant message.
+
 #### Model attempt sequences
 
 1. **Normal step:** The Runtime MUST allocate an id, take eligible steering and call `prepareStep`. The host MUST run `step.before` and the Provider request transform at their respective boundaries. The Runtime MUST call `model`, commit the answer through `record`, settle the call round, then run `step.after`.
@@ -416,7 +419,7 @@ A build serving the conformance plugin MUST document its command and support the
 
 ## Changes
 
-- **Proposed production rules.** Hosted callbacks resolve parent IDs and ownership within their connection.
+- **Proposed production rules.** Hosted callbacks resolve parent IDs and ownership within their connection. Reservation refusal uses `busy` before a new operation or `turn_limit` with `capacity` at the model boundary.
 
 - **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). Still `/1`: every addition is an optional method that an edition 3 peer answers with the method-not-found or `not_supported` error. `host/tools/list` and `host/tools/call` let a tool source in another process make nested calls (the standard configuration's code tool could not be served over the wire). `env/list` and `host/env/list` list a directory (its `find` and `list` tools had to shell out). A cancelled Provider request sends no `provider.response`, and `outOfReach` items are for people (both guessed by the Claude sidecar). The fixture gains the optional tool `nest`.
 

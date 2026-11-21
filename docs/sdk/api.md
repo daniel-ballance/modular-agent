@@ -93,6 +93,7 @@ An Agent is safe to use from several tasks at once. Sessions are independent of 
 | `mixedActorInput` | `refused` |
 | `settingsDuringTurn` | `nextTurn` if the host records a change during a turn and applies it from the next; otherwise `refused` |
 | `erasureDuringTurn` | `refused` |
+| `resourceReservations` | The configured count ceilings from [Resource reservations](../contracts.md#resource-reservations). The SDK MUST make the bounds configurable by the operator. Project composition callbacks and project settings MUST NOT raise them. |
 | `commandContainment` | the containment the working environment declares for the current platform. `strong` only where it confirms that every descendant of a command stops; `processGroup` where it contains only the command's process group. Never inferred from the environment's name. |
 | `confinesFiles` | from the working environment. False for the local one: it resolves paths against the project but does not refuse ones that lead outside it. True for the testing kit's memory environment, which has no other files. |
 | `nestedToolCalls` | true only if the host and the Runtime path both run nested calls in the chosen placement. For a served Runtime the host decides from its own Runtime bridge, which settles nested calls; the plugin binding's `RuntimeSupports` has no flag for it, and no private wire field may stand in for one. |
@@ -435,7 +436,7 @@ The SDK has two surfaces, and each uses the codes of the binding it mirrors:
 | `forbidden` | app | the actor lacks a required right |
 | `not_found` | both | a named session, entry, file, point, tool or question does not exist |
 | `not_open` | app | the session is not open |
-| `busy` | app | conflicts with current work, close or recovery |
+| `busy` | both | conflicts with current work, close or recovery (app), or no capacity for new work |
 | `held` | app | another writer holds the session's history; `data.retryAfterMs` says when to retry |
 | `conflict` | app | an invalid transition, such as a proposal already released, or an entry that conflicts with a kept one |
 | `cancelled` | both | the operation was cancelled |
