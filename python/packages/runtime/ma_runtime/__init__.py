@@ -347,6 +347,8 @@ class Runtime(Turns, Plugin):
     async def wait(self, d, emit):
         sid = d["session"]
         task = self.tasks.get(sid)
+        if task is None and sid in self.suspending:
+            raise AgentError("Session suspended", "lost")
         try:
             result = await asyncio.shield(task) if task else []
         except asyncio.CancelledError:
@@ -355,6 +357,8 @@ class Runtime(Turns, Plugin):
                 if sid in self.suspending:
                     raise AgentError("Session suspended", "lost") from None
             raise
+        if sid in self.suspending:
+            raise AgentError("Session suspended", "lost")
         return result if isinstance(result, list) else []
 
     async def cancel(self, d, emit):
