@@ -129,7 +129,7 @@ async function runtime(m, { ask }) {
 		const input = (await history()).find((e) => e.kind === "input" && e.turnId === turn.turnId);
 		const text = input?.message?.content?.find((p) => p.type === "text")?.text;
 		test = text?.match(/^tool:probe-effect \{"value":"(omitted|changed|exact|refusal)"\}$/)?.[1] ??
-			text?.match(/^fixture (unoffered|latched|post-intent|burner|extra-response-member)$/)?.[1];
+			text?.match(/^fixture (unoffered|latched|post-intent|burner|extra-response-member|oversize calls)$/)?.[1];
 		if (!test) throw rpcError("invalid_request", "unknown Runtime fixture input");
 		await callHost("hook", { hook: "turn.start", payload: {} });
 		const { id: stepId } = await callHost("newId");
@@ -157,6 +157,16 @@ async function runtime(m, { ask }) {
 		checks.hostKind = fake.error?.code === -32602 && codeOf(fake.error) === "invalid_request";
 		if (!["omitted", "changed", "exact", "unoffered", "refusal"].includes(test)) {
 			await callHost("hook", { hook: "step.after", payload: { stepId, response } });
+			if (test === "oversize calls") {
+				const next = await callHost("newId");
+				const denied = await outcome(callHost("prepareStep", { stepId: next.id, usage }));
+				const kept = (await history()).filter((e) => e.stepId === stepId && e.turnId === turn.turnId);
+				checks.capacity = response.stop === "failed" && !response.content.some((p) => p.type === "toolCall") &&
+					usage.input === 2 && usage.output === 1 && equal(kept.map((e) => e.kind), ["modelRequest", "response", "modular-agent.stepAfter"]) &&
+					equal(kept[1].message, response) && denied.error?.code === -32000 && codeOf(denied.error) === "turn_limit" &&
+					denied.error.data.limit === "capacity" && !(await history()).some((e) => e.stepId === next.id);
+				if (checks.capacity) terminal = { kind: "limit", limit: "capacity" };
+			}
 			if (test === "latched") {
 				const next = await callHost("newId");
 				const denied = await outcome(callHost("prepareStep", { stepId: next.id, usage }));
@@ -301,7 +311,7 @@ serve("probe", async (m, ctx) => {
 			return {};
 		case "hook/handle": {
 			if (config.role === "runtime" && p.handlerId === 2 && p.hook === "step.before") {
-				if (p.payload.model?.provider !== model.provider) return null;
+				if (p.payload.model?.provider !== model.provider || config.capacityCase) return null;
 				const request = p.payload.request;
 				return { value: { ...p.payload, request: { ...request, tools: request.tools.filter((t) => t.name !== EFFECT.name) } } };
 			}
@@ -378,7 +388,7 @@ serve("probe", async (m, ctx) => {
 			const last = request.messages.findLast((m) => m.role === "user");
 			const unoffered = last?.content?.some((p) => p.text === "fixture unoffered");
 			const extra = last?.content?.some((p) => p.text === "fixture extra-response-member");
-			const oversize = config.role === "capacity-provider" && last?.content?.some((p) => p.text === "fixture oversize calls") &&
+			const oversize = (config.role === "capacity-provider" || config.capacityCase) && last?.content?.some((p) => p.text === "fixture oversize calls") &&
 				!request.messages.slice(request.messages.lastIndexOf(last) + 1).some((m) => m.role === "toolResult");
 			const message = { role: "assistant", stop: unoffered ? "toolUse" : "finished", usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
 				content: unoffered ? [{ type: "toolCall", id: "probe-unoffered-call", name: EFFECT.name, arguments: { value: "unoffered" } }] : [{ type: "text", text: "fixture limit" }] };

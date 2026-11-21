@@ -357,26 +357,42 @@ export async function capacity(kit) {
 			}
 		} finally { await h.stop(); }
 	});
-	for (const version of [1, 2]) await attempt(`capacity: /${version} model call list`, async () => {
-		const trace = join(kit.root, `call-capacity-${version}`);
-		const h = await host(kit, [scopeAll], { limits: ceiling("session", "calls"), extraEnv: fixtureEnv(kit, "capacity-provider", { traceOut: trace }) });
-		try {
-			const { a } = await h.peer(0, version);
-			const sid = await approvalOff(a, await open(a, project));
-			await rpc(a, "session/set_config_option", { sessionId: sid, configId: "model", value: "kit-probe/scripted" });
-			const reply = await within(15000, prompt(a, sid, "fixture oversize calls"), "bounded Provider response");
-			const entries = (await history(a, sid, { all: true })).entries;
-			const responses = rows("response", entries);
-			const outcome = { kind: "limit", limit: "capacity" };
-			check(`capacity: /${version} rejects a call list as one bounded response, preserves usage and dispatches nothing`,
-				reply.stopReason === "max_turn_requests" && equal(meta(reply)?.outcome, outcome) &&
-				responses.length === 1 && responses[0].message?.stop === "failed" && responses[0].message.usage?.input === 2 && responses[0].message.usage?.output === 1 &&
-				!responses[0].message.content.some((p) => p.type === "toolCall") && !rows("toolStarted", entries).length &&
-				observed(trace).filter((e) => e.providerDispatch === sid).length === 1 && !observed(trace).some((e) => e.effect) &&
-				equal(rows("turnEnd", entries)[0]?.data?.outcome, outcome));
-		} finally { await h.stop(); }
-	});
+	for (const [version, wireRuntime] of [[1, false], [2, false], [2, true]]) {
+		const label = `capacity: /${version} ${wireRuntime ? "wire Runtime" : "model call list"}`;
+		await attempt(label, () => callCapacity(kit, scopeAll, { version, wireRuntime, label }));
+	}
 	await attempt("capacity: reserve and transfer a job report", () => jobCapacity(kit, scopeAll));
+}
+
+async function callCapacity(kit, scope, { version, wireRuntime, label }) {
+	const { root, project, prompt, history, within, check } = kit;
+	const trace = join(root, `call-capacity-${version}-${wireRuntime}`);
+	const h = await host(kit, [scope], { limits: ceiling("session", "calls"),
+		extraEnv: fixtureEnv(kit, wireRuntime ? "runtime" : "capacity-provider", { traceOut: trace, capacityCase: wireRuntime }) });
+	let stage = "initialize";
+	try {
+		const { a } = await h.peer(0, version);
+		stage = "session/new";
+		const s = await open(a, project);
+		const sid = s.sessionId;
+		stage = "select the remote Provider";
+		await rpc(a, "session/set_config_option", { sessionId: sid, configId: "model", value: "kit-probe/scripted" });
+		if (s.configOptions?.some((o) => o.id === "approval")) await rpc(a, "session/set_config_option", { sessionId: sid, configId: "approval", value: "off" });
+		stage = "prompt and inspect the bounded response";
+		const reply = await within(15000, prompt(a, sid, "fixture oversize calls"), "bounded Provider response");
+		const entries = (await history(a, sid, { all: true })).entries;
+		const responses = rows("response", entries), events = observed(trace);
+		const outcome = { kind: "limit", limit: "capacity" };
+		check(`${label}: one bounded response preserves usage, dispatches nothing and ends at capacity`,
+			(!wireRuntime || events.some((e) => e.test === "oversize calls" && e.checks.capacity === true)) &&
+			reply.stopReason === "max_turn_requests" && equal(meta(reply)?.outcome, outcome) &&
+			responses.length === 1 && responses[0].message?.stop === "failed" && responses[0].message.usage?.input === 2 && responses[0].message.usage?.output === 1 &&
+			!responses[0].message.content.some((p) => p.type === "toolCall") && !rows("toolStarted", entries).length &&
+			events.filter((e) => e.providerDispatch === sid).length === 1 && !events.some((e) => e.effect) &&
+			equal(rows("turnEnd", entries)[0]?.data?.outcome, outcome), JSON.stringify({ outcome: meta(reply)?.outcome, events }));
+	} catch (error) {
+		throw Error(`${stage}: ${error.message}; fixture trace: ${JSON.stringify(observed(trace))}`);
+	} finally { await h.stop(); }
 }
 
 async function jobCapacity(kit, scope) {
