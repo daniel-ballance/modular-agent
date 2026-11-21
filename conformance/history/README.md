@@ -24,7 +24,16 @@ To include the restart check, leave the port free and pass `--restart -- <servic
 
 If the service supports a change of TTL across restart, use `--restart-ttl` instead of `--restart`. Both flags set `MODULAR_AGENT_KIT_RESTART_PHASE` to `initial` on the first launch and `restart` on the second. Configure the same service address and store for both runs, with a longer TTL at first (for example, 6000 ms) and a shorter TTL on restart (for example, 1000 ms). The kit tests beyond the shorter TTL, while the old lease could still be live. Keep the startup time plus the shorter TTL well below the old TTL to exercise the check.
 
-For the ADR 0030 deployment check, run two disposable services with distinct endpoints, backing directories and credentials. Add `--isolation-checks SECOND_URL SECOND_TOKEN_FILE` after the first URL and token file. The kit seeds only the second service, checks both cross-credential refusals, and verifies that neither a project filter nor a foreign session ID routes reads, lease acquisition, append or erase to the other store. The second service's records must stay unchanged. This checks the two configured endpoints, not how an agent selects among raw stores. Pending erasure is a Harness check and does not add a `/1` service method.
+For the ADR 0030 deployment check, run two disposable services with distinct endpoints, backing directories and credentials. Add `--isolation-checks SECOND_URL SECOND_TOKEN_FILE` after the first URL and token file. The kit seeds only the second service, checks both cross-credential refusals, and verifies that neither a project filter nor a foreign session ID routes reads, lease acquisition, append or erase to the other store. The second service's records must stay unchanged. This checks the two configured endpoints, not how an agent selects among raw stores.
+
+To check the optional [pending-erasure registry](../../docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1), run:
+
+```sh
+node conformance/history/run.mjs "$MODULAR_AGENT_HISTORY_URL" "$MODULAR_AGENT_HISTORY_TOKEN_FILE" \
+  --erasure-registry-checks --restart -- <service command> [args...]
+```
+
+Use the same foreground command and disposable store rules as for `--restart`. Use a fixed TTL such as 2,500 ms. The option fails if the service does not declare `pendingErasure: 1`; the remaining profile checks run only if it does. Separate wire client processes publish a mark, refuse a cached copy, and complete it under a new lease. The kit restarts the service with the mark pending and again after completion. The reader fixture checks the wire cutoff; it does not test an SDK's delivery, dispatch or Provider behavior.
 
 Stop any service you started and remove the scratch directory after use. Exit code 0 means all checks run passed.
 
@@ -37,4 +46,4 @@ What it checks:
 - Erasure with and without a lease, ordered idempotent results, and the exact tombstone projection, including associations, source ids, usage, keyed job ownership and valid legacy nested IDs, including batch hand-back `inputIds`.
 - With either restart flag, committed data survives a restart. If the service drops its old lease, acquire and unleased erase return `409 held` during the restart hold. If it preserves the lease, another owner still cannot acquire it. `--restart-ttl` checks the same exclusions after the shorter TTL has elapsed. The hold check is skipped if the restart and probes exceed the old lease TTL.
 
-It does not check failover between replicas, retention expiry, all client lease loss paths, backup deletion, token entropy on the service, or TLS provisioning. The [ACP kit](../acp/README.md) with `--crash-checks` checks the client side of late renewal replies with a service TTL from 1,000 to 15,000 ms inclusive. Use the 2,500 ms example above if your service is outside that range. The bearer token is service-wide, not a test of tenant isolation. Passing these checks is not proof of [conformance](../../docs/conformance.md#what-conforms).
+It does not check failover between replicas, retention expiry, all client lease loss paths, restore freshness, backup deletion, token entropy on the service, or TLS provisioning. The [ACP kit](../acp/README.md) with `--crash-checks` checks the client side of late renewal replies with a service TTL from 1,000 to 15,000 ms inclusive. Use the 2,500 ms example above if your service is outside that range. The bearer token is service-wide, not a test of tenant isolation. Passing these checks is not proof of [conformance](../../docs/conformance.md#what-conforms).
