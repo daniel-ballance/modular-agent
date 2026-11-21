@@ -19,8 +19,6 @@ class HistoryStore:
     _kind: Literal["memory", "file", "http"]
     _path: Path | None = None
     _url: str | None = None
-    _coordination: Path | None = None
-    _witness: Path | None = None
 
 
 def memory_history() -> HistoryStore:
@@ -31,24 +29,8 @@ def file_history(dir: str | PathLike[str]) -> HistoryStore:
     return HistoryStore("file", Path(dir))
 
 
-def http_history(
-    url: str,
-    token_file: str | PathLike[str],
-    *,
-    coordination: str | PathLike[str] | None = None,
-    witness: str | PathLike[str] | None = None,
-) -> HistoryStore:
-    if (coordination is None) != (witness is None):
-        raise AgentError(
-            ErrorCode.INVALID_PARAMS, "Set both erasure coordination and witness paths"
-        )
-    return HistoryStore(
-        "http",
-        Path(token_file),
-        url,
-        Path(coordination) if coordination is not None else None,
-        Path(witness) if witness is not None else None,
-    )
+def http_history(url: str, token_file: str | PathLike[str]) -> HistoryStore:
+    return HistoryStore("http", Path(token_file), url)
 
 
 class HistoryListener:

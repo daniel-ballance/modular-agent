@@ -1,6 +1,8 @@
 import asyncio
 import sqlite3
 from contextlib import closing
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -11,6 +13,7 @@ from modular_agent import (
     file_history,
     http_history,
     serve_history,
+    sqlite_history_port,
 )
 from modular_agent.testing import scripted_provider
 
@@ -46,6 +49,118 @@ async def test_held_fork_is_pending_and_next_writer_confirms_it(tmp_path):
 
 
 @pytest.mark.loopback
+async def test_http_history_discovers_registry_and_reconciles_on_takeover(tmp_path):
+    token = tmp_path / "token"
+    token.write_text("c79e2509a4395582e0fac55c25c18df1")
+    server = serve_history(
+        file_history(tmp_path / "store"), address=("127.0.0.1", 0), token_file=token
+    )
+    assert server is not None
+    options = dict(project=tmp_path, history=http_history(server.url, token), durability="kept")
+    try:
+        async with create_agent(
+            **options, data_dir=tmp_path / "a", providers=[scripted_provider([{"text": "reply"}])]
+        ) as a:
+            source = await a.session()
+            await source.prompt("kept until marked", key="spent")
+            target = next(e["id"] for e in await source.history() if e["kind"] == "input")
+            fork = await source.fork()
+            sid = fork.id
+            copied = next(e["id"] for e in await fork.history() if e["kind"] == "inputAccepted")
+            await fork.close()
+            async with create_agent(
+                **options, data_dir=tmp_path / "b", providers=[scripted_provider([])]
+            ) as b:
+                attached = await b.open_session(sid)
+                assert "kept until marked" in repr(await attached.history())
+                report = await source.erase([target])
+                assert {"id": copied, "sessionId": sid} in report["pending"]
+                # An active writer can reconcile before a new view; it may not
+                # let a queued snapshot cross the pending mark.
+                await attached.close()
+            async with create_agent(
+                **options, data_dir=tmp_path / "c", providers=[scripted_provider([])]
+            ) as c:
+                loaded = await c.open_session(sid)
+                history = await loaded.history()
+                assert "kept until marked" not in repr(history)
+                assert sum(e["kind"] == "erasure" for e in history) == 1
+                assert any(e["id"] == copied and e.get("erased") for e in history)
+                duplicate = await loaded.send("ignored", "now", key="spent")
+                assert duplicate.duplicate and not duplicate.input_id
+    finally:
+        server.close()
+
+
+@pytest.mark.loopback
+async def test_base_http_composition_does_not_declare_erasure(tmp_path):
+    token = tmp_path / "token"
+    token.write_text("c79e2509a4395582e0fac55c25c18df1")
+    with sqlite_history_port(tmp_path / "store") as port:
+        server = serve_history(port, address=("127.0.0.1", 0), token_file=token)
+        assert server is not None
+        try:
+            async with create_agent(
+                project=tmp_path,
+                data_dir=tmp_path / "agent",
+                history=http_history(server.url, token),
+                durability="kept",
+                providers=[scripted_provider([{"text": "reply"}])],
+            ) as agent:
+                session = await agent.session()
+                await session.prompt("no registry")
+                target = next(e["id"] for e in await session.history() if e["kind"] == "input")
+                with pytest.raises(AgentError) as exc:
+                    await session.erase([target])
+                assert exc.value.code is ErrorCode.NOT_SUPPORTED
+        finally:
+            server.close()
+
+
+@pytest.mark.loopback
+def test_service_does_not_replace_missing_registry_on_restart(tmp_path):
+    token = tmp_path / "token"
+    token.write_text("c79e2509a4395582e0fac55c25c18df1")
+    directory = tmp_path / "store"
+
+    def listen():
+        return serve_history(file_history(directory), address=("127.0.0.1", 0), token_file=token)
+
+    def request(server, route, data=None):
+        return urlopen(
+            Request(
+                server.url + route,
+                data=data,
+                method="PUT" if data else "GET",
+                headers={
+                    "Authorization": "Bearer " + token.read_text(),
+                    "Content-Type": "application/json",
+                },
+            )
+        )
+
+    server = listen()
+    assert server is not None
+    try:
+        with request(server, "/v1/sessions/saved", b'{"project":"project","created":0}') as reply:
+            assert reply.status == 200
+    finally:
+        server.close()
+    with closing(sqlite3.connect(directory / "history-service" / "records.db")) as db:
+        db.execute("DROP TABLE registry_plans")
+    server = listen()
+    assert server is not None
+    try:
+        with pytest.raises(HTTPError) as failure:
+            request(server, "/v1/sessions/saved/pending-erasure")
+        with failure.value as response:
+            assert response.status == 503
+            assert b'"code":"unavailable"' in response.read()
+    finally:
+        server.close()
+
+
+@pytest.mark.loopback
 async def test_restored_http_store_refuses_stale_pending_state(tmp_path):
     directory = tmp_path / "history"
     path = directory / "history-service" / "records.db"
@@ -61,7 +176,7 @@ async def test_restored_http_store_refuses_stale_pending_state(tmp_path):
         async with create_agent(
             project=tmp_path,
             data_dir=tmp_path / "agent",
-            history=http_history(server.url, token_file, coordination=path, witness=witness),
+            history=http_history(server.url, token_file),
             durability="kept",
             providers=[scripted_provider([{"text": "reply"}])],
         ) as agent:

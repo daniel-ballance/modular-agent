@@ -5,9 +5,7 @@ import ipaddress
 import json
 import os
 import re
-import sqlite3
 import time
-from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
@@ -16,8 +14,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from ma_core import AgentError, Plugin, identity
 from ma_core.wire import entry_out
 
-from . import freshness, pending
 from .portable import session_view
+from .profile import PendingErasure
 
 
 def lease_clock():
@@ -40,20 +38,16 @@ class NoRedirect(HTTPRedirectHandler):
         return None  # Do not forward the bearer token to another origin.
 
 
-class HTTPHistory(Plugin):
+class HTTPHistory(PendingErasure, Plugin):
     name = "history"
     role = "history_store"
     declarations = {
-        "erasure": True,
+        "erasure": False,
         "single_writer": True,
         "remote_lease": True,
     }
 
-    def __init__(self, url, token_file, coordination=None, witness=None):
-        self.witness = Path(witness) if witness is not None else None
-        self.coordination = Path(coordination) if coordination is not None else None
-        if self.coordination is not None:
-            self.declarations = {**self.declarations, "erasure": True, "pending_erasure": True}
+    def __init__(self, url, token_file):
         parsed = urlsplit(url)
         if (
             parsed.scheme not in {"http", "https"}
@@ -96,9 +90,9 @@ class HTTPHistory(Plugin):
         self.ttl = info.get("ttlMs")
         if type(self.ttl) is not int or self.ttl <= 0:
             raise AgentError("Invalid history lease TTL")
-        if self.coordination is not None:
-            with self._registry():
-                pass
+        version = info.get("pendingErasure")
+        if type(version) is int and version == 1:
+            self.declarations = {**self.declarations, "erasure": True, "pending_erasure": True}
         api.provide("history", self)
 
     @staticmethod
@@ -117,12 +111,16 @@ class HTTPHistory(Plugin):
             raise ValueError("Invalid history body")
         return value
 
-    async def request(self, method, path, body=None):
+    async def request(self, method, path, body=None, *, headers=None):
         req = Request(
             self.url + path,
             method=method,
             data=self.encode(body) if body is not None else None,
-            headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"},
+            headers={
+                "Authorization": "Bearer " + self.token,
+                "Content-Type": "application/json",
+                **(headers or {}),
+            },
         )
 
         def once():
@@ -321,7 +319,14 @@ class HTTPHistory(Plugin):
         except AgentError as exc:
             if exc.code != "unavailable":
                 raise
-        return session_view(metadata, entries, defaults)
+        state = session_view(metadata, entries, defaults)
+        if self.declarations.get("pending_erasure"):
+            state["_history_tombstones"] = [e["id"] for e in entries if e.get("erased") is True]
+            if d.get("view"):
+                await self.erasure_revision(
+                    {"session": d["session"], "tombstones": state["_history_tombstones"]}, emit
+                )
+        return state
 
     async def open(self, d, emit):
         await self.acquire(d["session"])
@@ -357,121 +362,52 @@ class HTTPHistory(Plugin):
                     raise AgentError("HTTP fork batch exceeds the append limit", "result_too_large")
                 meta["forkedFrom"] = {"sessionId": origin["session"], "entryId": origin["point"]}
             await self.request("PUT", path, meta)
-        lease = await self.acquire(sid)
+        await self.acquire(sid)
+        body = {"entries": entries}
+        if self.declarations.get("pending_erasure"):
+            generation = self.leases[sid]
+            while True:
+                self._check(sid, generation)
+                revision = await self.append_revision(s, entries)
+                if revision is None:
+                    continue
+                try:
+                    return await self.erasure_request(
+                        sid,
+                        generation,
+                        path + "/entries",
+                        body,
+                        headers={"History-Revision": revision},
+                    )
+                except ServiceError as exc:
+                    if exc.code != "stale_revision":
+                        raise
+        return await self.erasure_request(sid, self.leases[sid], path + "/entries", body)
+
+    def erasure_lease(self, sid):
+        lease = self.leases.get(sid)
+        if lease is None:
+            raise AgentError("Erasure requires the current writer", "lost")
+        self._check(sid, lease)
+        return lease
+
+    async def erasure_request(self, sid, lease, path, data, *, headers=None):
+        self._check(sid, lease)
+        body = {**data, "lease": lease["id"]}
         try:
             result = await self.request(
-                "POST",
-                path + "/entries",
-                {
-                    "lease": lease,
-                    "entries": entries,
-                },
+                "POST", path, body, **({"headers": headers} if headers else {})
             )
-            self._check(sid, self.leases[sid])
+            self._check(sid, lease)
             return result
         except ServiceError as exc:
             if exc.code == "lost":
-                self._lose(sid, self.leases[sid])
+                self._lose(sid, lease)
                 exc.writer_lost = True
             raise
         except (AgentError, asyncio.CancelledError):
-            self._lose(sid, self.leases[sid], notify=False)
+            self._lose(sid, lease)
             raise
-
-    @contextmanager
-    def _registry(self, *, write=False):
-        if self.coordination is None:
-            raise AgentError("No pending erasure coordinator", "not_supported")
-        try:
-            uri = self.coordination.resolve().as_uri() + "?mode=rw"
-            with closing(sqlite3.connect(uri, uri=True)) as db, db:
-                db.execute("BEGIN IMMEDIATE")
-                freshness.check(db, self.witness)
-                changes = db.total_changes
-                yield db
-                if write and db.total_changes != changes:
-                    freshness.advance(db, self.witness)
-        except (OSError, sqlite3.Error) as exc:
-            raise AgentError("Pending erasure registry is unavailable", "unavailable") from exc
-
-    async def publish_erasure(self, d, emit):
-        await self.writable(d, emit)
-        with self._registry(write=True) as db:
-            intent = pending.publish(db, d["session"], d["entries"])
-            return pending.copies(db, intent=intent)
-
-    async def pending_erasure(self, d, emit):
-        with self._registry() as db:
-            return pending.copies(db, session=d["session"])
-
-    async def erasure_revision(self, d, emit):
-        with self._registry() as db:
-            return pending.revision(db, d["session"])
-
-    async def erase(self, d, emit):
-        if self.coordination is not None and d.get("intent"):
-            sid = d["session"]
-            lease = self.leases.get(sid)
-            if lease is None:
-                raise AgentError("Erasure requires the current writer", "lost")
-            generation = await self.acquire(sid)
-            result = await self.request(
-                "POST", self.path(sid) + "/erase", {"lease": generation, "entryIds": d["entries"]}
-            )
-            self._check(sid, lease)
-            with self._registry(write=True) as db:
-                self._check(sid, lease)
-                for entry_id in result["erased"]:
-                    db.execute(
-                        "UPDATE erase_copies SET confirmed=1 WHERE intent=? AND session=? AND entry=?",
-                        (d["intent"], sid, entry_id),
-                    )
-            return result
-        sessions = {}
-        for item in await self.list({}, emit):
-            sid = item["id"]
-            _, sessions[sid] = await self.pages(self.path(sid), "entries")
-        by_id = {e["id"]: (sid, e) for sid, entries in sessions.items() for e in entries}
-        targets = set(d["entries"])
-        if not all(x in by_id and by_id[x][0] == d["session"] for x in targets):
-            raise AgentError("Unknown erasure entry")
-        while True:
-            expanded = targets | {
-                e["id"] for _, e in by_id.values() if targets.intersection(e.get("sources") or [])
-            }
-            for eid in targets:
-                _, e = by_id[eid]
-                refs = [e.get("fork_source")]
-                if e["kind"] == "input":
-                    refs.append((e.get("data") or {}).get("inputId"))
-                expanded.update(ref for ref in refs if ref in by_id)
-            if expanded == targets:
-                break
-            targets = expanded
-        erased, affected, pending = [], [], []
-        for sid in sorted({by_id[x][0] for x in targets}):
-            body = {"entryIds": sorted(x for x in targets if by_id[x][0] == sid)}
-            already_open = sid in self.leases
-            try:
-                body["lease"] = await self.acquire(sid)
-                result = await self.request("POST", self.path(sid) + "/erase", body)
-                self._check(sid, self.leases[sid])
-            except AgentError as exc:
-                if exc.code == "lost" and sid in self.leases:
-                    self._lose(sid, self.leases[sid])
-                pending.extend(body["entryIds"])
-            else:
-                erased.extend(result["erased"])
-                affected.append(sid)
-            finally:
-                if not already_open:
-                    await self.close({"session": sid}, emit)
-        return {
-            "erased": erased,
-            "sessions": affected,
-            "pending": pending,
-            "affectedPairs": [{"sessionId": by_id[x][0], "id": x} for x in targets],
-        }
 
 
 def configured_history(root):

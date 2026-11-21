@@ -2,11 +2,17 @@
 
 import asyncio
 import json
+from contextvars import ContextVar
 
 from acp import RequestError
 from acp._jsonrpc import decode_message, error_response
 
 MAX_FRAME = 64 << 20
+
+# The ACP router handles the request and sends its reply in separate tasks.
+# Both inherit this cell from the receive loop, so the reply keeps its view.
+REPLY_VIEW = ContextVar("acp_reply_view", default=None)
+UPDATE_VIEW = ContextVar("acp_update_view", default=None)
 
 
 def encode(value):
@@ -22,6 +28,7 @@ class Stdio:
         self.authorize = authorize
 
     async def receive(self):
+        REPLY_VIEW.set(None)
         while True:
             if self.frames is not None:
                 raw = await self.frames.receive()
@@ -84,6 +91,8 @@ class Stdio:
                         except TimeoutError:
                             return None
                         continue
+                if "method" in message and "id" in message:
+                    REPLY_VIEW.set([])
                 return message
 
     async def send(self, message):
@@ -117,7 +126,8 @@ class Stdio:
                         sid = result.get("sessionId")
                 try:
                     if isinstance(sid, str):
-                        reduced = await self.authorize(sid, method, message)
+                        prepared = UPDATE_VIEW.get() if "method" in message else REPLY_VIEW.get()
+                        reduced = await self.authorize(sid, method, message, prepared)
                         if reduced is not None:
                             raw = encode(reduced)
                 except RequestError as exc:
