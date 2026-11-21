@@ -1,12 +1,12 @@
 import { mapOutput } from "@modular-agent/plugin-wire";
 import type { Configuration, CredentialStore, ModelStreamEvent, OutputPayload, HistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
 import type { Agent } from "./agent.js";
-import { AgentError } from "./errors.js";
-import { toolSource, type Tool } from "./tool.js";
+import { AgentError, checked } from "./errors.js";
+import { questionReply, toolSource, type Tool, type ToolEnvironment } from "./tool.js";
 import { adaptProvider, type Provider } from "./provider.js";
 import { sdkJob, type JobOwner, type JobRecovery, type JobStarter } from "./jobs.js";
 import type {
-  Actor, AssistantMessage, Content, HistoryEntry, ModelError, ModelRef, ModelRequest, Outcome, QuestionDraft, Settings,
+  Actor, AssistantMessage, Content, HistoryEntry, ModelError, ModelRef, ModelRequest, Outcome, QuestionDraft, QuestionReply, Settings,
   ToolCall, ToolDefinition, ToolStatus, TurnResult,
 } from "./data.js";
 
@@ -55,7 +55,14 @@ export interface CallContext {
   history(cursor?: string): Promise<{ entries: HistoryEntry[]; next?: string }>;
   emit(type: string, data: unknown): void;
 }
-export interface CommandContext extends Omit<CallContext, "jobs"> { sessionId: string; actorId: string; jobs: JobStarter }
+export interface CommandContext extends Omit<CallContext, "jobs"> {
+  sessionId: string;
+  actorId: string;
+  jobs: JobStarter;
+  environment: ToolEnvironment;
+  ask(question: QuestionDraft, wait?: { wait: number }): Promise<QuestionReply>;
+  requestModel(request: ModelRequest): Promise<AssistantMessage>;
+}
 export type HookHandler<P extends HookPoint> =
   (payload: Readonly<Hooks[P][0]>, context: CallContext) => Awaitable<Hooks[P][1] | void>;
 export type CommandHandler = (args: string, context: CommandContext) => Awaitable<string | void>;
@@ -335,9 +342,9 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
     command(name, description, handler, options) {
       add(`command:${name}`);
       if (served && (options?.usesModel || options?.inProcessOnly)) unavailable(`command ${name}`);
-      if (options?.usesModel) throw new AgentError("not_supported", `Model-using command ${name}`);
-      registrations.push(api => api.registerCommand(name, { description, async run(args, ids) {
-        const { cx, finish, assert } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId }, ids as Work, options?.inProcessOnly);
+      if (options?.usesModel && !options.inProcessOnly) throw new AgentError("invalid_composition", `Model-using command ${name} must declare inProcessOnly`);
+      registrations.push(api => api.registerCommand(name, { description, usesModel: options?.usesModel, async run(args, ids) {
+        const { cx, finish, assert } = context(api, { sessionId: ids.sessionId, actorId: ids.actorId, stepId: ids.stepId }, ids as Work, options?.inProcessOnly);
         const jobs: JobStarter = { async start(kind, detail, key) {
           assert();
           const handle = served
@@ -346,7 +353,38 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
           await handle.ready;
           return sdkJob(handle);
         } };
-        try { return await handler(args, { ...cx, sessionId: ids.sessionId, actorId: ids.actorId, jobs }); }
+        const env = async () => {
+          assert();
+          if (!ids.environment) throw new AgentError("not_supported", "The host does not provide a command environment");
+          return ids.environment();
+        };
+        const environment: ToolEnvironment = {
+          read: path => checked(async () => (await env()).readFile(path)),
+          exists: path => checked(async () => (await env()).exists(path)),
+          write: (path, data) => checked(async () => (await env()).writeFile(path, typeof data === "string" ? data : Buffer.from(data))),
+          list: path => checked(async () => {
+            const scoped = await env();
+            if (!scoped.list) throw new AgentError("not_supported", "The environment does not list directories");
+            return scoped.list(path);
+          }),
+          exec: (command, opts) => checked(async () => (await env()).exec(command, { signal: cx.cancelled, timeoutMs: opts?.timeout })),
+        };
+        const command: CommandContext = { ...cx, sessionId: ids.sessionId, actorId: ids.actorId, jobs, environment,
+          async ask(question, wait) {
+            assert();
+            if (served) throw new AgentError("not_supported", "A served command cannot ask questions");
+            if (wait && (!Number.isSafeInteger(wait.wait) || wait.wait < 0)) throw new AgentError("invalid_request", "Invalid question wait");
+            const answer = await checked(() => ids.ask({ ...question, timeLimitMs: wait?.wait ?? question.timeLimitMs }));
+            assert();
+            return questionReply(question.kind, answer);
+          },
+          async requestModel(request) {
+            assert();
+            if (served || !options?.usesModel) throw new AgentError("not_supported", "Command did not declare usesModel");
+            return checked(() => ids.requestModel(request));
+          },
+        };
+        try { return await handler(args, command); }
         finally { finish(); }
       } }));
     },

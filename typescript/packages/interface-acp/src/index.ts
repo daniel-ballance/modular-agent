@@ -105,6 +105,7 @@ export interface AcpOptions {
 	actorId?: string;
 	actor?: Actor;
 	allowTenant?(tenant: string | null): boolean;
+	connectionScope?<T>(run: () => T): T;
 	allowSession?(id: string, project: string): Promise<boolean>;
 	declaration?: (sessionId?: string) => Record<string, boolean | string>;
 	projectSettings?(project: string): Promise<Record<string, unknown>>;
@@ -157,7 +158,16 @@ export class AcpInterface implements InterfaceCapability {
 		return api.onEvent((e) => this.track(e), { raw: true });
 	}
 
-	present(sessionId: string): boolean { return !!this.client && this.sessions.has(sessionId); }
+	private scoped<T>(run: () => T): T { return this.options.connectionScope ? this.options.connectionScope(run) : run(); }
+
+	present(sessionId: string, request?: InputRequest): boolean {
+		if (!this.client || !this.sessions.has(sessionId)) return false;
+		if (request && this.options.connectionScope) {
+			const right = request.kind === "approval" ? "approve" : "answer";
+			return this.scoped(() => this.hasRight(sessionId, this.actorId, right));
+		}
+		return true;
+	}
 	presentActors(sessionId: string): string[] { return [...(this.sessions.get(sessionId)?.present ?? [])]; }
 
 	private actor(): Actor {
@@ -217,7 +227,7 @@ export class AcpInterface implements InterfaceCapability {
 		app.onRequest(methods.agent.session.new, async ({ params }) => {
 			const tenant = (params._meta?.[NS] as { tenant?: unknown } | undefined)?.tenant;
 			if (tenant !== undefined && typeof tenant !== "string") throw RequestError.invalidParams();
-			if (this.options.allowTenant && !this.options.allowTenant(tenant ?? null)) throw bindingError("forbidden");
+			if (this.options.allowTenant && (!this.options.allowTenant(tenant ?? null) || !this.actor().authority.includes("input"))) throw bindingError("forbidden");
 			const sessionId = await this.checked(async () => {
 				const { api, cwd } = await this.options.project?.(params.cwd) ?? { api: this.api, cwd: params.cwd };
 				const overrides = await this.options.projectSettings?.(cwd);
@@ -622,7 +632,7 @@ export class AcpInterface implements InterfaceCapability {
 		const state = this.sessions.get(sessionId) ?? this.state();
 		this.sessions.set(sessionId, state);
 		state.unfollow?.();
-		state.unfollow = this.apiFor(sessionId).follow(sessionId, { recipient: this.actorId }, (e) => this.forward(sessionId, e));
+		state.unfollow = this.apiFor(sessionId).follow(sessionId, { recipient: this.actorId }, (e) => this.scoped(() => this.forward(sessionId, e)));
 		void this.update(sessionId, {
 			sessionUpdate: "available_commands_update",
 			availableCommands: this.apiFor(sessionId).commands().map((c) => ({ name: c.name, description: c.description, input: { hint: "arguments" } })),
@@ -850,7 +860,9 @@ export class AcpInterface implements InterfaceCapability {
 		return (entry?.data as { call?: { name: string; input: object } } | undefined)?.call;
 	}
 
-	onInputRequest(request: InputRequest): void {
+	onInputRequest(request: InputRequest): void { this.scoped(() => this.offerInputRequest(request)); }
+
+	private offerInputRequest(request: InputRequest): void {
 		if (!this.sessions.has(request.sessionId) || !this.client || this.pending.has(request.id)) return;
 		if (!this.hasRight(request.sessionId, this.actorId, request.kind === "approval" ? "approve" : "answer")) return;
 		// Without form support, free text and choices stay open for the binding's requests/answer extensions.
@@ -933,9 +945,10 @@ export class AcpInterface implements InterfaceCapability {
 
 	/** Serve a transport which already delivers complete, UTF-8 text messages. */
 	serveMessages(transport: { receive(callback: (bytes: Buffer) => void): void;
-		closed(callback: () => void): void; send(text: string): Promise<void> }): Promise<void> {
+		closed(callback: () => void): void; send(text: string): Promise<void>;
+		controlTimeoutMs?: number; lose?(): void }): Promise<void> {
 		let done = false;
-		return this.serveStream({
+		return this.scoped(() => this.serveStream({
 			readable: new ReadableStream({
 				start(controller) {
 					transport.closed(() => { if (!done) { done = true; controller.close(); } });
@@ -948,13 +961,23 @@ export class AcpInterface implements InterfaceCapability {
 							void transport.send('{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid request"}}').catch(() => {});
 							return;
 						}
+						if (message.jsonrpc === "2.0" && message.method === "$/ping" &&
+							(typeof message.id === "number" || typeof message.id === "string")) {
+							const valid = message.params === undefined || message.params && typeof message.params === "object" &&
+								!Array.isArray(message.params) && Object.keys(message.params).length === 0;
+							const reply = valid ? { result: {} } : { error: { code: -32602, message: "Invalid params" } };
+							const timer = setTimeout(() => transport.lose?.(), transport.controlTimeoutMs ?? 5000);
+							void transport.send(JSON.stringify({ jsonrpc: "2.0", id: message.id, ...reply }))
+								.catch(() => transport.lose?.()).finally(() => clearTimeout(timer));
+							return;
+						}
 						controller.enqueue(message);
 					});
 				},
 				cancel() { done = true; },
 			}),
 			writable: new WritableStream({ write: message => transport.send(JSON.stringify(message)) }),
-		});
+		}));
 	}
 
 	serveStream(stream: Stream): Promise<void> {

@@ -75,7 +75,10 @@ export interface AcpActorToken {
   tenants?: readonly (string | null)[];
   projects?: readonly string[];
 }
-export interface ServeAcpServiceOptions extends ServeAcpOptions, ListenOptions { actors: readonly AcpActorToken[] }
+export interface ServeAcpServiceOptions extends ServeAcpOptions, ListenOptions {
+  actors: readonly AcpActorToken[];
+  controlTimeoutMs?: number;
+}
 export interface SessionSummary { id: string; project: string; updated: number; model?: ModelRef; title?: string }
 export interface SessionInfo { id: string; project: string; created: number; updated: number; settings: Settings; tenant?: string }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
@@ -188,6 +191,9 @@ export class Agent {
       throw new AgentError("invalid_composition", "Loading processPlugins or servicePlugins requires a plugin host");
     }
     if (!["ephemeral", "kept", "durable"].includes(durability)) throw new AgentError("invalid_params", "Unknown durability");
+    if (durability === "ephemeral" && (options.history instanceof FileHistory || options.history instanceof HttpHistory)) {
+      throw new AgentError("invalid_composition", "Persistent history requires durability: kept or durable");
+    }
     if (options.approval !== undefined && !["off", "ask", "all", "never"].includes(options.approval)) {
       throw new AgentError("invalid_params", "Unknown approval policy");
     }
@@ -256,6 +262,7 @@ export class Agent {
       const persistent = effectiveStore === store
         ? !(history instanceof MemoryHistory)
         : effectiveStore?.supports.persistent === true || effectiveStore?.supports.portableSessions === true;
+      if (durability === "ephemeral" && persistent) throw new Error("Persistent history requires durability: kept or durable");
       if ((durability !== "ephemeral" || effectiveRuntime?.supports.continuesAfterRestart === true) && !persistent) {
         throw new Error("Kept history or a durable Runtime needs a persistent history store");
       }
@@ -496,9 +503,7 @@ export class Agent {
     this.#acp = true;
     const agents = new Map<string, Promise<Agent>>();
     const attachments = new Map<PluginApi, ReturnType<typeof standardMcpTools>>();
-    const ceilings = new Map<string, ReadonlySet<Right>>();
     const installMcp = async (agent: Agent) => {
-      agent.#h.setActorCeilings(ceilings);
       const mcp = standardMcpTools({ servers: async project => await options.projectMcp?.(project) ?? {} });
       await agent.#plugin(mcp);
       attachments.set(agent.#api, mcp);
@@ -520,11 +525,14 @@ export class Agent {
         const off = binding.acp.attach(agent.#api, agent === this);
         attached.set(agent.#api, { agent, detach() { off(); remove(); } });
       };
+      const actor = scope && { id: scope.actor.id, kind: scope.actor.kind, authority: scope.actor.rights };
       const binding = acpInterface({
-        ...(scope ? {
-          actor: { id: scope.actor.id, kind: scope.actor.kind, authority: scope.actor.rights },
+        ...(scope && actor ? {
+          actor,
+          connectionScope: run => this.#h.withConnectionActor(actor, run),
           allowTenant: scope.allowTenant,
-          allowSession: async (id, project) => scope.allowProject(project) && scope.allowTenant((await this.sessionInfo(id)).tenant ?? null),
+          allowSession: async (id, project) => scope.allowProject(project) && scope.allowTenant((await this.sessionInfo(id)).tenant ?? null) &&
+            await this.#h.canDiscoverSession(id, actor, this.#authority.severalActors),
         } : { actorId: options.actorId ?? process.env.MODULAR_AGENT_ACTOR }),
         showApproval: options.showApproval ?? this.#approval,
         declaration: id => (id && sessions.get(id) || this).declaration(),
@@ -534,8 +542,13 @@ export class Agent {
           const project = await checked(() => realpath(cwd), "invalid_params");
           if (!(await stat(project)).isDirectory()) throw new AgentError("invalid_params", "Project must be a directory");
           if (scope && !scope.allowProject(project)) throw new AgentError("forbidden", "Project is outside the actor's scope");
-          const saved = id ? await this.sessionInfo(id) : undefined;
-          if (saved && scope && !scope.allowTenant(saved.tenant ?? null)) throw new AgentError("forbidden", "Tenant is outside the actor's scope");
+          const inaccessible = () => new AgentError("forbidden", "Session is inaccessible");
+          const saved = id ? await this.sessionInfo(id).catch(error => {
+            if (scope && error instanceof AgentError && error.code === "not_found") throw inaccessible();
+            throw error;
+          }) : undefined;
+          if (saved && scope && actor && (!scope.allowTenant(saved.tenant ?? null) || !scope.allowProject(saved.project) ||
+              !await this.#h.canDiscoverSession(id!, actor, this.#authority.severalActors))) throw inaccessible();
           if (saved && saved.project !== project || !options.compose && project !== this.#project) {
             throw new AgentError("invalid_params", "Session belongs to a different project");
           }
@@ -588,6 +601,8 @@ export class Agent {
         try { await binding.acp.serveStdio(); } finally { detach(); }
         return;
       }
+      const controlTimeoutMs = options.controlTimeoutMs ?? 5000;
+      if (!Number.isSafeInteger(controlTimeoutMs) || controlTimeoutMs <= 0) throw new AgentError("invalid_params", "Invalid control timeout");
       const actors = await Promise.all(options.actors.map(async ({ tokenFile, actor, tenants, projects }) => {
         if (!actor.id || !["host", "user", "agent", "program"].includes(actor.kind) || !actor.rights.every(r => ALL_AUTHORITY.includes(r))) {
           throw new AgentError("invalid_params", "Invalid ACP actor");
@@ -595,17 +610,9 @@ export class Agent {
         const allowedTenants = tenants && new Set(tenants);
         const allowedProjects = projects && new Set(await Promise.all(projects.map(project => realpath(project))));
         return { tokenFile, value: { actor: structuredClone(actor),
-          allowTenant: (tenant: string | null) => !allowedTenants || allowedTenants.has(tenant),
-          allowProject: (project: string) => !allowedProjects || allowedProjects.has(project) } };
+          allowTenant: (tenant: string | null) => allowedTenants ? allowedTenants.has(tenant) : tenant === null,
+          allowProject: (project: string) => (!!options.compose || project === this.#project) && (!allowedProjects || allowedProjects.has(project)) } };
       }));
-      for (const { value: { actor } } of actors) {
-        const rights = new Set(actor.rights), prior = ceilings.get(actor.id);
-        if (prior && (prior.size !== rights.size || [...rights].some(right => !prior.has(right)))) {
-          throw new AgentError("invalid_params", "Tokens for the same actor must configure the same rights");
-        }
-        ceilings.set(actor.id, rights);
-      }
-      this.#h.setActorCeilings(ceilings);
       const server = await listenWebSocket(options, ACP_PROTOCOL, actors, async (ws, scope) => {
         const { binding, detach } = prepareConnection(scope);
         try {
@@ -613,6 +620,7 @@ export class Agent {
             receive: receive => receiveMessages(ws, receive),
             closed: close => { ws.once("close", close); ws.once("error", close); },
             send: text => new Promise((resolve, reject) => ws.send(text, error => error ? reject(error) : resolve())),
+            controlTimeoutMs, lose: () => ws.terminate(),
           });
         } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
       });
