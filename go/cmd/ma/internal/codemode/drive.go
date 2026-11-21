@@ -14,6 +14,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const pipeAllowance = 250 * time.Millisecond
+
 const osDenied = "the sandbox has no direct access to files, the network, the clock or the environment; use the provided functions"
 
 func stringNode(s string) *pb.MontyNode {
@@ -66,19 +68,21 @@ func lookup(name string, receiver *pb.Uuid) *pb.ClientRequest {
 	return &pb.ClientRequest{Kind: &pb.ClientRequest_ResumeNameLookup{ResumeNameLookup: answer}}
 }
 
-func (w *worker) drive(code string, fs []function, nested nestedFunc, l Limits, printed *strings.Builder) (any, int, error) {
+type exchangeFunc func(*pb.ClientRequest, time.Duration, *strings.Builder, int) (*pb.WorkerEvent, error)
+
+func (w *worker) drive(code string, fs []function, nested nestedFunc, l Limits, printed *strings.Builder, exchange exchangeFunc) (finalValue, int, error) {
 	if l.Compute < time.Microsecond || l.Calls < 0 || l.Recursion < 1 || l.PrintBytes < 0 {
-		return nil, 0, errors.New("invalid codemode limits")
+		return finalValue{}, 0, errors.New("invalid codemode limits")
 	}
-	ack, err := w.exchange(configuration(l), openingTimeout, nil, 0)
+	ack, err := exchange(configuration(l), openingTimeout, nil, 0)
 	if err != nil {
-		return nil, 0, fmt.Errorf("Monty %s worker did not accept protocol %d: %w", workerVersion, protocolVersion, err)
+		return finalValue{}, 0, fmt.Errorf("Monty %s worker did not accept protocol %d: %w", workerVersion, protocolVersion, err)
 	}
 	if ack.GetOk() == nil || ack.ExecutionClock == nil || *ack.ExecutionClock != pb.ExecutionClock_WALL {
 		if refusal := ack.GetSessionRefused(); refusal != nil {
-			return nil, 0, protocolError("Monty worker refused protocol %d configuration: %s", protocolVersion, refusal.Message)
+			return finalValue{}, 0, protocolError("Monty worker refused protocol %d configuration: %s", protocolVersion, refusal.Message)
 		}
-		return nil, 0, protocolError("Monty worker did not acknowledge protocol %d configuration", protocolVersion)
+		return finalValue{}, 0, protocolError("Monty worker did not acknowledge protocol %d configuration", protocolVersion)
 	}
 	tools, moduleID := toolModule(fs)
 	request := &pb.ClientRequest{Kind: &pb.ClientRequest_Feed{Feed: &pb.Feed{
@@ -89,25 +93,30 @@ func (w *worker) drive(code string, fs []function, nested nestedFunc, l Limits, 
 	budget := uint64(l.Compute.Microseconds())
 	for {
 		if w.ctx.Err() != nil {
-			return nil, made, w.ioError(io.EOF)
+			return finalValue{}, made, w.ioError(io.EOF)
 		}
 		// The VM clock tracks only execution. Give the pipe watchdog a small
 		// allowance for a final exception frame, so the VM error wins when
 		// it reaches a checkpoint on time. Neither clock runs in nested().
 		remaining := time.Duration(budget-(last-checkpoint)) * time.Microsecond
-		event, err := w.exchange(request, remaining+250*time.Millisecond, printed, l.PrintBytes)
+		event, err := exchange(request, remaining+pipeAllowance, printed, l.PrintBytes)
 		if err != nil {
-			return nil, made, err
+			return finalValue{}, made, err
 		}
-		if x := event.GetError(); x != nil {
-			return nil, made, raisedError(x.Exception)
+		x := event.GetError()
+		// Keep the worker's limit errors, including their tracebacks.
+		if x != nil && (x.Exception.GetExcType() == "TimeoutError" || x.Exception.GetExcType() == "MemoryError") {
+			return finalValue{}, made, raisedError(x.Exception)
 		}
 		if event.FeedExecutionMicros < last {
-			return nil, made, protocolError("worker execution clock went backwards")
+			return finalValue{}, made, protocolError("worker execution clock went backwards")
 		}
 		last = event.FeedExecutionMicros
 		if last-checkpoint >= budget {
-			return nil, made, errCompute
+			return finalValue{}, made, errCompute
+		}
+		if x != nil {
+			return finalValue{}, made, raisedError(x.Exception)
 		}
 		switch e := event.Kind.(type) {
 		case *pb.WorkerEvent_Complete:
@@ -116,12 +125,12 @@ func (w *worker) drive(code string, fs []function, nested nestedFunc, l Limits, 
 				err = a.roots([]uint32{e.Complete.Value})
 			}
 			if err != nil {
-				return nil, made, protocolError("%v", err)
+				return finalValue{}, made, protocolError("%v", err)
 			}
-			return a.jsonValue(e.Complete.Value), made, nil
+			return finalValue{a, e.Complete.Value}, made, nil
 		case *pb.WorkerEvent_NameLookup:
 			if e.NameLookup.ObjectId != nil && len(e.NameLookup.ObjectId.Data) != 16 {
-				return nil, made, protocolError("invalid name lookup receiver")
+				return finalValue{}, made, protocolError("invalid name lookup receiver")
 			}
 			request = lookup(e.NameLookup.Name, e.NameLookup.ObjectId)
 		case *pb.WorkerEvent_OsCall:
@@ -134,7 +143,7 @@ func (w *worker) drive(code string, fs []function, nested nestedFunc, l Limits, 
 				err = errors.New("missing OS operation")
 			}
 			if err != nil {
-				return nil, made, protocolError("%v", err)
+				return finalValue{}, made, protocolError("%v", err)
 			}
 			result := raise("RuntimeError", osDenied)
 			var values *pb.Arena
@@ -143,7 +152,7 @@ func (w *worker) drive(code string, fs []function, nested nestedFunc, l Limits, 
 			}
 			if c.AllowEagerAwait {
 				if c.GetAsyncSleep() == nil {
-					return nil, made, protocolError("unexpected eager OS call")
+					return finalValue{}, made, protocolError("unexpected eager OS call")
 				}
 				request = &pb.ClientRequest{Kind: &pb.ClientRequest_ResumeFutures{ResumeFutures: &pb.ResumeFutures{
 					Results: []*pb.FutureResult{{CallId: c.CallId, Result: result}},
@@ -155,15 +164,15 @@ func (w *worker) drive(code string, fs []function, nested nestedFunc, l Limits, 
 			prior := made
 			request, err = w.functionCall(e.FunctionCall, fs, nested, &made, l.Calls)
 			if err != nil {
-				return nil, made, err
+				return finalValue{}, made, err
 			}
 			if made != prior {
 				checkpoint = last // Only a dispatched tool starts a new compute interval.
 			}
 		case *pb.WorkerEvent_ResolveFutures:
-			return nil, made, errors.New("RuntimeError: awaited something that never resolves")
+			return finalValue{}, made, errors.New("RuntimeError: awaited something that never resolves")
 		default:
-			return nil, made, protocolError("unexpected event %T", event.Kind)
+			return finalValue{}, made, protocolError("unexpected event %T", event.Kind)
 		}
 	}
 }
