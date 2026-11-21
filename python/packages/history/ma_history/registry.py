@@ -79,11 +79,11 @@ class Registry:
         ).fetchone()
 
     def destinations(self, intent, source):
+        # Every copy set's session, the source's own included, in published order.
         return [
             session
             for (session,) in self.db.execute(
-                "SELECT session FROM registry_plans WHERE intent=? AND session!=? ORDER BY rowid",
-                (intent, source),
+                "SELECT session FROM registry_plans WHERE intent=? ORDER BY rowid", (intent,)
             )
         ]
 

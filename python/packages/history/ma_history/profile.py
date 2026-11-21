@@ -256,7 +256,6 @@ class PendingErasure:
             or not isinstance(destinations, list)
             or any(not _id(dest) or dest in {".", ".."} for dest in destinations)
             or len(set(destinations)) != len(destinations)
-            or sid in destinations
         ):
             raise AgentError("Invalid erasure publication response", "unavailable")
         # The session list does not include expired destinations. Use the
@@ -264,7 +263,7 @@ class PendingErasure:
         while True:
             revision, source_plans = await self.registry(sid)
             progress = []
-            for dest in [sid, *destinations]:
+            for dest in [sid, *(d for d in destinations if d != sid)]:
                 current, plans = (
                     (revision, source_plans) if dest == sid else await self.registry(dest)
                 )

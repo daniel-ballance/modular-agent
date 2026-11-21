@@ -379,7 +379,7 @@ class Store:
                 raise Refusal(413, "request_too_large")
             plans[destination] = plan
         registry.publish(sid, targets, intent, plans)
-        return {"intentId": intent, "sessionIds": [dest for dest in plans if dest != sid]}
+        return {"intentId": intent, "sessionIds": list(plans)}
 
     def complete(self, sid, intent, entries):
         plan = next((p for p in self.registry.plans(sid) if p["intentId"] == intent), None)

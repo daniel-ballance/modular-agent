@@ -127,7 +127,7 @@ async def test_http_republication_recovers_original_destinations_in_order(tmp_pa
         }
         path = http.registry_path("source")
         lease = http.leases["source"]
-        expected = {"intentId": "original", "sessionIds": ["z-copy", "a-copy"]}
+        expected = {"intentId": "original", "sessionIds": ["z-copy", "source", "a-copy"]}
         assert await http.erasure_request("source", lease, path, body) == expected
 
         # Simulate retention reclaiming records while keeping the ID and its plans reserved.
