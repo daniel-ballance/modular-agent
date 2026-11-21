@@ -121,7 +121,15 @@ pub(crate) async fn pump(
                             "command.result" => text(&cx,&session.id,"agent_message_chunk",&c.to_string()),
                             "request.opened" => {
                                 match serde_json::from_value::<Question>(c) {
-                                    Ok(q) => { questions.spawn(question(session.clone(),q,cx.clone(),capabilities.clone())); Ok(()) },
+                                    Ok(q) => {
+                                        let principal = PRINCIPAL.with(Clone::clone);
+                                        let ceiling = CONNECTION_CEILING.try_with(Clone::clone).ok();
+                                        questions.spawn(with_principal(
+                                            principal, ceiling,
+                                            question(session.clone(), q, cx.clone(), capabilities.clone()),
+                                        ));
+                                        Ok(())
+                                    },
                                     Err(e) => Err(e.into()),
                                 }
                             },

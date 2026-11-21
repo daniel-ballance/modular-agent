@@ -207,7 +207,7 @@ async fn tool_edits_fail_without_changing_a_file_if_the_match_is_not_unique() {
     );
 }
 #[tokio::test]
-async fn erasure_refuses_before_changes_if_a_fork_is_held_elsewhere() {
+async fn erasure_keeps_a_fork_pending_while_its_lease_is_held_elsewhere() {
     let rig = Rig::new(vec![text("private")]).await;
     rig.run("private").await;
     let input = rig
@@ -222,26 +222,27 @@ async fn erasure_refuses_before_changes_if_a_fork_is_held_elsewhere() {
     rig.h.close(&fork).await.unwrap();
     let store = history_fs::FileHistory::new(&rig.root.path().join("sessions")).unwrap();
     let lease = store.acquire(&fork).unwrap();
+    let report = rig
+        .h
+        .erase(&Scope::session(&rig.id), vec![input.clone()])
+        .await
+        .unwrap();
+    assert!(report.erased.contains(&input));
     assert!(
-        rig.h
-            .erase(&Scope::session(&rig.id), vec![input.clone()])
-            .await
-            .is_err()
-    );
-    assert!(
-        rig.data()
-            .entries
+        report
+            .qualified
             .iter()
-            .find(|e| e.id == input)
-            .unwrap()
-            .content
-            .is_some()
+            .any(|(session, id)| session == &fork && report.pending.contains(id))
     );
+    assert!(store.check_erasure(&store.load(&fork).unwrap()).is_err());
     drop(lease);
-    rig.h
+    let report = rig
+        .h
         .erase(&Scope::session(&rig.id), vec![input])
         .await
         .unwrap();
+    assert!(report.pending.is_empty());
+    assert!(store.check_erasure(&store.load(&fork).unwrap()).is_ok());
 }
 #[tokio::test]
 async fn output_limit_maps_to_a_limit_outcome() {

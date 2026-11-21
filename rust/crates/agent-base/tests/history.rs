@@ -63,7 +63,9 @@ async fn unused_session_has_no_store_artifact() {
         .unwrap();
     assert_eq!(h.snapshot(&id).unwrap().settings["model"], "test");
     h.close(&id).await.unwrap();
-    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    let store = history_fs::FileHistory::new(root.path()).unwrap();
+    assert!(store.list(None).unwrap().is_empty());
+    assert!(store.load(&id).is_err());
 }
 #[tokio::test]
 async fn history_branches_position_and_project_lists_survive_reopen() {

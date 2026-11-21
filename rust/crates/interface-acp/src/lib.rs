@@ -768,6 +768,19 @@ pub(crate) fn string<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
 /// Stdio is exclusively protocol output. Diagnostics belong on stderr.
 pub async fn run(factory: Arc<dyn Factory>) -> Result<()> {
     let mut identity = Identity::local();
+    // The base executable's operator-owned tenant configuration grants its
+    // local ACP launcher access. SDK callers provide the names explicitly.
+    if let Some(raw) = std::env::var_os("MODULAR_AGENT_TENANTS") {
+        let configured: BTreeMap<String, Value> = serde_json::from_str(
+            raw.to_str()
+                .ok_or_else(|| anyhow!("invalid tenant configuration"))?,
+        )?;
+        identity.tenants = Some(
+            std::iter::once(None)
+                .chain(configured.into_keys().map(Some))
+                .collect(),
+        );
+    }
     if let Some(configured) = std::env::var_os("MODULAR_AGENT_ACP_REPRESENTS") {
         identity.represents = serde_json::from_str(
             configured

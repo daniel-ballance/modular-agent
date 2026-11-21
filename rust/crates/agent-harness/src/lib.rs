@@ -2597,7 +2597,10 @@ impl AgentApi for Harness {
                         "no coordinated erasure store",
                     )
                 })?;
-            let affected = store.mark_erasure(&scope.session, &entries)?;
+            let mut affected = store.mark_erasure(&scope.session, &entries)?;
+            // An internal request with no record targets still asks the Provider
+            // to discard its copies of the source session.
+            affected.entry(scope.session.clone()).or_default();
             let mut erased = vec![];
             let mut unresolved = std::collections::BTreeSet::new();
             for (session, targets) in &affected {
