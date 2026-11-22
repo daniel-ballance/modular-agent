@@ -1,9 +1,12 @@
 """The Claude Provider speaks the Python Agent SDK's message types."""
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, ToolUseBlock
+from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock, ToolUseBlock
 from modular_agent import ModelRef, ProviderContext
 from modular_agent.claude import claude
+from modular_agent.fixtures import tide
 import pytest
+
+from test_sdk_subscription import mounted
 
 
 class ClaudeFixture:
@@ -168,3 +171,35 @@ async def test_claude_uses_reported_catalog_and_passes_stream_pieces():
     ]
     assert response["usage"] == {"output": 4}
     assert fixture.closed == 2
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("served", [False, True], ids=["embedded", "served"])
+async def test_claude_host_runs_the_tool_and_replays_result(tmp_path, runtime_kind, served):
+    model = "claude-sonnet-5-5"
+    fixture = ClaudeFixture(
+        callers=[
+            [
+                AssistantMessage(
+                    [ToolUseBlock("c1", "mcp__agent__tide", {"harbour": "Whitby"})], model
+                )
+            ],
+            [
+                AssistantMessage([TextBlock("Done")], model),
+                ResultMessage("success", 5, 5, False, 1, "s"),
+            ],
+        ]
+    )
+    provider = claude(client_factory=fixture)
+    async with mounted(
+        tmp_path, provider, served, "claude/" + model, runtime_kind, tools=[tide]
+    ) as agent:
+        session = await agent.session(settings={"reasoning": "high"})
+        result = await session.prompt("Tell me about the tide.")
+    assert result.text == "Done"
+    [call] = result.tool_results()
+    assert call.status == "completed"
+    assert "14:02" in call.text()
+    assert "14:02" in str(fixture.prompts[1])
+    assert fixture.options[-1].effort == "high"
+    assert fixture.closed == 3
