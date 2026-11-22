@@ -1,50 +1,25 @@
-"""ChatGPT OAuth. The caller presents the steps; the SDK opens no browser."""
+"""ChatGPT OAuth through browser and device sign-in."""
 
 import asyncio
 import base64
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 import errno
 import hashlib
 import json
-import re
 import secrets
-from typing import Literal
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from httpx2 import AsyncClient, HTTPError, Response
 
 from ._provider import ModelFailure
-from ._subscription_logins import OAuth, SubscriptionLogins, now_ms
-from ._types import AgentError, ErrorCode, JsonObject
+from ._subscription_logins import OAuth, now_ms
+from ._subscription_oauth import Paste, Show, SignInStep, json_body, poll_device
+from ._types import JsonObject
 
-DEFAULT_CLIENT_IDENTITY = "modular-agent"
 _AUTH = "https://auth.openai.com"
 _CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _SCOPE = "openid profile email offline_access"
 _PORT = 1455
 _WAIT = 900
-
-
-def validate_client_identity(value: str, code: ErrorCode = ErrorCode.INVALID_COMPOSITION) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value):
-        raise AgentError(
-            code,
-            "client_identity must be 1 to 64 ASCII letters, digits, dots, underscores or hyphens",
-        )
-    return value
-
-
-@dataclass(frozen=True)
-class SignInStep:
-    kind: Literal["openAndPaste", "deviceCode", "waiting"]
-    url: str = ""
-    code: str | None = None
-    message: str | None = None
-
-
-type Show = Callable[[SignInStep], None]
-type Paste = Callable[[], Awaitable[str | None]]
 
 
 def _pasted_code(line: str, state: str) -> str | None:
@@ -83,14 +58,6 @@ def account(access: str) -> str:
     return value
 
 
-def _json(response: Response) -> JsonObject:
-    try:
-        data = response.json()
-    except ValueError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _field(data: JsonObject, name: str) -> str:
     value = data.get(name)
     if not isinstance(value, str) or not value:
@@ -123,7 +90,7 @@ async def refresh(client: AsyncClient, login: OAuth) -> OAuth:
         raise ModelFailure(
             {"kind": "temporary", "message": "Could not reach the ChatGPT token endpoint."}
         ) from None
-    data = _json(response)
+    data = json_body(response)
     status = response.status_code
     if data.get("error") == "invalid_grant" or status in {400, 401, 403}:
         raise ModelFailure(
@@ -155,10 +122,10 @@ async def _exchange(client: AsyncClient, code: str, verifier: str, redirect: str
     )
     if not response.is_success:
         raise ValueError(f"ChatGPT sign-in failed (HTTP {response.status_code}).")
-    return _tokens(_json(response))
+    return _tokens(json_body(response))
 
 
-async def _device(client: AsyncClient, show: Show) -> OAuth:
+async def device_sign_in(client: AsyncClient, show: Show) -> OAuth:
     first = await client.post(
         _AUTH + "/api/accounts/deviceauth/usercode", json={"client_id": _CLIENT_ID}
     )
@@ -166,7 +133,7 @@ async def _device(client: AsyncClient, show: Show) -> OAuth:
         raise ValueError(
             f"ChatGPT device sign-in is not available (HTTP {first.status_code}); use browser sign-in."
         )
-    data = _json(first)
+    data = json_body(first)
     device = _field(data, "device_auth_id")
     code = _field(data, "user_code")
     interval = data.get("interval", 5)
@@ -176,36 +143,34 @@ async def _device(client: AsyncClient, show: Show) -> OAuth:
         delay = 5
     show(SignInStep("deviceCode", "https://auth.openai.com/codex/device", code))
     show(SignInStep("waiting"))
-    async with asyncio.timeout(_WAIT):
-        while True:
-            await asyncio.sleep(delay)
-            response = await client.post(
-                _AUTH + "/api/accounts/deviceauth/token",
-                json={"device_auth_id": device, "user_code": code},
-            )
-            data = _json(response)
-            if response.is_success:
-                return await _exchange(
-                    client,
-                    _field(data, "authorization_code"),
-                    _field(data, "code_verifier"),
-                    "https://auth.openai.com/deviceauth/callback",
-                )
-            error = data.get("error")
-            if isinstance(error, dict):
-                error = error.get("code")
-            if error == "slow_down":
-                delay += 5
-            elif error in ("access_denied", "authorization_denied", "expired_token"):
-                raise ValueError("ChatGPT device sign-in was denied or expired.")
-            elif response.status_code not in {403, 404} and error not in (
-                "authorization_pending",
-                "deviceauth_authorization_pending",
-            ):
-                raise ValueError(f"ChatGPT device sign-in failed (HTTP {response.status_code}).")
+
+    async def send() -> Response:
+        return await client.post(
+            _AUTH + "/api/accounts/deviceauth/token",
+            json={"device_auth_id": device, "user_code": code},
+        )
+
+    async def finish(data: JsonObject) -> OAuth:
+        return await _exchange(
+            client,
+            _field(data, "authorization_code"),
+            _field(data, "code_verifier"),
+            "https://auth.openai.com/deviceauth/callback",
+        )
+
+    def failure(error: str | None, status: int) -> ValueError:
+        if error in ("access_denied", "authorization_denied", "expired_token"):
+            return ValueError("ChatGPT device sign-in was denied or expired.")
+        return ValueError(f"ChatGPT device sign-in failed (HTTP {status}).")
+
+    return await poll_device(
+        send, finish, failure, delay=delay, expires=_WAIT, pending_statuses={403, 404}
+    )
 
 
-async def _browser(client: AsyncClient, show: Show, paste: Paste | None, identity: str) -> OAuth:
+async def browser_sign_in(
+    client: AsyncClient, show: Show, paste: Paste | None, identity: str
+) -> OAuth:
     state, verifier = secrets.token_urlsafe(16), secrets.token_urlsafe(32)
     challenge = (
         base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
@@ -254,7 +219,7 @@ async def _browser(client: AsyncClient, show: Show, paste: Paste | None, identit
         if exc.errno != errno.EADDRINUSE:
             raise
         if paste is None:
-            return await _device(client, show)
+            return await device_sign_in(client, show)
         server = None
     port = server.sockets[0].getsockname()[1] if server is not None else _PORT
     redirect = f"http://localhost:{port}/auth/callback"
@@ -320,39 +285,3 @@ async def _browser(client: AsyncClient, show: Show, paste: Paste | None, identit
         if server is not None:
             await server.wait_closed()
     return await _exchange(client, code, verifier, redirect)
-
-
-async def sign_in(
-    provider: str,
-    logins: SubscriptionLogins,
-    *,
-    on_step: Show,
-    device: bool = False,
-    paste: Paste | None = None,
-    client_identity: str = DEFAULT_CLIENT_IDENTITY,
-) -> None:
-    """Sign in to ChatGPT and save the login. Never opens a browser."""
-    if provider != "chatgpt":
-        raise AgentError(ErrorCode.INVALID_PARAMS, "SDK sign-in is supported only for chatgpt")
-    identity = validate_client_identity(client_identity, ErrorCode.INVALID_PARAMS)
-    try:
-        async with AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
-            login = await (
-                _device(client, on_step) if device else _browser(client, on_step, paste, identity)
-            )
-    except TimeoutError:
-        raise AgentError(ErrorCode.UNAVAILABLE, "The sign-in was not completed in time.") from None
-    except HTTPError:
-        raise AgentError(
-            ErrorCode.UNAVAILABLE, "Could not reach the ChatGPT sign-in endpoint."
-        ) from None
-    except (OSError, ValueError) as exc:
-        raise AgentError(ErrorCode.UNAVAILABLE, str(exc)) from None
-    await logins.set_login(provider, login)
-
-
-async def sign_out(provider: str, logins: SubscriptionLogins) -> None:
-    """Remove the local login. Does not revoke it with the vendor."""
-    if provider != "chatgpt":
-        raise AgentError(ErrorCode.INVALID_PARAMS, "SDK sign-out is supported only for chatgpt")
-    await logins.set_login(provider, None)

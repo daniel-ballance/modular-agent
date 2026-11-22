@@ -51,11 +51,11 @@ def chatgpt_http(monkeypatch):
     def install(handler):
         transport = httpx2.MockTransport(handler)
         monkeypatch.setattr(
-            "modular_agent._chatgpt_auth.AsyncClient",
+            "modular_agent._subscription_auth.AsyncClient",
             lambda **kw: httpx2.AsyncClient(transport=transport, **kw),
         )
         monkeypatch.setattr(
-            "modular_agent.chatgpt.AsyncClient",
+            "modular_agent._responses.AsyncClient",
             lambda **kw: httpx2.AsyncClient(transport=transport, **kw),
         )
 
