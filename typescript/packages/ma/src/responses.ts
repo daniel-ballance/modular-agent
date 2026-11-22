@@ -1,7 +1,8 @@
 import { ModelFailure, type AssistantMessage, type ContentPart, type ModelError, type ModelRequest, type Provider, type ProviderContext, type Settings } from "@modular-agent/core";
 import defaults from "./models.json" with { type: "json" };
 import { type AuthFile, type Login } from "./auth.js";
-import { CLIENT_IDENTITY, chatgptAccount, labels, loopback, oauth, type Vendor } from "./oauth.js";
+import { chatgptAccount, labels, loopback, oauth, type Vendor } from "./oauth.js";
+import { resolveClientIdentity, type ClientIdentityOptions } from "./client-identity.js";
 
 const endpoints = { "openai-codex": "https://chatgpt.com/backend-api/codex/responses", xai: "https://api.x.ai/v1/responses" };
 const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
@@ -142,8 +143,11 @@ function message(vendor: Vendor, raw: Record<string, unknown>): AssistantMessage
       cacheRead: usage?.input_tokens_details?.cached_tokens ?? 0, cacheWrite: 0, cost: 0 } };
 }
 
-export function responses(vendor: Vendor, auth: AuthFile, overrides: Settings = {}, test?: { endpoint: string; oauth: ReturnType<typeof oauth> }): Provider {
-  const models = catalogModels(vendor, overrides), tokenService = test?.oauth ?? oauth();
+type ResponsesOptions = ClientIdentityOptions & { test?: { endpoint: string; oauth: ReturnType<typeof oauth> } };
+export function responses(vendor: Vendor, auth: Pick<AuthFile, "login" | "current">, overrides: Settings = {},
+  { clientIdentity: identity, test }: ResponsesOptions = {}): Provider {
+  const clientIdentity = resolveClientIdentity(identity);
+  const models = catalogModels(vendor, overrides), tokenService = test?.oauth ?? oauth({ clientIdentity });
   const endpoint = test ? loopback(test.endpoint) : endpoints[vendor];
   return {
     id: vendor, supports: { keepsState: false, safeToRepeat: true }, inProcessOnly: true,
@@ -163,7 +167,7 @@ export function responses(vendor: Vendor, auth: AuthFile, overrides: Settings = 
         if (vendor === "openai-codex") {
           try { headers["chatgpt-account-id"] = (credential.type === "oauth" ? credential.account : undefined) ?? chatgptAccount(bearer); }
           catch (err) { throw failure("credentials", (err as Error).message); }
-          Object.assign(headers, { "OpenAI-Beta": "responses=experimental", originator: CLIENT_IDENTITY, "session-id": session, "x-client-request-id": session });
+          Object.assign(headers, { "OpenAI-Beta": "responses=experimental", originator: clientIdentity, "session-id": session, "x-client-request-id": session });
         }
         const res = await fetch(endpoint, { method: "POST", headers, body, redirect: "manual", signal: AbortSignal.any([ctx.cancelled, AbortSignal.timeout(300_000)]) })
           .catch(err => { throw failure("temporary", `could not reach ${labels[vendor]}: ${(err as Error).message}`); });

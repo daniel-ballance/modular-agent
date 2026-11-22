@@ -41,6 +41,56 @@ async function authFile(t: TestContext) {
   return new AuthFile(dir);
 }
 
+for (const [label, clientIdentity, expected] of [
+  ["default", undefined, "modular-agent"],
+  ["configured", "My-Agent_2.0", "My-Agent_2.0"],
+] as const) {
+  test(`ChatGPT requests and both sign-ins send the ${label} client identity`, { timeout: 10_000 }, async t => {
+    const base = await fixture(t, (req, res, body) => {
+      switch (req.url) {
+        case "/responses":
+          assert.equal(req.headers.originator, expected);
+          res.writeHead(200, { "content-type": "text/event-stream" })
+            .end('data: {"type":"response.completed","response":{"output":[]}}\n\n');
+          break;
+        case "/device":
+          assert.equal(new URLSearchParams(body).get("referrer"), expected);
+          send(res, { verification_uri: "https://example.invalid", user_code: "CODE", device_code: "device", interval: 1 });
+          break;
+        case "/token": send(res, token()); break;
+        default: assert.fail(`unexpected request to ${req.url}`);
+      }
+    });
+    const identity = clientIdentity === undefined ? {} : { clientIdentity };
+    const service = oauth({ ...identity, test: { endpoints: {
+      codexAuthorize: `${base}/authorize`, codexToken: `${base}/token`, xaiDeviceCode: `${base}/device`, xaiToken: `${base}/token`,
+    }, port: 0, pollUnit: 1 } });
+    await service.login("openai-codex", false, step => {
+      assert.equal(step.kind, "open-and-paste");
+      assert.equal(new URL(step.address).searchParams.get("originator"), expected);
+    }, receive => { receive("fixture-code"); return () => {}; });
+    await service.login("xai", true, step => { assert.equal(step.kind, "code"); });
+
+    const credential = { type: "api_key", key: jwt } as const;
+    const auth = { async login() { return credential; }, async current() { return credential; } };
+    const provider = responses("openai-codex", auth, {}, { ...identity, test: { endpoint: `${base}/responses`, oauth: service } });
+    await provider.request({ provider: "openai-codex", id: "gpt-6.1-sol" }, { systemPrompt: "", messages: [], tools: [], settings: {} }, {
+      cancelled: t.signal, async credential() { return undefined; }, piece() {}, log() {}, emit() {},
+    });
+  });
+}
+
+test("provider and sign-in options refuse invalid client identities", () => {
+  const unexpected = async () => { throw new Error("unexpected credential lookup"); };
+  const auth = { login: unexpected, current: unexpected };
+  for (const clientIdentity of ["", "x".repeat(65), "bad identity", "id!", "café", "id\n"]) {
+    const identity = { clientIdentity };
+    assert.throws(() => oauth(identity), /clientIdentity must be/, JSON.stringify(clientIdentity));
+    for (const vendor of ["openai-codex", "xai"] as const)
+      assert.throws(() => responses(vendor, auth, {}, identity), /clientIdentity must be/, JSON.stringify(clientIdentity));
+  }
+});
+
 test("auth.json matches Rust serde_json bytes and keeps its answers and private mode", async t => {
   const auth = await authFile(t);
   // Rendered by serde_json::to_vec_pretty on credentials_auth::Contents:
@@ -71,7 +121,7 @@ test("ChatGPT browser sign-in verifies state and exchanges PKCE over loopback", 
     assert.equal(createHash("sha256").update(form.get("code_verifier")!).digest("base64url"), challenge);
     send(res, token());
   });
-  const service = oauth({ endpoints: { codexToken: `${base}/token`, codexAuthorize: `${base}/authorize` }, port: 0 });
+  const service = oauth({ test: { endpoints: { codexToken: `${base}/token`, codexAuthorize: `${base}/authorize` }, port: 0 } });
   let callback: Promise<number> | undefined;
   const login = await service.login("openai-codex", false, step => {
     assert.equal(step.kind, "open");
@@ -105,7 +155,7 @@ test("ChatGPT sign-in finishes by pasting when the callback port is busy", { tim
     send(res, token());
   });
   // The token fake holds the callback port; no local callback can complete this login.
-  const service = oauth({ endpoints: { codexToken: `${base}/token`, codexAuthorize: `${base}/authorize` }, port: Number(new URL(base).port) });
+  const service = oauth({ test: { endpoints: { codexToken: `${base}/token`, codexAuthorize: `${base}/authorize` }, port: Number(new URL(base).port) } });
   const notes: string[] = [];
   let state: string | null = null;
   const login = await service.login("openai-codex", false, step => {
@@ -114,7 +164,6 @@ test("ChatGPT sign-in finishes by pasting when the callback port is busy", { tim
     const query = new URL(step.address).searchParams;
     state = query.get("state");
     assert.ok(state);
-    assert.equal(query.get("originator"), "pi");
     assert.equal(query.get("redirect_uri"), redirect);
   }, receive => {
     receive("");
@@ -160,7 +209,7 @@ test("ChatGPT device sign-in waits for authorization and exchanges the device ve
       send(res, token());
     }
   });
-  const service = oauth({ endpoints: { codexDeviceCode: `${base}/device`, codexDeviceToken: `${base}/poll`, codexToken: `${base}/token` }, pollUnit: 1 });
+  const service = oauth({ test: { endpoints: { codexDeviceCode: `${base}/device`, codexDeviceToken: `${base}/poll`, codexToken: `${base}/token` }, pollUnit: 1 } });
   const steps: unknown[] = [];
   const login = await service.login("openai-codex", true, s => steps.push(s));
   assert.equal(login.account, "test-account");
@@ -174,7 +223,6 @@ test("Grok device sign-in handles slow_down and never opens a non-HTTPS verifica
     const form = new URLSearchParams(body);
     assert.equal(form.get("client_id"), "b1a00492-073a-47ea-816f-4c329264a828");
     if (req.url === "/device") {
-      assert.equal(form.get("referrer"), "pi");
       send(res, { verification_uri_complete: bad ? "http://example.invalid" : "https://example.invalid", user_code: "CODE", device_code: "dev", interval: 1 });
     } else {
       assert.equal(form.get("device_code"), "dev");
@@ -184,7 +232,7 @@ test("Grok device sign-in handles slow_down and never opens a non-HTTPS verifica
       else send(res, token("access"));
     }
   });
-  const service = oauth({ endpoints: { xaiDeviceCode: `${base}/device`, xaiToken: `${base}/token` }, pollUnit: 1 });
+  const service = oauth({ test: { endpoints: { xaiDeviceCode: `${base}/device`, xaiToken: `${base}/token` }, pollUnit: 1 } });
   const login = await service.login("xai", false, s => { assert.equal(s.kind, "code"); });
   assert.equal(login.access, "access");
   assert.equal(login.account, undefined);
@@ -209,7 +257,7 @@ test("refresh holds Rust's flock while awaiting the token endpoint, and concurre
     }
     send(res, { access_token: "fresh", expires_in: 3600 });
   });
-  const service = oauth({ endpoints: { xaiToken: base } });
+  const service = oauth({ test: { endpoints: { xaiToken: base } } });
   const refresh = () => auth.current("xai", old => service.refresh("xai", old));
   const [a, b] = await Promise.all([refresh(), refresh()]);
   assert.equal(requests, 1);
@@ -218,7 +266,7 @@ test("refresh holds Rust's flock while awaiting the token endpoint, and concurre
   assert.equal(a.type === "oauth" && a.refresh, "once");
 });
 
-test("Codex sends Pi's headers and request shape, refreshes a rejected token once, and decodes split SSE", async t => {
+test("Codex sends the expected headers and request shape, refreshes a rejected token once, and decodes split SSE", async t => {
   const auth = await authFile(t);
   await auth.setLogin("openai-codex", { type: "oauth", access: "old", account: "test-account", refresh: "rotate", expires: Date.now() + 999_999 });
   let requests = 0, refreshes = 0;
@@ -231,7 +279,6 @@ test("Codex sends Pi's headers and request shape, refreshes a rejected token onc
     }
     assert.equal(req.url, "/responses");
     assert.equal(req.headers["openai-beta"], "responses=experimental");
-    assert.equal(req.headers.originator, "pi");
     assert.equal(req.headers["chatgpt-account-id"], "test-account");
     const parsed = JSON.parse(body);
     assert.equal(parsed.prompt_cache_key, req.headers["x-client-request-id"]);
@@ -252,7 +299,9 @@ test("Codex sends Pi's headers and request shape, refreshes a rejected token onc
     res.write('data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"café"}]}}\n\n');
     res.end('data: {"type":"response.completed",\n' + 'data: "response":{"output":[],"usage":{"input_tokens":7,"output_tokens":2,"input_tokens_details":{"cached_tokens":1}}}}\n\n');
   });
-  const provider = responses("openai-codex", auth, {}, { endpoint: `${base}/responses`, oauth: oauth({ endpoints: { codexToken: `${base}/token` } }) });
+  const provider = responses("openai-codex", auth, {}, {
+    test: { endpoint: `${base}/responses`, oauth: oauth({ test: { endpoints: { codexToken: `${base}/token` } } }) },
+  });
   const agent = await createAgent({ providers: [provider], model: "openai-codex/gpt-6.1-sol", settings: { maxOutput: 20 } });
   t.after(() => agent.close());
   const result = await (await agent.session()).prompt("hello");
@@ -275,7 +324,7 @@ test("Grok sends the system item, caps output, and maps a stream error", async t
     assert.deepEqual(parsed.reasoning, { effort: "high", summary: "auto" });
     res.writeHead(200, { "content-type": "text/event-stream" }).end('data: {"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"too long"}}}\n\n');
   });
-  const provider = responses("xai", auth, { xai: [{ id: "test", name: "Test", contextWindow: 1000, maxTokens: 20, effort: { off: "none", high: "high" } }] }, { endpoint: base, oauth: oauth({ endpoints: {} }) });
+  const provider = responses("xai", auth, { xai: [{ id: "test", name: "Test", contextWindow: 1000, maxTokens: 20, effort: { off: "none", high: "high" } }] }, { test: { endpoint: base, oauth: oauth({ test: { endpoints: {} } }) } });
   await assert.rejects(async () => provider.request({ provider: "xai", id: "test" }, { systemPrompt: "rules", messages: [{ role: "user", content: [{ type: "text", text: "hey" }] }], tools: [], settings: { reasoning: "xhigh", maxOutput: 99 } }, {
     cancelled: new AbortController().signal, async credential() { return undefined; }, piece() {}, log() {}, emit() {},
   }), { modelError: { kind: "contextTooLarge", message: "too long (context_length_exceeded)" } });
