@@ -7,6 +7,7 @@ import pytest
 from modular_agent import create_agent, subscription_logins
 from modular_agent.anthropic import anthropic
 from modular_agent.chatgpt import chatgpt
+from modular_agent.grok import grok
 from modular_agent.claude import claude
 from modular_agent.fixtures import tide
 from modular_agent.openai import openai
@@ -70,6 +71,7 @@ async def test_live_provider(provider_id, key_variable, model_variable, default_
     ("provider_id", "default_model"),
     [
         ("chatgpt", "gpt-6.1-sol"),
+        ("grok", "grok-4.7"),
         ("claude", "claude-haiku-5-5"),
     ],
 )
@@ -78,10 +80,11 @@ async def test_live_subscription(provider_id, default_model):
     if not login_path:
         pytest.skip("MODULAR_AGENT_LIVE_LOGINS is absent")
     model = os.getenv(f"MODULAR_AGENT_LIVE_{provider_id.upper()}_MODEL", default_model)
-    if provider_id == "chatgpt":
-        provider = chatgpt(logins=subscription_logins(login_path), models=[model])
+    if provider_id in {"chatgpt", "grok"}:
+        build = chatgpt if provider_id == "chatgpt" else grok
+        provider = build(logins=subscription_logins(login_path), models=[model])
         if not provider.available():
-            pytest.skip("No ChatGPT login in the named file")
+            pytest.skip(f"No {provider_id} login in the named file")
     else:
         provider = claude(models=[model])
         if not await provider.available():
