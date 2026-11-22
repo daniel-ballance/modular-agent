@@ -54,21 +54,20 @@ export interface AssistantMessage {
 
 export type Message =
 	| { role: "user"; content: Content }
-	| { role: "assistant"; content: Content; stop: Stop; [key: string]: unknown }
+	| { role: "assistant"; content: Content; stop: Stop; providerData?: unknown }
 	| { role: "toolResult"; toolCallId: string; toolName: string; content: Content; isError: boolean };
 
 export interface ToolDefinition {
 	name: string;
 	description: string;
 	parameters: unknown;
-	[key: string]: unknown;
 }
 
 export interface ModelRequest {
 	systemPrompt: string;
 	messages: Message[];
 	tools: ToolDefinition[];
-	settings: { reasoning?: Reasoning; maxOutput?: number; [key: string]: unknown };
+	settings: { reasoning?: string; maxOutput?: number; [key: string]: unknown };
 }
 
 export type StreamEvent =

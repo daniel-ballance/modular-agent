@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import type {
 	Options,
 	SDKControlGetContextUsageResponse,
@@ -29,7 +31,7 @@ export function loadQuery(): Promise<QueryFunction> {
 /** The installed Agent SDK's version, read from its manifest. */
 export function installedSdkVersion(): string {
 	try {
-		const path = new URL("../node_modules/@anthropic-ai/claude-agent-sdk/package.json", import.meta.url);
+		const path = join(dirname(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk")), "package.json");
 		const manifest: unknown = JSON.parse(readFileSync(path, "utf8"));
 		return typeof manifest === "object" && manifest !== null && "version" in manifest && typeof manifest.version === "string" ? manifest.version : "unknown";
 	} catch {
@@ -51,6 +53,11 @@ const API_ROUTING = [
 ];
 
 /** Variables a running Claude Code session sets for its own children; they describe that session, not ours. */
+export function apiRoutingReason(env: NodeJS.ProcessEnv): string | undefined {
+	const source = API_ROUTING.find(name => env[name]);
+	return source && `Claude Code is configured for API use by ${source}, not a Claude plan.`;
+}
+
 const PARENT_SESSION = [
 	"CLAUDECODE",
 	"CLAUDE_CODE_ENTRYPOINT",

@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node sidecars/claude/scripts/build.mjs",
     "clean": "tsc -b --clean",
     "test": "tsc -b && node --test --test-concurrency=4 packages/*/dist/test/*.test.js",
     "agent": "node packages/agent/dist/src/cli.js"
