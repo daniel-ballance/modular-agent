@@ -38,7 +38,17 @@ MODULAR_AGENT_SDK_REQUIRE=all MA_REMOTE=provider-pi-ai,runtime-transient,tools-f
 (cd sidecars/claude && npm ci && npm test)
 ```
 
-- **TypeScript suites:** `npm ci`, `tsc -b` and `git diff --check` passed. The normal and `MA_REMOTE` suites each passed **446/446** offline tests with the full shared matrix. Both include the base CLI and SDK suites; two live Provider tests are disabled by default. The workspace has no separate lint or formatter script.
+The TypeScript-only run used Node 26.13.1 on Apple silicon macOS 27.2 and on Linux. Both workspaces include the base CLI, SDK and `ma`, and run 51 shared scenarios across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for this run.
+
+| Check | macOS | Linux |
+|---|---:|---:|
+| `npm test` | 346 passed, 6 skipped | 351 passed, 2 skipped |
+| `MA_REMOTE` suite | 346 passed, 6 skipped | 351 passed, 2 skipped |
+| Claude sidecar | 44/44 | 44/44 |
+| `ma` reference | 23/23 | 23/23 |
+| `ma` stdio ACP with crash, probe and job checks | 188/188 | 188/188 |
+
+Two live Provider tests are disabled by default. macOS also skips four tests that read Linux `/proc`: two check cleanup after watcher or agent death, and two find the Monty worker PID. macOS tests still check process-group cleanup and declare no safe repeat for interrupted local commands. Earlier full shared-matrix runs passed **446/446** offline tests in both workspace configurations. The workspace has no separate lint or formatter script.
 - **Base kits:** The stdio runs cover local and HTTP history, an external Provider and tool source, and a served durable Runtime. The history kit also exercises an SDK file store, test-only memory, a relay, and a custom lease-aware store.
 - **SDK coverage:** The offline guide tests cover approvals, Providers, hook placements, process plugins, ACP stdio, and history handoff. Four tests kill a child process at specific secret-answer boundaries and reopen without leaking the value. Public API tests cover raw tool history and gated events in process, over stdio and over WebSocket, context lifetime and credential scope, and typed errors. The live Provider file compiles and skips both cases by default. Run live checks by hand only with `MODULAR_AGENT_LIVE=1`; each Provider test also requires its own API key. No live requests were made for this change.
 - **Same-connection callbacks:** The Go job-progress deadlock did not reproduce. The host registers notifications in arrival order without waiting for gated delivery. Public SDK tests over stdio and WebSocket check that the job owner's gate sees and redacts two ordered image-bearing progress events and that an `events()` follower receives both. Tests also cover tool progress, environment and nested tool callbacks, a served Runtime calling its own Provider, tools and hooks, model pieces, scoped and unscoped catalog changes, and custom events. A WebSocket test covers gated diagnostics. An output hook can read raw history under its live request but cannot use that scope to emit more output.
