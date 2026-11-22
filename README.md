@@ -110,6 +110,12 @@ The other languages' builds are in [`typescript/packages/ma`](typescript/package
 
 Each SDK's README lists its own gaps.
 
+## Planned for 0.2.0
+
+- **OpenTelemetry.** Trace context carried by every binding and kept with each turn, so a trace survives a restart; the Harness instrumented through each language's OpenTelemetry API, which does nothing until an app installs an exporter; one span profile for all four languages.
+- **AG-UI.** A web Interface, after the Harness gains tools run by a client and a rule for history a client sends.
+- **A demonstration host** in `demos/`: one conversation, one inbox and one listener across two agents, to test what the framework must give an application that drives agents. The host itself stays outside the specification ([ADR 0012](docs/adr/0012-one-agent-is-the-scope.md)); see [Agent platform 2027](docs/research/agent-platform-2027.md) for the ideas it tests.
+
 ## The specification
 
 The specification says **what** each part does, what passes between the parts, and what must always hold, not how a part works inside. Optional **bindings** fix the wire where two builds work together: ACP for hosts, a plugin protocol, and an HTTP history service. The current edition is [edition 4](docs/adr/0027-sdk-0-1-and-edition-4.md).
