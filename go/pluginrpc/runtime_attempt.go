@@ -212,7 +212,7 @@ func (w *runtimeWork) model(ctx context.Context, id any, p *Peer, step string, r
 			emit(part)
 		}
 		if p != nil && (part.Type == "text" || part.Type == "reasoning" || part.Type == "toolInput") {
-			_ = p.Send("host/runtime/modelEvent", object{"parentRequestId": id, "event": object{"type": part.Type, "delta": part.Text}})
+			_ = p.sendWork(ctx, "host/runtime/modelEvent", object{"parentRequestId": id, "event": object{"type": part.Type, "delta": part.Text}})
 		}
 	})
 	w.mu.Lock()

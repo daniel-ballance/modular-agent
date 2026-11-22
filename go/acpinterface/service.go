@@ -48,6 +48,8 @@ func (s *server) unlink(id string) bool {
 // Nil Projects allows any project in the composition. Empty string in Tenants
 // allows sessions without a tenant; nil Tenants allows only those sessions.
 type Principal struct {
+	// TrustTrace allows per-request trace context from this authenticated client.
+	TrustTrace        bool
 	Actor             api.Actor
 	Projects, Tenants []string
 	Represents        []string

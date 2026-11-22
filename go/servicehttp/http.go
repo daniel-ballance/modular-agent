@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"io"
 	"net"
 	"net/http"
@@ -96,6 +97,14 @@ func NewClient(base, token string) *Client {
 	transport.DisableCompression = true
 	return &Client{strings.TrimRight(base, "/"), token, &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("service redirects refused") }}}
 }
+
+type traceRequestKey struct{}
+
+// TraceRequest allows this configured service to receive the request trace.
+func TraceRequest(ctx context.Context) context.Context {
+	return context.WithValue(ctx, traceRequestKey{}, true)
+}
+
 func (c *Client) Open(ctx context.Context, path, key string, in any) (*http.Response, error) {
 	return c.OpenMethod(ctx, "POST", path, key, in)
 }
@@ -131,6 +140,11 @@ func (c *Client) OpenMethodHeaders(ctx context.Context, method, path, key string
 	for name, values := range headers {
 		for _, value := range values {
 			r.Header.Add(name, value)
+		}
+	}
+	if ctx.Value(traceRequestKey{}) != nil {
+		if w := telemetry.Inject(ctx); w != nil {
+			r.Header.Set("traceparent", w.Parent)
 		}
 	}
 	r.Header.Set("Authorization", "Bearer "+c.Token)

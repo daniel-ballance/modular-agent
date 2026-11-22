@@ -149,6 +149,7 @@ func (s *server) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptRes
 	if s.principal != nil && !s.authorize(id, st.actor, "input") {
 		return acp.PromptResponse{}, acpError("forbidden")
 	}
+	ctx = s.workTrace(ctx, p.Meta)
 	receipt, err := s.a.Submit(s.acting(ctx, id, st.actor), id, api.Input{Key: meta.Key, When: "after", Content: content})
 	if err != nil {
 		return acp.PromptResponse{}, outputReplyError(err)

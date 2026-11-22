@@ -9,6 +9,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/servicehttp"
+	"go.opentelemetry.io/otel/trace"
 	"net/http"
 	"net/url"
 	"os"
@@ -420,11 +421,14 @@ func (l *lease) loadSnapshot(physical bool) (api.Session, error) {
 	}
 	return snap, nil
 }
-func (l *lease) Save(s api.Session) error { return l.save(s, false) }
+func (l *lease) Save(s api.Session) error { return l.SaveContext(l.c.ctx, s) }
 
-func (l *lease) SaveErasureRecords(s api.Session) error { return l.save(s, true) }
+func (l *lease) SaveContext(ctx context.Context, s api.Session) error { return l.save(ctx, s, false) }
 
-func (l *lease) save(s api.Session, settling bool) error {
+func (l *lease) SaveErasureRecords(s api.Session) error { return l.save(l.c.ctx, s, true) }
+
+func (l *lease) save(parent context.Context, s api.Session, settling bool) error {
+	ctx := trace.ContextWithSpanContext(l.c.ctx, trace.SpanContextFromContext(parent))
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.usable(); err != nil {
@@ -477,7 +481,7 @@ func (l *lease) save(s api.Session, settling bool) error {
 		if source, entry, ok := strings.Cut(s.ForkedFrom, ":"); ok {
 			session.ForkedFrom = &ForkOrigin{SessionID: source, EntryID: entry}
 		}
-		if err := l.c.backend.Create(l.c.ctx, l.id, session); err != nil {
+		if err := l.c.backend.Create(ctx, l.id, session); err != nil {
 			return err
 		}
 		if err := l.acquire(false); err != nil {
@@ -508,7 +512,7 @@ func (l *lease) save(s api.Session, settling bool) error {
 	if err := l.CheckWriter(); err != nil {
 		return err
 	}
-	writeCtx, cancel := context.WithTimeout(l.c.ctx, time.Duration(l.cutoff.Load()-leaseClock()))
+	writeCtx, cancel := context.WithTimeout(ctx, time.Duration(l.cutoff.Load()-leaseClock()))
 	defer cancel()
 	var err error
 	if revision != "" {

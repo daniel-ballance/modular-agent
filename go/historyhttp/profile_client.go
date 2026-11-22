@@ -29,7 +29,7 @@ func (c *Client) profileCall(ctx context.Context, method, path string, in any, o
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	res, err := c.wire.OpenMethodHeaders(ctx, method, path, "", in, headers)
+	res, err := c.wire.OpenMethodHeaders(servicehttp.TraceRequest(ctx), method, path, "", in, headers)
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"net/http"
 	"net/url"
 	"os"
@@ -213,7 +214,11 @@ func (m *Manager) connect(ctx context.Context, id string, spec Server) (*connect
 func (c *connection) refresh(ctx context.Context, session *mcp.ClientSession) error {
 	var tools []api.Tool
 	routes := map[string]string{}
-	for tool, err := range session.Tools(ctx, nil) {
+	list := &mcp.ListToolsParams{}
+	if w := telemetry.Inject(ctx); w != nil {
+		list.SetMeta(map[string]any{"traceparent": w.Parent})
+	}
+	for tool, err := range session.Tools(ctx, list) {
 		if err != nil {
 			return err
 		}
@@ -292,6 +297,9 @@ func (m *Manager) Run(ctx context.Context, s api.Session, call api.Call, progres
 		c.mu.Unlock()
 		defer func() { c.mu.Lock(); delete(c.progress, token); c.mu.Unlock() }()
 		params := &mcp.CallToolParams{Name: name, Arguments: args}
+		if w := telemetry.Inject(ctx); w != nil {
+			params.SetMeta(map[string]any{"traceparent": w.Parent})
+		}
 		params.SetProgressToken(token)
 		res, err := c.session.CallTool(ctx, params)
 		if err != nil {

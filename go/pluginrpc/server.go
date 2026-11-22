@@ -23,15 +23,16 @@ import (
 )
 
 type Registration struct {
-	Binding     string                   `json:"binding"`
-	Name        string                   `json:"name"`
-	Providers   []ProviderRegistration   `json:"providers,omitempty"`
-	ToolSources []SourceRegistration     `json:"toolSources,omitempty"`
-	Environment *EnvironmentRegistration `json:"workingEnvironment,omitempty"`
-	Hooks       []HookRegistration       `json:"hooks,omitempty"`
-	Commands    []CommandRegistration    `json:"commands,omitempty"`
-	Runtime     *RuntimeRegistration     `json:"runtime,omitempty"`
-	Replaces    []string                 `json:"replaces,omitempty"`
+	TraceContext int                      `json:"traceContext,omitempty"`
+	Binding      string                   `json:"binding"`
+	Name         string                   `json:"name"`
+	Providers    []ProviderRegistration   `json:"providers,omitempty"`
+	ToolSources  []SourceRegistration     `json:"toolSources,omitempty"`
+	Environment  *EnvironmentRegistration `json:"workingEnvironment,omitempty"`
+	Hooks        []HookRegistration       `json:"hooks,omitempty"`
+	Commands     []CommandRegistration    `json:"commands,omitempty"`
+	Runtime      *RuntimeRegistration     `json:"runtime,omitempty"`
+	Replaces     []string                 `json:"replaces,omitempty"`
 }
 type ProviderRegistration struct {
 	ID       string `json:"id"`
@@ -285,7 +286,14 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 			s.project = project
 		}
 		s.initialized = true
-		return s.Registration, nil
+		reg := s.Registration
+		reg.TraceContext = 0
+		if n, ok := v["traceContext"].(json.Number); ok && string(n) == "1" {
+			reg.TraceContext = 1
+		}
+		s.peer.traceName.Store(&reg.Name)
+		s.peer.traceAgreed.Store(reg.TraceContext == 1)
+		return reg, nil
 	}
 	ready := s.initialized && !s.stopping
 	if method == "plugin/shutdown" && s.initialized {
@@ -337,7 +345,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		}
 		ctx = api.WithExecution(ctx, api.Execution{Session: str(v, "sessionId"), Call: call})
 		progress := func(content api.Content) {
-			_ = s.peer.Send("tools/progress", object{"parentRequestId": id, "content": contentOut(content)})
+			_ = s.peer.sendWork(ctx, "tools/progress", object{"parentRequestId": id, "content": contentOut(content)})
 		}
 		ctx = api.WithToolProgress(ctx, progress)
 		ctx = api.WithNestedTools(ctx, servedTools{s: s, ctx: ctx})
@@ -452,7 +460,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 				if callID := str(obj(part.Wire), "toolCallId"); callID != "" {
 					event["toolCallId"] = callID
 				}
-				_ = s.peer.Send("provider/event", object{"parentRequestId": id, "event": event})
+				_ = s.peer.sendWork(ctx, "provider/event", object{"parentRequestId": id, "event": event})
 			})
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) || Code(err) == "cancelled" {
 				return nil, fault("cancelled", "Provider request cancelled")
@@ -493,7 +501,9 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		if s.service && method != "env/exec" && !pathInProject(s.project, str(v, "cwd"), str(v, "path")) {
 			return nil, fault("invalid_request", "path must resolve within the initialized project")
 		}
-		return environmentRequest(ctx, s.Environment, method, v, func(chunk string) { _ = s.peer.Send("env/output", object{"parentRequestId": id, "chunk": chunk}) })
+		return environmentRequest(ctx, s.Environment, method, v, func(chunk string) {
+			_ = s.peer.sendWork(ctx, "env/output", object{"parentRequestId": id, "chunk": chunk})
+		})
 	case "hook/handle":
 		if str(v, "hook") == "output" {
 			v = parseOutput(raw)
