@@ -274,6 +274,14 @@ async function waitFor(a, sid, fn, ms = 15000) {
 }
 const said = (entries, text) => entries.some((e) => e.kind === "response" && JSON.stringify(e.message ?? {}).includes(text));
 
+// Read only record kinds and update kinds: diagnostics should not expose session content.
+async function promptState(agent, sid) {
+	const updates = agent.updates.filter((u) => u.sessionId === sid).map((u) => u.update.sessionUpdate);
+	const entries = await within(1000, history(agent, sid, { all: true }), "read diagnostic history")
+		.then((h) => h.entries.map((e) => e.kind).slice(-16), (e) => e.message);
+	return { updates: updates.slice(-16), entries, exitCode: agent.child?.exitCode, signal: agent.child?.signalCode };
+}
+
 // ACP: Prompts and Conformance mode. Contracts: Tool dispatch and Recovery and repeating work.
 function checkDeniedTool(name, reply, entries, marker) {
 	const { inputId, outcome } = meta(reply) ?? {};
@@ -710,11 +718,17 @@ if (decl.tenants) {
 			const before = await history(agent, busy, { all: true });
 			const denied = await within(6000, closeSession(agent, busy), "refuse close without cancel").catch((e) => e);
 			const after = await history(agent, busy, { all: true }).catch(() => null);
+			const releasedAt = performance.now();
 			writeFileSync(release, "");
-			const done = await within(6000, pending, "finish the uncancelled turn").catch(() => null);
-			check("Authorization: close without cancel is forbidden during a turn and changes nothing", denied?.code === -32602 && denied?.data?.code === "forbidden" &&
-				equal(before, after) && done?.stopReason === "end_turn" && readFileSync(marker, "utf8") === "finished\n",
-				JSON.stringify({ code: denied?.code, dataCode: denied?.data?.code, stop: done?.stopReason, historyUnchanged: equal(before, after) }));
+			const done = await within(6000, pending, "finish the uncancelled turn").catch((e) => e);
+			const elapsedMs = Math.round(performance.now() - releasedAt);
+			const commandFinished = readFileSync(marker, "utf8") === "finished\n";
+			const historyUnchanged = equal(before, after);
+			const ok = denied?.code === -32602 && denied?.data?.code === "forbidden" && historyUnchanged &&
+				done?.stopReason === "end_turn" && commandFinished;
+			check("Authorization: close without cancel is forbidden during a turn and changes nothing", ok,
+				JSON.stringify({ code: denied?.code, dataCode: denied?.data?.code, stop: done?.stopReason, historyUnchanged,
+					commandFinished, elapsedMs, finishError: done?.message, ...(ok ? {} : await promptState(agent, busy)) }));
 		} finally { writeFileSync(release, ""); }
 		await closeSession(agent, busy).catch(() => undefined);
 	});
@@ -1807,7 +1821,17 @@ if (jobChecks && crashChecks) {
 		sessionsUsed.push(sid);
 		await setOption(agent, sid, "model", "conformance/echo");
 		await setOption(agent, sid, "approval", "off");
-		await within(15000, prompt(agent, sid, 'tool:background {"text":"kit-survivor","ms":600000}'), "long background prompt");
+		const startedAt = performance.now();
+		const tracePath = probeOut("jobs");
+		const traceOffset = existsSync(tracePath) ? readFileSync(tracePath).length : 0;
+		try {
+			await within(15000, prompt(agent, sid, 'tool:background {"text":"kit-survivor","ms":600000}'), "long background prompt");
+		} catch (error) {
+			const elapsedMs = Math.round(performance.now() - startedAt);
+			const traceEvents = existsSync(tracePath) ? readFileSync(tracePath).subarray(traceOffset).toString()
+				.split("\n").slice(0, -1).filter(Boolean).map((line) => Object.keys(JSON.parse(line))) : [];
+			throw new Error(`${error.message}: ${JSON.stringify({ elapsedMs, traceEvents, ...await promptState(agent, sid) })}`, { cause: error });
+		}
 		const before = await waitFor(agent, sid, (x) => x.some((e) => e.kind === "jobStarted"));
 		const jobId = before.find((e) => e.kind === "jobStarted")?.jobId;
 		check("jobs after a crash: the job started", !!jobId);

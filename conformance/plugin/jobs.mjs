@@ -93,7 +93,9 @@ const peer = serve("jobs", async (m, { ask, signal }) => {
 			if (typeof message !== "string" || !Number.isFinite(ms) || ms < 0) throw rpcError("invalid_request");
 			try {
 				const start = { parentRequestId: m.id, kind: "background", key: `background:${call.id}`, detail: { text: message, ms } };
+				note({ startRequested: call.id });
 				const { jobId, started } = await ask("host/jobs/start", start);
+				note({ startAcknowledged: call.id });
 				if (started) {
 					const job = { jobId, sessionId };
 					running.set(jobId, job);
@@ -107,6 +109,7 @@ const peer = serve("jobs", async (m, { ask, signal }) => {
 				if (signal.aborted) throw rpcError("cancelled");
 				// Jobs: commit before start acknowledgement, then same-key start is idempotent.
 				const saved = (await all(ask, sessionId)).filter((e) => e.kind === "jobStarted" && e.jobId === jobId);
+				note({ startRead: call.id });
 				const duplicate = await ask("host/jobs/start", start);
 				note({ started: jobId, fresh: started, commit: saved.length === 1 && saved[0].writer === name, duplicate: duplicate.jobId === jobId && duplicate.started === false });
 				return { status: "completed", content: text(`started job ${jobId}`) };

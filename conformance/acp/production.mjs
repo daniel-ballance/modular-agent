@@ -508,6 +508,20 @@ async function eraseAcrossWriters(kit, cutoff) {
 	});
 	const h = await host(kit, [scope], { extraEnv: proxy ? { ...env, MODULAR_AGENT_HISTORY_URL: proxy.url } : env });
 	let reader, reopener, releaseLease, dst;
+	const takeoverLoad = async (peer, sid, ms, label) => {
+		const started = performance.now();
+		try {
+			return await within(ms, load(peer, sid, project), label);
+		} catch (error) {
+			const elapsedMs = Math.round(performance.now() - started);
+			const records = await within(1000, store.pages(sid), "read diagnostic history")
+				.then((rows) => rows.map((e) => e.erased ? `${e.kind} (erased)` : e.kind), (e) => e.message);
+			throw new Error(`${label} after ${elapsedMs} ms: ${error.message} ${JSON.stringify({
+				code: error.code, dataCode: error.data?.code, records,
+				exitCode: peer.child?.exitCode, signal: peer.child?.signalCode,
+			})}`, { cause: error });
+		}
+	};
 	try {
 		const { a, hello } = await h.peer();
 		const source = await open(a, project);
@@ -570,14 +584,14 @@ async function eraseAcrossWriters(kit, cutoff) {
 		stage = "reopen and reconcile the pending intent";
 		reopener = await host(kit, [scope], { dir: h.directory, extraEnv: env, which: kit.second });
 		const { a: next } = await reopener.peer();
-		await within(loadMs, load(next, dst, project), "new writer reconciles fork-of-fork");
+		await takeoverLoad(next, dst, loadMs, "new writer reconciles fork-of-fork");
 		const kept = await store.pages(dst);
 		const tombstone = kept.find((e) => e.id === copy.id);
 		check("next writer reconciles durable pending intent once, before replay", tombstone?.erased === true &&
 			!contains(kept, secret) && !contains(next.updates, secret) && rows("erasure", kept).length === 1);
 		const duplicate = await input(next, dst, secret, key, "now");
 		check("pending copy key survives only as an erased receipt", equal(duplicate, { duplicate: true, erased: true }) && equal(await store.pages(dst), kept));
-		await within(loadMs, load(next, sid, project), "reopen initiating source for progress");
+		await takeoverLoad(next, sid, loadMs, "reopen initiating source for progress");
 		const done = await erase(next);
 		check("repeated authorized erase reports convergence without duplicate bookkeeping", pair(done.erased, dst, copy.id) && !pair(done.pending, dst, copy.id) &&
 			rows("erasure", await store.pages(dst)).length === 1 && rows("erasure", await store.pages(sid)).length === 1);
