@@ -20,29 +20,34 @@ func TestLiveSubscriptions(t *testing.T) {
 	if path == "" {
 		t.Skip("set MODULAR_AGENT_LIVE_LOGINS to opt in")
 	}
-	for _, id := range []string{"chatgpt", "claude"} {
+	for _, id := range []string{"chatgpt", "grok", "claude"} {
 		t.Run(id, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 			defer cancel()
 			var provider modular.Provider
 			var model string
 			switch id {
-			case "chatgpt":
+			case "chatgpt", "grok":
 				logins := subscription.SubscriptionLogins(path)
-				l, err := logins.Login("chatgpt")
+				l, err := logins.Login(id)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if l == nil || l.Type != "oauth" {
-					t.Skip("no ChatGPT plan login")
+					t.Skipf("no %s plan login", id)
 				}
-				provider, err = subscription.ChatGPT(subscription.ChatGPTOptions{Logins: logins})
+				if id == "grok" {
+					provider, err = subscription.Grok(subscription.GrokOptions{Logins: logins})
+					model = "grok-4.7"
+				} else {
+					provider, err = subscription.ChatGPT(subscription.ChatGPTOptions{Logins: logins})
+					model = "gpt-6.1-sol"
+				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				model = os.Getenv("MODULAR_AGENT_LIVE_CHATGPT_MODEL")
-				if model == "" {
-					model = "gpt-6.1-sol"
+				if override := os.Getenv("MODULAR_AGENT_LIVE_" + strings.ToUpper(id) + "_MODEL"); override != "" {
+					model = override
 				}
 			case "claude":
 				if _, err := subscription.FindClaudeProgram(subscription.ClaudeOptions{}); err != nil {

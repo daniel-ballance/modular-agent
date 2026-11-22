@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/daniel-ballance/modular-agent/go/modular"
 	"io"
 	"net"
 	"net/http"
@@ -18,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/daniel-ballance/modular-agent/go/modular"
 )
 
 const (
@@ -52,15 +53,15 @@ type SignInOptions struct {
 	HTTPTransport  http.RoundTripper
 }
 
-// SignIn signs in to ChatGPT and stores the resulting login.
+// SignIn signs in to ChatGPT or Grok and stores the resulting login.
 func SignIn(ctx context.Context, provider string, logins Logins, opts SignInOptions) error {
 	return oauthDefaults().signIn(ctx, provider, logins, opts)
 }
 
 func (c oauthClient) signIn(ctx context.Context, provider string, logins Logins, opts SignInOptions) error {
 	invalid := func(message string) error { return &modular.Error{Code: modular.InvalidParams, Message: message} }
-	if provider != "chatgpt" {
-		return invalid("subscription sign-in supports chatgpt only")
+	if provider != "chatgpt" && provider != grokID {
+		return invalid("subscription sign-in supports chatgpt and grok only")
 	}
 	identity, err := clientIdentity(opts.ClientIdentity)
 	if err != nil {
@@ -75,6 +76,8 @@ func (c oauthClient) signIn(ctx context.Context, provider string, logins Logins,
 	}
 	var login Login
 	switch {
+	case provider == grokID:
+		login, err = c.grokSignIn(ctx, show, identity)
 	case opts.Device:
 		login, err = c.codexSignIn(ctx, show)
 	default:
@@ -99,10 +102,10 @@ func (c oauthClient) signIn(ctx context.Context, provider string, logins Logins,
 	return logins.Set(ctx, provider, &login)
 }
 
-// SignOut removes a ChatGPT login without contacting the service.
+// SignOut removes a ChatGPT or Grok login without contacting the service.
 func SignOut(ctx context.Context, provider string, logins Logins) error {
-	if provider != "chatgpt" {
-		return &modular.Error{Code: modular.InvalidParams, Message: "subscription sign-out supports chatgpt only"}
+	if provider != "chatgpt" && provider != grokID {
+		return &modular.Error{Code: modular.InvalidParams, Message: "subscription sign-out supports chatgpt and grok only"}
 	}
 	return logins.Set(ctx, provider, nil)
 }
@@ -140,12 +143,12 @@ func (c oauthClient) post(ctx context.Context, target string, body any) (int, ma
 		if ctx.Err() != nil {
 			return 0, nil, ctx.Err()
 		}
-		return 0, nil, errors.New("could not reach the ChatGPT sign-in endpoint")
+		return 0, nil, errors.New("could not reach the sign-in endpoint")
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if err != nil {
-		return res.StatusCode, nil, errors.New("could not read the ChatGPT sign-in reply")
+		return res.StatusCode, nil, errors.New("could not read the sign-in reply")
 	}
 	var out map[string]any
 	_ = json.Unmarshal(data, &out)
@@ -198,42 +201,54 @@ func tokens(body map[string]any, previous string) (Login, error) {
 	if refresh == "" {
 		return Login{}, errors.New("the sign-in answer has no refresh token")
 	}
-	l := Login{Type: "oauth", Access: access, Refresh: refresh, Expires: uint64(time.Now().UnixMilli() + int64(number(body, "expires_in", 3600))*1000 - 300000)}
-	a, err := account(access)
+	return Login{Type: "oauth", Access: access, Refresh: refresh, Expires: uint64(time.Now().UnixMilli() + int64(number(body, "expires_in", 3600))*1000 - 300000)}, nil
+}
+
+func codexTokens(body map[string]any, previous string) (Login, error) {
+	l, err := tokens(body, previous)
+	if err != nil {
+		return Login{}, err
+	}
+	a, err := account(l.Access)
 	if err != nil {
 		return Login{}, err
 	}
 	l.Account = &a
 	return l, nil
 }
-func (c oauthClient) refresh(ctx context.Context, l Login) (Login, error) {
-	if l.Type != "oauth" {
-		return Login{}, errors.New("no ChatGPT plan login; sign in again")
+func (c oauthClient) refresh(ctx context.Context, provider string, l Login) (Login, error) {
+	label, endpoint, client, parse := "ChatGPT", c.codexToken, codexClient, codexTokens
+	if provider == grokID {
+		label, endpoint, client, parse = "Grok", grokToken, grokClient, tokens
 	}
-	status, body, err := c.post(ctx, c.codexToken, url.Values{"grant_type": {"refresh_token"}, "client_id": {codexClient}, "refresh_token": {l.Refresh}})
+	status, body, err := c.post(ctx, endpoint, url.Values{"grant_type": {"refresh_token"}, "client_id": {client}, "refresh_token": {l.Refresh}})
 	if err != nil {
-		return Login{}, errors.New("could not reach ChatGPT to refresh the sign-in")
+		return Login{}, fmt.Errorf("could not reach %s to refresh the sign-in", label)
 	}
 	if !ok(status) {
 		if str(body, "error") == "invalid_grant" || status == 401 || status == 403 {
-			return Login{}, errors.New("ChatGPT refused the refresh; sign in again")
+			return Login{}, fmt.Errorf("%s refused the refresh; sign in again", label)
 		}
-		return Login{}, fmt.Errorf("refreshing the ChatGPT sign-in failed (HTTP %d)", status)
+		return Login{}, fmt.Errorf("refreshing the %s sign-in failed (HTTP %d)", label, status)
 	}
-	return tokens(body, l.Refresh)
+	return parse(body, l.Refresh)
 }
 
 func (c oauthClient) poll(ctx context.Context, interval int, limit time.Duration, attempt func(context.Context) (bool, bool, error)) error {
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
 	for {
 		select {
 		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return errors.New("the sign-in was not completed in time")
-			}
-			return ctx.Err()
 		case <-time.After(time.Duration(interval) * c.unit):
+		}
+		// The deadline timer may not have set ctx.Err yet when both timers fire.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || !time.Now().Before(deadline) {
+			return errors.New("the sign-in was not completed in time")
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		done, slow, err := attempt(ctx)
 		if done || err != nil {
@@ -252,7 +267,7 @@ func (c oauthClient) exchange(ctx context.Context, code, verifier, redirect stri
 	if !ok(status) {
 		return Login{}, fmt.Errorf("the ChatGPT sign-in failed (HTTP %d)", status)
 	}
-	return tokens(body, "")
+	return codexTokens(body, "")
 }
 func (c oauthClient) codexSignIn(ctx context.Context, show func(SignInStep)) (Login, error) {
 	status, body, err := c.post(ctx, c.codexDevice, map[string]string{"client_id": codexClient})

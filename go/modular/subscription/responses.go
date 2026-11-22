@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
@@ -21,16 +22,16 @@ func partStr(p modular.Part, k string) string {
 	return s
 }
 func decodeField(s map[string]any, k string) map[string]any { m, _ := s[k].(map[string]any); return m }
-func newResponsesRequest(ctx context.Context, endpoint string, body []byte, l Login, sessionID string, identity string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+func (c responsesConfig) newRequest(ctx context.Context, body []byte, l Login, sessionID string, identity string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+l.Secret())
-	req.Header.Set("User-Agent", "modular-agent/0.1.0")
-	{
+	if !c.systemMessage {
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "modular-agent/0.1.0")
 		var id string
 		if l.Account != nil {
 			id = *l.Account
@@ -49,8 +50,11 @@ func newResponsesRequest(ctx context.Context, endpoint string, body []byte, l Lo
 	return req, nil
 }
 
-func requestBody(m subscriptionModel, r modular.ModelRequest) map[string]any {
+func (c responsesConfig) requestBody(m subscriptionModel, r modular.ModelRequest) map[string]any {
 	input := []any{}
+	if c.systemMessage && r.SystemPrompt != "" {
+		input = append(input, map[string]any{"role": "system", "content": r.SystemPrompt})
+	}
 	for _, msg := range r.Messages {
 		var images []any
 		for _, p := range msg.Content {
@@ -70,7 +74,7 @@ func requestBody(m subscriptionModel, r modular.ModelRequest) map[string]any {
 				Provider string           `json:"provider"`
 				Output   []map[string]any `json:"output"`
 			}
-			if json.Unmarshal(msg.ProviderData, &previous) == nil && (previous.Provider == "chatgpt" || previous.Provider == "openai-codex") && previous.Output != nil {
+			if json.Unmarshal(msg.ProviderData, &previous) == nil && (previous.Provider == c.id || previous.Provider == c.legacyID) && previous.Output != nil {
 				i := 0
 				for _, item := range previous.Output {
 					if item["type"] == "function_call" && i < len(calls) {
@@ -115,7 +119,11 @@ func requestBody(m subscriptionModel, r modular.ModelRequest) map[string]any {
 			break
 		}
 	}
-	{
+	if c.systemMessage {
+		if cap := outputLimit(r.Settings["maxOutput"], m.Info.MaxOutput); cap > 0 {
+			out["max_output_tokens"] = cap
+		}
+	} else {
 		sys := r.SystemPrompt
 		if sys == "" {
 			sys = "You are a helpful assistant."
@@ -126,12 +134,33 @@ func requestBody(m subscriptionModel, r modular.ModelRequest) map[string]any {
 	}
 	return out
 }
-func modelError(status int, e map[string]any) *modular.ModelError {
+
+// Settings are native Go values in process and JSON numbers across the binding.
+func outputLimit(value any, limit int) int {
+	var n uint64
+	switch v := value.(type) {
+	case int:
+		n = uint64(max(v, 0))
+	case int64:
+		n = uint64(max(v, 0))
+	case uint64:
+		n = v
+	case json.Number:
+		n, _ = strconv.ParseUint(string(v), 10, 64)
+	case float64:
+		if v > 0 && v < 1<<64 && v == float64(uint64(v)) {
+			n = uint64(v)
+		}
+	}
+	return int(min(n, uint64(limit)))
+}
+
+func (c responsesConfig) modelError(status int, e map[string]any) *modular.ModelError {
 	code := str(e, "code")
 	if code == "" {
 		code = str(e, "type")
 	}
-	message := "ChatGPT refused the request"
+	message := c.label + " refused the request"
 
 	kind := modular.Other
 	switch code {
@@ -160,7 +189,7 @@ func modelError(status int, e map[string]any) *modular.ModelError {
 
 	return &modular.ModelError{Kind: kind, Message: message}
 }
-func readStream(body io.Reader, pc *modular.ProviderContext) (modular.AssistantMessage, error) {
+func (c responsesConfig) readStream(body io.Reader, pc *modular.ProviderContext) (modular.AssistantMessage, error) {
 	const limit = 16 << 20
 	scan := bufio.NewScanner(body)
 	scan.Buffer(make([]byte, 4096), limit)
@@ -178,7 +207,7 @@ func readStream(body io.Reader, pc *modular.ProviderContext) (modular.AssistantM
 		}
 		var event map[string]any
 		if err := json.Unmarshal([]byte(text), &event); err != nil {
-			return errors.New("invalid ChatGPT stream event")
+			return errors.New("invalid " + c.label + " stream event")
 		}
 		switch str(event, "type") {
 		case "response.output_text.delta":
@@ -192,13 +221,13 @@ func readStream(body io.Reader, pc *modular.ProviderContext) (modular.AssistantM
 		case "response.completed", "response.incomplete", "response.done":
 			done = decodeField(event, "response")
 		case "response.failed":
-			return modelError(0, decodeField(decodeField(event, "response"), "error"))
+			return c.modelError(0, decodeField(decodeField(event, "response"), "error"))
 		case "error":
 			e := decodeField(event, "error")
 			if e == nil {
 				e = event
 			}
-			return modelError(0, e)
+			return c.modelError(0, e)
 		}
 		return nil
 	}
@@ -219,7 +248,7 @@ func readStream(body io.Reader, pc *modular.ProviderContext) (modular.AssistantM
 		}
 	}
 	if err := scan.Err(); err != nil {
-		return modular.AssistantMessage{}, &modular.ModelError{Kind: modular.Temporary, Message: "could not read the ChatGPT stream"}
+		return modular.AssistantMessage{}, &modular.ModelError{Kind: modular.Temporary, Message: "could not read the " + c.label + " stream"}
 	}
 	if err := handle(); err != nil {
 		return modular.AssistantMessage{}, err
@@ -230,10 +259,10 @@ func readStream(body io.Reader, pc *modular.ProviderContext) (modular.AssistantM
 	if o, _ := done["output"].([]any); len(o) == 0 && len(items) > 0 {
 		done["output"] = items
 	}
-	return response(done)
+	return c.response(done)
 }
 func raw(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
-func response(r map[string]any) (modular.AssistantMessage, error) {
+func (c responsesConfig) response(r map[string]any) (modular.AssistantMessage, error) {
 	result := modular.AssistantMessage{Stop: "finished"}
 	items, ok := r["output"].([]any)
 	if !ok {
@@ -280,6 +309,10 @@ func response(r map[string]any) (modular.AssistantMessage, error) {
 			result.Content = append(result.Content, modular.Part{Type: "toolCall", Fields: map[string]json.RawMessage{"id": raw(id), "name": raw(name), "arguments": json.RawMessage(args)}})
 			result.Stop = "toolUse"
 		case "reasoning":
+			if c.systemMessage {
+				result.Content = append(result.Content, modular.Part{Type: "reasoning", Fields: map[string]json.RawMessage{"providerData": raw(map[string]any{"provider": c.id, "item": item})}})
+				continue
+			}
 			summary, _ := item["summary"].([]any)
 			for _, entry := range summary {
 				piece, _ := entry.(map[string]any)
@@ -293,8 +326,9 @@ func response(r map[string]any) (modular.AssistantMessage, error) {
 	}
 	if str(r, "status") == "incomplete" {
 		result.Stop = "length"
-	} else {
-		result.ProviderData = raw(map[string]any{"provider": "chatgpt", "output": items})
+	}
+	if c.systemMessage || result.Stop != "length" {
+		result.ProviderData = raw(map[string]any{"provider": c.id, "output": items})
 	}
 	usage := decodeField(r, "usage")
 	result.Usage = modular.Usage{Input: number(usage, "input_tokens", 0), Output: number(usage, "output_tokens", 0), CacheRead: number(decodeField(usage, "input_tokens_details"), "cached_tokens", 0)}

@@ -15,7 +15,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/grok"
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/subscription"
 	"golang.org/x/sys/unix"
@@ -203,7 +202,7 @@ func main() {
 func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Writer, interrupts <-chan os.Signal) error {
 	var identity *string
 	if value, set := os.LookupEnv("MA_CLIENT_IDENTITY"); set {
-		if _, err := grok.ParseClientIdentity(value); err != nil {
+		if err := subscription.ValidateClientIdentity(value); err != nil {
 			return fmt.Errorf("MA_CLIENT_IDENTITY: %w", err)
 		}
 		identity = &value
@@ -508,7 +507,7 @@ func (d layout) defaultModel(ctx context.Context) (string, error) {
 	for _, v := range []struct {
 		v     string
 		model string
-	}{{"chatgpt", "chatgpt/gpt-6.1-sol"}, {grok.ID, "grok/grok-4.7"}} {
+	}{{"chatgpt", "chatgpt/gpt-6.1-sol"}, {"grok", "grok/grok-4.7"}} {
 		l, err := d.auth().Login(v.v)
 		if err != nil {
 			return "", err
@@ -523,7 +522,7 @@ func (d layout) defaultModel(ctx context.Context) (string, error) {
 	return "", nil
 }
 func (d layout) authStatus(ctx context.Context, out io.Writer) error {
-	for _, v := range []string{"chatgpt", grok.ID} {
+	for _, v := range []string{"chatgpt", "grok"} {
 		l, err := d.auth().Login(v)
 		if err != nil {
 			return err
@@ -568,12 +567,11 @@ func terminalLines(ctx context.Context, in io.Reader) <-chan string {
 }
 
 func (d layout) signIn(ctx context.Context, o options, in io.Reader, out, stderr io.Writer) error {
-	return d.signInUsing(ctx, o, in, out, stderr, subscription.SignIn, grok.SignIn)
+	return d.signInUsing(ctx, o, in, out, stderr, subscription.SignIn)
 }
 
 func (d layout) signInUsing(ctx context.Context, o options, in io.Reader, out, stderr io.Writer,
-	chatSignIn func(context.Context, string, subscription.Logins, subscription.SignInOptions) error,
-	grokSignIn func(context.Context, func(grok.Step), grok.ClientIdentity) (subscription.Login, error),
+	signIn func(context.Context, string, subscription.Logins, subscription.SignInOptions) error,
 ) error {
 	if o.provider == "claude" {
 		if o.command == "logout" {
@@ -591,80 +589,57 @@ func (d layout) signInUsing(ctx context.Context, o options, in io.Reader, out, s
 		return nil
 	}
 	v := o.provider
-	if v != "chatgpt" && v != grok.ID {
+	if v != "chatgpt" && v != "grok" {
 		return fmt.Errorf("unknown provider %s; use chatgpt, grok or claude", v)
 	}
 	if o.command == "logout" {
-		var err error
-		if v == "chatgpt" {
-			err = subscription.SignOut(ctx, v, d.auth())
-		} else {
-			err = d.auth().Set(ctx, v, nil)
-		}
-		if err != nil {
+		if err := subscription.SignOut(ctx, v, d.auth()); err != nil {
 			return err
 		}
 		fmt.Fprintf(stderr, "Signed out of %s.\n", planLabel(v))
 		return nil
 	}
-	if v == "chatgpt" {
-		opts := subscription.SignInOptions{Device: o.device, ClientIdentity: o.clientIdentity, OnStep: func(s subscription.SignInStep) {
-			if s.Note != "" {
-				fmt.Fprintln(stderr, s.Note)
-				if s.CanPaste && strings.Contains(s.Note, "Paste it again.") {
-					fmt.Fprint(stderr, "Paste the address (or the code): ")
-				}
-				return
+	opts := subscription.SignInOptions{Device: o.device, ClientIdentity: o.clientIdentity, OnStep: func(s subscription.SignInStep) {
+		if s.Note != "" {
+			fmt.Fprintln(stderr, s.Note)
+			if s.CanPaste && strings.Contains(s.Note, "Paste it again.") {
+				fmt.Fprint(stderr, "Paste the address (or the code): ")
 			}
-			if s.Kind == subscription.Waiting {
-				fmt.Fprintln(stderr, "Waiting for the sign-in to finish...")
-				return
-			}
-			showSignIn(stderr, s.URL, s.Code, s.CanPaste)
-		}}
-		if !o.device {
-			lineCtx, cancel := context.WithCancel(ctx)
-			defer cancel()
-			if lines := terminalLines(lineCtx, in); lines != nil {
-				opts.Paste = func(ctx context.Context) (string, error) {
-					select {
-					case <-ctx.Done():
-						return "", ctx.Err()
-					case line, ok := <-lines:
-						if !ok {
-							return "", io.EOF
-						}
-						return line, nil
-					}
-				}
-			}
+			return
 		}
-		if err := chatSignIn(ctx, v, d.auth(), opts); err != nil {
-			return err
-		}
-	} else {
-		var identity grok.ClientIdentity
-		if o.clientIdentity != nil {
-			identity, _ = grok.ParseClientIdentity(*o.clientIdentity)
-		}
-		login, err := grokSignIn(ctx, func(s grok.Step) {
-			showSignIn(stderr, s.Address, s.Code, false)
+		if s.Kind == subscription.Waiting {
 			fmt.Fprintln(stderr, "Waiting for the sign-in to finish...")
-		}, identity)
-		if err != nil {
-			return err
+			return
 		}
-		if err := d.auth().Set(ctx, v, &login); err != nil {
-			return err
+		showSignIn(stderr, s.URL, s.Code, s.CanPaste)
+	}}
+	if v == "chatgpt" && !o.device {
+		lineCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		if lines := terminalLines(lineCtx, in); lines != nil {
+			opts.Paste = func(ctx context.Context) (string, error) {
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case line, ok := <-lines:
+					if !ok {
+						return "", io.EOF
+					}
+					return line, nil
+				}
+			}
 		}
+	}
+	if err := signIn(ctx, v, d.auth(), opts); err != nil {
+		return err
 	}
 	fmt.Fprintf(stderr, "Signed in to %s (%s).\n", planLabel(v), v)
 	return nil
 }
 
 func planLabel(id string) string {
-	if id == grok.ID {
-		return grok.Label
+	if id == "grok" {
+		return "Grok subscription"
 	}
 	return "ChatGPT subscription"
 }

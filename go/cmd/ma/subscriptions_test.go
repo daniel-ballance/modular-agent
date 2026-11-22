@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/grok"
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/subscription"
 )
@@ -62,21 +61,22 @@ func TestLoginAndLogoutAliasesMigrateTheFile(t *testing.T) {
 			fixture := subscription.Login{Type: "oauth", Access: "new-fixture", Refresh: "fixture", Expires: 1}
 			custom := "alias-test_1"
 			o.clientIdentity = &custom
-			chat := func(ctx context.Context, id string, logins subscription.Logins, opts subscription.SignInOptions) error {
-				if id != "chatgpt" || tc.current != id || !opts.Device || opts.ClientIdentity == nil || *opts.ClientIdentity != custom {
-					t.Fatal("login alias did not dispatch to ChatGPT with its options")
+			t.Setenv("MA_NO_BROWSER", "1")
+			signIn := func(ctx context.Context, id string, logins subscription.Logins, opts subscription.SignInOptions) error {
+				if id != tc.current || !opts.Device || opts.ClientIdentity == nil || *opts.ClientIdentity != custom {
+					t.Fatal("login alias did not dispatch to the SDK with its canonical id and options")
 				}
+				opts.OnStep(subscription.SignInStep{Kind: subscription.DeviceCode, URL: "https://example.test/device", Code: "fixture-code"})
+				opts.OnStep(subscription.SignInStep{Kind: subscription.Waiting})
 				return logins.Set(ctx, id, &fixture)
 			}
-			signGrok := func(_ context.Context, _ func(grok.Step), identity grok.ClientIdentity) (subscription.Login, error) {
-				want, _ := grok.ParseClientIdentity(custom)
-				if tc.current != grok.ID || identity != want {
-					t.Fatal("login alias did not dispatch to Grok with its identity")
-				}
-				return fixture, nil
-			}
-			if err := d.signInUsing(t.Context(), o, strings.NewReader(""), io.Discard, io.Discard, chat, signGrok); err != nil {
+			var stderr bytes.Buffer
+			if err := d.signInUsing(t.Context(), o, strings.NewReader(""), io.Discard, &stderr, signIn); err != nil {
 				t.Fatal(err)
+			}
+			want := "Open this address in a browser:\n\n  https://example.test/device\n\nand enter the code: fixture-code\n\nWaiting for the sign-in to finish...\nSigned in to " + planLabel(tc.current) + " (" + tc.current + ").\n"
+			if stderr.String() != want {
+				t.Fatalf("unexpected login output: %q", stderr.String())
 			}
 			if login, err := direct.Login(tc.current); err != nil || login == nil || login.Access != fixture.Access {
 				t.Fatal("login did not write the new slot", err)
