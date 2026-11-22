@@ -70,7 +70,7 @@ struct SessionLease {
     #[cfg(target_os = "linux")]
     _listener: UnixListener,
     #[cfg(target_os = "macos")]
-    _file: File,
+    _lock: StoreLock,
 }
 impl Lease for SessionLease {}
 struct StoreLock(File);
@@ -214,7 +214,10 @@ impl HistoryStore for FileHistory {
             .mode(0o600)
             .open(self.root.join(format!(".{session}.lease")))?;
         match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(Box::new(SessionLease { _file: file })),
+            // Unlock on drop even if a concurrent fork still holds a copy of the fd.
+            Ok(()) => Ok(Box::new(SessionLease {
+                _lock: StoreLock(file),
+            })),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(OperationError::Busy(
                 format!("session {session} is already held by another writer"),
             )
