@@ -1,3 +1,4 @@
+import { subscriptionModels, type ModelEnrollment } from "@modular-agent/subscription";
 import type { EffortLevel, ModelInfo as SdkModelInfo, ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
 import { PROVIDER_ID, REASONING_LEVELS, type ModelInfo, type Reasoning } from "./data.js";
 
@@ -13,44 +14,21 @@ export interface CatalogModel {
 	maxOutput: number;
 	adaptive: boolean;
 	thinking: Reasoning[];
+	input?: string[];
+	reasoning?: boolean;
 }
 
-const ALL: Reasoning[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
-const without = (...drop: Reasoning[]): Reasoning[] => ALL.filter((level) => !drop.includes(level));
+const baseline = subscriptionModels("claude");
+const sharedLevels = new Map(baseline.map(model => [model.id, model.levels]));
 
-function adaptive(id: string, name: string, thinking: Reasoning[]): CatalogModel {
-	return { id, name, contextWindow: 1_000_000, maxOutput: 128_000, adaptive: true, thinking };
-}
-function budgeted(id: string, name: string): CatalogModel {
-	return { id, name, contextWindow: 200_000, maxOutput: 64_000, adaptive: false, thinking: without("xhigh") };
-}
-
-/**
- * The built-in list: the same models, limits and accepted levels as Pi's Claude catalog,
- * which the reference package (claude-subscription) starts from. What the account really
- * offers, and its real context windows, replace this once Claude Code has reported them.
- */
-export function baselineModels(): CatalogModel[] {
-	return [
-		adaptive("claude-fable-5", "Claude Fable 5", without("off")),
-		adaptive("claude-fable-5-1", "Claude Fable 5.1", without("off")),
-		adaptive("claude-fable-5-2", "Claude Fable 5.2", without("off")),
-		budgeted("claude-haiku-4-5", "Claude Haiku 4.5 (latest)"),
-		budgeted("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
-		adaptive("claude-haiku-5-5", "Claude Haiku 5.5", without("minimal")),
-		budgeted("claude-opus-4-5", "Claude Opus 4.5 (latest)"),
-		budgeted("claude-opus-4-5-20251101", "Claude Opus 4.5"),
-		adaptive("claude-opus-4-6", "Claude Opus 4.6", without("xhigh")),
-		adaptive("claude-opus-4-7", "Claude Opus 4.7", ALL),
-		adaptive("claude-opus-4-8", "Claude Opus 4.8", ALL),
-		adaptive("claude-opus-5", "Claude Opus 5", ALL),
-		adaptive("claude-opus-5-5", "Claude Opus 5.5", without("off", "minimal")),
-		budgeted("claude-sonnet-4-5", "Claude Sonnet 4.5 (latest)"),
-		budgeted("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
-		adaptive("claude-sonnet-4-6", "Claude Sonnet 4.6", without("xhigh")),
-		adaptive("claude-sonnet-5", "Claude Sonnet 5", ALL),
-		adaptive("claude-sonnet-5-5", "Claude Sonnet 5.5", without("off", "minimal")),
-	];
+export function baselineModels(enrolled?: readonly ModelEnrollment[]): CatalogModel[] {
+	return subscriptionModels("claude", enrolled).map(model => ({
+		id: model.id, name: model.name ?? model.id, contextWindow: model.contextWindow, maxOutput: model.maxOutput,
+		adaptive: Object.values(model.levels).some(level => (level.thinking as ThinkingConfig | undefined)?.type === "adaptive"),
+		thinking: REASONING_LEVELS.filter(level => Object.hasOwn(model.levels, level)),
+		...(model.input.join(",") !== "text,image" ? { input: model.input } : {}),
+		...(!model.reasoning ? { reasoning: false } : {}),
+	}));
 }
 
 /**
@@ -82,6 +60,8 @@ export function discoveredModels(reported: readonly SdkModelInfo[], baseline: re
 			thinking: (["low", "medium", "high", "xhigh"] as const).filter((level) => efforts.includes(level)),
 		});
 	}
+	// Explicit enrollments remain available even if Claude Code does not list them.
+	for (const model of baseline) if (!sharedLevels.has(model.id)) models.set(model.id, model);
 	return [...models.values()];
 }
 
@@ -93,8 +73,8 @@ export function modelInfo(model: CatalogModel): ModelInfo {
 		name: model.name,
 		contextWindow: model.contextWindow,
 		maxOutput: model.maxOutput,
-		input: ["text", "image"],
-		reasoning: model.thinking.some((level) => level !== "off"),
+		input: model.input ?? ["text", "image"],
+		reasoning: model.reasoning ?? model.thinking.some((level) => level !== "off"),
 		...(model.thinking.length ? { thinking: [...model.thinking] } : {}),
 	};
 }
@@ -104,8 +84,6 @@ export interface Thinking {
 	thinking?: ThinkingConfig;
 	effort?: EffortLevel;
 }
-
-const BUDGETS: Record<Exclude<Reasoning, "off">, number> = { minimal: 1024, low: 2048, medium: 8192, high: 16384, xhigh: 16384 };
 
 /**
  * The level to use for one asked for: itself if listed, otherwise the nearest listed level
@@ -123,11 +101,17 @@ export function nearestLevel(model: CatalogModel, level: Reasoning): Reasoning |
  * Adaptive models take the effort of the same name (`minimal` runs at `low`); the older
  * models take a token budget.
  */
-export function thinkingFor(model: CatalogModel, level: Reasoning | undefined): Thinking {
+export function thinkingFor(model: CatalogModel, level: Reasoning | undefined, maxOutput = model.maxOutput): Thinking {
 	if (level === undefined) return {};
 	const use = nearestLevel(model, level);
 	if (use === undefined) return {};
-	if (use === "off") return { thinking: { type: "disabled" } };
-	if (model.adaptive) return { thinking: { type: "adaptive", display: "summarized" }, effort: use === "minimal" ? "low" : use };
-	return { thinking: { type: "enabled", budgetTokens: BUDGETS[use], display: "summarized" } };
+	const levels = sharedLevels.get(model.id);
+	if (levels) {
+		const fields = levels[use] as Thinking;
+		if (fields.thinking?.type !== "enabled") return structuredClone(fields);
+		const budgetTokens = Math.min(fields.thinking.budgetTokens ?? 1024, maxOutput - 1);
+		return budgetTokens < 1024 ? structuredClone(levels.off as Thinking) : { ...fields, thinking: { ...fields.thinking, budgetTokens } };
+	}
+	if (model.adaptive && use !== "off") return { thinking: { type: "adaptive", display: "summarized" }, effort: use === "minimal" ? "low" : use };
+	return {};
 }

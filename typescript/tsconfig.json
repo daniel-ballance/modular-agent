@@ -87,6 +87,12 @@
     },
     {
       "path": "packages/ma"
+    },
+    {
+      "path": "packages/subscription"
+    },
+    {
+      "path": "packages/claude"
     }
   ]
 }

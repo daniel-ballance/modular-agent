@@ -1,3 +1,4 @@
+import type { ModelEnrollment } from "@modular-agent/subscription";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -5,7 +6,7 @@ import type { AccountInfo, Options, SDKResultMessage } from "@anthropic-ai/claud
 import { PROVIDER_ID, REASONING_LEVELS, type AssistantMessage, type ModelInfo, type ModelRequest, type StreamEvent } from "./data.js";
 import { baselineModels, discoveredModels, modelInfo, thinkingFor, type CatalogModel } from "./models.js";
 import { Response, errorKind, scrub, stopFor } from "./response.js";
-import { Inbox, loadQuery, subscriptionEnv, type AgentQuery, type QueryFunction } from "./sdk.js";
+import { Inbox, apiRoutingReason, loadQuery, subscriptionEnv, type AgentQuery, type QueryFunction } from "./sdk.js";
 import { SERVER_NAME, ToolBridge } from "./tools.js";
 import { promptBlocks } from "./transcript.js";
 
@@ -22,6 +23,9 @@ export interface ProviderOptions {
 	loginVisible?: () => boolean;
 	/** Diagnostics, for stderr. Never given a credential. */
 	log?: (message: string) => void;
+	models?: readonly ModelEnrollment[];
+	onChange?: () => void;
+	checkApiRouting?: boolean;
 }
 
 /** The request was cancelled by the host; there is no assistant message to return. */
@@ -61,15 +65,20 @@ function describe(account: AccountInfo | undefined): string {
  * as soon as the model's message is complete. Nothing is kept between requests.
  */
 export class ClaudeProvider {
-	private readonly baseline = baselineModels();
-	private models: CatalogModel[] = this.baseline.map((model) => ({ ...model }));
+	private readonly baseline: CatalogModel[];
+	private models: CatalogModel[];
 	private account: AccountInfo | undefined;
 	private cwd = process.cwd();
 	private home: string | undefined;
 	private readonly running = new Set<AgentQuery>();
 	private closed = false;
 
-	constructor(private readonly options: ProviderOptions) {}
+	private checking?: Promise<void>;
+
+	constructor(private readonly options: ProviderOptions) {
+		this.baseline = baselineModels(options.models);
+		this.models = structuredClone(this.baseline);
+	}
 
 	private log(message: string): void {
 		this.options.log?.(message);
@@ -79,9 +88,11 @@ export class ClaudeProvider {
 		return this.options.query ? Promise.resolve(this.options.query) : loadQuery();
 	}
 
+	project(path: string): void { this.cwd = path; }
+
 	/** Take the project and state folder from `plugin/initialize`, and the catalog kept there if it is current. */
 	start(init: { project: string; home: string }): void {
-		this.cwd = init.project;
+		this.project(init.project);
 		this.home = init.home;
 		let fresh = false;
 		try {
@@ -109,7 +120,23 @@ export class ClaudeProvider {
 	/** Whether requests can be taken: a login is visible and Claude Code has not said it is no subscription. */
 	available(): boolean {
 		const visible = this.options.loginVisible ? this.options.loginVisible() : loginVisible(this.options.env);
-		return visible && (this.account === undefined || !!this.account.subscriptionType);
+		return visible && !this.routingReason() && (this.account === undefined || this.usesPlan(this.account));
+	}
+
+	private routingReason() { return this.options.checkApiRouting ? apiRoutingReason(this.options.env) : undefined; }
+	private usesPlan(account?: AccountInfo) { return !!account?.subscriptionType && !describe(account); }
+
+	unavailableReason(): string | undefined {
+		return this.routingReason() ?? (!this.usesPlan(this.account) ?
+			`Claude Code is not signed in with a Claude subscription${describe(this.account)}. ${SIGN_IN}` : undefined);
+	}
+
+	async ready(): Promise<boolean> {
+		if (this.account === undefined && this.available()) {
+			try { await this.refresh(); }
+			catch { return false; }
+		}
+		return !this.closed && this.available() && this.usesPlan(this.account);
 	}
 
 	/** Stop every Claude Code process this Provider started. */
@@ -124,9 +151,15 @@ export class ClaudeProvider {
 	 * the list to those. Each one's context window is Claude Code's own, which can be smaller
 	 * than the API's.
 	 */
-	async refresh(): Promise<void> {
+	refresh(): Promise<void> {
+		this.checking ??= this.probe().finally(() => { this.checking = undefined; });
+		return this.checking;
+	}
+
+	private async probe(): Promise<void> {
 		if (!this.available() || this.closed) return;
 		const start = await this.query;
+		if (this.closed) return;
 		const inbox = new Inbox();
 		const query = start({
 			prompt: inbox,
@@ -148,7 +181,8 @@ export class ClaudeProvider {
 		try {
 			const discovered = await Promise.race([late, (async () => {
 				const { account, models: reported } = await query.initializationResult();
-				this.account = account;
+				this.account = account ?? {};
+				if (!this.usesPlan(account)) return [];
 				const found = discoveredModels(reported ?? [], this.baseline);
 				for (const model of found) {
 					try {
@@ -163,6 +197,7 @@ export class ClaudeProvider {
 			})()]);
 			if (!discovered.length || this.closed) return;
 			this.models = discovered;
+			this.options.onChange?.();
 			this.log(`Claude Code reported ${discovered.length} models for this account.`);
 			if (this.home) {
 				try {
@@ -182,9 +217,10 @@ export class ClaudeProvider {
 
 	/** The options of the one Claude Code process a request gets. */
 	queryOptions(model: CatalogModel, request: ModelRequest, bridge: ToolBridge, stderr: (data: string) => void): Options {
-		const thinking = thinkingFor(model, REASONING_LEVELS.includes(request.settings.reasoning!) ? request.settings.reasoning : undefined);
 		const cap = request.settings.maxOutput;
 		const capped = typeof cap === "number" && Number.isSafeInteger(cap) && cap > 0 ? Math.min(cap, model.maxOutput) : undefined;
+		const level = REASONING_LEVELS.find(level => level === request.settings.reasoning);
+		const thinking = thinkingFor(model, level, capped);
 		return {
 			model: model.id,
 			cwd: this.cwd,
@@ -244,6 +280,8 @@ export class ClaudeProvider {
 		signal.addEventListener("abort", cancel!, { once: true });
 		try {
 			if (signal.aborted) throw new Cancelled();
+			const routing = this.routingReason();
+			if (routing) return response.finish("failed", { kind: "credentials", message: routing });
 			const start = await this.query;
 			if (signal.aborted || this.closed) throw new Cancelled();
 			query = start({ prompt: inbox, options: this.queryOptions(model, request, bridge, (data) => { stderr = (stderr + data).slice(-2_000); }) });
@@ -251,8 +289,8 @@ export class ClaudeProvider {
 			const messages = query[Symbol.asyncIterator]();
 			// The login is Claude Code's own; refuse anything that is not a subscription before sending a prompt.
 			const { account } = await Promise.race([cancelled, query.initializationResult()]);
-			this.account = account;
-			if (!account?.subscriptionType) {
+			this.account = account ?? {};
+			if (!this.usesPlan(account)) {
 				return response.finish("failed", { kind: "credentials", message: `Claude Code is not signed in with a Claude subscription${describe(account)}. ${SIGN_IN}` });
 			}
 			inbox.push({ type: "user", message: { role: "user", content: promptBlocks(request) }, parent_tool_use_id: null, uuid: randomUUID() });
@@ -307,7 +345,10 @@ export class ClaudeProvider {
 	private learn(result: SDKResultMessage): void {
 		for (const [id, usage] of Object.entries(result.modelUsage ?? {})) {
 			const model = this.models.find((candidate) => candidate.id === id);
-			if (model && usage.contextWindow > 0) model.contextWindow = usage.contextWindow;
+			if (model && usage.contextWindow > 0 && usage.contextWindow !== model.contextWindow) {
+				model.contextWindow = usage.contextWindow;
+				this.options.onChange?.();
+			}
 		}
 	}
 }

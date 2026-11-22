@@ -17,8 +17,8 @@ npm link --workspace @modular-agent/ma
 The link installs `ma` on npm's global bin path. Remove any other implementation's `ma` link first. The direct Node command above also works without a link. The TypeScript packages have not been published; keep the checkout and its built dependencies when using the link.
 
 ```sh
-ma login openai-codex          # add --device to use a code
-ma login xai                   # device sign-in
+ma login chatgpt          # add --device to use a code
+ma login grok                   # device sign-in
 ma models
 ma -p 'Summarize the files in this folder.'
 ma -c                          # continue the last session in this folder
@@ -28,7 +28,9 @@ ma --acp --listen 127.0.0.1:7401 --token-file /path/to/token  # ACP over WebSock
 
 The WebSocket listener requires a loopback address and an owner-only bearer token file. It acts as `ma`'s local ACP user, irrespective of `MODULAR_AGENT_ACTOR`.
 
-Subscription credential writes and refreshes use the same kernel lock as Rust. On Linux they require the util-linux `flock` command. On macOS they use `/usr/bin/perl` to call `flock(2)`. Claude uses Claude Code's own sign-in. To use it, build the sidecar (`cd typescript/sidecars/claude && npm ci && npm run build` from the repository root), install Claude Code, then run `ma login claude`. An installed sidecar can instead be named with `MODULAR_AGENT_CLAUDE_SIDECAR`.
+Subscription login writes and refreshes use `auth.lock` next to the private `auth.json`. The lock is shared with the other SDKs. Linux needs util-linux `flock`; macOS uses `/usr/bin/perl` to call `flock(2)`. `ma login claude` runs `claude auth login`. The TypeScript `ma` uses the Claude Agent SDK in process and does not need a sidecar.
+
+`openai-codex` and `xai` still work in `--model`, `ma login`, `ma logout`, `settings.json`, `models.json`, and saved sessions. `ma` moves old login keys to `chatgpt` and `grok` on the next write. If old and new keys coexist, the new key wins. `ma models` prints only the new ids.
 
 Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`. State is kept in `$XDG_STATE_HOME/modular-agent/typescript`, or `~/.local/state/modular-agent/typescript`. `MODULAR_AGENT_DATA_DIR` sets the configuration directory and puts state under its `state/` subdirectory. Use `--runtime transient` to keep history without resuming a turn cut off by a crash.
 
@@ -38,21 +40,12 @@ Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modul
 
 ```sh
 export MA_CLIENT_IDENTITY=my-agent_2.0
-ma login openai-codex
+ma login chatgpt
 ```
 
 Use 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. An empty or invalid value makes `ma` name `MA_CLIENT_IDENTITY` on stderr and exit with status 1.
 
-In an agent built from this code, set the `clientIdentity` option once. Pass it to `responses` for each Provider and to `oauth` for sign-in:
-
-```ts
-const identity = { clientIdentity: "my-agent_2.0" };
-const providers = (["openai-codex", "xai"] as const).map(vendor =>
-  responses(vendor, auth, {}, identity));
-const signIn = oauth(identity); // Use signIn.login(...) to sign in.
-```
-
-`responses` is in `src/responses.ts`; `oauth` is in `src/oauth.ts`. Both use the same default when the option is omitted. Neither reads the environment. The identity is a label, not a credential or a sign-in client ID.
+For another app, pass `clientIdentity` to `chatgpt({ logins, clientIdentity })` and `signIn("chatgpt", logins, { clientIdentity, onStep })` from `@modular-agent/subscription`. The SDK does not read `MA_CLIENT_IDENTITY`. The identity is a label, not a credential or a sign-in client ID. Grok sign-in and requests remain in `ma` until the SDK specification settles them.
 
 ## Code sandbox
 
@@ -73,7 +66,7 @@ npm ci --prefix conformance/acp
 npm ci --prefix conformance/tools
 (cd typescript && npm ci && npm run build && npm test)
 (cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test)
-(cd typescript/sidecars/claude && npm ci && npm test)
+(cd typescript && npm test --workspace=@modular-agent/claude)
 node conformance/reference/run.mjs --agent typescript
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
 scripts/websocket-kits.sh typescript
@@ -81,21 +74,30 @@ git diff --check
 ```
 
 - Reference checks: **24/24**, including `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
-- ACP with crash, probe and job checks: **188/188** on stdio and **193/193** on WebSocket. The WebSocket plugin kit passed **153/153** checks.
-- TypeScript workspace: **360/360** offline checks in both normal and `MA_REMOTE` configurations, with two live checks skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
-- Claude sidecar: **44/44**. No real sign-ins, credentials or models were used.
+- ACP with crash, probe and job checks: **188/188** on stdio and **193/193** on WebSocket. The WebSocket plugin kit passed **153/153**; listener isolation passed **14/14**.
+- TypeScript workspace: **422/422** offline tests in both normal and `MA_REMOTE` configurations, with four live tests skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- Claude package: **47/47** offline, including the 44 original tests. One live check skipped. No real sign-ins, credentials or model requests were made.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
 ## Known gaps
 
 - macOS local commands use process-group containment, not strong containment. A process that leaves its group is outside that guarantee.
 - HTTP history on macOS needs no clock setting: the writer derives a sleep-aware clock ([SDK history configuration](../core/README.md#registering-or-serving-a-custom-history-store)).
-- The terminal cannot switch to Claude unless it started the sidecar. In ACP, a project composition that did not start the sidecar does not offer Claude. Reopen with saved Claude settings or launch with `--model claude/ID`. See the [sidecar's own gaps](../../sidecars/claude/README.md#known-gaps-and-open-problems).
+- `ma` selects the Claude Provider at composition time. To switch to Claude from a launch that did not load it, start with `--model claude/ID` or reopen a saved Claude session. See the [Claude package gaps](../claude/README.md#known-gaps-and-open-problems).
 - `find` honors `.gitignore` files at or below its search root, but not parent or global Git rules, `.ignore` or `.git/info/exclude`. Its glob parser, filesystem diagnostics and Monty's tracebacks can differ from Rust.
 
 ## Findings for docs/reference and docs/sdk
 
 Proposed replacement text; the shared documents are unchanged in this branch.
+
+**Reference — Providers.** Replace “These are the SDK's subscription Providers, with their sign-in, login file, refresh, request shapes and model table; `ma` adds none of its own.” with:
+
+> `ma` uses the SDK's ChatGPT and Claude subscription Providers and shared login file. Until the SDK specifies Grok subscription access, `ma` keeps its existing Grok sign-in, requests and model list under `grok`.
+
+Replace the last three sentences of **The client identity** with:
+
+> The terminal and ACP load Claude when the launch or the saved session selects a Claude model. A composition without Claude cannot switch to a Claude model. TypeScript uses the Claude Agent SDK in process. Rust and Go launch the Claude process plugin.
+
 
 **ACP declarations.** The base Interface called the session API for proposals, actor joins, limits and tenant queries regardless of the SDK's session declaration. Its extension dispatcher now returns `not_supported` for disabled operations, while leaving `proposals`, `release` and `withdraw` available for parked job reports. The base declares all three features true and still passes the positive checks.
 

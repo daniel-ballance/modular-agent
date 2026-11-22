@@ -11,7 +11,7 @@ console.log = console.error;
 console.info = console.error;
 console.debug = console.error;
 
-const version = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+const version = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 // TEST ONLY. Any value replaces the Agent SDK with the scripted one in testing/fake-sdk.ts, so
 // no Claude Code process starts and no request leaves the machine. `signed-out` also reports no login.
@@ -27,6 +27,7 @@ const provider = new ClaudeProvider({
 	sdkVersion: fake ? "fake" : installedSdkVersion(),
 	query,
 	env: process.env,
+	checkApiRouting: !fake,
 	...(fake ? { loginVisible: () => fake !== "signed-out" } : {}),
 	log: process.env.CLAUDE_SIDECAR_DEBUG ? log : undefined,
 });

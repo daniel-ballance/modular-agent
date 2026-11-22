@@ -49,6 +49,8 @@ export interface AgentOptions {
   questionsOutlastTurns?: boolean;
   jobReportsStartTurns?: boolean;
   settingsDuringTurn?: "nextTurn" | "refused";
+  /** Former Provider ids to resolve when reopening saved model settings and attempts. */
+  reopenModelAliases?: Readonly<Record<string, string>>;
   /** Offline fixtures for the ACP conformance kit; not for production use. */
   conformance?: boolean;
   onQuestion?: QuestionHandler;
@@ -241,7 +243,7 @@ export class Agent {
       await mkdir(home, { recursive: true });
       const h = new Harness({ project, home, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
         jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn",
-        rejectUnknownModel: true, resourceReservations: options.resourceReservations, tenants: options.tenants ?? (options.conformance ? undefined : null) });
+        rejectUnknownModel: true, reopenModelAliases: options.reopenModelAliases, resourceReservations: options.resourceReservations, tenants: options.tenants ?? (options.conformance ? undefined : null) });
       const settings = structuredClone(options.settings ?? {});
       agent = new Agent(h, scratch, project, settings, options.onQuestion);
       agent.#authority = { severalActors: options.severalActors ?? false, sessionLimits: options.sessionLimits ?? false, tenants: options.tenants !== undefined };

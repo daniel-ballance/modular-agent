@@ -532,7 +532,7 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
 test("ma composes only the public SDK and official SDK plugin entry points", async () => {
   const pkg = join(root, "typescript/packages/ma");
   const manifest = JSON.parse(await readFile(join(pkg, "package.json"), "utf8"));
-  const allowed = ["@modular-agent/core", "@modular-agent/tools-files", "@modular-agent/tools-mcp", "@pydantic/monty", "protobufjs"]; // Monty's worker wire codec
+  const allowed = ["@modular-agent/claude", "@modular-agent/core", "@modular-agent/subscription", "@modular-agent/tools-files", "@modular-agent/tools-mcp", "@pydantic/monty", "protobufjs"]; // Monty's worker wire codec
   assert.deepEqual(Object.keys(manifest.dependencies).sort(), allowed.slice().sort());
   for (const file of await readdir(join(pkg, "src"))) if (file.endsWith(".ts")) {
     const source = await readFile(join(pkg, "src", file), "utf8");
@@ -540,7 +540,7 @@ test("ma composes only the public SDK and official SDK plugin entry points", asy
       const spec = entry[1];
       assert.ok(spec.startsWith("node:") || /^\.\/[\w-]+\.(js|json)$/.test(spec) ||
         (file === "monty-worker.ts" && spec === "protobufjs") ||
-        ["@modular-agent/core", "@modular-agent/core/testing", "@modular-agent/tools-files/sdk", "@modular-agent/tools-mcp/sdk", "@pydantic/monty"].includes(spec), `${file}: ${spec}`);
+        ["@modular-agent/claude", "@modular-agent/core", "@modular-agent/core/testing", "@modular-agent/subscription", "@modular-agent/tools-files/sdk", "@modular-agent/tools-mcp/sdk", "@pydantic/monty"].includes(spec), `${file}: ${spec}`);
     }
   }
 });
