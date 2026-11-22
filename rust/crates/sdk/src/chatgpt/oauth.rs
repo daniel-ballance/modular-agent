@@ -1,8 +1,7 @@
 //! ChatGPT's PKCE browser and device flows, with no browser or terminal I/O.
-use super::{SignInOptions, SignInStep};
 use crate::{
-    ClientIdentity, Login, now_ms,
-    subscription_oauth::{Poll, form, poll},
+    ClientIdentity, Login, SignInOptions, SignInStep,
+    subscription_oauth::{Poll, device_poll, encode, form, sign_in_client, tokens},
 };
 use anyhow::{Result, anyhow, bail, ensure};
 use base64::Engine;
@@ -22,8 +21,6 @@ const CODEX_DEVICE_PAGE: &str = "https://auth.openai.com/codex/device";
 const CODEX_DEVICE_REDIRECT: &str = "https://auth.openai.com/deviceauth/callback";
 const CODEX_SCOPE: &str = "openid profile email offline_access";
 
-/// Refresh this long before the stated expiry, so a token does not die mid-request.
-const MARGIN_MS: u64 = 5 * 60 * 1000;
 const DEVICE_WAIT: Duration = Duration::from_secs(15 * 60);
 
 fn pasted_code(input: &str, state: &str) -> Result<Option<String>> {
@@ -70,16 +67,6 @@ fn random(bytes: usize) -> Result<String> {
     let mut buffer = vec![0u8; bytes];
     getrandom::fill(&mut buffer).map_err(|e| anyhow!("no random source: {e}"))?;
     Ok(b64(&buffer))
-}
-fn encode(text: &str) -> String {
-    text.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
 }
 fn decode(text: &str) -> String {
     let bytes = text.as_bytes();
@@ -135,27 +122,6 @@ pub(crate) fn chatgpt_account(access: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("the ChatGPT token names no account; sign in again"))
 }
 
-fn tokens(body: &Value, previous: Option<&str>) -> Result<Login> {
-    let access = body["access_token"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("the sign-in answer has no access token"))?;
-    let refresh = body["refresh_token"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .or(previous)
-        .ok_or_else(|| anyhow!("the sign-in answer has no refresh token"))?;
-    let seconds = body["expires_in"].as_u64().unwrap_or(3600);
-    Ok(Login::Oauth {
-        access: access.into(),
-        refresh: refresh.into(),
-        expires: now_ms()
-            .saturating_add(seconds.saturating_mul(1000))
-            .saturating_sub(MARGIN_MS),
-        account: Some(chatgpt_account(access)?),
-    })
-}
-
 pub(crate) async fn refresh(client: &reqwest::Client, old: Login, url: &str) -> Result<Login> {
     let Login::Oauth { refresh, .. } = old else {
         bail!("ChatGPT needs a subscription sign-in");
@@ -177,7 +143,9 @@ pub(crate) async fn refresh(client: &reqwest::Client, old: Login, url: &str) -> 
         }
         bail!("ChatGPT could not refresh the sign-in (HTTP {status}); sign in again");
     }
-    tokens(&body, Some(&refresh))
+    tokens(&body, Some(&refresh), |access| {
+        chatgpt_account(access).map(Some)
+    })
 }
 async fn codex_exchange(
     client: &reqwest::Client,
@@ -201,7 +169,7 @@ async fn codex_exchange(
     if !(200..300).contains(&status) {
         return Err(anyhow!("ChatGPT sign-in failed (HTTP {status})"));
     }
-    tokens(&body, None)
+    tokens(&body, None, |access| chatgpt_account(access).map(Some))
 }
 
 async fn codex_device(
@@ -244,32 +212,37 @@ async fn codex_device(
         code: &code,
     });
     options.show(SignInStep::Waiting);
-    let (authorization, verifier) = poll(Duration::from_secs(interval), DEVICE_WAIT, || async {
-        let response = client
-            .post(poll_url)
-            .json(&json!({"device_auth_id": device, "user_code": code}))
-            .send()
-            .await?;
-        let status = response.status().as_u16();
-        let body: Value = response.json().await.unwrap_or(Value::Null);
-        if (200..300).contains(&status) {
-            return match (
-                body["authorization_code"].as_str(),
-                body["code_verifier"].as_str(),
-            ) {
-                (Some(code), Some(verifier)) => {
-                    Ok(Poll::Done((code.to_owned(), verifier.to_owned())))
-                }
-                _ => bail!("the ChatGPT sign-in answer is incomplete"),
-            };
-        }
-        let error = body["error"]["code"].as_str().or(body["error"].as_str());
-        match (status, error) {
-            (403 | 404, _) | (_, Some("deviceauth_authorization_pending")) => Ok(Poll::Pending),
-            (_, Some("slow_down")) => Ok(Poll::Slower),
-            _ => bail!("the ChatGPT sign-in failed (HTTP {status})"),
-        }
-    })
+    let (authorization, verifier) = device_poll(
+        interval,
+        DEVICE_WAIT.as_secs(),
+        options.fixture.is_some(),
+        || async {
+            let response = client
+                .post(poll_url)
+                .json(&json!({"device_auth_id": device, "user_code": code}))
+                .send()
+                .await?;
+            let status = response.status().as_u16();
+            let body: Value = response.json().await.unwrap_or(Value::Null);
+            if (200..300).contains(&status) {
+                return match (
+                    body["authorization_code"].as_str(),
+                    body["code_verifier"].as_str(),
+                ) {
+                    (Some(code), Some(verifier)) => {
+                        Ok(Poll::Done((code.to_owned(), verifier.to_owned())))
+                    }
+                    _ => bail!("the ChatGPT sign-in answer is incomplete"),
+                };
+            }
+            let error = body["error"]["code"].as_str().or(body["error"].as_str());
+            match (status, error) {
+                (403 | 404, _) | (_, Some("deviceauth_authorization_pending")) => Ok(Poll::Pending),
+                (_, Some("slow_down")) => Ok(Poll::Slower),
+                _ => bail!("the ChatGPT sign-in failed (HTTP {status})"),
+            }
+        },
+    )
     .await?;
     codex_exchange(
         client,
@@ -425,15 +398,7 @@ pub(crate) async fn login(
         },
     );
     let token = token.to_owned();
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30));
-    let client = if options.fixture.is_some() {
-        client.no_proxy()
-    } else {
-        client
-    }
-    .build()?;
+    let client = sign_in_client(options.fixture.is_some())?;
     if options.device {
         return codex_device(&client, &options, device_code, device_token, &token).await;
     }
