@@ -75,7 +75,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Set `Provider.CatalogChanges` to a `*modular.CatalogChanges` and call `Changed()` after updating the catalog. Register hooks with `Registrar.On(point, handler, options...)` or the typed methods; use `HookOrder` for explicit order.
 - Errors are values. `errors.As(err, &modularErr)` gives the code.
 - Minimum Go version: the one pinned in `go/mise.toml`.
-- Subscription Providers are in package `subscription`: `SubscriptionLogins(path)`, `SignIn`, `SignOut`, `ChatGPT` and `Claude`. `Claude` starts the TypeScript Claude program as a process plugin; it needs Node.js 22 or later.
+- Subscription Providers are in package `subscription`: `SubscriptionLogins(path)`, `SignIn`, `SignOut`, `ChatGPT`, `Grok` and `Claude`. `Grok(subscription.GrokOptions{Logins: logins})` returns a Provider; `SignIn(ctx, "grok", logins, options)` runs its device sign-in. `Claude` starts the TypeScript Claude program as a process plugin; it needs Node.js 22 or later.
 
 ## Python
 

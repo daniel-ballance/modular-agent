@@ -29,9 +29,9 @@ func (c responsesConfig) newRequest(ctx context.Context, body []byte, l Login, s
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+l.Secret())
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "modular-agent/0.1.0")
 	if !c.systemMessage {
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", "modular-agent/0.1.0")
 		var id string
 		if l.Account != nil {
 			id = *l.Account

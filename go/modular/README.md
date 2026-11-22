@@ -121,14 +121,4 @@ A repeated publication returns the original intent ID and destinations in publis
 
 ### Specification findings
 
-**`docs/sdk/languages.md`, Go.** Replace the subscription Providers bullet with:
-
-> - Subscription Providers are in package `subscription`: `SubscriptionLogins(path)`, `SignIn`, `SignOut`, `ChatGPT`, `Grok` and `Claude`. `Grok(subscription.GrokOptions{Logins: logins})` returns a Provider; use `SignIn(ctx, "grok", logins, options)` for device sign-in. `Claude` starts the TypeScript Claude program as a process plugin; it needs Node.js 22 or later.
-
-**`docs/sdk/subscription-providers.md`, Grok.** The Rust reference at the base commit also sets `Content-Type: application/json` and a user agent. Go follows the Grok section and does not set either. Replace “These are the values `ma` uses; the Rust SDK is the reference for the exact request.” with:
-
-> These are the values `ma` uses. For Grok, the header rule above takes precedence over the Rust reference. HTTP framing fields such as `Host` and `Content-Length` are not Provider headers.
-
-**`docs/reference/standard-configuration.md`, The client identity.** Replace the sentence starting “In each implementation the ChatGPT and Grok Providers take the identity” with:
-
-> The ChatGPT and Grok constructors accept the client identity. Pass the same identity to sign-in; Grok sends it only when starting device sign-in.
+None open.
