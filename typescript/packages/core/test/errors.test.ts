@@ -71,8 +71,9 @@ test("an HTTP history store reports an unpublished or missing session as not_fou
   const token = randomBytes(32).toString("hex");
   await writeFile(tokenFile, token, { mode: 0o600 });
   const server = await serveHistory(fileHistory(join(dir, "history")), { address: "127.0.0.1:0", tokenFile });
-  const agent = await testAgent({ script: [], durability: "kept", history: httpHistory(server.url, tokenFile) });
+  let agent: Awaited<ReturnType<typeof testAgent>> | undefined;
   try {
+    agent = await testAgent({ script: [], durability: "kept", history: httpHistory(server.url, tokenFile) });
     await assert.rejects(agent.sessionInfo("missing"), code("not_found"));
     await assert.rejects(agent.openSession("missing"), code("not_found"));
     assert.equal((await fetch(`${server.url}/v1/sessions/unpublished`, {
@@ -81,7 +82,9 @@ test("an HTTP history store reports an unpublished or missing session as not_fou
       },
     })).status, 200);
     await assert.rejects(agent.sessionInfo("unpublished"), code("not_found"));
-  } finally { await agent.close(); await server.close(); }
+  } finally {
+    try { await agent?.close(); } finally { await server.close(); }
+  }
 });
 
 for (const [remote, expected, retryAfterMs] of [
@@ -103,9 +106,9 @@ for (const [remote, expected, retryAfterMs] of [
     }
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  const addr = server.address();
-  assert.ok(addr && typeof addr !== "string");
   try {
+    const addr = server.address();
+    assert.ok(addr && typeof addr !== "string");
     const agent = await testAgent({ script: [], durability: "kept", history: httpHistory(`http://127.0.0.1:${addr.port}`, tokenFile) });
     try {
       await assert.rejects(agent.openSession("known"), code(expected, retryAfterMs ? { retryAfterMs } : undefined));

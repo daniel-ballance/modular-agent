@@ -30,7 +30,7 @@ function writerClock(configuredMargin?: number) {
 	if (process.platform === "linux") {
 		try { bootClock(); return { now: bootClock, margin: 10 }; } catch { /* No usable boot clock. */ }
 	}
-	if (!positive(configuredMargin)) throw new Error("Set MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS to a positive integer on platforms without a suspension-aware clock");
+	if (!positive(configuredMargin)) throw new Error("No suspension-aware clock is available to the history writer. Set MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS to a positive integer (milliseconds) in the process environment. Choose a margin that covers expected suspension and scheduling delays, or prevent suspension while writing.");
 	return { now: () => performance.now(), margin: configuredMargin };
 }
 type HistoryClientOptions = ClientOptions & { leaseMarginMs?: number };

@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
-    "test": "tsc -b && node --test --test-concurrency=4 packages/*/dist/test/*.test.js",
+    "test": "tsc -b && node --import ./scripts/test-history-clock.mjs --test --test-concurrency=4 packages/*/dist/test/*.test.js",
     "agent": "node packages/agent/dist/src/cli.js"
   },
   "devDependencies": {
