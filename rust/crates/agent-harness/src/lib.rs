@@ -41,6 +41,7 @@ type HeldOutput = BTreeMap<(String, String, String), Vec<(Event, Value, capacity
 pub struct Harness {
     me: Weak<Harness>,
     project: Option<PathBuf>,
+    model_provider_aliases: std::sync::OnceLock<&'static [(&'static str, &'static str)]>,
     tenants: RwLock<tenants::Tenants>,
     registry: RwLock<Registry>,
     points: BTreeMap<String, HookPoint>,
@@ -65,6 +66,7 @@ impl Harness {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             project,
+            model_provider_aliases: Default::default(),
             tenants: RwLock::default(),
             registry: RwLock::new(registry),
             points,
@@ -78,6 +80,29 @@ impl Harness {
             reservations: RwLock::new(Arc::new(ReservationPool::new(ResourceLimits::default()))),
         })
     }
+    /// Normalize old Provider ids supplied by a reference implementation
+    /// before session preparation or recovery, without rewriting history.
+    pub fn configure_model_provider_aliases(
+        &self,
+        aliases: &'static [(&'static str, &'static str)],
+    ) {
+        assert!(self.model_provider_aliases.set(aliases).is_ok());
+    }
+
+    fn normalize_model(&self, settings: &mut Value) {
+        let Some(aliases) = self.model_provider_aliases.get() else {
+            return;
+        };
+        let Some(model) = settings.get_mut("model") else {
+            return;
+        };
+        if let Some((provider, id)) = model.as_str().and_then(|model| model.split_once('/'))
+            && let Some((_, canonical)) = aliases.iter().find(|(alias, _)| *alias == provider)
+        {
+            *model = json!(format!("{canonical}/{id}"));
+        }
+    }
+
     pub fn configure_reservations(&self, pool: Arc<ReservationPool>) -> Result<()> {
         ensure!(
             self.sessions.lock().unwrap().is_empty(),
@@ -218,6 +243,7 @@ impl Harness {
             Err(_) => json!({}),
         };
         merge(&mut defaults, settings);
+        self.normalize_model(&mut defaults);
         let id = id();
         let lease = if provisional {
             None
@@ -354,6 +380,7 @@ impl Harness {
         ) {
             data.settings["approval"] = json!("ask_always");
         }
+        self.normalize_model(&mut data.settings);
         data.project = data.project.canonicalize()?;
         let previous_plugins = data.plugins.clone();
         data.plugins = self.registry.read().unwrap().names();
@@ -2266,8 +2293,9 @@ impl AgentApi for Harness {
             .get(session)
             .is_some_and(|s| s.active)
     }
-    fn settings(&self, scope: &Scope, patch: Value) -> Result<Value> {
+    fn settings(&self, scope: &Scope, mut patch: Value) -> Result<Value> {
         require(self, scope, "settings")?;
+        self.normalize_model(&mut patch);
         ensure!(
             patch
                 .as_object()

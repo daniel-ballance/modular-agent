@@ -31,4 +31,4 @@ case ":$PATH:" in
   *":$bin:"*) ;;
   *) echo "Note: $bin is not on your PATH." ;;
 esac
-echo "Next: ma login openai-codex | xai | claude, then ma auth"
+echo "Next: ma login chatgpt | grok | claude, then ma auth"

@@ -1,8 +1,7 @@
 //! The Providers against a loopback fixture: what is sent, and what a
 //! streamed answer becomes. No network and no real sign-in.
-use credentials_auth::AuthFile;
-use modular_agent::{Agent, Outcome, Plugin, Session};
-use provider_responses::{ClientIdentity, ResponsesPlugin, Vendor, catalog};
+use modular_agent::{Agent, ClientIdentity, Outcome, Plugin, Session, subscription_logins};
+use provider_responses::provider;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -74,17 +73,15 @@ fn sse(events: &[Value]) -> String {
 }
 
 async fn agent(
-    vendor: Vendor,
     model: &str,
     endpoint: &str,
     client_identity: ClientIdentity,
     plugins: Vec<Plugin>,
 ) -> (Agent, Session) {
-    let provider = ResponsesPlugin::new(
-        vendor,
-        catalog(vendor, &Value::Null).unwrap(),
-        AuthFile::new("unused-auth.json".into(), &[]),
+    let provider = provider(
+        subscription_logins("unused-auth.json"),
         client_identity,
+        vec![],
     )
     .unwrap()
     .with_test_endpoint(endpoint)
@@ -110,80 +107,6 @@ async fn agent(
     (agent, session)
 }
 #[tokio::test]
-async fn a_streamed_answer_becomes_text_calls_and_usage() {
-    // The Codex backend leaves `output` empty on the last event.
-    let stream = sse(&[
-        json!({"type":"response.created","response":{"id":"r1"}}),
-        json!({"type":"response.output_text.delta","delta":"Hel"}),
-        json!({"type":"response.output_text.delta","delta":"lo"}),
-        json!({"type":"response.output_item.done","item":{"type":"reasoning","id":"rs1","encrypted_content":"enc"}}),
-        json!({"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"Hello"}]}}),
-        json!({"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"codemode","arguments":"{\"code\":\"1+1\"}"}}),
-        json!({"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"input_tokens":12,"output_tokens":5}}}),
-    ]);
-    let server = fixture(vec![(200, stream)]).await;
-    let (agent, session) = agent(
-        Vendor::Codex,
-        "openai-codex/gpt-6.1-sol",
-        &server.endpoint,
-        ClientIdentity::default(),
-        vec![],
-    )
-    .await;
-    assert_eq!(agent.models().unwrap()[0].model.provider, "openai-codex");
-    session.prompt("hi").await.unwrap();
-    let response = session
-        .history()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|e| e["kind"] == "response")
-        .unwrap();
-    let answer = &response["message"];
-    assert_eq!(answer["content"][0]["text"], "Hello");
-    assert_eq!(answer["stop"], "toolUse");
-    assert_eq!(answer["content"][1]["arguments"], json!({"code":"1+1"}));
-    assert_eq!(answer["usage"]["input"], 12);
-    assert_eq!(answer["usage"]["output"], 5);
-    assert!(answer.get("providerData").is_none());
-    assert!(!answer.to_string().contains("encrypted_content"));
-    let requests = server.requests.lock().unwrap();
-    let (head, body) = &requests[0];
-    for (name, value) in [
-        ("authorization", "Bearer test-credential"),
-        ("chatgpt-account-id", "test-account"),
-        ("openai-beta", "responses=experimental"),
-        ("originator", "modular-agent"),
-        ("session-id", session.id()),
-        ("accept", "text/event-stream"),
-    ] {
-        assert_eq!(header(head, name), Some(value), "{name}");
-    }
-    assert_eq!(body["model"], "gpt-6.1-sol");
-    assert_eq!(body["instructions"], "Be brief.");
-    assert_eq!(body["store"], false);
-    assert_eq!(body["reasoning"]["effort"], "low");
-}
-
-#[tokio::test]
-async fn codex_requests_send_the_configured_originator() {
-    let stream = sse(&[json!({"type":"response.completed","response":{"output":[]}})]);
-    let server = fixture(vec![(200, stream)]).await;
-    let (_agent, session) = agent(
-        Vendor::Codex,
-        "openai-codex/gpt-6.1-sol",
-        &server.endpoint,
-        "My-agent_2.0".parse().unwrap(),
-        vec![],
-    )
-    .await;
-    session.prompt("hi").await.unwrap();
-
-    let requests = server.requests.lock().unwrap();
-    assert_eq!(header(&requests[0].0, "originator"), Some("My-agent_2.0"));
-}
-
-#[tokio::test]
 async fn service_errors_are_told_apart() {
     let server = fixture(vec![
         (429, json!({"error":{"type":"usage_limit_reached","message":"You have hit your usage limit."}}).to_string()),
@@ -201,8 +124,7 @@ async fn service_errors_are_told_apart() {
             async { Ok(modular_agent::ModelDecision::Stop) }
         });
     let (_agent, session) = agent(
-        Vendor::Xai,
-        "xai/grok-4.7",
+        "grok/grok-4.7",
         &server.endpoint,
         ClientIdentity::default(),
         vec![plugin],
@@ -246,15 +168,15 @@ async fn cancelling_stops_waiting_on_the_stream() {
         "http://127.0.0.1:{}/responses",
         listener.local_addr().unwrap().port()
     );
-    // Accepts and then says nothing.
+    // Wait for the request to connect before cancelling it.
+    let (connected, received) = tokio::sync::oneshot::channel();
     let held = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        drop(stream);
+        let (_stream, _) = listener.accept().await.unwrap();
+        connected.send(()).unwrap();
+        std::future::pending::<()>().await;
     });
     let (_agent, session) = agent(
-        Vendor::Xai,
-        "xai/grok-4.7",
+        "grok/grok-4.7",
         &endpoint,
         ClientIdentity::default(),
         vec![],
@@ -262,7 +184,7 @@ async fn cancelling_stops_waiting_on_the_stream() {
     .await;
     let prompt = session.prompt("hi");
     let cancel = async {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        received.await.unwrap();
         session.cancel().await.unwrap();
     };
     let (answer, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {

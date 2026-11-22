@@ -944,13 +944,11 @@ name = "credentials-auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fs2",
  "modular-agent",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -2644,6 +2642,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "base64 0.23.1",
  "config-files",
  "credentials-file",
@@ -2655,7 +2654,9 @@ dependencies = [
  "feature-model",
  "feature-prompt",
  "feature-questions",
+ "fs2",
  "futures-util",
+ "getrandom 0.3.4",
  "history-fs",
  "history-http",
  "interface-acp",
@@ -2668,6 +2669,7 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -3404,15 +3406,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
  "credentials-auth",
- "futures-util",
- "getrandom 0.3.4",
  "modular-agent",
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "tokio",
 ]

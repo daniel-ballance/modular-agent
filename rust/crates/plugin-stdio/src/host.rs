@@ -60,8 +60,33 @@ impl ExternalLaunch {
         home: &Path,
         index: usize,
     ) -> Result<Arc<Remote>> {
+        self.load_with_readiness(harness, project, home, index, None)
+            .await
+    }
+
+    pub async fn load_with_readiness(
+        self,
+        harness: &Arc<Harness>,
+        project: &Path,
+        home: &Path,
+        index: usize,
+        readiness: Option<ProviderReadiness>,
+    ) -> Result<Arc<Remote>> {
         match self {
-            Self::Process(launch) => load(harness, launch, project, home, index).await,
+            Self::Process(launch) => {
+                ensure!(!launch.command.is_empty(), "empty plugin command");
+                let config = launch.config.clone();
+                load_transport(
+                    harness,
+                    Transport::Process(launch),
+                    config,
+                    project,
+                    home,
+                    index,
+                    readiness,
+                )
+                .await
+            }
             Self::Service(launch) => {
                 ensure!(
                     launch.token_file.is_absolute(),
@@ -78,6 +103,7 @@ impl ExternalLaunch {
                     project,
                     home,
                     index,
+                    None,
                 )
                 .await
             }
@@ -85,7 +111,18 @@ impl ExternalLaunch {
     }
 }
 
+type ReadinessFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>;
+
+/// A local readiness check for one Provider in a process plugin. It supplies
+/// diagnostics that the boolean readiness reply does not carry.
+#[derive(Clone)]
+pub struct ProviderReadiness {
+    pub id: &'static str,
+    pub check: Arc<dyn Fn() -> ReadinessFuture + Send + Sync>,
+}
+
 pub(crate) struct Shared {
+    readiness: Option<ProviderReadiness>,
     pub(crate) api: Weak<dyn AgentApi>,
     pub(crate) registration: Mutex<Value>,
     pub(crate) sessions: Mutex<BTreeMap<String, Scope>>,
@@ -113,17 +150,9 @@ pub async fn load(
     home: &Path,
     index: usize,
 ) -> Result<Arc<Remote>> {
-    ensure!(!launch.command.is_empty(), "empty plugin command");
-    let config = launch.config.clone();
-    load_transport(
-        harness,
-        Transport::Process(launch),
-        config,
-        project,
-        home,
-        index,
-    )
-    .await
+    ExternalLaunch::Process(launch)
+        .load(harness, project, home, index)
+        .await
 }
 
 /// Load a plugin through connected streams, with the same host and registration checks.
@@ -135,7 +164,16 @@ pub async fn load_pipe(
     home: &Path,
     index: usize,
 ) -> Result<Arc<Remote>> {
-    load_transport(harness, Transport::Pipe(pipe), config, project, home, index).await
+    load_transport(
+        harness,
+        Transport::Pipe(pipe),
+        config,
+        project,
+        home,
+        index,
+        None,
+    )
+    .await
 }
 
 enum Transport {
@@ -151,12 +189,14 @@ async fn load_transport(
     project: &Path,
     home: &Path,
     index: usize,
+    readiness: Option<ProviderReadiness>,
 ) -> Result<Arc<Remote>> {
     tokio::fs::create_dir_all(home).await?;
     let project = project.canonicalize()?;
     let home = home.canonicalize()?;
     let api: Api = harness.clone();
     let shared = Arc::new(Shared {
+        readiness,
         api: Arc::downgrade(&api),
         registration: Mutex::new(Value::Null),
         sessions: Mutex::default(),
@@ -280,6 +320,13 @@ async fn load_transport(
             if let Some(value) = wire::optional(&registration, field) {
                 ensure!(value.is_array(), "registration {field} must be an array");
             }
+        }
+        if let Some(check) = &shared.readiness {
+            ensure!(
+                registration["providers"].as_array().is_some_and(|providers|
+                    providers.len() == 1 && providers[0]["id"] == check.id),
+                "process program did not register the expected {} Provider", check.id
+            );
         }
         if let Some(environment) = registration
             .get("workingEnvironment")
@@ -510,7 +557,8 @@ impl Plugin for Remote {
                 id: id.clone(),
                 peer: self.peer.clone(),
                 shared: self.shared.clone(),
-                models,
+                models: Arc::new(Mutex::new(models)),
+                supports: provider["supports"].clone(),
                 keeps_state: provider["supports"]["keepsState"] == true,
                 dirty: Arc::default(),
             });
@@ -807,18 +855,21 @@ struct RemoteProvider {
     id: String,
     peer: Arc<Peer>,
     shared: Arc<Shared>,
-    models: Vec<ModelInfo>,
+    models: Arc<Mutex<Vec<ModelInfo>>>,
+    supports: Value,
     keeps_state: bool,
     dirty: Arc<Mutex<BTreeSet<String>>>,
 }
 #[async_trait]
 impl Provider for RemoteProvider {
     fn catalog(&self) -> Vec<ModelInfo> {
-        self.models.clone()
+        self.models.lock().unwrap().clone()
     }
     fn bind(&self, name: &str) -> Result<Arc<dyn ModelAccess>> {
         let info = self
             .models
+            .lock()
+            .unwrap()
             .iter()
             .find(|m| m.name == name)
             .ok_or_else(|| anyhow!("unknown external model"))?
@@ -828,6 +879,8 @@ impl Provider for RemoteProvider {
             peer: self.peer.clone(),
             shared: self.shared.clone(),
             info,
+            models: self.models.clone(),
+            supports: self.supports.clone(),
             dirty: self.dirty.clone(),
         }))
     }
@@ -889,6 +942,8 @@ struct RemoteModel {
     peer: Arc<Peer>,
     shared: Arc<Shared>,
     info: ModelInfo,
+    models: Arc<Mutex<Vec<ModelInfo>>>,
+    supports: Value,
     dirty: Arc<Mutex<BTreeSet<String>>>,
 }
 #[async_trait]
@@ -917,6 +972,17 @@ impl ModelAccess for RemoteModel {
         Ok(())
     }
     async fn refresh(&self, api: &Api, scope: &Scope, cancel: CancellationToken) -> Result<()> {
+        if let Some(check) = &self.shared.readiness
+            && check.id == self.id
+        {
+            let reason = tokio::select! {
+                _ = cancel.cancelled() => bail!("Provider readiness check cancelled"),
+                reason = (check.check)() => reason,
+            };
+            if let Some(reason) = reason {
+                bail!("{reason}");
+            }
+        }
         for method in ["provider/models", "provider/available"] {
             let value = self
                 .peer
@@ -932,12 +998,17 @@ impl ModelAccess for RemoteModel {
                     .as_array()
                     .ok_or_else(|| anyhow!("missing Provider catalog"))?;
                 let mut ids = BTreeSet::new();
-                for model in catalog {
-                    ensure!(
-                        model["provider"] == self.id && ids.insert(wire::string(model, "id")?),
-                        "invalid Provider catalog"
-                    );
-                }
+                let models = catalog
+                    .iter()
+                    .map(|model| {
+                        ensure!(
+                            model["provider"] == self.id && ids.insert(wire::string(model, "id")?),
+                            "invalid Provider catalog"
+                        );
+                        wire::model(model, &self.supports)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                *self.models.lock().unwrap() = models;
                 ensure!(
                     ids.contains(self.info.name.split_once('/').unwrap().1),
                     "selected model is unavailable"

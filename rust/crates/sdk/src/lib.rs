@@ -17,6 +17,9 @@
 mod acp;
 mod agent;
 mod api_key;
+mod chatgpt;
+mod claude;
+mod client_identity;
 mod configuration;
 mod context;
 mod core;
@@ -31,9 +34,14 @@ mod jobs;
 mod parts;
 mod plugin;
 mod provider;
+#[doc(hidden)]
+pub mod responses;
 mod runtime;
 mod serve;
 mod session;
+mod subscription_logins;
+#[doc(hidden)]
+pub mod subscription_oauth;
 pub mod testing;
 mod tool;
 
@@ -44,6 +52,9 @@ pub use agent::{
 };
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
+pub use chatgpt::*;
+pub use claude::{ClaudeOptions, ClaudeProvider, claude};
+pub use client_identity::ClientIdentity;
 pub use configuration::FilesConfiguration;
 pub use context::{HistoryPage, HookContext};
 pub use credentials::{
@@ -88,6 +99,7 @@ pub use session::{
     PromptInput, PromptOptions, PromptResult, Proposal, ReleaseOptions, Rights, Session, Timing,
     ToolResult,
 };
+pub use subscription_logins::*;
 pub use tool::{
     Answer, Ask, AskWait, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext,
     ToolEnvironment, ToolOutput, ToolStatus,

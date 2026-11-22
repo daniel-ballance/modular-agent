@@ -12,7 +12,7 @@ The base's binary crate is now `crates/agent-base`, package `agent-base`, so tha
 
 | Part | Crate | What it does |
 |---|---|---|
-| Providers | `provider-responses` | ChatGPT subscription (`openai-codex/...`) and Grok subscription (`xai/...`) over the Responses API. Stateless. Sign-in and token refresh included. |
+| Providers | `modular-agent`, `provider-responses` | ChatGPT (`chatgpt/...`) uses the SDK. Grok (`grok/...`) keeps ma's existing sign-in and Responses adapter. |
 | Provider | [`sidecars/claude`](../typescript/sidecars/claude/README.md) | Claude subscription (`claude/...`) through the Claude Agent SDK for TypeScript. A plugin in its own process over the plugin binding, started only when a Claude model is used. |
 | Tools | `modular-agent-files` | `read`, `exec`, `edit`, `write`, `find` and `list`, with Pi's inputs, limits and wording. They work through the session's working environment. |
 | Tool | `tools-code` | `codemode`: Python in a [Monty](https://github.com/pydantic/monty) sandbox. Every other tool is a function on its `tools` object. |
@@ -58,8 +58,8 @@ scripts/install.sh                                    # optional: ~/.local/bin/m
 Sign in to at least one Provider:
 
 ```sh
-ma login openai-codex     # ChatGPT: opens a browser; add --device for a code instead
-ma login xai              # Grok: a code to enter at the address shown
+ma login chatgpt          # ChatGPT: follow the browser link, or add --device
+ma login grok             # Grok: enter the code at the address shown
 ma login claude           # runs `claude auth login`; Claude Code keeps this sign-in
 ma auth                   # what is signed in
 ma models                 # what is on offer
@@ -70,7 +70,7 @@ Then, in a project folder:
 ```sh
 ma                                           # talk to it; a line typed while it works steers it
 ma -p "Summarise the README"                 # one prompt, answer on stdout
-ma --model xai/grok-4.7 --thinking high
+ma --model grok/grok-4.7 --thinking high
 ma -c                                        # reopen this folder's last session
 ma -v                                        # also show each call the code makes
 ma --acp                                     # serve ACP on stdio, for an editor or T3 Code
@@ -86,7 +86,7 @@ ma --acp --listen 127.0.0.1:7401 --token-file /path/to/owner-only-token
 | `~/.config/modular-agent/settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools` |
 | `~/.config/modular-agent/auth.json` | Sign-ins. Written by `ma login`. Mode 0600. |
 | `~/.config/modular-agent/mcp.json` | `{"mcpServers": {...}}` in the form Pi and other clients use. `${NAME}` takes a value from the environment. |
-| `~/.config/modular-agent/models.json` | Catalog additions or replacements: `{"openai-codex": [{"id", "name", "contextWindow", "maxTokens", "effort"}], "xai": [...]}` |
+| `~/.config/modular-agent/models.json` | Catalog additions or replacements: `{"chatgpt": [{"id", "name", "contextWindow", "maxTokens", "effort"}], "grok": [...]}` |
 | `~/.config/modular-agent/AGENTS.md` | Your own standing instructions, for every project |
 | `~/.config/modular-agent/skills/`, `~/.agents/skills/` | Your skills |
 | `PROJECT/AGENTS.md` (or `CLAUDE.md`), and the same in each folder above it | Project instructions |
@@ -96,7 +96,9 @@ ma --acp --listen 127.0.0.1:7401 --token-file /path/to/owner-only-token
 | `PROJECT/.mcp.json` | Project MCP servers. Used only after `ma --trust-project`, because it starts programs. |
 | `~/.local/state/modular-agent/rust/` | Sessions, command state and the full output of commands whose output was cut |
 
-`MODULAR_AGENT_DATA_DIR` puts the configuration files directly in that folder and puts the state in its `state/` subfolder. Without it, the XDG configuration and state variables take precedence over the paths above. `MODULAR_AGENT_CLAUDE_SIDECAR` names the sidecar's `dist/main.js` if it is not beside the build or under `~/.local/share/modular-agent/sidecars/claude`.
+`MODULAR_AGENT_DATA_DIR` puts the configuration files directly in that folder and puts the state in its `state/` subfolder. Without it, the XDG configuration and state variables take precedence over the paths above. Set `MODULAR_AGENT_CLAUDE_SIDECAR` to the Claude program's `dist/main.js` if it is not installed at `~/.local/share/modular-agent/sidecars/claude/dist/main.js`.
+
+The old ids `openai-codex` and `xai` still work in `--model`, `ma login`, `ma logout`, `settings.json`, `models.json` and reopened sessions. `ma` moves old login keys to the new ids the next time it writes `auth.json`. It refuses a login file readable by others. Every write and refresh uses the lock in `auth.lock` beside the file.
 
 ### Client identity
 
@@ -105,18 +107,9 @@ Grok's device sign-in referrer. Set `MA_CLIENT_IDENTITY=My-agent_2.0` to use
 another name. It must be 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`,
 `.`, `_` and `-`. An invalid value stops `ma` at startup with status 1.
 
-In Rust code, set the name once and pass it to both Providers and sign-in.
-Use `ClientIdentity::default()` for the default. The Provider does not read
-the environment variable. The label does not change the OAuth client IDs.
-
-```rust
-use provider_responses::{ClientIdentity, ResponsesPlugin, oauth};
-
-let client_identity: ClientIdentity = "My-agent_2.0".parse()?;
-let provider = ResponsesPlugin::new(vendor, models, auth, client_identity.clone())?;
-// When signing in:
-let login = oauth::login(vendor, &client_identity, device, pasted, &show).await?;
-```
+In Rust code, set `client_identity` in `ChatGptOptions` and
+`SignInOptions`. The SDK does not read `MA_CLIENT_IDENTITY`. The label does
+not change the OAuth client IDs. See the [SDK subscription API](crates/sdk/README.md#subscription-providers).
 
 ## What is checked
 
@@ -140,10 +133,10 @@ mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 
 - **Standard reference checks:** 24/24, including client identity, tool values, denial of ambient access, result formatting, timeout and print-limit errors, memory limits, and both Runtime crash cases.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
-- **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. Neither WebSocket run used a bridge.
-- **Standard and codemode:** 32 tests for `ma` and 6 for `tools-code`. These cover startup validation, tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.
-- **Workspace:** 415 Rust tests passed. Formatting and Clippy with `-D warnings` pass. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
-- **Offline only:** browser sign-in uses a simulated browser on loopback; both device flows and refresh use loopback HTTP fixtures. No credentials, real sign-ins or model requests were used.
+- **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. The separate-listener WebSocket isolation run passed 14/14. Neither WebSocket run used a bridge.
+- **Standard and codemode:** `ma` includes the five alias checks. The six `tools-code` tests are separate. These cover startup validation, tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.
+- **Workspace:** 421 Rust tests passed, with no failures. Four opt-in live cases returned before accessing credentials. Formatting and Clippy with `-D warnings` passed. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
+- **Subscriptions:** Offline checks use loopback OAuth and Responses fixtures and a fake Claude process plug-in. The alias checks cover sign-in routing, sign-out, both model configuration files, `--model`, and reopening an old session. Live checks compile and skip without opt-in.
 
 To try the terminal without a login:
 
@@ -165,6 +158,8 @@ MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
 ## Findings for docs/reference and docs/sdk
 
 These are proposed edits; the shared documents are unchanged in this branch.
+
+- **[`docs/reference`, Providers](../docs/reference/standard-configuration.md#providers):** Replace “These are the SDK's subscription Providers, with their sign-in, login file, refresh, request shapes and model table; `ma` adds none of its own.” with “ChatGPT and Claude use the SDK's subscription Providers. Until the Grok protocol is decided, `ma` keeps its current Grok sign-in and request adapter. ChatGPT and Grok share the SDK's login file.”
 
 - **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools):** Replace “256 MiB of memory (Monty's `max_memory`, which counts what the interpreter allocates)” with “256 MiB of memory (Monty's `max_memory`, which counts live allocations against the worker's baseline, not the worker's resident memory)”. Monty 1.6.0 also counts compiled code and interpreter internals in worker mode.
 - **ACP declarations:** `interface-acp` dispatched proposed input, actor joins, session limits and tenant queries without consulting the SDK factory's session declaration. It now refuses disabled operations with `not_supported`, without changing the declarations or gating `proposals`, `release` or `withdraw`, which also serve parked job reports. The base declares all three features true and still passes the positive checks.

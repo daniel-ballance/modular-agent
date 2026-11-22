@@ -10,6 +10,6 @@ pub use runtime_server::{RuntimeContext, RuntimeHandler, local_runtime};
 pub mod server;
 pub use agent_api::wire;
 pub use host::{
-    ExternalLaunch, Launch, Remote, ServiceLaunch, hook_name, hook_payload, hook_result, load,
-    load_pipe,
+    ExternalLaunch, Launch, ProviderReadiness, Remote, ServiceLaunch, hook_name, hook_payload,
+    hook_result, load, load_pipe,
 };
