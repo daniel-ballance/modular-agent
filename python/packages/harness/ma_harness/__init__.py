@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 from ma_core import API, AgentError, Stop, clone, content, identity, now, silent
+from ma_core import telemetry as ot
 from ma_core.wire import provider_projection, recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
@@ -16,7 +17,14 @@ class Harness(Authority, Erasure):
     MAX_TOOL_DEPTH = 4
 
     def __init__(
-        self, admin=None, tenant=None, process_plugins=None, *, tenants=None, reservations=None
+        self,
+        admin=None,
+        tenant=None,
+        process_plugins=None,
+        *,
+        tenants=None,
+        reservations=None,
+        agent_name=None,
     ):
         import os
 
@@ -49,6 +57,7 @@ class Harness(Authority, Erasure):
         self.erasure_locks = {}
         self.capacity = Reservations(reservations)
         self.trace = []
+        self.agent_name = agent_name
         self.define_hook("@harness", "plugin.load", "gate")
         self.define_hook("@harness", "session.prepare", "observe")
         self.define_hook("@harness", "session.join", "observe")
@@ -371,8 +380,29 @@ class Harness(Authority, Erasure):
         token = identity()
         scope = {"data": data, "children": set(), "closing": False}
         self.tool_dispatches[token] = scope
+        attributes = ot.tool_attrs(
+            sid, data.get("turn"), data.get("step"), call, data["definition"]["name"]
+        )
+        tool_name = attributes.get("gen_ai.tool.name")
+        with ot.span(
+            "execute_tool " + tool_name if tool_name else "execute_tool", attributes
+        ) as operation:
+            return await self._dispatch_tool(sid, method, data, emit, token, scope, operation)
+
+    async def _dispatch_tool(self, sid, method, data, emit, token, scope, operation):
         try:
-            return clone(await self._effect(sid, method, {**data, "dispatch": token}, emit))
+            result = clone(await self._effect(sid, method, {**data, "dispatch": token}, emit))
+            status = ot.tool_status(result)
+            ot.set_attrs(operation, {"modular_agent.tool.status": status})
+            if status == "failed":
+                ot.error(operation, "tool_failed")
+            return result
+        except asyncio.CancelledError:
+            ot.set_attrs(operation, {"modular_agent.tool.status": "cancelled"})
+            raise
+        except Exception:
+            ot.set_attrs(operation, {"modular_agent.tool.status": "failed"})
+            raise
         finally:
             scope["closing"] = True
             children = list(scope["children"])
@@ -623,6 +653,33 @@ class Harness(Authority, Erasure):
         response = next(((sid, e.get("step")) for e in entries if e["kind"] == "response"), None)
         charged = self.capacity.stage(session, entries, response=response)
         if "history" in self.capabilities:
+            cancellation = await self._commit(sid, session, entries)
+        self.capacity.finish(sid, session.get("tenant"), charged, response=response)
+        # Calls to an out-of-process store yield. Preserve flags changed by a
+        # concurrent cancellation/close while that durable write was in flight.
+        current = self.sessions.get(session["id"], {})
+        for key in ("busy", "moving", "closing", "suspending", "writer_lost", "interruption"):
+            if key in current:
+                session[key] = current[key]
+        self.sessions[session["id"]] = session
+        # A cancelled caller cannot dispatch from this append. The next
+        # writer still needs the confirmed parent and call associations.
+        if session.get("writer_lost"):
+            raise AgentError("Session interrupted", "lost")
+        if cancellation is not None:
+            raise cancellation
+
+    async def _commit(self, sid, session, entries):
+        cancellation = None
+        with ot.span(
+            "modular_agent.history.commit",
+            ot.attrs(
+                sid,
+                **{
+                    "modular_agent.history.entry.count": len(entries),
+                },
+            ),
+        ) as operation:
             commit = asyncio.create_task(
                 self.call("@harness", "history", "keep", {"session": session, "entries": entries})
             )
@@ -638,25 +695,24 @@ class Harness(Authority, Erasure):
             except (Exception, asyncio.CancelledError) as exc:
                 reason = "writerLost" if getattr(exc, "writer_lost", False) else "commitFailed"
                 self._interrupt(sid, reason)
+                ot.set_attrs(
+                    operation,
+                    {
+                        "modular_agent.history.commit.status": (
+                            "uncertain"
+                            if getattr(exc, "writer_lost", False)
+                            or isinstance(exc, asyncio.CancelledError)
+                            else "failed"
+                        )
+                    },
+                )
                 if isinstance(exc, AgentError) and exc.code == "lost":
                     raise
                 raise AgentError(
                     "Cannot confirm the session commit; reopen to recover", "lost"
                 ) from exc
-        self.capacity.finish(sid, session.get("tenant"), charged, response=response)
-        # Calls to an out-of-process store yield. Preserve flags changed by a
-        # concurrent cancellation/close while that durable write was in flight.
-        current = self.sessions.get(session["id"], {})
-        for key in ("busy", "moving", "closing", "suspending", "writer_lost", "interruption"):
-            if key in current:
-                session[key] = current[key]
-        self.sessions[session["id"]] = session
-        # A cancelled caller cannot dispatch from this append. The next
-        # writer still needs the confirmed parent and call associations.
-        if session.get("writer_lost"):
-            raise AgentError("Session interrupted", "lost")
-        if cancellation is not None:
-            raise cancellation
+            ot.set_attrs(operation, {"modular_agent.history.commit.status": "committed"})
+        return cancellation
 
     def active_plugins(self):
         return [
@@ -985,6 +1041,29 @@ class Harness(Authority, Erasure):
         return parts
 
     async def handle(self, op, d, emit):
+        operation = {
+            "create": "new",
+            "open": "resume" if d.get("recover", True) else "load",
+            "close": "close",
+        }.get(op)
+        if operation is None or d.get("draft"):
+            return await self._handle(op, d, emit)
+        action = "close" if op == "close" else "open"
+        with ot.span(
+            "modular_agent.session." + action,
+            ot.attrs(
+                d.get("session"),
+                **{
+                    "modular_agent.session.operation": operation,
+                },
+            ),
+        ) as span:
+            result = await self._handle(op, d, emit)
+            if op == "create":
+                ot.set_attrs(span, {"gen_ai.conversation.id": result["id"]})
+            return result
+
+    async def _handle(self, op, d, emit):
         if op == "bound_model_response":
             return self.capacity.model_response(self._session(d), d["response"], d["step"])
         if op == "prepare_model_request":

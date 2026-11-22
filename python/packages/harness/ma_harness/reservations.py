@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections import Counter
 
+from ma_core import telemetry as ot
 from ma_core import AgentError, TOOL_RESULT_BYTES
 from ma_core.wire import entry_out, recorded_as
 
@@ -183,6 +184,15 @@ class Reservations:
                 > limits[k] - (limits["controlBytes"] if k == "storageBytes" else 0)
                 for k, v in delta.items()
             ):
+                ot.event(
+                    "modular_agent.capacity.refused",
+                    ot.attrs(
+                        sid,
+                        **{
+                            "modular_agent.capacity.scope": scope,
+                        },
+                    ),
+                )
                 raise AgentError("Resource reservation capacity exhausted", "busy")
 
     def stage(self, session, entries, *, response=None):

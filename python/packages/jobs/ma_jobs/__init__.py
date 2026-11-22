@@ -4,6 +4,7 @@ import asyncio
 
 import json
 
+from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, content, identity
 
 
@@ -16,6 +17,8 @@ class Jobs(Plugin):
     }
 
     def __init__(self):
+        self.spans = {}
+        self.report_links = {}
         self.signals = {}
         self.locks = {}
 
@@ -115,6 +118,16 @@ class Jobs(Plugin):
             data=job,
             copies=d.get("copies", []),
         )
+        self.spans[s["id"], job["id"]] = ot.begin(
+            "modular_agent.job",
+            ot.attrs(
+                s["id"],
+                job["turn"],
+                **{
+                    "modular_agent.job.id": job["id"],
+                },
+            ),
+        )
         await self.api.event("job_started", session=s["id"], job=job)
         return {**job, "started": True}
 
@@ -212,6 +225,14 @@ class Jobs(Plugin):
         )
         job.update(end)
         self.signals.setdefault((job["session"], job["id"]), asyncio.Event()).set()
+        operation = self.spans.pop((job["session"], job["id"]), None)
+        if operation is not None:
+            if end["report"]:
+                self.report_links[job["session"], job["id"]] = ot.own_context(operation)
+            ot.set_attrs(operation, {"modular_agent.job.outcome": state})
+            if state == "failed":
+                ot.error(operation, "job_failed")
+            ot.end(operation)
         await self.api.event("job_ended", session=job["session"], job=job)
         return job
 
@@ -322,6 +343,15 @@ class Jobs(Plugin):
                 await self._deliver(job)
 
     async def close(self, d):
+        sid = d["session"]
+        for key in list(self.spans):
+            if key[0] == sid:
+                operation = self.spans.pop(key)
+                ot.set_attrs(operation, {"modular_agent.job.outcome": "interrupted"})
+                ot.end(operation)
+        for key in list(self.report_links):
+            if key[0] == sid:
+                del self.report_links[key]
         for job in await self.list(d, None):
             if job["state"] == "running":
                 try:

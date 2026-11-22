@@ -2,6 +2,7 @@
 
 import asyncio
 
+from ma_core import telemetry as ot
 from ma_core import AgentError, content, identity, plain
 from ma_runtime import Runtime
 from ma_runtime.turns import UNKNOWN, checked_tool_result, require_processed_result
@@ -81,9 +82,7 @@ class HostedRuntime(Runtime):
             else "handedBack",
         }
 
-    async def _turn(self, sid, queued=None, turn=None):
-        recovering = turn is not None
-        turn = turn or identity()
+    async def _run_turn(self, sid, queued, turn, recovering):
         entries = await self.api.session("branch", session=sid)
         additions, problem = None, None
         if recovering:
@@ -121,6 +120,9 @@ class HostedRuntime(Runtime):
             )
         self.steering_closed.discard(sid)
         scope = TurnHost(self, sid, turn, start)
+        scope.trace_parent = ot.current()
+        scope.step_span = None
+        scope.traced_step = None
         scope.additions = (
             additions
             if not recovering
@@ -188,6 +190,7 @@ class HostedRuntime(Runtime):
             answer = await scope.checked_end_data(value)
         except asyncio.CancelledError:
             if sid in self.suspending:
+                scope.end_step()
                 raise
             answer = scope.end_data({"outcome": {"kind": "cancelled"}})
         except Exception as exc:
@@ -210,6 +213,7 @@ class HostedRuntime(Runtime):
             answer.update(
                 outcome="limit", error=None, shared_outcome={"kind": "limit", "limit": "capacity"}
             )
+        scope.end_step()
         answer = await scope.finish(answer)
         if answer["open_calls"]:
             await self.wake({"session": sid}, None)
@@ -1356,7 +1360,29 @@ class TurnHost:
             self.ended = True
         return saved
 
+    def end_step(self):
+        if self.step_span is not None:
+            ot.end(self.step_span)
+            self.step_span = self.traced_step = None
+
     async def callback(self, method, p, key):
+        step = p.get("stepId") or self.step
+        if (
+            method in {"prepareStep", "model"}
+            and step in self.allocated
+            and step != self.traced_step
+        ):
+            self.end_step()
+            self.traced_step = step
+            self.step_span = ot.begin(
+                "modular_agent.step", ot.attrs(self.sid, self.turn, step), parent=self.trace_parent
+            )
+        if self.step_span is not None and step == self.traced_step:
+            with ot.use(ot.scoped_context(self.step_span, self.sid, self.turn, step)):
+                return await self._callback(method, p, key)
+        return await self._callback(method, p, key)
+
+    async def _callback(self, method, p, key):
         if (
             self.ended
             or (self.final_hook and method != "report")

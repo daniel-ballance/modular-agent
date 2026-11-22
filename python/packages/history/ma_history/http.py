@@ -12,6 +12,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, identity
 from ma_core.wire import entry_out
 
@@ -241,7 +242,16 @@ class HTTPHistory(PendingErasure, Plugin):
                         raise AgentError("Invalid history retry interval", "lost") from exc
                     if now + delay >= deadline:
                         raise
-                    await asyncio.sleep(max(0.001, delay))
+                    with ot.span(
+                        "modular_agent.capacity.wait",
+                        ot.attrs(
+                            sid,
+                            **{
+                                "modular_agent.capacity.scope": "session",
+                            },
+                        ),
+                    ):
+                        await asyncio.sleep(max(0.001, delay))
                 except (AgentError, asyncio.CancelledError):
                     # The grant may have reached the service. A future acquire
                     # for this session must not mistake it for a fresh grant.
@@ -257,14 +267,17 @@ class HTTPHistory(PendingErasure, Plugin):
                 if sid in self.must_renew:
                     sent = lease_clock()
                     renewal = path + "/" + self.segment(lease["id"]) + "/renew"
-                    value = await self.request("POST", renewal)
+                    with ot.span("modular_agent.history.lease.renew", ot.attrs(sid)):
+                        value = await self.request("POST", renewal)
                     self._check(sid, lease)
                     self._arm(sid, lease, sent, value["ttlMs"])
                     self.must_renew.discard(sid)
             except (AgentError, asyncio.CancelledError):
                 self._lose(sid, lease)
                 raise
-            lease["task"] = asyncio.create_task(self.renew(sid, lease, sent, value["ttlMs"]))
+            # This worker renews the session lease, not a particular turn.
+            with ot.use(ot.extract(None)):
+                lease["task"] = asyncio.create_task(self.renew(sid, lease, sent, value["ttlMs"]))
             lease["watcher"] = self._watch_writer(sid, lease)
             return lease["id"]
 
@@ -279,7 +292,8 @@ class HTTPHistory(PendingErasure, Plugin):
                 await asyncio.sleep(max(0, sent + ttl / 3000 - self.margin - lease_clock()))
                 self._check(sid, lease)
                 sent = lease_clock()
-                value = await self.request("POST", path)
+                with ot.span("modular_agent.history.lease.renew", ot.attrs(sid)):
+                    value = await self.request("POST", path)
                 self._check(sid, lease)
                 ttl = value["ttlMs"]
                 self._arm(sid, lease, sent, ttl)

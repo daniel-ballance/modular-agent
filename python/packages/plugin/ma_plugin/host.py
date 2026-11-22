@@ -7,6 +7,7 @@ import os
 from functools import partial
 from pathlib import Path
 
+from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, identity, plain, silent
 
 from . import hooks
@@ -60,6 +61,10 @@ class Provider:
         model = d["access"]["id"].removeprefix(self.id + "/")
         if d.get("session") and not d.get("attempt_id"):
             d.update(attempt_id=identity(), auxiliary_step=identity())
+        r = await ot.inference(self.id, d, lambda: self._request(d, model, emit))
+        return r
+
+    async def _request(self, d, model, emit):
         r = await self.plugin.request(
             "provider/request",
             {
@@ -156,7 +161,12 @@ class NativeProvider:
             )
             await emit(event)
 
-        response = await self.service.generate(d, piece)
+        response = await ot.inference(
+            self.target,
+            d,
+            lambda: self.service.generate(d, piece),
+            local=self.target in {"fake", "scripted"},
+        )
         await self.h.fire(
             "@harness",
             "provider.response",

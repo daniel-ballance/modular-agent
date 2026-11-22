@@ -442,6 +442,12 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 name = "ma-core"
 version = "0.1.0"
 source = { editable = "packages/core" }
+dependencies = [
+    { name = "opentelemetry-api" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "opentelemetry-api", specifier = ">=1.45.2" }]
 
 [[package]]
 name = "ma-credentials"

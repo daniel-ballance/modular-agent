@@ -1204,6 +1204,7 @@ def create_agent(
     several_actors: bool = False,
     session_limits: bool = False,
     tenants: Mapping[str, Tenant] | None = None,
+    agent_name: str | None = None,
     job_reports_start_turns: bool = False,
     late_answers_start_turns: bool = False,
     resource_reservations: Mapping[str, Mapping[str, int]] | None = None,
@@ -1253,6 +1254,7 @@ def create_agent(
         try:
             h = Harness(
                 process_plugins=(),
+                agent_name=agent_name,
                 tenants=tenants or {},
                 reservations={k: dict(v) for k, v in resource_reservations.items()}
                 if resource_reservations is not None

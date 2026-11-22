@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime
 
+from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, content, identity
 from ma_core.wire import recorded_as
 
@@ -25,6 +26,7 @@ class Runtime(Turns, Plugin):
     }
 
     def __init__(self):
+        self.input_traces = {}
         self.tasks = {}
         self.admission = {}
         self.scheduling = {}
@@ -87,8 +89,12 @@ class Runtime(Turns, Plugin):
         return [e for e in pending if e["id"] in prior]
 
     async def submit(self, d, emit):
-        async with self.admission.setdefault(d["session"], asyncio.Lock()):
-            return await self._submit(d, emit)
+        with ot.span("modular_agent.input.admit", ot.attrs(d["session"])) as operation:
+            async with self.admission.setdefault(d["session"], asyncio.Lock()):
+                result = await self._submit(d, emit)
+            if result.get("input"):
+                ot.set_attrs(operation, {"modular_agent.input.id": result["input"]})
+            return result
 
     async def _submit(self, d, emit):
         sid = d["session"]
@@ -178,6 +184,8 @@ class Runtime(Turns, Plugin):
             },
             **({"job": d["source"]["job"]} if d.get("source", {}).get("job") else {}),
         )
+        if ot.valid(ot.current()):
+            self.input_traces[sid, e["id"]] = ot.current()
         await self.api.event("input_accepted", session=sid, input=e["id"], when=mode)
         if mode != "propose":
             await self._schedule(sid)
@@ -313,6 +321,7 @@ class Runtime(Turns, Plugin):
         return {"withdrawn": False}
 
     async def _return(self, sid, e):
+        self.input_traces.pop((sid, e["id"]), None)
         await self.api.session(
             "append",
             session=sid,
@@ -342,6 +351,7 @@ class Runtime(Turns, Plugin):
         }
 
     async def _take(self, sid, e, turn):
+        self.input_traces.pop((sid, e["id"]), None)
         return await self._record(sid, turn, "input", **self._taken_input(e))
 
     async def wait(self, d, emit):
