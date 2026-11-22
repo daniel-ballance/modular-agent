@@ -11,7 +11,7 @@ for (const served of [false, true]) {
     const fake = createFake(), replies: AssistantMessage[] = [];
     const p = claude({ test: { query: fake.query, loginVisible: () => true, env: {} } });
     assert.equal(await p.available(), true);
-    assert.equal(p.models().find(m => m.id === "claude-haiku-5-5")?.contextWindow, 200_000);
+    assert.ok(p.models().some(m => m.id === "claude-haiku-5-5"));
     const plugin = definePlugin({ name: "claude-fixture", setup: r => r.provider(p), stop: p.close });
     let runs = 0;
     const weather = tool({ name: "get_weather", description: "Get the weather", input: { type: "object", properties: { city: { type: "string" } } },

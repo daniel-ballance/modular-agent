@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import type { ModelInfo } from "../data.js";
 import { WireError, WirePeer } from "../wire.js";
 
 const MAIN = fileURLToPath(new URL("../main.js", import.meta.url));
@@ -24,6 +25,8 @@ interface Host {
 	seen: { kind: string; parent?: unknown; value: any }[];
 	stdout: string[];
 	stderr: () => string;
+	init: typeof INIT;
+	probeClosed: Promise<void>;
 	/** Changes the request at the provider.request hook. */
 	transform?: (payload: any) => any;
 	exited: Promise<number | null>;
@@ -34,11 +37,15 @@ function start(fake = "1"): Host {
 	const child = spawn(process.execPath, [MAIN], { env: { PATH: process.env.PATH ?? "", CLAUDE_SIDECAR_TEST_FAKE_SDK: fake }, stdio: ["pipe", "pipe", "pipe"] });
 	children.add(child);
 	let stderr = "";
-	child.stderr!.on("data", (d) => { stderr += String(d); });
+	const probeClosed = new Promise<void>((resolve) => child.stderr!.on("data", (d) => {
+		stderr += String(d);
+		if (stderr.includes("[fake-sdk] probe closed\n")) resolve();
+	}));
 	const host: Host = {
 		peer: new WirePeer((line) => void child.stdin!.write(line)),
-		child, seen: [], stdout: [], stderr: () => stderr,
-		exited: new Promise((resolve) => child.on("exit", (code) => resolve(code))),
+		child, seen: [], stdout: [], stderr: () => stderr, probeClosed,
+		init: { ...INIT, home: mkdtempSync(join(scratch, "home-")) },
+		exited: new Promise((resolve) => child.on("close", (code) => resolve(code))),
 	};
 	child.stdout!.on("data", (d: Buffer) => {
 		host.stdout.push(String(d));
@@ -77,7 +84,7 @@ test("handshake, catalog and availability", async () => {
 	assert.equal((await wireError(host.peer.request("provider/models", { provider: "claude" }))).code, "invalid_request");
 	assert.equal((await wireError(host.peer.request("plugin/initialize", { ...INIT, binding: "modular-agent-plugin/9" }))).code, "not_supported");
 	assert.deepEqual(await host.peer.request("$/ping", {}), {});
-	const registration = await host.peer.request("plugin/initialize", INIT);
+	const registration = await host.peer.request("plugin/initialize", host.init);
 	assert.equal(registration.binding, "modular-agent-plugin/1");
 	assert.equal(registration.name, "claude-agent-sdk");
 	assert.equal(registration.providers.length, 1);
@@ -87,12 +94,9 @@ test("handshake, catalog and availability", async () => {
 	assert.deepEqual(Object.keys(registration).sort(), ["binding", "name", "providers"]);
 	assert.equal((await wireError(host.peer.request("plugin/initialize", INIT))).code, "invalid_request");
 
-	// The catalog narrows to what the (fake) Claude Code reports for the account.
-	let models: any[] = [];
-	for (let i = 0; i < 100 && models.length !== 3; i++) {
-		models = (await host.peer.request("provider/models", { provider: "claude" })).models;
-		if (models.length !== 3) await new Promise((r) => setTimeout(r, 20));
-	}
+	// The probe closes after reading the account's context windows.
+	await host.probeClosed;
+	const { models } = await host.peer.request<{ models: ModelInfo[] }>("provider/models", { provider: "claude" });
 	assert.deepEqual(models.map((m) => m.id), ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-nova-9"]);
 	assert.deepEqual(models[1], { provider: "claude", id: "claude-haiku-5-5", name: "Claude Haiku 5.5", contextWindow: 200000, maxOutput: 128000, input: ["text", "image"], reasoning: true, thinking: ["off", "low", "medium", "high", "xhigh"] });
 
@@ -106,16 +110,21 @@ test("handshake, catalog and availability", async () => {
 	await stop(host);
 });
 
-test("a signed-out Claude Code is reported as unavailable", async () => {
-	const host = start("signed-out");
-	await host.peer.request("plugin/initialize", INIT);
-	assert.deepEqual(await host.peer.request("provider/available", { provider: "claude" }), { available: false });
-	await stop(host);
-});
+for (const [mode, detail] of [["signed-out", ""], ["api-key", " (it is using an API key from user)"]]) {
+	test(`Claude Code in ${mode} mode reports why it is unavailable`, async () => {
+		const host = start(mode);
+		await host.peer.request("plugin/initialize", host.init);
+		assert.deepEqual(await host.peer.request("provider/available", { provider: "claude" }), {
+			available: false,
+			reason: `Claude Code is not signed in with a Claude subscription${detail}. Run \`claude auth login\`, sign in with your Claude account, then try again.`,
+		});
+		await stop(host);
+	});
+}
 
 test("a request: request hook, streamed pieces, response hook, then the same message as the result", async () => {
 	const host = start();
-	await host.peer.request("plugin/initialize", INIT);
+	await host.peer.request("plugin/initialize", host.init);
 	// The hook changes the request; inference must use what the hook answered.
 	host.transform = (payload) => ({ ...payload, request: { ...payload.request, systemPrompt: "Changed by the hook." } });
 	const params = ask("hello");
@@ -140,7 +149,7 @@ test("a request: request hook, streamed pieces, response hook, then the same mes
 
 test("a tool call comes back as toolUse; a sessionless request has a null session in its hooks", async () => {
 	const host = start();
-	await host.peer.request("plugin/initialize", INIT);
+	await host.peer.request("plugin/initialize", host.init);
 	const { sessionId: _none, ...sessionless } = ask("[fake:tool] call it");
 	const pending = host.peer.request("provider/request", sessionless);
 	const message = await pending;
@@ -150,13 +159,13 @@ test("a tool call comes back as toolUse; a sessionless request has a null sessio
 	assert.equal(host.seen.at(-1)!.kind, "hook:provider.response");
 	assert.equal(host.seen.at(-1)!.value.sessionId, null);
 	assert.deepEqual(host.seen.filter((s) => s.kind === "event" && s.value.type === "toolInput").map((s) => s.value.toolCallId), ["toolu_fake_1", "toolu_fake_1"]);
-	assert.match(host.stderr(), /\[fake-sdk\] query closed/);
 	await stop(host);
+	assert.match(host.stderr(), /\[fake-sdk\] query closed/);
 });
 
 test("a model-service failure is a failed message, not a protocol error", async () => {
 	const host = start();
-	await host.peer.request("plugin/initialize", INIT);
+	await host.peer.request("plugin/initialize", host.init);
 	const message = await host.peer.request("provider/request", ask("[fake:auth]"));
 	assert.equal(message.stop, "failed");
 	assert.equal(message.error.kind, "credentials");
@@ -167,7 +176,7 @@ test("a model-service failure is a failed message, not a protocol error", async 
 
 test("invalid requests are refused before the hook", async () => {
 	const host = start();
-	await host.peer.request("plugin/initialize", INIT);
+	await host.peer.request("plugin/initialize", host.init);
 	const bad = [
 		{ ...ask("x"), provider: "other" },
 		{ ...ask("x"), model: { provider: "other", id: "claude-haiku-5-5" } },
@@ -185,18 +194,18 @@ test("invalid requests are refused before the hook", async () => {
 
 test("a refused request hook ends the request with the host's error and no inference", async () => {
 	const host = start();
-	await host.peer.request("plugin/initialize", INIT);
+	await host.peer.request("plugin/initialize", host.init);
 	host.transform = () => { throw new WireError("turn_limit", "steps", -32000, { limit: "steps" }); };
 	const error = await wireError(host.peer.request("provider/request", ask("hello")));
 	assert.equal(error.code, "turn_limit");
 	assert.deepEqual(host.seen.map((s) => s.kind), ["hook:provider.request"]);
-	assert.doesNotMatch(host.stderr(), /query closed/);
 	await stop(host);
+	assert.doesNotMatch(host.stderr(), /query closed/);
 });
 
 test("cancel aborts the SDK query and answers cancelled promptly", async () => {
 	const host = start();
-	await host.peer.request("plugin/initialize", INIT);
+	await host.peer.request("plugin/initialize", host.init);
 	const pending = host.peer.request("provider/request", ask("[fake:slow]"));
 	// Wait for the first streamed piece, so the cancel lands mid-inference.
 	for (let i = 0; i < 200 && !host.seen.some((s) => s.kind === "event"); i++) await new Promise((r) => setTimeout(r, 10));
@@ -207,7 +216,6 @@ test("cancel aborts the SDK query and answers cancelled promptly", async () => {
 	const error = await wireError(pending);
 	assert.equal(error.code, "cancelled");
 	assert.ok(Date.now() - at < 2_000, "the answer to a cancel must be prompt");
-	assert.match(host.stderr(), /\[fake-sdk\] query closed/);
 	assert.ok(!host.seen.some((s) => s.kind === "hook:provider.response"));
 	// A cancel for a settled id is ignored, and the plugin still serves.
 	host.peer.notify("$/cancel", { id: pending.id });
@@ -219,7 +227,7 @@ test("cancel aborts the SDK query and answers cancelled promptly", async () => {
 
 test("the plugin exits when the host closes stdin, even mid-request", async () => {
 	const host = start();
-	await host.peer.request("plugin/initialize", INIT);
+	await host.peer.request("plugin/initialize", host.init);
 	const pending = host.peer.request("provider/request", ask("[fake:slow]"));
 	pending.catch(() => {});
 	for (let i = 0; i < 200 && !host.seen.some((s) => s.kind === "event"); i++) await new Promise((r) => setTimeout(r, 10));

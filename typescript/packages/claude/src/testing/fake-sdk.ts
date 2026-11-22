@@ -25,7 +25,7 @@ function promptText(message: SDKUserMessage): string {
 	return content.map((block) => block.type === "text" ? block.text : `(${block.type})`).join("\n");
 }
 
-export function createFake(account: Record<string, unknown> = { subscriptionType: "max", email: "fake@example.invalid" }): { query: QueryFunction; log: FakeLog } {
+export function createFake(account: Record<string, unknown> = { subscriptionType: "max", email: "fake@example.invalid" }, beforeContextUsage?: () => Promise<void>): { query: QueryFunction; log: FakeLog } {
 	const log: FakeLog = { started: [], prompts: [], closed: 0 };
 	const query: QueryFunction = ({ prompt, options }) => {
 		log.started.push(options);
@@ -93,13 +93,16 @@ export function createFake(account: Record<string, unknown> = { subscriptionType
 				],
 			}) as never,
 			setModel: async () => {},
-			getContextUsage: async () => ({ rawMaxTokens: 200_000 }) as never,
+			getContextUsage: async () => {
+				await beforeContextUsage?.();
+				return { rawMaxTokens: 200_000 } as never;
+			},
 			close: () => {
 				if (closed) return;
 				closed = true;
 				log.closed++;
 				wake?.();
-				if (process.env.CLAUDE_SIDECAR_TEST_FAKE_SDK) process.stderr.write("[fake-sdk] query closed\n");
+				if (process.env.CLAUDE_SIDECAR_TEST_FAKE_SDK) process.stderr.write(`[fake-sdk] ${options.model ? "query" : "probe"} closed\n`);
 			},
 		};
 		return fake;
@@ -107,5 +110,5 @@ export function createFake(account: Record<string, unknown> = { subscriptionType
 	return { query, log };
 }
 
-/** The fake `main.ts` loads under CLAUDE_SIDECAR_TEST_FAKE_SDK. `signed-out` reports an account without a subscription. */
-export const fakeQuery: QueryFunction = createFake(process.env.CLAUDE_SIDECAR_TEST_FAKE_SDK === "signed-out" ? {} : undefined).query;
+/** The fake `main.ts` loads under CLAUDE_SIDECAR_TEST_FAKE_SDK. */
+export const fakeQuery: QueryFunction = createFake(process.env.CLAUDE_SIDECAR_TEST_FAKE_SDK === "api-key" ? { apiKeySource: "user" } : undefined).query;

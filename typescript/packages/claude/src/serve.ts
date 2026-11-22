@@ -63,7 +63,12 @@ export function serve(options: ServeOptions): Promise<void> {
 	});
 
 	peer.handle("provider/models", async (p) => (ours(p.provider), { models: provider.catalog() }));
-	peer.handle("provider/available", async (p) => (ours(p.provider), { available: await provider.ready() }));
+	peer.handle("provider/available", async (p) => {
+		ours(p.provider);
+		const available = await provider.ready();
+		const reason = available ? undefined : provider.unavailableReason();
+		return reason ? { available, reason } : { available };
+	});
 	peer.handle("provider/discard", async (p) => {
 		ours(p.provider);
 		if (typeof p.sessionId !== "string" || !p.sessionId) throw new WireError("invalid_request", "A session is required");

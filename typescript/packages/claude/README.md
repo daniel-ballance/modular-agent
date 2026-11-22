@@ -54,7 +54,7 @@ The host starts a plugin with a minimal environment ([plugin binding, "Choosing 
 
 Without any of these the sidecar still starts and registers, and answers `provider/available` with `false`.
 
-The Provider never opens a credential file. It checks whether a login may be present by checking for the credential file's existence or an OAuth token variable. Claude Code then reports whether the account has a plan. `claude().unavailableReason()` gives the reason after an availability check. API routing variables and an API key source reported by Claude Code both make the Provider unavailable; no prompt is sent.
+The Provider never opens a credential file. It checks whether a login may be present by checking for the credential file's existence or an OAuth token variable. Claude Code then reports whether the account has a plan. `claude().unavailableReason()` gives the reason after an availability check. Over the plugin binding, `provider/available` includes that reason when the Provider is unavailable. API routing variables and an API key source reported by Claude Code both make the Provider unavailable; no prompt is sent.
 
 Anthropic decides how Agent SDK usage is counted against a plan. This sidecar is for your own use with your own account.
 
@@ -74,7 +74,7 @@ Failed and aborted assistant messages in the request are not replayed, and neith
 
 ## Models
 
-The built-in list comes from the [shared subscription model table](../../../docs/sdk/subscription-models.json). After `plugin/initialize`, if a login is visible and `home/catalog.json` is missing, older than a day or from another SDK version, the sidecar starts Claude Code once without a prompt and asks which models the account offers. The list is narrowed to those, and each context window is replaced by the one Claude Code reports, which can be smaller than the API's. A model Claude Code names that the built-in list does not know gets 200,000 context, 32,000 output and the effort levels Claude Code gave for it. `provider/models` always returns the current list, so it can change shortly after start.
+The built-in list comes from the [shared subscription model table](../../../docs/sdk/subscription-models.json). After `plugin/initialize`, if a login is visible and `home/catalog.json` is missing, older than a day or from another SDK version, the sidecar starts Claude Code once without a prompt and asks which models the account offers. Readiness answers as soon as Claude Code reports whether the account uses a plan. The list narrows to the models the account offers. The sidecar reads their context windows in the background, without delaying requests. These windows can be smaller than the API's. A model Claude Code names that the built-in list does not know gets 200,000 context, 32,000 output and the effort levels Claude Code gave for it. `provider/models` always returns the current list, so it can change shortly after start.
 
 ## Reasoning levels
 
@@ -105,16 +105,16 @@ Which levels a model lists follows the reference: Fable 5.x cannot switch thinki
 
 ## Verification
 
-### Offline tests: 47 pass
+### Offline tests: 51 pass
 
 `npm test`, with a scripted fake in place of the SDK's `query()`:
 
 - `models.test.ts` (6): catalog shape, level mapping, nearest level, narrowing.
 - `transcript.test.ts` (6): ModelRequest to SDK input.
 - `response.test.ts` (11): SDK output to the assistant message (text, thinking, tool calls, usage, stop reasons), error kinds, token scrubbing.
-- `provider.test.ts` (12): one request end to end against the fake: the SDK options that make it a plain endpoint, streaming, tool use, failures, a login that is not a subscription, cancel, catalog refresh, login detection, tool names.
+- `provider.test.ts` (15): requests against the fake SDK, cancellation, catalog changes after readiness, and closing the probe on shutdown or at the deadline.
 - `api.test.ts` (3 offline, one gated live): the public constructor in process and over the plugin binding, including an API key source refusal.
-- `stdio.test.ts` (9): a host-side test that starts `dist/src/main.js` with only `PATH` in its environment and drives it over stdio: handshake, `provider/models`, `provider/available`, `provider/discard`, a request with both hook callbacks and streamed events in order, use of the hook's changed request, a sessionless request, a failed request, refused requests, a refused hook, cancel mid-stream, shutdown and exit on stdin EOF.
+- `stdio.test.ts` (10): a host starts `dist/src/main.js` with the fake SDK and drives it over stdio. The tests cover the catalog, readiness and reasons for unavailability, discard, hooks, streaming, failures, cancellation and shutdown.
 
 The fake is selected in the built program with `CLAUDE_SIDECAR_TEST_FAKE_SDK` (test only; `signed-out` makes it report no login). It starts no process and reaches no model.
 
