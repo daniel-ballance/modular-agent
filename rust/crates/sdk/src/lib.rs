@@ -18,6 +18,7 @@ mod acp;
 mod agent;
 mod api_key;
 mod chatgpt;
+mod claude;
 mod client_identity;
 mod configuration;
 mod context;
@@ -52,6 +53,7 @@ pub use agent::{
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
 pub use chatgpt::*;
+pub use claude::{ClaudeOptions, ClaudeProvider, claude};
 pub use client_identity::ClientIdentity;
 pub use configuration::FilesConfiguration;
 pub use context::{HistoryPage, HookContext};

@@ -136,7 +136,7 @@ pub struct AgentBuilder {
     providers: Vec<Arc<dyn base::Plugin>>,
     tools: Vec<Tool>,
     plugins: Vec<Plugin>,
-    process_plugins: Vec<ProcessPlugin>,
+    process_plugins: Vec<(ProcessPlugin, Option<plugin_stdio::ProviderReadiness>)>,
     service_plugins: Vec<ServicePlugin>,
     wire_plugins: Vec<Plugin>,
     environment: Option<crate::Environment>,
@@ -496,14 +496,21 @@ impl AgentBuilder {
         self
     }
     pub fn process_plugin(mut self, plugin: ProcessPlugin) -> Self {
-        self.process_plugins.push(plugin);
+        self.process_plugins.push((plugin, None));
+        self
+    }
+    /// Load the Claude Provider through its process plugin.
+    pub fn claude_provider(mut self, provider: crate::ClaudeProvider) -> Self {
+        let (launch, readiness) = provider.into_launch();
+        self.process_plugins.push((launch, Some(readiness)));
         self
     }
     /// Whether the agent hosts plugin programs. A plugin host also starts the programs
     /// named in `MODULAR_AGENT_PLUGINS`. Default: when process or service plugins are given.
     /// Append a list of process plugins, in load order.
     pub fn process_plugins(mut self, plugins: impl IntoIterator<Item = ProcessPlugin>) -> Self {
-        self.process_plugins.extend(plugins);
+        self.process_plugins
+            .extend(plugins.into_iter().map(|plugin| (plugin, None)));
         self
     }
 
@@ -764,17 +771,20 @@ impl AgentBuilder {
         let mut launches: Vec<_> = self
             .process_plugins
             .into_iter()
-            .map(|p| {
-                ExternalLaunch::Process(plugin_stdio::Launch {
-                    command: p.command,
-                    env: p.env,
-                    config: p.config,
-                })
+            .map(|(p, readiness)| {
+                (
+                    ExternalLaunch::Process(plugin_stdio::Launch {
+                        command: p.command,
+                        env: p.env,
+                        config: p.config,
+                    }),
+                    readiness,
+                )
             })
             .chain(
                 self.service_plugins
                     .into_iter()
-                    .map(ExternalLaunch::Service),
+                    .map(|p| (ExternalLaunch::Service(p), None)),
             )
             .collect();
         let plugin_host = self.plugin_host.unwrap_or(!launches.is_empty());
@@ -790,7 +800,7 @@ impl AgentBuilder {
                     ));
                 }
             };
-            launches.extend(named);
+            launches.extend(named.into_iter().map(|p| (p, None)));
         }
         let wire_count = self.wire_plugins.len();
         for (index, plugin) in self.wire_plugins.into_iter().enumerate() {
@@ -817,13 +827,16 @@ impl AgentBuilder {
                 }));
             }
         }
-        for (index, launch) in launches
+        for (index, (launch, readiness)) in launches
             .into_iter()
             .enumerate()
             .map(|(i, l)| (i + wire_count, l))
         {
             let home = state.join("plugins").join(index.to_string());
-            if let Err(e) = launch.load(&harness, &project, &home, index).await {
+            if let Err(e) = launch
+                .load_with_readiness(&harness, &project, &home, index, readiness)
+                .await
+            {
                 // An agent never runs without a part it was configured to have.
                 let _ = base::AgentApi::shutdown(harness.as_ref()).await;
                 return Err(Error::new(
