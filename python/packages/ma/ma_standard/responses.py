@@ -18,7 +18,8 @@ from modular_agent import (
 
 from .auth import AuthFile, OAuth
 from .config import read_object
-from .oauth import CLIENT_IDENTITY, LABELS, Vendor, account, refresh
+from .identity import DEFAULT_CLIENT_IDENTITY, validate_client_identity
+from .oauth import LABELS, Vendor, account, refresh
 
 ENDPOINTS: dict[Vendor, str] = {
     "openai-codex": "https://chatgpt.com/backend-api/codex/responses",
@@ -252,10 +253,18 @@ def _failure(error: Json, status: int = 0) -> ModelFailure:
 class Responses:
     supports = ProviderSupports()
 
-    def __init__(self, vendor: Vendor, auth: AuthFile, overrides: Path) -> None:
+    def __init__(
+        self,
+        vendor: Vendor,
+        auth: AuthFile,
+        overrides: Path,
+        *,
+        client_identity: str = DEFAULT_CLIENT_IDENTITY,
+    ) -> None:
         self.id: str = vendor
         self.vendor = vendor
         self.auth = auth
+        self._client_identity = validate_client_identity(client_identity)
         built = read_object(Path(__file__).with_name("models.json"))
         extra = read_object(overrides).get(vendor)
         if extra is not None and (
@@ -308,7 +317,7 @@ class Responses:
                                 )
                                 or account(login.secret),
                                 "OpenAI-Beta": "responses=experimental",
-                                "originator": CLIENT_IDENTITY,
+                                "originator": self._client_identity,
                                 "session-id": session,
                                 "x-client-request-id": session,
                             }
