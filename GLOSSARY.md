@@ -222,6 +222,9 @@ How long a history store keeps a session's history.
 **Lease**:
 A time-limited claim to be the only writer of a session in a history service.
 
+**Trace context**:
+Metadata the Harness uses to keep related work in one trace across requests and restarts. It identifies a trace and a span, not an actor or grant.
+
 **Model access**:
 What the Runtime is given so it can make model requests to the chosen model, without the credentials.
 _Avoid_: Provider handle (our earlier name), client, API key

@@ -225,6 +225,7 @@ A declaration describes which features this agent or selected session supports. 
 | `tenants` | No tenant extension. |
 | `projectRoot` | No single-project declaration. |
 | `confinesFiles` | No claim of file confinement after resolving symlinks. |
+| `telemetry` | No [metadata-only telemetry profile](telemetry.md) claim. Support does not tell a reader whether export is on. |
 
 ## Guarantees
 

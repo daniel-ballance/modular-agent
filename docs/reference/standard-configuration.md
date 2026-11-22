@@ -175,6 +175,24 @@ Moving back in a session with `rewind` also puts the project's files back as the
 
 Durable Runtime by default, transient with `--runtime transient`; history kept on disk in the state folder; the local working environment; context compaction; model selection; commands; questions; the terminal and ACP Interfaces. Approval, subagents and guardrails are not in the standard set, as in Pi.
 
+## Telemetry
+
+`ma` uses the SDK's [metadata-only telemetry profile](../telemetry.md) and sets `gen_ai.agent.name` to `ma`. It exports no session content and writes no disclosure markers. It does not enable GenAI content capture or export logs through this profile.
+
+Export is off unless the operator sets an OTLP endpoint. `ma` MUST NOT fall back to the OpenTelemetry default endpoint. It reads these variables from its launch environment, not project settings:
+
+| Variable | Effect |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base OTLP endpoint for traces and inference metrics. For HTTP, append `v1/traces` or `v1/metrics` as the OTLP rules specify. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Override the base endpoint for that signal. Use a signal-specific HTTP URL as supplied. Without a base or signal-specific endpoint, do not export that signal. An empty value is unset. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | OTLP transport. `ma` supports `http/protobuf` (default) and `grpc`. `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` and `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` override it for each signal. |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TIMEOUT` | Export request headers and timeout in milliseconds. The corresponding `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`, `OTEL_EXPORTER_OTLP_METRICS_HEADERS` and `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` override these per signal. Never copy headers into telemetry payloads or diagnostics. |
+| `OTEL_SERVICE_NAME` | Resource `service.name`, default `ma`. It does not change the agent name. |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | OpenTelemetry trace sampling. Default `parentbased_always_on`; `always_off` records no spans. The argument applies only to samplers that take one. Metrics do not depend on trace sampling. |
+| `OTEL_SDK_DISABLED` | `true` disables telemetry recording and export, even with endpoints set. |
+
+Use the [OpenTelemetry SDK environment rules](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/) and the [OTLP exporter rules](https://opentelemetry.io/docs/specs/otel/protocol/exporter/) for these values. Do not enable baggage or take additional attributes from project settings. Export failure does not change turn outcomes. The declaration reports support whether export is on or off.
+
 ## What it declares
 
 With the durable Runtime on Linux, every implementation declares the same values, so a client sees the same agent whichever is installed. With `--runtime transient`, `continuesAfterRestart` and `waitingThroughRestart` are false.
@@ -190,6 +208,7 @@ With the durable Runtime on Linux, every implementation declares the same values
 | `rewinding` | true when the session's project is in a git work tree ([rewind points](#rewind-points)); false otherwise |
 | `forking`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true | | `commandContainment` | `strong` on Linux; `processGroup` on macOS, where a process that leaves its command's process group is not stopped |
 | `confinesFiles`, `severalActors`, `sessionLimits`, `holdsOutput`, `outputBypassesAgent`, `cancellingTurnCancelsJobs`, `pluginsDuringSession`, `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | false | | `projectRoot` | omitted |
+| `telemetry` | `1`, independent of export |
 
 `tenants` is false unless the operator's [policy](#connection-policy-and-limits) names tenants; then `ma` enables those tenants' buckets and applies each connection's tenant reach, and a connection with no tenant list still reaches only sessions without a tenant.
 
@@ -218,3 +237,5 @@ Each implementation passes:
 - the [reference checks](../../conformance/reference/README.md), which run `ma` with a scripted model and look only at its output and its effects on files;
 - the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp`, and with `--connect` against `ma --acp --listen`;
 - its own tests, including that it depends only on its SDK's public API.
+
+Planned reference check, not yet counted: `telemetry-export`. Run a scripted turn without endpoints and check that it sends nothing to the default OTLP endpoint. With a loopback endpoint and always-on sampler, check the invocation and inference spans, `gen_ai.agent.name=ma`, configured `service.name` and no content. Repeat with `OTEL_SDK_DISABLED=true`; export stops and the declaration stays the same.

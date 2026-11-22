@@ -5,6 +5,7 @@ This binding defines the HTTP wire for keeping ordered JSON records. The service
 ## The basics
 
 - The service MUST authenticate every request, including `GET /v1`, using a bearer token with at least 128 bits of entropy or mutual TLS. A bearer token MUST be sent as `Authorization: Bearer <token>` and compared in constant time.
+- A request MAY carry W3C `traceparent` and optional `tracestate` headers. A participating service extracts them after authentication; absent, invalid or unknown context does not change the operation. This adds no endpoint or declaration and records remain opaque. See [Context on the wire](../telemetry.md#context-on-the-wire).
 - Clients and services MUST follow [Security's TLS rule](../security.md#authentication-on-each-wire). For the plaintext exception the client MUST require a numeric address in `127.0.0.0/8` or `::1`, with the service listening only on loopback. A client MUST NOT forward credentials to redirects. Peers MUST NOT log credentials or lease values.
 - One credential authorizes raw reads, creation, append and erasure for every session, including authority records. It grants write trust, not just observation. Operators MUST share a service only among trusted writers and MUST NOT give its credentials to read-only observers. A `/1` service does not authorize projects or tenants. To isolate raw records between trust scopes, the operator MUST use separate service instances, credentials and backing namespaces. Neither a project query nor a tenant entry partitions a service. The operator MUST assign a session's store from trusted configuration, not from a client or project, and MUST NOT give a writer a route to a raw namespace it is not trusted to read and change.
 - A nonempty body MUST be one UTF-8 JSON object with media type `application/json`, using the [shared JSON rules](data.md#general-rules). Responses MUST use that media type, including errors and `{}`. Senders MUST omit `Content-Encoding`. The service MUST reject request bodies over 64 MiB of actual body bytes.
@@ -159,6 +160,8 @@ The base authentication, paths, error order, media type and body limit apply. Th
 The client MUST check `GET /v1` before use and refuse a binding it does not speak. The service MUST use the declared `ttlMs` for grants and renewals. Absent or null `retention` disables expiry. Otherwise the service MUST treat the session as expired at operation lookup when it has no current lease and the declared interval since its last metadata or entry change has elapsed. An expired session and its cursors are unknown; its ID stays reserved. Sweeps reclaim storage, not authority. Expiry does not confirm erasure or reset usage.
 
 ## Changes
+
+- **2026-11-22.** Allow optional W3C trace context headers per authenticated request.
 
 - **2026-11-21.** Add the optional `pendingErasure: 1` profile for durable pending marks, guarded appends and leased completion without changing the base binding version.
 

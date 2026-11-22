@@ -318,6 +318,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 - The declaration MUST reflect the rules below and use the more restrictive value when behavior varies within the scope being declared.
 - The declaration MUST set `inputKeys: true` and `pluginsDuringSession: false`.
 - The declaration MUST set `continuesAfterRestart: true` when `waitingThroughRestart` is true.
+- An agent that supports the [metadata-only telemetry profile](telemetry.md) MUST declare `telemetry: 1`. Omission makes no claim. The optional key reports support, not whether telemetry is sampled or exported. Peers ignore a key they do not recognize.
 - The agent MUST refuse unsupported capabilities with no applicable fallback. The wire names and defaults are in [ACP](bindings/acp.md#the-declaration).
 
 ### Plugins and capabilities

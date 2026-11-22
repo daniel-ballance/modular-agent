@@ -33,6 +33,8 @@ The agent MUST advertise `loadSession: true` and `sessionCapabilities.list`, `.r
 
 ### Metadata
 
+In `/1` and `/2`, work requests that take `params._meta` MAY carry W3C `traceparent` and optional `tracestate` directly in it, not under `"modular-agent"`. Absent, invalid or unknown trace metadata does not change the operation. Do not reuse `initialize` context for work. See [Context on the wire](../telemetry.md#context-on-the-wire).
+
 Peers MUST use the following fields under `_meta["modular-agent"]` on the indicated messages. Fields marked optional are omitted when not applicable. For an update the namespace is on the ACP update payload (`params.update`); for a `/2` failed prompt it is under `error.data._meta`.
 
 | Field | Where | Type and values |
@@ -91,8 +93,9 @@ An agent MUST send every non-optional key and use only the values below. The ses
 | `confinesFiles` (optional) | boolean | File operations refuse paths resolving outside the project after symlinks. Default `false`. |
 | `resourceReservations` (optional) | `{ session, tenant, agent }`; each is `{ inputs, calls, jobs }` of nonnegative [Count](data.md#general-rules). These are the configured ceilings in [Resource reservations](../contracts.md#resource-reservations), not free slots. Omission does not declare reservation enforcement. |
 | `nestedToolCalls` (optional) | boolean | A running tool call can start [nested calls](../contracts.md#nested-calls). Default `false`. |
+| `telemetry` (optional) | `1` | Supports the [metadata-only profile](../telemetry.md). Omission makes no claim. |
 
-The table is the ACP projection of the core declaration; binding claims and extra hook names are published separately. In both versions a host MUST reject missing required keys, invalid values and the following inconsistent combinations:
+The table is the ACP projection of the core declaration; binding claims and extra hook names are published separately. In both versions a host MUST ignore unknown declaration members. An unrecognized `telemetry` value makes no supported profile claim. A host MUST reject missing required keys, other invalid values and the following inconsistent combinations:
 
 | If true | Also required |
 |---|---|
@@ -202,6 +205,8 @@ The agent MUST omit `approval` when no approval plugin is loaded. With the plugi
 
 `session/prompt` admits ACP input with an optional [key](#input-admission). The agent MUST wait for its turn or a terminal no-turn disposition. It MUST return the admission `inputId` except for an erased duplicate. A handled input MUST return `stopReason: "end_turn"` with `disposition: "handled"` and no turn outcome. A hand-back due to cancellation MUST map to `cancelled`. Other hand-backs MUST return `conflict` with `inputId` and `disposition: "handedBack"` in `error.data._meta` in both versions. Cancelling the RPC only detaches its waiter.
 
+A turn takes the trusted [trace context](#metadata) of the input that starts it, even if that input waited. Other queued or steering input does not reparent an active turn.
+
 The agent MUST use the shared [`turnEnd`](data.md#history-entries) outcome and the ACP mapping below. In either version it MUST include `openToolCalls` when the turn left any calls open and omit it otherwise. In the prompt projection `outcome` contains `kind`, `error` (a string only for `failed`), and `limit` (a string only for `limit`). The agent MUST use `"Turn failed"` if a failed outcome has no message.
 
 | Outcome | ACP result |
@@ -259,6 +264,8 @@ The agent MUST apply the [shared size and redaction rules](data.md#output-events
 
 ## Approvals
 
+`session/request_permission` MAY carry the current operation's [trace context](#metadata) in its request metadata. It does not authorize the reply.
+
 The agent MUST use exactly the following options in `session/request_permission`:
 
 ```json
@@ -271,6 +278,8 @@ The agent MUST use exactly the following options in `session/request_permission`
 The permission request MUST show the exact current call name as `toolCall.title` and input as `toolCall.rawInput`, bound to its `toolCallId` and question id. Neither a separate call notice nor a previous gate pass supplies that view. The agent MUST obey [core approval view and route rules](../contracts.md#approval-policy). A valid `allow` permits only the displayed call; valid `refuse` or explicit permission cancellation declines. A failed route cannot displace a valid answer, and this method offers no persistent approval.
 
 ## Questions
+
+An `elicitation/create` request MAY carry the current operation's [trace context](#metadata) where ACP supports `_meta`. It does not change who can answer.
 
 The agent MUST apply the [core question rules](../contracts.md#questions) to eligibility, deadlines and reuse. An approval never outlasts its turn; after a deadline, a later approval check for the exact call uses a fresh request. Presence is not proof of human assent. Standard ACP responses MUST act only as the actor to whom the agent addressed that RPC, on the same authenticated connection. The client MUST NOT override that actor in its reply. The authorization and scope of `actorId` in the extension are in [Several actors](#several-actors).
 
@@ -296,6 +305,8 @@ The agent MUST apply the [core cancellation deadline](../contracts.md#parts-that
 ## Extension methods
 
 Each extension request MUST include `sessionId`. These four methods MUST be listed in `extensions` and implemented. Identifiers are nonempty strings. Optional fields are omitted unless supplied; `null` is allowed only where shown.
+
+Extension work requests MAY carry the [optional request metadata](#metadata). `input` follows the starting-input rule in [Prompts](#prompts). History replies never carry stored trace context.
 
 | Method | Params beyond `sessionId` | Result |
 |---|---|---|
@@ -343,6 +354,8 @@ An ACP `Entry` is a recipient projection of a [shared history entry](data.md#his
 | Other kinds | No `data` |
 
 The agent MUST omit credential values, Provider-private state, working-environment points and launch details from this view. An unknown kind retains its envelope only.
+
+Omit `turnStart.data.traceContext` and project `modular-agent.turnTrace` with its envelope only. Do not expose private trace context in replay or entries.
 
 The agent MUST use shared [Content](data.md#content) for `message.content`, `data.content`, handed-back input and proposals. It MUST preserve text, image `data` and `mimeType`, readable reasoning text, and tool-call `id`, `name` and `arguments`, subject to the gate. It MUST omit opaque reasoning and Provider data anywhere in that projection. A host MAY ignore unknown part types. For rendering ACP chunks, the agent MUST convert text and images to the matching ACP block, render readable reasoning only as thoughts, and leave other parts to their explicit tool or application mapping. For admission a plain string MUST become one text part. The agent MUST convert recognized ACP text and image blocks to the matching shared parts. It MUST reject other blocks unless handled by the declared ACP capabilities or the pinned ACP resource rules. The same normalization applies to both input methods.
 
@@ -419,6 +432,8 @@ An agent participating in the shared-erasure check MUST take its authoritative t
 The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 
 ## Changes
+
+- **2026-11-22.** Allow optional W3C context in work request metadata in both versions. Add `telemetry: 1` to the declaration; keep stored context out of history views.
 
 - **Proposed production rules.** Stdio scope and an optional rights ceiling, connection-local configured representation, and scope checks on attached operations and delivery. Declare reservation ceilings and report capacity refusals without an admission receipt. Erasure reports distinguish pending from confirmed deletion.
 

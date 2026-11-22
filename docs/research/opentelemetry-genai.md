@@ -33,3 +33,18 @@ The seconds histogram [`gen_ai.client.operation.duration`](https://github.com/op
 - **W3C.** [Trace Context](https://www.w3.org/TR/trace-context/) defines `traceparent` as version, trace ID, parent span ID and flags. Reject invalid IDs, including all-zero IDs. Optional `tracestate` carries vendor state. Neither header is for identifiable or sensitive data. A trust boundary can restart the trace. [Baggage](https://www.w3.org/TR/baggage/) is separate application metadata and can disclose sensitive values.
 
 The [OpenTelemetry trace API](https://opentelemetry.io/docs/specs/otel/trace/api/#span-creation) inherits the trace ID from a valid parent. A link alone can point into any trace and does not inherit the ID. Resume needs a saved parent context as well as a link if the resumed span is to stay in the trace and explicitly point back.
+
+## Language APIs and export
+
+Current non-prerelease API packages checked **2026-11-22**. These are not project dependency pins.
+
+| Language | Package and checked version | Primary source for registration |
+|---|---|---|
+| Rust | [`opentelemetry` 0.33.1](https://index.crates.io/op/en/opentelemetry) | The [API crate](https://github.com/open-telemetry/opentelemetry-rust/blob/opentelemetry-0.33.1/opentelemetry/Cargo.toml) exposes [`global::set_tracer_provider`](https://github.com/open-telemetry/opentelemetry-rust/blob/opentelemetry-0.33.1/opentelemetry/src/global/trace.rs). |
+| TypeScript | [`@opentelemetry/api` 1.10.0](https://registry.npmjs.org/@opentelemetry%2fapi/latest) | The API exposes [tracer provider](https://github.com/open-telemetry/opentelemetry-js/blob/main/api/src/api/trace.ts) and [context manager](https://github.com/open-telemetry/opentelemetry-js/blob/main/api/src/api/context.ts) registration. |
+| Go | [`go.opentelemetry.io/otel` v1.47.0](https://proxy.golang.org/go.opentelemetry.io/otel/@latest), [`trace`](https://proxy.golang.org/go.opentelemetry.io/otel/trace/@latest) and [`metric`](https://proxy.golang.org/go.opentelemetry.io/otel/metric/@latest) at the same version | [`otel.SetTracerProvider`](https://pkg.go.dev/go.opentelemetry.io/otel@v1.47.0#SetTracerProvider). |
+| Python | [`opentelemetry-api` 1.45.2](https://pypi.org/project/opentelemetry-api/1.45.2/) | [`opentelemetry.trace.set_tracer_provider`](https://github.com/open-telemetry/opentelemetry-python/blob/v1.45.2/opentelemetry-api/src/opentelemetry/trace/__init__.py). |
+
+The [SDK environment specification](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/) defines `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` and `OTEL_SDK_DISABLED`. The [OTLP exporter specification](https://opentelemetry.io/docs/specs/otel/protocol/exporter/) defines the shared `OTEL_EXPORTER_OTLP_*` variables and their per-signal overrides. OTLP/HTTP appends the signal path to the shared endpoint, not to a signal-specific URL.
+
+[OTLP/HTTP JSON](https://opentelemetry.io/docs/specs/otlp/#json-protobuf-encoding) is a wire format, not a required exporter option. The exporter specification makes `http/json` optional. For example, the checked [Go](https://github.com/open-telemetry/opentelemetry-go/blob/v1.47.0/exporters/otlp/otlptrace/otlptracehttp/client.go) and [Python](https://github.com/open-telemetry/opentelemetry-python/blob/v1.45.2/exporter/opentelemetry-exporter-otlp-proto-http/src/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py) OTLP/HTTP exporters encode spans as binary Protobuf. The shared check can use a JSON exporter confined to test fixtures without requiring JSON export in `ma`.

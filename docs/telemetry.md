@@ -58,11 +58,13 @@ Only use checkpoints for the interrupted, non-copied turn in its original sessio
 
 ## No content
 
-Version 1 records no content. Telemetry MUST NOT include prompts, instructions, completion or reasoning text, tool definitions, arguments or results, question or answer bodies, history payloads, raw errors or arbitrary tags. Never record secret values, credentials, tokens, launch environment values or authorization headers. Apply this before the OpenTelemetry API, not just in an exporter filter, and do not enable raw capture in underlying instrumentation as a way around it. Span names use registered, vetted names only. Omit an unsafe suffix and never use request text as a fallback. Because nothing from the record leaves through telemetry, the exporter is not a copy that erasure must report.
+Version 1 records no content. Telemetry MUST NOT include prompts, instructions, completion or reasoning text, tool definitions, arguments or results, question or answer bodies, history payloads, raw errors or arbitrary tags. Never record secret values, credentials, tokens, launch environment values or authorization headers. Apply this before the OpenTelemetry API, not just in an exporter filter, and do not enable raw capture in underlying instrumentation as a way around it. Span names use registered, vetted names only. Omit an unsafe suffix and never use request text as a fallback. Because no record content leaves through telemetry, the exporter is not a copy that erasure must report. Version 1 writes no disclosure markers.
 
 ## Conformance checks
 
-Install an OpenTelemetry SDK with an always-on test sampler and an in-memory exporter. Use a scripted Provider, deterministic tools, fixture barriers and a controlled store. No collector or live model is needed. The check can assert:
+The [shared SDK check](sdk/testing.md#shared-telemetry-check) uses OTLP/HTTP JSON to compare exports across languages. For local checks, use an in-memory exporter.
+
+Install an OpenTelemetry SDK with an always-on test sampler. Use a scripted Provider, deterministic tools, fixture barriers and a controlled store. No collector or live model is needed. The check can assert:
 
 - The declaration is independent of export. Without an SDK, work still settles. A failing exporter cannot change effects, commitments or outcomes.
 - Parentage, kinds, names and attributes match the mapping. Include a failed attempt and retry, overlapping nested calls, a job, an open question, an uncertain commit, a lease renewal and a wait. A manual metric reader checks one duration measurement per attempt and no duplicate token accounting.

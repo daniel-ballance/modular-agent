@@ -241,7 +241,8 @@ The host and Runtime MUST write the shapes and visibility shown. Associations be
 | `inputAccepted` | Host | No | `actorId`, `jobId?`, `inputId`; `key?: Id`, `when: "now" \| "steer" \| "after" \| "propose"`, `releasedBy?: Id`, `submittedBy?: Id` (defaults to actor), `parked?: boolean` (initial disposition for job reports; see [Job reports](#job-reports)), `taken?: "now" \| "after" \| "inTurn" \| "proposed"` (original receipt if known), `content: Content`, `authorizers?: Authorizer[]`, `rights?: Rights` |
 | `inputHandedBack` | Host | No | `inputId`; `reason?: "withdrawn" \| "declined" \| "cancelled" \| "restart" \| "conflict" \| "handled" \| "turnEnded"`; legacy batch: `inputIds: Id[]` instead of `inputId` |
 | `input` | Host | Yes | `turnId`, `actorId`, `jobId?`, `inputId`; `message: Message` with role `user`, `key?: Id` |
-| `turnStart` | Host | No | `turnId`, `continuesTurnId?`; `startedBy: { kind: "actor" \| "job" \| "plugin" \| "answer", id: Id }`, `model: ModelRef \| null`, `system: string`, `context?: Content`, `tools: ToolDefinition[]`, `settings: TurnSettings`, `resultShape?: Schema`, `point?: Id`, `authorizers?: Authorizer[]`, `rights?: Rights`, `sources?: Id[]` for history carried in `system` or `context` |
+| `turnStart` | Host | No | `turnId`, `continuesTurnId?`; `startedBy: { kind: "actor" \| "job" \| "plugin" \| "answer", id: Id }`, `model: ModelRef \| null`, `system: string`, `context?: Content`, `tools: ToolDefinition[]`, `settings: TurnSettings`, `resultShape?: Schema`, `traceContext?: TraceContext`, `point?: Id`, `authorizers?: Authorizer[]`, `rights?: Rights`, `sources?: Id[]` for history carried in `system` or `context` |
+| `modular-agent.turnTrace` | Host | No | `turnId`; `traceContext: TraceContext` |
 | `modelRequest` | Host | No | `stepId`, `turnId?`; `model: ModelRef`, `safeToRepeat: boolean`, `tools: Id[]` (final offered names), `auxiliary?: true` (absent for step attempts), `tracksStepAfter?: true` (see [Recording order and ownership](#recording-order-and-ownership)), `request?: ModelRequest` (absent if not repeatable or legacy), `sources?: Id[]` for history carried in the request |
 | `response` | Runtime; host for its requests and bookkeeping settlements | Yes for steps except bookkeeping aborts | `stepId`, `turnId?`; `message: Message` with role `assistant`, `recovery?: true` (bookkeeping abort) |
 | `toolStarted` | Host | No | `toolCallId`, `turnId?`, `stepId?`, `actorId`; `call: ToolCall`, `source: { plugin: Id, toolSource: Id }`, `definition: ToolDefinition` (see legacy fallback below), `safeToRepeat: boolean`, `openWorld?: boolean` (defaults to true), `point?: Id` (out-of-turn only), `authorizers?: Authorizer[]`, `rights?: Rights` |
@@ -272,10 +273,13 @@ Outcome is exactly one of `{ kind: "completed" }`, `{ kind: "cancelled" }`, `{ k
 
 A private kind MUST have a dot in its name, be namespaced by its writer and be non-model-visible in a portable session. A reader MUST keep private records. Portable reconstruction MUST NOT depend on their meaning.
 
+`TraceContext` is `{ traceparent: string, tracestate?: string }` in W3C format. These two fields are private Harness metadata, not content or authority. A legacy reader keeps the unknown field and dotted kind as inert data. Readers that recognize them ignore invalid context without rejecting otherwise valid history. The usual envelope and topology checks still apply. See [Restart](../telemetry.md#restart).
+
 ### Recording order and ownership
 
 - The host MUST assign `id`, `parentId`, `sessionId`, `time`, `turnId` where applicable, and `writer` itself for `host/runtime/record`. The [plugin binding](plugin.md#runtime-records-and-effects) defines which drafts it accepts and how it returns a matching committed result. The host commits the checked `toolResult` before replying to `host/runtime/runToolCall`; a later `tool.after` callback returns the cached hook outcome. The in-process Runtime invokes `tool.after` itself and commits the result before the next step, as in [Contracts](../contracts.md#recovery-and-repeating-work).
 - The Harness MUST commit the admitted input before taking it. After the before-turn hook, it MUST commit `turnStart` and, for a turn started by an admission, its first `input` in that order in one batch. It MUST keep steering input before the next model request it affects. It MUST record `turnEnd` last, except for questions and calls explicitly left open for continuation. Other session records can be interleaved. Hand-backs of untaken steering follow [Input](../contracts.md#input).
+- For a durable turn under the [telemetry profile](../telemetry.md#restart), include the initial span's own valid context in `turnStart.data.traceContext`. Before resuming effects, commit each new valid segment context as `modular-agent.turnTrace` with the same `turnId` and `modelVisible: false`. Without valid context there is no new checkpoint. Only the Harness writes these fields.
 - For every model attempt, the Harness MUST record the tool names from the final effective request in `modelRequest.data.tools`, in request order, including `[]` for no tools. An agent-executed call from a response whose name was not offered MUST be settled as `refused` with reason `not offered`, regardless of the current catalog. A legacy request without `data.tools` proves no offer. The Harness MUST NOT dispatch a call without recorded proof of its offer; an ambiguous prior dispatch still follows [core recovery](../contracts.md#recovery-and-repeating-work).
 - For a portable repeatable attempt the host MUST record the final effective request and model without credentials. If it cannot keep the exact request, it MUST omit it and set `safeToRepeat: false`. The host MUST list carried history in `modelRequest.sources` and history carried in `turnStart.system` or `context` in `turnStart.sources`, even after transforms. Unknown lineage is not verifiably erasable. A response settles one attempt by step ID and scope. It MUST list the `modelRequest` it copies in `sources`.
 - The Harness MUST record `data.auxiliary: true` for an [auxiliary attempt](../contracts.md#hook-execution).
@@ -313,6 +317,8 @@ The Harness MUST use the standard kinds and preserve append order.
 
 A fork MUST begin with a display-only prefix copied from the chosen source branch in branch order. The Harness MUST omit erased payloads from the prefix and relink retained parents. Each copied entry MUST use a new destination ID and `sources: [originEntryId]`. The fork header supplies the origin session. The Harness MUST consistently remap links within the prefix, using `data.summarizes` for a copied summary's effective context sources. It MUST write current tenant, actors (including departures), settings and limit as fresh destination records without a source. A fresh `plugins` record ends setup. The Harness MUST publish the prefix and setup together. The reader MUST use copied entries only for display and context, not authority, usage or live work. Live-work association validation does not apply inside the copied prefix. The reader MUST identify the copied prefix before fresh setup as the leading run of entries with origin `sources`, including tombstones. It MUST also keep legacy sourceless tombstones in that leading run. Their provenance is unresolved. The Harness MUST NOT use them to confirm complete erasure.
 
+When copying history, omit `modular-agent.turnTrace` records and strip `turnStart.data.traceContext`. Relink across omitted checkpoints without changing the order of retained entries.
+
 ### Setup records
 
 For a newly created empty session, the Harness MUST hold setup entries provisionally until the first admission, with `tenant` first if present. It MUST append those entries in their original order and with their original times before the first `inputAccepted`. An unused session that closes leaves no setup record. [History HTTP](history-http.md#sessions) defines when to create the service record.
@@ -334,6 +340,8 @@ For a newly created empty session, the Harness MUST hold setup entries provision
 | Question | `inputRequest` | At most one `secretAnswerAccepted` for a secret and one `inputAnswer` with matching scope |
 | Job | `jobStarted` | `jobCleanupUnconfirmed`, one `jobEnded` and at most one report admission |
 
+A `modular-agent.turnTrace` is a normal private entry for branch topology. It does not settle a turn or affect recovery eligibility.
+
 Bootstrap actor IDs can name newly configured principals. The reader MUST NOT infer a principal or skip a revocation.
 
 ### Session state
@@ -348,11 +356,14 @@ Bootstrap actor IDs can name newly configured principals. The reader MUST NOT in
 | Job keys | The reader MUST index live keyed starts and keyed start tombstones by owning plugin and key within the session. For a tombstone it uses `writer`, `jobKey` and `jobId`. See [Jobs](../contracts.md#jobs) for the duplicate reply. |
 | Jobs | The reader MUST pair by job ID and treat a start without an end as unfinished. It MUST keep cleanup unconfirmed from `jobCleanupUnconfirmed` until that job's `jobEnded`, regardless of branch or owner connection. Current job and report rights, including the legacy `watch` fallback, are in [Authority](../contracts.md#authority). |
 | Plugins | The Harness MUST compare the recorded plugin set by name and origin, not order. [Plugins and capabilities](../contracts.md#plugins-and-capabilities) defines when to record the active set. [Configuration and trust](../contracts.md#configuration-and-trust) defines which plugins to load. |
+| Trace context | For an interrupted turn in its original session and trust scope, take the latest valid committed context in branch order, starting with `turnStart.data.traceContext`. Ignore copied, erased, invalid and off-branch checkpoints and checkpoints for other turns. |
 | Erasure | The Harness MUST reconcile [pending erasure](../contracts.md#cross-session-coordination) before rescheduling work. An `erasure` entry lists targets and preserves key reservations; it does not itself confirm tombstones or completion in other sessions. It MUST protect authority and branch-control records and `jobCleanupUnconfirmed` from erasure. It MUST preserve accounting under [Entry fields and tombstones](#entry-fields-and-tombstones). It MUST erase all admissions, release records and consumption for an erased input, following the [copy rules](../contracts.md#erasure). It MUST settle any affected live work before erasing data needed to recover it. A tombstoned terminal record still settles any work identifiable from its remaining associations. If a question or answer is erased, its counterpart MUST NOT authorize reuse. An incomplete lifecycle whose erased content prevents reliable reconstruction MUST NOT be replayed. |
 
 The Harness MUST NOT reopen an unfinished job under a different owner name. The [plugin binding](plugin.md#jobs) maps the [core job rules](../contracts.md#jobs) to callbacks. Portable history does not attest that a newly installed program with the same name is the same code; that trust is the operator's responsibility.
 
 ### Context and interrupted work
+
+- No model view may include trace context or trace checkpoints. If the interrupted turn has no valid saved context, recovery proceeds without a saved parent. With instrumentation it starts a new trace. The [profile](../telemetry.md#restart) defines how to use a saved parent and link. A checkpoint never authorizes recovery.
 
 - The default view MUST use current-branch model-visible messages, skipping tombstones and private records. It MUST append the current turn's `turnStart.data.system` additions to the base system prompt, with one newline between them when both are nonempty. This binding does not prescribe a base prompt. A context handler MAY project a different view.
 - Before applying summaries, the default view MUST place each included turn's `turnStart.data.context`, when present, as one `user` message at the original first `input` position, just before the input, with the `turnStart` entry ID as its effective source. Without a first input position there is no separate context message. Replacing that `turnStart` removes its context message; replacing the first input alone does not. The reader MUST NOT synthesize or re-anchor context after replacement.
@@ -402,6 +413,8 @@ The Harness MUST use this journal when restoring a point:
 While an intent is unresolved, the Harness MUST block project work and keep other entries from interleaving with the journal. It MUST resume project work only once the target or undo restore has established the files at the head and the matching completion is committed. A missing point or a partial restore is not evidence of completion. A legacy `data.failed: true` record MUST NOT clear that block.
 
 ## Changes
+
+- **2026-11-22.** Add optional Harness trace context on turn start and a private segment checkpoint for recovery. Exclude both from fork copies and model views.
 
 - **Proposed production rules.** `capacity` uses the existing `limit` outcome. Erasure records preserve key reservations but do not prove deletion.
 

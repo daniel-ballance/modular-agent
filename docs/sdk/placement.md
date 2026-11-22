@@ -32,7 +32,7 @@ A plugin moves into its own process without changing its code:
 1. **Serve it.** A plugin program's entry point calls `serve(plugin)`. That one call speaks the binding on stdio: it answers the handshake with the plugin's registration, routes requests to its tools, Provider, hooks and the rest, and passes each request's context through as host callbacks. `serve` refuses an [in-process-only plugin](api.md#plugins) with `not_supported`.
 2. **Load it.** The agent names the program in `processPlugins`: `{ command: ["python", "tides.py"], env?, config? }`. The command is an argument vector, never a shell line. The program can be written with any SDK, or without one.
 
-A child process starts with the minimal environment the binding requires, plus the `env` the developer approved; it does not inherit the agent's.
+A child process starts with the minimal environment the binding requires, plus the `env` the developer approved; it does not inherit the agent's. Trace context crosses this boundary per operation only after the [plugin handshake](../bindings/plugin.md#starting-the-handshake) agrees to it. A plugin that exports spans installs its own OpenTelemetry SDK and exporter. Starting it does not copy the host's exporter settings.
 
 A nonempty `processPlugins` or `servicePlugins` list enables plugin hosting. An embedded agent with neither can opt in with `pluginHost: true`. An explicit `pluginHost: false` with either nonempty list raises `invalid_composition`. A program that claims the plugin-host role, such as an agent served over ACP, enables plugin hosting even if it has no explicit lists.
 
