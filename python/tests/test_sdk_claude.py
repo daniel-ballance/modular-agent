@@ -1,7 +1,11 @@
 """The Claude Provider speaks the Python Agent SDK's message types."""
 
+import asyncio
+from importlib import import_module
+from types import SimpleNamespace
+
 from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock, ToolUseBlock
-from modular_agent import ModelRef, ProviderContext
+from modular_agent import ModelFailure, ModelRef, ProviderContext
 from modular_agent.claude import claude
 from modular_agent.fixtures import tide
 import pytest
@@ -41,6 +45,12 @@ class ClaudeFixture:
             ],
         }
 
+    async def set_model(self, model):
+        assert model == "claude-sonnet-5-5"
+
+    async def get_context_usage(self):
+        return {"rawMaxTokens": 234_567}
+
     async def query(self, prompt):
         self.prompts.append([message async for message in prompt])
 
@@ -49,13 +59,100 @@ class ClaudeFixture:
             yield message
 
 
-async def test_claude_declines_metered_account():
-    fixture = ClaudeFixture({"subscriptionType": "max", "apiKeySource": "user"})
+@pytest.mark.parametrize(
+    ("account", "reason"),
+    [
+        ({"subscriptionType": "max", "apiKeySource": "user"}, "API key from user"),
+        ({}, "not signed in to a Claude plan"),
+    ],
+)
+async def test_claude_reports_why_it_cannot_use_a_plan(account, reason):
+    fixture = ClaudeFixture(account)
     provider = claude(client_factory=fixture)
     assert not await provider.available()
-    assert "API key from user" in provider.unavailable_reason
+    assert reason in provider.unavailable_reason
+    assert not await provider.available()
     assert fixture.prompts == []
-    assert fixture.closed == 1
+    assert len(fixture.options) == 1
+
+
+async def test_claude_readiness_and_request_do_not_wait_for_model_windows():
+    model = "claude-sonnet-5-5"
+    reading_window = asyncio.Event()
+    finish_window = asyncio.Event()
+
+    class SlowDiscovery(ClaudeFixture):
+        async def get_context_usage(self):
+            reading_window.set()
+            await finish_window.wait()
+            return await super().get_context_usage()
+
+    fixture = SlowDiscovery(callers=[[ResultMessage("success", 5, 5, False, 1, "s")]])
+    provider = claude(client_factory=fixture)
+
+    async def emit(piece):
+        pytest.fail(f"Unexpected piece: {piece}")
+
+    before = provider.models()
+    try:
+        # The gate, not an elapsed-time comparison, keeps discovery unfinished.
+        async with asyncio.timeout(2):
+            assert await asyncio.gather(provider.available(), provider.available()) == [True, True]
+            await reading_window.wait()
+            assert provider.unavailable_reason is None
+            assert provider.models() == before
+            assert len(fixture.options) == 1
+            response = await provider.request(
+                ModelRef("claude", model), {}, ProviderContext("s", None, emit, lambda: None)
+            )
+            assert response["stop"] == "finished"
+            assert fixture.closed == 1  # Only the request has closed.
+            assert await provider.available()
+    finally:
+        finish_window.set()
+    await provider.refresh()  # Join the running discovery; do not start another probe.
+    [reported] = provider.models()
+    assert reported["id"] == model
+    assert reported["contextWindow"] == 234_567
+    assert len(fixture.options) == fixture.closed == 2
+
+
+async def test_claude_rechecks_only_after_credentials_fail_or_explicit_refresh(monkeypatch):
+    clock = SimpleNamespace(monotonic=lambda: 0)
+    monkeypatch.setattr(import_module("modular_agent.claude"), "time", clock, raising=False)
+    model = "claude-sonnet-5-5"
+    fixture = ClaudeFixture(
+        callers=[
+            [ResultMessage("success", 5, 5, False, 1, "s")],
+            [AssistantMessage([], model, error="authentication_failed")],
+        ]
+    )
+    provider = claude(client_factory=fixture)
+    assert await provider.available()
+    clock.monotonic = lambda: 61
+    assert await provider.available()
+    assert len(fixture.options) == 1
+
+    async def emit(piece):
+        pytest.fail(f"Unexpected piece: {piece}")
+
+    context = ProviderContext("s", None, emit, lambda: None)
+    assert (await provider.request(ModelRef("claude", model), {}, context))["stop"] == "finished"
+    assert await provider.available()
+    assert len(fixture.options) == 2
+    with pytest.raises(ModelFailure) as failure:
+        await provider.request(ModelRef("claude", model), {}, context)
+    assert failure.value.error["kind"] == "credentials"
+    fixture.account = {}
+    assert not await provider.available()
+    assert "not signed in to a Claude plan" in provider.unavailable_reason
+    assert await provider.available() is False
+    assert len(fixture.options) == 4
+    fixture.account = {"subscriptionType": "max", "apiKeySource": "none"}
+    await provider.refresh()
+    assert await provider.available()
+    assert provider.unavailable_reason is None
+    assert len(fixture.options) == 5
 
 
 @pytest.mark.parametrize(
@@ -154,6 +251,7 @@ async def test_claude_uses_reported_catalog_and_passes_stream_pieces():
     )
     provider = claude(client_factory=fixture)
     assert len(provider.models()) > 1
+    await provider.refresh()
     assert await provider.available()
     assert [m["id"] for m in provider.models()] == [model]
     received = []

@@ -7,7 +7,6 @@ from hashlib import sha256
 import json
 import os
 import tempfile
-import time
 from typing import Any, cast
 from uuid import uuid4
 
@@ -435,58 +434,92 @@ class Claude(ProviderCatalog):
         self._enrolled = {m if isinstance(m, str) else m["id"] for m in models or ()}
         self._client = client
         self._models = self._catalog.infos
-        self._probe_lock = asyncio.Lock()
-        self._checked_at: float | None = None
+        self._ready: asyncio.Future[bool] | None = None
+        self._checking: asyncio.Task[None] | None = None
         self.unavailable_reason: str | None = None
 
     def models(self) -> list[ModelInfo]:
         return deepcopy(list(self._models.values()))
 
     async def available(self) -> bool:
-        async with self._probe_lock:
-            if self._checked_at is None or time.monotonic() - self._checked_at >= 60:
-                await self._probe()
-                self._checked_at = time.monotonic()
-            return self.unavailable_reason is None
+        if self._ready is None:
+            self._start_probe()
+        assert self._ready is not None
+        # Cancelling one caller must not interrupt the shared check.
+        return await asyncio.shield(self._ready)
 
-    async def _probe(self) -> None:
+    async def refresh(self) -> None:
+        """Recheck the account and wait for its catalog, joining a probe already in progress."""
+        if self._ready is None or self._checking is None or self._checking.done():
+            self._start_probe()
+        assert self._checking is not None
+        await asyncio.shield(self._checking)
+
+    def _start_probe(self) -> None:
+        ready = asyncio.get_running_loop().create_future()
+        self._ready = ready
+        self._checking = asyncio.create_task(self._probe(ready))
+
+    def _reported_models(self, info: dict[str, Any]) -> dict[str, ModelInfo]:
+        found: dict[str, ModelInfo] = {}
+        for row in info.get("models") or []:
+            model = row.get("resolvedModel") or row.get("value")
+            if not isinstance(model, str) or not model.startswith("claude-") or model in found:
+                continue
+            if model in self._catalog.infos:
+                found[model] = deepcopy(self._catalog.infos[model])
+            else:
+                found[model] = ModelInfo(
+                    provider=self.id,
+                    id=model,
+                    contextWindow=200_000,
+                    maxOutput=32_000,
+                    input=["text", "image"],
+                    reasoning=False,
+                )
+            found[model]["name"] = row.get("displayName") or model  # type: ignore[typeddict-unknown-key]
+        return found
+
+    async def _probe(self, ready: asyncio.Future[bool]) -> None:
+        found: dict[str, ModelInfo] = {}
         try:
             with tempfile.TemporaryDirectory(prefix="modular-claude-") as directory:
                 async with asyncio.timeout(30), self._client(options=_options(directory)) as client:
+                    # Entering the client starts Claude Code and initializes it.
+                    # Server info is that cached response, not another exchange.
                     info = await client.get_server_info() or {}
+                    if ready is not self._ready:
+                        return
                     self.unavailable_reason = _account_reason(info)
+                    ready.set_result(self.unavailable_reason is None)
                     if self.unavailable_reason:
                         return
-                    found: dict[str, ModelInfo] = {}
-                    for row in info.get("models") or []:
-                        model = row.get("resolvedModel") or row.get("value")
-                        if (
-                            not isinstance(model, str)
-                            or not model.startswith("claude-")
-                            or model in found
-                        ):
-                            continue
-                        if model in self._catalog.infos:
-                            found[model] = deepcopy(self._catalog.infos[model])
-                        else:
-                            found[model] = ModelInfo(
-                                provider=self.id,
-                                id=model,
-                                contextWindow=200_000,
-                                maxOutput=32_000,
-                                input=["text", "image"],
-                                reasoning=False,
-                            )
-                        found[model]["name"] = row.get("displayName") or model  # type: ignore[typeddict-unknown-key]
-                    if found:
-                        found.update(
-                            {m: self._catalog.infos[m] for m in self._enrolled if m not in found}
-                        )
-                        if found != self._models:
-                            self._models = found
-                            self.changed()
+                    found = self._reported_models(info)
+                    for model in found.values():
+                        if ready is not self._ready:
+                            return
+                        try:
+                            await client.set_model(model["id"])
+                            window = (await client.get_context_usage()).get("rawMaxTokens")
+                            if type(window) is int and window > 0:
+                                model["contextWindow"] = window
+                        except Exception:
+                            # Keep the built-in window if Claude Code cannot report one.
+                            pass
         except Exception:
-            self.unavailable_reason = f"Could not check Claude Code's account. {_SIGN_IN}"
+            if not ready.done():
+                self.unavailable_reason = f"Could not check Claude Code's account. {_SIGN_IN}"
+                ready.set_result(False)
+        finally:
+            if not ready.done():
+                # The event loop stopped before the account check completed.
+                self._ready = None
+                ready.cancel()
+        if ready is self._ready and found:
+            found.update({m: self._catalog.infos[m] for m in self._enrolled if m not in found})
+            if found != self._models:
+                self._models = found
+                self.changed()
 
     async def request(
         self, model: ModelRef, request: JsonObject, context: ProviderContext
@@ -527,11 +560,9 @@ class Claude(ProviderCatalog):
                 )
                 response = _Response(context, names)
                 async with self._client(options=options) as client:
-                    self.unavailable_reason = _account_reason(await client.get_server_info() or {})
-                    if self.unavailable_reason:
-                        raise ModelFailure(
-                            {"kind": "credentials", "message": self.unavailable_reason}
-                        )
+                    reason = _account_reason(await client.get_server_info() or {})
+                    if reason:
+                        raise ModelFailure({"kind": "credentials", "message": reason})
                     await client.query(_input(request))
                     async for msg in client.receive_messages():
                         if isinstance(msg, StreamEvent) and msg.parent_tool_use_id is None:
@@ -542,7 +573,14 @@ class Claude(ProviderCatalog):
                                 return response.finish("toolUse")
                         elif isinstance(msg, ResultMessage):
                             return await response.result(msg)
-        except ModelFailure:
+        except ModelFailure as exc:
+            if exc.error["kind"] == "credentials":
+                self.unavailable_reason = exc.error["message"]
+                # Recheck on the next availability call. An older probe must
+                # not publish a catalog after the request learned this.
+                ready, self._ready = self._ready, None
+                if ready is not None and not ready.done():
+                    ready.set_result(False)
             raise
         except Exception:
             raise ModelFailure(
