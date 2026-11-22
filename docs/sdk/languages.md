@@ -46,6 +46,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Streams are the boxed `EventStream`, so `StreamExt::next` works on them without pinning. An unboxed `impl Stream` made the guide's own loop fail to compile.
 - Data types own their data and implement `Serialize`, `Deserialize`, `Clone` and `Debug`.
 - Minimum Rust version: the one pinned in `rust/mise.toml`. Edition 2024.
+- Subscription Providers: `chatgpt(ChatGptOptions::new(subscription_logins(path)))`, given to `AgentBuilder::provider`. `sign_in` and `sign_out` are async; `SignInOptions::paste` is an optional Tokio receiver of pasted lines. `AgentBuilder::claude_provider(claude(ClaudeOptions::default())?)` starts the Claude program as a process plugin; it needs Node.js 22 or later.
 
 ## TypeScript
 
@@ -59,6 +60,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Use `defineProvider` to get `changed()`. `agent.refreshModels()` explicitly refreshes served catalogs.
 - ACP's `compose(project, saved?)` takes an optional `SessionInfo`. `projectSettings(project)` and `projectMcp(project)` may be async. The stdio actor id comes from `actorId`, then `MODULAR_AGENT_ACTOR`, then `acp-user`.
 - No default exports.
+- Subscription Providers come from `@modular-agent/subscription` (`subscriptionLogins(path)`, `chatgpt({ logins, … })`, `signIn("chatgpt", logins, options)`, `signOut`) and `@modular-agent/claude` (`claude(options)`, in process on Anthropic's Agent SDK). The Claude package also has the program the Rust and Go SDKs start.
 
 ## Go
 
@@ -73,6 +75,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Set `Provider.CatalogChanges` to a `*modular.CatalogChanges` and call `Changed()` after updating the catalog. Register hooks with `Registrar.On(point, handler, options...)` or the typed methods; use `HookOrder` for explicit order.
 - Errors are values. `errors.As(err, &modularErr)` gives the code.
 - Minimum Go version: the one pinned in `go/mise.toml`.
+- Subscription Providers are in package `subscription`: `SubscriptionLogins(path)`, `SignIn`, `SignOut`, `ChatGPT` and `Claude`. `Claude` starts the TypeScript Claude program as a process plugin; it needs Node.js 22 or later.
 
 ## Python
 
@@ -89,6 +92,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - A plugin is a `Plugin(name, tools=[…], hooks={…})` or a subclass overriding `setup`.
 - Every public function and type is fully type-annotated and passes a strict type checker.
 - Minimum Python version: the one pinned in `python/mise.toml`.
+- Subscription Providers: `subscription_logins(path)`, `await sign_in("chatgpt", logins, …)`, `await sign_out("chatgpt", logins)`, `modular_agent.chatgpt.chatgpt(logins=…)`, and `modular_agent.claude.claude(…)` on Anthropic's Python Agent SDK.
 
 ## Packages
 

@@ -56,7 +56,7 @@ Requests and sign-ins name the client to the service: `originator` on ChatGPT re
 - **Sign-in.** OAuth 2.0 with PKCE against `https://auth.openai.com`, client `app_EMoamEEZ73f0CkXaXp7hrann`, scope `openid profile email offline_access`, redirect `http://localhost:1455/auth/callback`; the authorize address also carries `id_token_add_organizations=true`, `codex_cli_simplified_flow=true` and `originator`. The device flow uses `/api/accounts/deviceauth/usercode` and `/api/accounts/deviceauth/token`, with the page `https://auth.openai.com/codex/device`. `account` is the ChatGPT account id from the access token's `https://api.openai.com/auth` claim, `chatgpt_account_id`.
 - **Requests.** The Responses API at `https://chatgpt.com/backend-api/codex/responses`, streamed, `store: false`, with the bearer token, `chatgpt-account-id`, `OpenAI-Beta: responses=experimental`, `originator`, and the session id as both `session-id` and `x-client-request-id`. Encrypted reasoning is requested and kept as `providerData`.
 
-These are the values `ma` uses today; the Rust `provider-responses` crate is the reference for the exact request.
+These are the values `ma` uses through each SDK's `chatgpt` Provider; the Rust SDK is the reference for the exact request.
 
 ## Grok
 
@@ -71,6 +71,6 @@ Not yet decided. [Grok sign-in under The X Subscription](../research/grok-x-subs
 
 ## Checks
 
-Each SDK MUST test offline, against loopback servers or by inspecting the built request: both sign-in flows for `chatgpt` and `grok`, including paste forms, state mismatch and a busy redirect port; the authorize address and request headers, with the default and a configured client identity; refresh under the lock with two concurrent refreshers spending one refresh token; a refused refresh; the file mode check; and model mapping from the shared table. `claude()` is tested against the Agent SDK's fixtures, as the TypeScript sidecar's tests do today.
+Each SDK MUST test offline, against loopback servers or by inspecting the built request: both sign-in flows for `chatgpt` (Grok's checks come with its section), including paste forms, state mismatch and a busy redirect port; the authorize address and request headers, with the default and a configured client identity; refresh under the lock with two concurrent refreshers spending one refresh token; a refused refresh; the file mode check; and model mapping from the shared table. `claude()` is tested against the Agent SDK's fixtures, as the TypeScript sidecar's tests do today.
 
 [Live checks](testing.md#live-checks) for subscriptions run only with `MODULAR_AGENT_LIVE=1` and `MODULAR_AGENT_LIVE_LOGINS` naming a login file, and skip each Provider without a login (for `claude`, without a Claude Code sign-in). They make one short request per Provider and never sign in.
