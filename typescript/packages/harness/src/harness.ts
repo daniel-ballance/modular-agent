@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { activeOperation, carrier, conversation, currentSpan, observeInference, readTrace, safeName, startOperation, telemetryEvent, toolAttributes, type Operation } from "./telemetry.js";
+import { activeOperation, carrier, conversation, currentSpan, historyForPeer, observeInference, readTrace, safeName, startOperation, telemetryEvent, toolAttributes, TURN_TRACE, withTrace, type Operation } from "./telemetry.js";
 import { Reservations, resourceBytes, reservationLimits, type ReservationOptions } from "./reservations.js";
 import { memoryPendingErasure, type ErasureIntent, type ErasurePlan, type HistoryErasureRegistry, type PendingErasure } from "./erasure.js";
 import { addAbortListener } from "node:events";
@@ -1268,7 +1268,7 @@ export class Harness {
 				case "input": case "inputAccepted": case "inputHandedBack":
 					add("input", inputIdOf(entry)); add("job", entry.jobId); break;
 				case "turnStart": add("input", inputId); add("turn", entry.turnId); break;
-				case "modular-agent.turnTrace": add("turn", entry.turnId); break;
+				case TURN_TRACE: add("turn", entry.turnId); break;
 				case "turnEnd":
 					add("turn", entry.turnId); break;
 				case "modelRequest": case "response":
@@ -2225,7 +2225,7 @@ export class Harness {
 	private savedTrace(s: Session, turnId: string) {
 		for (const entry of s.branch().reverse()) {
 			if (entry.turnId !== turnId || entry.erased || s.copied.has(entry.id) || entry.writer !== "harness" ||
-				(entry.kind !== "turnStart" && entry.kind !== "modular-agent.turnTrace")) continue;
+				(entry.kind !== "turnStart" && entry.kind !== TURN_TRACE)) continue;
 			const saved = readTrace((entry.data as { traceContext?: unknown } | undefined)?.traceContext);
 			if (saved) return saved;
 		}
@@ -2298,13 +2298,13 @@ export class Harness {
 
 	private async resumeTurn(s: Session, interrupted: InterruptedTurn, startedBy: QueuedInput["startedBy"], signal: AbortSignal, snapshot?: Partial<TurnSnapshot> & { resultShape?: Record<string, unknown> }): Promise<void> {
 		const turnId = interrupted.turnId;
-		if (!this.runtime()?.supports.continuesAfterRestart) return this.resumeTurnWithin(s, interrupted, startedBy, signal, snapshot);
+		if (!this.runtime()?.supports.continuesAfterRestart) return withTrace(undefined, () => this.resumeTurnWithin(s, interrupted, startedBy, signal, snapshot));
 		const saved = this.savedTrace(s, turnId);
 		const span = this.turnSpan(s, turnId, saved ?? null, true);
 		try {
 			await span.run(async () => {
 				const traceContext = carrier(span.spanContext);
-				if (traceContext) await this.commit(s, [{ kind: "modular-agent.turnTrace", writer: "harness", turnId, modelVisible: false, data: { traceContext } }]);
+				if (traceContext) await this.commit(s, [{ kind: TURN_TRACE, writer: "harness", turnId, modelVisible: false, data: { traceContext } }]);
 				await this.resumeTurnWithin(s, interrupted, startedBy, signal, snapshot);
 			});
 		} finally { span.end(); }
@@ -3938,7 +3938,7 @@ const PROVISIONAL_SETUP = new Set(["tenant", "actorJoined", "actorLeft", "settin
 const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting inputAccepted inputHandedBack input turnStart modelRequest response toolStarted toolPending toolResult inputRequest secretAnswerAccepted inputAnswer resultFeedback modular-agent.stepAfter turnEnd summary position erasure jobStarted jobCleanupUnconfirmed jobEnded plugins".split(" "));
 
 function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () => string): HistoryEntry[] {
-	const kept = branch.filter((e) => !e.erased && e.kind !== "position" && e.kind !== "modular-agent.turnTrace");
+	const kept = branch.filter((e) => !e.erased && e.kind !== "position" && e.kind !== TURN_TRACE);
 	const entries = new Map(kept.map((e) => [e.id, makeId()]));
 	const associations = new Map<string, Map<string, string>>();
 	const remap = (kind: string, id: string) => {
@@ -3949,8 +3949,7 @@ function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () =>
 	};
 	let parentId: string | null = null;
 	return kept.map((old) => {
-		const e: HistoryEntry = { ...structuredClone(old), id: entries.get(old.id)!, parentId, sessionId, sources: [old.id] };
-		if (e.kind === "turnStart" && e.data && typeof e.data === "object") delete (e.data as Record<string, unknown>).traceContext;
+		const e: HistoryEntry = { ...structuredClone(historyForPeer(old)), id: entries.get(old.id)!, parentId, sessionId, sources: [old.id] };
 		if (e.turnId) e.turnId = remap("turn", e.turnId);
 		if (e.continuesTurnId) e.continuesTurnId = remap("turn", e.continuesTurnId);
 		if (e.stepId) e.stepId = remap("step", e.stepId);

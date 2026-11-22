@@ -1,4 +1,4 @@
-import { carrier, currentSpan, readTrace, withTrace } from "@modular-agent/harness/telemetry";
+import { carrier, currentSpan, historyForPeer, readTrace, withTrace } from "@modular-agent/harness/telemetry";
 import { Readable, Writable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { type AgentApp, type AgentContext, type Stream, agent, methods, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
@@ -448,7 +448,7 @@ export class AcpInterface implements InterfaceCapability {
 			const max = 4 * 1024 * 1024;
 			let bytes = Buffer.byteLength('{"entries":[]}');
 			for (let i = at + 1; i < Math.min(raw.length, at + 1 + limit); i++) {
-				const entry = raw[i];
+				const entry = historyForPeer(raw[i]);
 				const request = entry.kind === "inputRequest" ? (entry.data as { request?: InputRequest } | undefined)?.request : undefined;
 				const view = request && await this.requestView(request);
 				const projected = view ? { ...entry, data: { request: view } } : entry;
