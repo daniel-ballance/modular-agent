@@ -34,6 +34,7 @@ mod provider;
 mod runtime;
 mod serve;
 mod session;
+mod subscription_logins;
 pub mod testing;
 mod tool;
 
@@ -88,6 +89,7 @@ pub use session::{
     PromptInput, PromptOptions, PromptResult, Proposal, ReleaseOptions, Rights, Session, Timing,
     ToolResult,
 };
+pub use subscription_logins::*;
 pub use tool::{
     Answer, Ask, AskWait, CommandOutput, NestedTools, Tool, ToolBuilder, ToolContext,
     ToolEnvironment, ToolOutput, ToolStatus,

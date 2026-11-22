@@ -1,150 +1,52 @@
-//! The credential store of the standard configuration: one file, `auth.json`,
-//! readable only by its owner. It keeps a sign-in per Provider (an OAuth token
-//! set or an API key) and the named secrets a person gave in answer to a
-//! question. Providers refresh their own tokens through [`AuthFile::current`],
-//! which holds a lock across processes so two agents never spend the same
-//! refresh token.
+//! The standard configuration's named credentials and staging journal in the
+//! same file that the SDK uses for subscription logins.
 use anyhow::{Result, anyhow, ensure};
-use serde::{Deserialize, Serialize};
-use std::{
-    fs::File,
-    io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
-};
+use modular_agent::{LoginContents, SecretJournal, SubscriptionLogins, subscription_logins};
+use std::{collections::BTreeMap, path::PathBuf};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Login {
-    Oauth {
-        access: String,
-        refresh: String,
-        /// Milliseconds since the epoch, already brought forward by the refresh margin.
-        expires: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        account: Option<String>,
-    },
-    ApiKey {
-        key: String,
-    },
-}
-impl Login {
-    /// What a request presents.
-    pub fn secret(&self) -> &str {
-        match self {
-            Self::Oauth { access, .. } => access,
-            Self::ApiKey { key } => key,
-        }
-    }
-    pub fn expired(&self) -> bool {
-        matches!(self, Self::Oauth { expires, .. } if *expires <= now_ms())
-    }
-}
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct Contents {
-    #[serde(default)]
-    logins: std::collections::BTreeMap<String, Login>,
-    #[serde(default)]
-    answers: std::collections::BTreeMap<String, String>,
-    #[serde(
-        default,
-        skip_serializing_if = "modular_agent::SecretJournal::is_empty"
-    )]
-    staging: modular_agent::SecretJournal,
-}
+pub use modular_agent::{Login, now_ms};
 
 #[derive(Clone)]
 pub struct AuthFile {
     pub path: PathBuf,
     /// Names that are Provider sign-ins, never the target of a secret answer.
     pub providers: Vec<String>,
+    logins: SubscriptionLogins,
 }
-struct Locked(File);
-impl Drop for Locked {
-    fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.0);
-    }
+
+type Answers = BTreeMap<String, String>;
+
+fn member<T: serde::de::DeserializeOwned + Default>(
+    contents: &LoginContents,
+    name: &str,
+) -> Result<T> {
+    contents.extra.get(name).map_or_else(
+        || Ok(T::default()),
+        |v| {
+            serde_json::from_value(v.clone())
+                .map_err(|_| anyhow!("invalid {name} in the credential file"))
+        },
+    )
 }
+
 impl AuthFile {
     pub fn new(path: PathBuf, providers: &[&str]) -> Self {
+        let logins = subscription_logins(&path);
         Self {
             path,
+            logins,
             providers: providers.iter().map(|p| p.to_string()).collect(),
         }
     }
-    fn read(&self) -> Result<Contents> {
-        match std::fs::read(&self.path) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)
-                .map_err(|_| anyhow!("{} is not a valid credential file", self.path.display()))?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Contents::default()),
-            Err(e) => Err(e.into()),
-        }
-    }
-    fn write(&self, contents: &Contents) -> Result<()> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| anyhow!("credential file has no directory"))?;
-        std::fs::create_dir_all(parent)?;
-        let temporary = parent.join(format!(".auth-{}.tmp", uuid::Uuid::new_v4()));
-        let result: Result<()> = (|| {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temporary)?;
-            file.write_all(&serde_json::to_vec_pretty(contents)?)?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &self.path)?;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
-            File::open(parent)?.sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result.map_err(|_| anyhow!("the credential file could not be written"))
-    }
-    fn lock(&self) -> Result<Locked> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| anyhow!("credential file has no directory"))?;
-        std::fs::create_dir_all(parent)?;
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(self.path.with_extension("lock"))?;
-        fs2::FileExt::lock_exclusive(&file)?;
-        Ok(Locked(file))
-    }
-    /// Operator use, as `ma auth` and `ma login` do. Plugins get a sign-in
-    /// from their own bounded sign-in handle.
+
     pub fn login(&self, provider: &str) -> Result<Option<Login>> {
-        Ok(self.read()?.logins.remove(provider))
+        self.logins.login(provider)
     }
-    /// Operator use.
+
     pub fn set_login(&self, provider: &str, login: Option<Login>) -> Result<()> {
-        let _lock = self.lock()?;
-        let mut contents = self.read()?;
-        match login {
-            Some(login) => contents.logins.insert(provider.into(), login),
-            None => contents.logins.remove(provider),
-        };
-        self.write(&contents)
+        self.logins.set_login(provider, login)
     }
-    /// The Provider's current sign-in, refreshed first when it has expired.
-    /// `refresh` runs with the file locked against other agents, on the value
-    /// read under that lock, so a token another process just refreshed is used
-    /// instead of being spent again.
+
     pub async fn current<F, Fut>(
         &self,
         provider: &str,
@@ -155,28 +57,31 @@ impl AuthFile {
         F: FnOnce(Login) -> Fut,
         Fut: std::future::Future<Output = Result<Login>>,
     {
-        let needs_refresh = |login: &Login| {
-            login.expired()
-                || matches!(login, Login::Oauth { access, .. } if Some(access.as_str()) == rejected)
-        };
-        let missing = || anyhow!("not signed in to {provider}; run `ma login {provider}`");
-        let login = self.login(provider)?.ok_or_else(missing)?;
-        if !needs_refresh(&login) {
-            return Ok(login);
-        }
-        let this = self.clone();
-        let lock = tokio::task::spawn_blocking(move || this.lock()).await??;
-        let login = self.login(provider)?.ok_or_else(missing)?;
-        if !needs_refresh(&login) {
-            return Ok(login);
-        }
-        let fresh = refresh(login).await?;
-        let mut contents = self.read()?;
-        contents.logins.insert(provider.into(), fresh.clone());
-        self.write(&contents)?;
-        drop(lock);
-        Ok(fresh)
+        self.logins.current(provider, rejected, refresh).await
     }
+
+    fn change<T>(
+        &self,
+        change: impl FnOnce(&mut SecretJournal, &mut Answers) -> Result<T>,
+    ) -> Result<T> {
+        self.logins.update(|contents| {
+            let mut staging = member::<SecretJournal>(contents, "staging")?;
+            let mut answers = member::<Answers>(contents, "answers")?;
+            let result = change(&mut staging, &mut answers)?;
+            contents
+                .extra
+                .insert("answers".into(), serde_json::to_value(answers)?);
+            if staging.is_empty() {
+                contents.extra.remove("staging");
+            } else {
+                contents
+                    .extra
+                    .insert("staging".into(), serde_json::to_value(staging)?);
+            }
+            Ok(result)
+        })
+    }
+
     fn answer_name(&self, name: &str) -> Result<()> {
         ensure!(
             !name.is_empty()
@@ -192,13 +97,10 @@ impl AuthFile {
         );
         Ok(())
     }
-}
 
-impl AuthFile {
     pub fn answer(&self, name: &str) -> Result<String> {
         self.answer_name(name)?;
-        self.read()?
-            .answers
+        member::<Answers>(&self.logins.read()?, "answers")?
             .remove(name)
             .ok_or_else(|| anyhow!("no credential named {name}"))
     }
@@ -209,12 +111,7 @@ impl AuthFile {
 
     pub fn put_answer(&self, name: &str, value: &str) -> Result<()> {
         self.answer_name(name)?;
-        let _lock = self.lock()?;
-        let mut contents = self.read()?;
-        contents
-            .staging
-            .replace(&mut contents.answers, name, Some(value.into()))?;
-        self.write(&contents)
+        self.change(|staging, answers| Ok(staging.replace(answers, name, Some(value.into()))?))
     }
 }
 
@@ -241,32 +138,25 @@ impl modular_agent::CredentialStore for AuthFile {
         value: &str,
     ) -> modular_agent::Result<()> {
         self.answer_name(&receipt.name)?;
-        let _lock = self.lock()?;
-        let mut contents = self.read()?;
-        contents.staging.stage(receipt, value)?;
-        Ok(self.write(&contents)?)
+        Ok(self.change(|staging, _| Ok(staging.stage(receipt, value)?))?)
     }
     fn lookup_staged(
         &self,
         request: &modular_agent::SecretRequest,
     ) -> modular_agent::Result<Option<modular_agent::StagingReceipt>> {
-        Ok(self.read()?.staging.lookup(request))
+        Ok(member::<SecretJournal>(&self.logins.read()?, "staging")?.lookup(request))
     }
     fn activate(
         &self,
         request: &modular_agent::SecretRequest,
     ) -> modular_agent::Result<modular_agent::Activation> {
-        let _lock = self.lock()?;
-        let mut contents = self.read()?;
-        let decision = contents.staging.activate(request, &mut contents.answers)?;
-        self.write(&contents)?;
-        Ok(decision)
+        Ok(self.change(|staging, answers| Ok(staging.activate(request, answers)?))?)
     }
     fn discard(&self, request: &modular_agent::SecretRequest) -> modular_agent::Result<()> {
-        let _lock = self.lock()?;
-        let mut contents = self.read()?;
-        contents.staging.discard(request);
-        Ok(self.write(&contents)?)
+        Ok(self.change(|staging, _| {
+            staging.discard(request);
+            Ok(())
+        })?)
     }
     fn writable(&self) -> bool {
         true
@@ -279,6 +169,7 @@ impl modular_agent::CredentialStore for AuthFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -290,6 +181,7 @@ mod tests {
         let auth = AuthFile::new(dir.path().join("auth.json"), &["openai-codex", "xai"]);
         let fixture = include_bytes!("../tests/fixtures/auth.json");
         std::fs::write(&auth.path, fixture).unwrap();
+        std::fs::set_permissions(&auth.path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(auth.answer("named-answer").unwrap(), "fixture");
         assert!(auth.put_answer("xai", "refused").is_err());
         auth.set_login("openai-codex", auth.login("openai-codex").unwrap())
@@ -331,7 +223,8 @@ mod tests {
             }
         };
         let a = auth.current("xai", None, refresh.clone());
-        let b = auth.current("xai", Some("before"), refresh);
+        let other = AuthFile::new(auth.path.clone(), &["xai"]);
+        let b = other.current("xai", Some("before"), refresh);
         let (a, b) = tokio::join!(a, b);
         assert_eq!(a.unwrap(), b.unwrap());
         assert_eq!(observed.load(Ordering::SeqCst), 1);

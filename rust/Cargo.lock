@@ -944,13 +944,11 @@ name = "credentials-auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fs2",
  "modular-agent",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -2655,6 +2653,7 @@ dependencies = [
  "feature-model",
  "feature-prompt",
  "feature-questions",
+ "fs2",
  "futures-util",
  "history-fs",
  "history-http",
