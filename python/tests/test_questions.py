@@ -259,7 +259,10 @@ async def test_interrupted_question_reasked_only_by_durable_runtime(
     try:
         await a.session("open", session=sid)
         ui = await interface(h, sid)
-        if runtime_kind == "durable":
+        repeats = (
+            runtime_kind == "durable" and h.plugins["local"].declarations["stops_commands_on_crash"]
+        )
+        if repeats:
             await until(lambda: any(e["kind"] == "input_request_opened" for e in seen))
             q = (await a.call("questions", "list", {"session": sid}))[0]
             await ui.call(
@@ -270,7 +273,10 @@ async def test_interrupted_question_reasked_only_by_durable_runtime(
         await a.call("runtime", "wait", {"session": sid})
         qs = await a.call("questions", "list", {"session": sid})
         assert len(qs) == 1
-        assert bool(qs[0].get("closed")) == (runtime_kind == "transient")
+        assert bool(qs[0].get("closed")) == (not repeats)
+        assert not qs[0]["answerable"]
+        (result,) = await entries(a, sid, "tool_result")
+        assert result["data"]["status"] == ("completed" if repeats else "outcome_unknown")
         assert (await entries(a, sid, "turn_end"))[-1]["data"]["outcome"] == (
             "completed" if runtime_kind == "durable" else "failed"
         )

@@ -40,6 +40,15 @@ def pid_ready(path):
     return value.endswith("\n") and value.strip().isdecimal() and int(value) > 0
 
 
+def pid_exists(pid):
+    # Signal 0 detects an unreaped process too, on both Linux and macOS.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def dead(pid):
     if sys.platform == "darwin":
         state = subprocess.run(

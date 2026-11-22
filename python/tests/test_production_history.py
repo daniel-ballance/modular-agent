@@ -1,10 +1,47 @@
 """History client tests using scripted HTTP exchanges, without a listener."""
 
 import asyncio
+import sys
+import time
 
 import pytest
 from ma_core import AgentError
-from ma_history.http import HTTPHistory
+from ma_history.http import HTTPHistory, lease_clock
+
+
+@pytest.mark.parametrize(
+    "platform, boottime, expected_clock",
+    [("darwin", None, 6), ("linux", 7, 7), ("freebsd", None, None)],
+)
+def test_writer_clock_and_margin(tmp_path, monkeypatch, platform, boottime, expected_clock):
+    reads = []
+
+    def clock_gettime(clock_id):
+        reads.append(clock_id)
+        return 12.5
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "platform", platform)
+        patch.setattr(time, "CLOCK_MONOTONIC", 6, raising=False)
+        if boottime is None:
+            patch.delattr(time, "CLOCK_BOOTTIME", raising=False)
+        else:
+            patch.setattr(time, "CLOCK_BOOTTIME", boottime, raising=False)
+        patch.setattr(time, "clock_gettime", clock_gettime)
+        patch.setattr(time, "monotonic", lambda: 4.0)
+        patch.delenv("MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS", raising=False)
+        args = ("http://127.0.0.1:8080", tmp_path / "token")
+        if expected_clock is None:
+            with pytest.raises(AgentError, match="Configure MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS"):
+                HTTPHistory(*args)
+            patch.setenv("MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS", "250")
+            assert HTTPHistory(*args).margin == 0.25
+            assert lease_clock() == 4.0
+            assert not reads
+        else:
+            assert HTTPHistory(*args).margin == 0
+            assert lease_clock() == 12.5
+            assert reads == [expected_clock]
 
 
 async def test_history_list_paginates_with_original_filter(tmp_path, monkeypatch):

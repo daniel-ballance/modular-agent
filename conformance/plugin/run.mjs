@@ -816,27 +816,27 @@ await attempt("environment", async () => {
 	// A PID would mean nothing if the environment has its own PID namespace.
 	const heartbeatCommand = (f) => `for i in $(seq 600); do printf . >> ${f}; sleep 0.1; done`;
 	const heartbeatSize = (f) => statSync(f, { throwIfNoEntry: false })?.size ?? 0;
-	// A nonmatching platform does not claim containment here.
+	// A nonmatching platform does not claim containment here. Only a strong
+	// claim is tested with a setsid escapee; macOS keeps the child in the group.
 	const containment = containmentOn(reg.workingEnvironment, process.platform);
-	const beat = join(work, `cancel-${randomUUID()}`);
-	const loop = heartbeatCommand(beat);
-	// Only strong containment promises to stop a descendant that leaves its group.
-	const command = containment === "strong" ? `setsid bash -c '${loop}' & wait` : `(${loop}) & wait`;
-	const s = p.request("env/exec", { cwd: work, sessionId: "s1", command }, 20000);
-	for (let i = 0; i < 100 && heartbeatSize(beat) === 0; i++) await sleep(50);
-	const beforeCancel = heartbeatSize(beat);
+	const cancelBeat = join(work, `cancel-${randomUUID()}`);
+	const loop = heartbeatCommand(cancelBeat);
+	const child = containment === "strong" ? `setsid bash -c '${loop}'` : `(${loop})`;
+	const s = p.request("env/exec", { cwd: work, sessionId: "s1", command: `${child} >/dev/null 2>&1 & wait` }, 20000);
+	for (let i = 0; i < 100 && heartbeatSize(cancelBeat) === 0; i++) await sleep(50);
+	const beforeCancel = heartbeatSize(cancelBeat);
 	const t0 = Date.now();
 	p.cancel(s.id);
 	// Plugin binding: Command lifetime.
 	const cancelled = await s.catch((e) => e);
 	check("env/exec: cancelling answers cancelled or lost within 5 s", beforeCancel > 0 && ["cancelled", "lost"].includes(code(cancelled)) && Date.now() - t0 <= 5000, `heartbeat before cancel: ${beforeCancel}; answer after ${Date.now() - t0} ms`);
-	if (containment !== "none") {
+	if (containment === "strong" || containment === "processGroup") {
 		await sleep(1500);
-		const a = heartbeatSize(beat);
+		const a = heartbeatSize(cancelBeat);
 		await sleep(700);
-		const b = heartbeatSize(beat);
-		const descendant = containment === "strong" ? "a setsid escapee" : "a child in the process group";
-		check(`env/exec: ${containment} containment stops ${descendant}`, beforeCancel > 0 && a >= beforeCancel && a === b, `heartbeat sizes (before cancel, after, later): ${beforeCancel}, ${a}, ${b}`);
+		const b = heartbeatSize(cancelBeat);
+		const scope = containment === "strong" ? "strong containment stops a setsid escapee" : "process-group containment stops an in-group child";
+		check(`env/exec: ${scope}`, beforeCancel > 0 && a >= beforeCancel && a === b, `heartbeat sizes (before cancel, after, later): ${beforeCancel}, ${a}, ${b}`);
 	}
 
 	// Saved points, if the environment offers them.

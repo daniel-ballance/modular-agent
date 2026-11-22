@@ -2,7 +2,6 @@
 
 import asyncio
 from collections import defaultdict
-from pathlib import Path
 
 import pytest
 
@@ -301,7 +300,7 @@ async def test_cancel_job_stops_child_bash_and_session_close_stops_jobs(tmp_path
     finally:
         await h.stop()
         if pid:
-            assert not Path(f"/proc/{pid}").exists()
+            assert dead(pid)
 
 
 async def test_job_usage_enforces_session_budget_and_reports_are_not_commands(agent):

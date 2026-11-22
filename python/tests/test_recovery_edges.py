@@ -153,9 +153,13 @@ async def test_later_parallel_receipt_survives_before_first_result(agent, runtim
     await a.session("close", session=sid)
     await a.session("open", session=sid)
     await a.call("runtime", "wait", {"session": sid})
-    assert attempts == (["first"] if runtime_kind == "durable" else [])
+    repeats = (
+        runtime_kind == "durable" and h.plugins["local"].declarations["stops_commands_on_crash"]
+    )
+    assert attempts == (["first"] if repeats else [])
     results = await entries(a, sid, "tool_result")
     assert [e["call"] for e in results] == [c["id"] for c in calls]
+    assert results[0]["data"]["status"] == ("completed" if repeats else "outcome_unknown")
     assert plain(results[1]["content"]) == "already finished"
     paired(await entries(a, sid))
 
@@ -224,9 +228,12 @@ async def test_gate_reruns_on_safe_recovery(agent, runtime_kind):
     await a.session("close", session=sid)
     await a.session("open", session=sid)
     await a.call("runtime", "wait", {"session": sid})
-    assert checks == ([c["id"]] if runtime_kind == "durable" else [])
-    # The new policy kept the tool from running again, but cannot tell us
-    # how its earlier execution ended.
+    repeats = (
+        runtime_kind == "durable" and h.plugins["local"].declarations["stops_commands_on_crash"]
+    )
+    assert checks == ([c["id"]] if repeats else [])
+    # Neither refusal by the current gate nor unconfirmed cleanup tells us
+    # how the earlier execution ended.
     assert (await entries(a, sid, "tool_result"))[0]["data"]["status"] == "outcome_unknown"
 
 

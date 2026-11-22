@@ -9,6 +9,8 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 from ma_core import Plugin, content, plain
@@ -48,16 +50,27 @@ def save(output, name, data):
     (output / name).write_text(json.dumps(data, indent=2) + "\n")
 
 
-def descendants(pid):
-    result = []
+def process_parents():
+    # Request only PID and PPID. Both macOS and Linux ps support these columns.
+    rows = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
+    return dict(tuple(map(int, row.split())) for row in rows.splitlines())
+
+
+def descendants(pid, parents):
+    children = {pid}
+    while True:
+        more = {child for child, parent in parents.items() if parent in children}
+        if more <= children:
+            return children - {pid}
+        children.update(more)
+
+
+def pid_exists(pid):
     try:
-        children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
-    except FileNotFoundError:
-        return result
-    for child in children:
-        child = int(child)
-        result.extend([child, *descendants(child)])
-    return result
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def validate(output):
@@ -127,7 +140,9 @@ async def demonstrate(output, offline=False, runtime="durable"):
     from ma_runtime import Runtime
     from ma_cli import build
 
-    delegated_root()  # Refuse before inference if command containment is unavailable.
+    if sys.platform != "darwin":
+        # On Linux, refuse before inference if strong containment is unavailable.
+        delegated_root()
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     project = output / "project"
@@ -164,9 +179,10 @@ async def demonstrate(output, offline=False, runtime="durable"):
     a.follow("live-proof", follow)
     try:
         await h.load(Audit(output / "requests.jsonl", provider.name))
+        parents = process_parents()
         for name, plugin in h.plugins.items():
             assert isinstance(plugin, ProcessPlugin)
-            ppid = int(Path(f"/proc/{plugin.pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+            ppid = parents[plugin.pid]
             proof["placements"][name] = {
                 "placement": "process",
                 "pid": plugin.pid,
@@ -205,15 +221,17 @@ async def demonstrate(output, offline=False, runtime="durable"):
         proof["entries"] = (await a.session("get", session=sid))["entries"]
         proof["trace"] = h.trace
     finally:
-        children = descendants(os.getpid())
-        await h.stop()
-        event_file.close()
+        try:
+            children = descendants(os.getpid(), process_parents())
+        finally:
+            await h.stop()
+            event_file.close()
         # The SDK and command watcher also have to be gone, not only plugin PIDs.
         async with asyncio.timeout(5):
-            while any(Path(f"/proc/{pid}").exists() for pid in children):
+            while remaining := sorted(pid for pid in children if pid_exists(pid)):
                 await asyncio.sleep(0.01)
         proof["cleanup"] = True
-        proof["remaining_pids"] = [pid for pid in children if Path(f"/proc/{pid}").exists()]
+        proof["remaining_pids"] = remaining
         save(output, "proof.json", proof)
     return validate(output)
 

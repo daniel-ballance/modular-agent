@@ -14,7 +14,7 @@ from ma_fake import Fake, call, reply
 from ma_harness import Harness
 from ma_process import ProcessPlugin
 from ma_cli import build
-from test_swap import DRIVER_STARTUP, dead, pid_ready, until
+from test_swap import DRIVER_STARTUP, dead, pid_exists, pid_ready, until
 from test_vanilla import entries, paired, run
 
 
@@ -285,7 +285,7 @@ async def test_remote_start_failure_removes_registrations_and_reaps_child():
         await h.load(plugin, process=False)
     assert exc.value.code == "refused"
     assert not h.plugins and not h.capabilities
-    assert not Path(f"/proc/{plugin.pid}").exists()
+    assert not pid_exists(plugin.pid)
     await h.stop()
 
 

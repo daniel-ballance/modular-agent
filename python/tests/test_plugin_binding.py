@@ -12,6 +12,7 @@ from ma_core.wire import entry_out
 
 from ma_fake import Fake, call, reply
 from ma_cli import build
+from test_swap import dead, pid_ready, until
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVE = [str(ROOT / ".venv/bin/modular-agent-plugin")]
@@ -203,8 +204,7 @@ async def test_shared_plugin_loss_settles_unknown_and_stops_nested_command(
             t["name"] for t in await h.api().call("tools", "definitions", {"session": sid})
         ]
         pid = int((tmp_path / "lost-pid").read_text())
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        await until(lambda: dead(pid))
     finally:
         await h.stop()
 
@@ -337,24 +337,26 @@ async def test_served_environment_stops_active_work_on_stdin_eof(tmp_path):
             },
         )
         async with asyncio.timeout(5):
-            assert "result" in json.loads(await process.stdout.readline())
+            registration = json.loads(await process.stdout.readline())["result"]
+        containment = registration["workingEnvironment"]["containment"]
+        # Use an escapee only when the serving environment promises to stop it.
+        child = "setsid sleep 60" if containment == "strong" else "sleep 60"
         send(
             2,
             "env/exec",
             {
                 "cwd": str(tmp_path),
                 "sessionId": "eof-session",
-                "command": "setsid sleep 60 & echo $! > eof-pid; sleep 60",
+                "command": f"{child} & echo $! > eof-pid; wait",
             },
         )
         async with asyncio.timeout(5):
-            while not (tmp_path / "eof-pid").exists():
-                await asyncio.sleep(0.01)
+            await until(lambda: pid_ready(tmp_path / "eof-pid"))
             pid = int((tmp_path / "eof-pid").read_text())
+            assert not dead(pid)
             process.stdin.close()
             await process.wait()
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        await until(lambda: dead(pid))
     finally:
         if process.returncode is None:
             process.kill()
@@ -671,12 +673,15 @@ async def test_recovery_checks_tools_right(tmp_path, monkeypatch, external, tool
         assert result["outcome"] == "completed", result.get("error")
         entries = await a.session("branch", session=sid)
         statuses = [(e["call"], e["data"]["status"]) for e in entries if e["kind"] == "tool_result"]
+        # The local environment does not confirm crash cleanup on macOS. Even
+        # with tools rights, only the call known not to have started can run.
+        repeated = tools_right and h.plugins["local"].declarations["stops_commands_on_crash"]
         assert dict(statuses) == {
-            first["id"]: "completed" if tools_right else "outcome_unknown",
+            first["id"]: "completed" if repeated else "outcome_unknown",
             second["id"]: "completed" if tools_right else "refused",
         }
         assert len(statuses) == 2
-        assert sum(e["kind"] == "tool_started" for e in entries) == (3 if tools_right else 1)
+        assert sum(e["kind"] == "tool_started" for e in entries) == 1 + tools_right + repeated
     finally:
         await h.stop()
 
@@ -811,6 +816,45 @@ async def test_hosted_runtime_checks_outcome_with_a_pending_tool_reply(
         assert observed["result"]["openToolCalls"] == expected_calls
         settlements = [e["toolCallId"] for e in entries if e["kind"] == "toolResult"]
         assert settlements == ([] if expected_calls else [c["id"]])
+    finally:
+        await h.stop()
+
+
+async def test_native_runtime_continues_a_relinquished_wire_tool(
+    tmp_path, monkeypatch, runtime_type
+):
+    spec = {
+        "command": [str(ROOT / ".venv/bin/python"), str(ROOT / "tests/shared_plugin_fixture.py")]
+    }
+    monkeypatch.setenv("MODULAR_AGENT_PLUGINS", json.dumps([spec]))
+    c = call("probe", operation="late-question")
+    h = await build(
+        tmp_path / "state", Fake([reply(calls=[c]), reply("continued")]), runtime=runtime_type()
+    )
+    try:
+        a = h.api()
+        sid = (await a.session("create", project=str(tmp_path), settings={"model": "fake"}))["id"]
+        args = {"session": sid}
+        await a.call("questions", "connect", {**args, "actor": "user"})
+        await a.call("runtime", "submit", {**args, "content": content("start")})
+        (first,) = await a.call("runtime", "wait", args)
+        assert first["outcome"] == "completed" and first["open_calls"] == [c["id"]]
+        (q,) = await a.call("questions", "list", args)
+        await a.call(
+            "questions", "answer", {**args, "actor": "user", "request": q["id"], "value": "blue"}
+        )
+        (later,) = await a.call("runtime", "wait", args)
+        assert later["outcome"] == "completed"
+        es = [entry_out(e) for e in await a.session("branch", **args)]
+        (terminal,) = [e for e in es if e["kind"] == "toolResult"]
+        assert terminal["data"]["status"] == "completed"
+        assert terminal["message"]["content"] == content("blue")
+        starts = [e for e in es if e["kind"] == "toolStarted"]
+        (pending,) = [e for e in es if e["kind"] == "toolPending"]
+        assert pending["data"]["toolStartedId"] == starts[0]["id"]
+        assert [e["turnId"] for e in starts] == [first["turn"], later["turn"]]
+        assert terminal["turnId"] == later["turn"]
+        assert terminal["stepId"] == starts[1]["stepId"] == starts[0]["stepId"]
     finally:
         await h.stop()
 

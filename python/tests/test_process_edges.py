@@ -11,7 +11,7 @@ from ma_fake import Fake, call, reply
 from ma_harness import Harness
 from ma_process import ProcessPlugin
 from ma_cli import build
-from test_swap import dead, pid_ready, until
+from test_swap import dead, pid_exists, pid_ready, until
 from test_vanilla import entries, paired, run
 
 
@@ -168,7 +168,7 @@ async def test_connection_setup_failure_still_reaps_worker(monkeypatch):
     with pytest.raises(OSError, match="setup refused"):
         await h.load(worker, process=False)
     assert not h.plugins
-    assert not Path(f"/proc/{worker.pid}").exists()
+    assert not pid_exists(worker.pid)
     await h.stop()
 
 
@@ -188,7 +188,7 @@ async def test_shutdown_escalation_reaps_exact_uncooperative_worker():
     worker.stop_timeout = 0.05
     await h.load(worker, process=False)
     await asyncio.wait_for(h.stop(), 3)
-    assert not Path(f"/proc/{worker.pid}").exists()
+    assert not pid_exists(worker.pid)
     assert worker.exit_status == -9
 
 

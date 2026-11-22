@@ -247,7 +247,10 @@ class Turns:
                 }
                 by_call.update({e["call"]: e["data"] for e in es if e["kind"] == "tool_call"})
                 calls = [by_call[cid] for cid in resume if cid in by_call]
-                open_calls = await self._tools(sid, turn, "late:" + turn, calls, tools)
+                origin = (queued["data"].get("source") or {}).get("continuesTurnId")
+                open_calls = await self._tools(
+                    sid, turn, "late:" + turn, calls, tools, continuation_of=origin
+                )
             # Replay journal decisions, not model requests or completed effects.
             while not open_calls:
                 tools = await self._definitions(sid)
@@ -725,10 +728,18 @@ class Turns:
     async def _result(self, sid, turn, step, call, answer):
         es = await self._entries(sid)
         if answer.get("open"):
-            await self._record(sid, turn, "tool_deferred", step=step, call=call["id"], data=answer)
+            pending = answer
+            if not pending.get("requestIds") and pending.get("request"):
+                pending = {**answer, "requestIds": [answer["request"]]}
+            await self._record(sid, turn, "tool_deferred", step=step, call=call["id"], data=pending)
             return
         if any(e["kind"] == "tool_result" and e.get("call") == call["id"] for e in es):
             return
+        # An invocation settled without dispatch cannot consume another answer.
+        if answer["status"] == "outcome_unknown" and any(
+            e["kind"] == "question_open" and e.get("call") == call["id"] for e in es
+        ):
+            await self.api.call("questions", "close_call", {"session": sid, "call": call["id"]})
         sources = [
             e["id"]
             for e in es
@@ -769,11 +780,30 @@ class Turns:
             "tool_progress", session=sid, turn=turn, step=step, call=call["id"], text="", final=True
         )
 
-    async def _tools(self, sid, turn, step, calls, tools):
+    async def _tools(self, sid, turn, step, calls, tools, *, continuation_of=None):
         es = await self._entries(sid)
         done = {e.get("call") for e in es if recorded_as(e, "tool_result")}
         receipts = {e["call"]: e["data"] for e in es if e["kind"] == "tool_finished"}
         started = {e["call"]: e for e in es if e["kind"] == "tool_started"}
+        relinquished = {}
+        call_steps = {}
+        if continuation_of is not None:
+            branch = await self.api.session("branch", session=sid)
+            open_ids = {
+                cid
+                for e in branch
+                if e.get("turn") == continuation_of and recorded_as(e, "turn_end")
+                for cid in e["data"].get("open_calls", [])
+            }
+            for e in branch:
+                cid = e.get("call")
+                if (
+                    cid in open_ids
+                    and e.get("turn") == continuation_of
+                    and e["kind"] == "tool_deferred"
+                ):
+                    relinquished[cid] = e["data"].get("toolStartedId")
+                    call_steps[cid] = e.get("step")
 
         async def execute(c):
             recorded = next(
@@ -786,6 +816,10 @@ class Turns:
             if c["id"] in receipts:
                 return receipts[c["id"]]
             old = started.get(c["id"])
+            if old and relinquished.get(c["id"]) == old["id"]:
+                # A pending disposition ends this invocation. It does not cover
+                # a later start or give the continuation new gate authority.
+                old = None
             if not step.startswith("late:"):
                 offered = next(
                     (
@@ -810,7 +844,9 @@ class Turns:
                 if not (was_safe and await self._safe_to_repeat(sid, definition)):
                     return {"status": "outcome_unknown", "content": content(UNKNOWN)}
                 c["input"] = prior.get("call", {}).get("input", c["input"])
-            return await self._tool(sid, turn, step, c, definition, replay=old is not None)
+            return await self._tool(
+                sid, turn, call_steps.get(c["id"], step), c, definition, replay=old is not None
+            )
 
         deferred = {
             e.get("call")
@@ -825,7 +861,7 @@ class Turns:
         opened = [c["id"] for c in calls if c["id"] in deferred - done]
 
         async def record(c, answer):
-            await self._result(sid, turn, step, c, answer)
+            await self._result(sid, turn, call_steps.get(c["id"], step), c, answer)
             require_processed_result(answer)
             if answer.get("open"):
                 opened.append(c["id"])
@@ -926,7 +962,7 @@ class Turns:
                 changed = {**gate["call"], "id": call["id"], "name": call["name"]}
                 if replay and changed["input"] != call["input"]:
                     return unknown
-                await self._record(
+                invocation = await self._record(
                     sid,
                     turn,
                     "tool_started",
@@ -973,7 +1009,7 @@ class Turns:
                     progress,
                 )
                 if answer.get("open"):
-                    return answer
+                    return {**answer, "toolStartedId": invocation["id"]}
                 answer["call"] = call["id"]
             answer = (
                 await self.api.hook(
