@@ -36,11 +36,12 @@ from modular_agent.chatgpt import chatgpt
 from modular_agent.claude import Claude, claude
 from modular_agent.compaction import compaction
 from modular_agent.files import file_tools
+from modular_agent.grok import grok
 from modular_agent.mcp import mcp
 from modular_agent.testing import ScriptedProvider
 
 from .code import code_tool
-from .config import PROVIDER_ALIASES, Paths, chatgpt_overrides, login_file, model_id
+from .config import PROVIDER_ALIASES, Paths, login_file, model_id, subscription_overrides
 from .identity import DEFAULT_CLIENT_IDENTITY, validate_client_identity
 from .prompt import discover, prompt_plugin
 from modular_agent import AcpPolicy
@@ -376,13 +377,17 @@ async def _agent(
         settings.pop("modelTools", None)
         settings["thinking"] = "off"
     else:
-        from .responses import Grok
-
         overrides = paths.config / "models.json"
         chatgpt_provider = chatgpt(
-            logins=auth, models=chatgpt_overrides(overrides), client_identity=args.client_identity
+            logins=auth,
+            models=subscription_overrides(overrides, "chatgpt"),
+            client_identity=args.client_identity,
         )
-        grok_provider = Grok(auth, overrides, client_identity=args.client_identity)
+        grok_provider = grok(
+            logins=auth,
+            models=subscription_overrides(overrides, "grok", use_effort=True),
+            client_identity=args.client_identity,
+        )
         providers.extend([chatgpt_provider, grok_provider])
         claude_provider: Claude | None = None
         if not model and (
@@ -398,7 +403,7 @@ async def _agent(
         ):
             if chatgpt_provider.available():
                 model = "chatgpt/gpt-6.1-sol"
-            elif auth.login("grok"):
+            elif grok_provider.available():
                 model = "grok/grok-4.7"
             else:
                 claude_provider = claude()

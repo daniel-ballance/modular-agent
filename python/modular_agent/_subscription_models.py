@@ -62,7 +62,18 @@ class SubscriptionModels:
             )
             info["provider"] = provider
             info.pop("thinking", None)
-            self.infos[model] = info
+            # Provider-specific constructor options are not catalog fields.
+            self.infos[model] = cast(ModelInfo, {k: v for k, v in info.items() if k != "effort"})
+
+    def set_effort(self, model: str, effort: dict[str, str]) -> None:
+        levels = [level for level in _LEVELS if level in effort]
+        self.levels[model] = {level: {"reasoning": {"effort": effort[level]}} for level in levels}
+        info = self.infos[model]
+        info["reasoning"] = any(level != "off" for level in levels)
+        if levels:
+            info["thinking"] = levels
+        else:
+            info.pop("thinking", None)
 
     def reasoning(self, model: str, request: JsonObject) -> JsonObject:
         settings = request.get("settings")

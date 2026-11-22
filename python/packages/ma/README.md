@@ -29,7 +29,7 @@ By default, ChatGPT requests and browser sign-in use `modular-agent` as the `ori
 
 Set `MA_CLIENT_IDENTITY=my-agent` in the environment that starts `ma` to use another name. The name must be 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. If the variable is set to an invalid name, including an empty string, `ma` reports the error and exits with status 1.
 
-In an agent built on the Python SDK, pass `client_identity` to `modular_agent.chatgpt.chatgpt` and `modular_agent.sign_in`. These options do not read the environment variable. Grok's sign-in and requests remain in `ma`; the SDK does not ship `grok()`.
+`ma` uses the SDK's three subscription Providers. In an agent built on the SDK, pass `client_identity` to `modular_agent.chatgpt.chatgpt(logins=...)`, `modular_agent.grok.grok(logins=...)` or `modular_agent.sign_in(provider, logins, on_step=...)`. These options do not read the environment variable.
 
 ## Code sandbox
 
@@ -46,8 +46,8 @@ When the worker delivers more than 1 MiB of printed output, the call stops and r
 - **Reference:** 24/24, including client identity validation, sandbox limits, ambient access, tool calls and result rendering.
 - **ACP:** 188/188 with `--crash-checks --probe-checks --job-checks`. The standard composition does not declare several actors, tenants or session limits.
 - **WebSocket kits:** 153/153 for the plugin binding, 14/14 for separate-listener isolation, and 193/193 for ACP.
-- **Python suites:** 617 passed and four live checks skipped in each full Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The final focused subscription and alias checks passed 47 tests and skipped four live checks in each combination. The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
-- **Subscriptions:** offline SDK checks cover sign-in, model requests, refresh, reasoning and Claude tools. Product checks cover all former Provider id entry points, including sessions saved before the rename.
+- **Python suites:** 628 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
+- **Subscriptions:** offline SDK checks cover ChatGPT and Grok sign-in, model requests, refresh and reasoning replay, and Claude tool dispatch. Product checks cover client identity and former Provider ids in sign-in, settings, catalog overrides and saved sessions.
 - **Python static checks:** Ruff lint and format checks passed; strict mypy passed.
 
 ```sh
@@ -94,7 +94,7 @@ The newly reachable Provider check also found that Python accepted an unknown `p
 Suggested replacement text. No shared documents were changed.
 
 - **Reference, Rules for every implementation** — replace “One language” with: “Use the implementation language and its SDK. Rust and Go reach Claude through the TypeScript Agent SDK sidecar. Python and TypeScript use Anthropic's Agent SDK for their own language.”
-- **Reference, Providers** — replace “These are the SDK's subscription Providers” through “`ma` adds none of its own” with: “ChatGPT and Claude use the SDK's subscription Providers. Until the SDK specifies Grok sign-in and requests, `ma` keeps its current Grok code under `grok`.” Replace “The Claude Provider is the sidecar” with: “The Claude Provider uses the SDK's language-specific Claude adapter.”
+- **Reference, Providers** — replace “The Claude Provider is the sidecar” with: “The Claude Provider uses the SDK's language-specific Claude adapter.”
 - **Reference, Files** — replace the `models.json` description with: “Catalog additions or replacements. ChatGPT entries use `id`, `contextWindow` and `maxTokens`, and may specify `input`. Shared ChatGPT reasoning mappings cannot be changed by this file. Grok keeps its existing `effort` mapping.”
 
 - **SDK, Durability** — replace the last invalid-composition bullet with: “a Runtime that does not declare `continuesAfterRestart` under `durable`, except in the offline ACP conformance profile when a fixture explicitly replaces the Runtime over the plugin binding and history is persistent. In that case the registered Runtime determines recovery and its declaration.”
