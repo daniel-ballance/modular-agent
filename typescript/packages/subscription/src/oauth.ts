@@ -10,13 +10,17 @@ const codex = { id: "app_EMoamEEZ73f0CkXaXp7hrann", scope: "openid profile email
   authorize: "https://auth.openai.com/oauth/authorize", deviceCode: "https://auth.openai.com/api/accounts/deviceauth/usercode",
   deviceToken: "https://auth.openai.com/api/accounts/deviceauth/token", devicePage: "https://auth.openai.com/codex/device",
   deviceRedirect: "https://auth.openai.com/deviceauth/callback" };
+const xai = { id: "b1a00492-073a-47ea-816f-4c329264a828", scope: "openid profile email offline_access grok-cli:access api:access",
+  token: "https://auth.x.ai/oauth2/token", deviceCode: "https://auth.x.ai/oauth2/device/code" };
 const realEndpoints = { codexToken: codex.token, codexAuthorize: codex.authorize, codexDeviceCode: codex.deviceCode,
-  codexDeviceToken: codex.deviceToken };
+  codexDeviceToken: codex.deviceToken, xaiToken: xai.token, xaiDeviceCode: xai.deviceCode };
 const LOOPBACK = "127.0.0.1";
 const DEVICE_WAIT = 900_000;
 const MARGIN = 300_000;
 export type SignInStep = { kind: "openAndPaste"; url: string } | { kind: "deviceCode"; url: string; code: string } | { kind: "waiting" };
-export type OAuthTestOptions = { endpoints: Partial<typeof realEndpoints>; port?: number; pollUnit?: number };
+export type SubscriptionProviderId = "chatgpt" | "grok";
+type PollClock = { now(): number; wait(ms: number): Promise<void> };
+export type OAuthTestOptions = { endpoints: Partial<typeof realEndpoints>; port?: number; pollUnit?: number; pollClock?: PollClock };
 export interface SignInOptions extends ClientIdentityOptions {
   device?: boolean;
   onStep?(step: SignInStep): void;
@@ -82,32 +86,53 @@ function tokens(body: Fields, previous?: string): OAuth {
   const access = string(body.access_token), refresh = string(body.refresh_token) ?? previous;
   if (!access) throw new Error("the sign-in answer has no access token");
   if (!refresh) throw new Error("the sign-in answer has no refresh token");
-  return { type: "oauth", access, refresh, expires: Math.max(0, Date.now() + count(body.expires_in, 3600) * 1000 - MARGIN),
-    account: chatgptAccount(access) };
+  return { type: "oauth", access, refresh, expires: Math.max(0, Date.now() + count(body.expires_in, 3600) * 1000 - MARGIN) };
+}
+function codexTokens(body: Fields, previous?: string): OAuth {
+  const login = tokens(body, previous);
+  return { ...login, account: chatgptAccount(login.access) };
 }
 
-export function chatgptOAuth(clientIdentity: string, test?: OAuthTestOptions) {
+function endpoints(test?: OAuthTestOptions) {
   const ep = { ...realEndpoints };
   if (test) for (const [k, v] of Object.entries(test.endpoints)) ep[k as keyof typeof ep] = loopback(v);
-  const endpoint = (name: keyof typeof ep) => {
+  return (name: keyof typeof ep) => {
     if (test && !test.endpoints[name]) throw new Error(`missing loopback endpoint ${name}`);
     return ep[name];
   };
+}
+
+async function poll<T>(interval: number, limit: number, attempt: () => Promise<T | "pending" | "slower">, test?: OAuthTestOptions) {
+  const clock = test?.pollClock ?? { now: () => performance.now(), wait };
+  const deadline = clock.now() + limit, unit = test?.pollUnit ?? 1000;
+  for (;;) {
+    await clock.wait(Math.min(interval * unit, Math.max(0, deadline - clock.now())));
+    if (clock.now() >= deadline) throw new Error("the sign-in was not completed in time");
+    const value = await attempt();
+    if (value === "slower") interval += 5;
+    else if (value !== "pending") return value;
+  }
+}
+
+async function refresh(url: string, label: string, clientId: string, parse: typeof tokens, old: OAuth, signal?: AbortSignal): Promise<OAuth> {
+  const [status, body] = await post(url, { grant_type: "refresh_token", refresh_token: old.refresh, client_id: clientId }, false, signal)
+    .catch(() => { throw new ModelFailure({ kind: "temporary", message: `Could not reach the ${label} token endpoint.` }); });
+  if (!ok(status)) {
+    const code = (body.error as { code?: string } | undefined)?.code ?? body.error;
+    const refused = code === "invalid_grant" || status === 401 || status === 403;
+    throw new ModelFailure({ kind: refused ? "credentials" : status >= 500 || status === 429 ? "temporary" : "other",
+      message: refused ? `${label} refused the refresh. Sign in again.` : `${label} refresh failed (HTTP ${status}).` });
+  }
+  return parse(body, old.refresh);
+}
+
+export function chatgptOAuth(clientIdentity: string, test?: OAuthTestOptions) {
+  const endpoint = endpoints(test);
   const exchange = async (code: string, verifier: string, redirect: string) => {
     const [status, body] = await post(endpoint("codexToken"), { grant_type: "authorization_code", client_id: codex.id, code, code_verifier: verifier, redirect_uri: redirect });
     if (!ok(status)) throw new Error(`the ChatGPT sign-in failed (HTTP ${status})`);
-    return tokens(body);
+    return codexTokens(body);
   };
-  async function poll<T>(interval: number, limit: number, attempt: () => Promise<T | "pending" | "slower">) {
-    const deadline = Date.now() + limit, unit = test?.pollUnit ?? 1000;
-    for (;;) {
-      await wait(Math.min(interval * unit, Math.max(0, deadline - Date.now())));
-      if (Date.now() >= deadline) throw new Error("the sign-in was not completed in time");
-      const value = await attempt();
-      if (value === "slower") interval += 5;
-      else if (value !== "pending") return value;
-    }
-  }
   const codexDevice = async (show: (s: SignInStep) => void) => {
     const [status, body] = await post(endpoint("codexDeviceCode"), { client_id: codex.id }, true);
     if (!ok(status)) throw new Error(`ChatGPT device sign-in is not available (HTTP ${status}); use the browser sign-in`);
@@ -128,7 +153,7 @@ export function chatgptOAuth(clientIdentity: string, test?: OAuthTestOptions) {
       if ([403, 404].includes(status) || codeOf === "deviceauth_authorization_pending") return "pending";
       if (codeOf === "slow_down") return "slower";
       throw new Error(`the ChatGPT sign-in failed (HTTP ${status})`);
-    });
+    }, test);
     return exchange(authorization, verifier, codex.deviceRedirect);
   };
   const codexBrowser = async (show: (s: SignInStep) => void, pasted?: SignInOptions["paste"]) => {
@@ -185,31 +210,56 @@ export function chatgptOAuth(clientIdentity: string, test?: OAuthTestOptions) {
     login(device: boolean, show: (s: SignInStep) => void, paste?: SignInOptions["paste"]) {
       return device ? codexDevice(show) : codexBrowser(show, paste);
     },
-    async refresh(old: OAuth, signal?: AbortSignal): Promise<OAuth> {
-      const [status, body] = await post(endpoint("codexToken"), {
-        grant_type: "refresh_token", refresh_token: old.refresh, client_id: codex.id,
-      }, false, signal).catch(() => { throw new ModelFailure({ kind: "temporary", message: "Could not reach the ChatGPT token endpoint." }); });
-      if (!ok(status)) {
-        const code = (body.error as { code?: string } | undefined)?.code ?? body.error;
-        const refused = code === "invalid_grant" || status === 401 || status === 403;
-        throw new ModelFailure({ kind: refused ? "credentials" : status >= 500 || status === 429 ? "temporary" : "other",
-          message: refused ? "ChatGPT refused the refresh. Sign in again." : `ChatGPT refresh failed (HTTP ${status}).` });
-      }
-      return tokens(body, old.refresh);
-    },
+    refresh: (old: OAuth, signal?: AbortSignal) => refresh(endpoint("codexToken"), "ChatGPT", codex.id, codexTokens, old, signal),
   };
 }
 
-export async function signIn(provider: "chatgpt", logins: SubscriptionLogins, options: SignInOptions = {}): Promise<void> {
-  if (provider !== "chatgpt") throw new AgentError("invalid_params", "Only chatgpt supports SDK sign-in");
+export function grokOAuth(clientIdentity: string, test?: OAuthTestOptions) {
+  const endpoint = endpoints(test);
+  return {
+    async login(show: (step: SignInStep) => void) {
+      const [status, device] = await post(endpoint("xaiDeviceCode"), { client_id: xai.id, scope: xai.scope, referrer: clientIdentity });
+      if (!ok(status)) throw new Error(`Starting the Grok sign-in failed (HTTP ${status}).`);
+      const field = (name: string) => {
+        const value = string(device[name]);
+        if (!value) throw new Error(`the Grok sign-in answer has no ${name}`);
+        return value;
+      };
+      const url = string(device.verification_uri_complete) ?? field("verification_uri");
+      if (!url.startsWith("https://") || URL.parse(url)?.protocol !== "https:") throw new Error("the Grok sign-in gave an address that is not https");
+      const code = field("user_code"), device_code = field("device_code");
+      show({ kind: "deviceCode", url, code });
+      show({ kind: "waiting" });
+      return poll<OAuth>(count(device.interval, 5) || 5, count(device.expires_in, 900) * 1000, async () => {
+        const [status, body] = await post(endpoint("xaiToken"), {
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code", client_id: xai.id, device_code,
+        });
+        if (ok(status)) return tokens(body);
+        switch (body.error) {
+          case "authorization_pending": return "pending";
+          case "slow_down": return "slower";
+          case "access_denied": case "authorization_denied": throw new Error("the Grok sign-in was denied");
+          case "expired_token": throw new Error("the Grok sign-in code expired");
+          default: throw new Error(`The Grok sign-in failed (HTTP ${status}).`);
+        }
+      }, test);
+    },
+    refresh: (old: OAuth, signal?: AbortSignal) => refresh(endpoint("xaiToken"), "Grok", xai.id, tokens, old, signal),
+  };
+}
+
+export async function signIn(provider: SubscriptionProviderId, logins: SubscriptionLogins, options: SignInOptions = {}): Promise<void> {
+  if (provider !== "chatgpt" && provider !== "grok") throw new AgentError("invalid_params", "Only chatgpt and grok support SDK sign-in");
   let identity: string;
   try { identity = resolveClientIdentity(options.clientIdentity); }
   catch (error) { throw new AgentError("invalid_params", (error as Error).message); }
-  const login = await chatgptOAuth(identity, options.test).login(!!options.device, options.onStep ?? (() => {}), options.paste);
+  const show = options.onStep ?? (() => {});
+  const login = provider === "grok" ? await grokOAuth(identity, options.test).login(show)
+    : await chatgptOAuth(identity, options.test).login(!!options.device, show, options.paste);
   await logins.setLogin(provider, login);
 }
 
-export async function signOut(provider: "chatgpt", logins: SubscriptionLogins): Promise<void> {
-  if (provider !== "chatgpt") throw new AgentError("invalid_params", "Only chatgpt supports SDK sign-out");
+export async function signOut(provider: SubscriptionProviderId, logins: SubscriptionLogins): Promise<void> {
+  if (provider !== "chatgpt" && provider !== "grok") throw new AgentError("invalid_params", "Only chatgpt and grok support SDK sign-out");
   await logins.setLogin(provider);
 }

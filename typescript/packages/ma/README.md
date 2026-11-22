@@ -17,8 +17,8 @@ npm link --workspace @modular-agent/ma
 The link installs `ma` on npm's global bin path. Remove any other implementation's `ma` link first. The direct Node command above also works without a link. The TypeScript packages have not been published; keep the checkout and its built dependencies when using the link.
 
 ```sh
-ma login chatgpt          # add --device to use a code
-ma login grok                   # device sign-in
+ma login chatgpt               # add --device to use a code
+ma login grok                  # device sign-in
 ma models
 ma -p 'Summarize the files in this folder.'
 ma -c                          # continue the last session in this folder
@@ -28,7 +28,7 @@ ma --acp --listen 127.0.0.1:7401 --token-file /path/to/token  # ACP over WebSock
 
 The WebSocket listener requires a loopback address and an owner-only bearer token file. It acts as `ma`'s local ACP user, irrespective of `MODULAR_AGENT_ACTOR`.
 
-Subscription login writes and refreshes use `auth.lock` next to the private `auth.json`. The lock is shared with the other SDKs. Linux needs util-linux `flock`; macOS uses `/usr/bin/perl` to call `flock(2)`. `ma login claude` runs `claude auth login`. The TypeScript `ma` uses the Claude Agent SDK in process and does not need a sidecar.
+`ma` uses `chatgpt({ logins })` and `grok({ logins })` from `@modular-agent/subscription`. Subscription login writes and refreshes use `auth.lock` next to the private `auth.json`. The lock is shared with the other SDKs. Linux needs util-linux `flock`; macOS uses `/usr/bin/perl` to call `flock(2)`. `ma login claude` runs `claude auth login`. The TypeScript `ma` uses the Claude Agent SDK in process and does not need a sidecar.
 
 `openai-codex` and `xai` still work in `--model`, `ma login`, `ma logout`, `settings.json`, `models.json`, and saved sessions. `ma` moves old login keys to `chatgpt` and `grok` on the next write. If old and new keys coexist, the new key wins. `ma models` prints only the new ids.
 
@@ -45,7 +45,7 @@ ma login chatgpt
 
 Use 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. An empty or invalid value makes `ma` name `MA_CLIENT_IDENTITY` on stderr and exit with status 1.
 
-For another app, pass `clientIdentity` to `chatgpt({ logins, clientIdentity })` and `signIn("chatgpt", logins, { clientIdentity, onStep })` from `@modular-agent/subscription`. The SDK does not read `MA_CLIENT_IDENTITY`. The identity is a label, not a credential or a sign-in client ID. Grok sign-in and requests remain in `ma` until the SDK specification settles them.
+For another app, use `chatgpt({ logins, clientIdentity })` and `signIn("chatgpt", logins, { clientIdentity, onStep })`, or `grok({ logins })` and `signIn("grok", logins, { clientIdentity, onStep })`. Grok sends the identity only when starting the sign-in. The SDK does not read `MA_CLIENT_IDENTITY`. The identity is a label, not a credential or a sign-in client ID.
 
 ## Code sandbox
 
@@ -66,7 +66,7 @@ npm ci --prefix conformance/acp
 npm ci --prefix conformance/tools
 (cd typescript && npm ci && npm run build && npm test)
 (cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test)
-(cd typescript && npm test --workspace=@modular-agent/claude)
+(cd typescript/sidecars/claude && npm ci && npm test)
 node conformance/reference/run.mjs --agent typescript
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
 scripts/websocket-kits.sh typescript
@@ -74,9 +74,9 @@ git diff --check
 ```
 
 - Reference checks: **24/24**, including `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
-- ACP with crash, probe and job checks: **188/188** on stdio and **193/193** on WebSocket. The WebSocket plugin kit passed **153/153**; listener isolation passed **14/14**.
-- TypeScript workspace: **422/422** offline tests in both normal and `MA_REMOTE` configurations, with four live tests skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
-- Claude package: **47/47** offline, including the 44 original tests. One live check skipped. No real sign-ins, credentials or model requests were made.
+- ACP with crash, probe and job checks: **188/188** on stdio. In the earlier WebSocket run, ACP passed **193/193**, the plugin kit passed **153/153**, and listener isolation passed **14/14**.
+- TypeScript workspace: **431 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- Claude sidecar: **47 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
 ## Known gaps
@@ -90,11 +90,7 @@ git diff --check
 
 Proposed replacement text; the shared documents are unchanged in this branch.
 
-**Reference — Providers.** Replace “These are the SDK's subscription Providers, with their sign-in, login file, refresh, request shapes and model table; `ma` adds none of its own.” with:
-
-> `ma` uses the SDK's ChatGPT and Claude subscription Providers and shared login file. Until the SDK specifies Grok subscription access, `ma` keeps its existing Grok sign-in, requests and model list under `grok`.
-
-Replace the last three sentences of **The client identity** with:
+**Reference — Providers.** Replace the last three sentences of **The client identity** with:
 
 > The terminal and ACP load Claude when the launch or the saved session selects a Claude model. A composition without Claude cannot switch to a Claude model. TypeScript uses the Claude Agent SDK in process. Rust and Go launch the Claude process plugin.
 

@@ -15,9 +15,8 @@ import { HELP } from "./help.js";
 import { loadPolicy } from "./policy.js";
 import { AuthFile, expired } from "./auth.js";
 import { claude } from "@modular-agent/claude";
-import { chatgpt, resolveClientIdentity, signIn, signOut, type ClientIdentityOptions, type SignInStep } from "@modular-agent/subscription";
-import { grokOAuth } from "./grok-oauth.js";
-import { grokResponses, modelRows } from "./grok-responses.js";
+import { chatgpt, grok, resolveClientIdentity, signIn, signOut, type ClientIdentityOptions, type SignInStep } from "@modular-agent/subscription";
+import { subscriptionModelOverrides } from "./subscription-model-overrides.js";
 import { formerProviderIds, modelRef, providerId } from "./provider-ids.js";
 
 function parse(argv: string[]) {
@@ -114,33 +113,25 @@ async function authCommand(argv: string[], auth: AuthFile, identity: ClientIdent
   }
   if (provider !== "chatgpt" && provider !== "grok") throw new Error(`unknown provider ${provider}${cmd === "login" ? "; use chatgpt, grok or claude" : ""}`);
   if (cmd === "logout") {
-    if (provider === "chatgpt") await signOut(provider, auth);
-    else await auth.setLogin(provider);
+    await signOut(provider, auth);
     console.error(`Signed out of ${labels[provider]}.`);
   } else {
-    if (provider === "chatgpt") {
-      let reader: ReturnType<typeof createInterface> | undefined;
-      let lines: AsyncIterator<string> | undefined;
-      try {
-        await signIn(provider, auth, { ...identity, device: rest[0] === "--device", onStep: show,
-          paste: process.stdin.isTTY ? async (signal, problem) => {
-            if (problem) console.error(problem);
-            if (!reader) {
-              reader = createInterface({ input: process.stdin });
-              lines = reader[Symbol.asyncIterator]();
-              signal.addEventListener("abort", () => reader?.close(), { once: true });
-            }
-            process.stderr.write("Paste the address (or the code): ");
-            return (await lines!.next()).value;
-          } : undefined,
-        });
-      } finally { reader?.close(); }
-    } else {
-      await auth.setLogin(provider, await grokOAuth(identity).login(step => {
-        show({ kind: "deviceCode", url: step.address, code: step.code });
-        show({ kind: "waiting" });
-      }));
-    }
+    let reader: ReturnType<typeof createInterface> | undefined;
+    let lines: AsyncIterator<string> | undefined;
+    try {
+      await signIn(provider, auth, { ...identity, device: rest[0] === "--device", onStep: show,
+        paste: process.stdin.isTTY ? async (signal, problem) => {
+          if (problem) console.error(problem);
+          if (!reader) {
+            reader = createInterface({ input: process.stdin });
+            lines = reader[Symbol.asyncIterator]();
+            signal.addEventListener("abort", () => reader?.close(), { once: true });
+          }
+          process.stderr.write("Paste the address (or the code): ");
+          return (await lines!.next()).value;
+        } : undefined,
+      });
+    } finally { reader?.close(); }
     console.error(`Signed in to ${labels[provider]} (${provider}).`);
   }
   return 0;
@@ -200,9 +191,8 @@ async function main(argv: string[]) {
   for (const [former, current] of Object.entries(formerProviderIds)) {
     if (!Object.hasOwn(overrides, current) && Object.hasOwn(overrides, former)) overrides[current] = overrides[former];
   }
-  const chatgptOverrides = modelRows("chatgpt", overrides).map(m => ({ id: m.id, name: m.name, contextWindow: m.contextWindow,
-    maxOutput: m.maxTokens, input: ["text", "image"], reasoning: Object.keys(m.effort).some(l => l !== "off"),
-    levels: Object.fromEntries(Object.entries(m.effort).map(([level, effort]) => [level, { reasoning: { effort } }])) }));
+  const chatgptOverrides = subscriptionModelOverrides("chatgpt", overrides);
+  const grokOverrides = subscriptionModelOverrides("grok", overrides);
   const projectMcp = async (cwd: string) => mcpServers(p, cwd, await trusted(p, cwd));
   if (opts.trust) await trusted(p, project, true);
   let defaultModel: string | undefined;
@@ -222,7 +212,10 @@ async function main(argv: string[]) {
     if (!model && !inspecting && !opts.acp) throw new Error(noModel);
     if (conformance) settings.modelTools = null;
     delete settings.model;
-    const providers = script ? [script] : conformance ? [] : [chatgpt({ logins: auth, ...identity, modelOverrides: chatgptOverrides }), grokResponses(auth, overrides, identity)];
+    const providers = script ? [script] : conformance ? [] : [
+      chatgpt({ logins: auth, ...identity, modelOverrides: chatgptOverrides }),
+      grok({ logins: auth, ...identity, modelOverrides: grokOverrides }),
+    ];
     const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p)];
     if (!opts.acp) plugins.push(standardMcpTools({ servers: projectMcp }));
     if (claudeProvider && (model?.startsWith("claude/") || opts.command === "models")) plugins.push(definePlugin({

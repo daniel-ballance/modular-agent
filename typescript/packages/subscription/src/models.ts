@@ -6,7 +6,7 @@ export type SubscriptionModel = Omit<ModelInfo, "thinking"> & { levels: Record<s
 export const reasoningLevels = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const table: { models: SubscriptionModel[] } = JSON.parse(readFileSync(new URL("../../subscription-models.json", import.meta.url), "utf8"));
 
-export function subscriptionModels(provider: "chatgpt" | "claude", enrolled: readonly ModelEnrollment[] = []): SubscriptionModel[] {
+export function subscriptionModels(provider: "chatgpt" | "grok" | "claude", enrolled: readonly ModelEnrollment[] = []): SubscriptionModel[] {
   const catalog = new Map(table.models.filter(m => m.provider === provider).map(m => [m.id, structuredClone(m)]));
   for (const m of enrolled) if (!catalog.has(m.id)) catalog.set(m.id, {
     ...structuredClone(m), provider, reasoning: m.reasoning ?? false, levels: {},

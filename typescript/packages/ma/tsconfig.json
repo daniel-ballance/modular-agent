@@ -2,12 +2,10 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": ".",
-    "resolveJsonModule": true
+    "rootDir": "."
   },
   "include": [
     "src",
-    "src/models.json",
     "test"
   ],
   "references": [
