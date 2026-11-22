@@ -22,7 +22,7 @@ use modular_agent::{
     Agent, AgentBuilder, Durability, FilesConfiguration, History, Plugin, ProcessPlugin,
 };
 use modular_agent_mcp::Mcp;
-use provider_responses::{ResponsesPlugin, Vendor};
+use provider_responses::{ClientIdentity, ResponsesPlugin, Vendor};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -41,6 +41,8 @@ pub struct Standard {
     /// Start the Claude sidecar. It costs a process, so it is started only
     /// when a Claude model is wanted or the catalog is being listed.
     pub claude: bool,
+    /// The label for ChatGPT requests and ChatGPT and Grok sign-ins.
+    pub client_identity: ClientIdentity,
     /// A scripted Provider in place of the real ones, for tests.
     pub scripted: Option<script::Script>,
     pub conformance: bool,
@@ -49,7 +51,7 @@ pub struct Standard {
 }
 
 impl Standard {
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env(client_identity: ClientIdentity) -> Result<Self> {
         let home =
             PathBuf::from(std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?);
         let dir = |variable: &str, fallback: &str, under: &str| {
@@ -75,6 +77,7 @@ impl Standard {
             tenant_scopes: false,
             durable: true,
             claude: false,
+            client_identity,
             scripted: std::env::var_os("MODULAR_AGENT_SCRIPT")
                 .map(|file| -> Result<_> {
                     let responses = serde_json::from_slice(&std::fs::read(file)?)?;
@@ -239,6 +242,7 @@ pub fn builder(
                 vendor,
                 provider_responses::catalog(vendor, &overrides)?,
                 standard.auth(),
+                standard.client_identity.clone(),
             )?);
         }
         if standard.claude {

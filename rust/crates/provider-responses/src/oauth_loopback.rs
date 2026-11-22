@@ -85,6 +85,10 @@ async fn browser_sign_in_binds_state_and_pkce_to_the_exchange() {
             panic!("expected browser address")
         };
         let (_, params) = address.split_once('?').unwrap();
+        assert_eq!(
+            query(params, "originator").as_deref(),
+            Some("modular-agent")
+        );
         let state = query(params, "state").unwrap();
         *challenge.lock().unwrap() = query(params, "code_challenge").unwrap();
         tokio::spawn(async move {
@@ -105,6 +109,7 @@ async fn browser_sign_in_binds_state_and_pkce_to_the_exchange() {
         Duration::from_secs(4),
         codex_browser(
             &client(),
+            &ClientIdentity::default(),
             Some(listener),
             None,
             &show,
@@ -143,10 +148,7 @@ async fn browser_sign_in_finishes_from_a_pasted_redirect_address() {
         Step::OpenAndPaste(address) => {
             let (_, params) = address.split_once('?').unwrap();
             let state = query(params, "state").unwrap();
-            assert_eq!(
-                query(params, "originator").as_deref(),
-                Some(CLIENT_IDENTITY)
-            );
+            assert_eq!(query(params, "originator").as_deref(), Some("My-agent_2.0"));
             paste.send(String::new()).unwrap();
             paste
                 .send("http://localhost:1455/auth/callback?code=stale&state=other".into())
@@ -164,6 +166,7 @@ async fn browser_sign_in_finishes_from_a_pasted_redirect_address() {
         Duration::from_secs(4),
         codex_browser(
             &client(),
+            &"My-agent_2.0".parse().unwrap(),
             None,
             Some(pasted),
             &show,
@@ -282,6 +285,7 @@ async fn xai_device_sign_in_polls_then_gets_tokens() {
     };
     let login = xai_device(
         &client(),
+        &ClientIdentity::default(),
         &show,
         &format!("{}/code", fake.base),
         &format!("{}/token", fake.base),
@@ -291,6 +295,10 @@ async fn xai_device_sign_in_polls_then_gets_tokens() {
     assert!(matches!(login, Login::Oauth { access, account: None, .. } if access == "fake-access"));
     fake.task.await.unwrap();
     let seen = fake.seen.lock().unwrap();
+    assert_eq!(
+        query(&seen[0].1, "referrer").as_deref(),
+        Some("modular-agent")
+    );
     assert_eq!(query(&seen[0].1, "scope").as_deref(), Some(XAI_SCOPE));
     assert_eq!(query(&seen[1].1, "client_id").as_deref(), Some(XAI_CLIENT));
     assert_eq!(
@@ -299,6 +307,27 @@ async fn xai_device_sign_in_polls_then_gets_tokens() {
     );
     assert_eq!(query(&seen[1].1, "device_code").as_deref(), Some("fixture"));
     assert_eq!(seen[1], seen[2]);
+}
+
+#[tokio::test]
+async fn xai_device_sign_in_sends_the_configured_referrer() {
+    let fake = server(vec![("/code", 400, json!({"error":"fixture"}))]).await;
+    assert!(
+        xai_device(
+            &client(),
+            &"My-agent_2.0".parse().unwrap(),
+            &|_| panic!("the fixture refuses the initial request"),
+            &format!("{}/code", fake.base),
+            &format!("{}/token", fake.base),
+        )
+        .await
+        .is_err()
+    );
+    fake.task.await.unwrap();
+    assert_eq!(
+        query(&fake.seen.lock().unwrap()[0].1, "referrer").as_deref(),
+        Some("My-agent_2.0")
+    );
 }
 
 #[tokio::test]
