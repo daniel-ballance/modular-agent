@@ -35,7 +35,9 @@ function bootClock(): number {
  * before the jump has expired, and the writer treats it as lost rather than trusting it.
  * (docs/bindings/history-http.md, Writing: one writer at a time.)
  */
-export function sleepAwareClock(monotonic: () => number = () => performance.now(), wall: () => number = () => Date.now(), tolerance = 50) {
+// Captured at load, so a replaced Date.now (as tests do to age records) cannot move lease deadlines.
+const systemWallClock = Date.now.bind(Date);
+export function sleepAwareClock(monotonic: () => number = () => performance.now(), wall: () => number = systemWallClock, tolerance = 50) {
 	let lastMonotonic = monotonic(), lastWall = wall(), elapsed = 0;
 	return {
 		now(): number {
