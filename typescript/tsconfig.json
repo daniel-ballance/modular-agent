@@ -87,6 +87,9 @@
     },
     {
       "path": "packages/ma"
+    },
+    {
+      "path": "packages/subscription"
     }
   ]
 }

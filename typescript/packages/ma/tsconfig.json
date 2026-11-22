@@ -19,6 +19,9 @@
     },
     {
       "path": "../tools-mcp"
+    },
+    {
+      "path": "../subscription"
     }
   ]
 }
