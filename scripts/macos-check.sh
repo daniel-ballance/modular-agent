@@ -47,7 +47,8 @@ export GIT_AUTHOR_EMAIL='checks@example.invalid' GIT_COMMITTER_EMAIL='checks@exa
 while IFS= read -r name; do
   case $name in MA_*|MODULAR_AGENT_*|CLAUDE_CONFIG_DIR) unset "$name" ;; esac
 done < <(compgen -e)
-trap 'rm -rf -- "$HOME" "$TMPDIR"' EXIT
+# Go leaves its module cache read-only.
+trap 'chmod -R u+w -- "$HOME" "$TMPDIR" 2>/dev/null; rm -rf -- "$HOME" "$TMPDIR"' EXIT
 
 failed=0
 rows=()
