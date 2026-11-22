@@ -23,7 +23,7 @@ These Providers are for a person using their own plan, on their own machine. Eac
 
 - The file is JSON, `{"logins": {PROVIDER: LOGIN}, ...}`. Other top-level members are kept unchanged; `ma` keeps its `answers` there. A login is `{"type": "oauth", "access", "refresh", "expires", "account"?}`, with `expires` in milliseconds since the epoch already brought forward by five minutes, so a token is refreshed before it dies in a request.
 - The file is created with mode 0600 and refused if it is readable by anyone else. Every change replaces the file atomically.
-- Every change, and every token refresh, holds an exclusive kernel lock (`flock(2)`) on the file from reading it to replacing it, including while waiting for the token endpoint. Two processes refreshing at once therefore spend one refresh token: the second finds the new token when it gets the lock. Programs in different languages share the lock.
+- Every change, and every token refresh, holds an exclusive kernel lock (`flock(2)`) from reading the file to replacing it, including while waiting for the token endpoint. The lock is on a sibling file with the same name and the extension `.lock` (`auth.json` is locked through `auth.lock`), created with mode 0600 and never removed, because replacing the login file gives it a new inode. Two processes refreshing at once therefore spend one refresh token: the second finds the new token when it gets the lock. Programs in different languages share the lock.
 - A Provider reads its login when it needs a token. If the stored token expires within the margin, it refreshes under the lock and writes the result. A refresh the service refuses (`invalid_grant`) leaves the login in place and fails the request with ModelError `credentials`, saying to sign in again.
 - `available()` is true when the file holds a login for the Provider. It does not call the service.
 
@@ -60,7 +60,7 @@ These are the values `ma` uses today; the Rust `provider-responses` crate is the
 
 ## Grok
 
-Set from [Grok sign-in under The X Subscription](../research/grok-x-subscription.md).
+Not yet decided. [Grok sign-in under The X Subscription](../research/grok-x-subscription.md) found that the OAuth sign-in `ma` uses today is Grok Build's own registration, that xAI documents no sign-in for other clients, and that the public API host `ma` calls may bill separately from the plan. Until this section is written, SDKs ship no `grok()`, and `ma` keeps its existing Grok code under the id `grok`.
 
 ## Claude
 
