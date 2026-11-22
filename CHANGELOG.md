@@ -25,6 +25,9 @@ The four SDKs share one version, the revision of the [SDK specification](docs/sd
 - **Live checks** pass against OpenAI and Anthropic in all four SDKs.
 - **`ma`'s code sandbox runs in a worker process** with a 256 MiB memory limit, in all four languages. A limit that fires, or a worker that dies, fails that run and the agent carries on; a new reference check, `sandbox-memory`, checks it. Go's served environment now lists directories.
 - **Fixed in all four SDKs:** a new session wrote its setup to persistent history before its first input; a plugin host could deadlock, or deliver progress out of order, when a plugin's own hook answered a callback; a served command used the wrong project (it now asks `host/session`).
+- **Rewind points are kept in git.** `ma` saved a copy of the whole project, ignored files included, at the start of every turn. It now keeps each point as a commit under `refs/modular-agent/points/` in the project's own repository, written without touching `HEAD`, the index or branches. Points survive a restart, and outside a git work tree there are none.
+- **ChatGPT sign-in over SSH.** `ma login` can finish by pasting the address the browser was sent to, so sign-in works when the browser is on another machine or port 1455 is busy.
+- **Fixed:** a process plugin could start work it had been told to cancel.
 - **Fixed:** the TypeScript local environment could lose its record of running commands if the agent was killed while saving it, leaving those commands running. Python `ma` now shows codemode calls on stderr instead of `tool(null)`.
 
 ## 0.1.0
