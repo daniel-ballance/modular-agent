@@ -1,11 +1,9 @@
-//! Grok device sign-in and token refresh, and the legacy ma sign-in entry.
-use crate::{ClientIdentity, Vendor};
+//! Grok device sign-in and token refresh, used only by ma.
+use crate::{ID, LABEL};
 use anyhow::{Result, anyhow, bail, ensure};
 use credentials_auth::{Login, now_ms};
-use modular_agent::{
-    SignInOptions, SignInStep, chatgpt_login,
-    subscription_oauth::{Poll, form, oauth_error, poll},
-};
+use modular_agent::ClientIdentity;
+use modular_agent::subscription_oauth::{Poll, form, oauth_error, poll};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -15,23 +13,11 @@ const XAI_DEVICE_CODE: &str = "https://auth.x.ai/oauth2/device/code";
 const XAI_TOKEN: &str = "https://auth.x.ai/oauth2/token";
 
 const MARGIN_MS: u64 = 5 * 60 * 1000;
-/// What a sign-in asks of the person. The caller shows it.
-pub enum Step<'a> {
-    /// Open this address in a browser.
-    Open(&'a str),
-    /// Open the address and enter the code.
-    Code {
-        address: &'a str,
-        code: &'a str,
-    },
-    Note(&'a str),
-    /// Open this address in a browser anywhere. When the browser comes back to
-    /// `localhost`, paste the address it shows, or the code, here.
-    OpenAndPaste(&'a str),
+/// The device code to show to the person signing in.
+pub struct DeviceCode<'a> {
+    pub address: &'a str,
+    pub code: &'a str,
 }
-
-/// Lines a person types while a sign-in waits, such as a pasted redirect address.
-pub type Pasted = tokio::sync::mpsc::UnboundedReceiver<String>;
 
 fn tokens(body: &Value, previous: Option<&str>) -> Result<Login> {
     let access = body["access_token"]
@@ -71,19 +57,10 @@ async fn refresh_at(client: &reqwest::Client, old: Login, url: &str) -> Result<L
         ],
     )
     .await
-    .map_err(|e| {
-        anyhow!(
-            "could not reach {} to refresh the sign-in: {e}",
-            Vendor::Xai.label()
-        )
-    })?;
+    .map_err(|e| anyhow!("could not reach {} to refresh the sign-in: {e}", LABEL))?;
     if !(200..300).contains(&status) {
         return Err(oauth_error(
-            &format!(
-                "refreshing the {} sign-in (run `ma login {}`)",
-                Vendor::Xai.label(),
-                Vendor::Xai.id()
-            ),
+            &format!("refreshing the {} sign-in (run `ma login {}`)", LABEL, ID),
             status,
             &body,
         ));
@@ -94,7 +71,7 @@ async fn refresh_at(client: &reqwest::Client, old: Login, url: &str) -> Result<L
 async fn xai_device(
     client: &reqwest::Client,
     client_identity: &ClientIdentity,
-    show: &(dyn Fn(Step<'_>) + Sync),
+    show: &(dyn Fn(DeviceCode<'_>) + Sync),
     code_url: &str,
     token_url: &str,
 ) -> Result<Login> {
@@ -128,7 +105,7 @@ async fn xai_device(
     );
     let code = field("user_code")?;
     let device_code = field("device_code")?.to_owned();
-    show(Step::Code { address, code });
+    show(DeviceCode { address, code });
     let interval = Duration::from_secs(device["interval"].as_u64().filter(|n| *n > 0).unwrap_or(5));
     let limit = Duration::from_secs(device["expires_in"].as_u64().unwrap_or(900));
     poll(interval, limit, || async {
@@ -157,27 +134,9 @@ async fn xai_device(
 }
 
 pub async fn login(
-    vendor: Vendor,
     client_identity: &ClientIdentity,
-    device: bool,
-    pasted: Option<Pasted>,
-    show: &(dyn Fn(Step<'_>) + Sync),
+    show: &(dyn Fn(DeviceCode<'_>) + Sync),
 ) -> Result<Login> {
-    if vendor == Vendor::Codex {
-        return Ok(chatgpt_login(SignInOptions {
-            device,
-            client_identity: Some(client_identity.as_str().into()),
-            paste: pasted,
-            on_notice: Some(&|message| show(Step::Note(message))),
-            on_step: Some(&|step| match step {
-                SignInStep::OpenAndPaste { url } => show(Step::OpenAndPaste(url)),
-                SignInStep::DeviceCode { url, code } => show(Step::Code { address: url, code }),
-                SignInStep::Waiting => {}
-            }),
-            ..Default::default()
-        })
-        .await?);
-    }
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))

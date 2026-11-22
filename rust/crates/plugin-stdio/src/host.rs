@@ -111,16 +111,14 @@ impl ExternalLaunch {
     }
 }
 
+type ReadinessFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>;
+
 /// A local readiness check for one Provider in a process plugin. It supplies
 /// diagnostics that the boolean readiness reply does not carry.
 #[derive(Clone)]
 pub struct ProviderReadiness {
     pub id: &'static str,
-    pub check: Arc<
-        dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    pub check: Arc<dyn Fn() -> ReadinessFuture + Send + Sync>,
 }
 
 pub(crate) struct Shared {

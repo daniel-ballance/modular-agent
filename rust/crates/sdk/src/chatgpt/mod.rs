@@ -8,7 +8,10 @@ use crate::{
     },
 };
 use serde_json::{Value, json};
-use std::{net::SocketAddr, sync::OnceLock};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+};
 
 pub(crate) fn subscription_models() -> &'static [Value] {
     static TABLE: OnceLock<Vec<Value>> = OnceLock::new();
@@ -69,16 +72,20 @@ pub fn chatgpt(options: ChatGptOptions) -> Result<ChatGptProvider> {
                 context_window: model.context_window,
                 max_tokens: model.max_output,
                 effort: Default::default(),
-                extra: [("input".into(), json!(model.input))].into_iter().collect(),
+                extra: [
+                    ("input".into(), json!(model.input)),
+                    ("reasoning".into(), json!(false)),
+                ]
+                .into_iter()
+                .collect(),
             });
         }
     }
-    build_chatgpt("chatgpt", models, options.logins, identity)
+    build_chatgpt(models, options.logins, identity)
         .map_err(|e| Error::new(Code::InvalidComposition, e.to_string()))
 }
 
-#[doc(hidden)]
-pub fn chatgpt_catalog() -> Vec<ResponsesModel> {
+fn chatgpt_catalog() -> Vec<ResponsesModel> {
     subscription_models()
         .iter()
         .filter(|model| model["provider"] == "chatgpt")
@@ -104,6 +111,7 @@ pub fn chatgpt_catalog() -> Vec<ResponsesModel> {
                     })
                     .collect(),
                 extra: [
+                    ("name".into(), model["name"].clone()),
                     ("input".into(), model["input"].clone()),
                     ("reasoning".into(), model["reasoning"].clone()),
                 ]
@@ -114,20 +122,18 @@ pub fn chatgpt_catalog() -> Vec<ResponsesModel> {
         .collect()
 }
 
-#[doc(hidden)]
-pub fn build_chatgpt(
-    id: &'static str,
+fn build_chatgpt(
     models: Vec<ResponsesModel>,
     logins: SubscriptionLogins,
     identity: ClientIdentity,
 ) -> anyhow::Result<ChatGptProvider> {
     ResponsesProvider::new(
         ResponsesOptions {
-            id,
+            id: "chatgpt",
             label: "ChatGPT subscription",
             endpoint: "https://chatgpt.com/backend-api/codex/responses",
             format: ResponsesFormat::ChatGpt,
-            refresh: Box::new(|client, old| {
+            refresh: Arc::new(|client, old| {
                 Box::pin(async move { oauth::refresh(&client, old, oauth::CODEX_TOKEN).await })
             }),
         },
@@ -144,7 +150,7 @@ impl ChatGptProvider {
         validate_loopback(token).map_err(invalid_params)?;
         self.use_loopback(responses).map_err(invalid_params)?;
         let token = token.to_owned();
-        self.set_refresh(Box::new(move |client, old| {
+        self.set_refresh(Arc::new(move |client, old| {
             let token = token.clone();
             Box::pin(async move { oauth::refresh(&client, old, &token).await })
         }));
@@ -261,8 +267,7 @@ pub async fn sign_in(
     Ok(())
 }
 
-#[doc(hidden)]
-pub async fn chatgpt_login(options: SignInOptions<'_>) -> Result<Login> {
+async fn chatgpt_login(options: SignInOptions<'_>) -> Result<Login> {
     let identity = identity(options.client_identity.as_deref(), Code::InvalidParams)?;
     Ok(oauth::login(&identity, options).await?)
 }

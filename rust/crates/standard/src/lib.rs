@@ -19,14 +19,30 @@ pub mod terminal;
 
 use anyhow::{Result, anyhow};
 use modular_agent::{
-    Agent, AgentBuilder, Durability, FilesConfiguration, History, Plugin, ProcessPlugin,
+    Agent, AgentBuilder, ChatGptOptions, ClaudeOptions, ClientIdentity, Durability,
+    FilesConfiguration, History, Plugin, chatgpt, claude,
 };
 use modular_agent_mcp::Mcp;
-use provider_responses::{ClientIdentity, Vendor};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-pub const PROVIDERS: [&str; 3] = ["openai-codex", "xai", "claude"];
+pub const PROVIDERS: [&str; 3] = ["chatgpt", "grok", "claude"];
+const ALIASES: &[(&str, &str)] = &[("openai-codex", "chatgpt"), ("xai", "grok")];
+
+pub fn canonical_provider(id: &str) -> &str {
+    ALIASES
+        .iter()
+        .find_map(|(old, new)| (*old == id).then_some(*new))
+        .unwrap_or(id)
+}
+
+pub fn canonical_model(model: &str) -> String {
+    if let Some((provider, model)) = model.split_once('/') {
+        format!("{}/{model}", canonical_provider(provider))
+    } else {
+        model.to_string()
+    }
+}
 
 #[derive(Clone)]
 pub struct Standard {
@@ -96,6 +112,7 @@ impl Standard {
     }
     pub fn auth(&self) -> credentials_auth::AuthFile {
         credentials_auth::AuthFile::new(self.config.join("auth.json"), &PROVIDERS)
+            .with_aliases(ALIASES)
     }
     pub fn configuration(&self) -> FilesConfiguration {
         FilesConfiguration {
@@ -115,7 +132,27 @@ impl Standard {
         let path = self.config.join("models.json");
         match std::fs::read(&path) {
             Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|e| anyhow!("{}: {e}", path.display()))
+                let mut catalog: Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| anyhow!("{}: {e}", path.display()))?;
+                if let Some(providers) = catalog.as_object_mut() {
+                    for &(old, canonical) in ALIASES {
+                        if let Some(old) = providers.remove(old) {
+                            // Canonical entries win if the same model appears twice.
+                            if let Some(new) = providers.get_mut(canonical) {
+                                let old = old.as_array().ok_or_else(|| {
+                                    anyhow!("models for {canonical} must be an array")
+                                })?;
+                                let new = new.as_array_mut().ok_or_else(|| {
+                                    anyhow!("models for {canonical} must be an array")
+                                })?;
+                                new.splice(..0, old.iter().cloned());
+                            } else {
+                                providers.insert(canonical.into(), old);
+                            }
+                        }
+                    }
+                }
+                Ok(catalog)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
             Err(e) => Err(e.into()),
@@ -125,37 +162,6 @@ impl Standard {
         Ok(match modular_agent::http_history_from_env()? {
             Some(history) => history,
             None => modular_agent::file_history(self.state.join("sessions"))?,
-        })
-    }
-    /// How to start the Claude sidecar, if it is installed.
-    pub fn claude_launch(&self) -> Option<ProcessPlugin> {
-        let script = std::env::var_os("MODULAR_AGENT_CLAUDE_SIDECAR")
-            .map(PathBuf::from)
-            .into_iter()
-            .chain(std::env::current_exe().ok().and_then(|exe| {
-                // A development build: rust/target/<profile>/ma beside typescript/sidecars/.
-                Some(
-                    exe.parent()?
-                        .parent()?
-                        .parent()?
-                        .parent()?
-                        .join("typescript/sidecars/claude/dist/main.js"),
-                )
-            }))
-            .chain(std::env::var_os("HOME").map(|home| {
-                PathBuf::from(home).join(".local/share/modular-agent/sidecars/claude/dist/main.js")
-            }))
-            .find(|path| path.is_file())?;
-        // A plugin starts with an empty environment. The sidecar needs these
-        // to find node and Claude Code's own sign-in. No credential is passed.
-        let env = ["HOME", "PATH", "CLAUDE_CONFIG_DIR"]
-            .into_iter()
-            .filter_map(|name| Some((name.to_owned(), std::env::var(name).ok()?)))
-            .collect();
-        Some(ProcessPlugin {
-            command: vec!["node".into(), script.to_string_lossy().into_owned()],
-            env,
-            config: Value::Null,
         })
     }
 }
@@ -194,6 +200,7 @@ pub fn builder(
     let skills = standard.skills();
     let mut b = Agent::builder()
         .project(&project)
+        .model_provider_aliases(ALIASES)
         .data_dir(&standard.state)
         .durability(if standard.durable {
             Durability::Durable
@@ -237,18 +244,20 @@ pub fn builder(
         b = modular_agent::testing::acp_conformance(b);
     } else {
         let overrides = standard.model_overrides()?;
-        for vendor in [Vendor::Codex, Vendor::Xai] {
-            b = b.provider(provider_responses::provider(
-                vendor,
-                provider_responses::catalog(vendor, &overrides)?,
-                standard.auth(),
+        let logins = standard.auth().subscription_logins();
+        let mut options = ChatGptOptions::new(logins.clone());
+        options.client_identity = Some(standard.client_identity.as_str().to_owned());
+        b = b
+            .provider(chatgpt(options)?.with_catalog_overrides(
+                provider_responses::model_overrides(&overrides, "chatgpt")?,
+            ))
+            .provider(provider_responses::provider(
+                logins,
                 standard.client_identity.clone(),
+                provider_responses::model_overrides(&overrides, "grok")?,
             )?);
-        }
         if standard.claude {
-            b = b.process_plugin(standard.claude_launch().ok_or_else(|| {
-                anyhow!("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR")
-            })?);
+            b = b.claude_provider(claude(ClaudeOptions::default())?);
         }
     }
     for plugin in extra {
@@ -259,26 +268,18 @@ pub fn builder(
 
 /// The model to start with when settings name none: the first Provider that
 /// is signed in.
-pub fn default_model(standard: &Standard) -> Option<&'static str> {
+pub async fn default_model(standard: &Standard) -> Option<&'static str> {
     let auth = standard.auth();
     let signed_in = |provider: &str| auth.login(provider).ok().flatten().is_some();
-    if signed_in("openai-codex") {
-        Some("openai-codex/gpt-6.1-sol")
-    } else if signed_in("xai") {
-        Some("xai/grok-4.7")
+    if signed_in("chatgpt") {
+        Some("chatgpt/gpt-6.1-sol")
+    } else if signed_in("grok") {
+        Some("grok/grok-4.7")
+    } else if let Ok(provider) = claude(ClaudeOptions::default())
+        && provider.available().await
+    {
+        Some("claude/claude-sonnet-5-5")
     } else {
-        if standard.claude_launch().is_some() && claude_signed_in() {
-            Some("claude/claude-sonnet-5-5")
-        } else {
-            None
-        }
+        None
     }
-}
-
-pub fn claude_signed_in() -> bool {
-    std::process::Command::new("claude")
-        .args(["auth", "status"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .is_ok_and(|output| output.status.success())
 }

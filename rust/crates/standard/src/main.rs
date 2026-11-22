@@ -1,11 +1,13 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use modular_agent::{self as sdk, testing::SCRIPTED_MODEL};
+use modular_agent::{
+    self as sdk, ClientIdentity, SignInOptions, SignInStep, testing::SCRIPTED_MODEL,
+};
 use modular_agent_mcp::{Mcp, Server};
-use provider_responses::{ClientIdentity, Vendor, oauth};
+use provider_responses::{LABEL as GROK_LABEL, oauth};
 use serde_json::json;
 use standard::terminal::TerminalOptions;
 use standard::{
-    Standard, builder,
+    Standard, builder, canonical_model, canonical_provider,
     terminal::{Mode, Questions},
 };
 
@@ -17,7 +19,7 @@ const HELP: &str = "ma, the standard Modular Agent
 Usage:
   ma [options]                 talk to the agent in this folder
   ma [options] -p PROMPT       answer one prompt and exit
-  ma login PROVIDER [--device] sign in: openai-codex, xai or claude
+  ma login PROVIDER [--device] sign in: chatgpt, grok or claude
   ma logout PROVIDER
   ma auth                      show what is signed in
   ma models                    list the models on offer
@@ -26,7 +28,7 @@ Usage:
   ma sessions [--all]          list saved sessions
 
 Options:
-  --model PROVIDER/ID   for example openai-codex/gpt-6.1-sol, xai/grok-4.7, claude/claude-sonnet-5-5
+  --model PROVIDER/ID   for example chatgpt/gpt-6.1-sol, grok/grok-4.7, claude/claude-sonnet-5-5
   --thinking LEVEL      off, minimal, low, medium, high or xhigh, as the model allows
   --session ID          reopen a session
   -c, --continue        reopen this folder's most recent session
@@ -98,39 +100,34 @@ async fn agent_main(client_identity: ClientIdentity) {
     }
 }
 
-fn show(step: oauth::Step<'_>) {
+fn show_device(address: &str, code: &str) {
+    eprintln!("Open this address in a browser:\n\n  {address}\n\nand enter the code: {code}\n");
+    open_browser(address);
+    eprintln!("Waiting for the sign-in to finish...");
+}
+
+fn show_chatgpt(step: SignInStep<'_>, can_paste: bool) {
     match step {
-        oauth::Step::Open(address) => {
-            eprintln!("Open this address in a browser to sign in:\n\n  {address}\n");
-            open_browser(address);
-            eprintln!("Waiting for the sign-in to finish...");
+        SignInStep::DeviceCode { url, code } => show_device(url, code),
+        SignInStep::Waiting => (),
+        SignInStep::OpenAndPaste { url } => {
+            eprintln!("Open this address in a browser to sign in:\n\n  {url}\n");
+            open_browser(url);
+            if can_paste {
+                eprintln!(
+                    "If the browser is elsewhere, copy its localhost address and paste it here."
+                );
+                eprint!("Paste the address (or the code): ");
+            } else {
+                eprintln!("Waiting for the sign-in to finish...");
+            }
         }
-        oauth::Step::Code { address, code } => {
-            eprintln!(
-                "Open this address in a browser:\n\n  {address}\n\nand enter the code: {code}\n"
-            );
-            open_browser(address);
-            eprintln!("Waiting for the sign-in to finish...");
-        }
-        oauth::Step::OpenAndPaste(address) => {
-            eprintln!(
-                "Open this address in a browser, on this machine or any other:\n\n  {address}\n"
-            );
-            open_browser(address);
-            eprintln!(
-                "After you sign in, the browser goes to a localhost address. If the browser is on this\n\
-                 machine, that finishes the sign-in. Otherwise the page will not load: copy the whole\n\
-                 address from the browser's address bar and paste it here.\n"
-            );
-            eprint!("Paste the address (or the code): ");
-        }
-        oauth::Step::Note(text) => eprintln!("{text}"),
     }
 }
 
 /// Lines typed at the terminal, for pasting a sign-in's redirect address. None
 /// when standard input is not a terminal.
-fn terminal_lines() -> Option<oauth::Pasted> {
+fn terminal_lines() -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
     use std::io::{BufRead, IsTerminal};
     if !std::io::stdin().is_terminal() {
         return None;
@@ -168,15 +165,41 @@ fn open_browser(address: &str) {
         .spawn();
 }
 
-async fn login(standard: &Standard, mut args: impl Iterator<Item = String>) -> Result<()> {
-    let provider = args
+fn login_options(mut args: impl Iterator<Item = String>) -> Result<(&'static str, bool)> {
+    let raw = args
         .next()
-        .ok_or_else(|| anyhow!("which provider? openai-codex, xai or claude"))?;
+        .ok_or_else(|| anyhow!("which provider? chatgpt, grok or claude"))?;
+    let provider = match canonical_provider(&raw) {
+        "chatgpt" => "chatgpt",
+        "grok" => "grok",
+        "claude" => "claude",
+        _ => bail!("unknown provider {raw}; use chatgpt, grok or claude"),
+    };
     let device = match args.next().as_deref() {
         None => false,
         Some("--device") => true,
         Some(other) => bail!("unknown argument {other}"),
     };
+    Ok((provider, device))
+}
+
+#[cfg(test)]
+#[test]
+fn login_aliases_route_to_the_canonical_sign_in_flows() {
+    for (alias, id) in [("openai-codex", "chatgpt"), ("xai", "grok")] {
+        assert_eq!(
+            login_options([alias, "--device"].map(str::to_owned).into_iter()).unwrap(),
+            (id, true)
+        );
+        assert_eq!(
+            login_options([alias].map(str::to_owned).into_iter()).unwrap(),
+            (id, false)
+        );
+    }
+}
+
+async fn login(standard: &Standard, args: impl Iterator<Item = String>) -> Result<()> {
+    let (provider, device) = login_options(args)?;
     if provider == "claude" {
         // Claude Code holds this sign-in. The sidecar uses it; nothing is stored here.
         eprintln!("Claude signs in through Claude Code. Running `claude auth login`.");
@@ -191,54 +214,54 @@ async fn login(standard: &Standard, mut args: impl Iterator<Item = String>) -> R
         ensure!(status.success(), "claude auth login did not complete");
         return Ok(());
     }
-    let vendor = Vendor::parse(&provider)
-        .ok_or_else(|| anyhow!("unknown provider {provider}; use openai-codex, xai or claude"))?;
-    let login = oauth::login(
-        vendor,
-        &standard.client_identity,
-        device,
-        terminal_lines(),
-        &show,
-    )
-    .await?;
-    standard.auth().set_login(vendor.id(), Some(login))?;
-    eprintln!("Signed in to {} ({}).", vendor.label(), vendor.id());
+    let auth = standard.auth();
+    let label = if provider == "chatgpt" {
+        let paste = if device { None } else { terminal_lines() };
+        let can_paste = paste.is_some();
+        sdk::sign_in(
+            provider,
+            &auth.subscription_logins(),
+            SignInOptions {
+                device,
+                paste,
+                client_identity: Some(standard.client_identity.as_str().into()),
+                on_step: Some(&|step| show_chatgpt(step, can_paste)),
+                on_notice: Some(&|text| eprintln!("{text}")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        "ChatGPT subscription"
+    } else {
+        let login = oauth::login(&standard.client_identity, &|step| {
+            show_device(step.address, step.code)
+        })
+        .await?;
+        auth.set_login(provider, Some(login))?;
+        GROK_LABEL
+    };
+    eprintln!("Signed in to {label} ({provider}).");
     Ok(())
 }
 
-fn claude_status() -> String {
-    match std::process::Command::new("claude")
-        .args(["auth", "status"])
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
-        Ok(output) if output.status.success() => "signed in through Claude Code".into(),
-        Ok(_) => "not signed in (run `ma login claude`)".into(),
-        Err(_) => "Claude Code is not installed".into(),
-    }
-}
-
-fn auth_status(standard: &Standard) -> Result<()> {
+async fn auth_status(standard: &Standard) -> Result<()> {
     let auth = standard.auth();
-    for vendor in [Vendor::Codex, Vendor::Xai] {
-        let state = match auth.login(vendor.id())? {
+    for (id, label) in [("chatgpt", "ChatGPT subscription"), ("grok", GROK_LABEL)] {
+        let state = match auth.login(id)? {
             Some(login) if login.expired() => "signed in (token will refresh on next use)",
             Some(_) => "signed in",
             None => "not signed in",
         };
-        println!("{:<13} {:<22} {state}", vendor.id(), vendor.label());
+        println!("{id:<13} {label:<22} {state}");
     }
-    println!(
-        "{:<13} {:<22} {}",
-        "claude",
-        "Claude subscription",
-        claude_status()
-    );
-    if standard.claude_launch().is_none() {
-        println!(
-            "              the Claude sidecar is not installed (build typescript/sidecars/claude)"
-        );
-    }
+    let status = match sdk::claude(sdk::ClaudeOptions::default()) {
+        Ok(provider) => provider
+            .unavailable_reason()
+            .await
+            .unwrap_or_else(|| "signed in through Claude Code".into()),
+        Err(e) => e.message().to_owned(),
+    };
+    println!("{:<13} {:<22} {status}", "claude", "Claude subscription");
     Ok(())
 }
 
@@ -290,15 +313,26 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             if provider == "claude" {
                 bail!("Claude Code holds that sign-in; run `claude auth logout`");
             }
-            let vendor =
-                Vendor::parse(&provider).ok_or_else(|| anyhow!("unknown provider {provider}"))?;
-            standard.auth().set_login(vendor.id(), None)?;
-            eprintln!("Signed out of {}.", vendor.label());
+            let auth = standard.auth();
+            let label = match canonical_provider(&provider) {
+                "chatgpt" => {
+                    sdk::sign_out("chatgpt", &auth.subscription_logins()).await?;
+                    "ChatGPT subscription"
+                }
+                "grok" => {
+                    auth.set_login("grok", None)?;
+                    GROK_LABEL
+                }
+                _ => bail!("unknown provider {provider}"),
+            };
+            eprintln!("Signed out of {label}.");
             return Ok(());
         }
-        Some("auth") => return auth_status(&standard),
+        Some("auth") => return auth_status(&standard).await,
         Some("models") => {
-            standard.claude = standard.claude_launch().is_some();
+            standard.claude = !standard.conformance
+                && standard.scripted.is_none()
+                && sdk::claude(sdk::ClaudeOptions::default()).is_ok();
             let agent = builder(&standard, &project, &Mcp::default(), vec![])?
                 .build()
                 .await?;
@@ -387,7 +421,9 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             "--listen" => listen = Some(take(&mut args, &arg)?),
             "--token-file" => token_file = Some(take(&mut args, &arg)?),
             "--trust-project" => trust = true,
-            "--model" => terminal.settings["model"] = json!(take(&mut args, &arg)?),
+            "--model" => {
+                terminal.settings["model"] = json!(canonical_model(&take(&mut args, &arg)?))
+            }
             "--thinking" => terminal.settings["thinking"] = json!(take(&mut args, &arg)?),
             "--runtime" => {
                 standard.durable = match take(&mut args, &arg)?.as_str() {
@@ -522,18 +558,23 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
         .as_str()
         .map(str::to_owned)
         .or(recorded)
-        .or(configured);
+        .or(configured)
+        .map(|model| canonical_model(&model));
     let inspecting = terminal.history;
     let chosen = if standard.scripted.is_some() {
         Some(SCRIPTED_MODEL.into())
     } else if standard.conformance {
         chosen.or_else(|| Some("conformance/echo".into()))
     } else {
-        chosen.or_else(|| standard::default_model(&standard).map(str::to_owned))
+        match chosen {
+            Some(model) => Some(model),
+            None if !inspecting => standard::default_model(&standard).await.map(str::to_owned),
+            None => None,
+        }
     };
     if chosen.is_none() && !inspecting {
         bail!(
-            "no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`."
+            "no model is available. Sign in with `ma login chatgpt`, `ma login grok` or `ma login claude`, or pass --model. See `ma models`."
         );
     }
     standard.claude = chosen.as_ref().is_some_and(|m| m.starts_with("claude/"));

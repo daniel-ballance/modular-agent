@@ -80,10 +80,7 @@ async fn xai_device_sign_in_polls_then_gets_tokens() {
         ("/token", 400, json!({"error":"authorization_pending"})),
         ("/token", 200, json!({"access_token":"fake-access","refresh_token":"fake-refresh"})),
     ]).await;
-    let show = |step: Step<'_>| match step {
-        Step::Code { code, .. } => assert_eq!(code, "X"),
-        _ => panic!("expected device code"),
-    };
+    let show = |step: DeviceCode<'_>| assert_eq!(step.code, "X");
     let login = xai_device(
         &client(),
         &ClientIdentity::default(),

@@ -144,6 +144,7 @@ pub struct AgentBuilder {
     plugin_host: Option<bool>,
     model: Option<String>,
     settings: serde_json::Map<String, Value>,
+    model_provider_aliases: &'static [(&'static str, &'static str)],
     approval: Option<Approval>,
     on_question: Option<QuestionHandler>,
     pub(crate) restartable: bool,
@@ -529,6 +530,16 @@ impl AgentBuilder {
         self.model = Some(model.into());
         self
     }
+    /// Accept former Provider ids when resolving saved and configured models.
+    #[doc(hidden)]
+    pub fn model_provider_aliases(
+        mut self,
+        aliases: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        self.model_provider_aliases = aliases;
+        self
+    }
+
     /// A default setting for new sessions, by its setting key.
     pub fn setting(mut self, key: impl Into<String>, value: Value) -> Self {
         self.settings.insert(key.into(), value);
@@ -689,6 +700,7 @@ impl AgentBuilder {
             own.push((Arc::new(InProcess::new(&plugin)?), vec![]));
         }
         let harness = Harness::for_project(project.clone());
+        harness.configure_model_provider_aliases(self.model_provider_aliases);
         harness.configure_reservations(Arc::new(agent_harness::ReservationPool::with_bytes(
             self.resource_limits,
             self.byte_limits,

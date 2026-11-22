@@ -45,7 +45,7 @@ impl AcpComposition for Factory {
             None => None,
         };
         let fallback = if standard.scripted.is_none() && !standard.conformance {
-            default_model(&standard)
+            default_model(&standard).await
         } else {
             None
         };

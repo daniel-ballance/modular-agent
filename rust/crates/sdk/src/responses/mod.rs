@@ -10,7 +10,7 @@ use anyhow::{Result, ensure};
 use futures_util::{StreamExt, future::BoxFuture};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,7 +36,7 @@ pub enum ResponsesFormat {
 }
 
 pub type Refresh =
-    Box<dyn Fn(reqwest::Client, Login) -> BoxFuture<'static, Result<Login>> + Send + Sync>;
+    Arc<dyn Fn(reqwest::Client, Login) -> BoxFuture<'static, Result<Login>> + Send + Sync>;
 
 pub struct ResponsesOptions {
     pub id: &'static str,
@@ -78,6 +78,16 @@ pub struct ResponsesProvider {
 }
 
 impl ResponsesProvider {
+    /// Apply ma's explicit catalog replacements after the shared defaults.
+    #[doc(hidden)]
+    pub fn with_catalog_overrides(mut self, overrides: Vec<ResponsesModel>) -> Self {
+        for model in overrides {
+            self.models.retain(|existing| existing.id != model.id);
+            self.models.push(model);
+        }
+        self
+    }
+
     pub(crate) fn set_refresh(&mut self, refresh: Refresh) {
         self.refresh = refresh;
     }
@@ -239,12 +249,28 @@ impl ResponsesProvider {
                 key: "test-credential".into(),
             });
         }
-        self.auth
-            .current(self.id, rejected, |old| {
-                (self.refresh)(self.client.clone(), old)
+        let result = if self.format == ResponsesFormat::ChatGpt {
+            let id = self.id;
+            let logins = self.auth.clone();
+            let refresh = self.refresh.clone();
+            let client = self.client.clone();
+            let rejected = rejected.map(str::to_owned);
+            // A token may have been spent before cancellation reaches the
+            // request. Finish saving the rotated login even if the turn ends.
+            tokio::spawn(async move {
+                logins
+                    .current(id, rejected.as_deref(), |old| refresh(client, old))
+                    .await
             })
-            .await
-            .map_err(|e| failed(FailureKind::Credentials, format!("{e:#}")).into())
+            .await?
+        } else {
+            self.auth
+                .current(self.id, rejected, |old| {
+                    (self.refresh)(self.client.clone(), old)
+                })
+                .await
+        };
+        result.map_err(|e| failed(FailureKind::Credentials, format!("{e:#}")).into())
     }
     async fn send(&self, login: &Login, session: &str, body: &Value) -> Result<reqwest::Response> {
         let mut request = self

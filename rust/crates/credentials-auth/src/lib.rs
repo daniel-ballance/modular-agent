@@ -39,6 +39,13 @@ impl AuthFile {
         }
     }
 
+    pub fn with_aliases(mut self, aliases: &[(&'static str, &'static str)]) -> Self {
+        self.providers
+            .extend(aliases.iter().map(|(old, _)| old.to_string()));
+        self.logins = self.logins.with_aliases(aliases);
+        self
+    }
+
     pub fn subscription_logins(&self) -> SubscriptionLogins {
         self.logins.clone()
     }
@@ -115,7 +122,7 @@ impl AuthFile {
 
     pub fn put_answer(&self, name: &str, value: &str) -> Result<()> {
         self.answer_name(name)?;
-        self.change(|staging, answers| Ok(staging.replace(answers, name, Some(value.into()))?))
+        self.change(|staging, answers| staging.replace(answers, name, Some(value.into())))
     }
 }
 
@@ -142,7 +149,7 @@ impl modular_agent::CredentialStore for AuthFile {
         value: &str,
     ) -> modular_agent::Result<()> {
         self.answer_name(&receipt.name)?;
-        Ok(self.change(|staging, _| Ok(staging.stage(receipt, value)?))?)
+        Ok(self.change(|staging, _| staging.stage(receipt, value))?)
     }
     fn lookup_staged(
         &self,
@@ -154,7 +161,7 @@ impl modular_agent::CredentialStore for AuthFile {
         &self,
         request: &modular_agent::SecretRequest,
     ) -> modular_agent::Result<modular_agent::Activation> {
-        Ok(self.change(|staging, answers| Ok(staging.activate(request, answers)?))?)
+        Ok(self.change(|staging, answers| staging.activate(request, answers))?)
     }
     fn discard(&self, request: &modular_agent::SecretRequest) -> modular_agent::Result<()> {
         Ok(self.change(|staging, _| {
