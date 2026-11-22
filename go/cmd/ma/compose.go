@@ -123,7 +123,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 			if err != nil {
 				return nil, err
 			}
-			opts = append(opts, modular.WithProvider(subscription.Provider(v, models, d.auth())))
+			opts = append(opts, modular.WithProvider(subscription.Provider(v, models, d.auth(), o.subscriptions)))
 		}
 		script := d.claudeSidecar()
 		if containsClaude(settings) || o.loadClaude || o.command == "models" && script != "" {

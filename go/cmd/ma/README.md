@@ -29,6 +29,14 @@ Claude needs Node.js 22 or later and the [Claude sidecar](../../../typescript/si
 
 The four languages share `$XDG_CONFIG_HOME/modular-agent` (or `~/.config/modular-agent`). Go saves sessions, command state and spilled output under `$XDG_STATE_HOME/modular-agent/go` (or `~/.local/state/modular-agent/go`). `MODULAR_AGENT_DATA_DIR` puts configuration directly in that directory and puts state in its `state/` subdirectory. `ma --trust-project` records the canonical project path in `trusted-projects.json` outside the project. A project's own settings are read without granting it permission to start a server. One ACP connection can serve several canonical projects, each with its own settings, prompt and trusted MCP servers.
 
+## Client identity
+
+The default is `modular-agent`. ChatGPT receives it as `originator` on model requests and in the browser sign-in address. Grok receives it as `referrer` when starting device sign-in. It is a label, not a credential or an OAuth client ID.
+
+Set `MA_CLIENT_IDENTITY` before running `ma`, including when you sign in. For example, run `export MA_CLIENT_IDENTITY=my-agent_2.0` in your shell. The value must be 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. Unset the variable to use the default. An empty or invalid value stops startup with status 1.
+
+In code under `cmd/ma`, call `subscription.ParseClientIdentity("my-agent_2.0")` and check the error. Set `subscription.Options{ClientIdentity: identity}` with the returned value, then pass the same options to `subscription.Provider` for both vendors and to `subscription.SignIn`. Use `subscription.Options{}` for the default. The subscription package does not read the environment.
+
 ## Code sandbox
 
 Each `codemode` call starts `monty subprocess` next to the running `ma`. The agent checks the binary's version and requires an acknowledgement of protocol 8 before sending Python. It never searches `PATH`, the project or the network for the worker. Only the worker compiles and runs Python. It sends length-prefixed protobuf frames over stdio; the agent makes each nested tool call and sends the result back. The worker receives no agent environment variables. `tools` is prebound and importable; its functions can be assigned and called later.
@@ -56,7 +64,7 @@ scripts/websocket-kits.sh go
 (cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/... > "$TMPDIR/ma-go-race.log" 2>&1)
 ```
 
-- **Reference checks:** 22/22 against Go `ma`, including tool function values, denied ambient access, codemode results and memory failure followed by recovery.
+- **Reference checks:** 24/24 against Go `ma`, including client identity validation, tool function values, denied ambient access, codemode results and memory failure followed by recovery.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio and 193/193 over WebSocket against Go `ma`. The Go plugin WebSocket kit passed 153/153.
 - **Sandbox regressions:** the Go tests cover imports and function values, schema-order arguments, JSON and repr, terminal memory and time limits, which suspensions reset the active clock, a tool wait longer than the compute budget, 500 nested calls, recursion at 200 and 201, a UTF-8 print cut, worker death and cancellation, malformed messages, denied OS operations and seeded random.
 - **Go checks:** build, vet and formatting pass. The full suite passed 38 tested packages. The race run for `modular/...` and `cmd/ma/...` passed 7 tested packages. `cmd/modular` takes several minutes; use the default package timeout.
