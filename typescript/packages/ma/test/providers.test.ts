@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,7 +46,10 @@ test("auth.json matches Rust serde_json bytes and keeps its answers and private 
   // Rendered by serde_json::to_vec_pretty on credentials_auth::Contents:
   // two-space indent, snake-case tags, BTreeMap order and no final newline.
   const rust = '{\n  "logins": {\n    "openai-codex": {\n      "type": "oauth",\n      "access": "test-access",\n      "refresh": "test-refresh",\n      "expires": 2000000000000,\n      "account": "test-account"\n    },\n    "xai": {\n      "type": "api_key",\n      "key": "dummy"\n    }\n  },\n  "answers": {\n    "test-answer": "test-value"\n  }\n}';
-  await writeFile(auth.path, rust, { mode: 0o644 });
+  await writeFile(auth.path, rust, { mode: 0o600 });
+  await chmod(auth.path, 0o644);
+  await assert.rejects(auth.login("openai-codex"), /credential file must be private/);
+  await chmod(auth.path, 0o600);
   const codex = await auth.login("openai-codex");
   assert.equal(codex?.type === "oauth" && codex.account, "test-account");
   assert.deepEqual(await auth.login("xai"), { type: "api_key", key: "dummy" });
@@ -197,8 +200,13 @@ test("refresh holds Rust's flock while awaiting the token endpoint, and concurre
   const base = await fixture(t, async (_req, res, body) => {
     requests++;
     assert.equal(new URLSearchParams(body).get("refresh_token"), "once");
-    await assert.rejects(run("flock", ["-n", join(auth.directory, "auth.lock"), "true"]), { code: 1 });
-    await wait(20);
+    const lock = join(auth.directory, "auth.lock");
+    if (process.platform === "darwin") {
+      await assert.rejects(run("/usr/bin/perl", ["-MFcntl=:flock", "-MErrno=EWOULDBLOCK", "-e",
+        'open(my $fd, "<", $ARGV[0]) or die $!; exit 0 if flock($fd, LOCK_EX | LOCK_NB); exit($! == EWOULDBLOCK ? 1 : 2);', lock], { env: {} }), { code: 1 });
+    } else {
+      await assert.rejects(run("flock", ["-n", lock, "true"]), { code: 1 });
+    }
     send(res, { access_token: "fresh", expires_in: 3600 });
   });
   const service = oauth({ endpoints: { xaiToken: base } });

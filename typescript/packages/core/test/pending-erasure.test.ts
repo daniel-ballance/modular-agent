@@ -59,12 +59,18 @@ test("HTTP erasure refuses a history delivery waiting at its output gate", async
   const atGate = new Promise<void>(resolve => { gated = resolve; });
   const release = new Promise<void>(resolve => { resume = resolve; });
   let pause = false;
-  const a = await testAgent({ durability: "kept", history: httpHistory(service.url, tokenFile), script: [{ text: "private answer" }],
+  let a: Awaited<ReturnType<typeof testAgent>> | undefined;
+  t.after(async () => {
+    resume();
+    try { await a?.close(); } finally {
+      try { await service.close(); } finally { await rm(dir, { recursive: true, force: true }); }
+    }
+  });
+  a = await testAgent({ durability: "kept", history: httpHistory(service.url, tokenFile), script: [{ text: "private answer" }],
     plugins: [definePlugin({ name: "pause-delivery", setup(registrar) {
       registrar.on("output", async () => { if (pause) { gated(); await release; } });
     } })],
   });
-  t.after(async () => { resume(); await a.close(); await service.close(); await rm(dir, { recursive: true, force: true }); });
   const view = await a.session();
   await view.prompt("private input");
   const target = (await view.history()).find(e => e.kind === "input")!.id;

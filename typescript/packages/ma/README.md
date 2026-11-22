@@ -28,7 +28,7 @@ ma --acp --listen 127.0.0.1:7401 --token-file /path/to/token  # ACP over WebSock
 
 The WebSocket listener requires a loopback address and an owner-only bearer token file. It acts as `ma`'s local ACP user, irrespective of `MODULAR_AGENT_ACTOR`.
 
-Subscription credential writes and refreshes require a `flock` command that supports locking an inherited descriptor, as provided by util-linux. Claude uses Claude Code's own sign-in. To use it, build the sidecar (`cd typescript/sidecars/claude && npm ci && npm run build` from the repository root), install Claude Code, then run `ma login claude`. An installed sidecar can instead be named with `MODULAR_AGENT_CLAUDE_SIDECAR`.
+Subscription credential writes and refreshes use the same kernel lock as Rust. On Linux they require the util-linux `flock` command. On macOS they use `/usr/bin/perl` to call `flock(2)`. Claude uses Claude Code's own sign-in. To use it, build the sidecar (`cd typescript/sidecars/claude && npm ci && npm run build` from the repository root), install Claude Code, then run `ma login claude`. An installed sidecar can instead be named with `MODULAR_AGENT_CLAUDE_SIDECAR`.
 
 Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`. State is kept in `$XDG_STATE_HOME/modular-agent/typescript`, or `~/.local/state/modular-agent/typescript`. `MODULAR_AGENT_DATA_DIR` sets the configuration directory and puts state under its `state/` subdirectory. Use `--runtime transient` to keep history without resuming a turn cut off by a crash.
 
@@ -66,7 +66,8 @@ git diff --check
 
 ## Known gaps
 
-- Tested on Linux. Subscription credential changes and refreshes need a compatible `flock`; without one they fail rather than using an incompatible lock.
+- macOS local commands use process-group containment, not strong containment. A process that leaves its group is outside that guarantee.
+- If `MODULAR_AGENT_HISTORY_URL` selects HTTP history on macOS, set `MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS` as described in the [SDK's history configuration](../core/README.md#registering-or-serving-a-custom-history-store). Local file history does not need this setting.
 - The terminal cannot switch to Claude unless it started the sidecar. In ACP, a project composition that did not start the sidecar does not offer Claude. Reopen with saved Claude settings or launch with `--model claude/ID`. See the [sidecar's own gaps](../../sidecars/claude/README.md#known-gaps-and-open-problems).
 - `find` honors `.gitignore` files at or below its search root, but not parent or global Git rules, `.ignore` or `.git/info/exclude`. Its glob parser, filesystem diagnostics and Monty's tracebacks can differ from Rust.
 

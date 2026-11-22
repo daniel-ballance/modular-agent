@@ -19,6 +19,7 @@ async function httpFixture(root: string, t: TestContext) {
   const service = await serveHistory(fileHistory(join(root, "service")), { address: "127.0.0.1:0", tokenFile });
   // Observe the real client's mutation boundaries on the wire, forwarding to the real service.
   const writes: { method: string; path: string; body: { entries?: HistoryEntry[] } }[] = [];
+  t.after(() => service.close());
   const proxy = createServer(async (req, res) => {
     try {
       const chunks: Buffer[] = [];
@@ -34,10 +35,7 @@ async function httpFixture(root: string, t: TestContext) {
   });
   proxy.listen(0, "127.0.0.1");
   await once(proxy, "listening");
-  t.after(async () => {
-    await new Promise<void>(resolve => proxy.close(() => resolve()));
-    await service.close();
-  });
+  t.after(() => new Promise<void>(resolve => proxy.close(() => resolve())));
   const address = proxy.address();
   assert.ok(address && typeof address !== "string");
   return {

@@ -72,7 +72,10 @@ async function agent(options: { history?: { url: string; token: string }; store?
 	const home = mkdtempSync(join(tmpdir(), "ma-svc-home-"));
 	const t = token();
 	const web = httpInterface({ token: t });
-	const h = await createAgent({ project, home, model: "faux/faux-1", plugins: [historyHttp(options.history ?? history, options.store), environmentHttp(environment), providerHttp(gateway), web] });
+	const client = options.history ?? history;
+	const store = options.store ?? new HttpHistoryStore(client);
+	await store.initialize(); // Fail setup rather than silently using the default JSONL store.
+	const h = await createAgent({ project, home, model: "faux/faux-1", plugins: [historyHttp(client, store), environmentHttp(environment), providerHttp(gateway), web] });
 	agents.push(h);
 	return { h, url: web.http!.url, token: t, home };
 }

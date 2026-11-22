@@ -459,7 +459,8 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
   const service = remote ? await serveHistory(fileHistory(join(p.dir, "history")), { address: "127.0.0.1:0", tokenFile }) : undefined;
   const env = { ...p.env, MODULAR_AGENT_CONFORMANCE: "1", TMPDIR: process.env.TMPDIR,
     MODULAR_AGENT_TENANTS: JSON.stringify({ demo: { rights: ["watch", "input", "settings"] } }),
-    ...(service && { MODULAR_AGENT_HISTORY_URL: service.url, MODULAR_AGENT_HISTORY_TOKEN_FILE: tokenFile }) };
+    ...(service && { MODULAR_AGENT_HISTORY_URL: service.url, MODULAR_AGENT_HISTORY_TOKEN_FILE: tokenFile,
+      MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS: process.env.MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS }) };
   const child = spawn(process.execPath, [cli, "--acp"], { cwd: p.work, env, stdio: ["pipe", "pipe", "inherit"] });
   const done = once(child, "exit");
   const lines = createInterface({ input: child.stdout });

@@ -57,7 +57,13 @@ export async function withCredentialLock<T>(path: string, work: () => Promise<T>
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 	await using file = await open(path, "a", 0o600);
 	await new Promise<void>((resolve, reject) => {
-		const lock = spawn("flock", ["-x", "3"], { stdio: ["ignore", "ignore", "ignore", file.fd], signal });
+		// macOS has flock(2) but no flock(1). Its system Perl exposes the same
+		// lock as Rust. In both cases the inherited open file description keeps
+		// the lock held in Node after the helper exits, until Node closes it.
+		const lock = process.platform === "darwin"
+			? spawn("/usr/bin/perl", ["-MFcntl=:flock", "-e", 'open(my $fd, "<&=3") or die $!; flock($fd, LOCK_EX) or die $!;'],
+				{ stdio: ["ignore", "ignore", "ignore", file.fd], signal, env: {} })
+			: spawn("flock", ["-x", "3"], { stdio: ["ignore", "ignore", "ignore", file.fd], signal });
 		lock.once("error", reject);
 		lock.once("close", code => code === 0 ? resolve() : reject(new Error("Could not lock the credential file")));
 	});
