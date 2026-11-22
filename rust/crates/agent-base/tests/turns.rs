@@ -142,7 +142,7 @@ async fn bash_progress_arrives_before_the_command_finishes() {
 #[tokio::test]
 #[cfg_attr(
     not(target_os = "linux"),
-    ignore = "requires Linux process inspection or strong containment"
+    ignore = "checks the Linux base's immediate cleanup of background work using /proc"
 )]
 async fn background_shell_returns_and_leaves_no_process() {
     let rig = Rig::new(vec![
@@ -332,12 +332,26 @@ async fn cancelling_a_model_request_returns_queued_input() {
     assert!(rig.h.run_next(&rig.id).await.unwrap().is_none());
 }
 #[tokio::test]
-async fn cancelling_bash_records_one_cancelled_result_and_reaps_children() {
+async fn cancelling_bash_records_one_cancelled_result_and_stops_the_command() {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
     let rig = Rig::new(vec![calls(vec![ToolCall::new(
         "bash",
-        json!({"command":"echo $$ > shell.pid; printf ready; sleep 60"}),
+        json!({"command":"exec 3>lifetime; sleep 60 & printf ready; wait"}),
     )])])
     .await;
+    let lifetime = rig.project.path().join("lifetime");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&lifetime)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(lifetime)
+        .unwrap();
     rig.h
         .submit(&rig.id, "user", "run", Timing::Now, None)
         .await
@@ -353,8 +367,9 @@ async fn cancelling_bash_records_one_cancelled_result_and_reaps_children() {
     );
     assert_eq!(rig.results().len(), 1);
     assert_eq!(rig.results()[0].status, ToolStatus::Cancelled);
-    let pid = std::fs::read_to_string(rig.project.path().join("shell.pid")).unwrap();
-    assert!(!std::path::Path::new(&format!("/proc/{}", pid.trim())).exists());
+    // Progress came after opening the FIFO. EOF proves that neither the shell
+    // nor its in-group child still holds the write end.
+    assert_eq!(reader.read(&mut [0; 1]).unwrap(), 0);
 }
 #[tokio::test]
 async fn steering_joins_next_step_and_followup_waits_for_a_new_turn() {
