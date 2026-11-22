@@ -11,7 +11,7 @@ import (
 func ObserveInference(ctx context.Context, access ModelAccess, request Request, emit func(Part)) (res Response, err error) {
 	m := access.Model()
 	id := strings.TrimPrefix(m.ID, m.Provider+"/")
-	internal := m.Provider == "fake" || m.Provider == "conformance" || m.Provider == "script"
+	internal := m.Provider == "fake" || m.Provider == "conformance" || m.Provider == "scripted"
 	ctx, end := telemetry.Inference(ctx, m.Provider, id, internal)
 	defer func() { end(err, res.Stop, res.Usage.Input, res.Usage.Output) }()
 	return access.Generate(ctx, request, emit)
