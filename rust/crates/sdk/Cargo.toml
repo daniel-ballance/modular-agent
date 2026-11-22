@@ -47,6 +47,8 @@ runtime-durable = { path = "../runtime-durable" }
 runtime-transient = { path = "../runtime-transient" }
 
 [dev-dependencies]
+opentelemetry.workspace = true
+opentelemetry_sdk = { version = "0.33.1", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 schemars = "1.2"
 serde.workspace = true

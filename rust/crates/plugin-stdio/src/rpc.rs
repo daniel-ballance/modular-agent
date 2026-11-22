@@ -14,6 +14,9 @@ use tokio::{
     task::JoinSet,
 };
 
+#[cfg(test)]
+mod trace_tests;
+
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 fn scope_from_params(params: &Value) -> Option<Scope> {
