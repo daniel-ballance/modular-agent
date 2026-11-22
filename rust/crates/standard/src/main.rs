@@ -1,7 +1,7 @@
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use modular_agent::{self as sdk, testing::SCRIPTED_MODEL};
 use modular_agent_mcp::{Mcp, Server};
-use provider_responses::{Vendor, oauth};
+use provider_responses::{ClientIdentity, Vendor, oauth};
 use serde_json::json;
 use standard::terminal::TerminalOptions;
 use standard::{
@@ -53,7 +53,24 @@ fn take(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
     args.next().ok_or_else(|| anyhow!("{flag} needs a value"))
 }
 
+fn client_identity_from_env() -> Result<ClientIdentity> {
+    match std::env::var("MA_CLIENT_IDENTITY") {
+        Ok(value) => value.parse().context("MA_CLIENT_IDENTITY"),
+        Err(std::env::VarError::NotPresent) => Ok(ClientIdentity::default()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("MA_CLIENT_IDENTITY must contain only ASCII characters")
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
+    let client_identity = match client_identity_from_env() {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         eprintln!("ma supports only Linux and macOS");
         return std::process::ExitCode::FAILURE;
@@ -69,13 +86,13 @@ fn main() -> std::process::ExitCode {
             }
         };
     }
-    agent_main();
+    agent_main(client_identity);
     std::process::ExitCode::SUCCESS
 }
 
 #[tokio::main]
-async fn agent_main() {
-    if let Err(error) = start().await {
+async fn agent_main(client_identity: ClientIdentity) {
+    if let Err(error) = start(client_identity).await {
         eprintln!("Error: {error:#}");
         std::process::exit(1)
     }
@@ -176,7 +193,14 @@ async fn login(standard: &Standard, mut args: impl Iterator<Item = String>) -> R
     }
     let vendor = Vendor::parse(&provider)
         .ok_or_else(|| anyhow!("unknown provider {provider}; use openai-codex, xai or claude"))?;
-    let login = oauth::login(vendor, device, terminal_lines(), &show).await?;
+    let login = oauth::login(
+        vendor,
+        &standard.client_identity,
+        device,
+        terminal_lines(),
+        &show,
+    )
+    .await?;
     standard.auth().set_login(vendor.id(), Some(login))?;
     eprintln!("Signed in to {} ({}).", vendor.label(), vendor.id());
     Ok(())
@@ -218,8 +242,8 @@ fn auth_status(standard: &Standard) -> Result<()> {
     Ok(())
 }
 
-async fn start() -> Result<()> {
-    let mut standard = Standard::from_env()?;
+async fn start(client_identity: ClientIdentity) -> Result<()> {
+    let mut standard = Standard::from_env(client_identity)?;
     let mut raw = std::env::args().skip(1);
     let mut remaining = Vec::new();
     let mut policy_file = None;

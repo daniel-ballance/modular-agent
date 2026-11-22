@@ -98,6 +98,26 @@ ma --acp --listen 127.0.0.1:7401 --token-file /path/to/owner-only-token
 
 `MODULAR_AGENT_DATA_DIR` puts the configuration files directly in that folder and puts the state in its `state/` subfolder. Without it, the XDG configuration and state variables take precedence over the paths above. `MODULAR_AGENT_CLAUDE_SIDECAR` names the sidecar's `dist/main.js` if it is not beside the build or under `~/.local/share/modular-agent/sidecars/claude`.
 
+### Client identity
+
+`ma` sends `modular-agent` as ChatGPT's request and sign-in originator and as
+Grok's device sign-in referrer. Set `MA_CLIENT_IDENTITY=My-agent_2.0` to use
+another name. It must be 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`,
+`.`, `_` and `-`. An invalid value stops `ma` at startup with status 1.
+
+In Rust code, set the name once and pass it to both Providers and sign-in.
+Use `ClientIdentity::default()` for the default. The Provider does not read
+the environment variable. The label does not change the OAuth client IDs.
+
+```rust
+use provider_responses::{ClientIdentity, ResponsesPlugin, oauth};
+
+let client_identity: ClientIdentity = "My-agent_2.0".parse()?;
+let provider = ResponsesPlugin::new(vendor, models, auth, client_identity.clone())?;
+// When signing in:
+let login = oauth::login(vendor, &client_identity, device, pasted, &show).await?;
+```
+
 ## What is checked
 
 Run from `rust/` with `TMPDIR` off `/tmp`:
@@ -118,11 +138,11 @@ mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 ../scripts/websocket-kits.sh rust
 ```
 
-- **Standard reference checks:** 22/22, including tool values, denial of ambient access, result formatting, timeout and print-limit errors, memory limits, and both Runtime crash cases.
+- **Standard reference checks:** 24/24, including client identity, tool values, denial of ambient access, result formatting, timeout and print-limit errors, memory limits, and both Runtime crash cases.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
 - **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. Neither WebSocket run used a bridge.
-- **Standard and codemode:** 26 tests for `ma` and 5 for `tools-code`. These cover tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.
-- **Workspace:** 394 Rust tests passed. Formatting and Clippy with `-D warnings` pass. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
+- **Standard and codemode:** 32 tests for `ma` and 6 for `tools-code`. These cover startup validation, tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.
+- **Workspace:** 415 Rust tests passed. Formatting and Clippy with `-D warnings` pass. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
 - **Offline only:** browser sign-in uses a simulated browser on loopback; both device flows and refresh use loopback HTTP fixtures. No credentials, real sign-ins or model requests were used.
 
 To try the terminal without a login:

@@ -3,7 +3,10 @@
 //! request carries the full context the agent supplies, and nothing is stored
 //! at the vendor. Sign-in and token refresh are in [`oauth`].
 pub mod body;
+mod client_identity;
 pub mod oauth;
+
+pub use client_identity::ClientIdentity;
 
 use anyhow::{Result, anyhow, ensure};
 use credentials_auth::{AuthFile, Login};
@@ -82,14 +85,20 @@ pub struct ResponsesPlugin {
     pub vendor: Vendor,
     pub models: Vec<Model>,
     endpoint: String,
-    pub originator: String,
+    client_identity: ClientIdentity,
     client: reqwest::Client,
     auth: AuthFile,
     test: bool,
 }
 
 impl ResponsesPlugin {
-    pub fn new(vendor: Vendor, models: Vec<Model>, auth: AuthFile) -> Result<Self> {
+    /// Use `ClientIdentity::default()` unless this agent has its own label.
+    pub fn new(
+        vendor: Vendor,
+        models: Vec<Model>,
+        auth: AuthFile,
+        client_identity: ClientIdentity,
+    ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(15))
@@ -100,7 +109,7 @@ impl ResponsesPlugin {
             vendor,
             models,
             endpoint: vendor.endpoint().into(),
-            originator: oauth::CLIENT_IDENTITY.into(),
+            client_identity,
             client,
             auth,
             test: false,
@@ -262,7 +271,7 @@ impl ResponsesPlugin {
             request = request
                 .header("chatgpt-account-id", account)
                 .header("OpenAI-Beta", "responses=experimental")
-                .header("originator", &self.originator)
+                .header("originator", self.client_identity.as_str())
                 .header("session-id", session)
                 .header("x-client-request-id", session);
         }

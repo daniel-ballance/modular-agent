@@ -80,6 +80,7 @@ impl Rig {
             state: root.path().join("state"),
             durable,
             claude: false,
+            client_identity: Default::default(),
             conformance: false,
             scripted: Some(Script::new(json!(scripts), None)),
             code: tools_code::CodeTool {

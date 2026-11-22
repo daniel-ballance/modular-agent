@@ -1,7 +1,7 @@
 //! Sign-in and token refresh for the two subscriptions. The flows, client ids
 //! and endpoints are the ones Pi uses (pi-ai 1.5.2, `auth/oauth/openai-codex`
 //! and `auth/oauth/xai`).
-use crate::Vendor;
+use crate::{ClientIdentity, Vendor};
 use anyhow::{Result, anyhow, bail, ensure};
 use base64::Engine;
 use credentials_auth::{Login, now_ms};
@@ -9,12 +9,6 @@ use serde_json::{Value, json};
 use sha2::Digest;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-/// How this agent names itself to OpenAI and xAI: the `originator` of a ChatGPT
-/// sign-in and request, and the `referrer` of a Grok sign-in. It is Pi's value,
-/// the only one known to be accepted. An agent built on this code should send its
-/// own name once the services are known to accept it.
-pub const CLIENT_IDENTITY: &str = "pi";
 
 const CODEX_CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_AUTHORIZE: &str = "https://auth.openai.com/oauth/authorize";
@@ -298,6 +292,7 @@ enum Poll<T> {
 
 async fn xai_device(
     client: &reqwest::Client,
+    client_identity: &ClientIdentity,
     show: &(dyn Fn(Step<'_>) + Sync),
     code_url: &str,
     token_url: &str,
@@ -308,7 +303,7 @@ async fn xai_device(
         &[
             ("client_id", XAI_CLIENT),
             ("scope", XAI_SCOPE),
-            ("referrer", CLIENT_IDENTITY),
+            ("referrer", client_identity.as_str()),
         ],
     )
     .await?;
@@ -516,6 +511,7 @@ async fn callback(listener: tokio::net::TcpListener, state: &str) -> Result<Stri
 /// person pastes the address the browser shows, even when the page fails to load.
 async fn codex_browser(
     client: &reqwest::Client,
+    client_identity: &ClientIdentity,
     listener: Option<tokio::net::TcpListener>,
     mut pasted: Option<Pasted>,
     show: &(dyn Fn(Step<'_>) + Sync),
@@ -532,7 +528,7 @@ async fn codex_browser(
         "{CODEX_AUTHORIZE}?response_type=code&client_id={CODEX_CLIENT}&redirect_uri={}&scope={}&code_challenge={challenge}&code_challenge_method=S256&state={state}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator={}",
         encode(CODEX_REDIRECT),
         encode(CODEX_SCOPE),
-        encode(CLIENT_IDENTITY)
+        encode(client_identity.as_str())
     );
     if pasted.is_some() {
         show(Step::OpenAndPaste(&address));
@@ -579,8 +575,10 @@ async fn codex_browser(
 /// Sign in to a subscription. `device` asks for a code typed on another
 /// machine instead of a browser. `pasted` carries lines the person types, so a
 /// ChatGPT browser sign-in can finish from a browser on another machine.
+/// Pass the same `client_identity` as for the Provider.
 pub async fn login(
     vendor: Vendor,
+    client_identity: &ClientIdentity,
     device: bool,
     pasted: Option<Pasted>,
     show: &(dyn Fn(Step<'_>) + Sync),
@@ -590,7 +588,7 @@ pub async fn login(
         .timeout(Duration::from_secs(30))
         .build()?;
     match vendor {
-        Vendor::Xai => xai_device(&client, show, XAI_DEVICE_CODE, XAI_TOKEN).await,
+        Vendor::Xai => xai_device(&client, client_identity, show, XAI_DEVICE_CODE, XAI_TOKEN).await,
         Vendor::Codex if device => {
             codex_device(
                 &client,
@@ -625,7 +623,15 @@ pub async fn login(
                             "Port 1455 is in use, so paste the address the browser comes back to.",
                         ));
                     }
-                    codex_browser(&client, listener, pasted, show, CODEX_TOKEN).await
+                    codex_browser(
+                        &client,
+                        client_identity,
+                        listener,
+                        pasted,
+                        show,
+                        CODEX_TOKEN,
+                    )
+                    .await
                 }
             }
         }

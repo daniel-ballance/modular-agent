@@ -2,7 +2,7 @@
 //! streamed answer becomes. No network and no real sign-in.
 use credentials_auth::AuthFile;
 use modular_agent::{Agent, Outcome, Plugin, Session};
-use provider_responses::{ResponsesPlugin, Vendor, catalog};
+use provider_responses::{ClientIdentity, ResponsesPlugin, Vendor, catalog};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,6 +11,13 @@ struct Fixture {
     endpoint: String,
     requests: Arc<Mutex<Vec<(String, Value)>>>,
 }
+
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines()
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.trim()))
+}
+
 /// Answers each POST with the next scripted reply: a status and a body.
 async fn fixture(replies: Vec<(u16, String)>) -> Fixture {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -31,11 +38,9 @@ async fn fixture(replies: Vec<(u16, String)>) -> Fixture {
                 let n = stream.read(&mut chunk).await.unwrap();
                 buffer.extend_from_slice(&chunk[..n]);
                 if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let head = String::from_utf8_lossy(&buffer[..at]).to_lowercase();
-                    let length: usize = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .map(|v| v.trim().parse().unwrap())
+                    let head = String::from_utf8_lossy(&buffer[..at]).into_owned();
+                    let length: usize = header(&head, "content-length")
+                        .map(|v| v.parse().unwrap())
                         .unwrap_or(0);
                     while buffer.len() < at + 4 + length {
                         let n = stream.read(&mut chunk).await.unwrap();
@@ -72,12 +77,14 @@ async fn agent(
     vendor: Vendor,
     model: &str,
     endpoint: &str,
+    client_identity: ClientIdentity,
     plugins: Vec<Plugin>,
 ) -> (Agent, Session) {
     let provider = ResponsesPlugin::new(
         vendor,
         catalog(vendor, &Value::Null).unwrap(),
         AuthFile::new("unused-auth.json".into(), &[]),
+        client_identity,
     )
     .unwrap()
     .with_test_endpoint(endpoint)
@@ -119,6 +126,7 @@ async fn a_streamed_answer_becomes_text_calls_and_usage() {
         Vendor::Codex,
         "openai-codex/gpt-6.1-sol",
         &server.endpoint,
+        ClientIdentity::default(),
         vec![],
     )
     .await;
@@ -139,24 +147,40 @@ async fn a_streamed_answer_becomes_text_calls_and_usage() {
     assert_eq!(answer["usage"]["output"], 5);
     assert!(answer.get("providerData").is_none());
     assert!(!answer.to_string().contains("encrypted_content"));
-    let session_header = format!("session-id: {}", session.id());
-
     let requests = server.requests.lock().unwrap();
     let (head, body) = &requests[0];
-    for header in [
-        "authorization: bearer test-credential",
-        "chatgpt-account-id: test-account",
-        "openai-beta: responses=experimental",
-        "originator: pi",
-        &session_header,
-        "accept: text/event-stream",
+    for (name, value) in [
+        ("authorization", "Bearer test-credential"),
+        ("chatgpt-account-id", "test-account"),
+        ("openai-beta", "responses=experimental"),
+        ("originator", "modular-agent"),
+        ("session-id", session.id()),
+        ("accept", "text/event-stream"),
     ] {
-        assert!(head.contains(header), "missing {header} in {head}");
+        assert_eq!(header(head, name), Some(value), "{name}");
     }
     assert_eq!(body["model"], "gpt-6.1-sol");
     assert_eq!(body["instructions"], "Be brief.");
     assert_eq!(body["store"], false);
     assert_eq!(body["reasoning"]["effort"], "low");
+}
+
+#[tokio::test]
+async fn codex_requests_send_the_configured_originator() {
+    let stream = sse(&[json!({"type":"response.completed","response":{"output":[]}})]);
+    let server = fixture(vec![(200, stream)]).await;
+    let (_agent, session) = agent(
+        Vendor::Codex,
+        "openai-codex/gpt-6.1-sol",
+        &server.endpoint,
+        "My-agent_2.0".parse().unwrap(),
+        vec![],
+    )
+    .await;
+    session.prompt("hi").await.unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(header(&requests[0].0, "originator"), Some("My-agent_2.0"));
 }
 
 #[tokio::test]
@@ -176,8 +200,14 @@ async fn service_errors_are_told_apart() {
             capture.lock().unwrap().push(p.error);
             async { Ok(modular_agent::ModelDecision::Stop) }
         });
-    let (_agent, session) =
-        agent(Vendor::Xai, "xai/grok-4.7", &server.endpoint, vec![plugin]).await;
+    let (_agent, session) = agent(
+        Vendor::Xai,
+        "xai/grok-4.7",
+        &server.endpoint,
+        ClientIdentity::default(),
+        vec![plugin],
+    )
+    .await;
     for _ in 0..5 {
         assert!(matches!(
             session.prompt("hi").await.unwrap().outcome,
@@ -202,7 +232,8 @@ async fn service_errors_are_told_apart() {
     // xAI takes the system prompt as the first input item, with no extra headers.
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests[0].1["input"][0]["role"], "system");
-    assert!(!requests[0].0.contains("chatgpt-account-id"));
+    assert_eq!(header(&requests[0].0, "chatgpt-account-id"), None);
+    assert_eq!(header(&requests[0].0, "originator"), None);
     assert_eq!(requests[0].1["max_output_tokens"], 1000);
 }
 
@@ -221,7 +252,14 @@ async fn cancelling_stops_waiting_on_the_stream() {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         drop(stream);
     });
-    let (_agent, session) = agent(Vendor::Xai, "xai/grok-4.7", &endpoint, vec![]).await;
+    let (_agent, session) = agent(
+        Vendor::Xai,
+        "xai/grok-4.7",
+        &endpoint,
+        ClientIdentity::default(),
+        vec![],
+    )
+    .await;
     let prompt = session.prompt("hi");
     let cancel = async {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
