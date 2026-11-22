@@ -66,6 +66,7 @@ type ServicePlugin struct {
 }
 
 type options struct {
+	agentName                               string
 	project, dataDir, model                 string
 	durability                              Durability
 	providers                               []Provider
@@ -102,6 +103,11 @@ func WithEnvironment(env Environment) Option {
 }
 
 type Option func(*options) error
+
+// WithAgentName sets the fixed name used in metadata-only traces.
+func WithAgentName(name string) Option {
+	return func(o *options) error { o.agentName = name; return nil }
+}
 
 func WithProject(p string) Option { return func(o *options) error { o.project = p; return nil } }
 func WithDataDir(p string) Option { return func(o *options) error { o.dataDir = p; return nil } }
@@ -308,6 +314,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		specs = append(specs, more...)
 	}
 	h := harness.NewWithLocalActor(localActor)
+	h.SetAgentName(o.agentName)
 	h.SetProviderAliases(o.providerAliases)
 	if o.durability != Ephemeral {
 		h.DeferPersistentHistory()

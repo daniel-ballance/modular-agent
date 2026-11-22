@@ -239,6 +239,8 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 }
 
 func (p *turnPorts) executeTool(ctx context.Context, source api.ToolSource, snap api.Session, call api.Call, binding api.ToolRegistration, depth int) (result api.ToolResult, err error) {
+	ctx, span := startTool(ctx, call)
+	defer func() { endTool(span, result, err) }()
 	live, cancel := context.WithCancelCause(ctx)
 	i := &invocation{p: p, ctx: live, cancel: cancel, call: call, depth: depth}
 	defer func() {

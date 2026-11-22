@@ -20,6 +20,9 @@ func (r *remoteRuntime) Declaration() api.RuntimeDeclaration {
 // Runtime work is locked to the selected turn/actor/model. The mutex guards
 // the approval and recording boundaries, not Provider or tool execution.
 type runtimeWork struct {
+	traceMu                                                                  sync.Mutex
+	traceSteps                                                               map[string]context.Context
+	traceTurn                                                                context.Context
 	turn                                                                     api.Turn
 	authorize                                                                func(string, string, string) bool
 	discard                                                                  func(context.Context) error
@@ -64,6 +67,8 @@ func runRuntimeHost(ctx context.Context, t api.Turn, host api.API, declaration a
 		return o
 	}
 	w := newRuntimeWork(t)
+	w.traceTurn = ctx
+	defer w.endTraceSteps()
 	w.turnContext, w.authorize = ctx, host.Authorize
 	w.steering = declaration.Steering
 	if port, ok := t.IO.(interface {
@@ -175,7 +180,7 @@ func runRuntimeHost(ctx context.Context, t api.Turn, host api.API, declaration a
 				return fail(err)
 			}
 		}
-		if err := w.settleOutstanding(context.Background(), out); err != nil {
+		if err := w.settleOutstanding(context.WithoutCancel(ctx), out); err != nil {
 			return fail(err)
 		}
 		if err := w.finish(context.Background(), out); err != nil {

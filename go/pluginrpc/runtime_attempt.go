@@ -93,6 +93,7 @@ func (w *runtimeWork) prepare(ctx context.Context, step string, usage api.Usage)
 		}
 	}
 	sc := api.StepContext{Turn: t, Step: step, Usage: w.usage, Compact: w.compactPending, DeferredCompaction: true, Request: api.Request{System: t.System, Tools: tools, Thinking: t.Settings.Thinking, MaxOutput: t.Settings.MaxOutput}}
+	ctx = w.traceStep(ctx, step)
 	out, err := t.IO.Hook(ctx, "runtime.step.before", sc)
 	if err != nil {
 		return nil, err
@@ -205,7 +206,7 @@ func (w *runtimeWork) model(ctx context.Context, id any, p *Peer, step string, r
 			return nil, err
 		}
 	}
-	res, err := t.Access.Generate(ctx, requestIn(req), func(part api.Part) {
+	res, err := api.ObserveInference(w.traceStep(ctx, step), t.Access, requestIn(req), func(part api.Part) {
 		t.IO.Emit(ctx, api.Event{Kind: "model.delta", Step: step, Data: api.JSON(part)})
 		if emit, _ := ctx.Value(modelEventKey{}).(func(api.Part)); p == nil && emit != nil {
 			emit(part)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
@@ -85,7 +86,7 @@ func (c *client) RequestCommandModel(ctx context.Context, id, step string, req a
 	} else if err := commit(ctx, req); err != nil {
 		return api.Response{}, err
 	}
-	response, err := access.Generate(ctx, req, func(api.Part) {})
+	response, err := api.ObserveInference(telemetry.Step(telemetry.Session(ctx, id), step), access, req, func(api.Part) {})
 	if err != nil && (intent.ID == "" || ctx.Err() != nil) {
 		return api.Response{}, err
 	}

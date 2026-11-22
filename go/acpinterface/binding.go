@@ -75,6 +75,9 @@ func Declaration(a api.API, project, id string) map[string]any {
 	if caps, ok := a.(interface{ ReservationDeclaration() any }); ok {
 		d["resourceReservations"] = caps.ReservationDeclaration()
 	}
+	if profile, ok := a.(interface{ TelemetryProfile() int }); ok {
+		d["telemetry"] = profile.TelemetryProfile()
+	}
 	return d
 }
 func sessionRewinding(a api.API, project, id string) bool {

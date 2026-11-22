@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"slices"
 	"sort"
 	"strings"
@@ -318,6 +321,7 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 		q.Deadline = questionDeadline(entry.Time, q.Wait)
 	}
 	m.mu.Unlock()
+	questionTrace(ctx, q, "")
 	m.a.Emit(ctx, api.Event{Kind: "question.open", Session: q.Session, Turn: q.Turn, Call: q.Call, Data: api.JSON(q)})
 	if s.Parent != "" {
 		parent, e := m.a.Snapshot(s.Parent)
@@ -473,7 +477,34 @@ func (m *Manager) decline(q api.Question, reason string) error {
 	}
 	return &api.QuestionDeclined{Request: q.ID, Reason: reason}
 }
+
+type skipQuestionTrace struct{}
+
+func questionTrace(ctx context.Context, q api.Question, disposition string) {
+	if ctx.Value(skipQuestionTrace{}) != nil {
+		return
+	}
+	attrs := []attribute.KeyValue{telemetry.String("modular_agent.question.id", q.ID), telemetry.String("modular_agent.question.kind", telemetry.Name(q.Kind))}
+	name := "modular_agent.question.open"
+	if disposition != "" {
+		name = "modular_agent.question.close"
+		switch disposition {
+		case "answered", "stored", "declined", "noLongerAnswerable", "timeLimit", "cancelled", "turnEnded", "restart":
+		default:
+			disposition = "declined"
+		}
+		attrs = append(attrs, telemetry.String("modular_agent.question.disposition", disposition))
+	}
+	if !trace.SpanFromContext(ctx).IsRecording() {
+		var span trace.Span
+		ctx, span = telemetry.Start(telemetry.Step(telemetry.Session(ctx, q.Session), q.Step), "modular_agent.question.answer")
+		defer span.End()
+	}
+	telemetry.Event(ctx, name, attrs...)
+}
+
 func (m *Manager) emitClosure(ctx context.Context, q api.Question, reason string) {
+	questionTrace(ctx, q, reason)
 	data := api.JSON(map[string]any{"questionId": q.ID, "reason": reason})
 	if reason == "noLongerAnswerable" {
 		m.a.Emit(ctx, api.Event{Kind: "question.unanswerable", Session: q.Session, Turn: q.Turn, Step: q.Step, Call: q.Call, Data: data})
@@ -583,7 +614,14 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 		return err
 	}
 	m.a.Emit(ctx, api.Event{Kind: "question.answered", Session: id, Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: a.Actor, Data: api.JSON(a)})
-	m.emitClosure(ctx, q, a.Reason)
+	disposition := "answered"
+	if a.Declined {
+		disposition = "declined"
+	} else if q.Kind == "secret" {
+		disposition = "stored"
+	}
+	questionTrace(ctx, q, disposition)
+	m.emitClosure(context.WithValue(ctx, skipQuestionTrace{}, true), q, a.Reason)
 	if forward.ForwardSession != "" {
 		child, e := m.a.Snapshot(forward.ForwardSession)
 		if e != nil {

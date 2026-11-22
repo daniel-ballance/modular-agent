@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"strings"
 	"time"
 )
@@ -234,6 +235,7 @@ func Entry(e api.Entry) map[string]any {
 	case "turn.start":
 		set(d, "point", e.Point, e.Point != "")
 		s := api.Decode[api.TurnStart](e.Data)
+		set(d, "traceContext", s.TraceContext, s.TraceContext != nil)
 		set(v, "continuesTurnId", s.ContinuesTurn, s.ContinuesTurn != "")
 		if s.StartedBy.Kind == "" {
 			s.StartedBy = api.TurnStarter{Kind: "actor", ID: e.Actor}
@@ -530,6 +532,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		e.InputKey = str(d, "key")
 	case "turn.start":
 		s := api.TurnStart{ContinuesTurn: association(v, d, "continuesTurnId"), StartedBy: api.Decode[api.TurnStarter](api.JSON(d["startedBy"])), System: str(d, "system"), Context: contentIn(d["context"]), Input: str(d, "go.initialInput")}
+		s.TraceContext = api.Decode[*telemetry.Wire](api.JSON(d["traceContext"]))
 		m := asObject(d["model"])
 		s.Settings.Model = modelID(m)
 		if !has(d, "context") {

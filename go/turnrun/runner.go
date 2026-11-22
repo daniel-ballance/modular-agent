@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"github.com/daniel-ballance/modular-agent/go/portable"
+	"go.opentelemetry.io/otel/trace"
 	"reflect"
 )
 
@@ -44,6 +46,13 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 	}
 	out.Status = "failed"
 	var produced []string
+	turnCtx := ctx
+	var stepSpan trace.Span
+	defer func() {
+		if stepSpan != nil {
+			stepSpan.End()
+		}
+	}()
 	bound, isBound := t.IO.(BoundPorts)
 	defer func() {
 		if errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
@@ -58,10 +67,10 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 			out.Error = ctx.Err().Error()
 		}
 		if isBound {
-			_, _ = t.IO.Hook(context.Background(), "runtime.turn.end", out)
+			_, _ = t.IO.Hook(context.WithoutCancel(turnCtx), "runtime.turn.end", out)
 			return
 		}
-		_, err := t.IO.Record(context.Background(), api.Entry{Kind: "turn.end", Copies: produced, Data: api.JSON(out)})
+		_, err := t.IO.Record(context.WithoutCancel(turnCtx), api.Entry{Kind: "turn.end", Copies: produced, Data: api.JSON(out)})
 		if err != nil {
 			out.Status = "failed"
 			out.Error = err.Error()
@@ -202,6 +211,11 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 		return err
 	}
 	for pendingModel != nil || pendingStep != "" || out.Steps < t.Settings.MaxSteps {
+		if stepSpan != nil {
+			stepSpan.End()
+			stepSpan = nil
+		}
+		ctx = turnCtx
 		if err := ctx.Err(); err != nil {
 			return fail(err)
 		}
@@ -228,6 +242,7 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 		} else if pendingModel == nil && !repeatingModel && (t.Access.Model().Stateful || t.Access.Model().RunsTools) {
 			return fail(errors.New("interrupted model request has unknown outside effects; not repeated"))
 		}
+		ctx, stepSpan = telemetry.Start(telemetry.Step(turnCtx, step), "modular_agent.step")
 		pendingStep, repeatingModel = "", false
 		if !replayed {
 			out.Steps++
@@ -304,7 +319,7 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 					}
 				}
 				attempted = sc
-				response, err = t.Access.Generate(modelCtx, sc.Request, func(p api.Part) { t.IO.Emit(ctx, api.Event{Kind: "model.delta", Step: step, Data: api.JSON(p)}) })
+				response, err = api.ObserveInference(modelCtx, t.Access, sc.Request, func(p api.Part) { t.IO.Emit(ctx, api.Event{Kind: "model.delta", Step: step, Data: api.JSON(p)}) })
 				if errors.Is(err, api.ErrCapacity) {
 					return fail(err)
 				}

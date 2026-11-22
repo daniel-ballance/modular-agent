@@ -28,6 +28,7 @@ type handler struct {
 	fn    api.Handler
 }
 type Harness struct {
+	agentName       string
 	localActor      string
 	providerAliases map[string]string
 	deferHistory    bool
@@ -76,6 +77,9 @@ func NewWithLocalActor(actor string) *Harness {
 
 // SetProviderAliases configures model-id migration before any sessions open.
 func (h *Harness) SetProviderAliases(aliases map[string]string) { h.providerAliases = aliases }
+
+func (h *Harness) SetAgentName(name string) { h.agentName = name }
+func (c *client) TelemetryProfile() int     { return 1 }
 
 func (h *Harness) currentModel(ref string) string {
 	provider, id, ok := strings.Cut(ref, "/")

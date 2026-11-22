@@ -43,7 +43,7 @@ func (c *client) startQueuedLocked(s *session) {
 	go c.h.run(runCtx, s, in)
 }
 
-func (c *client) admitLocked(s *session, in api.Input) (api.Receipt, error) {
+func (c *client) admitLocked(s *session, in api.Input, contexts ...context.Context) (api.Receipt, error) {
 	if s.closing {
 		return api.Receipt{}, errors.New("session closing")
 	}
@@ -84,7 +84,7 @@ func (c *client) admitLocked(s *session, in api.Input) (api.Receipt, error) {
 		appendEntry(&next, api.Entry{Kind: "setting", Data: api.JSON(next.Settings)}, "harness", true)
 	}
 	appendEntry(&next, api.Entry{Kind: "input.accepted", Job: in.Job, Data: api.JSON(in), Content: in.Content, Actor: attribution, Copies: in.Copies}, "harness", true)
-	if err := s.publishInitialLocked(next); err != nil {
+	if err := s.publishInitialLocked(next, contexts...); err != nil {
 		return api.Receipt{}, err
 	}
 	if !parked(in) && !s.opening {
