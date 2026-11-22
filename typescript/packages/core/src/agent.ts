@@ -28,6 +28,7 @@ export type Approval = "off" | "ask" | "all" | "never";
 export interface ProcessPlugin { command: string[]; env?: Record<string, string>; config?: Settings }
 export type ServicePlugin = ServicePluginSpec;
 export interface AgentOptions {
+  agentName?: string;
   project?: string;
   dataDir?: string;
   durability?: Durability;
@@ -245,7 +246,7 @@ export class Agent {
       if (!(await stat(project)).isDirectory()) throw new Error("Project must be a directory");
       const home = options.dataDir ? resolve(options.dataDir) : scratch;
       await mkdir(home, { recursive: true });
-      const h = new Harness({ project, home, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
+      const h = new Harness({ project, home, agentName: options.agentName, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
         jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn",
         rejectUnknownModel: true, reopenModelAliases: options.reopenModelAliases, resourceReservations: options.resourceReservations, tenants: options.tenants ?? (options.conformance ? undefined : null) });
       const settings = structuredClone(options.settings ?? {});

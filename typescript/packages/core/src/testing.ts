@@ -19,6 +19,7 @@ export function scriptedProvider(script: readonly ScriptStep[]): Provider {
   const steps = structuredClone(script);
   return {
     id: "scripted",
+    inProcessInference: true,
     supports: { keepsState: false, safeToRepeat: true },
     models: () => [{ provider: "scripted", id: "script", contextWindow: 128_000, maxOutput: 4096, reasoning: false, input: ["text"] }],
     request(_model, request, context) {
