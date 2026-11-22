@@ -1,0 +1,9 @@
+{
+  "name": "modular-agent-telemetry-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test" },
+  "engines": { "node": ">=22" },
+  "dependencies": { "protobufjs": "8.8.1" }
+}
