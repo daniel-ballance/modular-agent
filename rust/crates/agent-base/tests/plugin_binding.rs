@@ -193,13 +193,9 @@ fn supplied_plugin_kit_is_mandatory() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // The kit checks setsid escapees only when the environment declares strong containment.
-    let expected = if cfg!(target_os = "macos") {
-        "145/145 checks passed"
-    } else {
-        "146/146 checks passed"
-    };
-    assert!(stdout.contains(expected), "{stdout}");
+    // Strong containment is checked with a setsid escapee, process-group containment
+    // (macOS) with an in-group child: the same number of checks either way.
+    assert!(stdout.contains("146/146 checks passed"), "{stdout}");
 }
 #[test]
 fn supplied_acp_kit_with_two_external_plugins_is_mandatory() {
