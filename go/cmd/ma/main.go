@@ -63,6 +63,7 @@ type options struct {
 	command, provider, project, session, model, thinking                            string
 	listen, tokenFile, policyPath                                                   string
 	policy                                                                          operatorPolicy
+	subscriptions                                                                   subscription.Options
 	prompt                                                                          *string
 	loadClaude                                                                      bool
 	device, resume, all, trust, transient, verbose, json, history, declaration, acp bool
@@ -187,10 +188,6 @@ func parse(args []string) (o options, err error) {
 }
 
 func main() {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		fmt.Fprintln(os.Stderr, "ma supports only Linux and macOS")
-		os.Exit(1)
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 	interrupts := make(chan os.Signal, 1)
@@ -202,10 +199,22 @@ func main() {
 	}
 }
 func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Writer, interrupts <-chan os.Signal) error {
+	var identity subscription.ClientIdentity
+	if value, set := os.LookupEnv("MA_CLIENT_IDENTITY"); set {
+		var err error
+		identity, err = subscription.ParseClientIdentity(value)
+		if err != nil {
+			return fmt.Errorf("MA_CLIENT_IDENTITY: %w", err)
+		}
+	}
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		return errors.New("ma supports only Linux and macOS")
+	}
 	o, err := parse(args)
 	if err != nil {
 		return err
 	}
+	o.subscriptions = subscription.Options{ClientIdentity: identity}
 	switch o.command {
 	case "help":
 		fmt.Fprintln(out, help)
@@ -639,7 +648,7 @@ func (d layout) signIn(ctx context.Context, o options, in io.Reader, out, stderr
 		} else {
 			fmt.Fprintln(stderr, "Waiting for the sign-in to finish...")
 		}
-	})
+	}, o.subscriptions)
 	if err != nil {
 		return err
 	}

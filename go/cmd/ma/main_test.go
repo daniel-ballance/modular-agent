@@ -61,6 +61,22 @@ func TestACPListenOptions(t *testing.T) {
 	}
 }
 
+func TestInvalidClientIdentityStopsStartup(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("MODULAR_AGENT_DATA_DIR", root)
+	t.Setenv("MODULAR_AGENT_SCRIPT", filepath.Join(root, "missing-script.json"))
+	for _, value := range []string{"", "bad identity!", strings.Repeat("x", 65)} {
+		t.Setenv("MA_CLIENT_IDENTITY", value)
+		for _, args := range [][]string{{"--help"}, {"-p", "Hello."}} {
+			var out bytes.Buffer
+			err := run(t.Context(), args, io.NopCloser(strings.NewReader("")), &out, io.Discard, nil)
+			if err == nil || !strings.Contains(err.Error(), "MA_CLIENT_IDENTITY") || out.Len() != 0 {
+				t.Errorf("MA_CLIENT_IDENTITY=%q, args=%v: got stdout %q and error %v", value, args, out.String(), err)
+			}
+		}
+	}
+}
+
 func TestTerminalSessionSurvivesProcessComposition(t *testing.T) {
 	d, project, log := isolated(t)
 	execute := func(args ...string) string {

@@ -51,13 +51,13 @@ func (v Vendor) endpoint() string {
 	}
 	return "https://api.x.ai/v1/responses"
 }
-func Provider(v Vendor, models []Model, auth AuthFile) modular.Provider {
+func Provider(v Vendor, models []Model, auth AuthFile, opts Options) modular.Provider {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	transport.ResponseHeaderTimeout = 300 * time.Second
-	return provider(v, models, auth, v.endpoint(), &http.Client{Transport: transport, CheckRedirect: noRedirect}, oauthDefaults())
+	return provider(v, models, auth, v.endpoint(), &http.Client{Transport: transport, CheckRedirect: noRedirect}, oauthDefaults(), opts)
 }
-func provider(v Vendor, models []Model, auth AuthFile, endpoint string, client *http.Client, oauth oauthClient) modular.Provider {
+func provider(v Vendor, models []Model, auth AuthFile, endpoint string, client *http.Client, oauth oauthClient, opts Options) modular.Provider {
 	info := func() []modular.ModelInfo {
 		out := make([]modular.ModelInfo, 0, len(models))
 		for _, m := range models {
@@ -86,29 +86,9 @@ func provider(v Vendor, models []Model, auth AuthFile, endpoint string, client *
 			return modular.AssistantMessage{}, &modular.ModelError{Kind: modular.Credentials, Message: err.Error()}
 		}
 		for attempt := 0; ; attempt++ {
-			req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(b))
+			req, err := newResponsesRequest(ctx, v, endpoint, b, l, r.SessionID, opts.ClientIdentity)
 			if err != nil {
 				return modular.AssistantMessage{}, err
-			}
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Accept", "text/event-stream")
-			req.Header.Set("Authorization", "Bearer "+l.Secret())
-			req.Header.Set("User-Agent", "modular-agent/0.1.0")
-			if v == Codex {
-				var id string
-				if l.Account != nil {
-					id = *l.Account
-				} else {
-					id, err = account(l.Secret())
-					if err != nil {
-						return modular.AssistantMessage{}, &modular.ModelError{Kind: modular.Credentials, Message: err.Error()}
-					}
-				}
-				req.Header.Set("ChatGPT-Account-Id", id)
-				req.Header.Set("OpenAI-Beta", "responses=experimental")
-				req.Header.Set("Originator", CLIENT_IDENTITY)
-				req.Header.Set("Session-Id", r.SessionID)
-				req.Header.Set("X-Client-Request-Id", r.SessionID)
 			}
 			res, err := client.Do(req)
 			if err != nil {
@@ -153,6 +133,34 @@ func partStr(p modular.Part, k string) string {
 	return s
 }
 func decodeField(s map[string]any, k string) map[string]any { m, _ := s[k].(map[string]any); return m }
+func newResponsesRequest(ctx context.Context, v Vendor, endpoint string, body []byte, l Login, sessionID string, identity ClientIdentity) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+l.Secret())
+	req.Header.Set("User-Agent", "modular-agent/0.1.0")
+	if v == Codex {
+		var id string
+		if l.Account != nil {
+			id = *l.Account
+		} else {
+			id, err = account(l.Secret())
+			if err != nil {
+				return nil, &modular.ModelError{Kind: modular.Credentials, Message: err.Error()}
+			}
+		}
+		req.Header.Set("ChatGPT-Account-Id", id)
+		req.Header.Set("OpenAI-Beta", "responses=experimental")
+		req.Header.Set("Originator", identity.name())
+		req.Header.Set("Session-Id", sessionID)
+		req.Header.Set("X-Client-Request-Id", sessionID)
+	}
+	return req, nil
+}
+
 func requestBody(v Vendor, m Model, r modular.ModelRequest) map[string]any {
 	input := []any{}
 	if v == Xai && r.SystemPrompt != "" {

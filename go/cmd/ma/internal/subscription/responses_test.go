@@ -51,7 +51,7 @@ func TestResponsesRequestsAndRefresh(t *testing.T) {
 						t.Error("wrong stream request", body)
 					}
 					if v == Codex {
-						if body["instructions"] != "Use tides." || body["max_output_tokens"] != nil || r.Header.Get("ChatGPT-Account-Id") != "acct-fixture" || r.Header.Get("Originator") != "pi" || r.Header.Get("OpenAI-Beta") != "responses=experimental" || body["prompt_cache_key"] != r.Header.Get("Session-Id") || r.Header.Get("Session-Id") == "" {
+						if body["instructions"] != "Use tides." || body["max_output_tokens"] != nil || r.Header.Get("ChatGPT-Account-Id") != "acct-fixture" || r.Header.Get("Originator") != "modular-agent" || r.Header.Get("OpenAI-Beta") != "responses=experimental" || body["prompt_cache_key"] != r.Header.Get("Session-Id") || r.Header.Get("Session-Id") == "" {
 							t.Error("wrong Codex request", body)
 						}
 						if n == 1 {
@@ -90,7 +90,7 @@ func TestResponsesRequestsAndRefresh(t *testing.T) {
 			c := oauthDefaults()
 			c.client = httpFixture.Client()
 			c.codexToken, c.xaiToken = httpFixture.URL+"/token", httpFixture.URL+"/token"
-			p := provider(v, []Model{{ID: "test", MaxTokens: 25, Context: 10000, Effort: map[string]string{"low": "low"}}}, a, httpFixture.URL+"/responses", httpFixture.Client(), c)
+			p := provider(v, []Model{{ID: "test", MaxTokens: 25, Context: 10000, Effort: map[string]string{"low": "low"}}}, a, httpFixture.URL+"/responses", httpFixture.Client(), c, Options{})
 			agent := modulartest.Agent(t, modular.WithProvider(p), modular.WithSettings(modular.Settings{"reasoning": "medium", "maxOutput": 100}), modular.WithPlugin(modular.Plugin{Name: "system", Setup: func(r *modular.Registrar) error {
 				return r.OnTurnBefore(func(_ context.Context, _ modular.TurnBefore) (modular.TurnContribution, error) {
 					return modular.TurnContribution{System: "Use tides."}, nil

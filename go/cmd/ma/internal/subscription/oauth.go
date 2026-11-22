@@ -19,9 +19,6 @@ import (
 	"time"
 )
 
-// Pi's value is a placeholder until the services accept this client's own name.
-const CLIENT_IDENTITY = "pi"
-
 const (
 	codexClient         = "app_EMoamEEZ73f0CkXaXp7hrann"
 	codexScope          = "openid profile email offline_access"
@@ -58,24 +55,24 @@ func oauthDefaults() oauthClient {
 	return oauthClient{client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: noRedirect}, authorize: "https://auth.openai.com/oauth/authorize", redirect: "http://localhost:1455/auth/callback", listen: "127.0.0.1:1455", codexToken: "https://auth.openai.com/oauth/token", codexDevice: "https://auth.openai.com/api/accounts/deviceauth/usercode", codexPoll: "https://auth.openai.com/api/accounts/deviceauth/token", codexPage: "https://auth.openai.com/codex/device", xaiToken: "https://auth.x.ai/oauth2/token", xaiDevice: "https://auth.x.ai/oauth2/device/code", unit: time.Second, wait: 15 * time.Minute}
 }
 func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-func SignIn(ctx context.Context, v Vendor, device bool, pasted <-chan string, show func(Step)) (Login, error) {
-	return oauthDefaults().signIn(ctx, v, device, pasted, show)
+func SignIn(ctx context.Context, v Vendor, device bool, pasted <-chan string, show func(Step), opts Options) (Login, error) {
+	return oauthDefaults().signIn(ctx, v, device, pasted, show, opts)
 }
-func (c oauthClient) signIn(ctx context.Context, v Vendor, device bool, pasted <-chan string, show func(Step)) (Login, error) {
+func (c oauthClient) signIn(ctx context.Context, v Vendor, device bool, pasted <-chan string, show func(Step), opts Options) (Login, error) {
 	if v == Xai {
-		return c.xaiSignIn(ctx, show)
+		return c.xaiSignIn(ctx, show, opts.ClientIdentity)
 	}
 	if !device {
 		listener, err := net.Listen("tcp4", c.listen)
 		if err == nil {
-			return c.browser(ctx, listener, pasted, show)
+			return c.browser(ctx, listener, pasted, show, opts.ClientIdentity)
 		}
 		if !errors.Is(err, syscall.EADDRINUSE) {
 			return Login{}, err
 		}
 		if pasted != nil {
 			show(Step{Note: "Port 1455 is in use, so paste the address the browser comes back to."})
-			return c.browser(ctx, nil, pasted, show)
+			return c.browser(ctx, nil, pasted, show, opts.ClientIdentity)
 		}
 		show(Step{Note: "Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead."})
 	}
@@ -221,8 +218,8 @@ func (c oauthClient) poll(ctx context.Context, interval int, limit time.Duration
 		}
 	}
 }
-func (c oauthClient) xaiSignIn(ctx context.Context, show func(Step)) (Login, error) {
-	status, body, err := c.post(ctx, c.xaiDevice, url.Values{"client_id": {xaiClient}, "scope": {xaiScope}, "referrer": {CLIENT_IDENTITY}})
+func (c oauthClient) xaiSignIn(ctx context.Context, show func(Step), identity ClientIdentity) (Login, error) {
+	status, body, err := c.post(ctx, c.xaiDevice, url.Values{"client_id": {xaiClient}, "scope": {xaiScope}, "referrer": {identity.name()}})
 	if err != nil {
 		return Login{}, err
 	}
@@ -371,11 +368,11 @@ func pastedParam(query, name string) (string, bool) {
 	return "", false
 }
 
-func (c oauthClient) browser(ctx context.Context, l net.Listener, pasted <-chan string, show func(Step)) (Login, error) {
+func (c oauthClient) browser(ctx context.Context, l net.Listener, pasted <-chan string, show func(Step), identity ClientIdentity) (Login, error) {
 	verifier := base64.RawURLEncoding.EncodeToString(randBytes(32))
 	state := base64.RawURLEncoding.EncodeToString(randBytes(16))
 	challenge := sha256.Sum256([]byte(verifier))
-	values := url.Values{"response_type": {"code"}, "client_id": {codexClient}, "redirect_uri": {c.redirect}, "scope": {codexScope}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}, "state": {state}, "id_token_add_organizations": {"true"}, "codex_cli_simplified_flow": {"true"}, "originator": {CLIENT_IDENTITY}}
+	values := url.Values{"response_type": {"code"}, "client_id": {codexClient}, "redirect_uri": {c.redirect}, "scope": {codexScope}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}, "state": {state}, "id_token_add_organizations": {"true"}, "codex_cli_simplified_flow": {"true"}, "originator": {identity.name()}}
 	type callback struct {
 		code string
 		err  error

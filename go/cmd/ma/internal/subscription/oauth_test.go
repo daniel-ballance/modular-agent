@@ -35,7 +35,7 @@ func TestDeviceSignIn(t *testing.T) {
 						fmt.Fprint(w, `{"device_auth_id":"session","user_code":"CODE","interval":"1"}`)
 					} else {
 						_ = r.ParseForm()
-						if r.Form.Get("client_id") != xaiClient || r.Form.Get("scope") != xaiScope || r.Form.Get("referrer") != "pi" {
+						if r.Form.Get("client_id") != xaiClient || r.Form.Get("scope") != xaiScope || r.Form.Get("referrer") != "modular-agent" {
 							t.Error("wrong xAI form")
 						}
 						fmt.Fprint(w, `{"device_code":"session","user_code":"CODE","verification_uri_complete":"https://fixture.invalid/device?code=CODE","interval":1,"expires_in":500}`)
@@ -90,7 +90,7 @@ func TestDeviceSignIn(t *testing.T) {
 			c.xaiToken, c.codexPoll = server.URL+"/poll", server.URL+"/poll"
 			c.codexToken = server.URL + "/token"
 			var shown Step
-			l, err := c.signIn(t.Context(), v, true, nil, func(s Step) { shown = s })
+			l, err := c.signIn(t.Context(), v, true, nil, func(s Step) { shown = s }, Options{})
 			if err != nil || shown.Code != "CODE" || l.Refresh != "refresh" || l.Expired() {
 				t.Fatalf("unexpected sign-in: %v, %v, %+v", l, err, shown)
 			}
@@ -138,13 +138,13 @@ func TestBrowserSignInFromPasteWhenPortIsBusy(t *testing.T) {
 			t.Fatal(err)
 		}
 		q := u.Query()
-		if q.Get("originator") != "pi" || q.Get("state") == "" {
+		if q.Get("originator") != "modular-agent" || q.Get("state") == "" {
 			t.Fatal("missing client identity or state")
 		}
 		pasted <- ""
 		pasted <- c.redirect + "?code=stale&state=other"
 		pasted <- c.redirect + "?code=pasted-code&scope=x&state=" + q.Get("state")
-	})
+	}, Options{})
 	if err != nil || l.Account == nil || *l.Account != "acct-fixture" || l.Refresh != "refresh" {
 		t.Fatalf("browser login: %v, %v", l, err)
 	}
@@ -221,7 +221,7 @@ func TestBrowserSignInWithPKCE(t *testing.T) {
 				t.Errorf("callback status %d, expected %d", res.StatusCode, tc.status)
 			}
 		}
-	})
+	}, ClientIdentity{})
 	if err != nil || l.Account == nil || *l.Account != "acct-fixture" {
 		t.Fatalf("browser login: %v, %v", l, err)
 	}
