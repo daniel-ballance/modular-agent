@@ -7,8 +7,6 @@ use crate::{
     subscription::{enroll_models, identity, responses_catalog},
 };
 
-use std::sync::Arc;
-
 pub struct ChatGptOptions {
     pub logins: SubscriptionLogins,
     pub client_identity: Option<String>,
@@ -36,9 +34,8 @@ pub fn chatgpt(options: ChatGptOptions) -> Result<ChatGptProvider> {
             label: "ChatGPT subscription",
             endpoint: "https://chatgpt.com/backend-api/codex/responses",
             format: ResponsesFormat::ChatGpt,
-            refresh: Arc::new(|client, old| {
-                Box::pin(async move { oauth::refresh(&client, old, oauth::CODEX_TOKEN).await })
-            }),
+            token_endpoint: oauth::CODEX_TOKEN,
+            refresh: |client, old, url| Box::pin(oauth::refresh(client, old, url)),
         },
         models,
         options.logins,

@@ -42,8 +42,7 @@ mod serve;
 mod session;
 mod subscription;
 mod subscription_logins;
-#[doc(hidden)]
-pub mod subscription_oauth;
+mod subscription_oauth;
 pub mod testing;
 mod tool;
 

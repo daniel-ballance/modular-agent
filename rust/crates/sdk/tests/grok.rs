@@ -481,3 +481,93 @@ async fn invalid_grant_leaves_the_login_and_reports_credentials() -> Result<()> 
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn distinguishes_service_errors_and_an_incomplete_stream() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let auth = dir.path().join("auth.json");
+    private_file(&auth, &valid_login());
+    let http = Http::start(vec![
+        ("/responses", 429, json!({"error":{"type":"usage_limit_reached","message":"You have hit your usage limit."}}).to_string()),
+        ("/responses", 400, json!({"error":{"code":"context_length_exceeded","message":"too long"}}).to_string()),
+        ("/responses", 503, "upstream unavailable".into()),
+        ("/responses", 200, format!("data: {}\n\n", json!({"type":"response.failed","response":{"error":{"code":"server_error","message":"boom"}}}))),
+        ("/responses", 200, format!("data: {}\n\n", json!({"type":"response.output_text.delta","delta":"cut"}))),
+    ]).await;
+    let provider = grok(GrokOptions::new(subscription_logins(auth)))?
+        .with_test_endpoints(&http.url("/responses"), &http.url("/token"))?;
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    let agent = Agent::builder()
+        .provider(provider)
+        .model("grok/grok-4.3")
+        .plugin(Plugin::new("capture").on_model_failed_with(
+            modular_agent::Order::First,
+            move |p| {
+                send.send(p.error).unwrap();
+                async { Ok(ModelDecision::Stop) }
+            },
+        ))
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    use ModelErrorKind::{ContextTooLarge, Other, Temporary};
+    for (kind, message) in [
+        (Other, "usage limit"),
+        (ContextTooLarge, "too long"),
+        (Temporary, "503"),
+        (Temporary, "boom"),
+        (Temporary, "ended before a complete response"),
+    ] {
+        assert!(matches!(
+            session.prompt("hi").await?.outcome,
+            Some(Outcome::Failed { .. })
+        ));
+        let error = receive.try_recv().unwrap();
+        assert_eq!(error.kind, kind);
+        assert!(error.message.contains(message));
+    }
+    http.done.await.unwrap();
+    agent.close().await
+}
+
+#[tokio::test]
+async fn cancelling_does_not_wait_for_the_stream() -> Result<()> {
+    use std::time::Duration;
+    let dir = tempfile::tempdir()?;
+    let auth = dir.path().join("auth.json");
+    private_file(&auth, &valid_login());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let (connected, received) = tokio::sync::oneshot::channel();
+    let held = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        connected.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let provider = grok(GrokOptions::new(subscription_logins(auth)))?
+        .with_test_endpoints(&format!("{base}/responses"), &format!("{base}/token"))?;
+    let agent = Agent::builder()
+        .provider(provider)
+        .model("grok/grok-4.3")
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    let (answer, cancel) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(session.prompt("hi"), async {
+            received.await.unwrap();
+            session.cancel().await
+        })
+    })
+    .await
+    .expect("cancel did not settle the turn");
+    cancel?;
+    assert_eq!(answer?.outcome, Some(Outcome::Cancelled));
+    held.abort();
+    agent.close().await
+}
+
+fn valid_login() -> Vec<u8> {
+    let mut file: Value = serde_json::from_slice(&expired_login()).unwrap();
+    file["logins"]["grok"]["expires"] = json!(u64::MAX);
+    serde_json::to_vec(&file).unwrap()
+}

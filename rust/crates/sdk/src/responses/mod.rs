@@ -10,7 +10,7 @@ use anyhow::{Result, ensure};
 use futures_util::{StreamExt, future::BoxFuture};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,19 +30,19 @@ pub struct ResponsesModel {
 pub(crate) const LEVELS: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ResponsesFormat {
+pub(crate) enum ResponsesFormat {
     ChatGpt,
     SystemMessage,
 }
 
-pub type Refresh =
-    Arc<dyn Fn(reqwest::Client, Login) -> BoxFuture<'static, Result<Login>> + Send + Sync>;
+type Refresh = for<'a> fn(&'a reqwest::Client, Login, &'a str) -> BoxFuture<'a, Result<Login>>;
 
-pub struct ResponsesOptions {
+pub(crate) struct ResponsesOptions {
     pub id: &'static str,
     pub label: &'static str,
     pub endpoint: &'static str,
     pub format: ResponsesFormat,
+    pub token_endpoint: &'static str,
     pub refresh: Refresh,
 }
 
@@ -73,8 +73,8 @@ pub struct ResponsesProvider {
     client_identity: ClientIdentity,
     client: reqwest::Client,
     auth: SubscriptionLogins,
+    token_endpoint: String,
     refresh: Refresh,
-    fixture: bool,
 }
 
 impl ResponsesProvider {
@@ -88,8 +88,7 @@ impl ResponsesProvider {
         self
     }
 
-    #[doc(hidden)]
-    pub fn new(
+    pub(crate) fn new(
         options: ResponsesOptions,
         models: Vec<ResponsesModel>,
         auth: SubscriptionLogins,
@@ -101,7 +100,7 @@ impl ResponsesProvider {
             label: options.label,
             format: options.format,
             endpoint: options.endpoint.into(),
-            fixture: false,
+            token_endpoint: options.token_endpoint.into(),
             refresh: options.refresh,
             models,
             client_identity,
@@ -131,31 +130,8 @@ impl ResponsesProvider {
         validate_loopback(responses).map_err(invalid_params)?;
         validate_loopback(token).map_err(invalid_params)?;
         self.endpoint = responses.into();
+        self.token_endpoint = token.into();
         self.client = Self::client(self.format, true).map_err(invalid_params)?;
-        let token = token.to_owned();
-        let format = self.format;
-        self.refresh = Arc::new(move |client, old| {
-            let token = token.clone();
-            Box::pin(async move {
-                match format {
-                    ResponsesFormat::ChatGpt => {
-                        crate::chatgpt::oauth::refresh(&client, old, &token).await
-                    }
-                    ResponsesFormat::SystemMessage => {
-                        crate::grok::oauth::refresh(&client, old, &token).await
-                    }
-                }
-            })
-        });
-        Ok(self)
-    }
-
-    #[doc(hidden)]
-    pub fn with_test_endpoint(mut self, responses: &str) -> Result<Self> {
-        validate_loopback(responses)?;
-        self.endpoint = responses.into();
-        self.client = Self::client(self.format, true)?;
-        self.fixture = true;
         Ok(self)
     }
 }
@@ -191,11 +167,10 @@ impl Provider for ResponsesProvider {
     }
 
     fn available(&self) -> bool {
-        self.fixture
-            || self.auth.login(self.id).is_ok_and(|v| match self.format {
-                ResponsesFormat::ChatGpt => matches!(v, Some(Login::Oauth { .. })),
-                ResponsesFormat::SystemMessage => v.is_some(),
-            })
+        self.auth.login(self.id).is_ok_and(|v| match self.format {
+            ResponsesFormat::ChatGpt => matches!(v, Some(Login::Oauth { .. })),
+            ResponsesFormat::SystemMessage => v.is_some(),
+        })
     }
 
     async fn request(
@@ -267,21 +242,17 @@ fn api_failure(status: Option<u16>, error: &Value) -> Failure {
 
 impl ResponsesProvider {
     async fn sign_in(&self, rejected: Option<&str>) -> Result<Login> {
-        if self.fixture {
-            return Ok(Login::ApiKey {
-                key: "test-credential".into(),
-            });
-        }
         let id = self.id;
         let logins = self.auth.clone();
-        let refresh = self.refresh.clone();
+        let refresh = self.refresh;
         let client = self.client.clone();
+        let url = self.token_endpoint.clone();
         let rejected = rejected.map(str::to_owned);
         // A token may have been spent before cancellation reaches the request.
         // Finish saving the rotated login even if the turn ends.
         let result = tokio::spawn(async move {
             logins
-                .current(id, rejected.as_deref(), |old| refresh(client, old))
+                .current(id, rejected.as_deref(), |old| refresh(&client, old, &url))
                 .await
         })
         .await?;
@@ -300,7 +271,6 @@ impl ResponsesProvider {
                     account: Some(account),
                     ..
                 } => account.clone(),
-                _ if self.fixture => "test-account".into(),
                 _ => crate::chatgpt::oauth::chatgpt_account(login.secret())?,
             };
             request = request

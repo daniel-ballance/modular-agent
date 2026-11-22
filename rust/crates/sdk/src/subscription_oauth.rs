@@ -72,30 +72,11 @@ pub(crate) fn tokens(
     })
 }
 
-pub fn oauth_error(action: &str, status: u16, body: &Value) -> anyhow::Error {
-    let detail = [&body["error"], &body["error_description"]]
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect::<Vec<_>>()
-        .join(": ");
-    anyhow!(
-        "{action} failed (HTTP {status}){}{detail}",
-        if detail.is_empty() { "" } else { ": " }
-    )
-}
-pub async fn poll<F, Fut, T>(interval: Duration, limit: Duration, attempt: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<Poll<T>>>,
-{
-    poll_for(interval, limit, Duration::from_secs(5), attempt).await
-}
-
 pub(crate) async fn device_poll<F, Fut, T>(
     interval: u64,
     limit: u64,
     fixture: bool,
-    attempt: F,
+    mut attempt: F,
 ) -> Result<T>
 where
     F: FnMut() -> Fut,
@@ -108,23 +89,9 @@ where
         Duration::from_secs(1)
     };
     let duration = |seconds: u64| unit.saturating_mul(seconds.min(u32::MAX.into()) as u32);
-    if fixture {
-        poll_for(duration(interval), duration(limit), duration(5), attempt).await
-    } else {
-        poll(duration(interval), duration(limit), attempt).await
-    }
-}
-
-async fn poll_for<F, Fut, T>(
-    mut interval: Duration,
-    limit: Duration,
-    slowdown: Duration,
-    mut attempt: F,
-) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<Poll<T>>>,
-{
+    let limit = duration(limit);
+    let mut interval = duration(interval);
+    let slowdown = duration(5);
     let deadline = tokio::time::Instant::now() + limit;
     loop {
         tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + interval)).await;

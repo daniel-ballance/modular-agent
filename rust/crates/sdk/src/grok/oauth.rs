@@ -10,7 +10,7 @@ const XAI_SCOPE: &str = "openid profile email offline_access grok-cli:access api
 const XAI_DEVICE_CODE: &str = "https://auth.x.ai/oauth2/device/code";
 pub(super) const XAI_TOKEN: &str = "https://auth.x.ai/oauth2/token";
 
-pub(crate) async fn refresh(client: &reqwest::Client, old: Login, url: &str) -> Result<Login> {
+pub(super) async fn refresh(client: &reqwest::Client, old: Login, url: &str) -> Result<Login> {
     let Login::Oauth { refresh, .. } = old else {
         return Ok(old);
     };

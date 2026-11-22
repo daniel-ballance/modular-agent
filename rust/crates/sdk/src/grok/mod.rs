@@ -7,8 +7,6 @@ use crate::{
     subscription::{enroll_models, identity, responses_catalog},
 };
 
-use std::sync::Arc;
-
 pub struct GrokOptions {
     pub logins: SubscriptionLogins,
     pub client_identity: Option<String>,
@@ -36,9 +34,8 @@ pub fn grok(options: GrokOptions) -> Result<GrokProvider> {
             label: "Grok subscription",
             endpoint: "https://api.x.ai/v1/responses",
             format: ResponsesFormat::SystemMessage,
-            refresh: Arc::new(|client, old| {
-                Box::pin(async move { oauth::refresh(&client, old, oauth::XAI_TOKEN).await })
-            }),
+            token_endpoint: oauth::XAI_TOKEN,
+            refresh: |client, old, url| Box::pin(oauth::refresh(client, old, url)),
         },
         models,
         options.logins,
