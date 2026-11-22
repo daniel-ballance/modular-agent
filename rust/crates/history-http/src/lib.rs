@@ -35,21 +35,23 @@ fn lease_value(value: &Value) -> Result<&str> {
     Ok(lease)
 }
 
-// CLOCK_BOOTTIME advances during suspension, unlike Instant on Linux.
+// Both clocks advance during suspension (see clock_gettime(3) on macOS).
 #[cfg(target_os = "linux")]
+const LEASE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
+#[cfg(target_os = "macos")]
+const LEASE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn now() -> Duration {
     let mut t = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    assert_eq!(
-        unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut t) },
-        0
-    );
+    assert_eq!(unsafe { libc::clock_gettime(LEASE_CLOCK, &mut t) }, 0);
     Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn now() -> Duration {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed()
@@ -84,11 +86,11 @@ enum Transport {
 }
 
 fn clock_margin() -> Result<Duration> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         Ok(Duration::ZERO)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Ok(Duration::from_millis(std::env::var("MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS")
         .map_err(|_| anyhow!("configure MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS without a suspension-aware clock"))?.parse()?))
