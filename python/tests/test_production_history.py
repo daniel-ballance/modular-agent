@@ -6,7 +6,7 @@ import time
 
 import pytest
 from ma_core import AgentError
-from ma_history.http import HTTPHistory, lease_clock
+from ma_history.http import HTTPHistory, ServiceError, lease_clock
 
 
 @pytest.mark.parametrize(
@@ -61,6 +61,24 @@ async def test_history_list_paginates_with_original_filter(tmp_path, monkeypatch
         "/v1/sessions?project=%2Fdemo%20project",
         "/v1/sessions?project=%2Fdemo%20project&after=a%20b",
     ]
+
+
+async def test_history_open_for_erasure_reports_held_without_waiting(tmp_path, monkeypatch):
+    history = HTTPHistory("http://127.0.0.1:8080", tmp_path / "token")
+    history.ttl = 15_000
+    held = False
+
+    async def exchange(method, path, body=None):
+        nonlocal held
+        assert (method, path) == ("POST", "/v1/sessions/copy/lease")
+        assert not held, "Erasure must leave the held copy pending after the first refusal"
+        held = True
+        raise ServiceError(409, {"code": "held", "retryAfterMs": 1})
+
+    monkeypatch.setattr(history, "request", exchange)
+    with pytest.raises(ServiceError) as exc:
+        await history.open({"session": "copy", "wait_for_lease": False}, None)
+    assert exc.value.code == "held"
 
 
 async def test_late_successful_renewal_cannot_extend_old_lease(tmp_path, monkeypatch):

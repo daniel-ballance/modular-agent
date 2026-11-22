@@ -207,7 +207,7 @@ class HTTPHistory(PendingErasure, Plugin):
             max(0, cutoff - lease_clock()), self._lose, sid, lease
         )
 
-    async def acquire(self, sid):
+    async def acquire(self, sid, *, wait_for_lease=True):
         async with self.opening.setdefault(sid, asyncio.Lock()):
             if sid in self.leases:
                 lease = self.leases[sid]
@@ -228,7 +228,7 @@ class HTTPHistory(PendingErasure, Plugin):
                     self.must_renew.add(sid)
                     raise held from exc
                 except ServiceError as exc:
-                    if exc.code != "held":
+                    if exc.code != "held" or not wait_for_lease:
                         raise
                     held = exc
                     now = lease_clock()
@@ -335,7 +335,7 @@ class HTTPHistory(PendingErasure, Plugin):
         return state
 
     async def open(self, d, emit):
-        await self.acquire(d["session"])
+        await self.acquire(d["session"], wait_for_lease=d.get("wait_for_lease", True))
         try:
             result = await self.read(d, emit)
             self._check(d["session"], self.leases[d["session"]])

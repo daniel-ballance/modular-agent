@@ -54,7 +54,10 @@ async def test_http_history_discovers_registry_and_reconciles_on_takeover(tmp_pa
     token = tmp_path / "token"
     token.write_text("c79e2509a4395582e0fac55c25c18df1")
     server = serve_history(
-        file_history(tmp_path / "store"), address=("127.0.0.1", 0), token_file=token
+        file_history(tmp_path / "store"),
+        address=("127.0.0.1", 0),
+        token_file=token,
+        lease_ttl=2.5,
     )
     assert server is not None
     options = dict(project=tmp_path, history=http_history(server.url, token), durability="kept")

@@ -52,12 +52,14 @@ def serve_history(
     *,
     address: tuple[str, int],
     token_file: str | PathLike[str],
-    ttl: float = 2.5,
+    lease_ttl: float = 15.0,
     witness: str | PathLike[str] | None = None,
 ) -> HistoryListener | None:
-    """Serve opaque history. Port zero starts a listener and returns its handle."""
+    """Serve opaque history. Port zero starts a listener and returns its handle.
+
+    For a file store, lease_ttl is in seconds. A custom port owns its lease TTL.
+    """
     import asyncio
-    import math
 
     from ma_core import AgentError as NativeError
     from ma_history.service import serve
@@ -66,8 +68,13 @@ def serve_history(
         raise AgentError(ErrorCode.NOT_SUPPORTED, f"Cannot serve {store._kind} history")
     if not isinstance(store, HistoryStore) and not store.persistent:
         raise AgentError(ErrorCode.NOT_SUPPORTED, f"Cannot serve {type(store).__name__} history")
-    if not math.isfinite(ttl) or ttl < 0.001:
-        raise AgentError(ErrorCode.INVALID_PARAMS, "History TTL must be at least one millisecond")
+    ttl_error = "lease_ttl must be a positive duration in whole milliseconds"
+    if not isinstance(lease_ttl, (int, float)) or not 0.001 <= lease_ttl <= (2**53 - 1) / 1000:
+        raise AgentError(ErrorCode.INVALID_PARAMS, ttl_error)
+    ttl_ms = round(lease_ttl * 1000)
+    # Compare in seconds: for example, 1.001 * 1000 is not exactly 1001 as a float.
+    if lease_ttl != ttl_ms / 1000:
+        raise AgentError(ErrorCode.INVALID_PARAMS, ttl_error)
 
     if witness is not None and not isinstance(store, HistoryStore):
         raise AgentError(ErrorCode.NOT_SUPPORTED, "A custom history port owns its freshness checks")
@@ -79,7 +86,7 @@ def serve_history(
                     store._path,
                     address,
                     token_file,
-                    round(ttl * 1000),
+                    ttl_ms,
                     started=started,
                     witness=witness,
                 )

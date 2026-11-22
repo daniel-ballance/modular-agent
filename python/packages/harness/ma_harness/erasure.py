@@ -152,7 +152,10 @@ class Erasure:
                 await self._reconcile_erasure(destination)
                 continue
             try:
-                loaded = await self.call("@harness", "history", "open", {"session": destination})
+                # A held copy stays pending for its current or next writer.
+                loaded = await self.call(
+                    "@harness", "history", "open", {"session": destination, "wait_for_lease": False}
+                )
             except AgentError as exc:
                 if exc.code not in {"locked", "held", "unknown_session", "not_found"}:
                     raise
