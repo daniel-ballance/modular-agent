@@ -103,7 +103,7 @@ The other languages' builds are in [`typescript/packages/ma`](typescript/package
 
 ## Known gaps
 
-- **Command containment varies by OS.** Linux uses namespaces, ptrace and cgroups. macOS supports local commands and Git rewind points with process-group containment, not strong containment: processes that leave their group are not stopped. Windows is unsupported.
+- **Command containment varies by OS.** Linux uses namespaces, ptrace and cgroups. macOS (Apple silicon; checked with `scripts/macos-check.sh`, where all four SDKs and `ma` builds pass their suites, the reference checks and the ACP kit) uses process-group containment, not strong containment: a process that leaves its command's group is not stopped, so a command interrupted by a crash is never repeated there. Windows is unsupported.
 - **`ma` names itself `pi` to OpenAI and xAI,** Pi's client identity, because it is the only one known to be accepted. If you build an agent from this code, change it in the one place each implementation keeps it ([client identity](docs/reference/standard-configuration.md#providers)).
 - **Few real requests.** The test suites use scripted models and local fakes. The ChatGPT, Grok and Claude subscription Providers have answered real requests through all four `ma` builds, each reading a file through `codemode`, and the `openai` and `anthropic` API-key Providers pass the [live checks](docs/sdk/testing.md#live-checks) in all four SDKs.
 - **`ma` turns off several actors, session limits and tenants.** The SDKs offer them as options.
