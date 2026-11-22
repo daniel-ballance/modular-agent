@@ -160,10 +160,13 @@ func (s *Server) serve(ctx context.Context, p *Peer) error {
 	return err
 }
 
-// Callback sends a scoped request on behalf of the current served handler.
-func providerAvailable(p api.Provider) bool {
+func providerAvailable(p api.Provider) bool { ready, _ := providerAvailability(p); return ready }
+func providerAvailability(p api.Provider) (bool, string) {
+	if a, ok := p.(interface{ Availability() (bool, string) }); ok {
+		return a.Availability()
+	}
 	a, ok := p.(interface{ Available() bool })
-	return !ok || a.Available()
+	return !ok || a.Available(), ""
 }
 
 // ProviderCredential uses the host-owned credential handed to this Provider.
@@ -364,7 +367,12 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 			return object{"models": list}, nil
 		}
 		if method == "provider/available" {
-			return object{"available": providerAvailable(provider)}, nil
+			ready, reason := providerAvailability(provider)
+			out := object{"available": ready}
+			if !ready && reason != "" {
+				out["reason"] = reason
+			}
+			return out, nil
 		}
 		if method == "provider/discard" {
 			session := str(v, "sessionId")

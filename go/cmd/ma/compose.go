@@ -13,22 +13,23 @@ import (
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/codemode"
-	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/subscription"
+	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/grok"
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/files"
 	"github.com/daniel-ballance/modular-agent/go/modular/mcp"
 	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
+	"github.com/daniel-ballance/modular-agent/go/modular/subscription"
 )
 
-func (d layout) auth() subscription.AuthFile {
-	return subscription.OpenAuthFile(filepath.Join(d.config, "auth.json"))
+func (d layout) auth() subscription.Logins {
+	return subscription.SubscriptionLogins(filepath.Join(d.config, "auth.json")).WithAliases(providerAliases)
 }
 func (d layout) compose(ctx context.Context, o options, settings modular.Settings, store modular.HistoryStore, stderr io.Writer) (*modular.Agent, error) {
 	durability := modular.Durable
 	if o.transient {
 		durability = modular.Kept
 	}
-	opts := []modular.Option{modular.WithProject(o.project), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp), modular.WithJobReportsStartTurns(true), modular.WithLateAnswersStartTurns(true), modular.WithRefusedSettingsDuringTurn()}
+	opts := []modular.Option{modular.WithProject(o.project), modular.WithProviderAliases(providerAliases), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp), modular.WithJobReportsStartTurns(true), modular.WithLateAnswersStartTurns(true), modular.WithRefusedSettingsDuringTurn()}
 	opts = append(opts, modular.WithCapacityLimits(o.policy.Limits))
 	if len(o.policy.Tenants) != 0 {
 		opts = append(opts, modular.WithTenants(o.policy.Tenants))
@@ -41,8 +42,8 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		if os.Getenv("MODULAR_AGENT_SCRIPT") != "" || chosenModel(settings) != "" || os.Getenv("OPENAI_API_KEY") != "" || os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" || len(d.mcp(o.project, io.Discard)) > 0 {
 			return nil, errors.New("conformance mode refuses configured production Providers or servers")
 		}
-		for _, v := range []subscription.Vendor{subscription.Codex, subscription.Xai} {
-			l, err := d.auth().Login(string(v))
+		for _, v := range []string{"chatgpt", grok.ID} {
+			l, err := d.auth().Login(v)
 			if err != nil {
 				return nil, err
 			}
@@ -106,6 +107,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 				return modular.TurnContribution{System: prompt}, err
 			})
 		}}))
+	var claude *subscription.ClaudeProvider
 	if script := os.Getenv("MODULAR_AGENT_SCRIPT"); script != "" {
 		p, err := scripted(script, os.Getenv("MODULAR_AGENT_SCRIPT_LOG"))
 		if err != nil {
@@ -114,33 +116,54 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		settings["model"] = modulartest.ScriptedModel
 		opts = append(opts, modular.WithProvider(p))
 	} else {
-		var overrides map[subscription.Vendor][]subscription.Model
-		if err := readJSON(filepath.Join(d.config, "models.json"), &overrides); err != nil {
+		overrides, err := d.modelOverrides()
+		if err != nil {
 			return nil, err
 		}
-		for _, v := range []subscription.Vendor{subscription.Codex, subscription.Xai} {
-			models, err := subscription.Catalog(v, overrides)
+		chat := subscription.ChatGPTOptions{Logins: d.auth(), ClientIdentity: o.clientIdentity}
+		for _, model := range overrides["chatgpt"] {
+			chat.CatalogOverrides = append(chat.CatalogOverrides, subscription.ChatGPTModelOverride{Model: modular.ModelInfo{ModelRef: modular.ModelRef{ID: model.ID}, ContextWindow: model.Context, MaxOutput: model.MaxTokens, Input: []string{"text", "image"}}, Effort: model.Effort})
+		}
+		chatgpt, err := subscription.ChatGPT(chat)
+		if err != nil {
+			return nil, err
+		}
+		models, err := grok.Catalog(overrides[grok.ID])
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, modular.WithProvider(chatgpt), modular.WithProvider(grok.Provider(models, d.auth())))
+		_, available := subscription.FindClaudeProgram(subscription.ClaudeOptions{})
+		if containsClaude(settings) || o.loadClaude || o.command == "models" && available == nil {
+			claude, err = subscription.Claude(ctx, subscription.ClaudeOptions{})
 			if err != nil {
 				return nil, err
 			}
-			opts = append(opts, modular.WithProvider(subscription.Provider(v, models, d.auth(), o.subscriptions)))
-		}
-		script := d.claudeSidecar()
-		if containsClaude(settings) || o.loadClaude || o.command == "models" && script != "" {
-			if script == "" {
-				return nil, errors.New("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR")
-			}
-			env := map[string]string{}
-			for _, k := range []string{"HOME", "PATH", "CLAUDE_CONFIG_DIR"} {
-				if v, ok := os.LookupEnv(k); ok {
-					env[k] = v
-				}
-			}
-			opts = append(opts, modular.WithPluginHost(true), modular.WithProcessPlugin(modular.ProcessPlugin{Command: []string{"node", script}, Env: env}))
+			opts = append(opts, modular.WithPlugin(claude.Plugin()))
 		}
 	}
-	return modular.New(ctx, append(opts, modular.WithSettings(settings), modular.WithCredentials(d.auth().CredentialStore()))...)
+	a, err := modular.New(ctx, append(opts, modular.WithSettings(settings), modular.WithCredentials(d.auth().CredentialStore()))...)
+	if err != nil && claude != nil {
+		_ = claude.Close()
+	}
+	return a, err
 }
+
+func (d layout) modelOverrides() (map[string][]grok.Model, error) {
+	var overrides map[string][]grok.Model
+	if err := readJSON(filepath.Join(d.config, "models.json"), &overrides); err != nil {
+		return nil, err
+	}
+	for old, current := range providerAliases {
+		if models, ok := overrides[old]; ok {
+			// Later entries replace earlier entries with the same model id.
+			overrides[current] = append(models, overrides[current]...)
+			delete(overrides, old)
+		}
+	}
+	return overrides, nil
+}
+
 func scripted(path, log string) (modular.Provider, error) {
 	var script []modulartest.Reply
 	b, err := os.ReadFile(path)

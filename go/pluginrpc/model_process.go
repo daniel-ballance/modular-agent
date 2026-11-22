@@ -56,12 +56,7 @@ func StartModelProcess(ctx context.Context, spec Spec, project, state, id string
 func (p *ModelProcess) Close() error { return p.remote.Close() }
 
 func (p *ModelProcess) Status(ctx context.Context) (bool, string, error) {
-	var out struct {
-		Available bool
-		Reason    string
-	}
-	err := p.remote.call(ctx, "provider/available", object{"provider": p.reg.ID}, &out)
-	return out.Available, out.Reason, err
+	return p.status(ctx)
 }
 
 func (p *ModelProcess) Generate(ctx context.Context, session, model string, request json.RawMessage, emit func(api.Part)) (json.RawMessage, error) {

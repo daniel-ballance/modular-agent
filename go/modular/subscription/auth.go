@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -57,17 +59,51 @@ func (l Login) Expired() bool {
 }
 
 type contents struct {
-	Logins  map[string]Login  `json:"logins"`
+	Logins map[string]Login
+	extra  map[string]json.RawMessage
+}
+
+type credentialsData struct {
 	Answers map[string]string `json:"answers"`
 	modular.CredentialStages
-	extra map[string]json.RawMessage
+}
+
+var credentialMembers = []string{"answers", "secretStages", "secretGenerations"}
+
+func (data contents) credentials() (credentialsData, error) {
+	fields := map[string]json.RawMessage{}
+	for _, name := range credentialMembers {
+		if value, ok := data.extra[name]; ok {
+			fields[name] = value
+		}
+	}
+	var out credentialsData
+	b, err := json.Marshal(fields)
+	if err != nil || json.Unmarshal(b, &out) != nil {
+		return out, errors.New("the credential answers or staging data are invalid")
+	}
+	if out.Answers == nil {
+		out.Answers = map[string]string{}
+	}
+	return out, nil
 }
 
 // Logins is a handle to the shared login file. Construct it with SubscriptionLogins.
-type Logins struct{ path string }
+type Logins struct {
+	path    string
+	aliases map[string]string
+}
 
 // SubscriptionLogins names a login file without opening it.
 func SubscriptionLogins(path string) Logins { return Logins{path: path} }
+
+// WithAliases maps former Provider ids to current ids. Reads prefer the
+// current id; the next write moves the old slots under the same file lock.
+// Each alias must point directly at a current id, not another alias.
+func (a Logins) WithAliases(aliases map[string]string) Logins {
+	a.aliases = maps.Clone(aliases)
+	return a
+}
 
 func privateFile(path string, flags int) (*os.File, error) {
 	fd, err := unix.Open(path, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0600)
@@ -87,7 +123,7 @@ func privateFile(path string, flags int) (*os.File, error) {
 }
 
 func (a Logins) read() (contents, error) {
-	data := contents{Logins: map[string]Login{}, Answers: map[string]string{}}
+	data := contents{Logins: map[string]Login{}, extra: map[string]json.RawMessage{}}
 	f, err := privateFile(a.path, unix.O_RDONLY)
 	if os.IsNotExist(err) {
 		return data, nil
@@ -101,15 +137,26 @@ func (a Logins) read() (contents, error) {
 	if err != nil {
 		return contents{}, err
 	}
-	if json.Unmarshal(b, &data.extra) != nil || data.extra == nil || json.Unmarshal(b, &data) != nil || data.Logins == nil || data.Answers == nil {
+	if json.Unmarshal(b, &data.extra) != nil || data.extra == nil {
 		return contents{}, invalid()
 	}
-	for _, name := range []string{"logins", "answers", "secretStages", "secretGenerations"} {
-		delete(data.extra, name)
+	if logins, ok := data.extra["logins"]; ok {
+		if json.Unmarshal(logins, &data.Logins) != nil || data.Logins == nil {
+			return contents{}, invalid()
+		}
+		delete(data.extra, "logins")
 	}
 	for _, l := range data.Logins {
 		if l.Type != "oauth" && l.Type != "api_key" {
 			return contents{}, invalid()
+		}
+	}
+	for old, current := range a.aliases {
+		if login, ok := data.Logins[old]; ok && old != current {
+			if _, exists := data.Logins[current]; !exists {
+				data.Logins[current] = login
+			}
+			delete(data.Logins, old)
 		}
 	}
 	return data, nil
@@ -121,14 +168,34 @@ func (a Logins) CredentialStore() modular.TransactionalCredentials {
 				return "", err
 			}
 			data, err := a.read()
-			return data.Answers[name], err
+			if err != nil {
+				return "", err
+			}
+			credentials, err := data.credentials()
+			return credentials.Answers[name], err
 		},
 		Update: func(ctx context.Context, fn func(*modular.CredentialStages, map[string]string) (bool, error)) error {
 			return a.locked(ctx, func(data contents) error {
-				save, err := fn(&data.CredentialStages, data.Answers)
+				credentials, err := data.credentials()
+				if err != nil {
+					return err
+				}
+				save, err := fn(&credentials.CredentialStages, credentials.Answers)
 				if err != nil || !save {
 					return err
 				}
+				var fields map[string]json.RawMessage
+				b, err := json.Marshal(credentials)
+				if err != nil {
+					return err
+				}
+				if err := json.Unmarshal(b, &fields); err != nil {
+					return err
+				}
+				for _, name := range credentialMembers {
+					delete(data.extra, name)
+				}
+				maps.Copy(data.extra, fields)
 				return a.write(data)
 			})
 		},
@@ -224,22 +291,30 @@ func (a Logins) write(data contents) error {
 type withExtras contents
 
 func (data withExtras) MarshalJSON() ([]byte, error) {
-	var standard, extra bytes.Buffer
-	enc := json.NewEncoder(&standard)
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(contents(data)); err != nil {
+	out.WriteString(`{"logins":`)
+	if err := enc.Encode(data.Logins); err != nil {
 		return nil, err
 	}
-	if len(data.extra) == 0 {
-		return standard.Bytes(), nil
+	names := append(slices.Clone(credentialMembers), slices.Sorted(maps.Keys(data.extra))...)
+	seen := map[string]bool{}
+	for _, name := range names {
+		v, ok := data.extra[name]
+		if !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out.WriteByte(',')
+		if err := enc.Encode(name); err != nil {
+			return nil, err
+		}
+		out.WriteByte(':')
+		out.Write(v)
 	}
-	enc = json.NewEncoder(&extra)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(data.extra); err != nil {
-		return nil, err
-	}
-	prefix := bytes.TrimSuffix(standard.Bytes(), []byte("}\n"))
-	return append(append(prefix, ','), extra.Bytes()[1:]...), nil
+	out.WriteByte('}')
+	return out.Bytes(), nil
 }
 
 func (a Logins) Set(ctx context.Context, provider string, l *Login) error {

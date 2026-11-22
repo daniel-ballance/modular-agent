@@ -31,7 +31,14 @@ func (s *Selection) Resolve(session api.Session) (api.ModelAccess, error) {
 		}
 		for _, m := range p.Catalog() {
 			if m.ID == session.Settings.Model || (m.Provider != "" && m.Provider+"/"+m.ID == session.Settings.Model) {
-				if a, ok := p.(interface{ Available() bool }); ok && !a.Available() {
+				if a, ok := p.(interface{ Availability() (bool, string) }); ok {
+					if available, reason := a.Availability(); !available {
+						if reason == "" {
+							reason = "Provider unavailable"
+						}
+						return nil, errors.New(reason)
+					}
+				} else if a, ok := p.(interface{ Available() bool }); ok && !a.Available() {
 					return nil, errors.New("Provider unavailable")
 				}
 				return p.Access(m.ID)

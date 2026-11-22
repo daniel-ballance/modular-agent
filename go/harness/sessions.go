@@ -274,6 +274,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 			snap.Settings = turnSettings(defaults, snap.Settings)
 		}
 	}
+	snap.Settings.Model = c.h.currentModel(snap.Settings.Model)
 	project, err := filepath.EvalSymlinks(snap.Project)
 	if err != nil {
 		_ = lease.Close()
@@ -1107,6 +1108,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	if resume != nil {
 		selectionView.Settings = turnSettings(snap.Settings, api.Decode[api.TurnStart](resume.Data).Settings)
 	}
+	selectionView.Settings.Model = h.currentModel(selectionView.Settings.Model)
 	access, resolveErr := selection.(api.Selection).Resolve(selectionView)
 	turnID := api.ID()
 	if resume != nil {

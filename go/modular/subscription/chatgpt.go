@@ -70,14 +70,22 @@ func clientIdentity(identity *string) (string, error) {
 	return label, nil
 }
 
+// ChatGPTModelOverride replaces the catalog entry for an operator-configured model.
+// Unlike enrollment, this lets an operator supply the exact vendor effort values.
+type ChatGPTModelOverride struct {
+	Model  modular.ModelInfo
+	Effort map[string]string
+}
+
 // ChatGPTOptions configures the ChatGPT plan Provider. A nil ClientIdentity uses
 // "modular-agent". Models enroll unlisted IDs without reasoning controls.
 // HTTPTransport is optional and trusted with the login, including the refresh token.
 type ChatGPTOptions struct {
-	Logins         Logins
-	ClientIdentity *string
-	Models         []modular.ModelInfo
-	HTTPTransport  http.RoundTripper
+	Logins           Logins
+	ClientIdentity   *string
+	Models           []modular.ModelInfo
+	CatalogOverrides []ChatGPTModelOverride
+	HTTPTransport    http.RoundTripper
 }
 
 // ChatGPT constructs the chatgpt Provider. It reads the login file at request time.
@@ -102,6 +110,25 @@ func ChatGPT(opts ChatGPTOptions) (modular.Provider, error) {
 		}
 		m.Provider, m.Thinking, m.Input = "chatgpt", nil, slices.Clone(m.Input)
 		models = append(models, subscriptionModel{Info: m})
+	}
+	for _, override := range opts.CatalogOverrides {
+		info := override.Model
+		if info.ID == "" || info.ContextWindow <= 0 || info.MaxOutput <= 0 {
+			return invalid("invalid ChatGPT model override")
+		}
+		info.Provider, info.Thinking, info.Input = "chatgpt", nil, slices.Clone(info.Input)
+		mapping := map[string]reasoningMapping{}
+		for _, level := range levels {
+			if effort, ok := override.Effort[level]; ok {
+				entry := reasoningMapping{}
+				entry.Reasoning.Effort = effort
+				mapping[level] = entry
+				info.Thinking = append(info.Thinking, level)
+				info.Reasoning = info.Reasoning || level != "off"
+			}
+		}
+		models = slices.DeleteFunc(models, func(m subscriptionModel) bool { return m.Info.ID == info.ID })
+		models = append(models, subscriptionModel{Info: info, Levels: mapping})
 	}
 	transport := opts.HTTPTransport
 	oauth := oauthDefaults()

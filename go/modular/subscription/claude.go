@@ -144,7 +144,8 @@ func (c *ClaudeProvider) models() []modular.ModelInfo {
 
 // Provider returns the SDK Provider backed by this process.
 func (c *ClaudeProvider) Provider() modular.Provider {
-	return modular.Provider{ID: "claude", Models: c.models, Available: func() bool { available, _ := c.Status(context.Background()); return available }, Request: c.request}
+	status := func() (bool, string) { return c.Status(context.Background()) }
+	return modular.Provider{ID: "claude", Models: c.models, Available: func() bool { available, _ := status(); return available }, Availability: status, Request: c.request}
 }
 
 // Plugin registers the Provider and takes ownership of the child process.
