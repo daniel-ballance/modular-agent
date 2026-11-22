@@ -88,7 +88,7 @@ func TestExternalSIGKILLQuestion(t *testing.T) {
 			if e.Kind == "tool.result" {
 				results++
 				r := api.Decode[api.ToolResult](e.Data)
-				if runtimetest.Plugin(t).Name == "durable" {
+				if runtimetest.Plugin(t).Name == "durable" && runtimetest.StopsOnCrash(t, a) {
 					if r.Status != "completed" || r.Content.Text() != "cobalt" || asked != 1 {
 						t.Fatal(r, asked)
 					}

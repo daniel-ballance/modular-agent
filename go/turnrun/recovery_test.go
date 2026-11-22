@@ -7,6 +7,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/durable"
 	"github.com/daniel-ballance/modular-agent/go/fake"
 	"github.com/daniel-ballance/modular-agent/go/internal/proctest"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"github.com/daniel-ballance/modular-agent/go/vanilla"
 	"os"
 	"os/exec"
@@ -162,6 +163,7 @@ func TestRuntimeSIGKILLRecovery(t *testing.T) {
 					}
 					defer h.Close()
 					installEffects(t, h, root, "")
+					canRepeat := runtimetest.StopsOnCrash(t, h.API())
 					if err = h.API().Open(context.Background(), id); err != nil {
 						t.Fatal(err)
 					}
@@ -203,8 +205,9 @@ func TestRuntimeSIGKILLRecovery(t *testing.T) {
 								t.Fatal(name, results)
 							}
 						}
-						if cut == "effect-unsafe" {
-							r := results["unsafe"][0]
+						if cut == "effect-unsafe" || cut == "effect-safe" && !canRepeat {
+							name := strings.TrimPrefix(cut, "effect-")
+							r := results[name][0]
 							if r.Status != "unknown" || !strings.Contains(r.Content.Text(), "did not finish") || !strings.Contains(r.Content.Text(), "Check outside state") {
 								t.Fatal(r)
 							}
@@ -234,7 +237,7 @@ func TestRuntimeSIGKILLRecovery(t *testing.T) {
 					if runtimeName == "durable" {
 						for _, name := range []string{"done", "safe", "unsafe", "tail"} {
 							wantCount := 1
-							if name == "safe" && cut == "effect-safe" {
+							if name == "safe" && cut == "effect-safe" && canRepeat {
 								wantCount = 2
 							}
 							got := 0
