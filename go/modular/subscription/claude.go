@@ -102,14 +102,21 @@ func (c *ClaudeProvider) Close() error {
 	return c.closeErr
 }
 
+const claudeStatusGuard = 35 * time.Second
+
 // Status reports plan readiness and, when unavailable, why. Only the program
 // can check the account; no Go code reads or stores a Claude credential.
 func (c *ClaudeProvider) Status(ctx context.Context) (available bool, reason string) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// The program's first answer starts Claude Code and reads each model's
+	// context window under its own 30-second deadline (PROBE_MS in
+	// typescript/packages/claude/src/provider.ts); it took 12.4 seconds for
+	// 13 models on 2026-11-22. This guard is longer, so it stops only a
+	// program that never answers.
+	ctx, cancel := context.WithTimeout(ctx, claudeStatusGuard)
 	defer cancel()
 	available, reason, err := c.process.Status(ctx)
 	if err != nil {
-		return false, "could not check the Claude Code sign-in"
+		return false, "could not check the Claude Code sign-in: " + err.Error()
 	}
 	if available {
 		return true, ""
