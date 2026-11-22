@@ -112,7 +112,7 @@ Each SDK's README lists its own gaps.
 
 ## Planned for 0.2.0
 
-- **OpenTelemetry.** Trace context carried by every binding and kept with each turn, so a trace survives a restart; the Harness instrumented through each language's OpenTelemetry API, which does nothing until an app installs an exporter; one span profile for all four languages.
+- **OpenTelemetry, metadata only** ([profile](docs/telemetry.md), [ADR 0032](docs/adr/0032-telemetry.md)). Trace context carried by every binding (to plugins in other processes once both sides agree in the handshake) and kept with each turn, so a trace survives a restart; the Harness instrumented through each language's OpenTelemetry API, which does nothing until an app installs an exporter; one span profile for all four languages. Content capture and deeper tracing follow in later profile versions.
 - **AG-UI.** A web Interface, after the Harness gains tools run by a client and a rule for history a client sends.
 - **A demonstration host** in `demos/`: one conversation, one inbox and one listener across two agents, to test what the framework must give an application that drives agents. The host itself stays outside the specification ([ADR 0012](docs/adr/0012-one-agent-is-the-scope.md)); see [Agent platform 2027](docs/research/agent-platform-2027.md) for the ideas it tests.
 - **Faster local checks.** The full `scripts/check.sh` takes about 70 minutes, one step at a time. Run the four languages in parallel lanes, after the tests that fail under load are fixed at their cause, and run tests within each suite in parallel where they share no state: pytest-xdist for Python, and Rust tests without `--test-threads=1`. `--quick` (about 10 minutes) stays the everyday check.
@@ -131,7 +131,7 @@ It was proven before any SDK existed. Five builds were made from the documents a
 | [Architecture](docs/architecture.md) | the parts, their responsibilities, and why | informative |
 | [Contracts](docs/contracts.md) | what passes between the parts, and the rules every implementation follows | normative |
 | [Security](docs/security.md) | the trust boundaries, and the rules that keep them | normative |
-| [OpenTelemetry](docs/telemetry.md) | Harness instrumentation, trace context and content rules | draft profile |
+| [OpenTelemetry](docs/telemetry.md) | Harness instrumentation and trace context, metadata only | optional profile |
 | [Scenarios](docs/scenarios.md) | seventeen situations, told with the parts and rules | informative |
 | [Bindings](docs/bindings/README.md) | the wire: [shared data](docs/bindings/data.md), [plugins](docs/bindings/plugin.md), [ACP](docs/bindings/acp.md), [history service](docs/bindings/history-http.md) | linked bindings are normative |
 | [Conformance kits](conformance/) | programs that check a build against the bindings | informative |
