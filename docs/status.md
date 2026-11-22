@@ -12,19 +12,20 @@
 
 **What the checks do not establish.** Byte limits are counted logically: they do not reserve physical disk, and the operator provides the extra space an atomic replacement needs. Scope is rechecked when a queued reply leaves its queue, but not every transport proves it at the last socket handoff. A deletion is not held until every external effect already in flight has finished, and restoring a backup still needs separate proof that it is current. Each SDK's README lists its own remaining items. Full production readiness is not claimed.
 
-## SDK 0.1 and edition 4
+## 0.1.0
 
-Recorded on 2026-11-20 at the commit that tags [0.1.0](../CHANGELOG.md). [ADR 0027](adr/0027-sdk-0-1-and-edition-4.md) explains what these results establish.
+Recorded on 2026-11-22 for the commit tagged `v0.1.0`, from `scripts/check.sh` on Linux (Fedora, x86-64) and `scripts/macos-check.sh` on macOS (Apple silicon). [ADR 0027](adr/0027-sdk-0-1-and-edition-4.md) explains what these results establish.
 
 | Check | Rust | TypeScript | Go | Python |
 |---|---|---|---|---|
-| Shared SDK scenarios, in process and served by each SDK | 55/55 | 55/55 | 55/55 | 55/55 |
-| Reference checks against `ma` | 15/15 | 15/15 | 15/15 | 15/15 |
+| Shared SDK scenarios: 17 in 9 placements, in process, in another process and as a service | 153/153 | 153/153 | 153/153 | 153/153 |
+| Reference checks against `ma` | 24/24 | 24/24 | 24/24 | 24/24 |
 | ACP kit against `ma`, crash, probe and job checks | 188/188 | 188/188 | 188/188 | 188/188 |
-| ACP kit against the base agent, same options | 214/214 | 214/214 | 214/214 | 214/214 |
-| Own suites | 304 tests | 219, also with remote parts | 36 packages, race on SDK and `ma` | 369 in each of four configurations |
+| Over WebSocket: plugin kit, listener isolation, ACP kit | 153, 14, 193 | 153, 14, 193 | 153, 14, 193 | 153, 14, 193 |
+| [ADR 0030](adr/0030-production-gaps.md) kits: isolation, capacity, erasure, history registry | pass | pass | pass | pass |
+| Own suites | 429 tests | 536 in each of two layouts, 5 live skipped | 38 packages; race on 7 | 637 in each of four configurations, 5 live skipped |
 
-All four `ma` builds run the identical set of 188 ACP checks. Every result above used scripted models; no real model service was called.
+Each language's agents passed the erasure checks on every other language's history service: 12 of 12 pairings. The [project notes demo](../demos/project-notes/README.md) passed, including its crash run. On macOS all 20 steps passed: every suite, the reference checks and the ACP kit for all four languages. Every result above used scripted models. Real requests through ChatGPT, Grok and Claude succeeded in all four `ma` builds, and the live checks against OpenAI and Anthropic pass in all four SDKs.
 
 ## Production edition 3
 
