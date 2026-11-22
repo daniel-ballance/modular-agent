@@ -20,7 +20,8 @@ pub mod terminal;
 use anyhow::{Result, anyhow};
 use modular_agent::{
     Agent, AgentBuilder, ChatGptOptions, ClaudeOptions, ClientIdentity, Durability,
-    FilesConfiguration, History, Plugin, chatgpt, claude,
+    FilesConfiguration, GrokOptions, History, Plugin, chatgpt, claude, grok,
+    responses::ResponsesModel,
 };
 use modular_agent_mcp::Mcp;
 use serde_json::{Value, json};
@@ -245,17 +246,19 @@ pub fn builder(
     } else {
         let overrides = standard.model_overrides()?;
         let logins = standard.auth().subscription_logins();
-        let mut options = ChatGptOptions::new(logins.clone());
-        options.client_identity = Some(standard.client_identity.as_str().to_owned());
+        let identity = standard.client_identity.as_str().to_owned();
+        let mut chatgpt_options = ChatGptOptions::new(logins.clone());
+        chatgpt_options.client_identity = Some(identity.clone());
+        let mut grok_options = GrokOptions::new(logins);
+        grok_options.client_identity = Some(identity);
         b = b
-            .provider(chatgpt(options)?.with_catalog_overrides(
-                provider_responses::model_overrides(&overrides, "chatgpt")?,
-            ))
-            .provider(provider_responses::provider(
-                logins,
-                standard.client_identity.clone(),
-                provider_responses::model_overrides(&overrides, "grok")?,
-            )?);
+            .provider(
+                chatgpt(chatgpt_options)?
+                    .with_catalog_overrides(catalog_overrides(&overrides, "chatgpt")?),
+            )
+            .provider(
+                grok(grok_options)?.with_catalog_overrides(catalog_overrides(&overrides, "grok")?),
+            );
         if standard.claude {
             b = b.claude_provider(claude(ClaudeOptions::default())?);
         }
@@ -264,6 +267,14 @@ pub fn builder(
         b = b.plugin(plugin);
     }
     Ok(b)
+}
+
+fn catalog_overrides(catalog: &Value, provider: &str) -> Result<Vec<ResponsesModel>> {
+    let models = &catalog[provider];
+    if models.is_null() {
+        return Ok(vec![]);
+    }
+    serde_json::from_value(models.clone()).map_err(|e| anyhow!("models for {provider}: {e}"))
 }
 
 /// The model to start with when settings name none: the first Provider that

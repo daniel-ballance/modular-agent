@@ -28,6 +28,7 @@ mod data;
 mod environment;
 mod error;
 mod events;
+mod grok;
 mod history;
 mod hooks;
 mod jobs;
@@ -39,9 +40,9 @@ pub mod responses;
 mod runtime;
 mod serve;
 mod session;
+mod subscription;
 mod subscription_logins;
-#[doc(hidden)]
-pub mod subscription_oauth;
+mod subscription_oauth;
 pub mod testing;
 mod tool;
 
@@ -52,7 +53,7 @@ pub use agent::{
 };
 pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
-pub use chatgpt::*;
+pub use chatgpt::{ChatGptOptions, ChatGptProvider, chatgpt};
 pub use claude::{ClaudeOptions, ClaudeProvider, claude};
 pub use client_identity::ClientIdentity;
 pub use configuration::FilesConfiguration;
@@ -73,6 +74,7 @@ pub use events::{
     Question, QuestionKind, QuestionReply, QuestionResponse, SessionEvent, SettingEvent, StepEvent,
     ToolCallData, ToolInputData, ToolOutputData, TurnEndedData, TurnStartedData,
 };
+pub use grok::{GrokOptions, GrokProvider, grok};
 pub use history::{
     EntryPage, ErasedEntry, ErasureReport, History, HistoryFault, HistoryResult, HistoryServer,
     HistoryStore, LeaseGrant, PortableHistoryStore, ServeHistoryOptions, SessionInfo, SessionPage,
@@ -98,6 +100,9 @@ pub use session::{
     Actor, Content, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome,
     PromptInput, PromptOptions, PromptResult, Proposal, ReleaseOptions, Rights, Session, Timing,
     ToolResult,
+};
+pub use subscription::{
+    SignInOptions, SignInStep, SignInTestEndpoints, SubscriptionModel, sign_in, sign_out,
 };
 pub use subscription_logins::*;
 pub use tool::{

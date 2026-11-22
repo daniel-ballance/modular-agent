@@ -130,6 +130,35 @@ async fn chatgpt_live() -> Result<()> {
 }
 
 #[tokio::test]
+async fn grok_live() -> Result<()> {
+    use modular_agent::{GrokOptions, Provider, grok};
+    let Some(logins) = live_logins() else {
+        return Ok(());
+    };
+    let provider = grok(GrokOptions::new(logins))?;
+    if !provider.available() {
+        eprintln!("skip grok: no plan sign-in");
+        return Ok(());
+    }
+    let model =
+        std::env::var("MODULAR_AGENT_LIVE_GROK_MODEL").unwrap_or_else(|_| "grok-4.7".into());
+    let agent = Agent::builder()
+        .provider(provider)
+        .model(format!("grok/{model}"))
+        .setting("maxOutput", json!(256))
+        .build()
+        .await?;
+    let turn = agent
+        .session()
+        .await?
+        .prompt("Answer briefly: name a harbour in Yorkshire.")
+        .await?;
+    assert_eq!(turn.outcome, Some(Outcome::Completed));
+    assert!(!turn.text.trim().is_empty());
+    agent.close().await
+}
+
+#[tokio::test]
 async fn claude_live() -> Result<()> {
     use modular_agent::{ClaudeOptions, claude};
     if live_logins().is_none() {

@@ -3401,21 +3401,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "provider-responses"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "credentials-auth",
- "modular-agent",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "psm"
 version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4772,7 +4757,6 @@ dependencies = [
  "monty-alloc",
  "monty-proto",
  "monty-types",
- "provider-responses",
  "serde",
  "serde_json",
  "tempfile",

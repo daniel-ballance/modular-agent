@@ -15,7 +15,6 @@ modular-agent-files = { path = "../tools-files" }
 modular-agent-mcp = { path = "../sdk-mcp" }
 credentials-auth = { path = "../credentials-auth" }
 tools-code = { path = "../tools-code" }
-provider-responses = { path = "../provider-responses" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -12,7 +12,7 @@ The base's binary crate is now `crates/agent-base`, package `agent-base`, so tha
 
 | Part | Crate | What it does |
 |---|---|---|
-| Providers | `modular-agent`, `provider-responses` | ChatGPT (`chatgpt/...`) uses the SDK. Grok (`grok/...`) keeps ma's existing sign-in and Responses adapter. |
+| Providers | `modular-agent` | ChatGPT (`chatgpt/…`), Grok (`grok/…`) and Claude (`claude/…`) use the SDK's subscription Providers. |
 | Provider | [`sidecars/claude`](../typescript/sidecars/claude/README.md) | Claude subscription (`claude/...`) through the Claude Agent SDK for TypeScript. A plugin in its own process over the plugin binding, started only when a Claude model is used. |
 | Tools | `modular-agent-files` | `read`, `exec`, `edit`, `write`, `find` and `list`, with Pi's inputs, limits and wording. They work through the session's working environment. |
 | Tool | `tools-code` | `codemode`: Python in a [Monty](https://github.com/pydantic/monty) sandbox. Every other tool is a function on its `tools` object. |
@@ -107,13 +107,13 @@ Grok's device sign-in referrer. Set `MA_CLIENT_IDENTITY=My-agent_2.0` to use
 another name. It must be 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`,
 `.`, `_` and `-`. An invalid value stops `ma` at startup with status 1.
 
-In Rust code, set `client_identity` in `ChatGptOptions` and
+In Rust code, set `client_identity` in `ChatGptOptions`, `GrokOptions` or
 `SignInOptions`. The SDK does not read `MA_CLIENT_IDENTITY`. The label does
 not change the OAuth client IDs. See the [SDK subscription API](crates/sdk/README.md#subscription-providers).
 
 ## What is checked
 
-Run from `rust/` with `TMPDIR` off `/tmp`:
+Run from `rust/` with `TMPDIR` off `/tmp`. Run the ACP kit after builds complete; it measures command startup and cancellation against fixed deadlines.
 
 ```sh
 export TMPDIR="$HOME/.cache/ma-std-tmp"; mkdir -p "$TMPDIR"
@@ -135,8 +135,8 @@ mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 - **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
 - **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. The separate-listener WebSocket isolation run passed 14/14. Neither WebSocket run used a bridge.
 - **Standard and codemode:** `ma` includes the five alias checks. The six `tools-code` tests are separate. These cover startup validation, tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.
-- **Workspace:** 421 Rust tests passed, with no failures. Four opt-in live cases returned before accessing credentials. Formatting and Clippy with `-D warnings` passed. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
-- **Subscriptions:** Offline checks use loopback OAuth and Responses fixtures and a fake Claude process plug-in. The alias checks cover sign-in routing, sign-out, both model configuration files, `--model`, and reopening an old session. Live checks compile and skip without opt-in.
+- **Workspace:** 425 Rust tests passed, with no failures. Five opt-in live checks returned before accessing credentials. The locked history demo build passed. Formatting and Clippy with `-D warnings` passed. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
+- **Subscriptions:** Offline checks use loopback OAuth and Responses fixtures and a fake Claude process plugin. The Grok SDK checks cover device sign-in, locked refresh, request shape and encrypted reasoning replay. The alias checks cover sign-in routing, sign-out, both model configuration files, `--model`, and reopening an old session. Live checks compile and skip without opt-in.
 
 To try the terminal without a login:
 
@@ -159,8 +159,6 @@ MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
 
 These are proposed edits; the shared documents are unchanged in this branch.
 
-- **[`docs/reference`, Providers](../docs/reference/standard-configuration.md#providers):** Replace “These are the SDK's subscription Providers, with their sign-in, login file, refresh, request shapes and model table; `ma` adds none of its own.” with “ChatGPT and Claude use the SDK's subscription Providers. Until the Grok protocol is decided, `ma` keeps its current Grok sign-in and request adapter. ChatGPT and Grok share the SDK's login file.”
-
 - **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools):** Replace “256 MiB of memory (Monty's `max_memory`, which counts what the interpreter allocates)” with “256 MiB of memory (Monty's `max_memory`, which counts live allocations against the worker's baseline, not the worker's resident memory)”. Monty 1.6.0 also counts compiled code and interpreter internals in worker mode.
 - **ACP declarations:** `interface-acp` dispatched proposed input, actor joins, session limits and tenant queries without consulting the SDK factory's session declaration. It now refuses disabled operations with `not_supported`, without changing the declarations or gating `proposals`, `release` or `withdraw`, which also serve parked job reports. The base declares all three features true and still passes the positive checks.
 - **[`docs/reference`, Checks](../docs/reference/standard-configuration.md#checks):** Replace the ACP-kit bullet with: “the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;”
@@ -181,7 +179,7 @@ Building this turned up seven places where edition 3 was silent. They are now th
 | `modelTools` is a standard setting (`model_tools` in this build's settings files) | `agent-harness`, `agent-api::portable` |
 | An ACP client is told a nested call's parent | `interface-acp` |
 | `env/list` and `host/env/list` | `WorkingEnvironment::list_dir`, `plugin-stdio` |
-| A cancelled Provider request sends no response callback; an unlisted reasoning level is lowered, never raised; `outOfReach` text is for people | `provider-responses`, `sidecars/claude` |
+| A cancelled Provider request sends no response callback; an unlisted reasoning level is lowered, never raised; `outOfReach` text is for people | `modular-agent`, `sidecars/claude` |
 
 See the [SDK's checks](crates/sdk/README.md#what-is-checked) for the scenario matrix.
 
@@ -207,7 +205,7 @@ rust/
     sdk, tools-files, sdk-mcp                  SDK and official file/MCP plugins
     mcp-client                                 shared MCP transport
     tools-code                                 standard: codemode
-    provider-responses, credentials-auth       standard: Providers and sign-in
+    credentials-auth                           standard: named credentials and staging
     standard                                   standard: composition, prompt, skills, MCP config, the ma binary
   scripts/                                     fixtures and install.sh
   docs/clean-room/                             the base build's own notes and gap log

@@ -47,5 +47,6 @@ runtime-durable = { path = "../runtime-durable" }
 runtime-transient = { path = "../runtime-transient" }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 schemars = "1.2"
 serde.workspace = true

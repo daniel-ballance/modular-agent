@@ -3,7 +3,6 @@ use modular_agent::{
     self as sdk, ClientIdentity, SignInOptions, SignInStep, testing::SCRIPTED_MODEL,
 };
 use modular_agent_mcp::{Mcp, Server};
-use provider_responses::{LABEL as GROK_LABEL, oauth};
 use serde_json::json;
 use standard::terminal::TerminalOptions;
 use standard::{
@@ -106,7 +105,7 @@ fn show_device(address: &str, code: &str) {
     eprintln!("Waiting for the sign-in to finish...");
 }
 
-fn show_chatgpt(step: SignInStep<'_>, can_paste: bool) {
+fn show_sign_in(step: SignInStep<'_>, can_paste: bool) {
     match step {
         SignInStep::DeviceCode { url, code } => show_device(url, code),
         SignInStep::Waiting => (),
@@ -214,39 +213,44 @@ async fn login(standard: &Standard, args: impl Iterator<Item = String>) -> Resul
         ensure!(status.success(), "claude auth login did not complete");
         return Ok(());
     }
-    let auth = standard.auth();
-    let label = if provider == "chatgpt" {
-        let paste = if device { None } else { terminal_lines() };
-        let can_paste = paste.is_some();
-        sdk::sign_in(
-            provider,
-            &auth.subscription_logins(),
-            SignInOptions {
-                device,
-                paste,
-                client_identity: Some(standard.client_identity.as_str().into()),
-                on_step: Some(&|step| show_chatgpt(step, can_paste)),
-                on_notice: Some(&|text| eprintln!("{text}")),
-                ..Default::default()
-            },
-        )
-        .await?;
-        "ChatGPT subscription"
+    let label = subscription_label(provider).expect("checked subscription id");
+    let paste = if provider == "chatgpt" && !device {
+        terminal_lines()
     } else {
-        let login = oauth::login(&standard.client_identity, &|step| {
-            show_device(step.address, step.code)
-        })
-        .await?;
-        auth.set_login(provider, Some(login))?;
-        GROK_LABEL
+        None
     };
+    let can_paste = paste.is_some();
+    sdk::sign_in(
+        provider,
+        &standard.auth().subscription_logins(),
+        SignInOptions {
+            device,
+            paste,
+            client_identity: Some(standard.client_identity.as_str().into()),
+            on_step: Some(&|step| show_sign_in(step, can_paste)),
+            on_notice: Some(&|text| eprintln!("{text}")),
+            ..Default::default()
+        },
+    )
+    .await?;
     eprintln!("Signed in to {label} ({provider}).");
     Ok(())
 }
 
+fn subscription_label(provider: &str) -> Option<&'static str> {
+    match provider {
+        "chatgpt" => Some("ChatGPT subscription"),
+        "grok" => Some("Grok subscription"),
+        _ => None,
+    }
+}
+
 async fn auth_status(standard: &Standard) -> Result<()> {
     let auth = standard.auth();
-    for (id, label) in [("chatgpt", "ChatGPT subscription"), ("grok", GROK_LABEL)] {
+    for (id, label) in standard::PROVIDERS
+        .into_iter()
+        .filter_map(|id| subscription_label(id).map(|label| (id, label)))
+    {
         let state = match auth.login(id)? {
             Some(login) if login.expired() => "signed in (token will refresh on next use)",
             Some(_) => "signed in",
@@ -313,18 +317,10 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             if provider == "claude" {
                 bail!("Claude Code holds that sign-in; run `claude auth logout`");
             }
-            let auth = standard.auth();
-            let label = match canonical_provider(&provider) {
-                "chatgpt" => {
-                    sdk::sign_out("chatgpt", &auth.subscription_logins()).await?;
-                    "ChatGPT subscription"
-                }
-                "grok" => {
-                    auth.set_login("grok", None)?;
-                    GROK_LABEL
-                }
-                _ => bail!("unknown provider {provider}"),
-            };
+            let canonical = canonical_provider(&provider);
+            let label = subscription_label(canonical)
+                .ok_or_else(|| anyhow!("unknown provider {provider}"))?;
+            sdk::sign_out(canonical, &standard.auth().subscription_logins()).await?;
             eprintln!("Signed out of {label}.");
             return Ok(());
         }
