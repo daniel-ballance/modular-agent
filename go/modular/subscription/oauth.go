@@ -237,18 +237,18 @@ func (c oauthClient) refresh(ctx context.Context, provider string, l Login) (Log
 func (c oauthClient) poll(ctx context.Context, interval int, limit time.Duration, attempt func(context.Context) (bool, bool, error)) error {
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
 	for {
 		select {
 		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return errors.New("the sign-in was not completed in time")
-			}
-			return ctx.Err()
 		case <-time.After(time.Duration(interval) * c.unit):
-			// If both timers fired, expiry wins over starting another poll.
-			if ctx.Err() != nil {
-				continue
-			}
+		}
+		// The deadline timer may not have set ctx.Err yet when both timers fire.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || !time.Now().Before(deadline) {
+			return errors.New("the sign-in was not completed in time")
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		done, slow, err := attempt(ctx)
 		if done || err != nil {
