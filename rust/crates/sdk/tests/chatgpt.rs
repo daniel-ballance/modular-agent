@@ -1,121 +1,27 @@
 //! Public SDK checks against disposable logins and loopback HTTP only.
 use modular_agent::{
     Agent, ChatGptOptions, Code, ModelErrorKind, Outcome, Plugin, Provider, Result, ServeOptions,
-    ServicePlugin, SignInOptions, SignInStep, SignInTestEndpoints, SubscriptionModel, chatgpt,
-    serve_websocket, sign_in, sign_out, subscription_logins,
+    ServicePlugin, SignInOptions, SignInStep, SubscriptionModel, chatgpt, serve_websocket, sign_in,
+    sign_out, subscription_logins,
 };
 use serde_json::{Value, json};
-use std::{
-    io::Write,
-    os::unix::fs::OpenOptionsExt,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 
-struct Request {
-    target: String,
-    head: String,
-    body: String,
-}
-impl Request {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.head
-            .lines()
-            .filter_map(|line| line.split_once(':'))
-            .find_map(|(k, v)| k.eq_ignore_ascii_case(name).then_some(v.trim()))
-    }
-}
-struct Http {
-    base: String,
-    done: tokio::task::JoinHandle<Vec<Request>>,
-}
-impl Http {
-    async fn start(replies: Vec<(&'static str, u16, String)>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let done = tokio::spawn(async move {
-            let mut seen = vec![];
-            for (path, status, body) in replies {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut buf = vec![];
-                let start = loop {
-                    let n = stream.read_buf(&mut buf).await.unwrap();
-                    assert_ne!(n, 0);
-                    if let Some(at) = buf.windows(4).position(|b| b == b"\r\n\r\n") {
-                        break at + 4;
-                    }
-                };
-                let head = String::from_utf8(buf[..start].to_vec()).unwrap();
-                let target = head.split_whitespace().nth(1).unwrap().to_owned();
-                assert_eq!(target, path);
-                let mut request = Request {
-                    target,
-                    head,
-                    body: String::new(),
-                };
-                let length = request
-                    .header("content-length")
-                    .unwrap()
-                    .parse::<usize>()
-                    .unwrap();
-                while buf.len() < start + length {
-                    assert_ne!(stream.read_buf(&mut buf).await.unwrap(), 0);
-                }
-                request.body = String::from_utf8(buf[start..start + length].to_vec()).unwrap();
-                seen.push(request);
-                let kind = if path == "/responses" {
-                    "text/event-stream"
-                } else {
-                    "application/json"
-                };
-                stream.write_all(format!("HTTP/1.1 {status} Fixture\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-            }
-            seen
-        });
-        Self { base, done }
-    }
-    fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.base)
-    }
-    fn sign_in(&self, bind: std::net::SocketAddr) -> SignInTestEndpoints {
-        SignInTestEndpoints::new(
-            &self.url("/token"),
-            &self.url("/code"),
-            &self.url("/poll"),
-            bind,
-        )
-        .unwrap()
-    }
+mod subscription_support;
+use subscription_support::{Http, private_file};
+
+fn form(body: &str, key: &str) -> String {
+    subscription_support::form(body).remove(key).unwrap()
 }
 
 fn tokens() -> String {
     // A JWT-shaped fixture with just an account claim; not a real login.
     json!({"access_token":"h.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiZml4dHVyZS1hY2NvdW50In19.s", "refresh_token":"new-refresh", "expires_in":3600}).to_string()
 }
-fn form(form: &str, key: &str) -> String {
-    reqwest::Url::parse(&format!("http://localhost/?{form}"))
-        .unwrap()
-        .query_pairs()
-        .find(|(k, _)| k == key)
-        .unwrap()
-        .1
-        .into_owned()
-}
-fn private_file(path: &Path, value: &[u8]) {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .unwrap()
-        .write_all(value)
-        .unwrap();
-}
-
 #[tokio::test]
 async fn browser_sign_in_checks_state_and_binds_pkce_to_the_exchange() -> Result<()> {
     use base64_oauth::Engine;

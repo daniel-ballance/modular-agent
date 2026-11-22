@@ -144,3 +144,26 @@ pub enum Poll<T> {
     Pending,
     Slower,
 }
+
+#[cfg(test)]
+#[tokio::test(start_paused = true)]
+async fn slow_down_adds_five_seconds_to_every_later_poll() -> Result<()> {
+    use tokio::time::Instant;
+    let start = Instant::now();
+    let mut elapsed = Vec::new();
+    let mut answers = [
+        Poll::Pending,
+        Poll::Slower,
+        Poll::Pending,
+        Poll::Slower,
+        Poll::Done(()),
+    ]
+    .into_iter();
+    device_poll(5, 900, false, || {
+        elapsed.push(start.elapsed().as_secs());
+        std::future::ready(Ok(answers.next().unwrap()))
+    })
+    .await?;
+    assert_eq!(elapsed, [5, 10, 20, 30, 45]);
+    Ok(())
+}
