@@ -20,6 +20,7 @@ from modular_agent import JsonObject
 
 from .auth import AuthFile, OAuth, now_ms
 from .config import claude_launch
+from .identity import DEFAULT_CLIENT_IDENTITY, validate_client_identity
 
 type Vendor = Literal["openai-codex", "xai"]
 
@@ -34,8 +35,6 @@ class Step:
 
 type Show = Callable[[Step], None]
 
-# Pi's value is a placeholder until the services accept this client's own name.
-CLIENT_IDENTITY = "pi"
 LABELS = {"openai-codex": "ChatGPT subscription", "xai": "Grok subscription"}
 CODEX = "https://auth.openai.com"
 XAI = "https://auth.x.ai"
@@ -173,7 +172,9 @@ def _interval(data: JsonObject, fallback: int = 5) -> int:
         return fallback
 
 
-async def _device(client: AsyncClient, vendor: Vendor, show: Show) -> OAuth:
+async def _device(
+    client: AsyncClient, vendor: Vendor, show: Show, *, client_identity: str
+) -> OAuth:
     is_codex = vendor == "openai-codex"
     base = _base(vendor)
     if is_codex:
@@ -190,7 +191,7 @@ async def _device(client: AsyncClient, vendor: Vendor, show: Show) -> OAuth:
             data={
                 "client_id": CLIENTS[vendor],
                 "scope": SCOPE + " grok-cli:access api:access",
-                "referrer": CLIENT_IDENTITY,
+                "referrer": client_identity,
             },
             headers={"Accept": "application/json"},
         )
@@ -271,7 +272,12 @@ async def _device(client: AsyncClient, vendor: Vendor, show: Show) -> OAuth:
 
 
 async def _browser(
-    client: AsyncClient, show: Show, port: int = 1455, pasted: AsyncIterable[str] | None = None
+    client: AsyncClient,
+    show: Show,
+    port: int = 1455,
+    pasted: AsyncIterable[str] | None = None,
+    *,
+    client_identity: str,
 ) -> OAuth:
     state, verifier = secrets.token_urlsafe(16), secrets.token_urlsafe(32)
     challenge = (
@@ -333,7 +339,7 @@ async def _browser(
                     note="Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead."
                 )
             )
-            return await _device(client, "openai-codex", show)
+            return await _device(client, "openai-codex", show, client_identity=client_identity)
         server = None
         show(Step(note="Port 1455 is in use, so paste the address the browser comes back to."))
     redirect = (
@@ -352,7 +358,7 @@ async def _browser(
             "state": state,
             "id_token_add_organizations": "true",
             "codex_cli_simplified_flow": "true",
-            "originator": CLIENT_IDENTITY,
+            "originator": client_identity,
         }
     )
 
@@ -395,12 +401,18 @@ async def _browser(
 
 
 async def sign_in(
-    vendor: Vendor, device: bool, show: Show, pasted: AsyncIterable[str] | None = None
+    vendor: Vendor,
+    device: bool,
+    show: Show,
+    pasted: AsyncIterable[str] | None = None,
+    *,
+    client_identity: str = DEFAULT_CLIENT_IDENTITY,
 ) -> OAuth:
+    validate_client_identity(client_identity)
     async with AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
         if vendor == "xai" or device:
-            return await _device(client, vendor, show)
-        return await _browser(client, show, pasted=pasted)
+            return await _device(client, vendor, show, client_identity=client_identity)
+        return await _browser(client, show, pasted=pasted, client_identity=client_identity)
 
 
 async def _terminal_lines(fd: int) -> AsyncIterator[str]:
@@ -468,6 +480,8 @@ async def account_command(
     device: bool,
     auth: AuthFile,
     claude_status: Callable[[], str],
+    *,
+    client_identity: str = DEFAULT_CLIENT_IDENTITY,
 ) -> None:
     if command == "auth":
         for vendor, label in LABELS.items():
@@ -519,5 +533,8 @@ async def account_command(
             if provider == "openai-codex" and not device and sys.stdin.isatty()
             else None
         )
-        await auth.set_login(provider, await sign_in(cast(Vendor, provider), device, _show, pasted))
+        login = await sign_in(
+            cast(Vendor, provider), device, _show, pasted, client_identity=client_identity
+        )
+        await auth.set_login(provider, login)
         print(f"Signed in to {LABELS[provider]} ({provider}).", file=sys.stderr)

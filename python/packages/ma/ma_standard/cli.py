@@ -41,6 +41,7 @@ from modular_agent.testing import ScriptedProvider
 from .auth import AuthFile
 from .code import code_tool
 from .config import Paths, claude_launch
+from .identity import DEFAULT_CLIENT_IDENTITY, validate_client_identity
 from .prompt import discover, prompt_plugin
 from modular_agent import AcpPolicy
 
@@ -396,7 +397,9 @@ async def _agent(
 
         providers.extend(
             [
-                Responses(vendor, auth, paths.config / "models.json")
+                Responses(
+                    vendor, auth, paths.config / "models.json", client_identity=args.client_identity
+                )
                 for vendor in ("openai-codex", "xai")
             ]
         )
@@ -501,6 +504,7 @@ async def _run(args: argparse.Namespace) -> int:
             args.device,
             AuthFile(paths.config / "auth.json"),
             _claude_status,
+            client_identity=args.client_identity,
         )
         return 0
     if args.command == "skills":
@@ -620,7 +624,12 @@ async def _run(args: argparse.Namespace) -> int:
 
 def main() -> None:
     try:
-        status = asyncio.run(_run(_parser().parse_args()))
+        client_identity = validate_client_identity(
+            os.environ.get("MA_CLIENT_IDENTITY", DEFAULT_CLIENT_IDENTITY), name="MA_CLIENT_IDENTITY"
+        )
+        args = _parser().parse_args()
+        args.client_identity = client_identity
+        status = asyncio.run(_run(args))
     except (AgentError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         status = 1

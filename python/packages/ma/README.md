@@ -21,6 +21,14 @@ The configuration folder is shared across languages; sessions live under `$XDG_S
 
 Build the [Claude sidecar](../../../typescript/sidecars/claude/README.md) with Node 22 or newer. `ma` looks for it in a development checkout, at `~/.local/share/modular-agent/sidecars/claude/dist/main.js`, or at `MODULAR_AGENT_CLAUDE_SIDECAR`. `ma login claude` uses the installed `claude` program. ACP selects a composition for the client’s project; it does not start the Claude sidecar for sessions that select another Provider.
 
+## Client identity
+
+By default, ChatGPT requests and browser sign-in use `modular-agent` as the `originator`. Grok device sign-in uses it as the `referrer`. The identity is a label, not a credential. It does not change the services' sign-in client IDs.
+
+Set `MA_CLIENT_IDENTITY=my-agent` in the environment that starts `ma` to use another name. The name must be 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. If the variable is set to an invalid name, including an empty string, `ma` reports the error and exits with status 1.
+
+In an agent built from this code, set one name and pass it as the `client_identity` keyword argument to `ma_standard.responses.Responses` for both `openai-codex` and `xai`, and to `ma_standard.oauth.sign_in` when signing in. These options do not read the environment variable.
+
 ## Code sandbox
 
 Each `codemode` call checks out a fresh worker process from [Monty 1.6.0's async pool](https://github.com/pydantic/monty/blob/v1.6.0/docs/api/python/pools.md). The interpreter never runs in the agent process. Sandbox code cannot access files, the network, processes, wall clocks, sleep or system entropy. Process and thread clocks read zero. An explicitly seeded generator such as `random.Random(7)` works.
@@ -33,11 +41,11 @@ When the worker delivers more than 1 MiB of printed output, the call stops and r
 
 ## What is checked
 
-- **Reference:** 22/22, including sandbox limits, ambient access, tool calls and result rendering.
+- **Reference:** 24/24, including client identity validation, sandbox limits, ambient access, tool calls and result rendering.
 - **ACP:** 188/188 with `--crash-checks --probe-checks --job-checks`. The standard composition does not declare several actors, tenants or session limits.
 - **WebSocket kits:** 153/153 for the plugin binding and 193/193 for ACP.
-- **Python suites:** 547 passed and 2 live tests skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
-- **Python static checks:** Ruff lint and format checks passed; strict mypy passed (39 source files).
+- **Python suites:** 588 passed and 2 live tests skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
+- **Python static checks:** Ruff lint and format checks passed; strict mypy passed (41 source files).
 
 ```sh
 # From the repository root, after uv sync above:

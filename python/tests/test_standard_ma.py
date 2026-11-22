@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import signal
 import stat
+import sys
 from urllib.parse import parse_qs, urlsplit
 
 from httpx2 import AsyncClient
@@ -32,7 +33,7 @@ from modular_agent import (
 )
 from modular_agent.files import file_tools
 from modular_agent.testing import memory_environment, scripted_provider, test_agent as offline_agent
-from ma_standard import oauth, prompt, responses
+from ma_standard import cli, oauth, prompt, responses
 from ma_standard.auth import ApiKey, AuthFile, OAuth
 from ma_standard.code import code_tool, functions, prompt as function_prompt
 from ma_standard.config import Paths
@@ -140,8 +141,20 @@ async def _http(handler: Callable[[Request], Reply]) -> AsyncIterator[str]:
 
 
 @pytest.mark.loopback
-@pytest.mark.parametrize("vendor", ["openai-codex", "xai"])
-async def test_device_sign_in(vendor: oauth.Vendor, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("vendor", "identity_options", "expected_identity"),
+    [
+        ("openai-codex", {}, None),
+        ("xai", {}, "modular-agent"),
+        ("xai", {"client_identity": "My-agent_2.0"}, "My-agent_2.0"),
+    ],
+)
+async def test_device_sign_in(
+    vendor: oauth.Vendor,
+    identity_options: dict[str, str],
+    expected_identity: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     recorded: list[Request] = []
     access = _jwt() if vendor == "openai-codex" else "fake-access"
     token = {"access_token": access, "refresh_token": "fake-refresh", "expires_in": 3600}
@@ -169,7 +182,7 @@ async def test_device_sign_in(vendor: oauth.Vendor, monkeypatch: pytest.MonkeyPa
     shown: list[oauth.Step] = []
     async with _http(route) as url:
         monkeypatch.setattr(oauth, "CODEX" if vendor == "openai-codex" else "XAI", url)
-        login = await oauth.sign_in(vendor, True, shown.append)
+        login = await oauth.sign_in(vendor, True, shown.append, **identity_options)
     assert shown[0].code == "CODE"
     assert login.secret == access and not login.expired
     assert login.account == ("loopback-account" if vendor == "openai-codex" else None)
@@ -179,8 +192,29 @@ async def test_device_sign_in(vendor: oauth.Vendor, monkeypatch: pytest.MonkeyPa
         assert json.loads(recorded[0][2]) == {"client_id": oauth.CLIENTS[vendor]}
         assert exchange["code_verifier"] == ["verifier"]
     else:
-        assert parse_qs(recorded[0][2].decode())["referrer"] == ["pi"]
+        assert parse_qs(recorded[0][2].decode())["referrer"] == [expected_identity]
         assert exchange["device_code"] == ["device"]
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize(
+    ("identity_options", "expected_identity"),
+    [({}, "modular-agent"), ({"client_identity": "My-agent_2.0"}, "My-agent_2.0")],
+)
+async def test_browser_sign_in_originator(
+    identity_options: dict[str, str], expected_identity: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shown: list[oauth.Step] = []
+
+    async def pasted() -> AsyncIterator[str]:
+        yield "local-code"
+
+    async with _http(lambda _: _reply({"access_token": _jwt(), "refresh_token": "fake"})) as url:
+        monkeypatch.setattr(oauth, "CODEX", url)
+        await oauth.sign_in("openai-codex", False, shown.append, pasted(), **identity_options)
+    authorize = urlsplit(next(step.address for step in shown if step.address))
+    assert authorize.path == "/oauth/authorize"
+    assert parse_qs(authorize.query)["originator"] == [expected_identity]
 
 
 @pytest.mark.loopback
@@ -215,10 +249,10 @@ async def test_browser_sign_in(wrong_state: bool, monkeypatch: pytest.MonkeyPatc
 
         if wrong_state:
             with pytest.raises(ValueError, match="wrong state"):
-                await oauth._browser(client, show, port=0)
+                await oauth._browser(client, show, port=0, client_identity="test-agent")
             assert not posted and await callbacks[0] == 400
             return
-        login = await oauth._browser(client, show, port=0)
+        login = await oauth._browser(client, show, port=0, client_identity="test-agent")
         assert await callbacks[0] == 200
     assert login.account == "loopback-account"
     fields = parse_qs(posted[0][2].decode())
@@ -256,11 +290,14 @@ async def test_browser_sign_in_from_paste_when_port_is_busy(
         # The token fake is already bound on that port.
         async with asyncio.timeout(4):
             login = await oauth._browser(
-                client, show, port=urlsplit(url).port or 0, pasted=pasted()
+                client,
+                show,
+                port=urlsplit(url).port or 0,
+                pasted=pasted(),
+                client_identity="test-agent",
             )
 
     assert login.account == "loopback-account" and login.refresh == "fake-rotate"
-    assert shown["originator"] == ["pi"]
     assert len(posted) == 1 and posted[0][0] == "/oauth/token"
     fields = parse_qs(posted[0][2].decode())
     assert fields["code"] == ["pasted-code"]
@@ -315,6 +352,83 @@ async def test_secret_answer_is_written_to_shared_auth_not_history(tmp_path: Pat
     assert document["logins"] == {"xai": {"type": "api_key", "key": "test-key"}}
     assert document["answers"] == {"signing-key": "test-secret"}
     assert stat.S_IMODE(auth.path.stat().st_mode) == 0o600
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize(
+    ("identity_options", "expected_identity"),
+    [({}, "modular-agent"), ({"client_identity": "A._-9z" * 10 + "test"}, "A._-9z" * 10 + "test")],
+)
+async def test_chatgpt_request_originator(
+    identity_options: dict[str, str],
+    expected_identity: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[Request] = []
+    auth = AuthFile(tmp_path / "auth.json")
+
+    async def current(*args, **kwargs) -> OAuth:
+        return OAuth("fake", "fake", 9_999_999_999_999, "loopback-account")
+
+    def route(request: Request) -> Reply:
+        recorded.append(request)
+        return (
+            200,
+            "text/event-stream",
+            'data: {"type":"response.completed","response":{"output":[]}}\n\n',
+        )
+
+    async def sink(event: dict[str, object]) -> None:
+        pass
+
+    monkeypatch.setattr(auth, "current", current)
+    async with _http(route) as url:
+        monkeypatch.setitem(responses.ENDPOINTS, "openai-codex", url + "/responses")
+        provider = responses.Responses(
+            "openai-codex", auth, tmp_path / "models.json", **identity_options
+        )
+        await provider.request(
+            ModelRef("openai-codex", "gpt-6.1-sol"),
+            {"messages": []},
+            ProviderContext("session-abc", "user", sink, lambda: None),
+        )
+    assert recorded[0][1]["originator"] == expected_identity
+
+
+@pytest.mark.parametrize("identity", ["", "a" * 65, "with space", "a/1", "é", "agent\n"])
+def test_ma_rejects_invalid_client_identity_before_startup(
+    identity: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("MA_CLIENT_IDENTITY", identity)
+    monkeypatch.setenv("MODULAR_AGENT_SCRIPT", str(tmp_path / "missing-script.json"))
+    monkeypatch.setattr(sys, "argv", ["ma", "-p", "hello"])
+    with pytest.raises(SystemExit) as caught:
+        cli.main()
+    assert caught.value.code == 1
+    assert "MA_CLIENT_IDENTITY" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("vendor", ["openai-codex", "xai"])
+async def test_provider_and_sign_in_reject_invalid_client_identity(
+    vendor: oauth.Vendor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_client(**kwargs) -> None:
+        pytest.fail("invalid identity must be refused before starting a sign-in")
+
+    monkeypatch.setattr(oauth, "AsyncClient", no_client)
+    with pytest.raises(ValueError, match="client_identity"):
+        await oauth.sign_in(vendor, False, lambda _: None, client_identity="invalid name")
+    with pytest.raises(ValueError, match="client_identity"):
+        responses.Responses(
+            vendor,
+            AuthFile(tmp_path / "auth.json"),
+            tmp_path / "models.json",
+            client_identity="invalid name",
+        )
 
 
 @pytest.mark.loopback
@@ -414,7 +528,7 @@ async def test_responses_refresh_retry_and_stream(
     ]
     if vendor == "openai-codex":
         assert request["instructions"] == "instructions" and "max_output_tokens" not in request
-        assert headers["chatgpt-account-id"] == "loopback-account" and headers["originator"] == "pi"
+        assert headers["chatgpt-account-id"] == "loopback-account"
         assert headers["session-id"] == headers["x-client-request-id"] == "session-abc"
     else:
         assert request["input"][0] == {"role": "system", "content": "instructions"}
