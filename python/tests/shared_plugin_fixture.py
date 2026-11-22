@@ -366,8 +366,9 @@ class Fixture(PluginServer):
                     "whenTimeLimit": "leaveOpen",
                 },
             )
-            assert answer["pending"] is True
-            return {"pending": "Waiting for fixture answer"}
+            if answer.get("pending"):
+                return {"pending": "Waiting for fixture answer"}
+            return {"status": "completed", "content": content(answer["value"])}
         if operation == "end-job":
             start = await host("jobs/start", kind="check", detail={})
             jid = start["jobId"]

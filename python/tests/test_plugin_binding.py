@@ -820,6 +820,45 @@ async def test_hosted_runtime_checks_outcome_with_a_pending_tool_reply(
         await h.stop()
 
 
+async def test_native_runtime_continues_a_relinquished_wire_tool(
+    tmp_path, monkeypatch, runtime_type
+):
+    spec = {
+        "command": [str(ROOT / ".venv/bin/python"), str(ROOT / "tests/shared_plugin_fixture.py")]
+    }
+    monkeypatch.setenv("MODULAR_AGENT_PLUGINS", json.dumps([spec]))
+    c = call("probe", operation="late-question")
+    h = await build(
+        tmp_path / "state", Fake([reply(calls=[c]), reply("continued")]), runtime=runtime_type()
+    )
+    try:
+        a = h.api()
+        sid = (await a.session("create", project=str(tmp_path), settings={"model": "fake"}))["id"]
+        args = {"session": sid}
+        await a.call("questions", "connect", {**args, "actor": "user"})
+        await a.call("runtime", "submit", {**args, "content": content("start")})
+        (first,) = await a.call("runtime", "wait", args)
+        assert first["outcome"] == "completed" and first["open_calls"] == [c["id"]]
+        (q,) = await a.call("questions", "list", args)
+        await a.call(
+            "questions", "answer", {**args, "actor": "user", "request": q["id"], "value": "blue"}
+        )
+        (later,) = await a.call("runtime", "wait", args)
+        assert later["outcome"] == "completed"
+        es = [entry_out(e) for e in await a.session("branch", **args)]
+        (terminal,) = [e for e in es if e["kind"] == "toolResult"]
+        assert terminal["data"]["status"] == "completed"
+        assert terminal["message"]["content"] == content("blue")
+        starts = [e for e in es if e["kind"] == "toolStarted"]
+        (pending,) = [e for e in es if e["kind"] == "toolPending"]
+        assert pending["data"]["toolStartedId"] == starts[0]["id"]
+        assert [e["turnId"] for e in starts] == [first["turn"], later["turn"]]
+        assert terminal["turnId"] == later["turn"]
+        assert terminal["stepId"] == starts[1]["stepId"] == starts[0]["stepId"]
+    finally:
+        await h.stop()
+
+
 async def test_hosted_runtime_continues_open_calls(tmp_path, monkeypatch, runtime_type):
     monkeypatch.setenv("MODULAR_AGENT_PLUGINS", runtime_plugins("durable-runtime"))
     c = call("ask_user", question="Which?", kind="choice", options=["red", "blue"], timeout=0)
