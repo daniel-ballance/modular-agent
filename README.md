@@ -131,6 +131,7 @@ It was proven before any SDK existed. Five builds were made from the documents a
 | [Architecture](docs/architecture.md) | the parts, their responsibilities, and why | informative |
 | [Contracts](docs/contracts.md) | what passes between the parts, and the rules every implementation follows | normative |
 | [Security](docs/security.md) | the trust boundaries, and the rules that keep them | normative |
+| [OpenTelemetry](docs/telemetry.md) | Harness instrumentation, trace context and content rules | draft profile |
 | [Scenarios](docs/scenarios.md) | seventeen situations, told with the parts and rules | informative |
 | [Bindings](docs/bindings/README.md) | the wire: [shared data](docs/bindings/data.md), [plugins](docs/bindings/plugin.md), [ACP](docs/bindings/acp.md), [history service](docs/bindings/history-http.md) | linked bindings are normative |
 | [Conformance kits](conformance/) | programs that check a build against the bindings | informative |

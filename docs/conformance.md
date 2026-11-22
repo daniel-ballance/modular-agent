@@ -14,6 +14,10 @@ This document defines conformance for agents, plugins, services and hosts, and h
 | [ACP binding](bindings/acp.md) | Driving an agent over ACP |
 | [History service binding](bindings/history-http.md) | A history store as an HTTP service |
 
+| Draft profile | Holds |
+|---|---|
+| [OpenTelemetry](telemetry.md) | Proposed Harness instrumentation, context propagation and content rules. Not required by this edition. |
+
 Informative documents explain and illustrate. Where one disagrees with a normative document, the normative document wins. A binding can specify a narrower profile or an explicit mapping of core behavior. It does not silently override a core rule. Unresolved conflicts between applicable rules are defects.
 
 | Informative document | Holds |

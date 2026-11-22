@@ -19,6 +19,7 @@ Notes on other systems, gathered to inform the [architecture](../architecture.md
 | [API-key reasoning](sdk-api-key-reasoning.md) | OpenAI and Anthropic request settings and the research behind the shared catalog |
 | [Grok with The X Subscription](grok-x-subscription.md) | Grok Build sign-in and model access, the existing `ma` path, and what the SDKs can support |
 | [Protocol landscape](protocol-landscape-2026-11.md) | MCP, MCP Apps, AG-UI, A2A, ACP, A2UI and OpenTelemetry |
+| [OpenTelemetry GenAI](opentelemetry-genai.md) | GenAI spans, content, metrics and trace propagation in MCP and ACP |
 | [Computers and filesystems for agents](agent-computers-and-filesystems.md) | Remote execution, sandbox forks, shared storage, and what fits inside one agent |
 | [Agent conversations, inboxes, triggers and apps](agent-conversations-inbox-triggers-apps.md) | Product examples and what fits in an Interface, needs a spec change, or belongs to a host |
 | [Codemode engines](codemode-engines.md) | One sandbox for all four `ma` builds; Monty, QuickJS, Starlark, Lua, and Go worker tests |
@@ -56,7 +57,7 @@ This is the first attempt at the [acceptance test](../architecture.md#how-we-wil
 |---|---|---|---|---|
 | Session | thread | context | session | conversation ID |
 | Turn | run | task, roughly | prompt turn (v1); foreground work (v2) | `invoke_agent` span |
-| Step | step, though not always a model call | none | none | `chat` span |
+| Step | step, though not always a model call | none | none | no equivalent; `chat` spans cover model attempts |
 | Tool call | tool call events | none | tool call | `execute_tool` span |
 | Turn waiting for the user | run ends with an interrupt, resumed by a later run | `INPUT_REQUIRED`, `AUTH_REQUIRED` | `requires_action` (v2) | none |
 
@@ -70,4 +71,4 @@ This is the first attempt at the [acceptance test](../architecture.md#how-we-wil
 | ACP | an Interface for editors and automation. ACP's "agent" is our whole agent. Driving another agent over ACP makes it a tool source. |
 | A2A | an Interface when other agents use ours, and a tool source when we use theirs |
 | A2UI | a content type passed through intact |
-| OpenTelemetry | what a telemetry plugin reports |
+| OpenTelemetry | Harness instrumentation in the [proposed profile](../telemetry.md) |
