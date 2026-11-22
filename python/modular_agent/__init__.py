@@ -185,3 +185,11 @@ from ._types import (
     ToolResult as ToolResult,
     ToolStatus as ToolStatus,
 )
+
+from ._subscription_logins import (
+    ApiKey as ApiKey,
+    Login as Login,
+    OAuth as OAuth,
+    SubscriptionLogins as SubscriptionLogins,
+    subscription_logins as subscription_logins,
+)
