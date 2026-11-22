@@ -185,3 +185,17 @@ from ._types import (
     ToolResult as ToolResult,
     ToolStatus as ToolStatus,
 )
+
+from ._subscription_logins import (
+    ApiKey as ApiKey,
+    Login as Login,
+    OAuth as OAuth,
+    SubscriptionLogins as SubscriptionLogins,
+    subscription_logins as subscription_logins,
+)
+
+from ._chatgpt_auth import (
+    SignInStep as SignInStep,
+    sign_in as sign_in,
+    sign_out as sign_out,
+)

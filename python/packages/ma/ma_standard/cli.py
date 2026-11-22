@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import signal
-import subprocess
 import sys
 import warnings
 from typing import cast
@@ -33,14 +32,15 @@ from modular_agent import (
     file_history,
     http_history,
 )
+from modular_agent.chatgpt import chatgpt
+from modular_agent.claude import Claude, claude
 from modular_agent.compaction import compaction
 from modular_agent.files import file_tools
 from modular_agent.mcp import mcp
 from modular_agent.testing import ScriptedProvider
 
-from .auth import AuthFile
 from .code import code_tool
-from .config import Paths, claude_launch
+from .config import PROVIDER_ALIASES, Paths, chatgpt_overrides, login_file, model_id
 from .identity import DEFAULT_CLIENT_IDENTITY, validate_client_identity
 from .prompt import discover, prompt_plugin
 from modular_agent import AcpPolicy
@@ -301,29 +301,11 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
     return 0
 
 
-def _claude_status() -> str:
-    try:
-        result = subprocess.run(
-            ["claude", "auth", "status"], stdin=subprocess.DEVNULL, capture_output=True, check=False
-        )
-    except OSError:
-        return "Claude Code is not installed"
-    return (
-        "signed in through Claude Code"
-        if result.returncode == 0
-        else "not signed in (run `ma login claude`)"
-    )
-
-
-def _signed_in_model(paths: Paths) -> str | None:
-    auth = AuthFile(paths.config / "auth.json")
-    if auth.login("openai-codex"):
-        return "openai-codex/gpt-6.1-sol"
-    if auth.login("xai"):
-        return "xai/grok-4.7"
-    if claude_launch() and _claude_status().startswith("signed in"):
-        return "claude/claude-sonnet-5-5"
-    return None
+async def _claude_status() -> str:
+    provider = claude()
+    if await provider.available():
+        return "signed in through Claude Code"
+    return provider.unavailable_reason or "not signed in (run `ma login claude`)"
 
 
 async def _agent(
@@ -366,9 +348,8 @@ async def _agent(
     settings: JsonObject = (
         {"thinking": "off"} if args.acp and not acp_session else paths.settings(project)
     )
-    auth = AuthFile(paths.config / "auth.json")
+    auth = login_file(paths.config / "auth.json")
     providers: list[Provider] = []
-    processes = None
     configured_model = settings.pop("model", None)
     if configured_model is not None and not isinstance(configured_model, str):
         raise ValueError("model must be PROVIDER/ID")
@@ -380,6 +361,8 @@ async def _agent(
         or saved_model
         or (configured_model if not args.acp or acp_session else None)
     )
+    if model is not None:
+        model = model_id(model)
     if script:
         script_data = json.loads(Path(script).read_text(encoding="utf-8"))
         if not isinstance(script_data, list) or any(not isinstance(s, dict) for s in script_data):
@@ -393,57 +376,71 @@ async def _agent(
         settings.pop("modelTools", None)
         settings["thinking"] = "off"
     else:
-        from .responses import Responses
+        from .responses import Grok
 
-        providers.extend(
-            [
-                Responses(
-                    vendor, auth, paths.config / "models.json", client_identity=args.client_identity
-                )
-                for vendor in ("openai-codex", "xai")
-            ]
+        overrides = paths.config / "models.json"
+        chatgpt_provider = chatgpt(
+            logins=auth, models=chatgpt_overrides(overrides), client_identity=args.client_identity
         )
-        if not model and not (
-            args.session
-            or args.resume
-            or args.declaration
-            or args.history
-            or args.acp
-            or args.command in {"models", "sessions"}
+        grok_provider = Grok(auth, overrides, client_identity=args.client_identity)
+        providers.extend([chatgpt_provider, grok_provider])
+        claude_provider: Claude | None = None
+        if not model and (
+            acp_session
+            or not (
+                args.session
+                or args.resume
+                or args.declaration
+                or args.history
+                or args.acp
+                or args.command in {"models", "sessions"}
+            )
         ):
-            model = _signed_in_model(paths)
-            if model is None:
+            if chatgpt_provider.available():
+                model = "chatgpt/gpt-6.1-sol"
+            elif auth.login("grok"):
+                model = "grok/grok-4.7"
+            else:
+                claude_provider = claude()
+                if await claude_provider.available():
+                    catalog = claude_provider.models()
+                    if catalog:
+                        ids = [info["id"] for info in catalog]
+                        model = "claude/" + (
+                            "claude-sonnet-5-5" if "claude-sonnet-5-5" in ids else ids[0]
+                        )
+            if model is None and not acp_session:
                 raise ValueError(
-                    "no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`."
+                    "no model is available. Sign in with `ma login chatgpt`, `ma login grok` or `ma login claude`, or pass --model. See `ma models`."
                 )
-        if acp_session and model is None:
-            model = _signed_in_model(paths)
         if args.command == "models" or (model and model.startswith("claude/")):
-            sidecar = claude_launch()
-            if model and model.startswith("claude/") and sidecar is None:
-                raise ValueError(
-                    "the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR"
-                )
-            if sidecar:
-                processes = [sidecar]
+            claude_provider = claude_provider or claude()
+            if model and not await claude_provider.available():
+                raise ValueError(claude_provider.unavailable_reason or "Claude is not available")
+            providers.append(claude_provider)
     if args.thinking:
         settings["thinking"] = args.thinking
     if args.command != "models" and (
         script or model is not None and not model.startswith("claude/")
     ):
         for info in (info for provider in providers for info in provider.models()):
-            if (
-                model == f"{info['provider']}/{info['id']}"
-                and settings.get("thinking") not in info["thinking"]
-            ):
+            if model == f"{info['provider']}/{info['id']}" and settings.get(
+                "thinking"
+            ) not in info.get("thinking", []):
                 if args.thinking:
                     raise ValueError(f"thinking level {args.thinking} is not available for {model}")
                 levels = ["off", "minimal", "low", "medium", "high", "xhigh"]
-                asked = levels.index(str(settings["thinking"]))
-                settings["thinking"] = next(
-                    (level for level in reversed(levels[: asked + 1]) if level in info["thinking"]),
-                    "off",
-                )
+                requested = settings.get("thinking")
+                if requested in levels:
+                    asked = levels.index(str(requested))
+                    settings["thinking"] = next(
+                        (
+                            level
+                            for level in reversed(levels[: asked + 1])
+                            if level in info.get("thinking", [])
+                        ),
+                        "off",
+                    )
     inspecting = args.command == "models" or args.declaration or args.acp
 
     return await create_agent(
@@ -453,7 +450,7 @@ async def _agent(
         durability=durability,
         local_process_groups=True,
         providers=providers,
-        credentials=file_credentials(auth.path),
+        credentials=file_credentials(auth),
         tools=[code_tool()],
         plugins=[
             file_tools(paths.state / "output"),
@@ -462,8 +459,8 @@ async def _agent(
             *([] if inspecting else [mcp(project_servers=paths.mcp)]),
         ],
         model=model,
+        model_aliases=PROVIDER_ALIASES,
         settings=settings,
-        process_plugins=processes,
         resource_reservations=policy.limits,
         tenants=policy.tenants,
         plugin_host=True,
@@ -502,7 +499,7 @@ async def _run(args: argparse.Namespace) -> int:
             args.command,
             args.provider,
             args.device,
-            AuthFile(paths.config / "auth.json"),
+            login_file(paths.config / "auth.json"),
             _claude_status,
             client_identity=args.client_identity,
         )
@@ -601,7 +598,7 @@ async def _run(args: argparse.Namespace) -> int:
             for info in await agent.models():
                 name = f"{info['provider']}/{info['id']}"
                 print(
-                    f"{name:<34} context {info['contextWindow']:>7}  thinking {','.join(info['thinking'])}"
+                    f"{name:<34} context {info['contextWindow']:>7}  thinking {','.join(info.get('thinking', []))}"
                 )
             return 0
         if args.declaration:
@@ -611,7 +608,7 @@ async def _run(args: argparse.Namespace) -> int:
         if args.session:
             for key in ("model", "thinking"):
                 if value := getattr(args, key):
-                    await session.set_setting(key, value)
+                    await session.set_setting(key, model_id(value) if key == "model" else value)
         if args.history:
             _json({"sessionId": session.id, "entries": await session.history()})
             return 0

@@ -8,7 +8,59 @@ import re
 import sys
 from typing import cast
 
-from modular_agent import Json, JsonObject, ProcessPlugin
+from modular_agent import Json, JsonObject, ModelInfo, SubscriptionLogins, subscription_logins
+
+
+PROVIDER_ALIASES = {"openai-codex": "chatgpt", "xai": "grok"}
+
+
+def login_file(path: Path) -> SubscriptionLogins:
+    return subscription_logins(path, aliases=PROVIDER_ALIASES)
+
+
+def model_id(value: str) -> str:
+    provider, slash, name = value.partition("/")
+    return f"{PROVIDER_ALIASES.get(provider, provider)}{slash}{name}"
+
+
+def model_overrides(path: Path, provider: str) -> list[JsonObject]:
+    doc = read_object(path)
+    overrides: list[JsonObject] = []
+    for key in [*(old for old, new in PROVIDER_ALIASES.items() if new == provider), provider]:
+        if key not in doc:
+            continue
+        rows = doc[key]
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError(f"models for {key}: expected an array of objects")
+        overrides.extend(cast(list[JsonObject], rows))
+    return overrides
+
+
+def chatgpt_overrides(path: Path) -> list[ModelInfo]:
+    models: dict[str, ModelInfo] = {}
+    for row in model_overrides(path, "chatgpt"):
+        name, context, maximum = row.get("id"), row.get("contextWindow"), row.get("maxTokens")
+        if (
+            not isinstance(name, str)
+            or not name
+            or type(context) is not int
+            or context <= 0
+            or type(maximum) is not int
+            or maximum <= 0
+        ):
+            raise ValueError("models need id, contextWindow and maxTokens")
+        inputs = row.get("input", ["text", "image"])
+        if not isinstance(inputs, list) or not all(isinstance(item, str) for item in inputs):
+            raise ValueError("model input must be an array of strings")
+        models[name] = ModelInfo(
+            provider="chatgpt",
+            id=name,
+            contextWindow=context,
+            maxOutput=maximum,
+            input=cast(list[str], inputs),
+            reasoning=False,
+        )
+    return list(models.values())
 
 
 def read_object(path: Path) -> JsonObject:
@@ -155,22 +207,3 @@ class Paths:
             except (OSError, ValueError) as exc:
                 print(f"{path}: {exc}", file=sys.stderr)
         return list(servers.values())
-
-
-def claude_launch() -> ProcessPlugin | None:
-    override = os.environ.get("MODULAR_AGENT_CLAUDE_SIDECAR")
-    paths = [Path(override)] if override else []
-    paths.extend(
-        parent / "typescript/sidecars/claude/dist/main.js"
-        for parent in Path(__file__).resolve().parents
-    )
-    paths.append(Path.home() / ".local/share/modular-agent/sidecars/claude/dist/main.js")
-    for script in paths:
-        if script.is_file():
-            env = {
-                name: os.environ[name]
-                for name in ("HOME", "PATH", "CLAUDE_CONFIG_DIR")
-                if name in os.environ
-            }
-            return ProcessPlugin(["node", str(script.resolve())], env=env)
-    return None
