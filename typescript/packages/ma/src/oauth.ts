@@ -3,12 +3,11 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { setTimeout as wait } from "node:timers/promises";
 import type { OAuth } from "./auth.js";
+import { resolveClientIdentity, type ClientIdentityOptions } from "./client-identity.js";
 
 export const vendors = ["openai-codex", "xai"] as const;
 export type Vendor = typeof vendors[number];
 export const labels: Record<Vendor, string> = { "openai-codex": "ChatGPT subscription", xai: "Grok subscription" };
-// Pi's value is a placeholder until the services accept this client's own name.
-export const CLIENT_IDENTITY = "pi";
 const codex = { id: "app_EMoamEEZ73f0CkXaXp7hrann", scope: "openid profile email offline_access", token: "https://auth.openai.com/oauth/token",
   authorize: "https://auth.openai.com/oauth/authorize", deviceCode: "https://auth.openai.com/api/accounts/deviceauth/usercode",
   deviceToken: "https://auth.openai.com/api/accounts/deviceauth/token", devicePage: "https://auth.openai.com/codex/device",
@@ -88,7 +87,8 @@ function tokens(vendor: Vendor, body: Fields, previous?: string): OAuth {
     ...(vendor === "openai-codex" ? { account: chatgptAccount(access) } : {}) };
 }
 type TestOptions = { endpoints: Partial<typeof realEndpoints>; port?: number; pollUnit?: number };
-export function oauth(test?: TestOptions) {
+export function oauth({ clientIdentity: identity, test }: ClientIdentityOptions & { test?: TestOptions } = {}) {
+  const clientIdentity = resolveClientIdentity(identity);
   const ep = { ...realEndpoints };
   if (test) for (const [k, v] of Object.entries(test.endpoints)) ep[k as keyof typeof ep] = loopback(v);
   const endpoint = (name: keyof typeof ep) => {
@@ -111,7 +111,7 @@ export function oauth(test?: TestOptions) {
     }
   }
   const xaiDevice = async (show: (s: Step) => void) => {
-    const [status, body] = await post(endpoint("xaiDeviceCode"), { client_id: xai.id, scope: xai.scope, referrer: CLIENT_IDENTITY });
+    const [status, body] = await post(endpoint("xaiDeviceCode"), { client_id: xai.id, scope: xai.scope, referrer: clientIdentity });
     if (!ok(status)) throw failure("starting the Grok sign-in", status, body);
     const field = (name: string) => {
       const value = string(body[name]);
@@ -189,7 +189,7 @@ export function oauth(test?: TestOptions) {
         });
         show({ kind: pasted ? "open-and-paste" : "open", address: `${endpoint("codexAuthorize")}?${form({ response_type: "code", client_id: codex.id, redirect_uri: redirect, scope: codex.scope,
           code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256", state,
-          id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: CLIENT_IDENTITY })}` });
+          id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: clientIdentity })}` });
         let accepted = false;
         stopPasting = pasted?.(line => {
           if (accepted) return;

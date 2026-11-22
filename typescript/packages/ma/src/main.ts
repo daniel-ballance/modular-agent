@@ -17,6 +17,7 @@ import { loadPolicy } from "./policy.js";
 import { AuthFile, expired } from "./auth.js";
 import { labels, oauth, vendors, type Step, type Vendor } from "./oauth.js";
 import { responses } from "./responses.js";
+import { resolveClientIdentity, type ClientIdentityOptions } from "./client-identity.js";
 
 function parse(argv: string[]) {
   const opts: { command?: string; project: string; runtime: "durable" | "transient"; session?: string; prompt?: string;
@@ -99,7 +100,7 @@ function show(step: Step) {
     process.stderr.write("Paste the address (or the code): ");
   } else console.error("Waiting for the sign-in to finish...");
 }
-async function authCommand(argv: string[], p: Paths, auth: AuthFile) {
+async function authCommand(argv: string[], p: Paths, auth: AuthFile, identity: ClientIdentityOptions) {
   const [cmd, provider, ...rest] = argv;
   const isVendor = (name: string): name is Vendor => (vendors as readonly string[]).includes(name);
   if (cmd === "auth") {
@@ -131,15 +132,16 @@ async function authCommand(argv: string[], p: Paths, auth: AuthFile) {
       reader.on("line", onLine);
       return () => { reader.off("line", onLine); reader.close(); };
     } : undefined;
-    await auth.setLogin(provider, await oauth().login(provider, rest[0] === "--device", show, pasted));
+    await auth.setLogin(provider, await oauth(identity).login(provider, rest[0] === "--device", show, pasted));
     console.error(`Signed in to ${labels[provider]} (${provider}).`);
   }
   return 0;
 }
 async function main(argv: string[]) {
+  const identity = { clientIdentity: resolveClientIdentity(process.env.MA_CLIENT_IDENTITY, "MA_CLIENT_IDENTITY") };
   if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("ma supports only Linux and macOS");
   const p = paths(), auth = new AuthFile(p.config);
-  if (["login", "logout", "auth"].includes(argv[0])) return authCommand(argv, p, auth);
+  if (["login", "logout", "auth"].includes(argv[0])) return authCommand(argv, p, auth, identity);
   const opts = parse(argv);
   if (opts.help) { console.log(HELP); return 0; }
   if (opts.version) { console.log("ma 0.1.0 (typescript)"); return 0; }
@@ -205,7 +207,7 @@ async function main(argv: string[]) {
     delete settings.model;
     const claude = model?.startsWith("claude/") || opts.command === "models" ? launch : undefined;
     if (model?.startsWith("claude/") && !claude) throw new Error("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR");
-    const providers = script ? [script] : conformance ? [] : vendors.map(v => responses(v, auth, overrides));
+    const providers = script ? [script] : conformance ? [] : vendors.map(v => responses(v, auth, overrides, identity));
     const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p)];
     if (!opts.acp) plugins.push(standardMcpTools({ servers: projectMcp }));
     return createAgent({ ...base, project: cwd, settings, credentials: auth.credentials(), model: opts.command === "models" ? undefined : model, providers, plugins,

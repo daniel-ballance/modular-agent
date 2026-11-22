@@ -33,6 +33,21 @@ async function project(t: TestContext) {
   const env = { PATH: process.env.PATH, HOME: home, MODULAR_AGENT_DATA_DIR: config, MODULAR_AGENT_SCRIPT: script, MODULAR_AGENT_SCRIPT_LOG: log };
   return { dir, home, config, work, script, log, env, put, run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env }) };
 }
+test("ma validates MA_CLIENT_IDENTITY before help, sign-in, or loading a script", async t => {
+  const p = await project(t);
+  const run = (identity: string, ...args: string[]) => exec(process.execPath, [cli, ...args], {
+    cwd: p.work, env: { ...p.env, MA_CLIENT_IDENTITY: identity }, timeout: 10_000,
+  });
+  await assert.rejects(run("", "--help"), { code: 1, stdout: "", stderr: /MA_CLIENT_IDENTITY/ });
+  await assert.rejects(run("space here", "login", "not-a-provider"), { code: 1, stdout: "", stderr: /MA_CLIENT_IDENTITY/ });
+  const identity = { code: 1, stdout: "", stderr: /MA_CLIENT_IDENTITY/ };
+  await assert.rejects(run("x".repeat(65), "-p", "Say hello."), identity);
+  const { stdout } = await run("A0-._" + "x".repeat(59), "-p", "Say hello.");
+  assert.equal(stdout, "ok\n");
+  await rm(p.script);
+  await assert.rejects(run("id\n", "-p", "Say hello."), identity);
+});
+
 const scripted = (code: string) => [{ toolCalls: [{ name: "codemode", input: { code } }] }, { text: "done" }];
 async function sandbox(t: TestContext, code: string, fixture: () => number | Promise<number> = () => 7, computeMs?: number) {
   const p = await project(t);
