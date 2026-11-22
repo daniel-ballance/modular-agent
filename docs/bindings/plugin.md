@@ -6,6 +6,8 @@ Both peers MUST use the [shared data](data.md) shapes. The tables define method 
 
 ## Transport
 
+After the [handshake](#starting-the-handshake) agrees to `traceContext: 1`, either peer MAY send `params.traceContext: { traceparent: string, tracestate?: string }` on work requests and notifications. Peers MUST NOT send it on responses or control messages. They MUST ignore absent, invalid or unagreed context. See [Context on the wire](../telemetry.md#context-on-the-wire).
+
 - The host MUST start the plugin as a child process and send and receive JSON-RPC 2.0 over its stdin and stdout, or connect to a plugin service over the [WebSocket transport](websocket.md), which replaces this section's stdio rules. See [Stdio authentication](../security.md#authentication-on-each-wire) for the peer and trust rules. The plugin MUST NOT write anything else to stdout. The host MAY route stderr to operator diagnostics. Each peer MUST NOT include secrets in errors, traces or diagnostics.
 - Each peer MUST send one UTF-8 JSON-RPC object per line, with no byte order mark or batch. Receivers MUST accept LF and CRLF. The 64 MiB cap counts 67,108,864 [actual line bytes](data.md#general-rules), excluding the line ending. Receivers MUST bound input before decoding or parsing and close the connection on an oversized frame, including a frame with no newline. Senders MUST substitute `result_too_large` for an oversized success result. For an oversized outgoing error, senders MUST replace its diagnostic text and data with the minimal envelope for the same code. A sender MUST NOT send an oversized request or notification.
 - Request ids MUST be strings or integers in the inclusive range −(2^53 − 1) to 2^53 − 1. Peers MUST compare ids by type and value, independently in each direction. A sender MUST NOT reuse an id on the same connection, even after its request settles. A parent is live from send until its answer is received. A peer MUST close on a reused request id, an unsolicited or duplicate answer, or an invalid response envelope.
@@ -43,10 +45,12 @@ The host MUST treat unexpected EOF, process exit, an unusable stream, a required
 
 | Host request | Params | Result | Errors |
 |---|---|---|---|
-| `plugin/initialize` | `{ binding: string, data: string, host: { name: string, version: string }, project: string, home: string, config: object }` | `Registration` | `not_supported` for an unsupported version |
+| `plugin/initialize` | `{ binding: string, data: string, host: { name: string, version: string }, project: string, home: string, config: object, traceContext?: 1 }` | `Registration` | `not_supported` for an unsupported version |
 | `plugin/shutdown` | `{ reason: "stop" \| "reload" \| "refused", detail?: string }` | `{}` | Common errors only |
 
 The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"` and `data: "modular-agent-data/1"`. `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
+
+A plugin MUST return `traceContext: 1` only if the host offered it. Both members MUST equal `1`; otherwise neither peer sends the work field. A peer that does not recognize the member MUST ignore it.
 
 **Registration**
 
@@ -54,6 +58,7 @@ The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugi
 |---|---|
 | `binding` | `"modular-agent-plugin/1"` |
 | `name` | Nonempty string, stable plugin identity |
+| `traceContext?` | `1`; acceptance of the host's offer. Omission means no agreement. |
 | `providers?` | `{ id: Id, supports: ProviderSupports, models: ModelInfo[] }[]`; default `[]` |
 | `toolSources?` | `{ id: Id, tools: ToolDefinition[], perSession?: boolean }[]`; defaults `[]` and `perSession: false` |
 | `workingEnvironment?` | `{ containment: "strong" \| "processGroup" \| "none", platforms?: string[], points?: boolean, confinesFiles?: boolean }`; default absent; omitted platforms makes no platform claim; omitted flags are false |
@@ -222,6 +227,8 @@ The [core output gate](../contracts.md#the-output-gate) defines which deliveries
 | `runtime/resumeTurn` | `{ turn: Turn, interrupted: { turnId: Id, calls: PendingCall[], lastStep?: ResumedStep } }` | TurnOutcome | As for `runTurn`; `invalid_request` for mismatched turn, calls or step |
 | `runtime/continueOpenCalls` | `{ turn: Turn, calls: PendingCall[] }` | TurnOutcome | As for `runTurn`; `invalid_request` for invalid continuation |
 
+On `runtime/resumeTurn`, the host propagates the new segment through the [common work field](#transport), using that request's client span in the resumed trace. See [Restart](../telemetry.md#restart).
+
 | Shape | Fields |
 |---|---|
 | Turn | `{ sessionId: Id, turnId: Id, startedBy: StartedBy, model: ModelInfo, modelSupports: ProviderSupports, settings: TurnSettings, resultShape?: Schema }` |
@@ -242,7 +249,7 @@ The [core output gate](../contracts.md#the-output-gate) defines which deliveries
 
 ### Runtime callbacks
 
-Every method or notification in this table also carries `parentRequestId: RpcId` for the turn. Bad scope, phase or identity is `invalid_request`; see [authority](#authority) and [transport](#transport).
+Every method or notification in this table also carries `parentRequestId: RpcId` for the turn. Bad scope, phase or identity is `invalid_request`; see [authority](#authority) and [transport](#transport). Trace context stays in the trace of the live parent and never changes those checks. See [callback context](../telemetry.md#context-on-the-wire).
 
 | Plugin method | Other params | Result | Errors |
 |---|---|---|---|
@@ -272,7 +279,7 @@ Every method or notification in this table also carries `parentRequestId: RpcId`
 
 ### Runtime records and effects
 
-The host is the sole writer. The [shared ownership table](data.md#standard-kinds) lists each standard record, including host-owned `summary`. The host MUST accept only `response`, a matching committed `toolResult` or a Runtime-owned dotted kind via `record`.
+The host is the sole writer. The [shared ownership table](data.md#standard-kinds) lists each standard record, including host-owned `summary`. The host MUST accept only `response`, a matching committed `toolResult` or a Runtime-owned dotted kind via `record`. Trace checkpoints and disclosure markers are reserved for the Harness. The Runtime MUST NOT submit them. Version 1 writes no disclosure markers.
 
 With an in-process Provider, the host MUST commit the effective `modelRequest` before dispatch to inference, following [Recording order and ownership](data.md#recording-order-and-ownership). A remote Provider uses the [Provider request callback](#the-host-asks-a-provider), even when the Runtime is local. If the final dispatch check finds a limit after that commit, the host MUST commit a bookkeeping `response` before returning `turn_limit`: `message` is `{ role: "assistant", stop: "aborted", content: [] }`, with `data.recovery: true` and `modelVisible: false`. It has no usage or calls and is not eligible for replay. Without a committed intent there is nothing to settle. The Runtime MUST NOT submit a `response` when `host/runtime/model` returns an RPC error. See [The host asks a Provider](#the-host-asks-a-provider) for the error when a Provider skips its request callback.
 
@@ -298,7 +305,7 @@ The host MUST emit standard [events](../contracts.md#event) once, through the ou
 
 ## Jobs
 
-A job belongs to its plugin by registered name. The host records jobs in the [shared history kinds](data.md#history-entries).
+A job belongs to its plugin by registered name. The host records jobs in the [shared history kinds](data.md#history-entries). A job callback can carry context only for a live parent or an authorized job in that connection's scope. The host MUST use its tracked context for the authorized work if context is absent, invalid or in another trace. See the [profile](../telemetry.md#context-on-the-wire).
 
 | Host request | Params | Result | Errors |
 |---|---|---|---|
@@ -331,6 +338,8 @@ A job belongs to its plugin by registered name. The host records jobs in the [sh
 
 ## What a plugin may ask the host
 
+Trace context on a callback MUST come from work under a live `parentRequestId` or an [authorized job](#jobs). Without that scope the host ignores it, including on unscoped credential reads. Context does not extend authority. `host/declaration` uses the [ACP projection](acp.md#the-declaration), including its optional `telemetry` key.
+
 | Plugin method | Params | Result | Errors |
 |---|---|---|---|
 | `host/ask` | `{ parentRequestId: RpcId, request: InputRequestDraft }` | [Terminal Answer](data.md#questions) or `{ requestId: Id, pending: true }` | `invalid_request` for bad question or parent; `not_supported` for unsupported waiting mode |
@@ -361,6 +370,8 @@ A job belongs to its plugin by registered name. The host records jobs in the [sh
 
 `all` defaults to false. The host MUST return the current branch in root-to-head order, or all entries in kept order with `all: true`, as defined in [Shared data](data.md#history-entries). `limit` MUST be from 1 to 500 inclusive, default 500. The host MUST page from immediately after `after`, or from the start when it is absent. A cursor not in the selected view is `invalid_request`. Each request reads the current view; the cursor is an entry id, not a snapshot. The host MUST NOT return [pending erasure](../contracts.md#cross-session-coordination) content even on this raw read. If the host cannot establish pending-state freshness, it MUST refuse with `internal`, without returning history. Appends, moves and erasure can change the view between pages.
 
+The host MUST omit `turnStart.data.traceContext` and send `modular-agent.turnTrace` with its envelope only, without `data`. This preserves paging and topology even on raw reads. Only the common work field carries trace context to a plugin.
+
 The host MUST fit the whole `result` it sends, including any `next`, in 4 MiB. It MUST return `next` as the last returned id only when more entries remain. The host MUST include at least one entry when entries remain; if that entry and any required cursor do not fit, the host MUST return `result_too_large` rather than split or skip it. A host MUST NOT commit an entry that would make its own Runtime unable to page it. An external record already too large is a recovery failure, not an empty page.
 
 ### Authority
@@ -390,7 +401,7 @@ A Runtime registration grants no direct access to `host/env/*`, `host/ask` or cr
 
 ## Choosing plugins at start
 
-A plugin is trusted code. It runs with the agent's permissions unless separately confined. Process separation and use of the plugin API do not make a sandbox. See [Security](../security.md#plugins) for what the host can observe and for tenant isolation and launch rules.
+A plugin is trusted code. It runs with the agent's permissions unless separately confined. Process separation and use of the plugin API do not make a sandbox. See [Security](../security.md#plugins) for what the host can observe and for tenant isolation and launch rules. Trace context support comes from the [handshake](#starting-the-handshake), not plugin settings or an authority grant.
 
 - The host MUST start only programs approved by the operator. The host MUST check [project trust](../contracts.md#configuration-and-trust) before starting a project plugin. The host MUST validate registration before enabling the plugin's callbacks or replacements.
 - The host MUST read `MODULAR_AGENT_PLUGINS` at startup if set. It is a JSON array of `{ command: string[], env?: object, config?: object }`, or of the [network form](websocket.md#choosing-plugin-services-at-start) `{ url, tokenFile, config? }` for plugin services. `command` is a nonempty argument vector; its first item is the executable, with no shell expansion. `env` maps names to strings. Both optional objects default to `{}`. The host MUST reject malformed configuration before spawning programs from it. A build MAY support other configuration sources.
@@ -418,6 +429,8 @@ A build serving the conformance plugin MUST document its command and support the
 - The `tool.before` fixture MUST refuse a call whose input JSON contains `conformance-forbidden`, with reason `refused by the conformance plugin`. The `turn.before` fixture MUST contribute `{ "system": "The conformance plugin is loaded." }`. The `output` fixture MUST replace `conformance-secret` with `[redacted]` in editable strings, including a match across text events within one segment, without making other changes.
 
 ## Changes
+
+- **2026-11-22.** Agree to per-operation trace context in the handshake. Add the optional telemetry declaration to the ACP projection used by `host/declaration`.
 
 - **Proposed production rules.** Hosted callbacks resolve parent IDs and ownership within their connection. Reservation refusal uses `busy` before a new operation or `turn_limit` with `capacity` at the model boundary. Raw plugin reads enforce pending erasure.
 

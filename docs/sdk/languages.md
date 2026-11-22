@@ -19,6 +19,19 @@ How each language expresses the [API](api.md). The rule is the same throughout: 
 | Closed sets of values | enums with an `Unknown(String)` variant where shared data keeps unknown values | string unions | typed string constants | `StrEnum` |
 | Tool input | a type deriving `Deserialize` and `JsonSchema` | a [Standard Schema](https://standardschema.dev) or JSON Schema | a struct with `json` tags | type hints or a Pydantic model |
 
+## OpenTelemetry
+
+Each Modular Agent SDK depends on the OpenTelemetry API only. The app chooses and installs the OpenTelemetry SDK and exporter. Register the app's tracer provider before creating the agent. If the app uses a meter provider, register it the same way.
+
+| Language | API dependency | How the app installs tracing |
+|---|---|---|
+| Rust | `opentelemetry` crate, not `opentelemetry_sdk` | Set the SDK tracer provider through `opentelemetry::global`. |
+| TypeScript | `@opentelemetry/api` | Register the SDK tracer provider and an async context manager with the API. |
+| Go | `go.opentelemetry.io/otel` API packages, including `trace` and `metric` | Set the SDK tracer provider through `otel.SetTracerProvider`. |
+| Python | `opentelemetry-api` | Set the SDK tracer provider through `opentelemetry.trace.set_tracer_provider`. |
+
+See [Tracing](api.md#tracing) for the common rules and the [research note](../research/opentelemetry-genai.md#language-apis-and-export) for the upstream versions checked.
+
 ## Schemas
 
 A tool's input and output are written as types or schema objects, never as hand-written JSON Schema unless the developer chooses to. Each SDK turns them into JSON Schema 2020-12 using only the standard vocabulary and within-document references ([Tools](../bindings/data.md#tools)):

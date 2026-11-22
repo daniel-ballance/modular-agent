@@ -18,12 +18,14 @@ A server MAY accept many connections. Each connection is independent, with its o
 - The client MUST open a WebSocket ([RFC 6455](https://www.rfc-editor.org/rfc/rfc6455)) to the URL the operator configured, offering the subprotocol `modular-agent-plugin-1` or `modular-agent-acp-1`. The server MUST refuse an upgrade that does not offer the subprotocol it serves, and MUST select it in its response. The ACP binding version is still negotiated in ACP `initialize`.
 - The client MUST send `Authorization: Bearer <token>` in the upgrade request. The server MUST authenticate every upgrade as [Security](../security.md#authentication-on-each-wire) requires for network transports: a token of at least 128 bits of entropy compared in constant time, or mutual TLS. It MUST answer an unauthenticated upgrade with HTTP 401 and no WebSocket. Neither peer may log the token or pass it on a command line; operators supply it in a file readable only by its owner.
 - Peers MUST use TLS (`wss:`), unless the listener and destination are loopback-only and the operator trusts every local account on the host, in which case `ws:` MAY be used. A server MUST refuse to listen on a non-loopback address without TLS. A client MUST verify the server's identity before sending the token.
+- Trace context on the HTTP upgrade, if present, describes only the upgrade. A peer MUST NOT use it as the parent of work on the connection.
 
 ## Framing
 
 - Each WebSocket text message carries exactly one JSON-RPC object, encoded as UTF-8 with no byte order mark and no batch. A peer MUST NOT send binary messages; a receiver MUST close on one with status 1003.
 - The 64 MiB cap of the carried binding counts the bytes of one message. Receivers MUST bound a message before buffering it whole, and close with status 1009 on an oversized message. The carried binding's rules for oversized results and errors apply unchanged.
 - All other message rules of the carried binding apply: ids, cancellation, notifications, ordering and errors. WebSocket ping and pong frames are not `$/ping`.
+- Carry optional trace context per message in the [plugin](plugin.md#transport) or [ACP](acp.md#metadata) fields. Use no special frame or URL parameter. Absent or unknown fields leave work unchanged. See [Context on the wire](../telemetry.md#context-on-the-wire).
 
 ## Connection lifetime
 
@@ -43,7 +45,7 @@ The connection takes the place of the child process's pipes, and closing it take
 
 ## Choosing plugin services at start
 
-Each entry of `MODULAR_AGENT_PLUGINS` is either the stdio form `{ command, env?, config? }` or the network form `{ url: string, tokenFile: string, config?: object }`. `url` is a `ws:` or `wss:` URL; `tokenFile` is an absolute path to a file holding the token. An entry with both `command` and `url` is malformed. The [startup rules](plugin.md#choosing-plugins-at-start) apply to both forms: the host loads entries in array order, and a service it cannot connect to, that refuses the upgrade, or whose registration is refused, fails startup. The host MUST NOT substitute a built-in part for a failed configured one.
+Each entry of `MODULAR_AGENT_PLUGINS` is either the stdio form `{ command, env?, config? }` or the network form `{ url: string, tokenFile: string, config?: object }`. `url` is a `ws:` or `wss:` URL; `tokenFile` is an absolute path to a file holding the token. An entry with both `command` and `url` is malformed. The [startup rules](plugin.md#choosing-plugins-at-start) apply to both forms: the host loads entries in array order, and a service it cannot connect to, that refuses the upgrade, or whose registration is refused, fails startup. The host MUST NOT substitute a built-in part for a failed configured one. Trace context requires the [plugin handshake](plugin.md#starting-the-handshake) on each connection, including after reconnect.
 
 ## An agent service
 
@@ -55,6 +57,8 @@ Each entry of `MODULAR_AGENT_PLUGINS` is either the stdio form `{ command, env?,
 - **Client methods.** ACP's client file and terminal methods reach the client's machine, not the agent's. An agent service MUST NOT offer them to tools as the agent's working environment.
 
 ## Changes
+
+- **2026-11-22.** Carry the binding's optional trace fields per message, not as connection context.
 
 - **Proposed production rules.** Connection-local plugin instances, authenticated host scope for state and projects, and configuration of represented ACP actors.
 

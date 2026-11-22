@@ -33,6 +33,8 @@ See [MCP servers](contracts.md#mcp-servers) for programs an Interface asks the a
 
 The connection rules also give the `joinOnOpen` default. See [Limits and tenants](contracts.md#limits-and-tenants) for tenant access, inheritance and session ceilings.
 
+Trace context is never identity or authority. A receiver MUST ignore context from outside the operator's trace trust scope. Authentication and scope checks still apply. A peer using the [telemetry profile](telemetry.md#context-on-the-wire) MUST NOT send, accept into work context or persist baggage.
+
 ### Connection scope
 
 An Interface connection's project and tenant limits restrict which sessions and mediated operations it can reach. They do not confine trusted code, a Provider or a shell. The operator MUST separate agents, stores, credentials and working environments wherever the deployment requires isolation those parts do not enforce. This includes tenant-isolated deployments with loaded plugins that can read raw records. See [ACP authorization](bindings/acp.md#authorization), [plugin services](bindings/websocket.md#a-plugin-service) and [history HTTP authentication](bindings/history-http.md#the-basics).
@@ -62,6 +64,8 @@ See [The output gate](contracts.md#the-output-gate) for raw records, recipient v
 [Erasure](contracts.md#erasure) defines the Harness's role; [history HTTP](bindings/history-http.md#erasure) defines the service's. The operator MUST verify restored records against an authority and erasure freshness source independent of the restored backup. Without proof that newer revocations and deletions are enforced, the operator MUST keep the restore unavailable.
 
 [Authority](contracts.md#authority) lists the audit events and entries the operator needs. Operational logs SHOULD omit raw session content.
+
+[Telemetry version 1](telemetry.md#no-content) MUST NOT capture content, even with export enabled. It records no disclosure markers; the exporter is not an erasure destination for session content.
 
 ## Resource limits and denial of service
 

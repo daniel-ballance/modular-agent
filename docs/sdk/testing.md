@@ -143,6 +143,24 @@ and can have `expect`:
 
 The runner MUST report each failed expectation with the scenario, placement, step and both values. It MUST NOT retry a failed scenario.
 
+## Shared telemetry check
+
+The planned `conformance/telemetry/` check reuses the [shared scenarios](#the-shared-scenarios) without replacing their outcome or history assertions. It needs no live Provider or collector.
+
+The harness runs a receiver on a fresh loopback port outside the agent and plugin process groups. It accepts [OTLP/HTTP JSON](https://opentelemetry.io/docs/specs/otlp/#json-protobuf-encoding) at `/v1/traces` and returns a successful OTLP response. Each SDK's scenario runner and each participating fixture program install their language's OpenTelemetry SDK with an always-on sampler and an OTLP/HTTP JSON span exporter pointed at that receiver. If the upstream exporter does not support JSON, install a fixture-only exporter that writes the same OTLP JSON. Pass the endpoint explicitly to children. Do not use production credentials or endpoints. Force a flush on normal exit and wait for the acknowledged exports before comparing spans. Do not require a flush from a killed process.
+
+Run these cases for each host SDK:
+
+| Scenario | Placements and assertions |
+|---|---|
+| `first-turn` | `inProcess`. Check one invocation, one step, one scripted inference attempt and the history commits that the host observes. Check `telemetry: 1` in both agent and session declarations, with and without an OpenTelemetry SDK. Without it the turn still completes and no spans reach the receiver. |
+| `tool-call` | `inProcess` and `process:<sdk>` for every other SDK. With both handshake members present, the plugin client span is under the tool execution; the fixture's server span has the same trace ID and the client span ID as parent. Check the injected context in the request. Repeat with the fixture omitting acceptance, then with the host omitting the offer. Observe both directions of the wire: no work request or notification has `params.traceContext` in either case, and no response has it in any case. Work still settles. |
+| `nested-call` | `inProcess` and the same cross-language process pairs. In process, the child tool span is a direct child of the parent tool span. In the cross-language run, observe the scoped `host/tools/call` callback under the parent tool's trace and check the nested call's parent call ID. Repeat the two handshake omissions here to exercise a callback as well. |
+| `gate-refusal`, `question-answered` | `inProcess`. A pre-dispatch refusal produces a disposition event and no execution span. An answered question has open and close events with the matching ID, kind and disposition, without the question or answer body. |
+| `durable-crash`, `kept-crash` | `inProcess`. Use the scenario's counter barrier and kill the agent group with `SIGKILL` (`kill -9`). Save the committed initial context and turn ID outside that group before killing it. After restart over the same data, the durable run has an invocation with the same trace and turn IDs, a fresh span ID, `modular_agent.turn.resumed=true`, and both a parent and a link to the saved segment. Do not require the old invocation span to have been exported. Observe the new checkpoint before resumed effects. In the kept run there is no resumed invocation; neither run repeats the counter effect. |
+
+For each case, compare against the [profile's span and event mapping](../telemetry.md#spans-and-events). Match operations by the fixture's session, turn, step and call IDs, not export order. Check names, kinds, parentage, required attributes and their values, and one observation per actual operation. Inspect every exported name, resource attribute, span attribute, status, event and link for forbidden fields or fixture content. Use distinct sentinels in prompts, model output, tool payloads, question and answer bodies, diagnostics and test secrets. None may appear, even as substrings. Check the raw wire for absent fields rather than inferring their absence from missing spans. No baggage crosses the wire. Check that version 1 writes no disclosure markers.
+
 ## Live checks
 
 Everything above runs offline. Each SDK also has a small set of live checks against real model services, skipped unless `MODULAR_AGENT_LIVE=1`. Each check is skipped, not failed, when its key is absent.

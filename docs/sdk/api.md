@@ -36,6 +36,7 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `sessionLimits` | boolean | false. When true, the agent declares `sessionLimits` and `session.setLimit` works; otherwise it raises `not_supported`. |
 | `tenants` | map of tenant name to `{ rights, tokens? }`, the shape of `MODULAR_AGENT_TENANTS` | none. Given, the agent declares `tenants`, and `session({ tenant })` places a session in one ([Limits and tenants](../contracts.md#limits-and-tenants)). |
 | `jobReportsStartTurns` | boolean | false: a job's report is parked until released ([Jobs](../contracts.md#jobs)) |
+| `agentName` | string | absent. A stable name for `gen_ai.agent.name`; omit the attribute and span name suffix when unset. |
 
 Each SDK provides constructors for the parts it ships: `transientRuntime()`, `durableRuntime()`, `memoryHistory()`, `fileHistory(dir)`, `httpHistory(url, tokenFile)`, `localEnvironment(root?)`, `environmentCredentials()` and `fileCredentials(path)`. `serve(plugin)` and `serveHistory(store, options)` are covered in [Placement](placement.md).
 
@@ -44,6 +45,12 @@ Each option that names a part is shorthand for a plugin that provides it. `provi
 `createAgent` raises `invalid_composition` for combinations the [durability rules](placement.md#durability) forbid. With `ephemeral`, an explicit persistent history store or a history service raises `invalid_composition` whose message names `kept`. The rule applies whether the store comes from `history` or a plugin registration.
 
 `createAgent` also raises `invalid_composition` for `pluginHost: false` with a nonempty `processPlugins` or `servicePlugins` list, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. Failure to load, start, connect to, initialize or register a configured plugin fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
+
+### Tracing
+
+The Harness records [metadata-only telemetry](../telemetry.md) through the [language's OpenTelemetry API](languages.md#opentelemetry). To export traces, the app installs an OpenTelemetry SDK and an exporter of its choice before creating the agent. It registers that SDK's tracer provider with the OpenTelemetry API. The app chooses sampling and owns flushing and shutdown. For profile metrics it likewise installs a meter provider and a metric reader or exporter.
+
+There is no `createAgent` switch to turn tracing on or off. Without an OpenTelemetry SDK the calls are a no-op. An app that installs one can turn off recording with its sampler or turn off export by not registering an exporter. Neither choice changes the declaration. Set `agentName` at composition time to name the agent on applicable spans. Use a fixed, non-sensitive name, not a session ID, project path, or user input. This name is not the OpenTelemetry resource's `service.name`.
 
 ## The agent
 
@@ -66,7 +73,7 @@ An Agent is safe to use from several tasks at once. Sessions have separate work 
 
 ### The declaration
 
-`declaration()` returns every key of the [ACP declaration](../bindings/acp.md#the-declaration), computed from the parts the agent was built with. The SDK never guesses a key: each comes from a part's own declaration or from a choice in `createAgent`. Where support varies, the agent declares the more restrictive value. Most values are capabilities of the chosen parts, not constants:
+`declaration()` returns the required and applicable optional keys of the [ACP declaration](../bindings/acp.md#the-declaration). They come from the Harness, the parts' declarations and the choices in `createAgent`. Where support varies, the agent declares the more restrictive value. Most values are capabilities of the chosen parts, not constants:
 
 | Key | Value |
 |---|---|
@@ -85,6 +92,7 @@ An Agent is safe to use from several tasks at once. Sessions have separate work 
 | `outputBypassesAgent` | false |
 | `cancellingTurnCancelsJobs` | false |
 | `pluginsDuringSession` | false |
+| `telemetry` | `1` for a Harness that supports the [profile](../telemetry.md), including in its session declaration. Omitted without support. Independent of the app's tracer provider, sampler and exporter. |
 | `erasure` | true only if the history store and the agent implement erasure and can enforce [pending erasure](../contracts.md#cross-session-coordination) across the declared scope. An HTTP history client uses the [pending-erasure registry profile](../bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) when the service declares a supported version. Without one, the HTTP composition declares false, even if the service can erase. |
 | `inputKeys` | true |
 | `questionsOutlastTurns`, `lateAnswersStartTurns` | false unless the app enables both |
