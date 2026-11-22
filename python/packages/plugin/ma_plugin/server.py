@@ -20,6 +20,7 @@ from ma_tools import DEFINITIONS
 
 from ma_core.wire import tool_out
 from .rpc import MAX_FRAME, Peer, WireError
+from .rpc import trace_offer
 from .runtime_server import METHODS, RuntimeServer
 from .websocket import PLUGIN_PROTOCOL, listen_websocket, wait_for_stop
 
@@ -37,6 +38,8 @@ class PluginServer:
         self.initializing = False
         self.peer = None
 
+    trace_context = True
+
     async def dispatch(self, method, params, key):
         if method == "plugin/initialize":
             if self.ready or self.initializing:
@@ -50,7 +53,12 @@ class PluginServer:
                 self.ready = True
             finally:
                 self.initializing = False
-            return self.registration
+            registration = {k: v for k, v in self.registration.items() if k != "traceContext"}
+            if self.trace_context and trace_offer(params.get("traceContext")):
+                self.peer.trace_agreed = True
+                registration["traceContext"] = 1
+            self.peer.trace_name = registration["name"]
+            return registration
         if not self.ready:
             raise WireError("Initialize first", "invalid_request")
         if method == "plugin/shutdown":
@@ -71,6 +79,7 @@ class PluginServer:
             "host",
             frames=frames,
             close_after_shutdown=True,
+            trace_server=True,
         )
         try:
             await self.peer.closed.wait()
@@ -88,7 +97,14 @@ class PluginServer:
             asyncio.streams.FlowControlMixin, sys.stdout.buffer
         )
         writer = asyncio.StreamWriter(transport, protocol, reader, loop)
-        self.peer = Peer(reader, writer, self.dispatch, getattr(self, "notification", None), "host")
+        self.peer = Peer(
+            reader,
+            writer,
+            self.dispatch,
+            getattr(self, "notification", None),
+            "host",
+            trace_server=True,
+        )
         try:
             await self.peer.closed.wait()
         finally:

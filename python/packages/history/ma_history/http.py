@@ -127,6 +127,7 @@ class HTTPHistory(PendingErasure, Plugin):
                 "Authorization": "Bearer " + self.token,
                 "Content-Type": "application/json",
                 **(headers or {}),
+                **ot.inject(),
             },
         )
 

@@ -30,6 +30,7 @@ from ma_core.wire import (
     tool_out,
 )
 from .rpc import MAX_FRAME, Peer, WireError, rpc_id
+from .rpc import trace_offer, work_method
 from .runtime_host import HostedRuntime
 from .server import BINDING, DATA
 from .websocket import connect_plugin
@@ -255,6 +256,7 @@ class Environment:
 
 
 class External(Plugin):
+    trace_context = True
     """One process may register several different capability kinds."""
 
     role = "feature"
@@ -336,6 +338,7 @@ class External(Plugin):
                     "project": str(self.project),
                     "home": str(self.home),
                     "config": self.spec.get("config", {}),
+                    **({"traceContext": 1} if self.trace_context else {}),
                 },
                 cancel_on_interrupt=False,
             ),
@@ -343,6 +346,10 @@ class External(Plugin):
         )
         if self.registration.get("binding") != BINDING or not self.registration.get("name"):
             raise WireError("Invalid registration", "invalid_request")
+        self.peer.trace_agreed = self.trace_context and trace_offer(
+            self.registration.get("traceContext")
+        )
+        self.peer.trace_name = self.registration["name"]
         for source in self.registration.get("toolSources", []):
             if source["id"] in self.sources:
                 raise WireError("Duplicate tool source", "invalid_request")
@@ -495,6 +502,7 @@ class External(Plugin):
             "method": method,
             "params": params,
             "context": context or {},
+            "trace": ot.current(),
             "emit": emit,
             "questions": 0,
             "pending_questions": {},
@@ -662,7 +670,18 @@ class External(Plugin):
             "host/jobs/progress",
         }:
             return None
-        return partial(self.notification, method, p, parent)
+
+        async def deliver():
+            if parent is None:
+                return await self.notification(method, p, parent)
+            fallback = parent["trace"]
+            received = (
+                ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
+            )
+            with ot.use(received if ot.same_trace(fallback, received) else fallback):
+                return await self.notification(method, p, parent)
+
+        return deliver
 
     async def refresh_changed(self, source, sessions):
         for sid in sessions:
@@ -731,8 +750,40 @@ class External(Plugin):
         return None
 
     async def callback(self, method, p, key, *, notification_parent=None):
+        parent = notification_parent if notification_parent is not None else self.live_parent(p)
         try:
-            return await self.host_call(method, p, key, notification_parent=notification_parent)
+            if parent is None or not work_method(method):
+                with ot.use(ot.extract(None)):
+                    return await self.host_call(
+                        method, p, key, notification_parent=notification_parent
+                    )
+            d = parent["context"]
+            fallback = parent["trace"]
+            received = (
+                ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
+            )
+            trace_parent = received if ot.same_trace(fallback, received) else fallback
+            attributes = ot.attrs(
+                d.get("session") or d.get("sessionId"),
+                d.get("turn"),
+                d.get("step"),
+                **{
+                    "modular_agent.plugin.name": self.registration["name"],
+                    "modular_agent.plugin.method": method,
+                },
+            )
+            if key is None:
+                with ot.use(trace_parent):
+                    return await self.host_call(
+                        method, p, key, notification_parent=notification_parent
+                    )
+            with ot.span(
+                "modular_agent.plugin.request",
+                attributes,
+                parent=trace_parent,
+                kind=ot.trace.SpanKind.SERVER,
+            ):
+                return await self.host_call(method, p, key, notification_parent=notification_parent)
         except AgentError as exc:
             if isinstance(exc, WireError):
                 raise

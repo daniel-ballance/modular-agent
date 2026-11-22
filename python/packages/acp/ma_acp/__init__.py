@@ -9,6 +9,7 @@ from pathlib import Path
 
 import acp
 from acp import schema as s
+from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, content, lower_reasoning
 
 from ma_harness.authority import PERMISSIONS
@@ -95,7 +96,11 @@ def rpc(fn):
         )
         scope = self.project_scope()
         try:
-            return await gated(self, *args, **kwargs)
+            metadata = params.get("_meta") if fn.__name__ == "ext_method" else kwargs
+            trusted = not self.network or getattr(self, "trace_trusted", False)
+            parent = ot.extract(metadata if trusted and fn.__name__ != "initialize" else None)
+            with ot.use(parent):
+                return await gated(self, *args, **kwargs)
         finally:
             self.reset_project_scope(scope)
             OUTPUT_SESSION.reset(token)
@@ -1003,7 +1008,7 @@ class ACP(Plugin):
                     session_id=sid,
                     tool_call=tool_call,
                     options=options,
-                    field_meta=params["_meta"],
+                    **{**params["_meta"], **ot.inject()},
                 )
                 if response.outcome.outcome == "selected" and response.outcome.option_id in {
                     "allow",
@@ -1031,6 +1036,7 @@ class ACP(Plugin):
                                 properties={"answer": prop}, required=["answer"]
                             ),
                         ),
+                        **ot.inject(),
                     )
                     if response.action == "accept":
                         submitted = (response.content or {}).get("answer")

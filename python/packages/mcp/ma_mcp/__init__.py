@@ -13,6 +13,7 @@ from mcp import types
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
+from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, content
 
 
@@ -130,8 +131,11 @@ class Connection:
     async def tools(self):
         tools, cursor, seen = [], None, set()
         while True:
+            metadata = ot.inject()
             page = await self.current().list_tools(
-                params=types.PaginatedRequestParams(cursor=cursor) if cursor else None
+                params=types.PaginatedRequestParams(cursor=cursor, _meta=metadata or None)
+                if cursor or metadata
+                else None
             )
             tools.extend(page.tools)
             cursor = page.next_cursor
@@ -318,7 +322,9 @@ class MCP(Plugin):
 
             session = connection.current()
             dispatched = True
-            result = await session.call_tool(original, call["input"], progress_callback=progress)
+            result = await session.call_tool(
+                original, call["input"], progress_callback=progress, meta=ot.inject() or None
+            )
             return {
                 "call": call["id"],
                 "status": "failed" if result.is_error else "completed",
