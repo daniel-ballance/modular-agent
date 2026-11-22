@@ -35,7 +35,13 @@ async function project(t: TestContext) {
         assert.equal(url.pathname, "/oauth2/token");
       } else {
         assert.ok(["chatgpt.com", "api.x.ai"].includes(url.host), String(url));
-        if (url.host === "chatgpt.com") assert.equal(new Headers(init.headers).get("originator"), "fixture-ma");
+        const headers = new Headers(init.headers);
+        if (url.host === "chatgpt.com") assert.equal(headers.get("originator"), "fixture-ma");
+        else {
+          assert.equal(url.href, "https://api.x.ai/v1/responses");
+          assert.equal(headers.get("originator"), null);
+          assert.equal(headers.get("referrer"), null);
+        }
         const text = url.host + "/" + JSON.parse(init.body).model;
         return new Response("data: " + JSON.stringify({ type: "response.completed", response: { output: [{ type: "message", content: [{ type: "output_text", text }] }] } }) + "\\n\\n");
       }
@@ -53,8 +59,10 @@ for (const [former, current, model] of aliases) {
   test(`ma login and logout accept ${former} and migrate old logins on write`, async t => {
     const p = await project(t);
     await p.put("auth.json", { logins: Object.fromEntries(aliases.map(([old]) => [old, fixtureLogin])), answers: { fixture: "keep" }, extra: true });
-    await p.run("login", former, "--device");
+    const { stderr } = await p.run("login", former, "--device");
+    assert.match(stderr, /enter the code: FIXTURE[\s\S]*Waiting for the sign-in to finish/);
     assert.deepEqual(Object.keys((await p.auth()).logins), ["chatgpt", "grok"]);
+    if (current === "grok") assert.equal(Object.hasOwn((await p.auth()).logins.grok, "account"), false);
     assert.deepEqual((await p.auth()).answers, { fixture: "keep" });
     assert.equal((await p.auth()).extra, true);
     await p.put("auth.json", { logins: { [former]: fixtureLogin } });

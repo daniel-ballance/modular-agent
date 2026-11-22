@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { promisify } from "node:util";
 import { createAgent, definePlugin, type AssistantMessage } from "@modular-agent/core";
 import { memoryEnvironment, overWire } from "@modular-agent/core/testing";
 import { grok, signIn, signOut, subscriptionLogins, type OAuth, type SignInStep } from "@modular-agent/subscription";
 import { body, fixture, loginFile } from "./fixtures.js";
 
+const exec = promisify(execFile);
 const client = "b1a00492-073a-47ea-816f-4c329264a828";
 const scope = "openid profile email offline_access grok-cli:access api:access";
 const verification = "https://example.test/device";
@@ -142,8 +145,13 @@ for (const served of [false, true]) {
       assert.equal(req.headers["content-type"], "application/json");
       for (const name of ["chatgpt-account-id", "openai-beta", "originator", "referrer", "session-id", "x-client-request-id"])
         assert.equal(req.headers[name], undefined, name);
-      requests.push(JSON.parse(await body(req)));
+      const request = JSON.parse(await body(req));
+      requests.push(request);
       res.setHeader("content-type", "text/event-stream");
+      if (request.input.at(-1)?.content === "too long") {
+        res.end('data: {"type":"response.failed","response":{"error":{"code":"context_length_exceeded"}}}\n\n');
+        return;
+      }
       res.write('data: {"type":"response.output_text.delta","delta":"hel');
       res.end(`lo"}\r\n\r\ndata: ${JSON.stringify({ type: "response.completed", response: { output } })}\n\n`);
     });
@@ -152,9 +160,12 @@ for (const served of [false, true]) {
     const p = grok({ logins, clientIdentity: served ? "fixture-grok" : undefined, test: { endpoint: `${server.url}/v1/responses` }, models: [known, extra] });
     assert.equal(p.id, "grok");
     const plugin = definePlugin({ name: "grok-fixture", setup: r => r.provider(p) });
+    const replies: AssistantMessage[] = [];
     const hooks = definePlugin({ name: "fixture-request", setup: r => {
       r.on("provider.request", ({ request }) => ({ change: { ...request, systemPrompt: "Fixture rules",
         settings: { ...request.settings, maxOutput: 99_000, reasoning: "high" } } }));
+      r.on("provider.response", ({ message }) => { replies.push(message); });
+      r.on("model.failed", () => "stop");
     } });
     const agent = await createAgent({ environment: memoryEnvironment(), plugins: [served ? overWire(plugin) : plugin, hooks] });
     t.after(() => agent.close());
@@ -179,13 +190,15 @@ for (const served of [false, true]) {
     assert.equal(requests[2].model, extra.id);
     assert.equal(requests[2].max_output_tokens, 20);
     assert.equal(requests[2].reasoning, undefined);
+    assert.equal((await enrolled.prompt("too long")).outcome?.kind, "failed");
+    assert.equal(replies.at(-1)?.error?.kind, "contextTooLarge");
   });
 
   test(`Grok refresh spends one token and a refused refresh leaves the login (${placement})`, async t => {
     const logins = await loginFile(t);
     await logins.setLogin("grok", old);
     let spent = 0, refuse = false, models = 0;
-    const entered = barrier(), secondRead = barrier();
+    const entered = barrier(), secondRequest = barrier();
     const server = await fixture(t, async (req, res) => {
       if (req.url === "/oauth2/token") {
         spent++;
@@ -194,8 +207,15 @@ for (const served of [false, true]) {
         assert.deepEqual([...new URLSearchParams(await body(req))], [["grant_type", "refresh_token"], ["refresh_token", old.refresh], ["client_id", client]]);
         if (refuse) res.writeHead(400).end(JSON.stringify({ error: "invalid_grant", error_description: old.refresh }));
         else {
+          const lock = logins.path.replace(/\.json$/, ".lock");
+          if (process.platform === "darwin") {
+            await assert.rejects(exec("/usr/bin/perl", ["-MFcntl=:flock", "-MErrno=EWOULDBLOCK", "-e",
+              'open(my $fd, "<", $ARGV[0]) or die $!; exit 0 if flock($fd, LOCK_EX | LOCK_NB); exit($! == EWOULDBLOCK ? 1 : 2);', lock]), { code: 1 });
+          } else {
+            await assert.rejects(exec("flock", ["-n", "-E", "73", lock, "true"]), { code: 73 });
+          }
           entered.resolve();
-          await secondRead.promise;
+          await secondRequest.promise;
           res.end(JSON.stringify({ access_token: fresh.access_token }));
         }
       } else {
@@ -206,10 +226,11 @@ for (const served of [false, true]) {
       }
     });
     const replies: AssistantMessage[] = [];
-    const start = async (file: typeof logins) => {
+    const start = async (file: typeof logins, atRequest?: () => void) => {
       const p = grok({ logins: file, test: { endpoint: `${server.url}/v1/responses`, oauth: { endpoints: { xaiToken: `${server.url}/oauth2/token` } } } });
       const plugin = definePlugin({ name: "grok-fixture", setup: r => r.provider(p) });
       const hooks = definePlugin({ name: "fixture-replies", setup: r => {
+        if (atRequest) r.on("provider.request", () => { atRequest(); });
         r.on("provider.response", ({ message }) => { replies.push(message); });
         r.on("model.failed", () => "stop");
       } });
@@ -217,22 +238,14 @@ for (const served of [false, true]) {
       t.after(() => agent.close());
       return agent.session({ settings: { model: "grok/grok-4.7" } });
     };
-    const other = subscriptionLogins(logins.path);
-    const [a, b] = await Promise.all([start(logins), start(other)]);
-    const read = other.login.bind(other);
-    // Release the first exchange only after the second reader sees the old login.
-    t.mock.method(other, "login", async (provider: string) => {
-      const login = await read(provider);
-      secondRead.resolve();
-      return login;
-    });
+    const [a, b] = await Promise.all([start(logins), start(subscriptionLogins(logins.path), secondRequest.resolve)]);
     const beforeRefresh = Date.now();
     const first = a.prompt("first");
     await Promise.race([entered.promise, first.then(() => assert.fail("the first request did not reach the token endpoint"))]);
     const second = b.prompt("second");
     try {
-      await Promise.race([secondRead.promise, second.then(() => assert.fail("the second request did not read the old login"))]);
-    } finally { secondRead.resolve(); }
+      await Promise.race([secondRequest.promise, second.then(() => assert.fail("the second prompt did not request a model"))]);
+    } finally { secondRequest.resolve(); }
     assert.deepEqual((await Promise.all([first, second])).map(r => r.text), ["fresh", "fresh"]);
     assert.equal(spent, 1);
     assert.equal(models, 2);
