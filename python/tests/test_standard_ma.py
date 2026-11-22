@@ -36,6 +36,7 @@ from ma_standard import oauth, prompt, responses
 from ma_standard.auth import ApiKey, AuthFile, OAuth
 from ma_standard.code import code_tool, functions, prompt as function_prompt
 from ma_standard.config import Paths
+from test_swap import pid_exists
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "python/packages/ma/ma_standard"
@@ -814,7 +815,7 @@ async def test_codemode_worker_stops_and_next_run_works(
                 await session.cancel()
             result = await running
             # Monty's native runtime reaps the child, independently of asyncio.
-            while Path(f"/proc/{pid}").exists():
+            while pid_exists(pid):
                 await asyncio.sleep(0.01)
         if stop != "cancel":
             failed, completed = result.tool_results()
