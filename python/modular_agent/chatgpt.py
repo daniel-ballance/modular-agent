@@ -212,7 +212,7 @@ class ChatGPT:
     ) -> None:
         self._logins = logins
         self._client_identity = validate_client_identity(client_identity)
-        self._catalog = SubscriptionModels(self.id, models)
+        self._catalog = SubscriptionModels(self.id, models, override_limits=True)
 
     def available(self) -> bool:
         return self._logins.login(self.id) is not None

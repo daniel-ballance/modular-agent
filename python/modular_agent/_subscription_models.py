@@ -16,7 +16,13 @@ _ROWS: list[JsonObject] = json.loads(
 
 
 class SubscriptionModels:
-    def __init__(self, provider: str, models: Sequence[str | ModelInfo] | None) -> None:
+    def __init__(
+        self,
+        provider: str,
+        models: Sequence[str | ModelInfo] | None,
+        *,
+        override_limits: bool = False,
+    ) -> None:
         self.infos: dict[str, ModelInfo] = {}
         self.levels: dict[str, JsonObject] = {}
         for row in _ROWS:
@@ -34,6 +40,13 @@ class SubscriptionModels:
             if not model:
                 raise AgentError(ErrorCode.INVALID_COMPOSITION, "A model id cannot be empty")
             if model in self.infos:
+                if override_limits and not isinstance(entry, str):
+                    # Local catalog limits may be narrower or wider. The shared
+                    # model's verified reasoning settings do not change.
+                    known = self.infos[model]
+                    known["contextWindow"] = entry["contextWindow"]
+                    known["maxOutput"] = entry["maxOutput"]
+                    known["input"] = list(entry["input"])
                 continue
             info = (
                 ModelInfo(

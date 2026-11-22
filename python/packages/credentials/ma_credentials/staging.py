@@ -1,6 +1,7 @@
 """File-backed, generation-checked secret staging shared by the SDK and ma."""
 
 import asyncio
+from copy import deepcopy
 import fcntl
 import json
 import os
@@ -67,9 +68,17 @@ class StagedFile:
             if temp is not None:
                 temp.unlink(missing_ok=True)
 
-    async def stage(self, session, request, name, actor, value):
+    @asynccontextmanager
+    async def edit(self):
         async with self.locked():
             doc = self.document()
+            before = deepcopy(doc)
+            yield doc
+            if doc != before:
+                self.write(doc)
+
+    async def stage(self, session, request, name, actor, value):
+        async with self.edit() as doc:
             stages = doc.setdefault("staged", {}).setdefault(session, {})
             if request in stages:
                 raise AgentError("Secret request already staged or discarded", "conflict")
@@ -79,7 +88,6 @@ class StagedFile:
                 "value": value,
                 "generation": doc.get("generations", {}).get(name, 0),
             }
-            self.write(doc)
             return receipt
 
     async def lookup_staged(self, session, request):
@@ -87,8 +95,7 @@ class StagedFile:
         return stage.get("receipt")
 
     async def activate(self, session, request):
-        async with self.locked():
-            doc = self.document()
+        async with self.edit() as doc:
             stage = doc.get("staged", {}).get(session, {}).get(request)
             if stage is None or stage.get("decision") == "discarded":
                 raise AgentError("Secret stage is missing", "not_found")
@@ -104,24 +111,19 @@ class StagedFile:
                 stage["decision"] = "activated"
             else:
                 stage["decision"] = "superseded"
-            self.write(doc)
             return stage["decision"]
 
     async def discard(self, session, request):
-        async with self.locked():
-            doc = self.document()
+        async with self.edit() as doc:
             stages = doc.setdefault("staged", {}).setdefault(session, {})
             if stages.get(request, {}).get("decision") is None:
                 stages[request] = {"decision": "discarded"}
-                self.write(doc)
 
     async def set_answer(self, name, value):
-        async with self.locked():
-            doc = self.document()
+        async with self.edit() as doc:
             generations = doc.setdefault("generations", {})
             generations[name] = generations.get(name, 0) + 1
             if value is not None:
                 doc.setdefault("answers", {})[name] = value
             else:
                 doc.setdefault("answers", {}).pop(name, None)
-            self.write(doc)

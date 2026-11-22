@@ -275,6 +275,7 @@ def _account_reason(info: dict[str, Any]) -> str | None:
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_AUTH_TOKEN",
                 "managed",
+                "/login managed key",
             }
             else "Claude Code settings"
         )
@@ -377,7 +378,12 @@ class _Response:
         self._usage(message.usage or {})
         for block in message.content:
             if isinstance(block, ToolUseBlock):
-                self.content.append(self._call(block.name, block.id, block.input))
+                # Claude Code emits an AssistantMessage for each completed block.
+                # With partial messages, wait for the message's stop reason so
+                # parallel tool calls from later blocks are not lost.
+                # https://code.claude.com/docs/en/agent-sdk/streaming-output
+                if not any(p.get("type") == "toolCall" for p in self.blocks.values()):
+                    self.content.append(self._call(block.name, block.id, block.input))
             elif isinstance(block, (TextBlock, ThinkingBlock)):
                 kind, text = (
                     ("text", block.text)

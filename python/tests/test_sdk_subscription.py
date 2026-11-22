@@ -300,6 +300,7 @@ async def test_chatgpt_request_and_replay(
     tmp_path, chatgpt_http, runtime_kind, served, model, identity, asked, expected
 ):
     seen = []
+    failures = []
     opaque = {"type": "reasoning", "id": "r1", "encrypted_content": "opaque-fixture", "summary": []}
     output = [
         opaque,
@@ -311,6 +312,8 @@ async def test_chatgpt_request_and_replay(
     ]
 
     def endpoint(request):
+        if request.url == "https://auth.openai.com/oauth/token":
+            return httpx2.Response(400, json={"error": "invalid_grant"})
         assert request.url == "https://chatgpt.com/backend-api/codex/responses"
         seen.append((request.headers, json.loads(request.content)))
         events = [
@@ -330,10 +333,23 @@ async def test_chatgpt_request_and_replay(
     )
     options = {"client_identity": identity} if identity else {}
     provider = chatgpt(logins=logins, models=["fixture-unlisted"], **options)
-    async with mounted(tmp_path, provider, served, f"chatgpt/{model}", runtime_kind) as agent:
+    observe = Plugin(
+        "observe-failure", hooks={"model.failed": lambda d: failures.append(d["error"])}
+    )
+    async with mounted(
+        tmp_path, provider, served, f"chatgpt/{model}", runtime_kind, plugins=[observe]
+    ) as agent:
         session = await agent.session(settings={"reasoning": asked} if asked else {})
         assert (await session.prompt("First")).text == "Hello"
         assert (await session.prompt("Second")).text == "Hello"
+        await logins.set_login("chatgpt", OAuth("old", "old-refresh", 1, "fixture-account"))
+        before = logins.path.read_bytes()
+        failed = await session.prompt("After expiry")
+        assert failed.outcome is not None and failed.outcome.kind == "failed"
+        assert failures == [
+            {"kind": "credentials", "message": "ChatGPT refused the token refresh. Sign in again."}
+        ]
+        assert logins.path.read_bytes() == before
     assert len(seen) == 2
     for headers, body in seen:
         assert headers["authorization"] == "Bearer fixture-access"

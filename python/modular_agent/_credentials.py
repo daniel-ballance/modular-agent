@@ -1,14 +1,22 @@
 """Credential stores and the authorized secret-answer path."""
 
+from __future__ import annotations
+
 import asyncio
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ma_core import AgentError
 from ma_credentials import StagedCredentials
 from ma_credentials.staging import StagedFile
+
+from ._types import JsonObject
+
+if TYPE_CHECKING:
+    from ._subscription_logins import SubscriptionLogins
 
 
 @dataclass(frozen=True)
@@ -26,9 +34,24 @@ def environment_credentials() -> CredentialStore:
     return CredentialStore(lambda name: os.getenv(name.upper().replace("-", "_") + "_API_KEY"))
 
 
-def file_credentials(path: str | os.PathLike[str]) -> CredentialStore:
-    """Read and stage named answers in an owner-only JSON file."""
-    file = StagedFile(path)
+class _LoginFileAnswers(StagedFile):  # type: ignore[misc]  # Untyped base store.
+    def __init__(self, logins: SubscriptionLogins) -> None:
+        self._logins = logins
+
+    def document(self) -> JsonObject:
+        return self._logins.metadata()
+
+    @asynccontextmanager
+    async def edit(self) -> AsyncIterator[JsonObject]:
+        async with self._logins._edit_metadata() as doc:
+            yield doc
+
+
+def file_credentials(path: str | os.PathLike[str] | SubscriptionLogins) -> CredentialStore:
+    """Read and stage named answers, optionally in a shared subscription login file."""
+    from ._subscription_logins import SubscriptionLogins
+
+    file = _LoginFileAnswers(path) if isinstance(path, SubscriptionLogins) else StagedFile(path)
     return CredentialStore(file.read, file.stage, file.lookup_staged, file.activate, file.discard)
 
 

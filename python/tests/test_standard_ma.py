@@ -2,10 +2,8 @@
 
 import ast
 import asyncio
-import base64
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,14 +11,16 @@ import re
 import signal
 import stat
 import sys
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 
-from httpx2 import AsyncClient
 from pydantic_monty import AsyncFunctionSnapshot, AsyncMontySession, AsyncNameLookupSnapshot
 import pytest
 
 from modular_agent import (
     Answer,
+    ApiKey,
+    OAuth,
+    subscription_logins,
     ModelRef,
     ProviderContext,
     Tool,
@@ -29,14 +29,14 @@ from modular_agent import (
     ToolResult,
     create_agent,
     file_credentials,
+    file_history,
     local_environment,
 )
 from modular_agent.files import file_tools
 from modular_agent.testing import memory_environment, scripted_provider, test_agent as offline_agent
 from ma_standard import cli, oauth, prompt, responses
-from ma_standard.auth import ApiKey, AuthFile, OAuth
 from ma_standard.code import code_tool, functions, prompt as function_prompt
-from ma_standard.config import Paths
+from ma_standard.config import Paths, login_file
 from test_swap import pid_exists
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +46,8 @@ PACKAGE = ROOT / "python/packages/ma/ma_standard"
 def test_public_sdk_only() -> None:
     public = {
         "modular_agent",
+        "modular_agent.chatgpt",
+        "modular_agent.claude",
         "modular_agent.compaction",
         "modular_agent.files",
         "modular_agent.mcp",
@@ -90,22 +92,14 @@ async def test_rust_auth_fixture(tmp_path: Path) -> None:
 }"""
     path = tmp_path / "auth.json"
     path.write_bytes(fixture)
-    auth = AuthFile(path)
+    path.chmod(0o600)
+    auth = subscription_logins(path)
     assert auth.login("openai-codex") == OAuth("test-access", "test-refresh", 1, "test-account")
     assert auth.login("xai") == ApiKey("test-key")
     await auth.set_login("xai", ApiKey("test-key"))
     assert path.read_bytes() == fixture
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.with_suffix(".lock").stat().st_mode) == 0o600
-
-
-def _jwt() -> str:
-    claims = {"https://api.openai.com/auth": {"chatgpt_account_id": "loopback-account"}}
-    return (
-        "fake."
-        + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
-        + ".fake"
-    )
 
 
 type Request = tuple[str, dict[str, str], bytes]
@@ -141,192 +135,42 @@ async def _http(handler: Callable[[Request], Reply]) -> AsyncIterator[str]:
 
 
 @pytest.mark.loopback
-@pytest.mark.parametrize(
-    ("vendor", "identity_options", "expected_identity"),
-    [
-        ("openai-codex", {}, None),
-        ("xai", {}, "modular-agent"),
-        ("xai", {"client_identity": "My-agent_2.0"}, "My-agent_2.0"),
-    ],
-)
-async def test_device_sign_in(
-    vendor: oauth.Vendor,
-    identity_options: dict[str, str],
-    expected_identity: str | None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recorded: list[Request] = []
-    access = _jwt() if vendor == "openai-codex" else "fake-access"
-    token = {"access_token": access, "refresh_token": "fake-refresh", "expires_in": 3600}
+@pytest.mark.parametrize("expected_identity", ["modular-agent", "My-agent_2.0"])
+async def test_grok_device_sign_in(expected_identity, monkeypatch):
+    recorded = []
 
-    def route(request: Request) -> Reply:
+    def route(request):
         recorded.append(request)
-        match request[0]:
-            case "/api/accounts/deviceauth/usercode":
-                return _reply({"device_auth_id": "device", "user_code": "CODE", "interval": "1"})
-            case "/api/accounts/deviceauth/token":
-                return _reply({"authorization_code": "code", "code_verifier": "verifier"})
-            case "/oauth2/device/code":
-                return _reply(
-                    {
-                        "device_code": "device",
-                        "user_code": "CODE",
-                        "verification_uri": "https://example.test/verify",
-                        "interval": 1,
-                    }
-                )
-            case "/oauth/token" | "/oauth2/token":
-                return _reply(token)
-        return _reply({}, 404)
+        if request[0] == "/oauth2/device/code":
+            return _reply(
+                {
+                    "device_code": "device",
+                    "user_code": "CODE",
+                    "verification_uri": "https://example.test/verify",
+                    "interval": 1,
+                }
+            )
+        assert request[0] == "/oauth2/token"
+        return _reply({"access_token": "fake", "refresh_token": "fake-refresh", "expires_in": 3600})
 
-    shown: list[oauth.Step] = []
+    shown = []
     async with _http(route) as url:
-        monkeypatch.setattr(oauth, "CODEX" if vendor == "openai-codex" else "XAI", url)
-        login = await oauth.sign_in(vendor, True, shown.append, **identity_options)
+        monkeypatch.setattr(oauth, "XAI", url)
+        options = (
+            {"client_identity": expected_identity} if expected_identity != "modular-agent" else {}
+        )
+        login = await oauth.sign_in(shown.append, **options)
     assert shown[0].code == "CODE"
-    assert login.secret == access and not login.expired
-    assert login.account == ("loopback-account" if vendor == "openai-codex" else None)
-    exchange = parse_qs(recorded[-1][2].decode())
-    assert exchange["client_id"] == [oauth.CLIENTS[vendor]]
-    if vendor == "openai-codex":
-        assert json.loads(recorded[0][2]) == {"client_id": oauth.CLIENTS[vendor]}
-        assert exchange["code_verifier"] == ["verifier"]
-    else:
-        assert parse_qs(recorded[0][2].decode())["referrer"] == [expected_identity]
-        assert exchange["device_code"] == ["device"]
-
-
-@pytest.mark.loopback
-@pytest.mark.parametrize(
-    ("identity_options", "expected_identity"),
-    [({}, "modular-agent"), ({"client_identity": "My-agent_2.0"}, "My-agent_2.0")],
-)
-async def test_browser_sign_in_originator(
-    identity_options: dict[str, str], expected_identity: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    shown: list[oauth.Step] = []
-
-    async def pasted() -> AsyncIterator[str]:
-        yield "local-code"
-
-    async with _http(lambda _: _reply({"access_token": _jwt(), "refresh_token": "fake"})) as url:
-        monkeypatch.setattr(oauth, "CODEX", url)
-        await oauth.sign_in("openai-codex", False, shown.append, pasted(), **identity_options)
-    authorize = urlsplit(next(step.address for step in shown if step.address))
-    assert authorize.path == "/oauth/authorize"
-    assert parse_qs(authorize.query)["originator"] == [expected_identity]
-
-
-@pytest.mark.loopback
-@pytest.mark.parametrize("wrong_state", [False, True])
-async def test_browser_sign_in(wrong_state: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    posted: list[Request] = []
-    shown: dict[str, list[str]] = {}
-    callbacks: list[asyncio.Task[int]] = []
-
-    def route(request: Request) -> Reply:
-        posted.append(request)
-        return _reply({"access_token": _jwt(), "refresh_token": "fake-rotate"})
-
-    async with _http(route) as url, AsyncClient(trust_env=False) as client:
-        monkeypatch.setattr(oauth, "CODEX", url)
-
-        async def browser_callback() -> int:
-            redirect = urlsplit(shown["redirect_uri"][0])
-            reply = await client.get(
-                f"http://127.0.0.1:{redirect.port}{redirect.path}",
-                params={
-                    "code": "local-code",
-                    "state": "wrong" if wrong_state else shown["state"][0],
-                },
-            )
-            return reply.status_code
-
-        def show(step: oauth.Step) -> None:
-            assert step.code is None and step.note is None and not step.open_and_paste
-            shown.update(parse_qs(urlsplit(step.address).query))
-            callbacks.append(asyncio.create_task(browser_callback()))
-
-        if wrong_state:
-            with pytest.raises(ValueError, match="wrong state"):
-                await oauth._browser(client, show, port=0, client_identity="test-agent")
-            assert not posted and await callbacks[0] == 400
-            return
-        login = await oauth._browser(client, show, port=0, client_identity="test-agent")
-        assert await callbacks[0] == 200
-    assert login.account == "loopback-account"
-    fields = parse_qs(posted[0][2].decode())
-    digest = hashlib.sha256(fields["code_verifier"][0].encode()).digest()
-    assert shown["code_challenge"] == [base64.urlsafe_b64encode(digest).decode().rstrip("=")]
-    assert fields["code"] == ["local-code"]
-
-
-@pytest.mark.loopback
-async def test_browser_sign_in_from_paste_when_port_is_busy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    posted: list[Request] = []
-    notes: list[str] = []
-    shown: dict[str, list[str]] = {}
-
-    def route(request: Request) -> Reply:
-        posted.append(request)
-        return _reply({"access_token": _jwt(), "refresh_token": "fake-rotate"})
-
-    def show(step: oauth.Step) -> None:
-        if step.note:
-            notes.append(step.note)
-        else:
-            assert step.open_and_paste
-            shown.update(parse_qs(urlsplit(step.address).query))
-
-    async def pasted() -> AsyncIterator[str]:
-        yield ""
-        yield "http://localhost:1455/auth/callback?code=stale&state=other"
-        yield f"http://localhost:1455/auth/callback?code=pasted-code&scope=x&state={shown['state'][0]}"
-
-    async with _http(route) as url, AsyncClient(trust_env=False) as client:
-        monkeypatch.setattr(oauth, "CODEX", url)
-        # The token fake is already bound on that port.
-        async with asyncio.timeout(4):
-            login = await oauth._browser(
-                client,
-                show,
-                port=urlsplit(url).port or 0,
-                pasted=pasted(),
-                client_identity="test-agent",
-            )
-
-    assert login.account == "loopback-account" and login.refresh == "fake-rotate"
-    assert len(posted) == 1 and posted[0][0] == "/oauth/token"
-    fields = parse_qs(posted[0][2].decode())
-    assert fields["code"] == ["pasted-code"]
-    assert fields["redirect_uri"] == ["http://localhost:1455/auth/callback"]
-    assert len(notes) == 2
-    assert "Port 1455 is in use" in notes[0]
-    assert "different sign-in" in notes[1] and "Paste it again." in notes[1]
-
-
-def test_pasted_code_forms() -> None:
-    read = oauth.pasted_code
-    assert read("http://localhost:1455/auth/callback?code=c1&state=st", "st") == "c1"
-    assert read("  code=a%2Fb+c&state=st  ", "st") == "a/b c"
-    assert read("c3#st", "st") == "c3"
-    assert read("c4", "st") == "c4"
-    assert read("   ", "st") is None
-    with pytest.raises(ValueError, match="different sign-in"):
-        read("http://localhost:1455/auth/callback?code=c&state=other", "st")
-    with pytest.raises(ValueError, match="different sign-in"):
-        read("code=c&state=", "st")
-    with pytest.raises(ValueError, match="not completed"):
-        read("http://localhost:1455/auth/callback?error=access_denied&state=st", "st")
-    with pytest.raises(ValueError, match="no code"):
-        read("http://localhost:1455/auth/callback?state=st", "st")
+    assert login.secret == "fake" and not login.expired and login.account is None
+    assert parse_qs(recorded[0][2].decode())["referrer"] == [expected_identity]
+    assert parse_qs(recorded[1][2].decode())["device_code"] == ["device"]
+    assert parse_qs(recorded[1][2].decode())["client_id"] == [oauth.CLIENT_ID]
 
 
 async def test_secret_answer_is_written_to_shared_auth_not_history(tmp_path: Path) -> None:
-    auth = AuthFile(tmp_path / "auth.json")
-    await auth.set_login("xai", ApiKey("test-key"))
+    logins = subscription_logins(tmp_path / "auth.json")
+    await logins.set_login("xai", ApiKey("test-key"))
+    auth = login_file(logins.path)
 
     async def ask(arguments, context):
         reply = await context.ask(
@@ -341,7 +185,7 @@ async def test_secret_answer_is_written_to_shared_auth_not_history(tmp_path: Pat
         tools=[tool],
         providers=[provider],
         on_question=lambda question, _: Answer("value", "test-secret"),
-        credentials=file_credentials(auth.path),
+        credentials=file_credentials(auth),
     ) as agent:
         session = await agent.session()
         result = await asyncio.wait_for(session.prompt("ask"), 5)
@@ -349,51 +193,9 @@ async def test_secret_answer_is_written_to_shared_auth_not_history(tmp_path: Pat
         assert result.tool_results()[0].text() == "signing-key"
         assert "test-secret" not in json.dumps(await session.history())
     document = json.loads(auth.path.read_text())
-    assert document["logins"] == {"xai": {"type": "api_key", "key": "test-key"}}
+    assert document["logins"] == {"grok": {"type": "api_key", "key": "test-key"}}
     assert document["answers"] == {"signing-key": "test-secret"}
     assert stat.S_IMODE(auth.path.stat().st_mode) == 0o600
-
-
-@pytest.mark.loopback
-@pytest.mark.parametrize(
-    ("identity_options", "expected_identity"),
-    [({}, "modular-agent"), ({"client_identity": "A._-9z" * 10 + "test"}, "A._-9z" * 10 + "test")],
-)
-async def test_chatgpt_request_originator(
-    identity_options: dict[str, str],
-    expected_identity: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recorded: list[Request] = []
-    auth = AuthFile(tmp_path / "auth.json")
-
-    async def current(*args, **kwargs) -> OAuth:
-        return OAuth("fake", "fake", 9_999_999_999_999, "loopback-account")
-
-    def route(request: Request) -> Reply:
-        recorded.append(request)
-        return (
-            200,
-            "text/event-stream",
-            'data: {"type":"response.completed","response":{"output":[]}}\n\n',
-        )
-
-    async def sink(event: dict[str, object]) -> None:
-        pass
-
-    monkeypatch.setattr(auth, "current", current)
-    async with _http(route) as url:
-        monkeypatch.setitem(responses.ENDPOINTS, "openai-codex", url + "/responses")
-        provider = responses.Responses(
-            "openai-codex", auth, tmp_path / "models.json", **identity_options
-        )
-        await provider.request(
-            ModelRef("openai-codex", "gpt-6.1-sol"),
-            {"messages": []},
-            ProviderContext("session-abc", "user", sink, lambda: None),
-        )
-    assert recorded[0][1]["originator"] == expected_identity
 
 
 @pytest.mark.parametrize("identity", ["", "a" * 65, "with space", "a/1", "é", "agent\n"])
@@ -412,37 +214,27 @@ def test_ma_rejects_invalid_client_identity_before_startup(
     assert "MA_CLIENT_IDENTITY" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("vendor", ["openai-codex", "xai"])
-async def test_provider_and_sign_in_reject_invalid_client_identity(
-    vendor: oauth.Vendor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def no_client(**kwargs) -> None:
+async def test_grok_rejects_invalid_client_identity(tmp_path, monkeypatch):
+    def no_client(**kwargs):
         pytest.fail("invalid identity must be refused before starting a sign-in")
 
     monkeypatch.setattr(oauth, "AsyncClient", no_client)
     with pytest.raises(ValueError, match="client_identity"):
-        await oauth.sign_in(vendor, False, lambda _: None, client_identity="invalid name")
+        await oauth.sign_in(lambda _: None, client_identity="invalid name")
     with pytest.raises(ValueError, match="client_identity"):
-        responses.Responses(
-            vendor,
-            AuthFile(tmp_path / "auth.json"),
+        responses.Grok(
+            login_file(tmp_path / "auth.json"),
             tmp_path / "models.json",
             client_identity="invalid name",
         )
 
 
 @pytest.mark.loopback
-@pytest.mark.parametrize("vendor", ["openai-codex", "xai"])
-async def test_responses_refresh_retry_and_stream(
-    vendor: oauth.Vendor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_grok_refresh_and_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[Request] = []
-    actual = _jwt() if vendor == "openai-codex" else "fresh"
-    vendors_model = "gpt-6.1-sol" if vendor == "openai-codex" else "grok-4.7"
-    auth = AuthFile(tmp_path / "auth.json")
-    await auth.set_login(
-        vendor, OAuth("rejected", "old-refresh", 9_999_999_999_999, "stale-account")
-    )
+    actual = "fresh"
+    auth = login_file(tmp_path / "auth.json")
+    await auth.set_login("grok", OAuth("rejected", "old-refresh", 9_999_999_999_999))
     emitted = []
 
     async def sink(event: dict[str, object]) -> None:
@@ -477,13 +269,13 @@ async def test_responses_refresh_retry_and_stream(
         )
 
     async with _http(route) as url:
-        monkeypatch.setattr(oauth, "CODEX" if vendor == "openai-codex" else "XAI", url)
-        monkeypatch.setitem(responses.ENDPOINTS, vendor, url + "/responses")
-        provider = responses.Responses(vendor, auth, tmp_path / "models.json")
+        monkeypatch.setattr(oauth, "XAI", url)
+        monkeypatch.setattr(responses, "ENDPOINT", url + "/responses")
+        provider = responses.Grok(auth, tmp_path / "models.json")
         first, _ = await asyncio.gather(
             *[
                 provider.request(
-                    ModelRef(vendor, vendors_model),
+                    ModelRef("grok", "grok-4.7"),
                     {
                         "systemPrompt": "instructions",
                         "settings": {"reasoning": "high", "maxOutput": 25},
@@ -501,7 +293,7 @@ async def test_responses_refresh_retry_and_stream(
             {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-fixture"}
         ]
         await provider.request(
-            ModelRef(vendor, vendors_model),
+            ModelRef("grok", "grok-4.7"),
             {
                 "systemPrompt": "instructions",
                 "settings": {"reasoning": "high", "maxOutput": 25},
@@ -517,7 +309,7 @@ async def test_responses_refresh_retry_and_stream(
     assert len(token_requests) == 1 and parse_qs(token_requests[0].decode())["refresh_token"] == [
         "old-refresh"
     ]
-    assert isinstance(login := auth.login(vendor), OAuth) and login.refresh == "rotated"
+    assert isinstance(login := auth.login("grok"), OAuth) and login.refresh == "rotated"
     assert len(emitted) == 3 and emitted[0]["event"] == {"type": "text", "delta": "hello"}
     _, headers, body = requests[-1]
     request = json.loads(body)
@@ -526,13 +318,164 @@ async def test_responses_refresh_retry_and_stream(
     assert {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-fixture"} in request[
         "input"
     ]
-    if vendor == "openai-codex":
-        assert request["instructions"] == "instructions" and "max_output_tokens" not in request
-        assert headers["chatgpt-account-id"] == "loopback-account"
-        assert headers["session-id"] == headers["x-client-request-id"] == "session-abc"
+    assert request["input"][0] == {"role": "system", "content": "instructions"}
+    assert request["max_output_tokens"] == 25
+
+
+@pytest.fixture
+def ma_args(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("MODULAR_AGENT_DATA_DIR", str(config))
+    monkeypatch.setenv("MA_NO_BROWSER", "1")
+    monkeypatch.delenv("MODULAR_AGENT_SCRIPT", raising=False)
+
+    def args(*arguments):
+        result = cli._parser().parse_args(["--project", str(tmp_path), *arguments])
+        result.client_identity = "old-config-client"
+        return result
+
+    return config, args
+
+
+@pytest.mark.parametrize(("old", "new"), [("openai-codex", "chatgpt"), ("xai", "grok")])
+async def test_ma_login_and_logout_aliases(ma_args, monkeypatch, old, new):
+    config, args = ma_args
+    path = config / "auth.json"
+    raw = subscription_logins(path)
+    await raw.set_login("openai-codex", ApiKey("old-fixture-1"))
+    await raw.set_login("xai", ApiKey("old-fixture-2"))
+    login = OAuth("new-fixture", "new-refresh", 2**62, "fixture-account")
+    calls = []
+
+    async def chatgpt_sign_in(provider, logins, *, device, on_step, paste, client_identity):
+        assert provider == "chatgpt" and device
+        calls.append(client_identity)
+        await logins.set_login(provider, login)
+
+    async def grok_sign_in(show, *, client_identity):
+        calls.append(client_identity)
+        return login
+
+    monkeypatch.setattr(oauth, "chatgpt_sign_in", chatgpt_sign_in)
+    monkeypatch.setattr(oauth, "sign_in", grok_sign_in)
+    assert await cli._run(args("--device", "login", old)) == 0
+    assert calls == ["old-config-client"]
+    assert raw.login(new) == login
+    assert set(json.loads(path.read_text())["logins"]) == {"chatgpt", "grok"}
+    # Logout must also find a login that has not yet been migrated.
+    await raw.set_login(new, None)
+    await raw.set_login(old, login)
+    assert await cli._run(args("logout", old)) == 0
+    assert raw.login(new) is None and raw.login(old) is None
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize(
+    ("old", "new", "model"),
+    [
+        ("openai-codex", "chatgpt", "gpt-6.1-sol"),
+        ("xai", "grok", "grok-4.7"),
+    ],
+)
+@pytest.mark.parametrize("source", ["flag", "settings", "reopen"])
+async def test_ma_selects_the_renamed_provider(
+    ma_args, tmp_path, monkeypatch, capsys, old, new, model, source
+):
+    config, args = ma_args
+    auth = subscription_logins(config / "auth.json")
+    await auth.set_login(old, OAuth("fixture-access", "fixture-refresh", 2**62, "fixture-account"))
+    sent = []
+
+    def route(request):
+        sent.append((request[1], json.loads(request[2])))
+        completed = {
+            "type": "response.completed",
+            "response": {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "Test response"}],
+                    },
+                ]
+            },
+        }
+        return 200, "text/event-stream", f"data: {json.dumps(completed)}\n\n"
+
+    selection = f"{old}/{model}"
+    options = []
+    if source == "flag":
+        options = ["--model", selection]
+    elif source == "settings":
+        (config / "settings.json").write_text(json.dumps({"model": selection}))
     else:
-        assert request["input"][0] == {"role": "system", "content": "instructions"}
-        assert request["max_output_tokens"] == 25
+        fixture = scripted_provider([{"text": "Old turn"}])
+        fixture.id = old
+        original_models = fixture.models
+        fixture.models = lambda: [{**info, "id": model} for info in original_models()]
+        history = config / "state" / "sessions"
+        async with create_agent(
+            project=tmp_path,
+            data_dir=config / "state",
+            history=file_history(history),
+            durability="kept",
+            providers=[fixture],
+            model=selection,
+            local_process_groups=True,
+        ) as agent:
+            session = await agent.session()
+            assert (await session.prompt("Before the rename")).text == "Old turn"
+        options = ["--session", session.id]
+
+    async with _http(route) as url:
+        monkeypatch.setattr("modular_agent.chatgpt._ENDPOINT", url + "/responses")
+        monkeypatch.setattr(responses, "ENDPOINT", url + "/responses")
+        assert await cli._run(args("--runtime", "transient", *options, "-p", "Hello")) == 0
+    assert capsys.readouterr().out == "Test response\n"
+    [(headers, body)] = sent
+    assert body["model"] == model
+    if new == "chatgpt":
+        assert headers["originator"] == "old-config-client"
+    if source == "reopen":
+        async with create_agent(
+            project=tmp_path,
+            data_dir=config / "state",
+            history=file_history(history),
+            durability="kept",
+            local_process_groups=True,
+        ) as agent:
+            saved = await agent.session_info(session.id)
+        assert saved["settings"]["model"] == {"provider": new, "id": model}
+
+
+async def test_ma_model_entries_accept_old_and_new_keys(ma_args, monkeypatch, capsys):
+    config, args = ma_args
+    auth = subscription_logins(config / "auth.json")
+    for key in ("openai-codex", "xai"):
+        await auth.set_login(key, ApiKey("fixture"))
+    rows = {
+        key: [{"id": "extra-" + key, "name": "Extra", "contextWindow": 12000, "maxTokens": 1234}]
+        for key in ("openai-codex", "chatgpt", "xai", "grok")
+    }
+    rows["openai-codex"].append({"id": "gpt-6.1-sol", "contextWindow": 12001, "maxTokens": 1234})
+    rows["xai"].append({"id": "grok-4.7", "contextWindow": 12002, "maxTokens": 1234})
+    (config / "models.json").write_text(json.dumps(rows))
+
+    class NoClaude:
+        id = "claude"
+        supports = scripted_provider([]).supports
+
+        async def available(self):
+            return False
+
+    monkeypatch.setattr(cli, "claude", NoClaude)
+    assert await cli._run(args("--runtime", "transient", "models")) == 0
+    shown = capsys.readouterr().out
+    assert re.search(r"chatgpt/gpt-6.1-sol\s+context\s+12001\s+thinking minimal,low", shown)
+    assert re.search(r"grok/grok-4.7\s+context\s+12002", shown)
+    for provider, keys in (("chatgpt", ["openai-codex", "chatgpt"]), ("grok", ["xai", "grok"])):
+        for key in keys:
+            assert f"{provider}/extra-{key}" in shown
 
 
 @pytest.mark.parametrize(

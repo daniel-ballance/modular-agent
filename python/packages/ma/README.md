@@ -19,7 +19,9 @@ From a project folder, run `ma` for line mode, `ma -p 'Describe this project'` f
 
 The configuration folder is shared across languages; sessions live under `$XDG_STATE_HOME/modular-agent/python` (or `~/.local/state/modular-agent/python`). With `MODULAR_AGENT_DATA_DIR` set, configuration goes directly in it and state goes under `state/`. New terminal secret answers go in `auth.json` under `answers`; use `/answer REQUEST_ID` without a value for an echo-disabled prompt.
 
-Build the [Claude sidecar](../../../typescript/sidecars/claude/README.md) with Node 22 or newer. `ma` looks for it in a development checkout, at `~/.local/share/modular-agent/sidecars/claude/dist/main.js`, or at `MODULAR_AGENT_CLAUDE_SIDECAR`. `ma login claude` uses the installed `claude` program. ACP selects a composition for the client’s project; it does not start the Claude sidecar for sessions that select another Provider.
+Use `ma login chatgpt` to sign in with a browser or add `--device` for a code. Use `ma login grok` for Grok. `ma login claude` runs Anthropic's own `claude auth login`. Python uses the Claude Agent SDK directly; it does not need a Node sidecar. A metered Claude Code account is not a subscription login.
+
+The Provider ids are `chatgpt`, `grok` and `claude`. `ma` still accepts `openai-codex` and `xai` in `--model`, `login`, `logout`, `settings.json`, `models.json` and saved sessions. On the next write of `auth.json`, it moves logins to their new ids. If both entries exist, it keeps the login under the new id.
 
 ## Client identity
 
@@ -27,7 +29,7 @@ By default, ChatGPT requests and browser sign-in use `modular-agent` as the `ori
 
 Set `MA_CLIENT_IDENTITY=my-agent` in the environment that starts `ma` to use another name. The name must be 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. If the variable is set to an invalid name, including an empty string, `ma` reports the error and exits with status 1.
 
-In an agent built from this code, set one name and pass it as the `client_identity` keyword argument to `ma_standard.responses.Responses` for both `openai-codex` and `xai`, and to `ma_standard.oauth.sign_in` when signing in. These options do not read the environment variable.
+In an agent built on the Python SDK, pass `client_identity` to `modular_agent.chatgpt.chatgpt` and `modular_agent.sign_in`. These options do not read the environment variable. Grok's sign-in and requests remain in `ma`; the SDK does not ship `grok()`.
 
 ## Code sandbox
 
@@ -43,13 +45,15 @@ When the worker delivers more than 1 MiB of printed output, the call stops and r
 
 - **Reference:** 24/24, including client identity validation, sandbox limits, ambient access, tool calls and result rendering.
 - **ACP:** 188/188 with `--crash-checks --probe-checks --job-checks`. The standard composition does not declare several actors, tenants or session limits.
-- **WebSocket kits:** 153/153 for the plugin binding and 193/193 for ACP.
-- **Python suites:** 588 passed and 2 live tests skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
-- **Python static checks:** Ruff lint and format checks passed; strict mypy passed (41 source files).
+- **WebSocket kits:** 153/153 for the plugin binding, 14/14 for separate-listener isolation, and 193/193 for ACP.
+- **Python suites:** 617 passed and four live checks skipped in each full Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The final focused subscription and alias checks passed 47 tests and skipped four live checks in each combination. The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
+- **Subscriptions:** offline SDK checks cover sign-in, model requests, refresh, reasoning and Claude tools. Product checks cover all former Provider id entry points, including sessions saved before the rename.
+- **Python static checks:** Ruff lint and format checks passed; strict mypy passed.
 
 ```sh
 # From the repository root, after uv sync above:
 npm ci --prefix conformance/acp
+npm ci --prefix conformance/tools
 node conformance/reference/run.mjs --agent python
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/python/.venv/bin/ma" --acp
 scripts/websocket-kits.sh python
@@ -69,8 +73,8 @@ See the [SDK README](../../SDK.md) for fixture build commands and SDK scenario r
 
 - The local environment does not confine paths. Strong command containment requires a writable, delegated Linux cgroup v2 subtree. Without it, `ma` declares `processGroup`, which cannot stop descendants that leave the group. The terminal and local tool environment are for POSIX systems.
 - Some file and MCP errors still differ from the Rust wording. The file search uses Git enumeration or `find` plus Python glob matching; it does not support every Rust glob extension. Monty requires a finite suspension ceiling, separate from the 500 nested-call budget; Python sets it to 2,147,483,647 so lookups do not spend that budget.
-- The terminal stores secret answers before recording their credential names. The SDK does not yet provide the staged credential-store recovery protocol; a crash between these two writes can leave an unused answer in `auth.json`. ACP does not accept secret answers. Served tools have byte, directory and command callbacks; served commands do not have working-environment access.
-- Real services were not tested. The earlier Claude test used the sidecar’s fake SDK; the new ACP project tests use the SDK's scripted Provider.
+- Terminal secret answers use the SDK's staged credential store. ACP does not accept secret answers. Served tools have byte, directory and command callbacks; served commands do not have working-environment access.
+- No real sign-ins or model requests were made. The new Claude Provider was tested with Python Agent SDK message fixtures.
 
 ## Served Runtime findings
 
@@ -88,6 +92,10 @@ The newly reachable Provider check also found that Python accepted an unknown `p
 ## Findings for the shared docs
 
 Suggested replacement text. No shared documents were changed.
+
+- **Reference, Rules for every implementation** — replace “One language” with: “Use the implementation language and its SDK. Rust and Go reach Claude through the TypeScript Agent SDK sidecar. Python and TypeScript use Anthropic's Agent SDK for their own language.”
+- **Reference, Providers** — replace “These are the SDK's subscription Providers” through “`ma` adds none of its own” with: “ChatGPT and Claude use the SDK's subscription Providers. Until the SDK specifies Grok sign-in and requests, `ma` keeps its current Grok code under `grok`.” Replace “The Claude Provider is the sidecar” with: “The Claude Provider uses the SDK's language-specific Claude adapter.”
+- **Reference, Files** — replace the `models.json` description with: “Catalog additions or replacements. ChatGPT entries use `id`, `contextWindow` and `maxTokens`, and may specify `input`. Shared ChatGPT reasoning mappings cannot be changed by this file. Grok keeps its existing `effort` mapping.”
 
 - **SDK, Durability** — replace the last invalid-composition bullet with: “a Runtime that does not declare `continuesAfterRestart` under `durable`, except in the offline ACP conformance profile when a fixture explicitly replaces the Runtime over the plugin binding and history is persistent. In that case the registered Runtime determines recovery and its declaration.”
 - **ACP, Conformance mode** — replace the first sentence with: “With `MODULAR_AGENT_CONFORMANCE=1` the agent MUST offer the fixture model `conformance/echo` and fixture tools `bash` (`{ command: string }`) and `read` (`{ path: string }`). Use `conformance/echo` when no model was explicitly selected, even when a served fixture adds a Provider.”

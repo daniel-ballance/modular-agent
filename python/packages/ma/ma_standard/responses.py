@@ -1,4 +1,4 @@
-"""ChatGPT and Grok subscription requests over the Responses API."""
+"""Grok subscription requests over the Responses API."""
 
 from dataclasses import dataclass
 import json
@@ -14,17 +14,15 @@ from modular_agent import (
     ModelRef,
     ProviderContext,
     ProviderSupports,
+    OAuth,
+    SubscriptionLogins,
 )
 
-from .auth import AuthFile, OAuth
-from .config import read_object
+from .config import model_overrides
 from .identity import DEFAULT_CLIENT_IDENTITY, validate_client_identity
-from .oauth import LABELS, Vendor, account, refresh
+from .oauth import refresh
 
-ENDPOINTS: dict[Vendor, str] = {
-    "openai-codex": "https://chatgpt.com/backend-api/codex/responses",
-    "xai": "https://api.x.ai/v1/responses",
-}
+ENDPOINT = "https://api.x.ai/v1/responses"
 LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
 
 
@@ -113,7 +111,7 @@ def _input_rows(request: JsonObject) -> list[JsonObject]:
     return rows
 
 
-def request_body(vendor: Vendor, model: Model, request: JsonObject, session: str) -> JsonObject:
+def request_body(model: Model, request: JsonObject) -> JsonObject:
     messages = _input_rows(request)
     tools: list[Json] = [
         {
@@ -143,18 +141,11 @@ def request_body(vendor: Vendor, model: Model, request: JsonObject, session: str
                 body["reasoning"] = {"effort": model.effort[offered], "summary": "auto"}
                 break
     system = str(request.get("systemPrompt", ""))
-    if vendor == "openai-codex":
-        body.update(
-            instructions=system or "You are a helpful assistant.",
-            text={"verbosity": "low"},
-            prompt_cache_key=session,
-        )
-    else:
-        if system:
-            messages.insert(0, {"role": "system", "content": system})
-        limit = settings.get("maxOutput", settings.get("max_output", model.maximum))
-        if type(limit) is int and limit > 0:
-            body["max_output_tokens"] = min(limit, model.maximum)
+    if system:
+        messages.insert(0, {"role": "system", "content": system})
+    limit = settings.get("maxOutput", settings.get("max_output", model.maximum))
+    if type(limit) is int and limit > 0:
+        body["max_output_tokens"] = min(limit, model.maximum)
     body["input"] = list(messages)
     return body
 
@@ -250,29 +241,23 @@ def _failure(error: Json, status: int = 0) -> ModelFailure:
     return ModelFailure({"kind": kind, "message": message + suffix})
 
 
-class Responses:
+class Grok:
+    id = "grok"
     supports = ProviderSupports()
 
     def __init__(
         self,
-        vendor: Vendor,
-        auth: AuthFile,
+        auth: SubscriptionLogins,
         overrides: Path,
         *,
         client_identity: str = DEFAULT_CLIENT_IDENTITY,
     ) -> None:
-        self.id: str = vendor
-        self.vendor = vendor
         self.auth = auth
-        self._client_identity = validate_client_identity(client_identity)
-        built = read_object(Path(__file__).with_name("models.json"))
-        extra = read_object(overrides).get(vendor)
-        if extra is not None and (
-            not isinstance(extra, list) or any(not isinstance(row, dict) for row in extra)
-        ):
-            raise ValueError(f"models for {vendor}: expected an array of objects")
+        validate_client_identity(client_identity)
+        built = model_overrides(Path(__file__).with_name("models.json"), self.id)
+        extra = model_overrides(overrides, self.id)
         self.catalog: dict[str, Model] = {}
-        for model in map(Model.parse, _rows(built.get(vendor)) + _rows(extra)):
+        for model in map(Model.parse, built + extra):
             self.catalog.pop(model.id, None)
             self.catalog[model.id] = model
 
@@ -293,40 +278,25 @@ class Responses:
     async def request(
         self, model: ModelRef, request: JsonObject, context: ProviderContext
     ) -> JsonObject:
-        vendor = self.vendor
-        session = context.session_id or ""
-        body = request_body(vendor, self.catalog[model.id], request, session)
+        body = request_body(self.catalog[model.id], request)
         headers = {"Accept": "text/event-stream", "User-Agent": "modular-agent/0.1.0"}
         async with AsyncClient(
             timeout=Timeout(300, connect=15), follow_redirects=False, trust_env=False
         ) as client:
 
             async def renew(old: OAuth) -> OAuth:
-                return await refresh(client, vendor, old)
+                return await refresh(client, old)
 
             rejected: str | None = None
             while True:
                 try:
-                    login = await self.auth.current(vendor, renew, rejected=rejected)
+                    login = await self.auth.current(self.id, renew, rejected=rejected)
                     headers["Authorization"] = "Bearer " + login.secret
-                    if vendor == "openai-codex":
-                        headers.update(
-                            {
-                                "chatgpt-account-id": (
-                                    login.account if isinstance(login, OAuth) else None
-                                )
-                                or account(login.secret),
-                                "OpenAI-Beta": "responses=experimental",
-                                "originator": self._client_identity,
-                                "session-id": session,
-                                "x-client-request-id": session,
-                            }
-                        )
                 except (HTTPError, ValueError, OSError) as exc:
                     raise ModelFailure({"kind": "credentials", "message": str(exc)}) from exc
                 try:
                     async with client.stream(
-                        "POST", ENDPOINTS[vendor], json=body, headers=headers
+                        "POST", ENDPOINT, json=body, headers=headers
                     ) as result:
                         if (
                             result.status_code == 401
@@ -346,7 +316,7 @@ class Responses:
                                 raise ModelFailure(
                                     {
                                         "kind": "credentials",
-                                        "message": f"{failure} Run `ma login {vendor}` to sign in again.",
+                                        "message": f"{failure} Run `ma login grok` to sign in again.",
                                     }
                                 )
                             raise failure
@@ -399,5 +369,8 @@ class Responses:
                         return response_body(completed)
                 except HTTPError as exc:
                     raise ModelFailure(
-                        {"kind": "temporary", "message": f"could not reach {LABELS[vendor]}: {exc}"}
+                        {
+                            "kind": "temporary",
+                            "message": f"could not reach Grok subscription: {exc}",
+                        }
                     ) from exc

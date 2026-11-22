@@ -119,12 +119,18 @@ class SubscriptionLogins:
 
     async def update_metadata(self, change: Callable[[JsonObject], None]) -> None:
         """Change the other members in one locked transaction."""
+        async with self._edit_metadata() as metadata:
+            change(metadata)
+
+    @asynccontextmanager
+    async def _edit_metadata(self) -> AsyncIterator[JsonObject]:
         async with self._locked():
             doc, logins = self._read()
             metadata = {k: v for k, v in doc.items() if k != "logins"}
-            change(metadata)
+            yield metadata
             metadata.pop("logins", None)
-            ordered = {k: metadata.get(k) for k in doc if k == "logins" or k in metadata}
+            ordered: JsonObject = {"logins": None}
+            ordered.update({k: metadata[k] for k in doc if k in metadata})
             self._write(ordered | metadata, logins)
 
     @asynccontextmanager

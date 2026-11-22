@@ -51,7 +51,8 @@ def _pasted_code(line: str, state: str) -> str | None:
     text = line.strip()
     if not text:
         return None
-    if "?" in text or text.startswith(("code=", "error=", "state=")):
+    query_fields = {field.split("=", 1)[0] for field in text.split("&") if "=" in field}
+    if "?" in text or query_fields & {"code", "error", "state"}:
         query = text.partition("?")[2] if "?" in text else text
         fields = parse_qs(query.partition("#")[0], keep_blank_values=True)
         if "error" in fields:

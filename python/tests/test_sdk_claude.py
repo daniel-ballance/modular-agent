@@ -203,3 +203,55 @@ async def test_claude_host_runs_the_tool_and_replays_result(tmp_path, runtime_ki
     assert "14:02" in str(fixture.prompts[1])
     assert fixture.options[-1].effort == "high"
     assert fixture.closed == 3
+
+
+async def test_claude_waits_for_the_complete_streamed_tool_list():
+    model = "claude-sonnet-5-5"
+    messages = []
+    for i, name in enumerate(("first", "second")):
+        tool = f"mcp__agent__{name}"
+        messages.extend(
+            [
+                StreamEvent(
+                    "e",
+                    "s",
+                    {
+                        "type": "content_block_start",
+                        "index": i,
+                        "content_block": {"type": "tool_use", "id": name, "name": tool},
+                    },
+                ),
+                StreamEvent(
+                    "e",
+                    "s",
+                    {
+                        "type": "content_block_delta",
+                        "index": i,
+                        "delta": {"type": "input_json_delta", "partial_json": '{"n": 1}'},
+                    },
+                ),
+                AssistantMessage([ToolUseBlock(name, tool, {"n": 1})], model),
+                StreamEvent("e", "s", {"type": "content_block_stop", "index": i}),
+            ]
+        )
+    messages.append(
+        StreamEvent("e", "s", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    )
+    fixture = ClaudeFixture(callers=[messages])
+    provider = claude(client_factory=fixture)
+
+    async def emit(piece):
+        pytest.fail(f"Unexpected piece {piece}")
+
+    response = await provider.request(
+        ModelRef("claude", model),
+        {
+            "tools": [
+                {"name": name, "parameters": {"type": "object"}} for name in ("first", "second")
+            ],
+        },
+        ProviderContext("s", None, emit, lambda: None),
+    )
+    assert response["stop"] == "toolUse"
+    assert [part["name"] for part in response["content"]] == ["first", "second"]
+    assert all(part["arguments"] == {"n": 1} for part in response["content"])
